@@ -876,9 +876,26 @@ session among its machine's alone. Held on the first or last line of the
 rows, it scrolls them. Let go, it stays there. Let go off the sidebar, or
 press `Esc`, and it goes back. A press on a pane's row lifts nothing. What the
 mouse holds stays with the sidebar until it lets go, over zellij too, and
-while the button is down the sidebar does nothing with a key but `Esc`, which
-lets go. So a click is a press let go on the line it went down on, and acts
-as it lets go. While the search has something typed, nothing lifts.
+while the button is down no key reaches zellij, and the sidebar does nothing
+with one but `Esc`, which lets go, as the window losing the focus does. The
+button does nothing more then until it comes up: zellij hears nothing of it. So
+a click is a press let go on the line it went down on, and acts as it lets go,
+though the hand moved a cell along it. While the search has something typed,
+nothing lifts.
+
+A drag anywhere else on the sidebar selects text, as it does in a pane: a
+branch, a session's name, an agent's topic, what a note says. On a session's
+row or a machine's header, go along the line first, as straight off it lifts
+the row; what acts on the press, as a pull request's number or a key the bottom
+of the sidebar names, selects nothing. A selection goes from the cell the button
+went down on to the one under the pointer, line by line, and only over the
+sidebar's column, whatever zellij drew beside it. It shows reversed, and letting
+go copies it, as OSC 52 to the terminal you run luneta in: the blanks at the end
+of each line go, a note wrapped over lines comes out as one line, and a `…` that
+shows comes out as the rest of the name it cut short, with no control character
+in it, as a row shows none. It stays reversed until the next click, or until
+other rows or notes come under it. Over nothing but blanks nothing is copied, and
+nothing stays reversed. `Esc` drops it before you let go, with nothing copied.
 
 The order is the same in every luneta on the host, and lasts: it is kept in
 `$XDG_STATE_HOME/luneta/order`, or `~/.local/state/luneta/order`, which every
@@ -1288,6 +1305,7 @@ machine Claude Code runs on, which over ssh has no microphone of yours.
 
 `Alt u` reads aloud what you selected in a pane: zellij copies a selection as
 the mouse lets go, and luneta hears it there, with no need of the clipboard.
+What you selected on the sidebar reads the same.
 While anything plays, `Alt u` pauses it, and again has it go on from there.
 `Alt Shift u` stops it, and lets go of what waits.
 

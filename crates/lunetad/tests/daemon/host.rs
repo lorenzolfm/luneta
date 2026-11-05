@@ -128,7 +128,8 @@ pub fn script(path: &Path, text: &str) {
 /// minutes and three seconds before. It notes each rename it is asked for,
 /// for `renamed`, and renames nothing. It notes each client that is started,
 /// with `attach`, for `attached`, which ends at once as one that detached
-/// does. A pane closing can cut a call of a session short, once, as a test had
+/// does, or stays and notes all it hears, as a test had it `listen`, for
+/// `heard`. A pane closing can cut a call of a session short, once, as a test had
 /// it `silences` or `unreaches` it, or hand it another call's answer, as a test
 /// had it `answers_another`. It knows no other command.
 pub struct FakeZellij {
@@ -271,6 +272,11 @@ case "$*" in
         ;;
     "attach "*)
         echo "$asked" >> "{panes}/attached"
+        if [ -f "{panes}/listen" ]; then
+            stty raw -echo
+            printf '\033[?1000h\033[?1002h\033[?1006hon screen'
+            exec cat > "{panes}/heard"
+        fi
         exit 0
         ;;
     "delete-session "*)
@@ -360,6 +366,22 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// the order they were.
     pub fn attached(&self) -> Vec<String> {
         self.lines("attached")
+    }
+
+    /// Has each client of zellij's stay from now on, while its terminal does: it
+    /// asks for the mouse, as zellij's does, shows on the screen, and notes all
+    /// it hears.
+    pub fn listen(&self) {
+        fs::write(self.panes().join("listen"), "").unwrap();
+    }
+
+    /// All that a client of zellij's heard, since one had it `listen`.
+    pub fn heard(&self) -> String {
+        match fs::read(self.panes().join("heard")) {
+            Ok(heard) => String::from_utf8_lossy(&heard).into_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => panic!("what zellij's client heard does not read: {error}"),
+        }
     }
 
     /// Each pane and tab zellij was asked to open, in the order it was

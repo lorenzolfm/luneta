@@ -38,10 +38,9 @@ struct Ended {
     said: String,
 }
 
-/// Runs `command`, a luneta, on a terminal of its own until it ends. The
-/// terminal is read all along, so that nothing waits on a write, and to its
-/// end, once all that hold it have let go, as a `Command` does as it goes.
-fn on_terminal(mut command: Command) -> Ended {
+/// A terminal of 40 lines of 120 columns: its controller, and the end a program
+/// runs on.
+pub fn terminal() -> (OwnedFd, OwnedFd) {
     let controller = pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
     fcntl_setfd(&controller, FdFlags::CLOEXEC).unwrap();
     pty::grantpt(&controller).unwrap();
@@ -51,6 +50,14 @@ fn on_terminal(mut command: Command) -> Ended {
     let tty: OwnedFd = rustix::fs::open(&path, flags, Mode::empty()).unwrap();
     let size = Winsize { ws_row: 40, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0 };
     termios::tcsetwinsize(&tty, size).unwrap();
+    (controller, tty)
+}
+
+/// Runs `command`, a luneta, on a terminal of its own until it ends. The
+/// terminal is read all along, so that nothing waits on a write, and to its
+/// end, once all that hold it have let go, as a `Command` does as it goes.
+fn on_terminal(mut command: Command) -> Ended {
+    let (controller, tty) = terminal();
     let reader = thread::spawn(move || {
         let mut said = Vec::new();
         // It ends in an error where it ends, with all there was to read in.
@@ -67,12 +74,12 @@ fn on_terminal(mut command: Command) -> Ended {
 }
 
 /// A folder of the test's, named `name`, for luneta to start in.
-struct Directory {
+pub struct Directory {
     _parent: TempDir,
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
-fn directory(name: &str) -> Directory {
+pub fn directory(name: &str) -> Directory {
     let parent = tempfile::tempdir().unwrap();
     let path = parent.path().join(name);
     fs::create_dir(&path).unwrap();
@@ -80,7 +87,7 @@ fn directory(name: &str) -> Directory {
 }
 
 /// A luneta of `vars`, started in `dir`, in no ssh session.
-fn luneta(vars: Vars, dir: &Path) -> Command {
+pub fn luneta(vars: Vars, dir: &Path) -> Command {
     luneta_at(LUNETA, vars, dir)
 }
 
@@ -93,7 +100,7 @@ fn luneta_at(program: &str, vars: Vars, dir: &Path) -> Command {
 
 /// Has `name` run on `host`, as zellij answers for it: whatever the socket
 /// that this returns, which it listens on while it is kept.
-fn runs(host: &Host, name: &str) -> std::os::unix::net::UnixListener {
+pub fn runs(host: &Host, name: &str) -> std::os::unix::net::UnixListener {
     host.zellij.list(name, &json!([]));
     host.serve(name)
 }

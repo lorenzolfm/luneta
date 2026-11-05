@@ -89,6 +89,7 @@ use crate::printed::Printed;
 use crate::pull::{Found, Kind, Link, Others, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
+use crate::sweep::{cells, Page, Sweep};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
@@ -948,6 +949,8 @@ pub enum Asked {
     Take,
     /// Put this on the clipboard of luneta's terminal.
     Copy(Link),
+    /// Put this, which a sweep of the mouse selected, on that clipboard.
+    CopyText(String),
     /// Open this page in the browser of the machine luneta runs on.
     Browse(Link),
     /// Give the focus back to zellij.
@@ -1116,6 +1119,10 @@ pub struct Sidebar {
     revealed: Option<Spot>,
     /// The first line of the rows on screen.
     top: usize,
+    /// What it drew last, for a sweep to read.
+    page: Page,
+    /// How that was laid out.
+    laid: Layout,
     /// How many lines the rows had on screen when last drawn, under the rule
     /// along the top and over the notes at the bottom, which a click on
     /// either side of is not on.
@@ -1173,8 +1180,8 @@ enum Pending {
 }
 
 /// What `v` and the left button do to the order of the machines and their
-/// sessions: one thing at a time, so that no selection lasts under a row the
-/// mouse lifted.
+/// sessions, and what the left button selects of the text: one thing at a
+/// time, so that no selection lasts under a row the mouse lifted.
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
@@ -1185,9 +1192,31 @@ enum Moving {
     /// The left button is down on the sidebar at `at`, on luneta's terminal:
     /// a click once it lets go on the line it went down on. On a session's
     /// row, or a machine's header, `lifts` says what is there, which goes
-    /// with the mouse once that moves a line. A pane's row goes nowhere.
+    /// with the mouse once that moves a line. A pane's row goes nowhere. It
+    /// sweeps, from anywhere else, or once it moves past the cells around `at`.
     Down { at: Position, lifts: Option<Movable> },
     Lifted(Lift),
+    /// The left button drags over the text, which is copied as it lets go.
+    Sweeping(Sweep),
+    /// What it copied shows until the next click, or until what it showed on
+    /// may have moved from under it, as `Layout` tells.
+    Swept(Sweep, Layout),
+}
+
+/// How the sidebar laid out what it drew: which rows and notes, on which lines.
+/// Another layout has other text on the cells a sweep is on, which is not what
+/// it copied. A row's own text changing is no other layout: a spinner turns on
+/// it each frame, and a sweep over one would show for no longer than that.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Layout {
+    area: Rect,
+    /// The line of the rows at the top.
+    top: usize,
+    /// The rows, in the order they show, each with how many lines it takes.
+    rows: Vec<(Spot, usize)>,
+    /// How many lines go along the bottom, and what the notes among them say.
+    bottom: usize,
+    notes: Vec<String>,
 }
 
 /// What moves, with the rows under it: a machine, among the machines, or a
@@ -2362,7 +2391,11 @@ impl Sidebar {
             Moving::Selected(Movable::Session(of, _)) => {
                 matches!(row, Row::Session { machine, .. } if machine == of)
             },
-            Moving::Still | Moving::Down { .. } | Moving::Lifted(_) => row.stops(),
+            Moving::Still
+            | Moving::Down { .. }
+            | Moving::Lifted(_)
+            | Moving::Sweeping(_)
+            | Moving::Swept(..) => row.stops(),
         }
     }
 
@@ -2476,22 +2509,23 @@ impl Sidebar {
         (Some(next) != here).then_some(place)
     }
 
-    /// What a key does while the sidebar has the focus, pressed at `now`. The
-    /// left button down on the sidebar takes every key, and `Esc` lets go of
-    /// what it holds: what it lifted goes back, and a click is no longer
-    /// one. The menu takes every key while it is open. Without it, a
-    /// character does what `Top::of` says, which the legend goes by too, and
-    /// one it has not is the menu's.
+    /// What a key does while the sidebar has the focus, or the left button is
+    /// down on it, pressed at `now`. The left button down on the sidebar takes
+    /// every key, which leaves the notes as they are, and `Esc` lets go of what
+    /// it holds: what it lifted goes back, and a click is no longer one. The
+    /// menu takes every key while it is open. Without it, a character does what
+    /// `Top::of` says, which the legend goes by too, and one it has not is the
+    /// menu's.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
-        self.notice = None;
-        self.copied = None;
-        let pending = std::mem::take(&mut self.pending);
         if self.pressed() {
             if key.code == KeyCode::Esc {
                 self.let_go();
             }
             return Asked::Nothing;
         }
+        self.notice = None;
+        self.copied = None;
+        let pending = std::mem::take(&mut self.pending);
         if let Some(menu) = self.menu.take() {
             return self.menu_did(menu.key(key));
         }
@@ -3536,7 +3570,8 @@ impl Sidebar {
     /// nowhere takes the focus, as any other button does. The left button
     /// lifts the session whose row it went down on, or the machine whose
     /// header, once the mouse moves a line, and lets go of it where it shows;
-    /// and the wheel scrolls.
+    /// anywhere else, or moving along the line first, it sweeps over the text,
+    /// which it copies as it lets go; and the wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         // A click or the wheel drops a `g` or a `y` pressed before it, as a key
         // does.
@@ -3569,7 +3604,8 @@ impl Sidebar {
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
             MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area),
             // The button let go where luneta did not hear it, as outside its
-            // window: what it lifted goes back. A selection is the keys'.
+            // window: what it lifted goes back, and what it swept is not
+            // copied. A selection is the keys'.
             MouseEventKind::Moved => {
                 self.let_go();
                 Asked::Nothing
@@ -3582,31 +3618,45 @@ impl Sidebar {
     /// it, and a session pressed on its row, or a machine on its header, is
     /// lifted once the mouse moves a line, and takes the focus, for `Esc` to
     /// put it back. What is typed in the search lifts none: it leaves out of
-    /// sight the places it could take.
+    /// sight the places it could take. What lifts nothing sweeps, once the
+    /// mouse is past the cells around where it went down: a hand that clicks
+    /// moves a little, as desktops allow it a few pixels, and that is a click
+    /// all the same.
     fn drag(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let line = mouse.row.saturating_sub(area.y);
         let over = (area.left()..area.right()).contains(&mouse.column);
-        let lifts = match &mut self.moving {
+        let pointer = Position::new(mouse.column, mouse.row);
+        let (from, lifts) = match &mut self.moving {
             Moving::Lifted(lift) => {
                 lift.line = line;
                 lift.over = over;
                 return Asked::Nothing;
             },
-            Moving::Down { at, lifts: Some(lifts) } if mouse.row != at.y => lifts.clone(),
-            Moving::Down { .. } | Moving::Selected(_) | Moving::Still => return Asked::Nothing,
+            Moving::Sweeping(sweep) => {
+                sweep.reach(pointer, inside(area));
+                return Asked::Nothing;
+            },
+            Moving::Down { at, lifts } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
+            Moving::Selected(_) | Moving::Swept(..) | Moving::Still => return Asked::Nothing,
         };
         let typed = matches!(self.search, Some(Search::Typed { .. }));
-        if typed || self.row_of(&lifts.spot()).is_none() {
-            return Asked::Nothing;
+        let lifts = lifts.filter(|lifts| !typed && self.row_of(&lifts.spot()).is_some());
+        if let Some(lifted) = lifts {
+            self.moving = Moving::Lifted(Lift { lifted, line, over, scrolled: None });
+            return Asked::Take;
         }
-        self.moving = Moving::Lifted(Lift { lifted: lifts, line, over, scrolled: None });
-        Asked::Take
+        if from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1 {
+            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside(area)));
+        }
+        Asked::Nothing
     }
 
     /// The left button lets go: a press that is on the line it went down on
     /// is a click there, and what it lifted lands where it shows, the
     /// highlight on it, among the rows as the order is kept now, as `shift`
-    /// moves them.
+    /// moves them. What it swept is copied, as it shows on the last frame, and
+    /// shows on; over nothing but blanks nothing is copied, and nothing shows on
+    /// to say that it was.
     fn release(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
         match std::mem::take(&mut self.moving) {
@@ -3622,9 +3672,18 @@ impl Sidebar {
                 }
                 Asked::Nothing
             },
+            Moving::Sweeping(mut sweep) => {
+                sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
+                let text = sweep.text(&self.page, inside(area));
+                if text.is_empty() {
+                    return Asked::Nothing;
+                }
+                self.moving = Moving::Swept(sweep, self.laid.clone());
+                Asked::CopyText(text)
+            },
             // A selection is the keys', and no press of the sidebar's.
-            selected @ Moving::Selected(_) => {
-                self.moving = selected;
+            kept @ (Moving::Selected(_) | Moving::Swept(..)) => {
+                self.moving = kept;
                 Asked::Nothing
             },
             Moving::Down { .. } | Moving::Still => Asked::Nothing,
@@ -3683,12 +3742,20 @@ impl Sidebar {
     /// Whether the left button is down on the sidebar, which has what the
     /// mouse does until it lets go, wherever the mouse goes.
     pub fn pressed(&self) -> bool {
-        matches!(self.moving, Moving::Down { .. } | Moving::Lifted(_))
+        matches!(self.moving, Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_))
+    }
+
+    /// Drops what a sweep left showing, as the next click does, wherever that
+    /// is.
+    pub fn unsweep(&mut self) {
+        if let Moving::Swept(..) = self.moving {
+            self.moving = Moving::Still;
+        }
     }
 
     /// Lets go of what the left button holds on the sidebar, as a release it
-    /// never hears: what it lifted goes back, and the press is no click.
-    /// A selection is the keys', and stays.
+    /// never hears: what it lifted goes back, the press is no click, and what
+    /// it swept is not copied. A selection is the keys', and stays.
     pub fn let_go(&mut self) {
         if self.pressed() {
             self.moving = Moving::Still;
@@ -3786,6 +3853,7 @@ impl Sidebar {
     /// changes. What the mouse lifted has it, where it lands, the others
     /// making room for it. Its last column is the edge, drawn as the title's
     /// rule is.
+    /// What the mouse swept shows reversed over it all.
     /// Says the spots on the menu at its bottom, or on the legend, and on the
     /// numbers of the pull requests on its rows.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
@@ -3796,12 +3864,16 @@ impl Sidebar {
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width, frame));
         let (notes, spotted, buttons) = self.notes(width, height, frame);
-        let room = height.saturating_sub(HEADER + notes.len());
+        let room = height.saturating_sub(HEADER + notes.lines.len());
         self.room = room;
         let highlight = self.highlight();
         let landing = match &self.moving {
             Moving::Lifted(lift) => self.landing(lift),
-            Moving::Still | Moving::Selected(_) | Moving::Down { .. } => None,
+            Moving::Still
+            | Moving::Selected(_)
+            | Moving::Down { .. }
+            | Moving::Sweeping(_)
+            | Moving::Swept(..) => None,
         };
         match highlight {
             Highlight::Lit(at) => {
@@ -3850,16 +3922,23 @@ impl Sidebar {
         // Where each number is, by its line among all those of the rows. None
         // takes a click under what the mouse lifted.
         let mut numbers = Vec::new();
+        // And where each cut's `…` is, by the same.
+        let mut cuts = Vec::new();
+        let mut rows = Vec::with_capacity(order.len());
         for at in order {
             let row = &self.rows[at];
             let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
             let background = on.map(|(_, background)| *background);
-            let (row_drawn, number) = row_lines(row, width, frame, now);
+            let RowLines { lines: row_drawn, number, cuts: row_cuts } =
+                row_lines(row, width, frame, now);
             if landing.is_none()
                 && let Some(number) = number
             {
                 numbers.push(NumberAt { line: drawn.len() + number.line, ..number });
             }
+            let first = drawn.len();
+            cuts.extend(row_cuts.into_iter().map(|cut| CutAt { line: first + cut.line, ..cut }));
+            rows.push((row.spot(), row_drawn.len()));
             for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
@@ -3868,21 +3947,38 @@ impl Sidebar {
             }
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
+        let bottom = notes.lines.len();
+        let laid = Layout { area, top: self.top, rows, bottom, notes: notes.said };
         lines.extend(drawn.into_iter().skip(self.top).take(room));
-        let notes_from = height.saturating_sub(notes.len());
+        let notes_from = height.saturating_sub(notes.lines.len());
         lines.resize(notes_from, Line::default());
-        lines.extend(notes);
+        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
+        lines.extend(notes.lines);
         put(buffer, area, &lines, self.framing());
         let mut spots = Spots::default();
+        let mut cut_spots = Spots::default();
         let shown = self.top..self.top + room;
         for NumberAt { line, columns, link } in numbers {
             if shown.contains(&line) {
                 spots.add(HEADER + line - self.top, columns, link.clone());
             }
         }
+        for CutAt { line, column, took } in cuts {
+            if shown.contains(&line) {
+                cut_spots.add(HEADER + line - self.top, column..column + 1, took);
+            }
+        }
         // The rows and the notes go short of the edge, the notes along the
         // bottom.
-        let inside = Rect { width: area.width.saturating_sub(1), ..area };
+        let inside = inside(area);
+        if matches!(&self.moving, Moving::Swept(_, under) if *under != laid) {
+            self.moving = Moving::Still;
+        }
+        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
+            sweep.draw(buffer, inside);
+        }
+        self.laid = laid;
+        self.page = Page { lines, goes_on, cuts: cut_spots.placed(inside) };
         self.aloud_buttons = buttons.down(notes_from).placed(inside);
         Drawn::Sidebar {
             numbers: spots.placed(inside),
@@ -3899,6 +3995,7 @@ impl Sidebar {
     /// the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
+        self.unsweep();
         self.aloud_buttons = Spots::default();
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
@@ -4015,11 +4112,11 @@ impl Sidebar {
         width: usize,
         height: usize,
         frame: usize,
-    ) -> (Vec<Line<'static>>, Drawn, Spots<aloud::Button>) {
-        let mut notes = Vec::new();
+    ) -> (Notes, Drawn, Spots<aloud::Button>) {
+        let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
-            notes.extend(wrapped(&format!("lunetad: {away}"), width, error));
+            notes.say(&format!("lunetad: {away}"), width, error);
         }
         if self.unlisted > 0 {
             let count = self.unlisted;
@@ -4028,7 +4125,7 @@ impl Sidebar {
                 "lunetad: {count} {sessions} with no start or socket, or a name zellij refuses, \
                  not listed"
             );
-            notes.extend(wrapped(&unlisted, width, error));
+            notes.say(&unlisted, width, error);
         }
         if self.unlisted_machines > 0 {
             let count = self.unlisted_machines;
@@ -4037,54 +4134,54 @@ impl Sidebar {
                 "lunetad: {count} {machines} with a destination luneta does not read, or named \
                  twice, not listed"
             );
-            notes.extend(wrapped(&unlisted, width, error));
+            notes.say(&unlisted, width, error);
         }
         if let Some(unread) = self.host.as_ref().and_then(Host::unread_count) {
-            notes.extend(wrapped(&unread.to_string(), width, error));
+            notes.say(&unread.to_string(), width, error);
         }
         if self.host.as_ref().is_some_and(|host| host.unread_hosts.is_some_and(|it| it > 0)) {
             let unread = "lunetad could not read all of luneta's hosts file: its log says why";
-            notes.extend(wrapped(unread, width, error));
+            notes.say(unread, width, error);
         }
         if let Some(why) = self.unreached() {
-            notes.extend(wrapped(&why, width, error));
+            notes.say(&why, width, error);
         }
         if let Some(lost) = self.folds.lost() {
-            notes.extend(wrapped(&format!("folds stay in this luneta: {lost}"), width, error));
+            notes.say(&format!("folds stay in this luneta: {lost}"), width, error);
         }
         if let Some(lost) = self.news.lost() {
-            notes.extend(wrapped(&format!("dots stay in this luneta: {lost}"), width, error));
+            notes.say(&format!("dots stay in this luneta: {lost}"), width, error);
         }
         if let Some(lost) = self.order.lost() {
-            notes.extend(wrapped(&format!("order stays in this luneta: {lost}"), width, error));
+            notes.say(&format!("order stays in this luneta: {lost}"), width, error);
         }
         if let Some(unread) = self.order.unread() {
-            notes.extend(wrapped(&format!("order not read: {unread}"), width, error));
+            notes.say(&format!("order not read: {unread}"), width, error);
         }
         if let Some(notice) = &self.notice {
-            notes.extend(wrapped(notice, width, error));
+            notes.say(notice, width, error);
         }
         if let Some((number, _)) = &self.copied {
-            notes.extend(wrapped(&format!("copied #{number}"), width, Style::new().fg(NAME)));
+            notes.say(&format!("copied #{number}"), width, Style::new().fg(NAME));
         }
         if let Some(to) = &self.image_going {
             let going = format!("image on its way to {to}");
-            notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
+            notes.say(&going, width, Style::new().fg(NAME));
         }
         if let Some(Sent { session, from: Some(Leaving { ends: true, .. }), landed: false, .. }) =
             &self.sent
         {
             let going = format!("Going to {session}; this session ends once you are there");
-            notes.extend(wrapped(&going, width, Style::new().fg(NAME)));
+            notes.say(&going, width, Style::new().fg(NAME));
         }
         let mut buttons = Spots::default();
         if let Some(aloud) = &self.aloud {
             let (line, spots) = aloud.line(width);
-            buttons = spots.down(notes.len());
-            notes.push(line);
+            buttons = spots.down(notes.lines.len());
+            notes.lines.push(line);
         }
-        let room = height.saturating_sub(HEADER + 1 + notes.len());
-        let above = notes.len();
+        let room = height.saturating_sub(HEADER + 1 + notes.lines.len());
+        let above = notes.lines.len();
         let (lines, spotted) = match self.bottom() {
             Bottom::Menu(menu) => {
                 let (lines, spots) = menu.lines(width, room, frame);
@@ -4105,7 +4202,7 @@ impl Sidebar {
             },
             Bottom::Nothing => (Vec::new(), Drawn::Nothing),
         };
-        notes.extend(lines);
+        notes.lines.extend(lines);
         (notes, spotted, buttons)
     }
 
@@ -4203,6 +4300,11 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
 /// has any: where it is drawn, and where a press takes it to drag.
 pub fn edge(area: Rect) -> Option<u16> {
     area.width.checked_sub(1).map(|last| area.x + last)
+}
+
+/// A sidebar's `area` short of its edge, where its rows and notes go.
+fn inside(area: Rect) -> Rect {
+    Rect { width: area.width.saturating_sub(1), ..area }
 }
 
 /// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
@@ -4637,14 +4739,41 @@ struct NumberAt<'a> {
     link: &'a Link,
 }
 
-/// The lines a row is drawn on, `width` wide, and where they have a number that
-/// takes a click.
-fn row_lines(
-    row: &Row,
-    width: usize,
-    frame: usize,
-    now: SystemTime,
-) -> (Vec<Line<'static>>, Option<NumberAt<'_>>) {
+/// Where the `…` of a text cut short is, on the lines of a row, for a sweep over
+/// it to copy what it stands for.
+struct CutAt {
+    /// Which of them it is on.
+    line: usize,
+    column: usize,
+    /// What the cut took of the text, with no control character, as a row draws
+    /// none: one that shows nowhere is not to hide in a paste.
+    took: String,
+}
+
+/// Where the `…` is of `text` as `cut` cuts it to `room`, drawn from the column
+/// `column` of the line `line`: nowhere, while all of it shows.
+fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
+    let shown = cut(text, room);
+    if shown == text {
+        return None;
+    }
+    let kept = shown.strip_suffix('…')?;
+    let took = text.strip_prefix(kept)?.chars().filter(|c| !c.is_control()).collect();
+    Some(CutAt { line, column: column + cells(kept), took })
+}
+
+/// The lines a row is drawn on, and what the row has on them that the mouse goes
+/// by.
+struct RowLines<'a> {
+    lines: Vec<Line<'static>>,
+    /// Its number that takes a click.
+    number: Option<NumberAt<'a>>,
+    /// Its texts cut short.
+    cuts: Vec<CutAt>,
+}
+
+/// The lines a row is drawn on, `width` wide.
+fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines<'_> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Machine { name, heads: Heads::Away(away), .. } => {
@@ -4653,7 +4782,9 @@ fn row_lines(
             let (word, since) = away.said();
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
-            let said = cut(&format!("{name} · {word}"), width.saturating_sub(5 + reserve + 1));
+            let whole = format!("{name} · {word}");
+            let room = width.saturating_sub(5 + reserve + 1);
+            let said = cut(&whole, room);
             let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
             let line = Line::from(vec![
                 Span::raw(" "),
@@ -4665,13 +4796,16 @@ fn row_lines(
                 Span::raw(" ".repeat(gap)),
                 Span::styled(age, dim),
             ]);
-            (vec![line], None)
+            let cuts = cut_at(0, 5, &whole, room).into_iter().collect();
+            RowLines { lines: vec![line], number: None, cuts }
         },
         Row::Machine { name, heads: Heads::Sessions { under, waiting, dot, busy, here }, .. } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
-            let name = cut(name, width.saturating_sub(6 + reserve + 1));
+            let room = width.saturating_sub(6 + reserve + 1);
+            let cuts = cut_at(0, 5, name, room).into_iter().collect();
+            let name = cut(name, room);
             let rule = width.saturating_sub(5 + name.width() + 1 + reserve + 1);
             // Folded, its rule says luneta's zellij is in one of its
             // sessions, as the session's own row would.
@@ -4691,7 +4825,7 @@ fn row_lines(
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            (vec![Line::from(spans)], None)
+            RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
         Row::Session { session, hits, under, here, colour, waiting, dot, busy, .. } => {
             let folded = *under == Under::Folded;
@@ -4703,6 +4837,7 @@ fn row_lines(
             let room = width.saturating_sub(4 + reserve + 1);
             let bold = chip.add_modifier(Modifier::BOLD);
             let (name, named) = lit(session.name.as_str(), room, Keep::Start, hits, bold);
+            let cuts = cut_at(0, 3, session.name.as_str(), room).into_iter().collect();
             let rule = width.saturating_sub(3 + named + 1 + reserve + 1);
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
@@ -4716,7 +4851,7 @@ fn row_lines(
                 spans.push(Span::raw(" "));
                 spans.push(badge);
             }
-            (vec![Line::from(spans)], None)
+            RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
         Row::Pane { here, unread, marked, icon, label, hits, checkout, bracket, speaks, .. } => {
             let mark = marked.as_ref().map(|marked| &marked.mark);
@@ -4750,6 +4885,7 @@ fn row_lines(
             spans.push(Span::raw(" "));
             let room = width.saturating_sub(LABEL + reserve + 1);
             let (shown, wide) = lit(label, room, Keep::Start, hits, label_style);
+            let mut cuts: Vec<CutAt> = cut_at(0, LABEL, label, room).into_iter().collect();
             let gap = width.saturating_sub(LABEL + wide + speaker + age.width() + 1);
             spans.extend(shown);
             spans.push(Span::raw(" ".repeat(gap)));
@@ -4762,14 +4898,15 @@ fn row_lines(
             let mut number = None;
             if let Some(checkout) = checkout {
                 let at = lines.len();
-                let (drawn, columns) =
+                let (drawn, columns, branch_room) =
                     checkout_line(*here, gutter(*bracket, at, height), checkout, width);
                 lines.push(drawn);
+                cuts.extend(cut_at(at, LABEL, &checkout.branch, branch_room));
                 let link = checkout.pull_request.as_ref().and_then(Numbered::link);
                 let number_at = |(columns, link)| NumberAt { line: at, columns, link };
                 number = columns.zip(link).map(number_at);
             }
-            (lines, number)
+            RowLines { lines, number, cuts }
         },
     }
 }
@@ -4884,20 +5021,21 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 /// work tree stands. The branch is cut to leave the other two whole. The mark
 /// of the pane luneta's zellij is on, `here`, runs down it too, and the
 /// `gutter` after it. And the columns the number is on, as the line has it, for
-/// a click to go by.
+/// a click to go by, and the room the branch had, for a sweep over it.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
     checkout: &Checkout,
     width: usize,
-) -> (Line<'static>, Option<Range<usize>>) {
+) -> (Line<'static>, Option<Range<usize>>, usize) {
     let status = &checkout.status;
     let number = checkout.pull_request.as_ref().map(|numbered| {
         Span::styled(numbered.shown(), Style::new().fg(numbered.colour))
     });
     let held = number.as_ref().map_or(0, |number| number.content.width() + 1);
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
-    let branch = cut(&checkout.branch, width.saturating_sub(LABEL + held + reserve + 1));
+    let room = width.saturating_sub(LABEL + held + reserve + 1);
+    let branch = cut(&checkout.branch, room);
     let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
@@ -4914,7 +5052,7 @@ fn checkout_line(
     }
     spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::raw(status.clone()));
-    (Line::from(spans), columns)
+    (Line::from(spans), columns, room)
 }
 
 /// `text` cut to `room` columns, with a `…` for what it took.
@@ -4957,6 +5095,27 @@ pub fn tail(text: &str, room: usize) -> String {
         return String::new();
     }
     format!("…{}", &text[start..])
+}
+
+/// What goes at the bottom of the sidebar: its lines, those of them that go on
+/// from the line above, as `wrapped` breaks a note too long for one, and what
+/// each note says.
+#[derive(Debug, Default)]
+struct Notes {
+    lines: Vec<Line<'static>>,
+    goes_on: Vec<usize>,
+    said: Vec<String>,
+}
+
+impl Notes {
+    /// Puts `text` on as many lines of `width` as it takes.
+    fn say(&mut self, text: &str, width: usize, style: Style) {
+        let lines = wrapped(text, width, style);
+        let start = self.lines.len();
+        self.goes_on.extend(start + 1..start + lines.len());
+        self.lines.extend(lines);
+        self.said.push(text.to_owned());
+    }
 }
 
 /// `text` on as many lines of `width` as it takes, a space in from the edge.
@@ -8576,11 +8735,10 @@ mod tests {
         assert!(matches!(sidebar.moving, Moving::Still));
     }
 
-    /// A press and release on one line is a click, wherever the mouse went
-    /// along it. A press on a pane's row lifts nothing. One on a session's
-    /// row lifts the session once the mouse moves a line, and takes the
-    /// focus: it shows where it lands, lit, with its panes, the others making
-    /// room. Let go, it stays where it showed, for the daemon's next list too.
+    /// A press on a pane's row lifts nothing. One on a session's row lifts the
+    /// session once the mouse moves a line, and takes the focus: it shows where
+    /// it lands, lit, with its panes, the others making room. Let go, it stays
+    /// where it showed, for the daemon's next list too.
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
@@ -8589,13 +8747,8 @@ mod tests {
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
         assert_eq!(act(MouseEventKind::Down(left), 10, 5), Asked::Nothing);
-        assert_eq!(act(MouseEventKind::Drag(left), 20, 5), Asked::Nothing);
-        let api = pane_of("bipa", 10, 1);
-        assert_eq!(act(MouseEventKind::Up(left), 20, 5), go_here(api));
-
-        assert_eq!(act(MouseEventKind::Down(left), 10, 5), Asked::Nothing);
         assert_eq!(act(MouseEventKind::Drag(left), 10, 7), Asked::Nothing);
-        assert_eq!(act(MouseEventKind::Up(left), 10, 7), Asked::Nothing);
+        act(MouseEventKind::Up(left), 10, 7);
         assert_eq!(drawn_rows(&mut sidebar).0, before);
 
         // notes's row, under bipa's, past zed's.
@@ -8688,8 +8841,305 @@ mod tests {
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 3), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 6), area), Asked::Nothing);
-        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area), Asked::Nothing);
+        sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 6), area);
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
+    }
+
+    /// The sidebar drawn into `area`, with the keys where they are.
+    fn framed(sidebar: &mut Sidebar, area: Rect) -> Buffer {
+        let mut buffer = Buffer::empty(area);
+        sidebar.draw(&mut buffer, area, moment(160_000));
+        buffer
+    }
+
+    /// The cells of `buffer` drawn reversed.
+    fn reversed(buffer: &Buffer) -> Vec<(u16, u16)> {
+        let on = |at: &Position| buffer[*at].modifier.contains(Modifier::REVERSED);
+        buffer.area.positions().filter(on).map(|at| (at.x, at.y)).collect()
+    }
+
+    /// The left button down at `from`, dragged to `to`, on the sidebar as drawn
+    /// last into `area`.
+    fn dragged(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) {
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), from.0, from.1), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), to.0, to.1), area);
+    }
+
+    /// What the left button asks, down at `from`, dragged to `to` and let go.
+    fn swept(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) -> Asked {
+        dragged(sidebar, area, from, to);
+        sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1), area)
+    }
+
+    fn copied(text: &str) -> Asked {
+        Asked::CopyText(text.to_owned())
+    }
+
+    /// A drag copies what it went over as it lets go, and goes nowhere: along
+    /// a pane's row, the way back, and over lines, from any line of the sidebar.
+    /// It has the mouse over zellij too, and copies only the sidebar's column.
+    /// Over nothing but blanks, there is nothing to copy, and nothing stays
+    /// reversed to say that there was.
+    #[test]
+    fn a_drag_copies_what_it_went_over_as_it_lets_go() {
+        let mut sidebar = searched();
+        let area = Rect::new(0, 0, 32, 26);
+        framed(&mut sidebar, area);
+        let here = sidebar.cursor.clone();
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (13, 5)), copied("a-p-i-x"));
+        assert_eq!(swept(&mut sidebar, area, (13, 5), (9, 5)), copied("p-i-x"));
+        // Let go further on than it was last heard to drag.
+        dragged(&mut sidebar, area, (7, 5), (9, 5));
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 5), area);
+        assert_eq!(up, copied("a-p-i-x"));
+        assert_eq!(swept(&mut sidebar, area, (2, 0), (8, 0)), copied("luneta"));
+        assert_eq!(sidebar.cursor, here);
+
+        dragged(&mut sidebar, area, (9, 5), (40, 6));
+        assert!(sidebar.pressed());
+        let left = MouseButton::Left;
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 40, 6), area);
+        assert_eq!(up, copied("p-i-x\n       dda-bank-slip"));
+        assert!(!sidebar.pressed());
+
+        assert_eq!(swept(&mut sidebar, area, (5, 2), (25, 2)), Asked::Nothing);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), []);
+    }
+
+    /// A hand that clicks moves a little: a press let go on its line within a
+    /// cell of where it went down is a click, one further along is a sweep, and
+    /// one let go a line off within a cell is neither, and copies nothing.
+    #[test]
+    fn a_click_is_a_click_though_the_hand_moves_a_cell() {
+        let mut sidebar = searched();
+        let area = Rect::new(0, 0, 32, 26);
+        framed(&mut sidebar, area);
+        let api = || go_here(pane_of("bipa", 10, 1));
+        assert_eq!(swept(&mut sidebar, area, (10, 5), (11, 5)), api());
+        assert_eq!(swept(&mut sidebar, area, (10, 5), (9, 5)), api());
+        assert_eq!(swept(&mut sidebar, area, (10, 5), (12, 5)), copied("-i-"));
+        assert_eq!(swept(&mut sidebar, area, (10, 5), (11, 6)), Asked::Nothing);
+    }
+
+    /// On what lifts, a drag along the line first sweeps, and goes on over
+    /// other lines with nothing lifted; straight off the line it lifts, as ever,
+    /// and a hand that moved a cell along it on the way lifts all the same.
+    #[test]
+    fn a_drag_along_a_session_s_row_sweeps_and_one_off_it_lifts() {
+        let mut sidebar = searched();
+        let area = Rect::new(0, 0, 32, 26);
+        let (listed, _) = drawn_rows(&mut sidebar);
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 3, 4), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 6, 4), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 9, 5), area), Asked::Nothing);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 9, 5), area);
+        assert_eq!(up, copied(&format!("bipa {}\n       a-p", "─".repeat(22))));
+        assert_eq!(drawn_rows(&mut sidebar).0, listed);
+
+        // This machine's header.
+        assert_eq!(swept(&mut sidebar, area, (5, 3), (7, 3)), copied("mac"));
+        assert_eq!(drawn_rows(&mut sidebar).0, listed);
+
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 8), area);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 8), area), Asked::Nothing);
+        assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 9), area), Asked::Take);
+    }
+
+    /// What is swept shows reversed from the frame after it moves, through the
+    /// frames and the daemon's answers after it lets go, a row's own text
+    /// changing among them, however the pointer moves then, until the next click.
+    #[test]
+    fn a_sweep_shows_reversed_until_the_next_click() {
+        let mut sidebar = searched();
+        let area = Rect::new(0, 0, 32, 26);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), []);
+        dragged(&mut sidebar, area, (7, 5), (9, 5));
+        let cells = [(7, 5), (8, 5), (9, 5)];
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 5), area);
+        assert_eq!(up, copied("a-p"));
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        sidebar.mouse(mouse(MouseEventKind::Moved, 20, 12), area);
+        sidebar.heard(searched().host.unwrap());
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        sidebar.heard(first_pane_is(1, "a-p-i-y"));
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+
+        sidebar.unsweep();
+        assert_eq!(reversed(&framed(&mut sidebar, area)), []);
+    }
+
+    /// What `searched` lists, with its first pane another: its row takes as
+    /// many lines, on the same line, whichever pane it is.
+    fn first_pane_is(id: u32, command: &str) -> Host {
+        let mut listed = searched().host.unwrap();
+        let first = &mut listed.sessions[0].panes.as_mut().unwrap().panes[0];
+        first.id = id;
+        first.command = Some(command.to_owned());
+        listed
+    }
+
+    /// Once what shows under a sweep may be other than what it copied, it goes:
+    /// the wheel, a pane that came, another pane or note on as many lines, a row
+    /// taking a line more, the keys bringing the legend, another width, the
+    /// sidebar collapsed.
+    #[test]
+    fn a_sweep_goes_once_the_text_moves_from_under_it() {
+        let area = Rect::new(0, 0, 32, 26);
+        let more_rows = || {
+            let panes = vec![pane(1, 0, "/w/a", "a-p-i-x"), pane(2, 1, "/w/b", "b")];
+            host(vec![session("bipa", 10, panes)], Vec::new())
+        };
+        let branch_too = || {
+            let mut listed = searched().host.unwrap();
+            let (trees, pulls) = (&mut listed.work_trees, &mut listed.pull_requests);
+            checked_out(trees, pulls, "/w/a", "main", None);
+            listed
+        };
+        let moves: [&dyn Fn(&mut Sidebar); 8] = [
+            &|sidebar| {
+                sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+            },
+            &|sidebar| {
+                sidebar.heard(more_rows());
+            },
+            &|sidebar| {
+                sidebar.heard(first_pane_is(9, "other"));
+            },
+            &|sidebar| {
+                sidebar.notify("other word".to_owned());
+            },
+            &|sidebar| {
+                sidebar.heard(branch_too());
+            },
+            &|sidebar| {
+                sidebar.focus(Keys::Sidebar);
+            },
+            &|sidebar| {
+                framed(sidebar, Rect::new(0, 0, 28, 26));
+            },
+            &|sidebar| {
+                sidebar.draw_collapsed(&mut Buffer::empty(area), area, moment(160_000));
+            },
+        ];
+        for (case, moved) in moves.iter().enumerate() {
+            let mut sidebar = searched();
+            sidebar.notify("first word".to_owned());
+            framed(&mut sidebar, area);
+            assert_eq!(swept(&mut sidebar, area, (7, 5), (9, 5)), copied("a-p"));
+            moved(&mut sidebar);
+            assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
+        }
+    }
+
+    /// `Esc`, or the pointer moving with no button down after a release luneta
+    /// did not hear, lets go of what is swept: it shows no more, the notes stay,
+    /// and its release, if it comes, copies nothing.
+    #[test]
+    fn a_sweep_let_go_otherwise_copies_nothing() {
+        let area = Rect::new(0, 0, 32, 26);
+        let esc = KeyEvent::from(KeyCode::Esc);
+        let lets_go: [&dyn Fn(&mut Sidebar); 2] = [
+            &|sidebar| {
+                sidebar.key(&esc, moment(160_000));
+            },
+            &|sidebar| {
+                sidebar.mouse(mouse(MouseEventKind::Moved, 9, 5), area);
+            },
+        ];
+        for (case, let_go) in lets_go.iter().enumerate() {
+            let mut sidebar = searched();
+            sidebar.notify("a note".to_owned());
+            framed(&mut sidebar, area);
+            dragged(&mut sidebar, area, (7, 5), (9, 5));
+            let_go(&mut sidebar);
+            assert!(!sidebar.pressed(), "case {case}");
+            assert_eq!(sidebar.notice.as_deref(), Some("a note"), "case {case}");
+            assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
+            let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 5), area);
+            assert_eq!(up, Asked::Nothing, "case {case}");
+        }
+    }
+
+    /// A sweep over the notes at the bottom has each as it was said, though it
+    /// wrapped, and each to a line of its own, whatever else takes lines there.
+    #[test]
+    fn a_sweep_has_each_note_as_it_was_said() {
+        let mut sidebar = searched();
+        let area = Rect::new(0, 0, 32, 26);
+        let (why, notice) = (
+            "the daemon stopped answering a while ago",
+            "something went wrong with what you asked for just now",
+        );
+        sidebar.lost(why.to_owned());
+        sidebar.notify(notice.to_owned());
+        framed(&mut sidebar, area);
+        // Two lines of two notes, at the bottom.
+        let said = format!(" lunetad: {why}\n {notice}");
+        assert_eq!(swept(&mut sidebar, area, (0, 22), (30, 25)), copied(&said));
+    }
+
+    /// Where a sweep has the `…` of a machine's, a session's or a pane's text
+    /// cut short, it copies what the cut took, whichever line of the rows has it
+    /// on screen now. Short of the `…`, it copies what shows.
+    #[test]
+    fn a_sweep_has_a_text_cut_short_whole() {
+        let long = "a-text-too-long-for-the-sidebar";
+        let panes = vec![pane(1, 1, "/w/a", long)];
+        let mut local = host(vec![session(long, 10, panes)], Vec::new());
+        let (trees, pulls) = (&mut local.work_trees, &mut local.pull_requests);
+        checked_out(trees, pulls, "/w/a", long, Some((246, State::Open, Some(LINK))));
+        local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
+        let mut sidebar = fresh();
+        sidebar.this = long.to_owned();
+        sidebar.heard(local);
+        let area = Rect::new(0, 0, 24, 14);
+        framed(&mut sidebar, area);
+        for (line, from, whole) in [
+            (3, 5, long.to_owned()),
+            (4, 3, long.to_owned()),
+            (5, 7, long.to_owned()),
+            (6, 7, format!("{long} #246")),
+            (7, 5, "me@a-host-too-long-for-the-sidebar · unreachable 1m".to_owned()),
+        ] {
+            assert_eq!(swept(&mut sidebar, area, (from, line), (22, line)), copied(&whole));
+        }
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (11, 5)), copied("a-tex"));
+
+        sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+        framed(&mut sidebar, area);
+        // The branch, its row three lines further up now.
+        let branch = format!("{long} #246");
+        assert_eq!(swept(&mut sidebar, area, (7, 3), (22, 3)), copied(&branch));
+    }
+
+    /// A `…` is found where it is drawn, past a sound mark that takes a cell of
+    /// its own.
+    #[test]
+    fn a_sweep_finds_the_cut_past_a_halfwidth_sound_mark() {
+        let long = "\u{ff8a}\u{ff9e}-a-text-too-long-for-the-sidebar";
+        let mut sidebar = fresh();
+        sidebar.heard(host(vec![session("s", 10, vec![pane(1, 1, "/w/a", long)])], Vec::new()));
+        let area = Rect::new(0, 0, 24, 14);
+        framed(&mut sidebar, area);
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(long));
+    }
+
+    /// What a cut took shows nowhere, so that a control character in it would go
+    /// unseen on the clipboard, as a line break that a paste into a shell runs.
+    /// It comes out as a row would draw it, with none.
+    #[test]
+    fn a_sweep_has_no_control_character_of_what_a_cut_took() {
+        let cwd = "/w/a-directory-too-long-for-the-sidebar\necho hidden\x1b[201~\tend";
+        let mut sidebar = fresh();
+        sidebar.heard(host(vec![session("s", 10, vec![pane(1, 1, cwd, "fish")])], Vec::new()));
+        let area = Rect::new(0, 0, 24, 14);
+        framed(&mut sidebar, area);
+        let whole = "w/a-directory-too-long-for-the-sidebarecho hidden[201~end";
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(whole));
     }
 
     /// A session lifted and held on the last line of the rows scrolls them a
