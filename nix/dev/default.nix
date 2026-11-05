@@ -4,6 +4,8 @@
   buildTools,
   compileEnv,
   clippyRun,
+  testRun,
+  testTools,
 }:
 let
   inherit (pkgs) lib;
@@ -17,6 +19,8 @@ let
         buildTools
         compileEnv
         clippyRun
+        testRun
+        testTools
         ;
     }
   ) (builtins.attrNames (builtins.readDir ./commands));
