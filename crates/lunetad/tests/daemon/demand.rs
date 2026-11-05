@@ -79,7 +79,7 @@ fn pid(host: &api::Host) -> u32 {
 }
 
 /// The pid of the daemon that answers in the host's folder, if one does.
-fn answering(host: &Host) -> Option<u32> {
+pub fn answering(host: &Host) -> Option<u32> {
     told(host).map(|info| info.pid)
 }
 
@@ -111,7 +111,7 @@ fn log(host: &Host) -> String {
 }
 
 /// A copy of `luneta` in a folder of its own, where nothing is beside it.
-fn moved() -> tempfile::TempDir {
+pub fn moved() -> tempfile::TempDir {
     let elsewhere = tempfile::tempdir().unwrap();
     install(Path::new(LUNETA), &elsewhere.path().join("luneta"));
     elsewhere
@@ -281,6 +281,56 @@ fn a_luneta_whose_daemon_finds_the_folder_held_waits_for_it() {
     });
     let _daemon = Detached { host: &host, pid: pid(&answer) };
     assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), 2);
+}
+
+/// A lunetad that says it listens, and is stopped from outside as a newer luneta
+/// stops an older daemon, and the file that counts how often luneta started it.
+fn stopped_as_it_starts(elsewhere: &tempfile::TempDir) -> PathBuf {
+    let spawned = elsewhere.path().join("spawned");
+    let stand_in = format!(
+        "echo >> '{}'\necho 'lunetad: listening on it' >&2\nkill -TERM $$\n",
+        spawned.display()
+    );
+    script(&elsewhere.path().join("lunetad"), &stand_in);
+    spawned
+}
+
+/// A luneta whose lunetad is stopped as it starts, as a newer luneta stops an
+/// older daemon, has not failed: it starts no other for that luneta to stop in
+/// turn, and answers from the one that luneta starts. Here the test starts that
+/// one, long enough after for luneta to have looked and found its own gone.
+#[test]
+fn a_luneta_whose_lunetad_is_stopped_as_it_starts_waits_for_the_next() {
+    let host = Host::new();
+    let elsewhere = moved();
+    let spawned = stopped_as_it_starts(&elsewhere);
+    let luneta = elsewhere.path().join("luneta");
+
+    thread::scope(|scope| {
+        let asking = scope.spawn(|| watch(&host, &luneta));
+        eventually("luneta starts a lunetad", || spawned.exists().then_some(()));
+        thread::sleep(Duration::from_millis(300));
+        let next = start(host.vars()).unwrap();
+        assert_eq!(pid(&asking.join().unwrap()), next.pid());
+    });
+    assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), 1);
+}
+
+/// With no other to come, luneta says that the one it started was stopped, and
+/// not that it did not start: what it wrote says that it listened.
+#[test]
+fn a_luneta_whose_lunetad_is_stopped_as_it_starts_says_it_was_stopped() {
+    let host = Host::new();
+    let elsewhere = moved();
+    let spawned = stopped_as_it_starts(&elsewhere);
+    let luneta = elsewhere.path().join("luneta");
+
+    let output = answered(host.vars().command(&luneta.display().to_string()).arg("watch"));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{said}");
+    assert!(said.contains("the lunetad luneta started was stopped"), "{said}");
+    assert!(!said.contains("did not start"), "{said}");
+    assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), 1);
 }
 
 /// luneta starts the lunetad beside it, which the same build made, rather

@@ -11,13 +11,30 @@ use std::thread;
 use std::time::Duration;
 
 use lunetad::api::{InfoRequest, Version, WatchRequest};
+use tokio::time::Instant;
 
 use crate::commands::causes;
 use crate::daemon::{self, Reach};
 use crate::host::Event;
 
-/// How long luneta waits to ask again a daemon that did not answer.
+/// How often luneta reaches for a daemon at the most, from when it last began
+/// to: a lunetad that does not start, or one that fails as it answers, is
+/// started and asked no more often than this. One that answered for longer has
+/// waited this out, and leaves luneta only `MAKING_WAY` to wait.
 const AGAIN: Duration = Duration::from_secs(1);
+
+/// How long luneta leaves the folder to whoever stopped the daemon it lost,
+/// before it reaches for one again. A newer luneta stops an older daemon and
+/// looks again a `daemon::LOOK` later: reached for at once, a sidebar of the
+/// upgrade before it would start another older one first, for that luneta to
+/// stop in turn. Longer than that look and the moments its lunetad takes to
+/// hold the folder.
+const MAKING_WAY: Duration = Duration::from_millis(50);
+
+// The look it waits out has to fit in it, and it has to leave `AGAIN` something
+// to limit. These hold within one build alone: that look is the newer luneta's.
+const _: () = assert!(daemon::LOOK.as_millis() < MAKING_WAY.as_millis());
+const _: () = assert!(MAKING_WAY.as_millis() < AGAIN.as_millis());
 
 /// Watches the daemon in `folder`, or says why it cannot, until luneta ends.
 pub fn start(folder: PathBuf, events: Sender<Event>) {
@@ -36,11 +53,12 @@ pub fn start(folder: PathBuf, events: Sender<Event>) {
 
 /// Asks again each time the daemon answers, for the host once it is no longer
 /// as last seen, until luneta's loop is gone. A daemon that goes away is
-/// looked for again, each `AGAIN`, and started where none runs, or in the
-/// place of an older one. Each daemon found is asked first where it reads
-/// Claude Code's sessions, which are those of the agents it lists.
+/// looked for again, as `AGAIN` and `MAKING_WAY` let it, and started where none
+/// runs, or in the place of an older one. Each daemon found is asked first where
+/// it reads Claude Code's sessions, which are those of the agents it lists.
 async fn watch(folder: PathBuf, events: Sender<Event>) {
     loop {
+        let reaching = Instant::now();
         // A daemon found afresh is asked for the whole host, as one started
         // again counts its versions afresh.
         let mut after: Option<Version> = None;
@@ -86,6 +104,6 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         if events.send(Event::Daemon(Err(failure))).is_err() {
             return;
         }
-        tokio::time::sleep(AGAIN).await;
+        tokio::time::sleep_until((reaching + AGAIN).max(Instant::now() + MAKING_WAY)).await;
     }
 }

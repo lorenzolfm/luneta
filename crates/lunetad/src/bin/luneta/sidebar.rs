@@ -1408,7 +1408,8 @@ impl Sidebar {
     }
 
     /// The daemon does not answer, for `why`, which the log has as it
-    /// changes: luneta asks again each second. What it said last stands.
+    /// changes: luneta asks again in a moment, and once a second at the most.
+    /// What it said last stands.
     pub fn lost(&mut self, why: String) {
         if self.away.as_ref() != Some(&why) {
             log::say(&format!("lunetad: {why}"));
