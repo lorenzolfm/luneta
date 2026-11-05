@@ -109,13 +109,13 @@
 
           buildTools = [
             toolchain
+            pkgs.coreutils
             pkgs.gnumake
             pkgs.protobuf
             pkgs.stdenv.cc
           ]
           ++ speechBuild
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-            pkgs.coreutils
             pkgs.gnused
             pkgs.stdenv.cc.bintools.bintools
           ];

@@ -10,7 +10,6 @@
   help = "check the menu's skill finder against what claude runs in dir";
   tools = buildTools ++ [
     pkgs.bash
-    pkgs.coreutils
     pkgs.findutils
     pkgs.gawk
     pkgs.git
