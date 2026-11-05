@@ -119,6 +119,7 @@ pub enum Event {
     /// zellij did not take its client to the session luneta sent it to, on
     /// the go whose look, by its number, was to find it there.
     Stayed(u64),
+    Unfound(u64),
     /// Something went wrong that the sidebar says.
     Notice(String),
     /// A link for luneta's terminal to put on its clipboard.
@@ -1219,6 +1220,7 @@ impl App {
             Event::Daemon(_)
                 | Event::Looked(_)
                 | Event::Stayed(_)
+                | Event::Unfound(_)
                 | Event::Hosted(_, Said::Titled(_))
         );
         match event {
@@ -1262,6 +1264,10 @@ impl App {
                 let look = self.sidebar.stayed(look);
                 // The client never left: what it typed there counts still.
                 self.look(look);
+            },
+            Event::Unfound(look) => {
+                self.sidebar.unfound(look);
+                self.on_to_pane();
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Copy(link) => clip(terminal, ClipboardType::Clipboard, &link.url())?,
