@@ -52,6 +52,7 @@ mod tests {
             is_floating: false,
             is_focused: false,
             is_fullscreen: false,
+            title: String::new(),
             tab_id,
             tab_position: tab_id,
             tab_name: String::new(),

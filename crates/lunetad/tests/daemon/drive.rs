@@ -331,10 +331,11 @@ fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
     let host = Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
     let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
-    host.lists.list("work", &json!([pane(1, from), pane(2, from), pane(5, from), pane(3, to)]));
-    host.lists.stacks_into("work", 1, &json!([pane(1, to), pane(2, from), pane(5, from), pane(3, to)]));
-    host.lists.stacks_into("work", 2, &json!([pane(1, to), pane(2, to), pane(5, from), pane(3, to)]));
-    host.lists.stacks_into("work", 3, &json!([pane(1, to), pane(2, to), pane(5, to), pane(3, to)]));
+    let (three, there) = (pane(3, to), |id| pane(id, to));
+    host.lists.list("work", &json!([pane(1, from), pane(2, from), pane(5, from), three]));
+    host.lists.stacks_into("work", 1, &json!([there(1), pane(2, from), pane(5, from), three]));
+    host.lists.stacks_into("work", 2, &json!([there(1), there(2), pane(5, from), three]));
+    host.lists.stacks_into("work", 3, &json!([there(1), there(2), there(5), three]));
     host.lists.clients("work", &[(1, "terminal_2")]);
 
     let turned = luneta(&host, ("work", 1), &["turn", "tab", "work:1", "--into", "work:3"]);
@@ -342,10 +343,8 @@ fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
     assert_eq!(said(&turned), "work:1\n");
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
     let plain = "--session work action stack-panes -- terminal_9 terminal_2";
-    assert_eq!(
-        host.lists.turned(),
-        [unfocused("terminal_9", "terminal_1"), plain.to_owned(), unfocused("terminal_9", "terminal_5")],
-    );
+    let (one, five) = (unfocused("terminal_9", "terminal_1"), unfocused("terminal_9", "terminal_5"));
+    assert_eq!(host.lists.turned(), [one, plain.to_owned(), five]);
     assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
 }
 

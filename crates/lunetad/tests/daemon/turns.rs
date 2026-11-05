@@ -88,7 +88,18 @@ fn action(said: &str) -> String {
 
 /// A stand-in as zellij is asked to open one in the tab `tab`.
 fn stand_in(tab: u32) -> String {
-    let said = format!("new-pane --tab-id {tab} --no-focus --close-on-exit -- sleep 10");
+    opened_as(tab, "luneta stand-in")
+}
+
+/// What opens the second stand-in of a pane no client is taken to, in the tab `tab`.
+fn second_stand_in(tab: u32) -> String {
+    opened_as(tab, "luneta second stand-in")
+}
+
+/// A pane named `name` as zellij is asked to open a stand-in in the tab `tab`.
+fn opened_as(tab: u32, name: &str) -> String {
+    let flags = "--no-focus --close-on-exit";
+    let said = format!("new-pane --tab-id {tab} {flags} --name={name} -- sleep 10");
     format!("- {}", action(&said))
 }
 
@@ -270,7 +281,9 @@ fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
     // One for each, and another for each that no client went to.
-    assert_eq!(host.zellij.opened(), vec![stand_in(1); 5]);
+    let (first, second) = (stand_in(1), second_stand_in(1));
+    let opened = [first.clone(), second.clone(), first.clone(), first, second];
+    assert_eq!(host.zellij.opened(), opened);
     let stacked = [unfocused("terminal_5"), on_stand_in("terminal_1"), unfocused("plugin_7")];
     assert_eq!(host.zellij.turned(), stacked);
     assert_eq!(host.zellij.closed(), vec![stand_in_closed(); 5]);
@@ -341,6 +354,26 @@ fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
     assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), unfocused("terminal_2")]);
+}
+
+/// A pane closing cuts the answer of a stand-in short, which opens all the same:
+/// it is found by its name, and no second opens to stand in the tab till it ends.
+#[test]
+fn a_stand_in_whose_answer_was_cut_short_is_found_by_its_name() {
+    let host = Host::new();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    let mut opened = pane(8, to);
+    opened["title"] = json!("luneta stand-in");
+    host.zellij.list("work", &json!([pane(1, from), pane(3, to), opened]));
+    host.zellij.clients("work", &[(1, "terminal_1")]);
+    host.zellij.stacks_into("work", 1, &json!([pane(1, to), pane(3, to)]));
+    host.zellij.silences("work", "new-pane");
+
+    assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
+
+    assert_eq!(host.zellij.opened(), [stand_in(1)]);
+    assert_eq!(host.zellij.turned(), [action("stack-panes -- terminal_8 terminal_1")]);
+    assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_8")]);
 }
 
 /// A session of `work` whose one pane in the tab of terminal 1 moves to the tab

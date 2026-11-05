@@ -164,6 +164,9 @@ pub struct Laid {
     /// that.
     #[serde(default)]
     pub is_fullscreen: bool,
+    /// What its frame calls it, by which a turn finds a stand-in of its own.
+    #[serde(default)]
+    pub title: String,
     pub tab_id: u32,
     /// Where its tab stands among the session's, from the first.
     #[serde(default)]
@@ -269,6 +272,7 @@ mod tests {
             is_floating: false,
             is_focused: false,
             is_fullscreen: false,
+            title: String::new(),
             tab_id,
             tab_position: tab_id,
             tab_name: String::new(),

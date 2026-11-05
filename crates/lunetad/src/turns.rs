@@ -45,7 +45,9 @@
 //! same ids.
 //!
 //! Closing a stand-in can cut short the calls that follow it, as `cli::heard`
-//! says, so those are asked again. A `stack-panes` cut short can still be on
+//! says, so those are asked again, but for the `new-pane` of a stand-in, which
+//! opens all the same, and is found by its name: asked again, it would open a second
+//! that stands in the tab until it ends on its own. A `stack-panes` cut short can still be on
 //! its way as zellij lists the panes, and read as having no room: the pane then
 //! stays, or moves after all, and nothing is lost either way, as what goes then
 //! is its stand-in, and never a tab, which would end a pane late to land there.
@@ -62,7 +64,8 @@
 //! and `Leaving` and `Moving` say what it asks zellij to move.
 
 use std::process::Command;
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::tab;
 
@@ -75,6 +78,18 @@ use crate::zellij::SessionName;
 /// ends on its own, which closes the pane, and a tab with nothing else in it,
 /// where luneta is gone before it does.
 const STAND_IN: [&str; 2] = ["sleep", "10"];
+
+/// What a stand-in is named, for `open_stand_in` to find it.
+const STAND_IN_NAME: &str = "luneta stand-in";
+
+/// What the second stand-in of `under_stack` is named: found by the first's name,
+/// it would be the first.
+const SECOND_STAND_IN_NAME: &str = "luneta second stand-in";
+
+/// How long a stand-in whose answer was cut short has to show in what zellij lists,
+/// and how often it is looked for: it opens a moment after.
+const FINDING: Duration = Duration::from_millis(100);
+const LOOKING: Duration = Duration::from_millis(5);
 
 /// What zellij is told to stack last for it to move no client, as it focuses the
 /// last pane it is told to stack: a pane none of a session's has, as zellij
@@ -439,27 +454,46 @@ fn new_tab(session: &SessionName, name: Option<&str>) -> Result<u32, String> {
 /// opened there, which then closes and leaves it in its place; and says where
 /// it ended up, or why zellij was not asked to the end.
 fn over_stand_in(session: &SessionName, pane: PaneId, to: u32) -> Result<Landed, String> {
-    let stand_in = open_stand_in(session, to)?;
+    let stand_in = open_stand_in(session, to, STAND_IN_NAME)?;
     let listed = over_stand_ins(session, &[stand_in], pane, to)?;
     Ok(landed(&listed, pane, to))
 }
 
-/// Has zellij open a stand-in in the tab `to` of `session`, with no client
-/// moved, and says which. One zellij opened as a pane closing cut its answer
-/// short has a second open beside it, and ends on its own.
-fn open_stand_in(session: &SessionName, to: u32) -> Result<PaneId, String> {
+/// Has zellij open a stand-in named `name` in the tab `to` of `session`, with no
+/// client moved, and says which. One whose answer a pane closing cut short opens
+/// all the same, so it is found by its name, and asked for again only where it does
+/// not show: that one has a second open beside it, which ends on its own.
+fn open_stand_in(session: &SessionName, to: u32, name: &str) -> Result<PaneId, String> {
     let mut command = action(session);
     quiet(&mut command);
     command.args(["new-pane", "--tab-id", &to.to_string(), "--no-focus", "--close-on-exit"]);
-    command.arg("--").args(STAND_IN);
+    command.arg(format!("--name={name}")).arg("--").args(STAND_IN);
     heard(
         || answered(&mut command),
         |said| {
             let id = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
             let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
-            id.map(PaneId::Terminal).ok_or_else(unnamed)
+            let id = id.map(PaneId::Terminal);
+            id.or_else(|| found_stand_in(session, to, name)).ok_or_else(unnamed)
         },
     )
+}
+
+/// The newest stand-in named `name` in the tab `to` of `session`, as zellij lists
+/// it within `FINDING`, or none.
+fn found_stand_in(session: &SessionName, to: u32, name: &str) -> Option<PaneId> {
+    let deadline = Instant::now() + FINDING;
+    loop {
+        let listed = laid(session.as_str()).unwrap_or_default();
+        let is_it = |it: &&Laid| !it.is_plugin && it.tab_id == to && it.title == name;
+        if let Some(it) = listed.iter().filter(is_it).max_by_key(|it| it.id) {
+            return Some(it.pane_id());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(LOOKING);
+    }
 }
 
 /// Has zellij close the stand-in `pane` of `session`. What came of the move
@@ -538,7 +572,7 @@ fn stacked(
 /// pane stays a stack of one, as it ends with no client in the session: it has
 /// moved all the same.
 fn under_stack(session: &SessionName, root: PaneId, tab: u32) -> Option<PaneId> {
-    let last = open_stand_in(session, tab).ok()?;
+    let last = open_stand_in(session, tab, SECOND_STAND_IN_NAME).ok()?;
     let _ = stack(session, &[root, last, NOWHERE]);
     Some(last)
 }
@@ -576,6 +610,7 @@ mod tests {
             is_floating: false,
             is_focused: false,
             is_fullscreen: false,
+            title: String::new(),
             tab_id,
             tab_position: tab_id,
             tab_name: format!("Tab #{}", tab_id + 1),
