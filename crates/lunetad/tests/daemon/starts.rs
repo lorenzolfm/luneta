@@ -10,6 +10,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lunetad::program::alone;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
 use rustix::pty::{self, OpenptFlags};
@@ -53,6 +54,11 @@ pub fn terminal() -> (OwnedFd, OwnedFd) {
     (controller, tty)
 }
 
+pub fn spawn_on(tty: &OwnedFd, command: &mut Command) -> Running {
+    let stdio = || Stdio::from(tty.try_clone().unwrap());
+    Running::spawn(alone(command).stdin(stdio()).stdout(stdio()).stderr(stdio()))
+}
+
 /// Runs `command`, a luneta, on a terminal of its own until it ends. The
 /// terminal is read all along, so that nothing waits on a write, and to its
 /// end, once all that hold it have let go, as a `Command` does as it goes.
@@ -69,8 +75,7 @@ fn on_terminal_with(mut command: Command, meanwhile: impl FnOnce(&Running)) -> E
         let _ = File::from(controller).read_to_end(&mut said);
         said
     });
-    let stdio = || Stdio::from(tty.try_clone().unwrap());
-    let mut luneta = Running::spawn(command.stdin(stdio()).stdout(stdio()).stderr(stdio()));
+    let mut luneta = spawn_on(&tty, &mut command);
     drop(command);
     drop(tty);
     meanwhile(&luneta);
