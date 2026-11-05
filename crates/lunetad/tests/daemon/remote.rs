@@ -1634,10 +1634,9 @@ fn git_said(dir: &Path, args: &[&str]) -> String {
 /// reached through an ssh of its own: `up` is `o/n`, and `fork` is `f/n`. Of
 /// `feat`, the branch of `o/n#7`, it has only `origin/feat`.
 fn clone_with_pull_7(host: &Host, scratch: &Path) -> PathBuf {
-    host.gh.pull(7, "main", "feat");
     let (up, clone) = (scratch.join("up"), scratch.join("n"));
     cloned_as_wt(scratch, &up, &clone);
-    pushed(&up, "feat", "first");
+    pushed(host, &up, "feat", "first");
     let bare = clone.join(".bare");
     git(&bare, &["branch", "-q", "-D", "feat"]);
     git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
@@ -1655,10 +1654,11 @@ fn clone_with_pull_7(host: &Host, scratch: &Path) -> PathBuf {
     clone
 }
 
-fn pushed(up: &Path, parent: &str, name: &str) -> String {
+fn pushed(host: &Host, up: &Path, parent: &str, name: &str) -> String {
     let head = git_said(up, &["commit-tree", "-p", parent, "-m", name, "feat^{tree}"]);
     git(up, &["update-ref", "refs/heads/feat", &head]);
     git(up, &["update-ref", "refs/pull/7/head", &head]);
+    host.gh.pull(7, "main", &head);
     head
 }
 
@@ -1701,16 +1701,17 @@ fn r_brings_the_worktree_wt_found_to_the_pull_request_s_head() {
 
     let local_main = git_said(&main, &["rev-parse", "main"]);
     git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
-    at_head(&pushed(&up, "feat", "second"), "known only as last fetched");
+    at_head(&pushed(&host, &up, "feat", "second"), "known only as last fetched");
     let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
     assert_eq!(tracked_main, git_said(&up, &["rev-parse", "main"]));
     assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
-    assert_eq!(host.gh.viewed(), ["pr view 7 --repo github.com/o/n --json baseRefName,headRefName"]);
+    assert_eq!(host.gh.viewed(), ["pr view 7 --repo github.com/o/n --json baseRefName,headRefOid"]);
 
-    at_head(&pushed(&up, "feat", "third"), "a worktree there already");
-    at_head(&pushed(&up, "main", "rewritten"), "rewritten");
+    at_head(&pushed(&host, &up, "feat", "third"), "a worktree there already");
+    at_head(&pushed(&host, &up, "main", "rewritten"), "rewritten");
+    at_head(&pushed(&host, &up, "main", "rewritten again"), "rewritten again");
     git(&bare, &["worktree", "remove", "../feat"]);
-    at_head(&pushed(&up, "feat", "fourth"), "a local branch whose worktree went");
+    at_head(&pushed(&host, &up, "feat", "fourth"), "a local branch whose worktree went");
 }
 
 #[test]
@@ -1729,7 +1730,7 @@ fn w_leaves_the_worktree_where_it_is() {
     let was = git_said(&feat, &["rev-parse", "HEAD"]);
     let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
     git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
-    pushed(&up, "feat", "second");
+    pushed(&host, &up, "feat", "second");
     pasted_here(&host, &pasted).unwrap();
     assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
     assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), tracked_main);
@@ -1761,21 +1762,73 @@ fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let head = pushed(&up, "feat", "second");
+        let head = pushed(&far, &up, "feat", "second");
         let ready = pasted_on(&mut daemon, "far", &pasted).await.unwrap();
         assert_eq!(ready.at, At::There(0));
         assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
 
-        pushed(&up, "feat", "third");
+        pushed(&far, &up, "feat", "third");
         fs::write(feat.join("mine"), "mine").unwrap();
         git(&feat, &["add", "mine"]);
         let refused = pasted_on(&mut daemon, "far", &pasted).await.unwrap_err();
         assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
-        let why = format!("started no review in {}: it has uncommitted changes", feat.display());
+        let why = format!(
+            "started no review in {}: the worktree has changes that are not committed",
+            feat.display()
+        );
         assert_eq!(refused.message(), why);
         assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
     });
     assert_eq!(here.gh.viewed(), [] as [String; 0]);
+}
+
+/// Nothing has to move, so nothing the worktree holds is in danger, and no wt
+/// has to say what it follows: at the head is the code to review.
+#[test]
+fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let feat = clone.join("feat");
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let head = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read_to_string(feat.join("mine")).unwrap(), "mine");
+
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    git(&feat, &["switch", "-q", "--detach"]);
+    let ready = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap();
+    assert_eq!(ready.at, At::There(0));
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+}
+
+/// The sidebar's "this pane has #7" can lag a `git switch main`. wt follows what
+/// is checked out, which is not the pull request.
+#[test]
+fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let main = clone.join("main");
+    git(&main, &["branch", "-q", "--set-upstream-to=origin/main", "main"]);
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&main) };
+
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("and the head of o/n#7 is"), "{refused:?}");
+    let up_main = git_said(&scratch.join("up"), &["rev-parse", "main"]);
+    assert_eq!(git_said(&main, &["rev-parse", "HEAD"]), up_main);
 }
 
 /// wt names the branch `f-main`, as the clone has a `main` of its own.
@@ -1792,9 +1845,10 @@ fn r_syncs_a_pull_request_from_a_fork_s_main() {
         git(&fork, &[&["commit", "-q", "--allow-empty", "-m", name], amended].concat());
         let spec = "+refs/heads/main:refs/pull/7/head";
         git(&up, &["fetch", "-q", &fork.display().to_string(), spec]);
-        git_said(&fork, &["rev-parse", "main"])
+        let head = git_said(&fork, &["rev-parse", "main"]);
+        host.gh.pull(7, "main", &head);
+        head
     };
-    host.gh.pull(7, "main", "main");
     host.gh.api("f\thttps://github.com/f/n.git\tgit@github.com:f/n.git\tmain\n");
     let _daemon = start(host.vars()).unwrap();
     let pasted = reviewing_pull_7(vec![pane_in(&main)]);

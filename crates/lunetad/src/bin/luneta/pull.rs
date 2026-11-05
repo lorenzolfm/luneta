@@ -188,6 +188,18 @@ pub fn make(repo: &str, of: &Of) -> ExitCode {
     }
 }
 
+/// Brings the worktree in `dir` to its upstream branch, as `links::followed`
+/// does. Or prints why it did not, as `make` does.
+pub fn follow(dir: &str) -> ExitCode {
+    match links::followed(dir) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("{}{why}", links::WHY);
+            ExitCode::FAILURE
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

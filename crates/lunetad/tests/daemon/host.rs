@@ -719,7 +719,7 @@ exec cat "{pulls}/$branch.json"
     }
 
     pub fn pull(&self, number: u32, base: &str, head: &str) {
-        let said = serde_json::json!({ "baseRefName": base, "headRefName": head });
+        let said = serde_json::json!({ "baseRefName": base, "headRefOid": head });
         fs::write(self.pulls.join(format!("pull-{number}")), said.to_string()).unwrap();
     }
 

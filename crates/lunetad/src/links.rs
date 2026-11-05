@@ -1433,15 +1433,31 @@ fn luneta() -> Result<PathBuf, String> {
 /// names, and `layout`'s the one `repo` is in, so that the clone luneta sees
 /// wt cloned may not be the one wt makes the worktree in.
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
-    let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
-    if let Some(name) = named {
-        return Err(format!("{name} is set, and git would take another repository for {repo}'s"));
-    }
+    git_reads(repo)?;
     let wt_add = |error| format!("wt add: {error:#}");
     let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
     wt_made(repo)?;
     let made = add::run(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
     Ok(made.path().to_owned())
+}
+
+/// Brings the worktree in `dir` to its upstream branch, by wt's own code; or why
+/// it did not.
+pub fn followed(dir: &str) -> Result<(), String> {
+    git_reads(dir)?;
+    wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
+}
+
+/// Why wt's git would not read the repository `dir` is in, where a variable
+/// tells it where another is.
+fn git_reads(dir: &str) -> Result<(), String> {
+    let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
+    match named {
+        Some(name) => {
+            Err(format!("{name} is set, and git would take another repository for {dir}'s"))
+        },
+        None => Ok(()),
+    }
 }
 
 /// Why wt makes no worktree in the repository `dir` is in, where it does not:

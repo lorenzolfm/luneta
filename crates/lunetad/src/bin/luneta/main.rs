@@ -105,6 +105,13 @@ enum Command {
         #[arg(value_parser = pull::Of::parse, value_name = "BRANCH")]
         of: pull::Of,
     },
+    /// Bring a worktree to its upstream branch, as `wt follow` does. Why it did
+    /// not comes last on stderr, after `luneta: `.
+    #[command(hide = true)]
+    Follow {
+        #[arg(value_name = "DIR")]
+        dir: String,
+    },
     /// Tell the luneta listening on a socket that its notification of a
     /// group was clicked, as a click on one runs on macOS.
     #[command(hide = true)]
@@ -132,6 +139,7 @@ fn main() -> ExitCode {
     let command = match command {
         // It asks no lunetad, and so needs no folder to find one in.
         Command::Worktree { repo, of } => return pull::make(&repo, &of),
+        Command::Follow { dir } => return pull::follow(&dir),
         Command::Clicked { socket, group } => {
             return match peers::tell(&socket, &group) {
                 Ok(()) => ExitCode::SUCCESS,
