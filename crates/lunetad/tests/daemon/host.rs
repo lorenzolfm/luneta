@@ -148,7 +148,8 @@ pub fn script(path: &Path, text: &str) {
 /// with `attach`, for `attached`, which ends at once as one that detached
 /// does, or as one zellij dropped does, as many as a test had it
 /// `drops_clients`, or fails, as a test had it `refuses_clients`, or stays and
-/// notes all it hears, as a test had it `listen`, for `heard`. A pane closing
+/// notes all it hears, as a test had it `listen`, for `heard`, or stays a while,
+/// as a test had it `stays_for`. A pane closing
 /// can cut a call of a session short, once, as a test had it `silences` or
 /// `unreaches` it, or hand it another call's answer, as a test had it
 /// `answers_another`. It knows no other command.
@@ -306,7 +307,13 @@ case "$*" in
             if [ "$drops" -gt 0 ]; then
                 echo $((drops - 1)) > "{panes}/drops"
                 cat "{panes}/dropped"
+                exit 0
             fi
+        fi
+        if [ -f "{panes}/stays" ]; then
+            stays=$(cat "{panes}/stays")
+            rm "{panes}/stays"
+            sleep "$stays"
         fi
         exit 0
         ;;
@@ -410,6 +417,14 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     pub fn drops_clients(&self, clients: u32) {
         fs::write(self.panes().join("dropped"), DROPPED).unwrap();
         fs::write(self.panes().join("drops"), clients.to_string()).unwrap();
+    }
+
+    pub fn stays_for(&self, time: Duration) {
+        fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
+    }
+
+    pub fn stayed(&self) -> bool {
+        !self.panes().join("stays").exists()
     }
 
     /// Has each client of zellij's fail from now on, as it says why.

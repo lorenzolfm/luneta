@@ -307,6 +307,27 @@ fn a_client_zellij_keeps_dropping_at_once_is_given_up_on() {
     assert!(log.contains("ends: zellij dropped its client 6 times"), "{log}");
 }
 
+#[test]
+fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
+    let host = Host::new();
+    let _project = runs(&host, "project");
+    let _next = runs(&host, "next");
+    let lasts = Duration::from_secs(31);
+    host.zellij.drops_clients(5);
+    host.zellij.stays_for(lasts);
+
+    let ended = on_terminal_with(luneta(host.vars(), &directory("project").path), |_| {
+        eventually("a client to stay", || host.zellij.stayed().then_some(()));
+        host.zellij.drops_clients(1);
+        fs::remove_file(host.contract().join("project")).unwrap();
+        thread::sleep(lasts);
+    });
+    assert!(ended.status.success(), "{}", ended.said);
+    let mut attached = vec!["attach project"; 6];
+    attached.extend(["attach next"; 2]);
+    assert_eq!(host.zellij.attached(), attached);
+}
+
 /// On another machine it is the same, and through ssh: the client goes back to
 /// its session there, not on to one of this machine's.
 #[test]
@@ -326,7 +347,7 @@ fn a_client_zellij_drops_on_another_machine_is_taken_back_there() {
     assert!(log.contains("far: zellij dropped its client: taking it back to work"), "{log}");
 }
 
-/// However luneta ends, the log says why: its screen goes with it, and it may
+/// The log says why luneta ended: its screen goes with it, and it may
 /// end with no one there to read what it says last. Here, as its client
 /// detached, as it failed, as its ssh failed with no session left to go on in,
 /// as luneta was told to end, and as it would not start.

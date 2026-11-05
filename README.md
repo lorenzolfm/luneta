@@ -1655,7 +1655,7 @@ lines past the 16th: `luneta sessions` says lunetad could not read all of
 the file, and the log says which.
 
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
-wrong in luneta's sidebar, and why each luneta ended, as `ends:` lines, in
+wrong in luneta's sidebar, and why a luneta ended, as `ends:` lines, in
 `$XDG_STATE_HOME/luneta`, or
 `~/.local/state/luneta` (on macOS too), which outlives a reboot: a line for
 each, with when, in UTC, and which process said it, as

@@ -758,7 +758,8 @@ struct App {
 /// reaches. Where another does, a client of the newest takes the place of the
 /// one that ended, of its machine's first. One that zellij drops is taken back.
 /// The sidebar is of what the daemon in `folder` says, which is started if none
-/// runs. However luneta ends, the log says why.
+/// runs. The log says why luneta ended, but for a second signal, or one it
+/// does not handle.
 pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     // Before all else, for the log to say why luneta ended however early. Why
     // there is none is for the sidebar to say, once it has its notes.
@@ -2537,9 +2538,12 @@ impl App {
     /// another machine fails: back to the session it is in, of the machine it
     /// is on now; or nowhere, where luneta does not know which that is.
     fn back(&self) -> Fails {
-        let here = self.sidebar.here().and_then(|here| SessionName::running(here).ok());
-        let back = here.map(|session| Back { machine: self.sidebar.on().clone(), session });
-        back.map_or(Fails::End, Fails::Back)
+        self.here_back().map_or(Fails::End, Fails::Back)
+    }
+
+    fn here_back(&self) -> Option<Back> {
+        let session = SessionName::running(self.sidebar.here()?).ok()?;
+        Some(Back { machine: self.sidebar.on().clone(), session })
     }
 
     /// Starts a client on `machine` that `joins` its session, in the place
@@ -2611,6 +2615,7 @@ impl App {
         arrival: Option<Arrival>,
         then_pane: Option<Place>,
     ) {
+        self.drops.gave_way(self.client.started.elapsed());
         self.client = Client::new(hosted, fails, arrival, then_pane);
         // The client that takes its place heard no button go down over it.
         if self.held == Held::Zellij {
@@ -3053,18 +3058,18 @@ impl App {
     fn take_back(&mut self) -> io::Result<()> {
         let on = self.sidebar.on().clone();
         let who = of_machine(&on, "zellij");
-        let seats = self.sidebar.seats();
-        let Some(session) = seats.last().cloned() else {
+        let Some(back) = self.here_back() else {
             self.end(&format!("{who} dropped its client, in no session luneta knows of"));
             return Ok(());
         };
+        let session = &back.session;
         match self.drops.dropped(self.client.started.elapsed()) {
             Dropped::TakeBack => {
                 let note = format!("{who} dropped its client: taking it back to {session}");
                 self.sidebar.notify(note);
                 let mut fails = self.client.fails.clone();
                 fails.came_in();
-                self.go_back(&on, Back { machine: on.clone(), session }, fails)
+                self.go_back(&on, back, fails)
             },
             Dropped::GiveUp => {
                 let why = format!(
