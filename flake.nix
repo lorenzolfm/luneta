@@ -107,6 +107,39 @@
             }
             .${system} or "-DGGML_NATIVE=OFF";
 
+          # What a cargo in the tree builds the workspace with, in `dev` and in the
+          # devshell alike. protoc is for the build scripts of the protocol's crate and
+          # of the daemon, a C compiler to link every build script and to compile the
+          # speech model, and make for cmake to run. The devshell has the last two from
+          # stdenv anyway, and `dev` has only what it names, with the caller's PATH
+          # behind it: not named, they are the caller's, if the caller has any.
+          #
+          # On a Mac, cmake will not start without install_name_tool, which the linker's
+          # wrapper does not carry and its package does, and sed embeds ggml's Metal
+          # shaders.
+          buildTools = [
+            toolchain
+            pkgs.gnumake
+            pkgs.protobuf
+            pkgs.stdenv.cc
+          ]
+          ++ speechBuild
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.gnused
+            pkgs.stdenv.cc.bintools.bintools
+          ];
+
+          # What stdenv's setup hooks give the devshell on a Mac, for `dev`, which runs
+          # none. The compiler finds nix's SDK on its own, but cmake, with no SDKROOT,
+          # asks Xcode for one, and compiles its headers with nix's clang, which cannot
+          # read them. And rust links everything with -liconv, which that SDK leaves to
+          # a package of its own. Through LIBRARY_PATH, which clang reads: the linker's
+          # wrapper reads NIX_LDFLAGS only where a stdenv has set its role.
+          macBuildEnv = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            export SDKROOT="${pkgs.apple-sdk.sdkroot}"
+            export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          '';
+
           # What the daemon's derivations share.
           daemon = {
             pname = "lunetad";
@@ -228,27 +261,20 @@
           dev = pkgs.writeShellApplication {
             name = "dev";
             meta.description = "luneta build recipes on the flake-pinned toolchain";
-            # protoc is for the build scripts of the protocol's crate and of the
-            # daemon, which `dev clippy` and `dev skills` run, and cmake and
-            # pkg-config for the speech model's, with ALSA's below. cargo-deny
-            # is `dev deny`'s, whose check of what Cargo.lock names against the
-            # advisories known needs the network the derivation has none of, so
+            # cargo-deny is `dev deny`'s, whose check of what Cargo.lock names against
+            # the advisories known needs the network the derivation has none of, so
             # that check is no derivation as clippy's is.
-            runtimeInputs = [
-              toolchain
+            runtimeInputs = buildTools ++ [
               pkgs.coreutils
               pkgs.git
-              pkgs.protobuf
               pkgs.cargo-deny
-            ]
-            ++ speechBuild;
+            ];
             text = ''
               # luneta build recipes, as one command.
               #
-              # Lives in the devshell and behind `nix run .#dev`, and nowhere else. The rust
-              # toolchain comes from runtimeInputs, so every subcommand builds with the version
-              # this flake pins whether or not the caller entered the shell first; see the
-              # toolchain comment above.
+              # Lives in the devshell and behind `nix run .#dev`, and nowhere else. Its tools
+              # come from runtimeInputs, so every subcommand builds with what this flake pins
+              # whether or not the caller entered the shell first; see `buildTools` above.
               #
               # writeShellApplication supplies the shebang and `set -euo pipefail`, and lints
               # this text with shellcheck at build time.
@@ -287,7 +313,7 @@
               export PKG_CONFIG_PATH="${
                 pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
               }''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-
+              ${macBuildEnv}
               if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
                 echo "dev: run this inside the luneta checkout (no git worktree here)" >&2
                 exit 2
@@ -345,16 +371,11 @@
           checks = { inherit clippy; };
 
           shell = pkgs.mkShell {
-            # protoc for the daemon's build script, as `cargo build -p lunetad` runs it,
-            # what the speech model's library is built with, and node for the test that
-            # runs luneta's extension for pi.
-            packages = [
-              toolchain
+            # node for the test that runs luneta's extension for pi.
+            packages = buildTools ++ [
               dev
               pkgs.nodejs
-              pkgs.protobuf
-            ]
-            ++ speechBuild;
+            ];
             buildInputs = speechLibs;
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
 
