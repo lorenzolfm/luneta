@@ -1394,6 +1394,7 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "transcribe-cpp",
+ "unicode-segmentation",
  "unicode-width",
  "uzers",
  "wt",

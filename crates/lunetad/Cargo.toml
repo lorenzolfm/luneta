@@ -82,6 +82,7 @@ tower = { version = "0.5.3", features = ["util"] }
 # luneta's binary. Its default feature is Metal, which it turns on for macOS
 # alone. Exact, as a 0.x release of it may change what it runs.
 transcribe-cpp = "=0.4.1"
+unicode-segmentation = "1.13.3"
 unicode-width = { version = "0.2.2", default-features = false }
 # The shell the user database names yours, which a tab luneta opens runs:
 # std has no safe getpwuid, nor rustix any. Its libc is in the tree already.

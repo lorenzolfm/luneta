@@ -65,6 +65,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::alerts::{self, Reach};
@@ -5055,19 +5056,20 @@ fn checkout_line(
     (Line::from(spans), columns, room)
 }
 
-/// `text` cut to `room` columns, with a `…` for what it took.
+/// `text` cut to `room` columns, with a `…` for what it took. What shows as one
+/// stays whole, and counts as wide as it shows.
 pub fn cut(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
     }
     let mut kept = String::new();
     let mut taken = 0;
-    for c in text.chars() {
-        let width = c.width().unwrap_or(0);
+    for shown in text.graphemes(true) {
+        let width = shown.width();
         if taken + width + 1 > room {
             break;
         }
-        kept.push(c);
+        kept.push_str(shown);
         taken += width;
     }
     if room > 0 {
@@ -5076,15 +5078,16 @@ pub fn cut(text: &str, room: usize) -> String {
     kept
 }
 
-/// `text` cut to its last `room` columns, with a `…` for what it took.
+/// `text` cut to its last `room` columns, with a `…` for what it took, as `cut`
+/// cuts.
 pub fn tail(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
     }
     let mut start = text.len();
     let mut taken = 0;
-    for (at, c) in text.char_indices().rev() {
-        let width = c.width().unwrap_or(0);
+    for (at, shown) in text.grapheme_indices(true).rev() {
+        let width = shown.width();
         if taken + width + 1 > room {
             break;
         }
@@ -5123,12 +5126,12 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
     let mut line = String::new();
-    for c in text.chars() {
-        if line.width() + c.width().unwrap_or(0) > room {
+    for shown in text.graphemes(true) {
+        if line.width() + shown.width() > room {
             lines.push(Line::styled(format!(" {line}"), style));
             line.clear();
         }
-        line.push(c);
+        line.push_str(shown);
     }
     if !line.is_empty() {
         lines.push(Line::styled(format!(" {line}"), style));
@@ -6926,6 +6929,25 @@ mod tests {
         assert_eq!(tail("handoff-eng-11259", 8), "…g-11259");
         assert_eq!(tail("short", 8), "short");
         assert_eq!(tail("日本語", 4), "…語");
+    }
+
+    /// What shows as one stays whole, and counts as wide as it shows, in the
+    /// columns a cut has and in those a line of text wraps at: `⚠️` is a
+    /// character and a selector that widens it to two columns, and a family is
+    /// three people joined into two columns.
+    #[test]
+    fn a_cut_or_a_wrap_goes_by_what_shows_as_one() {
+        let family = "👩\u{200d}👩\u{200d}👧";
+        assert_eq!(cut("⚠️ fix the build", 5), "⚠️ f…");
+        assert_eq!(tail("fix the build ⚠️", 5), "…d ⚠️");
+        assert_eq!(cut(&format!("{family} team"), 5), format!("{family} t…"));
+        assert_eq!(tail(&format!("team {family}"), 5), format!("…m {family}"));
+        assert_eq!(cut("⚠️ fix", 2), "…");
+        assert_eq!(tail(&format!("fix {family}"), 2), "…");
+
+        let lines: Vec<String> =
+            wrapped("ab⚠️cd", 5, Style::new()).iter().map(ToString::to_string).collect();
+        assert_eq!(lines, [" ab", " ⚠️c", " d"]);
     }
 
     /// Sessions to search, each pane named for what it runs.
