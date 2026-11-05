@@ -107,6 +107,23 @@
             }
             .${system} or "-DGGML_NATIVE=OFF";
 
+          buildTools = [
+            toolchain
+            pkgs.gnumake
+            pkgs.protobuf
+            pkgs.stdenv.cc
+          ]
+          ++ speechBuild
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+            pkgs.gnused
+            pkgs.stdenv.cc.bintools.bintools
+          ];
+
+          macBuildEnv = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            export SDKROOT="${pkgs.apple-sdk.sdkroot}"
+            export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          '';
+
           # What the daemon's derivations share.
           daemon = {
             pname = "lunetad";
@@ -228,20 +245,11 @@
           dev = pkgs.writeShellApplication {
             name = "dev";
             meta.description = "luneta build recipes on the flake-pinned toolchain";
-            # protoc is for the build scripts of the protocol's crate and of the
-            # daemon, which `dev clippy` and `dev skills` run, and cmake and
-            # pkg-config for the speech model's, with ALSA's below. cargo-deny
-            # is `dev deny`'s, whose check of what Cargo.lock names against the
-            # advisories known needs the network the derivation has none of, so
-            # that check is no derivation as clippy's is.
-            runtimeInputs = [
-              toolchain
+            runtimeInputs = buildTools ++ [
               pkgs.coreutils
               pkgs.git
-              pkgs.protobuf
               pkgs.cargo-deny
-            ]
-            ++ speechBuild;
+            ];
             text = ''
               # luneta build recipes, as one command.
               #
@@ -287,7 +295,7 @@
               export PKG_CONFIG_PATH="${
                 pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
               }''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-
+              ${macBuildEnv}
               if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
                 echo "dev: run this inside the luneta checkout (no git worktree here)" >&2
                 exit 2
@@ -345,16 +353,10 @@
           checks = { inherit clippy; };
 
           shell = pkgs.mkShell {
-            # protoc for the daemon's build script, as `cargo build -p lunetad` runs it,
-            # what the speech model's library is built with, and node for the test that
-            # runs luneta's extension for pi.
-            packages = [
-              toolchain
+            packages = buildTools ++ [
               dev
               pkgs.nodejs
-              pkgs.protobuf
-            ]
-            ++ speechBuild;
+            ];
             buildInputs = speechLibs;
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
 
