@@ -229,12 +229,16 @@
             meta.description = "luneta build recipes on the flake-pinned toolchain";
             # protoc is for the build scripts of the protocol's crate and of the
             # daemon, which `dev clippy` and `dev skills` run, and cmake and
-            # pkg-config for the speech model's, with ALSA's below.
+            # pkg-config for the speech model's, with ALSA's below. cargo-deny
+            # is `dev deny`'s, whose check of what Cargo.lock names against the
+            # advisories known needs the network the derivation has none of, so
+            # that check is no derivation as clippy's is.
             runtimeInputs = [
               toolchain
               pkgs.coreutils
               pkgs.git
               pkgs.protobuf
+              pkgs.cargo-deny
             ]
             ++ speechBuild;
             text = ''
@@ -254,6 +258,7 @@
 
                 dev clippy [args...]       cargo clippy over every target, warnings denied
                 dev clean                  cargo clean
+                dev deny                   check Cargo.lock against RustSec advisories
                 dev skills [dir]           check the menu's skill finder against what claude runs in dir
               HELP
               }
@@ -266,7 +271,7 @@
                   usage
                   exit 0
                   ;;
-                clippy | clean | skills) ;;
+                clippy | clean | deny | skills) ;;
                 *)
                   # Explicit failure, not a silent fall-through to help: `dev buidl` in a script
                   # or a CI step must not exit 0.
@@ -304,6 +309,19 @@
 
                 clean)
                   cargo clean
+                  ;;
+
+                # What advisories are known of what Cargo.lock locks. Fetched,
+                # and not a flake check: a derivation has no network, so one
+                # would check against the advisories of when the flake built
+                # it, as old as the cache's hit. The new ones are what the
+                # check is for. It reads the lock alone, builds nothing, and
+                # runs wherever `nix run .#dev deny` does, which CI does.
+                #
+                # `deny.toml` says what is checked and which advisories luneta
+                # is not affected by, with why.
+                deny)
+                  cargo deny check advisories
                   ;;
 
                 # The menu's search finds skills where Claude Code looks for them, which

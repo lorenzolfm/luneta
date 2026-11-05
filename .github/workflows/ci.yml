@@ -1,4 +1,7 @@
-# Lint and test on every PR, and on main once a PR lands.
+# Lint and test on every PR, and on main once a PR lands, and check what
+# Cargo.lock locks against RustSec's advisories, anew each time: one landed
+# after the last run fails the run that locks nothing new, which is what the
+# check is for.
 #
 # CI builds through the flake and not through a toolchain action, so that the build
 # is written down once: the rust it builds with and how cargo is run are the
@@ -78,6 +81,19 @@ jobs:
       # store keeps the daemon's dependencies for the cache to save.
       - name: Clippy
         run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
+
+      # What advisories say of the crates Cargo.lock locks: the ones known of
+      # them, which the ones no run has seen yet are the reason for. The
+      # database of them is fetched on each run, so a new one fails the run
+      # that locks the crate it names, and the ones `deny.toml` says luneta is
+      # not affected by, with why, do not.
+      #
+      # No flake check of it: a derivation has no network, so it would check
+      # against the advisories of when it built, as old as the cache's hit of
+      # it. A step, and not of the daemon's job: the lock is one for every
+      # system the daemon builds on.
+      - name: Advisories
+        run: nix run .#dev -- deny
 
   # The daemon on each system it runs on: x86_64 and arm64 Linux, and an Apple
   # Silicon Mac. Through the flake, as the rest of CI goes, and each runner
