@@ -16,8 +16,8 @@
 //! dictates, held or tapped, into the pane zellij is on or the ask box, in a
 //! box along the bottom of zellij that has the keys and the mouse until what
 //! you said is written. What the mouse drags on zellij stays with zellij
-//! under a box too. `Alt u` reads aloud what zellij copied last, and pauses
-//! what is being read and has it go on, and `Alt Shift u` stops it.
+//! under a box too. `Alt u` reads aloud what zellij or the sidebar copied last,
+//! and pauses what is being read and has it go on, and `Alt Shift u` stops it.
 //! A click on an entry of the menu, a key a line of keys names, a skill the
 //! menu's search finds, or a row of the picker, does what its key does, or
 //! `Enter` on it, as each said where it drew them; and the one under the
@@ -122,6 +122,9 @@ pub enum Event {
     Notice(String),
     /// A link for luneta's terminal to put on its clipboard.
     Copy(Link),
+    /// What the mouse swept on the sidebar, for luneta's terminal to put on its
+    /// clipboard, as what zellij copies goes.
+    CopyText(String),
     /// What came of the image `Ctrl v` was to paste in an agent's pane on
     /// another machine.
     Image(Went),
@@ -675,8 +678,8 @@ struct App {
     aloud_repeats: dictation::Repeats,
     /// What luneta reads aloud.
     aloud: Aloud,
-    /// What zellij last copied, as it does a selection as the mouse lets go,
-    /// for `Alt u` to read: it is not kept past that.
+    /// What zellij last copied, as it does a selection as the mouse lets go, or
+    /// the sidebar, for `Alt u` to read: it is not kept past that.
     copied: Option<String>,
     /// What opens the pull requests `o` asks for.
     browser: Browser,
@@ -1205,6 +1208,10 @@ impl App {
             },
             Event::Notice(notice) => self.sidebar.notify(notice),
             Event::Copy(link) => clip(terminal, ClipboardType::Clipboard, &link.url())?,
+            Event::CopyText(text) => {
+                clip(terminal, ClipboardType::Clipboard, &text)?;
+                self.copied = Some(text);
+            },
             Event::Image(went) => self.image_went(went),
             Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
             Event::Folds => self.sidebar.refold(),
@@ -1771,6 +1778,8 @@ impl App {
         // the key of the entry that took its place in turn; and on zellij,
         // where a click closed the box over it, it would click there.
         if down {
+            // Any click ends what a sweep left showing, wherever it is.
+            self.sidebar.unsweep();
             if self.burst.as_mut().is_some_and(|burst| burst.takes(at, Instant::now())) {
                 self.held = Held::Taken;
                 return;
@@ -2005,6 +2014,9 @@ impl App {
             Asked::Copy(link) => {
                 let _ = self.events.send(Event::Copy(link));
             },
+            Asked::CopyText(text) => {
+                let _ = self.events.send(Event::CopyText(text));
+            },
             Asked::Browse(link) => {
                 if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
                     self.sidebar.notify(why);
@@ -2229,7 +2241,7 @@ impl App {
         Skills::Finding
     }
 
-    /// `Alt u`: what plays pauses or goes on, and else what zellij copied last
+    /// `Alt u`: what plays pauses or goes on, and else what was copied last
     /// is read, by this luneta where it is the one of its machine that reads
     /// aloud, or by the one that is. Where it knows of none, the sidebar says why.
     /// What it said before goes: this key tries again, and it may no longer be so.

@@ -50,6 +50,7 @@ mod speech;
 mod spots;
 mod starts;
 mod state;
+mod sweep;
 mod voice;
 mod watch;
 mod width;
