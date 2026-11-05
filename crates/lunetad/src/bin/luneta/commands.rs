@@ -30,7 +30,7 @@ use prost::Message as _;
 use tonic::transport::Channel;
 
 use crate::bridge;
-use crate::daemon::{self, Reach};
+use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::zellij::{self, Seat};
@@ -137,10 +137,13 @@ fn version(spelled: &str) -> Result<Version, String> {
 /// Asks the daemon in `folder` what `command` asks, or has zellij do it.
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
-        Command::Info => ask(folder, Reach::Running, info),
-        Command::Agents => ask(folder, Reach::Running, agents),
-        Command::Sessions => ask(folder, Reach::Running, sessions),
-        Command::Watch { after } => ask(folder, Reach::Current, |daemon| watch(daemon, *after)),
+        Command::Info => ask(folder, daemon::running(folder), info),
+        Command::Agents => ask(folder, daemon::running(folder), agents),
+        Command::Sessions => ask(folder, daemon::running(folder), sessions),
+        Command::Watch { after } => {
+            let current = async { daemon::current(folder).await.map(|current| current.daemon) };
+            ask(folder, current, |daemon| watch(daemon, *after))
+        },
         Command::Bridge => bridge::run(folder),
         Command::Ssh { destination } => ssh(destination, folder),
         Command::Here => drive::here(folder),
@@ -152,9 +155,10 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
     }
 }
 
-/// Reaches the daemon in `folder` as `wanted`, and has `asking` ask it.
-fn ask<F, Asked>(folder: &Path, wanted: Reach, asking: F) -> ExitCode
+/// Reaches the daemon in `folder` by `reaching`, and has `asking` ask it.
+fn ask<R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
 where
+    R: Future<Output = Result<DaemonClient<Channel>, String>>,
     F: FnOnce(DaemonClient<Channel>) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
@@ -165,7 +169,7 @@ where
             return ExitCode::FAILURE;
         },
     };
-    let daemon = match runtime.block_on(daemon::reach(folder, wanted)) {
+    let daemon = match runtime.block_on(reaching) {
         Ok(daemon) => daemon,
         Err(why) => {
             eprintln!("luneta: {why}");
@@ -196,7 +200,7 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
-    ask(folder, Reach::Running, |mut daemon| async move {
+    ask(folder, daemon::running(folder), |mut daemon| async move {
         daemon.say(SayRequest { say }).await?;
         Ok(())
     })
@@ -242,7 +246,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         },
     };
-    let daemon = match runtime.block_on(daemon::reach(folder, Reach::Running)) {
+    let daemon = match runtime.block_on(daemon::running(folder)) {
         Ok(daemon) => daemon,
         Err(why) => {
             println!("{destination}: lunetad reaches it once it runs: {why}");
@@ -315,7 +319,7 @@ pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     let runtime = runtime()?;
     runtime.block_on(async {
-        let mut daemon = daemon::reach(folder, Reach::Running).await?;
+        let mut daemon = daemon::running(folder).await?;
         let listed = daemon.list_agents(ListAgentsRequest {}).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
     })

@@ -37,7 +37,7 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
 use tonic::Status;
 
-use crate::daemon::{self, Reach};
+use crate::daemon;
 
 /// How long luneta waits for an answer on a thread of its own: the daemon
 /// answers in 5 seconds, or says it did not, and a connection that stalls
@@ -73,7 +73,7 @@ impl Away {
             .build()
             .map_err(|error| format!("no runtime: {error}"))?;
         // A timer is made within a runtime, which it needs.
-        let reached = daemon::reach(&folder, Reach::Running);
+        let reached = daemon::running(&folder);
         let daemon = match runtime.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,
             Err(_) => return Err(format!("lunetad did not answer in {}s", patience.as_secs_f32())),
