@@ -776,6 +776,8 @@ mod tests {
             (b"a", KeyCode::Char('a'), none),
             (b"A", KeyCode::Char('A'), shift),
             ("é".as_bytes(), KeyCode::Char('é'), none),
+            ("€".as_bytes(), KeyCode::Char('€'), none),
+            ("🦀".as_bytes(), KeyCode::Char('🦀'), none),
             (b"\x01", KeyCode::Char('a'), control),
             (b"\x00", KeyCode::Char(' '), control),
             (b"\x1c", KeyCode::Char('4'), control),
@@ -838,6 +840,13 @@ mod tests {
         let paste = Sent::Input(Input::Paste("ls\r".to_owned()));
         assert_eq!(sent(&[b"\x1b[", b"200~ls\r\x1b[201~"]), [paste]);
         assert_eq!(sent(&[b"\x1bO", b"A"]), [pressed(KeyCode::Up, KeyModifiers::NONE)]);
+    }
+
+    /// A read that ends within a character leaves it for the next.
+    #[test]
+    fn a_character_a_read_cuts_waits_for_the_rest() {
+        let crab = "🦀".as_bytes();
+        assert_eq!(sent(&[&crab[..2], &crab[2..]]), [typed('🦀')]);
     }
 
     #[test]

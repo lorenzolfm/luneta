@@ -1552,6 +1552,54 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     });
 }
 
+/// A remote by ssh is of a repository on GitHub under a name ssh's config gives
+/// GitHub, as `ssh -G` says, which reads the config and connects nowhere. What
+/// starts with `-` names no host, as ssh would take it for an option, and ssh is
+/// not asked of it.
+#[test]
+fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
+    let host = Host::new();
+    let runs = host.zellij.bin().join("ssh-runs");
+    let ssh = format!(
+        "echo \"$*\" >> {}\nif [ \"$2\" = github-work ]; then echo 'hostname github.com'; else echo \"hostname $2\"; fi\n",
+        quoted(&runs.display().to_string())
+    );
+    script(&host.zellij.bin().join("ssh"), &ssh);
+    script(&host.zellij.bin().join("zoxide"), "exit 0\n");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = |name: &str, url: &str| {
+        let dir = scratch.join(name);
+        git(&scratch, &["init", "-q", &dir.display().to_string()]);
+        git(&dir, &["remote", "add", "origin", url]);
+        dir
+    };
+    let option = clone("option", "git@-oProxyCommand:o/n.git");
+    let renamed = clone("renamed", "git@github-work:o/n.git");
+    let _daemon = start(host.vars()).unwrap();
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let link = Work::Link(Link::parse("https://github.com/o/n/pull/7").unwrap());
+        let answers = [
+            (&option, Code::NotFound, "no session works in o/n"),
+            (&renamed, Code::FailedPrecondition, "that git made"),
+        ];
+        for (dir, code, says) in answers {
+            let pane = links::Worked { dir: dir.display().to_string(), pull: None, here: false };
+            let asked = Pasted::new(link.clone(), vec![pane]).asked(None);
+            let mut answer = daemon.paste(asked).await.unwrap().into_inner();
+            let why = answer.message().await.unwrap_err();
+            assert_eq!(why.code(), code, "{why:?}");
+            assert!(why.message().contains(says), "{why:?}");
+        }
+    });
+    let asked = fs::read_to_string(&runs).unwrap();
+    assert!(!asked.contains("-oProxyCommand"), "{asked}");
+}
+
 /// A machine that made the worktree, and could not then say where the key goes,
 /// says so apart from a machine that made nothing: it is the one failure that
 /// leaves something behind, and no other machine should make another.
