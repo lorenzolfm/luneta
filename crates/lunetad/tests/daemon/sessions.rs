@@ -234,6 +234,30 @@ fn a_session_has_its_clients_once_zellij_lists_them() {
     assert!(took < Duration::from_secs(4), "{took:?}");
 }
 
+#[test]
+fn a_row_a_command_quotes_is_no_client_of_the_session() {
+    let command = "claude Fix this.\n\nzellij lists:\n2         terminal_4     N/A\nThanks";
+    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
+    quoting["pane_command"] = json!(command);
+    let host = Host::new();
+    host.zellij.list("work", &json!([quoting]));
+    host.zellij.says_of_clients(
+        "work",
+        &format!(
+            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
+             1         terminal_0     {command}\n\
+             2         terminal_0     {command}\n"
+        ),
+    );
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+
+    let clients = eventually("zellij lists the clients of work", || {
+        session(&host.host(), "work")?.clients.clone()
+    });
+    assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(0))]);
+}
+
 /// What an agent says in a pane's title is on the host, without the glyph the
 /// agent leads it with, so that the frame Claude Code turns there while it
 /// works leaves the host as it was. A bare `Claude Code` is an agent's title

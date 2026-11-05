@@ -596,7 +596,8 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
     command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     done(command)?;
     let new = |client: &clients::Client| before.iter().all(|was| was.id != client.id);
-    let came = seen(to, |clients| clients.into_iter().find(new)).ok_or_else(|| UNMOVED.to_owned())?;
+    let came = seen(to, |clients| clients.iter().copied().find(new));
+    let came = came.ok_or_else(|| UNMOVED.to_owned())?;
     match pane {
         Some(pane) if came.pane != PaneId::Terminal(pane) => {
             Err(format!("zellij took the client to {to}, but not to pane {pane}"))
@@ -617,7 +618,7 @@ pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
         Err(said) if !said.contains("is already focused") => return Err(said),
         _ => {},
     }
-    let on = |clients: Vec<clients::Client>| clients.iter().any(|client| client.pane == pane);
+    let on = |clients: &[clients::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
 
@@ -655,10 +656,10 @@ fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bo
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &str, seen: impl Fn(Vec<clients::Client>) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &str, seen: impl Fn(&[clients::Client]) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
-        if let Some(seen) = clients_on_panes(session).ok().and_then(&seen) {
+        if let Some(seen) = clients_on_panes(session).ok().and_then(|clients| seen(&clients)) {
             return Some(seen);
         }
         if Instant::now() >= deadline {
@@ -1115,12 +1116,12 @@ pub fn makes_away(
 /// up for good.
 pub fn clients(session: &str) -> Result<Vec<Client>, String> {
     let clients = clients_on_panes(session)?;
-    Ok(clients.into_iter().map(clients::Client::to_api).collect())
+    Ok(clients.iter().copied().map(clients::Client::to_api).collect())
 }
 
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
-pub fn clients_on_panes(session: &str) -> Result<Vec<clients::Client>, String> {
+pub fn clients_on_panes(session: &str) -> Result<clients::Listed, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
     clients::list(command, session)

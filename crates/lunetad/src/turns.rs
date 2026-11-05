@@ -417,7 +417,7 @@ fn has_client(session: &SessionName) -> Result<bool, String> {
 }
 
 /// The clients in `session`, as zellij lists them now.
-fn clients_of(session: &SessionName) -> Result<Vec<clients::Client>, String> {
+fn clients_of(session: &SessionName) -> Result<clients::Listed, String> {
     let mut zellij = Command::new("zellij");
     quiet(&mut zellij);
     clients::list(zellij, session.as_str())
@@ -548,7 +548,7 @@ fn stacked(
     moved: PaneId,
     tab: u32,
 ) -> Result<Stacked, String> {
-    let on_it = |clients: Vec<clients::Client>| clients.iter().any(|it| it.pane == moved);
+    let on_it = |clients: clients::Listed| clients.iter().any(|it| it.pane == moved);
     if !clients_of(session).is_ok_and(on_it) {
         stack(session, &[root, moved, NOWHERE])?;
         let listed = laid(session.as_str())?;

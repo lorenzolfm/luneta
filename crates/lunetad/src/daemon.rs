@@ -1101,7 +1101,7 @@ where
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     let listed = clients::list(std::process::Command::new("zellij"), session.as_str())?;
-    Ok(listed.into_iter().map(clients::Client::to_api).collect())
+    Ok(listed.iter().copied().map(clients::Client::to_api).collect())
 }
 
 /// When a session started, as a question says it, or why it is invalid: it

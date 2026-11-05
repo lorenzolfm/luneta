@@ -535,6 +535,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.write(&format!("{session}.clients"), &clients_said(clients));
     }
 
+    pub fn says_of_clients(&self, session: &str, said: &str) {
+        self.write(&format!("{session}.clients"), said);
+    }
+
     /// Has zellij list `clients` for the session `session` once it has listed
     /// its panes, as `clients` would, as a client moves of its own as it does.
     pub fn lists_clients_into(&self, session: &str, clients: &[(u32, &str)]) {

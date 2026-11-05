@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
-use crate::clients::Client;
+use crate::clients::{Client, Listed};
 use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
@@ -35,7 +35,7 @@ pub enum Command {
     /// What zellij listed of the panes of `session`, asked for by `name`.
     Panes { session: Id, name: String, panes: Vec<Pane> },
     /// What zellij listed of the clients of `session`, asked for by `name`.
-    Clients { session: Id, name: String, clients: Vec<Client> },
+    Clients { session: Id, name: String, clients: Listed },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
@@ -129,7 +129,7 @@ struct Known {
     /// What zellij last listed of each session's panes.
     panes: HashMap<Id, Vec<Pane>>,
     /// What zellij last listed of each session's clients, by their ids.
-    clients: HashMap<Id, Vec<Client>>,
+    clients: HashMap<Id, Listed>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
     /// What gh last found of the branch in each directory a pane works in.
@@ -213,8 +213,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if known.sessions.addressed(&name) != Some(session) {
                     continue;
                 }
-                // `clients::parse` lists each once, by its id.
-                assert!(clients.windows(2).all(|pair| pair[0].id < pair[1].id));
                 known.clients.insert(session, clients);
             },
             Command::WorkTree { dir, tree } => {
