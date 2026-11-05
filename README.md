@@ -427,6 +427,12 @@ where none is. Run through ssh, or in a pane of zellij, luneta passes over a
 session of another machine's that may hold its own terminal, through ssh: one
 with a pane that runs ssh or luneta. When zellij fails, luneta ends and says
 what zellij said.
+
+zellij drops a client that falls behind, as under load, or on a slow terminal,
+and the session runs on. luneta attaches zellij to that session again, on
+whichever machine it is, and the notes say so. Should zellij drop six clients
+in a row, each within 30 seconds of its start, luneta ends and says so.
+
 zellij's keys are yours as they were, but nine, which luneta takes before
 zellij sees them, whichever of the two has the keys:
 
@@ -1649,7 +1655,8 @@ lines past the 16th: `luneta sessions` says lunetad could not read all of
 the file, and the log says which.
 
 What `lunetad` says in `lunetad.log` goes in `luneta.log` too, with what goes
-wrong in luneta's sidebar, in `$XDG_STATE_HOME/luneta`, or
+wrong in luneta's sidebar, and why a luneta ended, as `ends:` lines, in
+`$XDG_STATE_HOME/luneta`, or
 `~/.local/state/luneta` (on macOS too), which outlives a reboot: a line for
 each, with when, in UTC, and which process said it, as
 `2026-10-29T14:03:12.481Z luneta[4123] zellij did not take its client there`.

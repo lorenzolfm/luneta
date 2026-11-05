@@ -17,7 +17,7 @@ use rustix::termios::{self, Winsize};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::demand::{answering, moved, Detached};
+use crate::demand::{answering, moved, stop, Detached};
 use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
 use crate::remote::{hosts, FakeSsh};
 use crate::sessions::listed;
@@ -56,7 +56,12 @@ pub fn terminal() -> (OwnedFd, OwnedFd) {
 /// Runs `command`, a luneta, on a terminal of its own until it ends. The
 /// terminal is read all along, so that nothing waits on a write, and to its
 /// end, once all that hold it have let go, as a `Command` does as it goes.
-fn on_terminal(mut command: Command) -> Ended {
+fn on_terminal(command: Command) -> Ended {
+    on_terminal_with(command, |_| {})
+}
+
+/// `on_terminal`, with `meanwhile` given the luneta as it runs.
+fn on_terminal_with(mut command: Command, meanwhile: impl FnOnce(&Running)) -> Ended {
     let (controller, tty) = terminal();
     let reader = thread::spawn(move || {
         let mut said = Vec::new();
@@ -68,6 +73,7 @@ fn on_terminal(mut command: Command) -> Ended {
     let mut luneta = Running::spawn(command.stdin(stdio()).stdout(stdio()).stderr(stdio()));
     drop(command);
     drop(tty);
+    meanwhile(&luneta);
     let status = luneta.ended_within(ENDS).expect("luneta did not end");
     let said = reader.join().unwrap();
     Ended { status, said: String::from_utf8_lossy(&said).into_owned() }
@@ -260,6 +266,138 @@ fn a_bare_luneta_says_where_the_hosts_file_does_not_read() {
     assert!(ended.status.success(), "{}", ended.said);
     assert!(ended.said.contains("luneta/hosts: "), "{}", ended.said);
     assert_eq!(host.zellij.attached(), ["attach --create project"]);
+}
+
+/// What the log holds of `host`, where a luneta there says why it ended.
+fn log_of(host: &Host) -> String {
+    fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap()
+}
+
+/// zellij drops a client that falls behind, which ends as well as one that
+/// detached, with its session running on, and is told apart by what it says.
+/// Another takes its place in that session, and the log says why. That one
+/// ends as one that detached does, and luneta with it.
+#[test]
+fn a_client_zellij_drops_is_taken_back_to_its_session() {
+    let host = Host::new();
+    let _session = runs(&host, "project");
+    host.zellij.drops_clients(1);
+
+    let ended = on_terminal(luneta(host.vars(), &directory("project").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach project", "attach project"]);
+    let log = log_of(&host);
+    assert!(log.contains("zellij dropped its client: taking it back to project"), "{log}");
+}
+
+/// A client zellij drops as soon as it comes is not taken back for good: luneta
+/// gives up after a few, and says why, in the log and where you can read it
+/// once its screen is gone.
+#[test]
+fn a_client_zellij_keeps_dropping_at_once_is_given_up_on() {
+    let host = Host::new();
+    let _session = runs(&host, "project");
+    host.zellij.drops_clients(100);
+
+    let ended = on_terminal(luneta(host.vars(), &directory("project").path));
+    assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach project"; 6]);
+    assert!(ended.said.contains("zellij dropped its client 6 times"), "{}", ended.said);
+    let log = log_of(&host);
+    assert!(log.contains("ends: zellij dropped its client 6 times"), "{log}");
+}
+
+#[test]
+fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
+    let host = Host::new();
+    let _project = runs(&host, "project");
+    let _next = runs(&host, "next");
+    let lasts = Duration::from_secs(31);
+    host.zellij.drops_clients(5);
+    host.zellij.stays_for(lasts);
+
+    let ended = on_terminal_with(luneta(host.vars(), &directory("project").path), |_| {
+        eventually("a client to stay", || host.zellij.stayed().then_some(()));
+        host.zellij.drops_clients(1);
+        fs::remove_file(host.contract().join("project")).unwrap();
+        thread::sleep(lasts);
+    });
+    assert!(ended.status.success(), "{}", ended.said);
+    let mut attached = vec!["attach project"; 6];
+    attached.extend(["attach next"; 2]);
+    assert_eq!(host.zellij.attached(), attached);
+}
+
+/// On another machine it is the same, and through ssh: the client goes back to
+/// its session there, not on to one of this machine's.
+#[test]
+fn a_client_zellij_drops_on_another_machine_is_taken_back_there() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "work", &json!([]));
+    ssh.drops_clients("far", 1);
+    hosts(&here, "far\n");
+    let _daemon = start(here.vars()).unwrap();
+
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(ssh.clients("far"), ["zellij attach 'work'", "zellij attach 'work'"]);
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
+    let log = log_of(&here);
+    assert!(log.contains("far: zellij dropped its client: taking it back to work"), "{log}");
+}
+
+/// The log says why luneta ended: its screen goes with it, and it may
+/// end with no one there to read what it says last. Here, as its client
+/// detached, as it failed, as its ssh failed with no session left to go on in,
+/// as luneta was told to end, and as it would not start.
+#[test]
+fn the_log_says_why_luneta_ended() {
+    let host = Host::new();
+    let _session = runs(&host, "project");
+    let detached = on_terminal(luneta(host.vars(), &directory("project").path));
+    assert!(detached.status.success(), "{}", detached.said);
+    let log = log_of(&host);
+    assert!(log.contains("ends: zellij's client ended, and its session runs on"), "{log}");
+
+    let refused = Host::new();
+    let _session = runs(&refused, "project");
+    refused.zellij.refuses_clients();
+    let failed = on_terminal(luneta(refused.vars(), &directory("project").path));
+    assert_eq!(failed.status.code(), Some(1), "{}", failed.said);
+    let log = log_of(&refused);
+    assert!(log.contains("ends: zellij's client failed: this zellij attaches no client"), "{log}");
+
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "work", &json!([]));
+    ssh.refuses_clients("far");
+    hosts(&here, "far\n");
+    let _daemon = start(here.vars()).unwrap();
+    let failed = on_terminal(luneta(here.vars(), &directory("project").path));
+    assert_eq!(failed.status.code(), Some(1), "{}", failed.said);
+    let log = log_of(&here);
+    assert!(log.contains("ends: no machine has a session to go on in"), "{log}");
+
+    let told = Host::new();
+    let _session = runs(&told, "project");
+    told.zellij.listen();
+    let ended = on_terminal_with(luneta(told.vars(), &directory("project").path), |luneta| {
+        eventually("zellij's client started", || told.zellij.attached().first().cloned());
+        stop(luneta.pid());
+    });
+    assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
+    let log = log_of(&told);
+    assert!(log.contains("ends: ended by signal 15"), "{log}");
+
+    let unstarted = Host::new();
+    let _session = runs(&unstarted, "project");
+    let dir = directory("project");
+    let mut alone = luneta(unstarted.vars(), &dir.path);
+    let output = alone.env("ZELLIJ_SESSION_NAME", "project").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let log = log_of(&unstarted);
+    assert!(log.contains("ends: this terminal is a pane of \"project\""), "{log}");
 }
 
 /// A machine of the hosts file, reached by `ssh`, with `name` running there.

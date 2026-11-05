@@ -42,7 +42,7 @@ use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
-use crate::host::{answered, eventually, folder_in, script, start, Host, Vars, LUNETA};
+use crate::host::{answered, eventually, folder_in, script, start, Host, Vars, DROPPED, LUNETA};
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -56,7 +56,8 @@ use crate::worktree::{cloned_as_wt, git};
 /// each time it is run to a destination, for `runs`, and the pid of each
 /// bridge it runs, for `bridges`. Run with `-t`, as luneta runs a client of a
 /// session there, it runs nothing: it notes the command, for `clients`, and
-/// ends well, as a client that detached does, or as ssh does that failed,
+/// ends well, as a client that detached does, or as one zellij there dropped
+/// does, as many as a test had it `drops_clients`, or as ssh does that failed,
 /// where a test had it `refuse` clients.
 pub struct FakeSsh {
     to: PathBuf,
@@ -85,6 +86,13 @@ if [ -n "$client" ] && [ -z "$quiet" ]; then
     if [ -f "{to}/$destination.refused" ]; then
         echo "ssh: connect to host $destination port 22: Connection refused" >&2
         exit 255
+    fi
+    if [ -f "{to}/$destination.drops" ]; then
+        drops=$(cat "{to}/$destination.drops")
+        if [ "$drops" -gt 0 ]; then
+            echo $((drops - 1)) > "{to}/$destination.drops"
+            cat "{to}/dropped"
+        fi
     fi
     exit 0
 fi
@@ -137,6 +145,13 @@ exec "{to}/$destination"
     /// does that loses the machine.
     pub fn refuses_clients(&self, destination: &str) {
         fs::write(self.to.join(format!("{destination}.refused")), "").unwrap();
+    }
+
+    /// Has the next `clients` of a session on `destination` end as one zellij
+    /// there dropped does.
+    pub fn drops_clients(&self, destination: &str, clients: u32) {
+        fs::write(self.to.join("dropped"), DROPPED).unwrap();
+        fs::write(self.to.join(format!("{destination}.drops")), clients.to_string()).unwrap();
     }
 
     /// The command of each client of a session on `destination` that was

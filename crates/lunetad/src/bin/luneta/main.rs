@@ -19,6 +19,7 @@ mod desktop;
 mod dictation;
 mod due;
 mod drive;
+mod drops;
 mod fails;
 mod folds;
 mod gruvbox;

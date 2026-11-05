@@ -84,6 +84,24 @@ impl<'a> Vars<'a> {
     }
 }
 
+/// What zellij's client writes as its server drops it, as zellij 0.45.1 words it,
+/// on the screen it leaves once zellij's own is down. Then it ends well.
+pub const DROPPED: &str = "
+Your zellij client lost connection to the zellij server.
+
+As a safety measure, you have been disconnected from the current zellij session.
+However, the session should still exist and none of your data should be lost.
+
+This usually means that your terminal didn't process server messages quick
+enough. Maybe your system is currently under high load, or your terminal
+isn't performant enough.
+
+There are a few things you can try now:
+    - Reattach to your previous session and see if it works out better this
+      time: `zellij attach project`
+    - Try using a faster (maybe GPU-accelerated) terminal emulator
+";
+
 /// Puts a program at `to`, a copy of `from`. A process of its own writes it,
 /// so that the test's never holds it open to write: a process that another
 /// test starts meanwhile would take that along until it runs its program,
@@ -128,10 +146,13 @@ pub fn script(path: &Path, text: &str) {
 /// minutes and three seconds before. It notes each rename it is asked for,
 /// for `renamed`, and renames nothing. It notes each client that is started,
 /// with `attach`, for `attached`, which ends at once as one that detached
-/// does, or stays and notes all it hears, as a test had it `listen`, for
-/// `heard`. A pane closing can cut a call of a session short, once, as a test had
-/// it `silences` or `unreaches` it, or hand it another call's answer, as a test
-/// had it `answers_another`. It knows no other command.
+/// does, or as one zellij dropped does, as many as a test had it
+/// `drops_clients`, or fails, as a test had it `refuses_clients`, or stays and
+/// notes all it hears, as a test had it `listen`, for `heard`, or stays a while,
+/// as a test had it `stays_for`. A pane closing
+/// can cut a call of a session short, once, as a test had it `silences` or
+/// `unreaches` it, or hand it another call's answer, as a test had it
+/// `answers_another`. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -277,6 +298,23 @@ case "$*" in
             printf '\033[?1000h\033[?1002h\033[?1006hon screen'
             exec cat > "{panes}/heard"
         fi
+        if [ -f "{panes}/refused-clients" ]; then
+            echo "this zellij attaches no client"
+            exit 1
+        fi
+        if [ -f "{panes}/drops" ]; then
+            drops=$(cat "{panes}/drops")
+            if [ "$drops" -gt 0 ]; then
+                echo $((drops - 1)) > "{panes}/drops"
+                cat "{panes}/dropped"
+                exit 0
+            fi
+        fi
+        if [ -f "{panes}/stays" ]; then
+            stays=$(cat "{panes}/stays")
+            rm "{panes}/stays"
+            sleep "$stays"
+        fi
         exit 0
         ;;
     "delete-session "*)
@@ -373,6 +411,25 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// it hears.
     pub fn listen(&self) {
         fs::write(self.panes().join("listen"), "").unwrap();
+    }
+
+    /// Has the next `clients` of zellij's end as one zellij dropped does.
+    pub fn drops_clients(&self, clients: u32) {
+        fs::write(self.panes().join("dropped"), DROPPED).unwrap();
+        fs::write(self.panes().join("drops"), clients.to_string()).unwrap();
+    }
+
+    pub fn stays_for(&self, time: Duration) {
+        fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
+    }
+
+    pub fn stayed(&self) -> bool {
+        !self.panes().join("stays").exists()
+    }
+
+    /// Has each client of zellij's fail from now on, as it says why.
+    pub fn refuses_clients(&self) {
+        fs::write(self.panes().join("refused-clients"), "").unwrap();
     }
 
     /// All that a client of zellij's heard, since one had it `listen`.
