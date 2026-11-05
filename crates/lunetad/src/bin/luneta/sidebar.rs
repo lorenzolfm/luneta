@@ -1547,6 +1547,7 @@ impl Sidebar {
 
     pub fn unfound(&mut self, look: u64) {
         if self.land(look) {
+            self.own.unfound();
             self.rebuild();
         }
     }
@@ -6225,6 +6226,20 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
         assert_eq!(sidebar.stayed(look.number), None);
         assert_eq!(sidebar.here(), Some("older"));
+    }
+
+    #[test]
+    fn the_menu_sends_you_to_a_pane_once_luneta_stops_looking_for_its_client() {
+        let mut sidebar = two_sessions();
+        let look = sidebar.rejoining(&session_name("older"));
+        sidebar.unfound(look.number + 1);
+        assert_eq!(sidebar.float_menu(), Err(NO_HERE_PANE));
+        sidebar.unfound(look.number);
+        assert_eq!(sidebar.float_menu(), Err(UNSURE_PANE));
+        let went = sidebar.went(&pane_of("older", 10, 1)).unwrap();
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: went.number, went: went.went, clients, before: None });
+        assert_eq!(sidebar.float_menu(), Ok(()));
     }
 
     #[test]
