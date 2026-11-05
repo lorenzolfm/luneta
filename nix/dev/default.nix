@@ -25,16 +25,14 @@ let
     }
   ) (builtins.attrNames (builtins.readDir ./commands));
 
-  program =
+  command =
     record:
-    lib.getExe (
-      pkgs.writeShellApplication {
-        name = "dev-${record.name}";
-        runtimeInputs = record.tools;
-        inheritPath = record.inheritPath or false;
-        inherit (record) text;
-      }
-    );
+    pkgs.writeShellApplication {
+      name = "dev-${record.name}";
+      runtimeInputs = record.tools;
+      inheritPath = record.inheritPath or false;
+      inherit (record) text;
+    };
 
   signature = record: "dev ${record.name} ${record.usage}";
   width = lib.foldl' lib.max 0 (map (record: lib.stringLength (signature record)) records);
@@ -47,13 +45,16 @@ let
   dispatch = lib.concatMapStringsSep "\n" (record: ''
     ${record.name})
       enter_checkout
-      exec ${program record} "$@"
+      exec ${lib.getExe (command record)} "$@"
       ;;
   '') records;
 in
 pkgs.writeShellApplication {
   name = "dev";
   meta.description = "luneta build recipes on the flake-pinned toolchain";
+  passthru.commands = lib.listToAttrs (
+    map (record: lib.nameValuePair record.name (command record)) records
+  );
   text = ''
     paint() {
       if [ -t "$1" ] && [ -z "''${NO_COLOR:-}" ]; then

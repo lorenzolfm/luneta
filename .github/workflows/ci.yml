@@ -70,6 +70,9 @@ jobs:
       - name: Build the dev CLI
         run: nix build --no-link .#dev
 
+      - name: Nix lints
+        run: nix build -L --keep-going --out-link nix-lint .#checks.x86_64-linux.statix .#checks.x86_64-linux.deadnix
+
       # `dev clippy`'s run, as the flake's check makes it in the sandbox, against the
       # dependencies the daemon's build compiles, so that clippy compiles none of
       # them again. Through the flake and not a bare `cargo clippy`: the invocation
@@ -94,6 +97,25 @@ jobs:
       # system the daemon builds on.
       - name: Advisories
         run: nix run .#dev -- deny
+
+  breaking:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Breaking changes to the protocol
+        run: |
+          git update-ref refs/remotes/origin/main HEAD^
+          nix run .#dev.commands.lint -- --breaking
 
   # The daemon on each system it runs on: x86_64 and arm64 Linux, and an Apple
   # Silicon Mac. Through the flake, as the rest of CI goes, and each runner

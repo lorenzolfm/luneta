@@ -275,11 +275,28 @@
               ${macBuildEnv}
             '';
           };
+
+          nixFiles = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.fileFilter (file: file.hasExt "nix") ./.;
+          };
+
+          nixLint =
+            tool: args:
+            pkgs.runCommand "luneta-${tool.pname}" { } ''
+              cd ${nixFiles}
+              ${pkgs.lib.getExe tool} ${args}
+              touch "$out"
+            '';
         in
         {
           inherit dev lunetad;
 
-          checks = { inherit clippy; };
+          checks = {
+            inherit clippy;
+            statix = nixLint pkgs.statix "check .";
+            deadnix = nixLint pkgs.deadnix "--fail .";
+          };
 
           shell = pkgs.mkShell {
             packages = buildTools ++ [
@@ -309,7 +326,7 @@
         default = built.lunetad;
       }) bySystem;
 
-      # clippy over the workspace, as CI runs it.
+      # clippy over the workspace and the linters over the nix files, as CI runs them.
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
     };
 }
