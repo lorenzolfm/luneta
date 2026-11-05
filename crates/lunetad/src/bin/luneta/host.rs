@@ -1678,7 +1678,9 @@ impl App {
             self.next();
             return;
         }
-        if self.focus.zellij() {
+        // The left button down on the sidebar takes every key, wherever they
+        // were going, for `Esc` to let go of what it holds.
+        if self.focus.zellij() && !self.sidebar.pressed() {
             if chord == images::KEY && self.key_for_image(key) {
                 return;
             }

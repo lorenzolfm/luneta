@@ -89,7 +89,7 @@ use crate::printed::Printed;
 use crate::pull::{Found, Kind, Link, Others, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
-use crate::sweep::{Page, Sweep};
+use crate::sweep::{cells, Page, Sweep};
 use crate::zellij::{Closes, Open, SessionName, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
@@ -1203,16 +1203,20 @@ enum Moving {
     Swept(Sweep, Layout),
 }
 
-/// How the sidebar laid out what it drew. Another layout has other text on the
-/// cells a sweep is on, which is not what it copied.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How the sidebar laid out what it drew: which rows and notes, on which lines.
+/// Another layout has other text on the cells a sweep is on, which is not what
+/// it copied. A row's own text changing is no other layout: a spinner turns on
+/// it each frame, and a sweep over one would show for no longer than that.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Layout {
     area: Rect,
-    /// The line of the rows at the top, and how many lines they take.
+    /// The line of the rows at the top.
     top: usize,
-    rows: usize,
-    /// How many lines the notes take.
-    notes: usize,
+    /// The rows, in the order they show, each with how many lines it takes.
+    rows: Vec<(Spot, usize)>,
+    /// How many lines go along the bottom, and what the notes among them say.
+    bottom: usize,
+    notes: Vec<String>,
 }
 
 /// What moves, with the rows under it: a machine, among the machines, or a
@@ -2505,22 +2509,23 @@ impl Sidebar {
         (Some(next) != here).then_some(place)
     }
 
-    /// What a key does while the sidebar has the focus, pressed at `now`. The
-    /// left button down on the sidebar takes every key, and `Esc` lets go of
-    /// what it holds: what it lifted goes back, and a click is no longer
-    /// one. The menu takes every key while it is open. Without it, a
-    /// character does what `Top::of` says, which the legend goes by too, and
-    /// one it has not is the menu's.
+    /// What a key does while the sidebar has the focus, or the left button is
+    /// down on it, pressed at `now`. The left button down on the sidebar takes
+    /// every key, which leaves the notes as they are, and `Esc` lets go of what
+    /// it holds: what it lifted goes back, and a click is no longer one. The
+    /// menu takes every key while it is open. Without it, a character does what
+    /// `Top::of` says, which the legend goes by too, and one it has not is the
+    /// menu's.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
-        self.notice = None;
-        self.copied = None;
-        let pending = std::mem::take(&mut self.pending);
         if self.pressed() {
             if key.code == KeyCode::Esc {
                 self.let_go();
             }
             return Asked::Nothing;
         }
+        self.notice = None;
+        self.copied = None;
+        let pending = std::mem::take(&mut self.pending);
         if let Some(menu) = self.menu.take() {
             return self.menu_did(menu.key(key));
         }
@@ -3650,7 +3655,8 @@ impl Sidebar {
     /// is a click there, and what it lifted lands where it shows, the
     /// highlight on it, among the rows as the order is kept now, as `shift`
     /// moves them. What it swept is copied, as it shows on the last frame, and
-    /// shows on.
+    /// shows on; over nothing but blanks nothing is copied, and nothing shows on
+    /// to say that it was.
     fn release(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
         match std::mem::take(&mut self.moving) {
@@ -3669,8 +3675,11 @@ impl Sidebar {
             Moving::Sweeping(mut sweep) => {
                 sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
                 let text = sweep.text(&self.page, inside(area));
-                self.moving = Moving::Swept(sweep, self.laid);
-                if text.is_empty() { Asked::Nothing } else { Asked::CopyText(text) }
+                if text.is_empty() {
+                    return Asked::Nothing;
+                }
+                self.moving = Moving::Swept(sweep, self.laid.clone());
+                Asked::CopyText(text)
             },
             // A selection is the keys', and no press of the sidebar's.
             kept @ (Moving::Selected(_) | Moving::Swept(..)) => {
@@ -3915,6 +3924,7 @@ impl Sidebar {
         let mut numbers = Vec::new();
         // And where each cut's `…` is, by the same.
         let mut cuts = Vec::new();
+        let mut rows = Vec::with_capacity(order.len());
         for at in order {
             let row = &self.rows[at];
             let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
@@ -3928,6 +3938,7 @@ impl Sidebar {
             }
             let first = drawn.len();
             cuts.extend(row_cuts.into_iter().map(|cut| CutAt { line: first + cut.line, ..cut }));
+            rows.push((row.spot(), row_drawn.len()));
             for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
@@ -3936,7 +3947,8 @@ impl Sidebar {
             }
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
-        let laid = Layout { area, top: self.top, rows: drawn.len(), notes: notes.lines.len() };
+        let bottom = notes.lines.len();
+        let laid = Layout { area, top: self.top, rows, bottom, notes: notes.said };
         lines.extend(drawn.into_iter().skip(self.top).take(room));
         let notes_from = height.saturating_sub(notes.lines.len());
         lines.resize(notes_from, Line::default());
@@ -4746,7 +4758,7 @@ fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> 
     }
     let kept = shown.strip_suffix('…')?;
     let took = text.strip_prefix(kept)?.to_owned();
-    Some(CutAt { line, column: column + kept.width(), took })
+    Some(CutAt { line, column: column + cells(kept), took })
 }
 
 /// The lines a row is drawn on, and what the row has on them that the mouse goes
@@ -5084,12 +5096,14 @@ pub fn tail(text: &str, room: usize) -> String {
     format!("…{}", &text[start..])
 }
 
-/// What goes at the bottom of the sidebar: its lines, and those of them that go
-/// on from the line above, as `wrapped` breaks a note too long for one.
+/// What goes at the bottom of the sidebar: its lines, those of them that go on
+/// from the line above, as `wrapped` breaks a note too long for one, and what
+/// each note says.
 #[derive(Debug, Default)]
 struct Notes {
     lines: Vec<Line<'static>>,
     goes_on: Vec<usize>,
+    said: Vec<String>,
 }
 
 impl Notes {
@@ -5099,6 +5113,7 @@ impl Notes {
         let start = self.lines.len();
         self.goes_on.extend(start + 1..start + lines.len());
         self.lines.extend(lines);
+        self.said.push(text.to_owned());
     }
 }
 
@@ -8863,7 +8878,8 @@ mod tests {
     /// A drag copies what it went over as it lets go, and goes nowhere: along
     /// a pane's row, the way back, and over lines, from any line of the sidebar.
     /// It has the mouse over zellij too, and copies only the sidebar's column.
-    /// Over nothing but blanks, there is nothing to copy.
+    /// Over nothing but blanks, there is nothing to copy, and nothing stays
+    /// reversed to say that there was.
     #[test]
     fn a_drag_copies_what_it_went_over_as_it_lets_go() {
         let mut sidebar = searched();
@@ -8887,6 +8903,7 @@ mod tests {
         assert!(!sidebar.pressed());
 
         assert_eq!(swept(&mut sidebar, area, (5, 2), (25, 2)), Asked::Nothing);
+        assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
     /// A hand that clicks moves a little: a press let go on its line within a
@@ -8930,8 +8947,8 @@ mod tests {
     }
 
     /// What is swept shows reversed from the frame after it moves, through the
-    /// frames and the daemon's answers after it lets go, however the pointer
-    /// moves then, until the next click.
+    /// frames and the daemon's answers after it lets go, a row's own text
+    /// changing among them, however the pointer moves then, until the next click.
     #[test]
     fn a_sweep_shows_reversed_until_the_next_click() {
         let mut sidebar = searched();
@@ -8947,13 +8964,27 @@ mod tests {
         sidebar.mouse(mouse(MouseEventKind::Moved, 20, 12), area);
         sidebar.heard(searched().host.unwrap());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
+        sidebar.heard(first_pane_is(1, "a-p-i-y"));
+        assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
 
         sidebar.unsweep();
         assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
+    /// What `searched` lists, with its first pane another: its row takes as
+    /// many lines, on the same line, whichever pane it is.
+    fn first_pane_is(id: u32, command: &str) -> Host {
+        let mut listed = searched().host.unwrap();
+        let first = &mut listed.sessions[0].panes.as_mut().unwrap().panes[0];
+        first.id = id;
+        first.command = Some(command.to_owned());
+        listed
+    }
+
     /// Once what shows under a sweep may be other than what it copied, it goes:
-    /// the wheel, a pane that came, another width, the sidebar collapsed.
+    /// the wheel, a pane that came, another pane or note on as many lines, a row
+    /// taking a line more, the keys bringing the legend, another width, the
+    /// sidebar collapsed.
     #[test]
     fn a_sweep_goes_once_the_text_moves_from_under_it() {
         let area = Rect::new(0, 0, 32, 26);
@@ -8961,12 +8992,30 @@ mod tests {
             let panes = vec![pane(1, 0, "/w/a", "a-p-i-x"), pane(2, 1, "/w/b", "b")];
             host(vec![session("bipa", 10, panes)], Vec::new())
         };
-        let moves: [&dyn Fn(&mut Sidebar); 4] = [
+        let branch_too = || {
+            let mut listed = searched().host.unwrap();
+            let (trees, pulls) = (&mut listed.work_trees, &mut listed.pull_requests);
+            checked_out(trees, pulls, "/w/a", "main", None);
+            listed
+        };
+        let moves: [&dyn Fn(&mut Sidebar); 8] = [
             &|sidebar| {
                 sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
             },
             &|sidebar| {
                 sidebar.heard(more_rows());
+            },
+            &|sidebar| {
+                sidebar.heard(first_pane_is(9, "other"));
+            },
+            &|sidebar| {
+                sidebar.notify("other word".to_owned());
+            },
+            &|sidebar| {
+                sidebar.heard(branch_too());
+            },
+            &|sidebar| {
+                sidebar.focus(Keys::Sidebar);
             },
             &|sidebar| {
                 framed(sidebar, Rect::new(0, 0, 28, 26));
@@ -8977,6 +9026,7 @@ mod tests {
         ];
         for (case, moved) in moves.iter().enumerate() {
             let mut sidebar = searched();
+            sidebar.notify("first word".to_owned());
             framed(&mut sidebar, area);
             assert_eq!(swept(&mut sidebar, area, (7, 5), (9, 5)), copied("a-p"));
             moved(&mut sidebar);
@@ -8985,8 +9035,8 @@ mod tests {
     }
 
     /// `Esc`, or the pointer moving with no button down after a release luneta
-    /// did not hear, lets go of what is swept: it shows no more, and its release,
-    /// if it comes, copies nothing.
+    /// did not hear, lets go of what is swept: it shows no more, the notes stay,
+    /// and its release, if it comes, copies nothing.
     #[test]
     fn a_sweep_let_go_otherwise_copies_nothing() {
         let area = Rect::new(0, 0, 32, 26);
@@ -9001,10 +9051,12 @@ mod tests {
         ];
         for (case, let_go) in lets_go.iter().enumerate() {
             let mut sidebar = searched();
+            sidebar.notify("a note".to_owned());
             framed(&mut sidebar, area);
             dragged(&mut sidebar, area, (7, 5), (9, 5));
             let_go(&mut sidebar);
             assert!(!sidebar.pressed(), "case {case}");
+            assert_eq!(sidebar.notice.as_deref(), Some("a note"), "case {case}");
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
             let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 9, 5), area);
             assert_eq!(up, Asked::Nothing, "case {case}");
@@ -9061,6 +9113,18 @@ mod tests {
         // The branch, its row three lines further up now.
         let branch = format!("{long} #246");
         assert_eq!(swept(&mut sidebar, area, (7, 3), (22, 3)), copied(&branch));
+    }
+
+    /// A `…` is found where it is drawn, past a sound mark that takes a cell of
+    /// its own.
+    #[test]
+    fn a_sweep_finds_the_cut_past_a_halfwidth_sound_mark() {
+        let long = "\u{ff8a}\u{ff9e}-a-text-too-long-for-the-sidebar";
+        let mut sidebar = fresh();
+        sidebar.heard(host(vec![session("s", 10, vec![pane(1, 1, "/w/a", long)])], Vec::new()));
+        let area = Rect::new(0, 0, 24, 14);
+        framed(&mut sidebar, area);
+        assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(long));
     }
 
     /// A session lifted and held on the last line of the rows scrolls them a

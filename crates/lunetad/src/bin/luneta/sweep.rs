@@ -6,11 +6,10 @@
 
 use std::ops::Range;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
+use ratatui::text::{Line, Span};
 
 use crate::spots::Spots;
 
@@ -125,16 +124,22 @@ fn read<'a>(
     let mut text = String::new();
     let mut x = left;
     for grapheme in line.styled_graphemes(Style::new()) {
-        let width = grapheme.symbol.width();
+        let width = grapheme.symbol.cell_width();
         if width == 0 {
             continue;
         }
         if columns.contains(&x) {
             text.push_str(cut(x).map_or(grapheme.symbol, String::as_str));
         }
-        x = x.saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
+        x = x.saturating_add(width);
     }
     text
+}
+
+/// How many cells `text` takes as it is drawn, which is how `read` counts them.
+pub fn cells(text: &str) -> usize {
+    let span = Span::raw(text);
+    span.styled_graphemes(Style::new()).map(|it| usize::from(it.symbol.cell_width())).sum()
 }
 
 #[cfg(test)]
@@ -244,5 +249,19 @@ mod tests {
         assert_eq!(swept(at(4, 1), at(5, 1), &page), "本");
         assert_eq!(swept(at(5, 1), at(6, 1), &page), "語");
         assert_eq!(swept(at(5, 1), at(5, 1), &page), "");
+    }
+
+    /// A sweep of one cell takes what ratatui drew on it, whatever counts how
+    /// wide: past a wide character, and past a halfwidth letter with its sound
+    /// mark, to which ratatui gives a cell more than `unicode_width` does.
+    #[test]
+    fn a_sweep_reads_each_cell_as_ratatui_drew_it() {
+        let page = page(&["\u{ff8a}\u{ff9e}xy日z"]);
+        let mut buffer = Buffer::empty(WITHIN);
+        buffer.set_line(WITHIN.x, WITHIN.y, &page.lines[0], WITHIN.width);
+        for x in WITHIN.left()..WITHIN.right() {
+            let drawn = buffer[(x, WITHIN.y)].symbol().trim_end().to_owned();
+            assert_eq!(swept(at(x, WITHIN.y), at(x, WITHIN.y), &page), drawn, "cell {x}");
+        }
     }
 }
