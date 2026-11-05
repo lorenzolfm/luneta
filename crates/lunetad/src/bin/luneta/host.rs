@@ -939,18 +939,21 @@ fn run_in(
     let mut watching = Vec::new();
     match folds_watched {
         Ok(watcher) => watching.extend(watcher),
-        Err(error) => sidebar
-            .notify(format!("folds made elsewhere show from luneta's next start: {error}")),
+        Err(error) => {
+            sidebar.notify(format!("folds made elsewhere show from luneta's next start: {error}"));
+        },
     }
     match news_watched {
         Ok(watcher) => watching.push(watcher),
-        Err(error) => sidebar
-            .notify(format!("dots of other lunetas show from luneta's next start: {error}")),
+        Err(error) => {
+            sidebar.notify(format!("dots of other lunetas show from luneta's next start: {error}"));
+        },
     }
     match order_watched {
         Ok(watcher) => watching.extend(watcher),
-        Err(error) => sidebar
-            .notify(format!("rows moved elsewhere show from luneta's next start: {error}")),
+        Err(error) => {
+            sidebar.notify(format!("rows moved elsewhere show from luneta's next start: {error}"));
+        },
     }
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
