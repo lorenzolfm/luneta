@@ -9361,6 +9361,46 @@ mod tests {
         assert!(sidebar.folds.contains(Fold::Machine(&machine)));
     }
 
+    /// Folded, a machine's header says what its sessions hold, as a session's
+    /// row does: the dot, where something finished in one of its panes; or else
+    /// the spinner, where an agent of its is at work; and neither otherwise. Its
+    /// rule turns the accent where luneta's zellij is in one of its sessions.
+    #[test]
+    fn a_folded_machine_s_header_says_what_its_sessions_hold() {
+        let holding = |status, in_it| {
+            let panes = vec![pane(1, 0, "/w/b", "claude")];
+            let agents = vec![agent("main", 1, status, Some("fix"))];
+            let mut host = machines();
+            host.remotes = vec![remote("nixos", up(vec![session("main", 20, panes)], agents))];
+            let mut sidebar = fresh();
+            sidebar.heard(host);
+            if in_it {
+                let look = sidebar.swapping(&Machine::Remote(nixos()), &session_name("main"));
+                let clients = vec![Client { id: 1, pane: Some(1) }];
+                let before = Some(Before::Listed(Vec::new()));
+                sidebar.looked(Looked { number: look.number, went: None, clients, before });
+                sidebar.titled("main | fix".to_owned());
+            }
+            sidebar.focus(Keys::Sidebar);
+            type_in(&mut sidebar, "Ghh");
+            sidebar
+        };
+        let header = |status| rows_shown(&mut holding(status, false)).pop().expect("a header");
+        assert_eq!(header(Status::Idle), format!(" ▸ \u{f108} nixos {} •", "═".repeat(17)));
+        assert_eq!(header(Status::Busy), format!(" ▸ \u{f108} nixos {} ⠋", "═".repeat(17)));
+        assert_eq!(header(Status::Shell), format!(" ▸ \u{f108} nixos {}", "═".repeat(19)));
+
+        // Just past the name, in the machine's rule.
+        let rule = |in_it| {
+            let mut sidebar = holding(Status::Shell, in_it);
+            let lines = screen(&mut sidebar, false, 32, 12);
+            let y = lines.iter().position(|line| line.contains("nixos")).expect("a header");
+            drawn(&mut sidebar, false, 32, 12)[(12, u16::try_from(y).unwrap())].fg
+        };
+        assert_ne!(rule(false), ACCENT);
+        assert_eq!(rule(true), ACCENT);
+    }
+
     /// Another machine's rows go there, as this one's do: `Enter` and a click
     /// on its pane ask luneta to take its zellij there. The menu on its pane
     /// is for that pane, of that machine, which opens what a key opens. `u`

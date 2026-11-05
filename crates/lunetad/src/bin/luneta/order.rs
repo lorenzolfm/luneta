@@ -707,14 +707,16 @@ mod tests {
         assert_eq!(sorted(&later, &["a", "b"]), ["b", "a"]);
     }
 
-    /// A file that does not read as an order leaves the order as it was, and
-    /// says why until a move writes over it. One that cannot be written
-    /// leaves the order to this luneta, and says why.
+    /// No file is no failure. A file that does not read as an order, or cannot
+    /// be read at all, leaves the order as it was, and says why until a move
+    /// writes over it. One that cannot be written leaves the order to this
+    /// luneta, and says why.
     #[test]
     fn a_file_that_fails_says_why() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("order");
         let mut order = Order::within(file.clone());
+        assert_eq!(order.unread(), None);
         order.keep_sessions(&Machine::Local, names(&["b", "a"]));
         fs::write(&file, "not JSON").unwrap();
         assert!(!order.reload());
@@ -722,7 +724,13 @@ mod tests {
         assert_eq!(sorted(&order, &["a", "b"]), ["b", "a"]);
         order.keep_sessions(&Machine::Local, names(&["a", "b"]));
         assert_eq!(order.unread(), None);
-        assert_eq!(sorted(&Order::within(file), &["b", "a"]), ["a", "b"]);
+        assert_eq!(sorted(&Order::within(file.clone()), &["b", "a"]), ["a", "b"]);
+
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(!order.reload());
+        assert!(order.unread().is_some_and(|why| why.contains("order")));
+        assert_eq!(sorted(&order, &["b", "a"]), ["a", "b"]);
 
         let blocker = scratch.path().join("not a folder");
         fs::write(&blocker, "").unwrap();

@@ -255,11 +255,13 @@ mod tests {
     }
 
     /// The command alone on a line, with no prompt in front of it, is not
-    /// where it was run, nor is a word that ends with it.
+    /// where it was run, nor is a word that starts or ends with it.
     #[test]
     fn the_command_s_line_has_a_prompt_in_front_of_it() {
         let dump = "➜ ls\nls\ntools\n➜\n";
         assert_eq!(kept(dump, "ls"), Printed::After(vec!["ls", "tools"]));
+        let dump = "➜ ls\nold\n➜ lsof -i\nnew\n➜\n";
+        assert_eq!(kept(dump, "ls"), Printed::After(vec!["old", "➜ lsof -i", "new"]));
     }
 
     /// Nothing after the first line the pane holds, the command's, is
