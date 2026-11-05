@@ -73,12 +73,13 @@ const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 /// your words point at with, and makes worktrees with. In `dontAsk` mode,
 /// Claude Code denies it any other but those your own settings allow, and a
 /// line that runs one inside another, as through `$(…)`.
-pub const ALLOWED: [&str; 14] = [
+pub const ALLOWED: [&str; 15] = [
     "Bash(luneta here:*)",
     "Bash(luneta sessions:*)",
     "Bash(luneta agents:*)",
     "Bash(luneta open:*)",
     "Bash(luneta go:*)",
+    "Bash(luneta turn:*)",
     "Bash(luneta close:*)",
     "Bash(zoxide query:*)",
     "Bash(gh issue view:*)",
@@ -102,7 +103,7 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     Do what they ask with luneta's commands, as the luneta skill below says, and end with a \
     line or two on what you did, and where. Run one command in each call to Bash, with \
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
-    sessions, agents, open, go and close, zoxide query, gh issue view and list, gh pr view \
+    sessions, agents, open, go, turn and close, zoxide query, gh issue view and list, gh pr view \
     and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
     pane you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
     with no other option of claude's: luneta refuses any other command. You cannot wait for \

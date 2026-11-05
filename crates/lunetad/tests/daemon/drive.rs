@@ -214,6 +214,399 @@ fn a_tab_opens_only_in_a_session_a_client_is_in() {
     assert!(why.contains("no client is in play"), "{why}");
 }
 
+/// A terminal in the tab `tab`, as zellij lists it.
+fn pane(id: u32, tab: (u32, &str)) -> serde_json::Value {
+    listed(id, "fish", tab, Some("/w"))
+}
+
+/// A plugin's pane, as zellij lists it, by an id of the plugins'.
+fn plugin(mut pane: serde_json::Value) -> serde_json::Value {
+    pane["is_plugin"] = json!(true);
+    pane
+}
+
+/// The session `work`, its panes 1 and 2 in one tab, where zellij moves pane 1
+/// to a tab it opens, as `luneta turn pane work:1` has it do. It runs as long as
+/// what this gives back is held.
+fn pane_to_turn(host: &Host) -> UnixListener {
+    let work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (old, new) = ((0, "Tab #1"), (3, "Tab #2"));
+    host.lists.list("work", &json!([pane(1, old), pane(2, old)]));
+    host.lists.opens_into("work", &json!([pane(1, old), pane(2, old), pane(4, new)]));
+    host.lists.stacks_into("work", 1, &json!([pane(2, old), pane(1, new), pane(4, new)]));
+    work
+}
+
+/// A pane zellij lists as shown over the others of its tab.
+fn fullscreen(mut pane: serde_json::Value) -> serde_json::Value {
+    pane["is_fullscreen"] = json!(true);
+    pane
+}
+
+/// What has zellij stack `moved` on `root` with no client moved: it focuses the
+/// last it is told to stack, and that is none of the session's.
+fn unfocused(root: &str, moved: &str) -> String {
+    format!("--session work action stack-panes -- {root} {moved} terminal_4294967295")
+}
+
+/// What a command said on its stdout, having gone well.
+fn said(ran: &Output) -> String {
+    assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+    String::from_utf8(ran.stdout.clone()).unwrap()
+}
+
+/// What a command said on its stderr, having failed.
+fn why(ran: &Output) -> String {
+    assert!(!ran.status.success(), "{}", String::from_utf8_lossy(&ran.stdout));
+    String::from_utf8_lossy(&ran.stderr).into_owned()
+}
+
+/// An agent turns the pane it runs in, whose variables zellij must not go by.
+/// It says that pane, which keeps its id. zellij focuses the last pane it is told
+/// to stack, and here that is none of the session's, so that it takes no client
+/// there, and what you type goes on reaching your pane.
+#[test]
+fn a_pane_turns_into_a_tab_and_no_client_moves() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_1")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
+    assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1")]);
+    assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
+    let opened = host.lists.opened();
+    assert!(opened.iter().all(|opened| opened.starts_with("- ")), "{opened:?}");
+}
+
+/// A tab with room for a pane but not for one more beside it has zellij stack it
+/// the plain way, as it would have had no room for neither: the pane moves all the
+/// same, and the client zellij takes there goes back.
+#[test]
+fn a_pane_with_little_room_moves_all_the_same_and_the_client_goes_back() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    host.lists.leave_little_room("work");
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_1")]);
+    host.lists.focuses_clients_into("work", &[(1, "terminal_2")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
+    let plain = "--session work action stack-panes -- terminal_4 terminal_1";
+    assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1"), plain.to_owned()]);
+    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
+}
+
+/// A client is on the pane that moves, so that it is to go with it, and zellij
+/// is told nothing else to focus: but it takes the client that last typed, here
+/// another. That one goes back, and the turn says of the one it left behind.
+#[test]
+fn a_client_zellij_took_to_a_pane_another_was_on_goes_back() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    host.lists.clients("work", &[(1, "terminal_2"), (2, "terminal_1")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_1"), (2, "terminal_2")]);
+    host.lists.focuses_clients_into("work", &[(1, "terminal_2"), (2, "terminal_2")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    let plain = "--session work action stack-panes -- terminal_4 terminal_1";
+    assert_eq!(host.lists.turned(), [plain]);
+    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
+    let warned = String::from_utf8_lossy(&turned.stderr);
+    assert!(warned.contains("may not be on the pane they were on"), "{warned}");
+}
+
+/// Of the panes of a tab, only the one a client is on is stacked for that client
+/// to go with it, and the rest take it no further.
+#[test]
+fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    let (three, there) = (pane(3, to), |id| pane(id, to));
+    host.lists.list("work", &json!([pane(1, from), pane(2, from), pane(5, from), three]));
+    host.lists.stacks_into("work", 1, &json!([there(1), pane(2, from), pane(5, from), three]));
+    host.lists.stacks_into("work", 2, &json!([there(1), there(2), pane(5, from), three]));
+    host.lists.stacks_into("work", 3, &json!([there(1), there(2), there(5), three]));
+    host.lists.clients("work", &[(1, "terminal_2")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "tab", "work:1", "--into", "work:3"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
+    let plain = "--session work action stack-panes -- terminal_9 terminal_2";
+    let (one, five) = (unfocused("terminal_9", "terminal_1"), unfocused("terminal_9", "terminal_5"));
+    assert_eq!(host.lists.turned(), [one, plain.to_owned(), five]);
+    assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
+}
+
+/// A pane leaving its tab ends the fullscreen of another there, and a stand-in
+/// opening in a tab that of a pane there. Each shows so again, once the turn is
+/// over, with nobody moved.
+#[test]
+fn a_turn_shows_fullscreen_again_what_it_ended() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (old, new) = ((0, "Tab #1"), (3, "Tab #2"));
+    host.lists.list("work", &json!([pane(1, old), fullscreen(pane(2, old))]));
+    host.lists.opens_into("work", &json!([pane(1, old), fullscreen(pane(2, old)), pane(4, new)]));
+    host.lists.stacks_into("work", 1, &json!([pane(2, old), pane(1, new), pane(4, new)]));
+    host.lists.clients("work", &[(1, "terminal_2")]);
+
+    let turned = luneta(&host, ("work", 2), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    let toggled = "--session work action toggle-fullscreen --pane-id terminal_2";
+    assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1"), toggled.to_owned()]);
+
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.lists.list("work", &json!([pane(1, from), fullscreen(pane(3, to)), pane(5, to)]));
+    host.lists.stacks_into("work", 1, &json!([pane(1, to), pane(3, to), pane(5, to)]));
+    host.lists.clients("work", &[(1, "terminal_3")]);
+
+    let turned = luneta(&host, ("work", 3), &["turn", "tab", "work:1", "--into", "work:3"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    let toggled = "--session work action toggle-fullscreen --pane-id terminal_3";
+    assert_eq!(host.lists.turned(), [unfocused("terminal_9", "terminal_1"), toggled.to_owned()]);
+}
+
+/// A pane stays out of fullscreen where the turn did not end that, or where it
+/// moved along itself, or where showing it would take a client off its pane:
+/// here one that went with its pane into the tab.
+#[test]
+fn a_turn_leaves_fullscreen_as_it_is_where_it_ended_none_or_would_move_a_client() {
+    let (old, new) = ((0, "Tab #1"), (3, "Tab #2"));
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    host.lists.list("work", &json!([pane(1, old), fullscreen(pane(2, old))]));
+    host.lists.opens_into("work", &json!([pane(1, old), fullscreen(pane(2, old)), pane(4, new)]));
+    let still = json!([fullscreen(pane(2, old)), pane(1, new), pane(4, new)]);
+    host.lists.stacks_into("work", 1, &still);
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    said(&luneta(&host, ("work", 2), &["turn", "pane", "work:1"]));
+    assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1")]);
+
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    host.lists.list("work", &json!([fullscreen(pane(1, old)), pane(2, old)]));
+    host.lists.opens_into("work", &json!([fullscreen(pane(1, old)), pane(2, old), pane(4, new)]));
+    host.lists.stacks_into("work", 1, &json!([pane(2, old), pane(1, new), pane(4, new)]));
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    said(&luneta(&host, ("work", 2), &["turn", "pane", "work:1"]));
+    assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1")]);
+
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.lists.list("work", &json!([pane(1, from), fullscreen(pane(3, to)), pane(5, to)]));
+    host.lists.stacks_into("work", 1, &json!([pane(1, to), pane(3, to), pane(5, to)]));
+    host.lists.clients("work", &[(1, "terminal_1")]);
+    said(&luneta(&host, ("work", 1), &["turn", "tab", "work:1", "--into", "work:3"]));
+    let plain = "--session work action stack-panes -- terminal_9 terminal_1";
+    assert_eq!(host.lists.turned(), [plain]);
+}
+
+/// A client on the pane that moves goes with it, and one that typed nothing is
+/// not moved: neither has anywhere to go back to.
+#[test]
+fn a_turn_leaves_a_client_zellij_did_not_take_elsewhere() {
+    for on in ["terminal_1", "terminal_2"] {
+        let host = Host::new();
+        let _work = pane_to_turn(&host);
+        host.lists.clients("work", &[(1, on)]);
+
+        let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+        assert_eq!(said(&turned), "work:1\n");
+        assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
+    }
+}
+
+/// A client goes back to a plugin's pane as to a terminal, by the id it has of
+/// the plugins': here the same as that of the terminal that moved.
+#[test]
+fn a_turn_takes_a_client_back_to_a_plugins_pane() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    host.lists.leave_little_room("work");
+    host.lists.clients("work", &[(1, "plugin_1")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_1")]);
+    host.lists.focuses_clients_into("work", &[(1, "plugin_1")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
+    assert_eq!(host.lists.went(), ["--session work action focus-pane-id plugin_1"]);
+}
+
+/// A tab whose one tiled pane is a plugin's has it move last, and the client
+/// zellij took ends on it: from a plugin's pane too, which is another pane, and
+/// it goes back there.
+#[test]
+fn a_client_zellij_took_from_a_plugins_pane_to_another_goes_back() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to, third) = ((0, "Tab #1"), (1, "Tab #2"), (2, "Tab #3"));
+    let mut floats = pane(1, from);
+    floats["is_floating"] = json!(true);
+    let stays = plugin(pane(5, third));
+    let list = json!([plugin(pane(2, from)), floats, pane(3, to), pane(4, third), stays]);
+    host.lists.list("work", &list);
+    let moved_one = json!([plugin(pane(2, from)), pane(1, to), pane(3, to), pane(4, third), stays]);
+    let moved_both = json!([plugin(pane(2, to)), pane(1, to), pane(3, to), pane(4, third), stays]);
+    host.lists.stacks_into("work", 1, &moved_one);
+    host.lists.stacks_into("work", 2, &moved_both);
+    host.lists.leave_little_room("work");
+    host.lists.clients("work", &[(1, "plugin_5")]);
+    host.lists.stacks_clients_into("work", &[(1, "plugin_2")]);
+    host.lists.focuses_clients_into("work", &[(1, "plugin_5")]);
+
+    let turned = luneta(&host, ("work", 4), &["turn", "tab", "work:1", "--into", "work:3"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
+    assert_eq!(host.lists.went(), ["--session work action focus-pane-id plugin_5"]);
+}
+
+/// What turned stays turned where a client has no way back, as one that typed
+/// nothing, whose pane left without it: the agent is told, for it to tell the
+/// user.
+#[test]
+fn a_turn_says_where_it_could_not_take_a_client_back() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    host.lists.clients("work", &[(1, "terminal_1")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_2")]);
+
+    let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    let warned = String::from_utf8_lossy(&turned.stderr);
+    assert!(warned.contains("may not be on the pane they were on"), "{warned}");
+}
+
+/// A turn refused before it asked zellij to move anything moved nobody: a client
+/// that goes elsewhere as it runs, the pane it was given too, went there of its
+/// own, and stays there, and the turn says nothing of panes moving.
+#[test]
+fn a_refused_turn_leaves_a_client_that_moves_as_it_runs() {
+    let alone: &[&str] = &["turn", "pane", "work:3"];
+    let beside: &[&str] = &["turn", "tab", "work:1", "--into", "work:2"];
+    let cases = [
+        (alone, "terminal_1", "terminal_3"),
+        (alone, "terminal_1", "terminal_2"),
+        (beside, "terminal_3", "terminal_1"),
+    ];
+    for (refused, was, goes) in cases {
+        let host = Host::new();
+        let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+        let (one, two) = ((0, "Tab #1"), (1, "Tab #2"));
+        host.lists.list("work", &json!([pane(1, one), pane(2, one), pane(3, two)]));
+        host.lists.clients("work", &[(1, was)]);
+        host.lists.lists_clients_into("work", &[(1, goes)]);
+
+        let turned = luneta(&host, ("work", 3), refused);
+
+        let why = why(&turned);
+        assert!(why.contains("already") && !why.contains("may not be on"), "{refused:?} {why}");
+        assert!(host.lists.went().is_empty(), "{refused:?} {:?}", host.lists.went());
+    }
+}
+
+/// A session no client is in has no room for a tab, and nobody is taken there
+/// to make it, as `open tab` takes nobody. What `lunetad::turns` refuses reaches
+/// the agent as a failure too.
+#[test]
+fn a_pane_that_cannot_turn_into_a_tab_fails_and_says_why() {
+    let host = Host::new();
+    let _work = pane_to_turn(&host);
+    let turned = luneta(&host, ("elsewhere", 7), &["turn", "pane", "work:1"]);
+    assert!(why(&turned).contains("no client is in work"), "{turned:?}");
+    assert!(host.lists.opened().is_empty());
+
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    host.lists.list("work", &json!([pane(1, (0, "Tab #1")), pane(2, (1, "Tab #2"))]));
+    host.lists.clients("work", &[(1, "terminal_2")]);
+    let turned = luneta(&host, ("work", 2), &["turn", "pane", "work:1"]);
+    assert!(why(&turned).contains("pane 1 is alone in its tab"), "{turned:?}");
+    assert!(host.lists.opened().is_empty());
+}
+
+/// `--into` names a tab by a pane of it. A pane of another session is refused
+/// before anything moves, and so is one of the same tab.
+#[test]
+fn a_tab_turns_into_panes_only_of_another_tab_of_its_session() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let tab = (0, "Tab #1");
+    host.lists.list("work", &json!([pane(1, tab), pane(2, tab), pane(3, (1, "Tab #2"))]));
+
+    let elsewhere = ["turn", "tab", "work:1", "--into", "play:3"];
+    let turned = luneta(&host, ("work", 1), &elsewhere);
+    assert!(why(&turned).contains("play:3 is of another session"), "{turned:?}");
+
+    let beside = ["turn", "tab", "work:1", "--into", "work:2"];
+    let turned = luneta(&host, ("work", 1), &beside);
+    assert!(why(&turned).contains("in the tab of pane 2 already"), "{turned:?}");
+
+    assert!(host.lists.opened().is_empty());
+    assert!(host.lists.turned().is_empty());
+}
+
+/// A tab turns into panes with no client in its session too, as the tab they go
+/// into has its room already, and the tab they left goes.
+#[test]
+fn a_tab_turns_into_panes_where_no_client_is_and_says_the_pane_it_was_given() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
+    host.lists.list("work", &json!([pane(1, from), pane(3, to)]));
+    host.lists.stacks_into("work", 1, &json!([pane(1, to), pane(3, to)]));
+
+    let turned = luneta(&host, ("elsewhere", 7), &["turn", "tab", "work:1", "--into", "work:3"]);
+
+    assert_eq!(said(&turned), "work:1\n");
+    let closed = host.lists.closed();
+    assert!(closed.contains(&"--session work action close-tab-by-id 0".to_owned()), "{closed:?}");
+}
+
+/// zellij runs out of room partway: the agent hears how many moved, as those
+/// stay moved, and the client zellij took along goes back all the same.
+#[test]
+fn a_tab_that_turns_only_partly_fails_saying_so_and_the_client_goes_back() {
+    let host = Host::new();
+    let _work = UnixListener::bind(host.contract().join("work")).unwrap();
+    let (from, to, third) = ((0, "Tab #1"), (1, "Tab #2"), (2, "Tab #3"));
+    let laid = json!([pane(1, from), pane(2, from), pane(3, to), pane(7, third)]);
+    host.lists.list("work", &laid);
+    let first_there = json!([pane(1, to), pane(2, from), pane(3, to), pane(7, third)]);
+    host.lists.stacks_into("work", 1, &first_there);
+    host.lists.leave_little_room("work");
+    host.lists.clients("work", &[(1, "terminal_7")]);
+    host.lists.stacks_clients_into("work", &[(1, "terminal_1")]);
+    host.lists.focuses_clients_into("work", &[(1, "terminal_7")]);
+
+    let turned = luneta(&host, ("work", 7), &["turn", "tab", "work:1", "--into", "work:3"]);
+
+    let why = why(&turned);
+    assert!(why.contains("turned 1 of the 2 panes"), "{why}");
+    assert!(why.contains("no room for terminal_2"), "{why}");
+    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_7"]);
+}
+
 /// A pane keeps the name its session had as it opened. Where no session runs
 /// by it now, and no lunetad says where the pane's agents are, luneta cannot
 /// tell which session it runs in, and what goes by that does nothing: a pane

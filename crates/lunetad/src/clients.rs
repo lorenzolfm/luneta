@@ -12,7 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::api;
-use crate::cli::{answer_of, heard};
+use crate::cli::{answer_of, heard, PaneId};
 use crate::program;
 
 /// How long zellij has to list a session's clients: a server that runs
@@ -27,14 +27,15 @@ const HEADER: &str = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
 pub struct Client {
     /// Its id, which it keeps while it stays in the session.
     pub id: u32,
-    /// The terminal it has the focus on, none while that is a plugin's pane.
-    pub pane: Option<u32>,
+    /// The pane it has the focus on.
+    pub pane: PaneId,
 }
 
 impl Client {
+    /// As lunetad says it: by the terminal it is on, none on a plugin's pane.
     #[must_use]
     pub fn to_api(self) -> api::Client {
-        api::Client { id: self.id, pane: self.pane }
+        api::Client { id: self.id, pane: self.pane.terminal() }
     }
 }
 
@@ -56,8 +57,8 @@ pub fn parse(said: &str) -> Result<Vec<Client>, String> {
         let id = id.parse().map_err(|_| format!("no client's id: {id:?}"))?;
         let number = |prefix| pane.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
         let pane = match (number("terminal_"), number("plugin_")) {
-            (Some(terminal), _) => Some(terminal),
-            (None, Some(_)) => None,
+            (Some(terminal), _) => PaneId::Terminal(terminal),
+            (None, Some(plugin)) => PaneId::Plugin(plugin),
             (None, None) => return Err(format!("no pane's id: {pane:?}")),
         };
         clients.push(Client { id, pane });
@@ -100,11 +101,17 @@ mod tests {
                     1         terminal_3     tail -f /dev/null\n\
                     3         terminal_0     N/A            \n";
         let client = |id, pane| Client { id, pane };
-        assert_eq!(
-            parse(said),
-            Ok(vec![client(1, Some(3)), client(2, None), client(3, Some(0))])
-        );
+        let (on, plugin) = (PaneId::Terminal, PaneId::Plugin);
+        assert_eq!(parse(said), Ok(vec![client(1, on(3)), client(2, plugin(4)), client(3, on(0))]));
         assert_eq!(parse("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n"), Ok(Vec::new()));
+    }
+
+    /// lunetad says no plugin's pane to what reads it, which goes by terminals.
+    #[test]
+    fn lunetad_says_the_terminal_a_client_is_on_and_no_plugin() {
+        let said = |pane| Client { id: 1, pane }.to_api().pane;
+        assert_eq!(said(PaneId::Terminal(3)), Some(3));
+        assert_eq!(said(PaneId::Plugin(3)), None);
     }
 
     #[test]

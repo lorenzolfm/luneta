@@ -104,11 +104,14 @@ pub fn script(path: &Path, text: &str) {
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It lists the session's clients too, as the test wrote them with `clients`,
-/// and none until it has. Of a session it was given no panes for, it says
-/// there is no such session, as zellij does. It notes each session the daemon
-/// asks it for the panes of, for `asked`, and each pane, tab and session it is
-/// asked to close, for `closed`, and closes nothing; in a session a test had
-/// it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
+/// and none until it has, and as `lists_clients_into`, `stacks_clients_into`
+/// and `focuses_clients_into` have them move. It moves none as it stacks a pane
+/// with one that is none of the session's last, and stacks nothing so in a session
+/// a test had `leave_little_room`. A stand-in it opened it stacks for `tucked`,
+/// with no pane moved. Of a session it was given no panes for, it says there is no such session, as zellij does. It notes each session
+/// the daemon asks it for the panes of, for `asked`, and each pane, tab and
+/// session it is asked to close, for `closed`, and closes nothing; in a session
+/// a test had it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
 /// lists nothing, and answers nothing. It deletes a session as zellij does:
 /// takes its socket away, as its server does once killed, and what it keeps
 /// of it in the home, which a session a test had `rewrites` has back at
@@ -161,7 +164,12 @@ if [ "$1" = action ] && [ -f "{panes}/$session.$2.once" ]; then
 fi
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
-    "action list-panes --json") asking=laid ;;
+    "action list-panes --json")
+        asking=laid
+        if [ -f "{panes}/$session.listed.clients" ]; then
+            mv "{panes}/$session.listed.clients" "{panes}/$session.clients"
+        fi
+        ;;
     "action list-clients") asking=clients ;;
     "action close-pane --pane-id "* | "action close-tab-by-id "* | "delete-session --force "*)
         if [ -f "{panes}/$session.refused" ]; then
@@ -192,14 +200,34 @@ case "$*" in
         ;;
     "action switch-session "* | "action focus-pane-id "*)
         echo "$asked" >> "{panes}/went"
+        if [ -f "{panes}/$session.focused.clients" ]; then
+            mv "{panes}/$session.focused.clients" "{panes}/$session.clients"
+        fi
+        exit 0
+        ;;
+    "action stack-panes -- "*" terminal_9 terminal_4294967295")
+        echo "$asked" >> "{panes}/tucked"
         exit 0
         ;;
     "action stack-panes -- "*)
         echo "$asked" >> "{panes}/turned"
-        for next in "{panes}/$session".stacks.*; do
-            [ -f "$next" ] && mv "$next" "{panes}/$session.json"
-            break
-        done
+        case "$*" in
+            *" terminal_4294967295") focuses=no ;;
+            *) focuses=yes ;;
+        esac
+        if [ "$focuses" = yes ] || [ ! -f "{panes}/$session.tight" ]; then
+            for next in "{panes}/$session".stacks.*; do
+                [ -f "$next" ] && mv "$next" "{panes}/$session.json"
+                break
+            done
+        fi
+        if [ "$focuses" = yes ] && [ -f "{panes}/$session.stacked.clients" ]; then
+            mv "{panes}/$session.stacked.clients" "{panes}/$session.clients"
+        fi
+        exit 0
+        ;;
+    "action toggle-fullscreen "*)
+        echo "$asked" >> "{panes}/turned"
         exit 0
         ;;
     "action toggle-pane-embed-or-floating "*)
@@ -346,6 +374,13 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("turned")
     }
 
+    /// Each stack of a stand-in zellij was asked for under a pane that moved,
+    /// which is what leaves that pane one like any other, in the order it was
+    /// asked.
+    pub fn tucked(&self) -> Vec<String> {
+        self.lines("tucked")
+    }
+
     /// Each rename zellij was asked for, as its arguments were, in the order
     /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
@@ -418,11 +453,34 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// an id and a pane as `list-clients` spells them, `terminal_3` or
     /// `plugin_2`, and padded as zellij 0.45.1 pads them.
     pub fn clients(&self, session: &str, clients: &[(u32, &str)]) {
-        let mut said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n".to_owned();
-        for (id, pane) in clients {
-            writeln!(said, "{id:<9} {pane:<14} {:<15}", "fish").unwrap();
-        }
-        self.write(&format!("{session}.clients"), &said);
+        self.write(&format!("{session}.clients"), &clients_said(clients));
+    }
+
+    /// Has zellij list `clients` for the session `session` once it has listed
+    /// its panes, as `clients` would, as a client moves of its own as it does.
+    pub fn lists_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
+        self.write(&format!("{session}.listed.clients"), &clients_said(clients));
+    }
+
+    /// Has zellij list `clients` for the session `session` once it has stacked
+    /// a pane there, as `clients` would, as it moves the client that last typed
+    /// to it. That is the last pane it is told to stack, so one that is none of
+    /// the session's moves nobody.
+    pub fn stacks_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
+        self.write(&format!("{session}.stacked.clients"), &clients_said(clients));
+    }
+
+    /// Has zellij find room in `session` for a pane to stack, but not for one
+    /// that is none of the session's beside it, which counts as a pane of the
+    /// stack: it stacks neither, and says nothing of it.
+    pub fn leave_little_room(&self, session: &str) {
+        self.write(&format!("{session}.tight"), "");
+    }
+
+    /// Has zellij list `clients` for the session `session` once it has moved
+    /// the focus there, as `clients` would.
+    pub fn focuses_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
+        self.write(&format!("{session}.focused.clients"), &clients_said(clients));
     }
 
     /// Has zellij fail from now on to close any pane, tab or session of the
@@ -473,6 +531,15 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         fs::write(&writing, text).unwrap();
         fs::rename(writing, path).unwrap();
     }
+}
+
+/// What zellij says as it lists `clients`, each an id and a pane.
+fn clients_said(clients: &[(u32, &str)]) -> String {
+    let mut said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n".to_owned();
+    for (id, pane) in clients {
+        writeln!(said, "{id:<9} {pane:<14} {:<15}", "fish").unwrap();
+    }
+    said
 }
 
 /// A `gh` of a test's own, beside its `zellij`, that finds the pull request

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{done, failure, laid, quiet, unrun, LEFT_OUT, PANE_VAR, SESSION_VAR};
+use lunetad::cli::{
+    done, done_once_reached, failure, laid, quiet, unrun, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
+};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -563,32 +565,39 @@ const UNMOVED: &str = "zellij moved nobody: it moves the client that last typed 
 /// CLI does. Waits for the client to be there, and says why it is not: as
 /// `UNMOVED` says, or as zellij said.
 pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
+    if at == to {
+        return pane.map_or(Ok(()), |pane| focused(at, PaneId::Terminal(pane)));
+    }
     let mut command = Command::new("zellij");
     let pane_id = pane.map(|id| format!("terminal_{id}"));
-    if at == to {
-        let (Some(pane), Some(pane_id)) = (pane, pane_id) else {
-            return Ok(());
-        };
-        command.args(["--session", at, "action", "focus-pane-id", &pane_id]);
-        match done(command) {
-            Err(said) if !said.contains("is already focused") => return Err(said),
-            _ => {},
-        }
-        let on = |clients: Vec<Client>| clients.iter().any(|client| client.pane == Some(pane));
-        return seen(at, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned());
-    }
     let before = clients(to)?;
     command.args(["--session", at, "action", "switch-session", to]);
     command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     done(command)?;
-    let new = |client: &Client| before.iter().all(|was| was.id != client.id);
+    let new = |client: &clients::Client| before.iter().all(|was| was.id != client.id);
     let came = seen(to, |clients| clients.into_iter().find(new)).ok_or_else(|| UNMOVED.to_owned())?;
     match pane {
-        Some(pane) if came.pane != Some(pane) => {
+        Some(pane) if came.pane != PaneId::Terminal(pane) => {
             Err(format!("zellij took the client to {to}, but not to pane {pane}"))
         },
         _ => Ok(()),
     }
+}
+
+/// Takes the client that last typed in `session` to its pane `pane`, a terminal's
+/// or a plugin's. Waits for a client to be on it, and says why none is: as
+/// `UNMOVED` says, or as zellij said. It is asked again where a pane closing kept
+/// it from asking, as a turn's stand-ins do just before it takes a client back.
+pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
+    let mut command = Command::new("zellij");
+    let pane_id = pane.to_string();
+    command.args(["--session", session, "action", "focus-pane-id", &pane_id]);
+    match done_once_reached(command) {
+        Err(said) if !said.contains("is already focused") => return Err(said),
+        _ => {},
+    }
+    let on = |clients: Vec<clients::Client>| clients.iter().any(|client| client.pane == pane);
+    seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
 
 /// Makes the session `to`, starting in `cwd`, and takes the client that last
@@ -625,10 +634,10 @@ fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bo
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &str, seen: impl Fn(Vec<Client>) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &str, seen: impl Fn(Vec<clients::Client>) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
-        if let Some(seen) = clients(session).ok().and_then(&seen) {
+        if let Some(seen) = clients_on_panes(session).ok().and_then(&seen) {
             return Some(seen);
         }
         if Instant::now() >= deadline {
@@ -1084,10 +1093,16 @@ pub fn makes_away(
 /// zellij's CLI waits on every session's server, and one that hangs holds it
 /// up for good.
 pub fn clients(session: &str) -> Result<Vec<Client>, String> {
+    let clients = clients_on_panes(session)?;
+    Ok(clients.into_iter().map(clients::Client::to_api).collect())
+}
+
+/// The clients of `session`, as `clients` lists them, each by the pane it is on,
+/// a plugin's too.
+pub fn clients_on_panes(session: &str) -> Result<Vec<clients::Client>, String> {
     let mut command = Command::new("zellij");
     quiet(&mut command);
-    let clients = clients::list(command, session)?;
-    Ok(clients.into_iter().map(clients::Client::to_api).collect())
+    clients::list(command, session)
 }
 
 /// What luneta asks of zellij once an action has run.
