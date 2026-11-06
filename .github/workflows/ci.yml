@@ -57,7 +57,7 @@ jobs:
       # Without it each store would carry every build before it.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
@@ -72,6 +72,9 @@ jobs:
 
       - name: Nix lints
         run: nix build -L --keep-going --out-link nix-lint .#checks.x86_64-linux.statix .#checks.x86_64-linux.deadnix
+
+      - name: Bans, licenses and sources
+        run: nix build -L --out-link deny .#checks.x86_64-linux.deny
 
       # `dev clippy`'s run, as the flake's check makes it in the sandbox, against the
       # dependencies the daemon's build compiles, so that clippy compiles none of
@@ -96,7 +99,7 @@ jobs:
       # it. A step, and not of the daemon's job: the lock is one for every
       # system the daemon builds on.
       - name: Advisories
-        run: nix run .#dev -- deny
+        run: nix run .#dev -- deny advisories
 
   breaking:
     if: github.event_name == 'pull_request'
@@ -147,7 +150,7 @@ jobs:
       # runner builds the daemon for a system of its own.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml') }}
+          primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0

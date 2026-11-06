@@ -2,6 +2,8 @@
 name = "lunetad"
 version.workspace = true
 edition = "2024"
+license.workspace = true
+publish = false
 description = "The luneta daemon, and luneta: zellij beside a sidebar of the host, and the CLI that asks the daemon"
 
 # The daemon and its CLI are one package, as they share all there is so far:
