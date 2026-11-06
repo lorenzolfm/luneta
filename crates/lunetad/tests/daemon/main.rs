@@ -31,6 +31,8 @@ mod shells;
 #[cfg(test)]
 mod starts;
 #[cfg(test)]
+mod topics;
+#[cfg(test)]
 mod turns;
 #[cfg(test)]
 mod worktree;

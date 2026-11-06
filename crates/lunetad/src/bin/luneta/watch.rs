@@ -76,7 +76,7 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
                     return;
                 }
                 loop {
-                    match daemon.watch(WatchRequest { after, kept: None }).await {
+                    match daemon.watch(WatchRequest { after, kept: None, shown: true }).await {
                         Ok(host) => {
                             let host = host.into_inner();
                             // One with no version would be asked after again at

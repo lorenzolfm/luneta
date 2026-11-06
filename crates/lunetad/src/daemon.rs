@@ -92,8 +92,8 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::{
     claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
-    opens, panes, pi, printed, release, remote, renames, screens, shells, skills, turns, watch,
-    zellij, zoxide,
+    opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics, turns,
+    watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -218,6 +218,7 @@ impl Claim {
 /// and no more, and waits for its clients to go for `DRAIN` at the most.
 pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
+    let started = SystemTime::now();
     // One wake-up is all a thread that asks on a sweep needs, however many
     // changes made it.
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
@@ -238,13 +239,16 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
-    remote::follow(core.clone(), watchers.kept.subscribe(), SWEEP, folder, Arc::clone(&bridges))?;
+    let (kept, shown) = (watchers.kept.subscribe(), watchers.window.subscribe());
+    let tells = remote::Tells { kept, shown };
+    remote::follow(core.clone(), tells, SWEEP, folder, Arc::clone(&bridges))?;
+    let projects = claude_folder.as_ref().map(|folder| folder.join("projects"));
+    topics::follow(core.clone(), watchers.shown.subscribe(), projects, started, SWEEP)?;
     tokio::spawn(sweep_keeps(claim.folder.clone()));
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let started = SystemTime::now();
     let host = Host { started, sockets, claude_folder, core, watchers, bridges };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
@@ -382,6 +386,10 @@ fn follow(
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let kept = !scan.alone() || clients;
         watchers.kept.send_if_modified(|was| mem::replace(was, kept) != kept);
+        let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
+        watchers.window.send_if_modified(|was| mem::replace(was, window) != window);
+        let shown = window || far_window;
+        watchers.shown.send_if_modified(|was| mem::replace(was, shown) != shown);
         if alone.saw(!kept && !daemons, Instant::now()) >= ALONE
             && let Some(end) = end.take()
         {
@@ -410,27 +418,46 @@ struct Watchers {
     /// come since. Only a daemon that is kept runs ssh to the machines it
     /// watches, and keeps their daemons running.
     kept: tokio::sync::watch::Sender<bool>,
+    /// luneta's windows that watch the host, each as its `WatchRequest` says.
+    windows: Watching,
+    /// The daemons of other machines where one of luneta's windows watches
+    /// them, each as its `WatchRequest` says: a machine's window sees only the
+    /// machines its own daemon watches, and so one hop is as far as it goes,
+    /// and two daemons that watch each other do not keep each other shown.
+    far_windows: Watching,
+    /// Whether a window watches this daemon, as it last looked, or one has come
+    /// since, which it says to the machines it watches.
+    window: tokio::sync::watch::Sender<bool>,
+    /// Whether someone sees this machine's agents, here or on another machine,
+    /// as it last looked, or one has come since: only then is a topic worth its
+    /// call.
+    shown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Watchers {
     /// Counts one that waits on `Watch`, until what this returns is dropped,
     /// as `kept`, of its `WatchRequest`, says who it is: a client, where it
     /// says nothing, and else the daemon of another machine, which is no one
-    /// where it runs for no reason of its own.
-    fn waits(&self, kept: Option<bool>) -> Option<Waits<'_>> {
-        let watching = match kept {
-            None => &self.clients,
-            Some(true) => &self.daemons,
-            Some(false) => return None,
+    /// where it runs for no reason of its own. It counts among those that show
+    /// the host too, where its `shown` says it is one.
+    fn waits(&self, kept: Option<bool>, shown: bool) -> [Option<Waits<'_>>; 2] {
+        let (watching, showing) = match kept {
+            None => (&self.clients, &self.windows),
+            Some(true) => (&self.daemons, &self.far_windows),
+            Some(false) => return [None, None],
         };
-        watching.asked.store(true, Ordering::Relaxed);
-        watching.waiting.fetch_add(1, Ordering::Relaxed);
         // A client keeps the daemon at once, so that it need not wait for
         // the next look for the machines the daemon watches to be reached.
         if kept.is_none() {
             self.kept.send_if_modified(|was| !mem::replace(was, true));
         }
-        Some(Waits(watching))
+        if shown {
+            if kept.is_none() {
+                self.window.send_if_modified(|was| !mem::replace(was, true));
+            }
+            self.shown.send_if_modified(|was| !mem::replace(was, true));
+        }
+        [Some(Waits::on(watching)), shown.then(|| Waits::on(showing))]
     }
 }
 
@@ -455,6 +482,14 @@ impl Watching {
 
 /// One that waits on `Watch`.
 struct Waits<'a>(&'a Watching);
+
+impl<'a> Waits<'a> {
+    fn on(watching: &'a Watching) -> Self {
+        watching.asked.store(true, Ordering::Relaxed);
+        watching.waiting.fetch_add(1, Ordering::Relaxed);
+        Waits(watching)
+    }
+}
 
 impl Drop for Waits<'_> {
     fn drop(&mut self) {
@@ -501,7 +536,7 @@ impl Daemon for Host {
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
         let request = request.into_inner();
-        let _waits = self.watchers.waits(request.kept);
+        let _waits = self.watchers.waits(request.kept, request.shown);
         let after = request.after;
         let watched = match timeout(WATCH, self.watched(after)).await {
             Ok(watched) => watched,

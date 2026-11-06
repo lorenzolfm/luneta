@@ -138,6 +138,17 @@ pub struct Name {
     pub source: Option<Source>,
 }
 
+impl Name {
+    /// Whether someone gave it, as `/rename` does: one Claude Code derives from
+    /// the directory, or makes up, is no name a row goes by. A name from before
+    /// Claude Code said who chose it is taken for given.
+    #[must_use]
+    pub fn given(&self) -> bool {
+        let chosen = matches!(self.source, None | Some(Source::User | Source::Peer));
+        chosen && !self.text.as_str().trim().is_empty()
+    }
+}
+
 /// Who chose a name, in the words Claude Code reads back itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -253,9 +264,9 @@ pub fn moment(millis: u64) -> SystemTime {
 
 impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
-    /// is in now.
+    /// is in now, with the topic the daemon keeps of it, if it keeps one.
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions) -> api::Agent {
+    pub fn to_api(&self, sessions: &Sessions, topic: Option<String>) -> api::Agent {
         // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
@@ -301,6 +312,7 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
+            topic,
         }
     }
 }

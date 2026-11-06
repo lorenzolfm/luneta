@@ -935,7 +935,8 @@ impl Host {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
-            daemon.watch(WatchRequest { after: None, kept: None }).await.unwrap().into_inner()
+            let asked = WatchRequest { after: None, kept: None, shown: false };
+            daemon.watch(asked).await.unwrap().into_inner()
         })
     }
 }

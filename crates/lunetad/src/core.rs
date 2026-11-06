@@ -43,6 +43,8 @@ pub enum Command {
     PullRequests(BTreeMap<String, Found>),
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
+    /// The topic of each agent that has one, by its session's id.
+    Topics(HashMap<String, String>),
     /// What the hosts file names now.
     Hosts(Named),
     /// What the watch of `destination` has of it now.
@@ -56,6 +58,8 @@ pub enum Command {
     /// Asks for the branch checked out in each directory a pane works in, by
     /// the directory, where git has said one is, for gh to be asked about.
     Branches(oneshot::Sender<BTreeMap<String, String>>),
+    /// Asks for Claude Code's agents, for their topics.
+    Claudes(oneshot::Sender<Vec<Agent>>),
     /// Asks for every agent, as the API gives it.
     List(oneshot::Sender<api::ListAgentsResponse>),
     /// Asks for the host once it is no longer as `after` saw it: at once if it
@@ -137,6 +141,9 @@ struct Known {
     /// What the shells with the hook last said, each in the session it
     /// started in.
     shells: Vec<Shell>,
+    /// The topic the daemon keeps of each agent that has one, by its session's
+    /// id.
+    topics: HashMap<String, String>,
     /// What the daemon has of each other machine the hosts file names, in its
     /// order.
     remotes: Vec<(Destination, Reached)>,
@@ -169,6 +176,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         trees: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
+        topics: HashMap::new(),
         remotes: Vec::new(),
         unread_hosts: 0,
         words: 0,
@@ -232,6 +240,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.panes);
                 }
             },
+            Command::Topics(now) => known.topics = now,
             Command::Hosts(now) => known.named(now),
             Command::Remote { destination, reached } => {
                 // One the file no longer names, since its watch heard it.
@@ -262,6 +271,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Branches(answer) => {
                 let _ = answer.send(known.branches());
+                continue;
+            },
+            Command::Claudes(answer) => {
+                let _ = answer.send(known.found.agents.clone());
                 continue;
             },
             Command::List(answer) => {
@@ -416,8 +429,11 @@ impl Known {
 
     /// Each agent, of whichever harness.
     fn agents(&self) -> Vec<api::Agent> {
-        let agents = self.found.agents.iter().chain(&self.pi);
-        agents.map(|agent| agent.to_api(&self.sessions)).collect()
+        let claude = self.found.agents.iter().map(|agent| {
+            let topic = self.topics.get(agent.session_id.as_str()).cloned();
+            agent.to_api(&self.sessions, topic)
+        });
+        claude.chain(self.pi.iter().map(|agent| agent.to_api(&self.sessions, None))).collect()
     }
 
     /// How many session files do not read, and each, as the API gives them:

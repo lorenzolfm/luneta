@@ -31,13 +31,14 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use lunetad::api::say::Does;
 use lunetad::api::{Saying, Utterance, Zellij};
 use lunetad::sayings::STALE;
+use lunetad::transcripts::one_line;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::brief::{one_line, Asking};
+use crate::brief::Asking;
 use crate::host::Event;
 use crate::machines::{self, Machine};
 use crate::models::Fetched;

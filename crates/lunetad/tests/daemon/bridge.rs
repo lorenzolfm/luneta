@@ -75,7 +75,7 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
         let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
         let info = bridged.info(InfoRequest {}).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
-        let first = WatchRequest { after: None, kept: None };
+        let first = WatchRequest { after: None, kept: None, shown: false };
         let watched = bridged.watch(first).await.unwrap().into_inner();
         assert_eq!(watched.version.unwrap().pid, daemon.pid());
     });

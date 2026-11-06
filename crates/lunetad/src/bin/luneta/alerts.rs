@@ -23,10 +23,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{Agent, Status, WaitingFor};
-use lunetad::transcripts::{Reading, SessionId};
+use lunetad::transcripts::{on_what, one_line, Reading, SessionId};
 use serde_json::Value;
 
-use crate::brief::{self, on_what, one_line};
+use crate::brief;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::picker::{Here, Seated};

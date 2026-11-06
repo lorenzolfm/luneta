@@ -856,7 +856,7 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
         let mut watching = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
         while Instant::now() < watched {
-            let asked = watching.watch(WatchRequest { after, kept: None }).await;
+            let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
         }
     });

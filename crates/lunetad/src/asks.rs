@@ -30,7 +30,7 @@ use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::zellij::SessionName;
-use crate::{git, program};
+use crate::{claude, git, program};
 
 /// The model the agent runs on: one that works out what words point at, and
 /// runs a few commands in a row, without slips.
@@ -62,11 +62,6 @@ pub const AWAY_VAR: &str = "LUNETA_AWAY";
 /// that reads a variable or sets one, in its `dontAsk` mode.
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
-
-/// Variables the agent must not have: with them, the daemon places it in the
-/// pane they name, as an agent of its own, and luneta's commands take that
-/// pane for the one they run in.
-const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
 /// The commands the agent may run, as Claude Code's rules name them: the
 /// verbs of luneta's its skill has, and the commands its skill reads what
@@ -428,7 +423,7 @@ impl Asked {
         // It takes every word after it for one more rule: the words you typed
         // go on its stdin.
         claude.arg("--allowedTools").args(ALLOWED);
-        for name in LEFT_OUT {
+        for name in claude::PANE_VARS {
             claude.env_remove(name);
         }
         git::local(&mut claude);
@@ -708,7 +703,7 @@ mod tests {
         assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
         let told_first = told(&first.user, &first.words);
         assert_eq!(told_first, "[luneta: the user is in pane luneta:2.]\n\nclose it");
-        for name in LEFT_OUT.into_iter().chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
+        for name in claude::PANE_VARS.into_iter().chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
         assert_eq!(var(&claude, ASKED_VAR), Some(Some("luneta:2".to_owned())));

@@ -11,7 +11,7 @@
 //! box over zellij, until a key closes it. Nothing is kept: each key asks
 //! again.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,13 +23,12 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lunetad::program::{self, Ran};
-use lunetad::transcripts::{Reading, SessionId, IDS_MAX};
-use lunetad::Destination;
+use lunetad::transcripts::{digest, Digest, Reading, SessionId, IDS_MAX};
+use lunetad::{one_answer, Destination};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use serde_json::Value;
 
 use crate::away::{self, Away};
 use crate::due::Due;
@@ -55,10 +54,6 @@ const CLOCK: Duration = Duration::from_secs(1);
 /// few milliseconds, and its end once it is killed.
 const GIVING_UP: Duration = Duration::from_millis(100);
 
-/// Variables that the model must not have: with them, the daemon places it in
-/// the pane they name, as an agent of its own.
-const LEFT_OUT: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
-
 /// What is said of an agent of another harness than Claude Code, to you where
 /// it is all a brief would cover, and to the model where others go with it.
 const ONLY_CLAUDE_CODE: &str = "luneta reads only Claude Code's transcripts so far";
@@ -67,12 +62,6 @@ const ONLY_CLAUDE_CODE: &str = "luneta reads only Claude Code's transcripts so f
 /// reading takes.
 const MAX_NOTES: usize = 32;
 const _: () = assert!(MAX_NOTES <= IDS_MAX);
-
-/// How long a title, a prompt and a step of what an agent did can run in the
-/// notes, in characters.
-const TITLE_CHARS: usize = 120;
-const ASKED_CHARS: usize = 500;
-const STEP_CHARS: usize = 300;
 
 /// The most the notes can take, in bytes: they go to `claude` as one argument,
 /// and Linux takes no argument longer than 128 KiB.
@@ -529,146 +518,6 @@ enum Told {
     Read(Digest),
 }
 
-/// What the end of a transcript says of what its agent is doing.
-#[derive(Debug, PartialEq, Eq)]
-struct Digest {
-    /// The title Claude Code gave the session.
-    title: Option<String>,
-    /// What you last asked of it.
-    asked: Option<String>,
-    /// What it said and ran last, oldest first.
-    steps: Vec<String>,
-}
-
-impl Digest {
-    /// What the note says of what the transcript says.
-    fn lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(title) = &self.title {
-            lines.push(format!("Title: {title}"));
-        }
-        if let Some(asked) = &self.asked {
-            // The notes name the developer as the model is told of them: a
-            // `you` here reads as the agent asking.
-            lines.push(format!("The developer last asked it: {asked}"));
-        }
-        if self.steps.is_empty() {
-            lines.push("Its transcript says nothing more.".to_owned());
-        } else {
-            lines.push("Lately, oldest first:".to_owned());
-            lines.extend(self.steps.iter().map(|step| format!("- {step}")));
-        }
-        lines
-    }
-}
-
-/// What `end`, the end of a transcript, says, with as many of the last steps
-/// as `steps`. A transcript is a JSON record to a line. A subagent's records,
-/// what Claude thought and what a tool answered are left out.
-fn digest(end: &str, steps: usize) -> Digest {
-    let mut title = None;
-    let mut asked = None;
-    let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
-    for line in end.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if record["isSidechain"].as_bool() == Some(true) {
-            continue;
-        }
-        match record["type"].as_str() {
-            Some("ai-title") => title = record["aiTitle"].as_str().map(str::to_owned).or(title),
-            // Claude Code records the last prompt some records after you type
-            // it, and a slash command only there: the later of the two is
-            // what you last asked.
-            Some("last-prompt") => {
-                asked = record["lastPrompt"].as_str().map(str::to_owned).or(asked);
-            },
-            Some("user") if record["isMeta"].as_bool() != Some(true) => {
-                asked = typed_by_you(&record["message"]["content"]).or(asked);
-            },
-            Some("assistant") => {
-                let blocks = record["message"]["content"].as_array().into_iter().flatten();
-                for step in blocks.filter_map(step) {
-                    last.push_back(step);
-                    if last.len() > steps {
-                        last.pop_front();
-                    }
-                }
-            },
-            _ => {},
-        }
-    }
-    Digest {
-        title: title.map(|title| one_line(&title, TITLE_CHARS)),
-        asked: asked.map(|asked| one_line(&asked, ASKED_CHARS)),
-        steps: last.into(),
-    }
-}
-
-/// How the line Claude Code writes in your place where you stopped it starts.
-const INTERRUPTED: &str = "[Request interrupted by user";
-
-/// What you typed, in a user record: its text, and not what a tool answered,
-/// what Claude Code wrapped in tags of its own, as a command's output, or the
-/// line it writes in your place where you stopped it.
-fn typed_by_you(content: &Value) -> Option<String> {
-    let text = match content {
-        Value::String(text) => Some(text.as_str()),
-        Value::Array(blocks) => {
-            blocks.iter().find(|b| b["type"] == "text").and_then(|b| b["text"].as_str())
-        },
-        _ => None,
-    }?;
-    let text = text.trim();
-    let theirs = text.starts_with('<') || text.starts_with(INTERRUPTED);
-    (!text.is_empty() && !theirs).then(|| text.to_owned())
-}
-
-/// A step of what an agent did, from a block of what it sent: what it said,
-/// or what it ran and on what.
-fn step(block: &Value) -> Option<String> {
-    match block["type"].as_str()? {
-        "text" => {
-            let text = block["text"].as_str()?.trim();
-            (!text.is_empty()).then(|| format!("said: {}", one_line(text, STEP_CHARS)))
-        },
-        "tool_use" => {
-            let name = block["name"].as_str()?;
-            Some(match on_what(&block["input"]) {
-                Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
-                None => format!("ran {name}"),
-            })
-        },
-        _ => None,
-    }
-}
-
-/// What a tool was run on, by the field that says it for the tools Claude
-/// Code has: what a command or a subagent is for, which says more than the
-/// command does, a command, a file, a pattern, a question asked of you.
-pub fn on_what(input: &Value) -> Option<&str> {
-    const FIELDS: [&str; 7] =
-        ["description", "command", "file_path", "pattern", "url", "query", "prompt"];
-    FIELDS
-        .iter()
-        .find_map(|field| input[field].as_str())
-        .or_else(|| input["questions"][0]["question"].as_str())
-}
-
-/// `text` on one line, its runs of white space one space each, and no longer
-/// than `chars`, ending in `…` where it was cut.
-pub fn one_line(text: &str, chars: usize) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let line = words.join(" ");
-    if line.chars().count() <= chars {
-        return line;
-    }
-    let mut cut: String = line.chars().take(chars.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
 /// `text` no longer than `bytes`, cut at a character.
 fn cut_bytes(mut text: String, bytes: usize) -> String {
     if text.len() > bytes {
@@ -778,12 +627,7 @@ fn clock() -> Option<String> {
 /// and with no zellij in its environment, so that the daemon places it in no
 /// pane.
 fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, String>> {
-    let mut claude = Command::new("claude");
-    claude.args(["-p", "--model", MODEL, "--tools", "", "--safe-mode"]);
-    claude.args(["--no-session-persistence", "--system-prompt", SYSTEM, prompt]);
-    for name in LEFT_OUT {
-        claude.env_remove(name);
-    }
+    let mut claude = one_answer(MODEL, SYSTEM, prompt);
     program::run_while(&mut claude, WRITING, wanted).transpose().map(wrote)
 }
 
@@ -953,7 +797,7 @@ mod tests {
 
     use lunetad::api::TranscriptEndsRequest;
     use lunetad::transcripts::TAILS_BYTES;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::*;
 

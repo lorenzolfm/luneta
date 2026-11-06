@@ -4531,14 +4531,15 @@ fn agent_dir<'a>(agent: &'a Agent, pane: &'a Pane) -> &'a str {
 }
 
 /// What a pane's row is named. Its agent goes by the name someone gave it, or
-/// else by its topic, as the daemon reads it in the title Claude Code gives
-/// its pane; or else by its tab, if someone named it, or else by where it
-/// works. A program goes by its command line, the program by its binary's
-/// name, and a shell at its prompt by its tab, if someone named it, as an
-/// agent does, or else by its directory's last two parts.
+/// else by the topic the daemon keeps of it, or else by the topic the daemon
+/// reads in the title Claude Code gives its pane; or else by its tab, if someone
+/// named it, or else by where it works. A program goes by its command line, the
+/// program by its binary's name, and a shell at its prompt by its tab, if someone
+/// named it, as an agent does, or else by its directory's last two parts.
 fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
-        let topic = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
+        let titled = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
+        let topic = agent.topic.as_deref().or(titled);
         let name = given_name(agent).or(topic).or(tab::named(&pane.tab_name));
         return name.map_or_else(|| short_cwd(agent_dir(agent, pane)), str::to_owned);
     }
@@ -5275,6 +5276,7 @@ mod tests {
                 pane,
             }),
             waiting_for: None,
+            topic: None,
         }
     }
 
@@ -6273,11 +6275,12 @@ mod tests {
         assert_eq!(tabbed(unsaid), "review");
     }
 
-    /// An agent goes by the name someone gave it, then by its topic, the title
-    /// Claude Code gives its pane, then by its tab if someone named it, then
-    /// by where it works: where its pane works, or else, while zellij has not
-    /// said, where Claude Code says. An agent's title with no topic, as a bare
-    /// `Claude Code`, is passed over, and so is zellij's `Tab #N`.
+    /// An agent goes by the name someone gave it, then by the topic the daemon
+    /// keeps of it, then by the title Claude Code gives its pane, then by its
+    /// tab if someone named it, then by where it works: where its pane works, or
+    /// else, while zellij has not said, where Claude Code says. An agent's title
+    /// with no topic, as a bare `Claude Code`, is passed over, and so is
+    /// zellij's `Tab #N`.
     #[test]
     fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
         let titled = |topic: Option<&str>, tab: &str| Pane {
@@ -6302,6 +6305,11 @@ mod tests {
         let source = Some(NameSource::Derived.into());
         derived.name = derived.name.map(|name| api::Name { source, ..name });
         assert_eq!(label(Some(&derived), &topic), "Fix the fold");
+        let kept =
+            |agent: &Agent| Agent { topic: Some("Session folds".to_owned()), ..agent.clone() };
+        assert_eq!(label(Some(&kept(&named)), &topic), "fold");
+        assert_eq!(label(Some(&kept(&unnamed)), &topic), "Session folds");
+        assert_eq!(label(Some(&kept(&derived)), &titled(None, "review")), "Session folds");
     }
 
     /// The icon of what runs in a pane has a column of its own, so that every

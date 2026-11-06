@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use luneta_protocol::said::Said;
@@ -35,6 +36,26 @@ use crate::watch::{self, Troubles};
 /// Code writes a file in place, and in a moment: one that does not read for
 /// longer is cut short for good, or in a shape of a newer Claude Code's.
 const TORN: Duration = Duration::from_secs(1);
+
+/// Variables a `claude` run for luneta must not have: with them, the daemon
+/// places it in the pane they name, as an agent of its own, and luneta's
+/// commands take that pane for the one they run in.
+pub const PANE_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+
+/// `claude`, to have `model`, told `system`, answer `prompt` once: with no
+/// tools, and in safe mode, so that none of your hooks, `CLAUDE.md` or MCP
+/// servers come into it, and with no zellij in its environment, so that the
+/// daemon places it in no pane.
+#[must_use]
+pub fn one_answer(model: &str, system: &str, prompt: &str) -> Command {
+    let mut claude = Command::new("claude");
+    claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
+    claude.args(["--no-session-persistence", "--system-prompt", system, prompt]);
+    for name in PANE_VARS {
+        claude.env_remove(name);
+    }
+    claude
+}
 
 /// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as Claude Code
 /// takes it.
@@ -274,5 +295,30 @@ fn agent(pid: u32, file: &File, pane: Option<Named>) -> Agent {
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
         pane,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    /// `claude` runs for one answer with no tools, in safe mode, and keeps no
+    /// session, and what names a pane stays out of its environment, so that
+    /// the daemon lists it as an agent in no pane.
+    #[test]
+    fn one_answer_runs_in_no_pane_with_no_tools() {
+        let claude = one_answer("haiku", "be brief", "the prompt");
+        let args: Vec<&OsStr> = claude.get_args().collect();
+        let said = [
+            "-p", "--model", "haiku", "--tools", "", "--safe-mode", "--no-session-persistence",
+            "--system-prompt", "be brief", "the prompt",
+        ];
+        assert_eq!(args, said.map(OsStr::new));
+        let unset: Vec<&OsStr> =
+            claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
+        assert_eq!(unset.len(), PANE_VARS.len());
+        assert!(PANE_VARS.map(OsStr::new).iter().all(|name| unset.contains(name)), "{unset:?}");
     }
 }

@@ -42,13 +42,14 @@ pub mod screens;
 mod shells;
 pub mod skills;
 pub mod state;
+mod topics;
 pub mod transcripts;
 pub mod turns;
 mod watch;
 mod zellij;
 pub mod zoxide;
 
-pub use claude::folder as claude_folder;
+pub use claude::{folder as claude_folder, one_answer};
 pub use client::{connect, listening, stream, through, Unbridged, BRIDGED, REACH};
 pub use daemon::{serve, Claim};
 pub use directory::Directory;

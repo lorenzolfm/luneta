@@ -458,7 +458,7 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
         loop {
-            let asked = WatchRequest { after, kept: None };
+            let asked = WatchRequest { after, kept: None, shown: false };
             let watched = daemon.watch(asked).await.unwrap().into_inner();
             if watched.version.is_some() && watched.version == after {
                 return;
@@ -478,7 +478,7 @@ fn watch_until(host: &Host, until: Instant) {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut after = None;
         while Instant::now() < until {
-            let asked = daemon.watch(WatchRequest { after, kept: None }).await;
+            let asked = daemon.watch(WatchRequest { after, kept: None, shown: false }).await;
             after = asked.expect("the daemon ended").into_inner().version;
         }
     });
