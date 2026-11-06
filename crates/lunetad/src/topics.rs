@@ -319,9 +319,8 @@ fn topic_of(said: &[u8]) -> Result<Said, String> {
     if lines.next().is_some() {
         return Err("it said more than a line".to_owned());
     }
-    let wrapped = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '*' | '.');
     let bare: String = line.chars().filter(|c| !c.is_control()).collect();
-    let bare = bare.trim_matches(wrapped);
+    let bare = unwrapped(&bare);
     let topic = one_line(bare, TOPIC_CHARS);
     if topic != bare.split_whitespace().collect::<Vec<_>>().join(" ") {
         return Err(format!("it said more than {TOPIC_CHARS} characters"));
@@ -329,17 +328,29 @@ fn topic_of(said: &[u8]) -> Result<Said, String> {
     Said::new(topic).ok_or_else(|| "it said nothing".to_owned())
 }
 
+/// `text` without what a model wraps a whole answer in, and the period it ends
+/// one with. A mark at one end alone, or that comes inside too, is the topic's
+/// own, as in `.gitignore rules` or `` `luneta.rs` parsing ``.
+fn unwrapped(text: &str) -> &str {
+    let bare = text.trim().trim_end_matches('.').trim_end();
+    let inner = ["**", "*", "\"", "'", "`"].iter().find_map(|mark| {
+        let inner = bare.strip_prefix(mark)?.strip_suffix(mark)?;
+        (!inner.contains(mark)).then_some(inner)
+    });
+    inner.map_or(bare, unwrapped)
+}
+
 /// What the model names as the topic on `prompt`, or why it named none. It runs
 /// in the home of the user the daemon runs as, as the daemon's own directory is
 /// no one's.
 fn written(prompt: &str) -> Result<Said, String> {
-    let mut claude = claude::one_answer(MODEL, SYSTEM, prompt);
+    let not_run = |error: io::Error| format!("claude could not be run: {error}");
+    let (mut claude, told) = claude::one_answer(MODEL, SYSTEM, prompt).map_err(not_run)?;
     if let Some(home) = env::var_os("HOME") {
         claude.current_dir(home);
     }
-    let ran = program::run(&mut claude, WRITING)
-        .map_err(|error| format!("claude could not be run: {error}"))?;
-    topic_of(&ran.answer().map_err(|why| format!("claude: {why}"))?)
+    let ran = program::run_reading(&mut claude, WRITING, told).map_err(not_run)?;
+    topic_of(&ran.answer_why_on_either().map_err(|why| format!("claude: {why}"))?)
 }
 
 /// Starts the call `due` asks for on a thread of its own, so that a slow one
@@ -765,18 +776,30 @@ mod tests {
         }
     }
 
-    /// A topic comes without what a model wraps a title in. An answer that says
-    /// nothing, or more than a topic, is none, and neither does one tell the
-    /// terminal anything.
+    /// A topic comes without what a model wraps a whole title in, and keeps the
+    /// marks that are its own. An answer that says nothing, or more than a
+    /// topic, is none, and neither does one tell the terminal anything.
     #[test]
     fn a_topic_is_one_short_line() {
         let topic = |said: &str| topic_of(said.as_bytes()).map(String::from);
         assert_eq!(topic("Session folds\n"), Ok("Session folds".to_owned()));
         assert_eq!(topic("\n  \"Session   folds.\"\n\n"), Ok("Session folds".to_owned()));
+        assert_eq!(topic("\"Session folds\"."), Ok("Session folds".to_owned()));
         assert_eq!(topic("**`luneta.rs`**"), Ok("luneta.rs".to_owned()));
+        assert_eq!(topic("CI for PR #310."), Ok("CI for PR #310".to_owned()));
         assert_eq!(topic("Session\u{1b}[31m folds"), Ok("Session[31m folds".to_owned()));
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS)), Ok("é".repeat(TOPIC_CHARS)));
-        for nothing in ["", " \n \n", "\"\""] {
+        let own = [
+            ".gitignore rules",
+            "*.rs glob matching",
+            "`luneta.rs` parsing",
+            "\"Standing\" enum states",
+            "`topic_of` and `one_line`",
+        ];
+        for own in own {
+            assert_eq!(topic(own), Ok(own.to_owned()));
+        }
+        for nothing in ["", " \n \n", "\"\"", "."] {
             assert_eq!(topic(nothing), Err("it said nothing".to_owned()), "{nothing:?}");
         }
         assert_eq!(topic("The topic:\nSession folds"), Err("it said more than a line".to_owned()));

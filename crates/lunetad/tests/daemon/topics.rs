@@ -22,13 +22,15 @@ const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 const SWEEPS: Duration = Duration::from_secs(5);
 
 /// Has `host`'s `claude` note each call, in `told`, and name a topic for the
-/// words of the prompt it is given: it fails on `please-fail`.
+/// words of the prompt it reads on its stdin: on `please-fail`, it fails, and
+/// says why on its stdout, as the real one does.
 fn claude_that_names_topics(host: &Host) {
     let told = told_file(host);
     let text = format!(
-        r#"{{ echo "cwd=$(pwd -P)"; printf '%s\n' "$@"; echo end-of-call; }} >> '{told}'
-case "$*" in
-    *please-fail*) echo 'Not logged in' >&2; exit 1 ;;
+        r#"prompt=$(cat)
+{{ echo "cwd=$(pwd -P)"; printf '%s\n' "$@"; echo stdin:; printf '%s\n' "$prompt"; echo end-of-call; }} >> '{told}'
+case "$prompt" in
+    *please-fail*) echo 'Not logged in'; exit 1 ;;
     *'now the tabs'*) echo 'Tab order' ;;
     *) echo '"Session folds."' ;;
 esac
@@ -86,8 +88,9 @@ fn topic(agents: &[api::Agent]) -> Option<&str> {
 /// A question asked once, as `luneta sessions` asks, shows no one anything, and
 /// costs no call. A window does, whose rows go by the topic the model names on
 /// each new prompt, without what it wraps one in: one call on each, in your
-/// home, told what you asked. One that fails leaves the topic as it was, and
-/// the next prompt asks again.
+/// home, told what you asked on its stdin, and not in its arguments, which any
+/// user of the machine can read. One that fails leaves the topic as it was, the
+/// log says why, and the next prompt asks again.
 #[test]
 fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     let host = Host::new();
@@ -116,12 +119,19 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     for flag in flags {
         assert!(call.contains(&format!("{flag}\n")), "{call}");
     }
-    assert!(call.contains("The developer last asked it: fold the sessions"), "{call}");
+    let (argv, stdin) = call.split_once("stdin:\n").unwrap();
+    assert!(!argv.contains("fold the sessions"), "{call}");
+    assert!(stdin.contains("The developer last asked it: fold the sessions"), "{call}");
 
     prompted(&host, "please-fail on this one");
     eventually("the call on it is made", || {
         seen(&host);
         (calls(&host).len() == 2).then_some(())
+    });
+    eventually("the log says why it failed", || {
+        let log = host.home.path().join(".local/state/luneta/luneta.log");
+        let log = fs::read_to_string(log).unwrap_or_default();
+        log.contains("the model named no topic: claude: Not logged in").then_some(())
     });
     prompted(&host, "and now the tabs");
     eventually("the topic moves with the prompt", || {

@@ -373,9 +373,23 @@ fn typed_by_you(content: &Value) -> Option<String> {
         },
         _ => None,
     }?;
+    let text = without_paste_marks(text);
     let text = text.trim();
     let theirs = text.starts_with('<') || text.starts_with(INTERRUPTED);
     (!text.is_empty() && !theirs).then(|| text.to_owned())
+}
+
+/// `text` without the marks Claude Code puts around what you pasted in a user
+/// record, which its `last-prompt` record leaves out.
+fn without_paste_marks(text: &str) -> String {
+    let mut bare = String::with_capacity(text.len());
+    let mut left = text;
+    while let Some((before, after)) = left.split_once("<pasted_content id=\"") {
+        bare.push_str(before);
+        left = after.split_once("\">").map_or(after, |(_, rest)| rest);
+    }
+    bare.push_str(left);
+    bare.replace("</pasted_content>", "")
 }
 
 /// A step of what an agent did, from a block of what it sent: what it said,
@@ -474,6 +488,19 @@ mod tests {
         assert_eq!(asked(&[typed("fold them"), last("/review this")]).unwrap(), "/review this");
         assert_eq!(asked(&[last("fold them"), typed("now the tabs")]).unwrap(), "now the tabs");
         assert_eq!(asked(&[last(&cut)]), Some(cut));
+    }
+
+    /// What you paste comes in marks in what you typed, which Claude Code's
+    /// record of the prompt leaves out: it is one prompt, with words before the
+    /// paste or none.
+    #[test]
+    fn a_prompt_with_a_paste_is_the_one_claude_code_recorded() {
+        let paste = "<pasted_content id=\"c6de\">\n- the first\n- the second\n</pasted_content>";
+        let after_words = format!("file these:\n{paste}\n");
+        let one = "file these: - the first - the second";
+        assert_eq!(asked(&[typed(&after_words)]).unwrap(), one);
+        assert_eq!(asked(&[typed(&after_words), last(one)]).unwrap(), one);
+        assert_eq!(asked(&[typed(paste)]).unwrap(), "- the first - the second");
     }
 
     /// The summary Claude Code goes on from as it compacts a session is no

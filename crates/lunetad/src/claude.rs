@@ -17,9 +17,9 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use luneta_protocol::said::Said;
@@ -29,7 +29,7 @@ use crate::agent::{
     file_text, moment, named_pid, nonempty, pane_of, Agent, Harness, Name, Named, Source, Status,
     Unread,
 };
-use crate::{log, process};
+use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 
 /// How long a file that does not read still says what it said before. Claude
@@ -42,19 +42,19 @@ const TORN: Duration = Duration::from_secs(1);
 /// commands take that pane for the one they run in.
 pub const PANE_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
-/// `claude`, to have `model`, told `system`, answer `prompt` once: with no
-/// tools, and in safe mode, so that none of your hooks, `CLAUDE.md` or MCP
-/// servers come into it, and with no zellij in its environment, so that the
-/// daemon places it in no pane.
-#[must_use]
-pub fn one_answer(model: &str, system: &str, prompt: &str) -> Command {
+/// `claude`, to have `model`, told `system`, answer `prompt` once, and the stdin
+/// that tells it `prompt`: its arguments are there for any user of the machine
+/// to read. It has no tools, and runs in safe mode, so that none of your hooks,
+/// `CLAUDE.md` or MCP servers come into it, and with no zellij in its
+/// environment, so that the daemon places it in no pane.
+pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Command, Stdio)> {
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
-    claude.args(["--no-session-persistence", "--system-prompt", system, prompt]);
+    claude.args(["--no-session-persistence", "--system-prompt", system]);
     for name in PANE_VARS {
         claude.env_remove(name);
     }
-    claude
+    Ok((claude, program::saying(prompt)?))
 }
 
 /// Claude Code's folder: `$CLAUDE_CONFIG_DIR`, or `~/.claude`, as Claude Code
@@ -306,19 +306,22 @@ mod tests {
 
     /// `claude` runs for one answer with no tools, in safe mode, and keeps no
     /// session, and what names a pane stays out of its environment, so that
-    /// the daemon lists it as an agent in no pane.
+    /// the daemon lists it as an agent in no pane. The prompt is on its stdin,
+    /// and not among its arguments, which any user of the machine can read.
     #[test]
     fn one_answer_runs_in_no_pane_with_no_tools() {
-        let claude = one_answer("haiku", "be brief", "the prompt");
+        let (claude, told) = one_answer("haiku", "be brief", "the prompt").unwrap();
         let args: Vec<&OsStr> = claude.get_args().collect();
         let said = [
             "-p", "--model", "haiku", "--tools", "", "--safe-mode", "--no-session-persistence",
-            "--system-prompt", "be brief", "the prompt",
+            "--system-prompt", "be brief",
         ];
         assert_eq!(args, said.map(OsStr::new));
         let unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
         assert_eq!(unset.len(), PANE_VARS.len());
         assert!(PANE_VARS.map(OsStr::new).iter().all(|name| unset.contains(name)), "{unset:?}");
+        let heard = Command::new("cat").stdin(told).output().unwrap();
+        assert_eq!(heard.stdout, b"the prompt");
     }
 }

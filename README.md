@@ -788,10 +788,10 @@ and such a row goes by its tab, if you named it, or else by the directory the
 agent works in. The daemon has the title without the `✳` Claude Code leads it
 with, or the frame it turns there while it works, so the title changes only as
 Claude Code changes it. A pane you renamed in zellij has your name for its title,
-which is no agent's: its row goes by its tab or its directory. A pane with
-no agent in it goes by what runs in it, and a shell at its prompt by its tab,
-if you named it, as an agent does, or else by its directory's last two parts,
-as `luneta/main`, where fish would title it `~/P/m/l/main`.
+which is no agent's: its row goes by its topic, or else its tab or its directory.
+A pane with no agent in it goes by what runs in it, and a shell at its prompt by
+its tab, if you named it, as an agent does, or else by its directory's last two
+parts, as `luneta/main`, where fish would title it `~/P/m/l/main`.
 
 A command in a shell with the [hook](#hook-the-shell) has the marks an agent
 has, once it has run for a second: the spinner while it works, `●` while it

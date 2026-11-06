@@ -63,8 +63,7 @@ const ONLY_CLAUDE_CODE: &str = "luneta reads only Claude Code's transcripts so f
 const MAX_NOTES: usize = 32;
 const _: () = assert!(MAX_NOTES <= IDS_MAX);
 
-/// The most the notes can take, in bytes: they go to `claude` as one argument,
-/// and Linux takes no argument longer than 128 KiB.
+/// The most the notes can take, in bytes.
 const NOTES_BYTES: usize = 100 * 1024;
 
 /// What the notes keep of `NOTES_BYTES` for saying which agents they leave
@@ -627,8 +626,10 @@ fn clock() -> Option<String> {
 /// and with no zellij in its environment, so that the daemon places it in no
 /// pane.
 fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, String>> {
-    let mut claude = one_answer(MODEL, SYSTEM, prompt);
-    program::run_while(&mut claude, WRITING, wanted).transpose().map(wrote)
+    let ran = one_answer(MODEL, SYSTEM, prompt).and_then(|(mut claude, told)| {
+        program::run_while_reading(&mut claude, WRITING, wanted, told)
+    });
+    ran.transpose().map(wrote)
 }
 
 /// What the model wrote, as `claude` `ran`, or why it wrote nothing: a brief
@@ -1014,7 +1015,7 @@ Its transcript is unknown: Claude Code names none for it.
     /// sidebar gives them, and says how many it leaves out and in which
     /// sessions, so that the model does not call a session whose agents it
     /// left out empty: past `MAX_NOTES` agents, and past `NOTES_BYTES` of
-    /// notes, which go to `claude` as one argument.
+    /// notes.
     #[test]
     fn a_brief_says_how_many_agents_it_has_no_room_for() {
         let note = |session: &str, pane: usize, name: String| Note {
