@@ -27,6 +27,12 @@ in
     ${compileEnv}
     status=0
     cargo clippy --locked ${clippyRun} "$@" -- -D warnings || status=$?
+    if [ "$status" -eq 0 ]; then
+      case " $* " in
+        *" --allow-dirty "*) ;;
+        *" --fix "*) set -- --allow-dirty "$@" ;;
+      esac
+    fi
     ${crossRun} || status=$?
     exit "$status"
   '';
