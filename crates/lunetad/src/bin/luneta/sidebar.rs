@@ -8042,11 +8042,37 @@ mod tests {
         assert_eq!(pressed('w', Some("issue-5"), false), (true, None));
         assert_eq!(pressed('w', None, false), (true, None));
 
-        let refused = "menu: lorenzolfm/luneta#5: /w/luneta/issue-5 is on dev-docs, not issue-5, so \
-                       no agent starts there; w opens it";
-        assert_eq!(pressed('t', Some("dev-docs"), true), (false, Some(refused.to_owned())));
+        assert_eq!(pressed('t', Some("dev-docs"), true), (false, None));
         assert_eq!(pressed('t', Some("issue-5"), false), (true, None));
         assert_eq!(pressed('t', None, false), (true, None));
+    }
+
+    #[test]
+    fn w_goes_on_from_a_menu_whose_t_refused_a_worktree_that_moved_off() {
+        let page = "https://github.com/lorenzolfm/luneta/issues/5";
+        for keys in [Keys::Sidebar, Keys::Menu { lent: true }] {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(keys);
+            sidebar.paste(page);
+            let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+            let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            let at = At::Session((listed("older", 10), 1));
+            let branch = Some("dev-docs".to_owned());
+            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off: true, work };
+            let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
+            assert_eq!(asked, Asked::Nothing);
+            assert_eq!(sidebar.floating().is_some(), matches!(keys, Keys::Menu { .. }));
+            assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, None));
+            let Asked::Pull { wanted: Wanted::AsItIs, .. } =
+                sidebar.key(&char('w'), moment(161_000))
+            else {
+                panic!("no job for the key");
+            };
+        }
     }
 
     /// A row that says where it works by no absolute path, as an agent's

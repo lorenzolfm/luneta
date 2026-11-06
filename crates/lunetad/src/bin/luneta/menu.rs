@@ -1322,7 +1322,7 @@ pub enum Opening<'a> {
 /// `w` and `r`, or `w` and `t`.
 enum Step {
     /// Its keys wait for one.
-    Choosing,
+    Choosing { wrong: Option<String> },
     /// A key waits, on what it says after a spinner that turns. Keys do
     /// nothing but close the menu.
     Waiting(Wait),
@@ -1381,7 +1381,7 @@ impl Menu {
     /// The menu numbered `number` for `work`, pasted with the menu for
     /// `target` open, or the row highlighted.
     pub fn pull(number: u64, target: Target, work: Work) -> Menu {
-        Menu { number, target, stage: Stage::Pull { work, step: Step::Choosing } }
+        Menu { number, target, stage: Stage::Pull { work, step: Step::Choosing { wrong: None } } }
     }
 
     pub fn number(&self) -> u64 {
@@ -1585,12 +1585,12 @@ impl Menu {
             },
             // `Backspace` goes out of the menu from its first group, and the
             // menu for a pull request, an issue or a file has no other.
-            Stage::Pull { step: Step::Choosing, .. }
+            Stage::Pull { step: Step::Choosing { .. }, .. }
                 if key.code == KeyCode::Backspace && bare(key) =>
             {
                 Did::Closed(Done::Nothing)
             },
-            Stage::Pull { work, step: Step::Choosing } => {
+            Stage::Pull { work, step: step @ Step::Choosing { .. } } => {
                 let asks = Asks::of(&work);
                 match Pull::pressed(key, asks) {
                     Some(pull) => {
@@ -1598,7 +1598,7 @@ impl Menu {
                         let step = Step::Waiting(Wait::Pulling(pull));
                         stays(Stage::Pull { work, step }, wants)
                     },
-                    None => stays(Stage::Pull { work, step: Step::Choosing }, Wants::Nothing),
+                    None => stays(Stage::Pull { work, step }, Wants::Nothing),
                 }
             },
             stage @ (Stage::Planning { .. }
@@ -1699,8 +1699,9 @@ impl Menu {
             };
         let off = work.off_branch(branch.as_deref()).filter(|_| moved_off);
         if let (Pull::Agent, Some(off)) = (pull, off) {
-            let why = format!("{worktree} is {off}, so no agent starts there; w opens it");
-            return Did::Closed(Done::Wrong(format!("menu: {work}: {why}")));
+            let wrong = Some(format!("{worktree} is {off}, so no agent starts there; w opens it"));
+            let stage = Stage::Pull { work, step: Step::Choosing { wrong } };
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
@@ -1892,11 +1893,16 @@ impl Menu {
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { work, step } => {
                 let body = match step {
-                    Step::Choosing => {
+                    Step::Choosing { wrong } => {
                         let asks = Asks::of(work);
                         let entries = Pull::ALL.map(|pull| Entry::Pull(pull, asks));
                         spots = entry_spots(&entries, width).map(Choice::Key);
-                        entries.iter().map(|entry| entry_line(entry, inner)).collect()
+                        let mut body: Vec<_> =
+                            entries.iter().map(|entry| entry_line(entry, inner)).collect();
+                        if let Some(wrong) = wrong {
+                            body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED)));
+                        }
+                        body
                     },
                     Step::Waiting(wait) => {
                         waiting(&wait.doing(work), width, Style::new().fg(NAME), frame)
@@ -3510,6 +3516,45 @@ mod tests {
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
         assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd: worktree, opens });
         assert!(menu.opening().is_some());
+    }
+
+    #[test]
+    fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
+        let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
+        let issue = Work::Link(link.clone());
+        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone()).key(&char('t')));
+        let name = SessionName::parse("cdk").unwrap();
+        let ready = Ready {
+            at: At::Clone { cwd: "/w/cdk".to_owned(), name },
+            worktree: "/w/cdk/issue-2736".to_owned(),
+            branch: Some("dev-docs".to_owned()),
+            moved_off: true,
+            work: Readied::Link(link),
+        };
+        let (menu, wants) = stays(menu.pulled(Ok(here(ready))));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(!menu.turning());
+        let refused = [
+            "─ #2736 ──────── cashubtc/cdk ─",
+            " w  worktree",
+            " t  tackle",
+            " /w/cdk/issue-2736 is on",
+            " dev-docs, not issue-2736, so",
+            " no agent starts there; w",
+            " opens it",
+            " <ESC> - Close",
+        ];
+        let (lines, spots) = menu.lines(31, 9, 0);
+        assert_eq!(text(&lines), refused);
+        assert_eq!(spots.at(Position::new(4, 1)), Some(&pressed(KeyCode::Char('w'))));
+
+        let (menu, wants) = stays(menu.key(&char('x')));
+        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(text(&menu.lines(31, 9, 0).0), refused);
+
+        let (menu, wants) = stays(menu.key(&char('w')));
+        assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
+        assert!(menu.pulling());
     }
 
     /// A paste of a file's path opens the menu for the file, named for it,

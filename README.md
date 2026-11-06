@@ -737,11 +737,11 @@ worktree may have moved on, as one does when an issue goes out as several pull
 requests. Where no worktree has `issue-123` checked out, and one of the
 repository sits where wt would make it, `w` goes to that one all the same, makes
 no branch, and the note says which branch it is on. `t` starts no agent on
-another branch: the note names it, and `w` opens the worktree. A directory of
-that name that is no worktree of the repository makes nothing, and the menu says
-why. luneta asks `gh` first what the number is: GitHub counts issues and pull
-requests in one sequence, and a link of an issue of a pull request's number, or
-of none, makes nothing, and the menu says why.
+another branch: the menu stays open and names it, and `w` there opens the
+worktree. A directory of that name that is no worktree of the repository opens
+nothing, and the menu says why. luneta asks `gh` first what the number is:
+GitHub counts issues and pull requests in one sequence, and a link of an issue
+of a pull request's number, or of none, makes nothing, and the menu says why.
 
 A `.md` file's path, pasted the same way, opens the menu for that file, for work
 written down there and not on GitHub: one line that ends in `.md`, from the

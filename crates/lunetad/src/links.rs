@@ -1097,7 +1097,10 @@ fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
         return None;
     }
     let first = format!("worktree {there}");
-    listed.split("\n\n").find(|entry| entry.lines().next() == Some(first.as_str()))
+    listed
+        .split("\n\n")
+        .find(|entry| entry.lines().next() == Some(first.as_str()))
+        .filter(|entry| !entry.lines().any(|line| line.starts_with("prunable")))
 }
 
 /// Where a key goes once the worktree `of` is made in the repository `dir` is

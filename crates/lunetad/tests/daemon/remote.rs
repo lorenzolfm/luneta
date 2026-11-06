@@ -2270,6 +2270,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
     far.gh.issue(8, "https://github.com/o/n/issues/8");
     far.gh.issue(9, "https://github.com/o/n/issues/9");
+    far.gh.issue(10, "https://github.com/o/n/issues/10");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_issue_7(&far, &scratch);
@@ -2328,6 +2329,13 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         let eight = Work::Link(Link::parse("https://github.com/o/n/issues/8").unwrap());
         let why = refused_there(&mut daemon, &Pasted::new(eight, panes.clone())).await;
         assert!(why.ends_with("issue-8 is already present"), "{why}");
+
+        git(&bare, &["worktree", "add", "-q", "-b", "gone", "../issue-10", "main"]);
+        fs::remove_dir_all(clone.join("issue-10")).unwrap();
+        fs::create_dir(clone.join("issue-10")).unwrap();
+        let ten = Work::Link(Link::parse("https://github.com/o/n/issues/10").unwrap());
+        let why = refused_there(&mut daemon, &Pasted::new(ten, panes.clone())).await;
+        assert!(why.ends_with("issue-10 is already present"), "{why}");
 
         let plan = main.join("plan.md");
         fs::write(&plan, "written down").unwrap();
