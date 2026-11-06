@@ -93,17 +93,23 @@ on every `open tab`:
 4. A session made for it: `luneta open session --cwd <the clone>`, with the
    directory `zoxide query` says. It takes the user there, and prints the name.
 
-A pane is in a repository if the `repo <dir>` that `luneta sessions` lists for it
-is the directory `zoxide query` says of that repository, or holds it. A pane that
-lists neither a `repo` nor `no repository` says nothing of its repository: if its
-directory is in the one `zoxide query` says, tell the user instead of making a
-session.
+A pane that lists a `repo <dir>` in `luneta sessions` is in a repository if that
+`repo` is the directory `zoxide query` says of the repository, or holds it, or if
+the pane's own directory is that directory or in it. A pane that lists neither a
+`repo` nor `no repository` says nothing of its repository: if its directory is in
+the one `zoxide query` says, tell the user instead of making a session.
 
 If `open tab` says no client is in the session, run `luneta go <session>` and
 open the tab again, as a pasted link does. Do this without asking, and say in
 your report that you took the user there. Don't open panes instead, unless the
-user asked for panes. If `go` fails, tell the user the session, and what you
-made for it.
+user asked for panes. If `go` fails, or `open tab` still says no client, tell the
+user the session, and what you made for it.
+
+`go` and step 4 take the user from what they are doing, and what they type next
+lands in another pane. Do either only while the user is waiting on you: they
+asked for this just now and you went straight to it, as in luneta's ask box they
+always have. If you have been working on your own since, leave them where they
+are: tell them the session or the directory, and what you made for it.
 
 A tab in no repository opens in the user's session: leave `--session` out.
 
@@ -137,7 +143,8 @@ own, or they edit the same files:
    [Which session a tab opens in](#which-session-a-tab-opens-in) picks, named for
    the branch, with `claude --name <branch> "<prompt>"` in it.
 4. Report the tabs you opened (`<session>:<pane>` and the issue each has).
-   Don't `go` anywhere unless asked, or that session has nobody in it.
+   Don't `go` anywhere unless asked, or that session has nobody in it and the
+   user is waiting on you.
 
 ### A skill on a PR
 

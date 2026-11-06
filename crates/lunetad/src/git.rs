@@ -794,7 +794,7 @@ fn ask(
         Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false),
     };
     let said = status(dir, &placed);
-    let elsewhere =|now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
+    let elsewhere = |now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
     let moved = anew && place(dir).is_ok_and(elsewhere);
     (placed, said, moved)
 }

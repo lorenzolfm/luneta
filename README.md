@@ -1082,8 +1082,8 @@ your words point at, a worktree for each agent it starts side by side, which
 session its tabs open in, and asking you before it closes anything. A tab of
 work in a repository opens where a pasted link's does: in the session you name,
 or else yours if it works in that repository, or else another that does, or else
-a session it makes in a clone of it. In a session nobody is in, it takes you
-there first.
+a session it makes in a clone of it. To a session nobody is in, or one it makes,
+it takes you first if you're waiting on it, and otherwise says where things are.
 
 ```sh
 npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/skills/

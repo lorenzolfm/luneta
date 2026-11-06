@@ -32,7 +32,8 @@ use tonic::transport::Channel;
 use crate::bridge;
 use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
-use crate::machines::{self, Added};
+use crate::machines::{self, Added, Machine};
+use crate::order::Order;
 use crate::zellij::{self, Seat};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
@@ -400,9 +401,10 @@ pub fn unread(unread: Unread) -> String {
     format!("{unread}, and its log says which")
 }
 
-/// A session to a line, with its panes under it, each by its tab and its id:
-/// where it works, then what is checked out there and what changed on it, and
-/// the pull request of its branch, and the directory of its repository. A pane
+/// A session to a line, as the sidebar lists them, with its panes under it, each
+/// by its tab and its id: where it works, then what is checked out there and what
+/// changed on it, and the pull request of its branch, and the directory of its
+/// repository. A pane
 /// zellij says no directory of has `-` for one, and a directory git has said
 /// nothing of has nothing after it.
 /// Then each other machine lunetad watches, as its hosts file names it, with
@@ -411,13 +413,17 @@ pub fn unread(unread: Unread) -> String {
 /// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after: None, kept: None }).await?.into_inner();
-    sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
+    let order = Order::shared();
+    let here = as_rows(&host.sessions, Some(&Machine::Local), &order);
+    sessions_of(&here, &host.work_trees, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
         match &remote.reached {
             Some(Reached::Host(host)) => {
                 println!("{machine}/");
-                sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "  ");
+                let far = machine.parse().map(Machine::Remote).ok();
+                let far = as_rows(&host.sessions, far.as_ref(), &order);
+                sessions_of(&far, &host.work_trees, &host.pull_requests, "  ");
             },
             Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
             Some(Reached::Unreached(unreached)) => {
@@ -437,17 +443,33 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// `sessions` in the order of the sidebar's rows on `machine`: oldest first, and
+/// as `order` has them.
+fn as_rows<'a>(
+    sessions: &'a [Session],
+    machine: Option<&Machine>,
+    order: &Order,
+) -> Vec<&'a Session> {
+    let mut rows: Vec<&Session> = sessions.iter().collect();
+    rows.sort_by_cached_key(|session| {
+        let started = session.started_at.and_then(|at| SystemTime::try_from(at).ok());
+        (started.is_none(), started, session.name.clone())
+    });
+    if let Some(machine) = machine {
+        order.sessions(machine, &mut rows, |session| session.name.as_str());
+    }
+    rows
+}
+
 /// The `sessions` of a host, with what it says of the `work_trees` and the
 /// `pull_requests` of their panes, as `sessions` says them, each line led by
 /// `indent`.
 fn sessions_of(
-    sessions: &[Session],
+    sessions: &[&Session],
     work_trees: &[WorkTree],
     pull_requests: &[PullRequest],
     indent: &str,
 ) {
-    let mut sessions: Vec<&Session> = sessions.iter().collect();
-    sessions.sort_by(|a, b| a.name.cmp(&b.name));
     for session in sessions {
         let Some(panes) = &session.panes else {
             println!("{indent}{}  (no panes listed yet)", session.name);

@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::{Detached, Head};
-use lunetad::api::work_tree::{Outside, Stands};
+use lunetad::api::work_tree::{NoCheckout, Outside, Stands};
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
@@ -596,6 +596,28 @@ fn luneta_sessions_names_the_repository_each_pane_works_in() {
     );
 }
 
+#[test]
+fn luneta_sessions_lists_the_sessions_as_the_sidebar_does() {
+    let host = Host::new();
+    let _zeta = host.serve("zeta");
+    thread::sleep(Duration::from_millis(50));
+    let _alpha = host.serve("alpha");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("both are listed", || (host.host().sessions.len() == 2).then_some(()));
+    let listed = || {
+        let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
+        let said = String::from_utf8(said.stdout).unwrap();
+        let first = |line: &str| line.split_whitespace().next().unwrap().to_owned();
+        said.lines().map(first).collect::<Vec<String>>()
+    };
+    assert_eq!(listed(), ["zeta", "alpha"]);
+
+    let kept = host.home.path().join(".local/state/luneta");
+    fs::create_dir_all(&kept).unwrap();
+    fs::write(kept.join("order"), r#"{"sessions":["alpha"]}"#).unwrap();
+    assert_eq!(listed(), ["alpha", "zeta"]);
+}
+
 /// What git will not read is said nothing of, as it could be any repository:
 /// a repository it refuses is not `no repository`, nor a work tree whose index
 /// does not read `no checkout`. Why goes to the log. The directory named last
@@ -690,7 +712,7 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
 fn in_no_work_tree(host: &Host, cwd: &str) {
     eventually("git says the directory is in no work tree", || {
         let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
-        matches!(tree.stands, Some(Stands::Outside(_) | Stands::NoCheckout(_))).then_some(())
+        (tree.stands == Some(Stands::Outside(Outside {}))).then_some(())
     });
 }
 
@@ -911,6 +933,24 @@ fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
     shows_at_once(&host, &cwd, "a work tree made in it", made, on_branch("first"));
 }
 
+#[test]
+fn a_checkout_taken_away_is_in_no_work_tree() {
+    let host = Host::new();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir(&work).unwrap();
+    assert!(git(&work, &["init", "-q", "-b", "main"]));
+    commit(&work, "file", "text\n");
+    let cwd = work.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says it is a checkout", || checkout(&host, &cwd));
+
+    fs::remove_dir_all(&work).unwrap();
+    in_no_work_tree(&host, &cwd);
+}
+
 /// A pane that works in a repository's own folder, which git places in no
 /// work tree, has git asked nothing as git writes there, as a commit does.
 #[test]
@@ -924,7 +964,12 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    in_no_work_tree(&host, &cwd);
+    let repository = fs::canonicalize(top).unwrap().display().to_string();
+    let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
+    eventually("git says it is no checkout of its clone", || {
+        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        (tree.stands == of_its_clone).then_some(())
+    });
 
     let asked = noted.statuses();
     for step in 0..5 {
