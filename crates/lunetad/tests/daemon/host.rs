@@ -636,7 +636,9 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// issue it was given none for, it says GitHub has none. It views a pull
 /// request by its number for its branches, which a test wrote with `pull`, and
 /// notes what it was asked, for `viewed`. Its `api` says what a test wrote with
-/// `api`. It knows no other command.
+/// `api`. Its `repo view` says the parent a test wrote with `fork_of`, and with
+/// `GH_REPO` set it finds what a test wrote with `open_in`. It knows no other
+/// command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -664,6 +666,12 @@ if [ "$1" = api ]; then
     echo "gh: Not Found (HTTP 404)" >&2
     exit 1
 fi
+if [ "$*" = "repo view --json parent,url" ]; then
+    echo "$*" >> "{pulls}/repositories"
+    [ -f "{pulls}/repository" ] && exec cat "{pulls}/repository"
+    echo '{{"parent":null,"url":"https://github.com/owner/repo"}}'
+    exit 0
+fi
 if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
@@ -673,12 +681,13 @@ if [ -f "{pulls}/switch" ]; then
     rm "{pulls}/switch"
 fi
 branch=$(git symbolic-ref --short HEAD) || exit 1
-echo "$branch" >> "{pulls}/asked"
-if [ ! -f "{pulls}/$branch.json" ]; then
+echo "${{GH_REPO:+$GH_REPO }}$branch" >> "{pulls}/asked"
+said="{pulls}/${{GH_REPO:+$GH_REPO/}}$branch.json"
+if [ ! -f "$said" ]; then
     echo "no pull requests found for branch \"$branch\"" >&2
     exit 1
 fi
-exec cat "{pulls}/$branch.json"
+exec cat "$said"
 "#,
             pulls = gh.pulls.display()
         );
@@ -742,6 +751,30 @@ exec cat "{pulls}/$branch.json"
         let writing = path.with_extension("writing");
         fs::write(&writing, said.to_string()).unwrap();
         fs::rename(writing, path).unwrap();
+    }
+
+    pub fn open_in(&self, repository: &str, branch: &str, said: &serde_json::Value) {
+        let path = self.pulls.join(format!("{repository}/{branch}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let writing = path.with_extension("writing");
+        fs::write(&writing, said.to_string()).unwrap();
+        fs::rename(writing, path).unwrap();
+    }
+
+    pub fn fork_of(&self, owner: &str, name: &str) {
+        let said = serde_json::json!({
+            "parent": { "name": name, "owner": { "login": owner } },
+            "url": "https://github.com/owner/repo",
+        });
+        fs::write(self.pulls.join("repository"), said.to_string()).unwrap();
+    }
+
+    pub fn repositories(&self) -> usize {
+        match fs::read_to_string(self.pulls.join("repositories")) {
+            Ok(asked) => asked.lines().count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
     }
 }
 

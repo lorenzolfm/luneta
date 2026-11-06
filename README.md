@@ -817,7 +817,9 @@ logged in. A branch too long for the line is cut short, and the number kept.
 lunetad runs `gh pr view` in the directory once for a branch of a repository,
 however many panes are on it, as a pane comes to the branch and then every
 minute: each ask counts against GitHub's hourly limit, which every other `gh`
-you run shares. A pull request opened or merged shows within a minute.
+you run shares. A pull request opened or merged shows within a minute. In a
+clone of a fork, a branch `gh` finds none for is asked about again in the
+repository the fork was made from, which takes one more ask.
 
 To take a pull request's link from there, without asking its agent, a click on
 the number copies it, wherever the keys are, and does nothing else: a note says

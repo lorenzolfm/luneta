@@ -952,6 +952,58 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let said = daemon.said_after(Duration::from_secs(1));
     assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
     assert!(!found().contains_key(&beside));
+    assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
+}
+
+#[test]
+fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
+    commit(tree.path(), "README", "start\n");
+    assert!(git(tree.path(), &["branch", "theirs"]));
+    assert!(git(tree.path(), &["branch", "ours"]));
+    let parent = "github.com/upstream/repo";
+    let in_parent = "https://github.com/upstream/repo/pull/2840";
+    let in_fork = "https://github.com/owner/repo/pull/9";
+    let pull = |number, url| {
+        json!({ "number": number, "state": "OPEN", "isDraft": false, "url": url })
+    };
+    host.gh.fork_of("upstream", "repo");
+    host.gh.open_in(parent, "theirs", &pull(2840, in_parent));
+    host.gh.open_in(parent, "ours", &pull(2845, "https://github.com/upstream/repo/pull/2845"));
+    host.gh.open("ours", &pull(9, in_fork));
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let found = || {
+        let host = host.host();
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.number, it.url))
+    };
+
+    let main_in_parent = format!("{parent} main");
+    eventually("gh asks the parent about main", || {
+        host.gh.asked().contains(&main_in_parent).then_some(())
+    });
+
+    assert!(git(tree.path(), &["switch", "-q", "theirs"]));
+    eventually("the parent's pull request is theirs", || {
+        (found() == Some((2840, in_parent.to_owned()))).then_some(())
+    });
+
+    assert!(git(tree.path(), &["switch", "-q", "ours"]));
+    eventually("the fork's pull request is ours, though the parent has one too", || {
+        (found() == Some((9, in_fork.to_owned()))).then_some(())
+    });
+
+    assert_eq!(
+        host.gh.asked(),
+        ["main", main_in_parent.as_str(), "theirs", &format!("{parent} theirs"), "ours"]
+    );
+    assert_eq!(host.gh.repositories(), 1);
+    let said = daemon.said_after(Duration::from_secs(1));
+    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
 }
 
 /// gh finds the pull request of the branch checked out as it is asked, which

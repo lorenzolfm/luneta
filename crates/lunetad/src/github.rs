@@ -75,6 +75,35 @@ fn parse(said: &[u8]) -> Result<PullRequest, String> {
     Ok(PullRequest { number: viewed.number, state, url: Some(viewed.url) })
 }
 
+const REPOSITORY: &str = "parent,url";
+
+#[derive(Deserialize)]
+struct Repository {
+    parent: Option<Parent>,
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct Parent {
+    name: String,
+    owner: Owner,
+}
+
+#[derive(Deserialize)]
+struct Owner {
+    login: String,
+}
+
+fn parent_of(said: &[u8]) -> Result<Option<String>, String> {
+    let repository: Repository = serde_json::from_slice(said).map_err(|error| error.to_string())?;
+    let Some(parent) = repository.parent else {
+        return Ok(None);
+    };
+    let host = repository.url.split('/').nth(2).filter(|host| !host.is_empty());
+    let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
+    Ok(Some(format!("{host}/{}/{}", parent.owner.login, parent.name)))
+}
+
 /// What gh said of the branch it was asked about.
 enum Answer {
     /// The branch was still checked out as gh answered: the pull request gh
@@ -85,29 +114,59 @@ enum Answer {
     Moved,
 }
 
+fn find(dir: &str, base: Option<&str>) -> Result<Option<PullRequest>, String> {
+    let mut gh = Command::new("gh");
+    git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
+    if let Some(base) = base {
+        gh.env("GH_REPO", base);
+    }
+    let ran = program::run(&mut gh, LIMIT)
+        .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
+    match ran.answer() {
+        Ok(said) => parse(&said)
+            .map(Some)
+            .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}")),
+        Err(why) if why.starts_with(NONE) => Ok(None),
+        Err(why) => Err(format!("gh pr view in {dir}: {why}")),
+    }
+}
+
+fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<String>, String> {
+    if let Some(parent) = parents.get(repository) {
+        return Ok(parent.clone());
+    }
+    let mut gh = Command::new("gh");
+    git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
+    let ran = program::run(&mut gh, LIMIT)
+        .map_err(|error| format!("gh repo view in {dir} could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
+    let parent = parent_of(&said)
+        .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
+    parents.insert(repository.to_owned(), parent.clone());
+    Ok(parent)
+}
+
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
 /// one it finds, or none, or that `branch` is no longer checked out there.
 /// When gh did not say, as it is not logged in, or did not answer in time,
 /// what is to be said of it instead.
 ///
-/// gh finds it as it does in a shell in `dir`: by the work tree's remotes,
-/// and the branch's config for where it pushes the branch. It reads what is
-/// checked out as it starts, where git can have last looked a sweep before,
-/// so what is checked out is read again once gh has answered.
-fn view(dir: &str, branch: &str) -> Result<Answer, String> {
-    let mut gh = Command::new("gh");
-    git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
-    let ran = program::run(&mut gh, LIMIT)
-        .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
-    let found = match ran.answer() {
-        Ok(said) => Some(
-            parse(&said)
-                .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}"))?,
-        ),
-        Err(why) if why.starts_with(NONE) => None,
-        Err(why) => return Err(format!("gh pr view in {dir}: {why}")),
-    };
-    if git::branch(dir).as_deref() != Some(branch) {
+/// gh finds it as it does in a shell in `dir`, or else in the repository that
+/// one forks: by the branch's config for where it pushes the branch. It reads
+/// what is checked out as it starts, where git can have last looked a sweep
+/// before, so what is checked out is read again once gh has answered.
+fn view(
+    dir: &str,
+    (repository, branch): &Branch,
+    parents: &mut Parents,
+) -> Result<Answer, String> {
+    let mut found = find(dir, None)?;
+    if found.is_none()
+        && let Some(parent) = parent(dir, repository, parents)?
+    {
+        found = find(dir, Some(&parent))?;
+    }
+    if git::branch(dir).as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
     Ok(Answer::Stayed(found))
@@ -116,6 +175,8 @@ fn view(dir: &str, branch: &str) -> Result<Answer, String> {
 /// A branch of a repository, by the repository's common directory and the
 /// branch's name.
 type Branch = (String, String);
+
+type Parents = HashMap<String, Option<String>>;
 
 /// Where gh stands with a branch it has been asked about.
 struct Asked {
@@ -140,6 +201,7 @@ pub fn follow(
 ) -> io::Result<()> {
     thread::Builder::new().name("gh".to_owned()).spawn(move || {
         let mut asked: HashMap<Branch, Asked> = HashMap::new();
+        let mut parents = Parents::new();
         let mut troubles = Troubles::default();
         'sweep: loop {
             let Some(branches) = core::ask(&core, core::Command::Branches) else {
@@ -155,6 +217,7 @@ pub fn follow(
                 }
             }
             asked.retain(|branch, _| on.contains_key(branch));
+            parents.retain(|repository, _| on.keys().any(|(of, _)| of == repository));
             // A directory that came to a branch gh has said of already.
             if !tell(&core, &on, &asked) {
                 return;
@@ -165,7 +228,7 @@ pub fn follow(
             // Never asked about before all others, then the one due longest.
             due.sort_by_key(|branch| asked.get(*branch).map(|was| was.next));
             for branch in due {
-                let said = view(&on[branch][0], &branch.1);
+                let said = view(&on[branch][0], branch, &mut parents);
                 let next = Instant::now() + sweep;
                 let was = asked.remove(branch).and_then(|was| was.found);
                 let (found, trouble) = match said {
@@ -226,7 +289,27 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::parse;
+    use super::{parent_of, parse};
+
+    #[test]
+    fn a_fork_s_parent_reads_as_gh_writes_it_on_the_fork_s_host() {
+        let parent = r#"{"id":"R","name":"cdk","owner":{"id":"O","login":"cashubtc"}}"#;
+        let forked = |url: &str| format!(r#"{{"parent":{parent},"url":"{url}"}}"#);
+        let read = |said: &str| parent_of(said.as_bytes());
+        assert_eq!(
+            read(&forked("https://github.com/lorenzolfm/cdk")),
+            Ok(Some("github.com/cashubtc/cdk".to_owned()))
+        );
+        assert_eq!(
+            read(&forked("https://git.example.com/lorenzolfm/cdk")),
+            Ok(Some("git.example.com/cashubtc/cdk".to_owned()))
+        );
+        let none = r#"{"parent":null,"url":"https://github.com/lorenzolfm/luneta"}"#;
+        assert_eq!(read(none), Ok(None));
+        for unread in [forked("nowhere"), String::new()] {
+            assert!(read(&unread).is_err(), "{unread:?}");
+        }
+    }
 
     /// A draft is open: one closed or merged is closed or merged, though
     /// GitHub still says it is a draft. What does not read, as a state GitHub
