@@ -70,6 +70,8 @@ use crate::api::{On, PasteRequest, PasteResponse};
 use crate::program::{self, Ran};
 use crate::{git, names, zoxide, Destination, Directory, SessionName};
 
+mod sync;
+
 /// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
 
@@ -674,7 +676,7 @@ impl Ready<usize> {
             Readied::Link(_) => None,
             Readied::File { real } => Some(real),
         };
-        PasteResponse { at: Some(at), worktree, branch, file }
+        PasteResponse { at: Some(at), worktree, branch, file, at_head: false }
     }
 }
 
@@ -722,19 +724,32 @@ impl From<String> for Unready {
     }
 }
 
+/// What a key of the menu needs of the worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wanted {
+    AsItIs,
+    AtHead,
+}
+
 /// A link or a file pasted on a row of a machine, and the panes of that
 /// machine, as luneta knows them, for where a key of the menu goes: on that
 /// machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pasted {
     work: Work,
+    wanted: Wanted,
     worked: Vec<Worked>,
 }
 
 impl Pasted {
     #[must_use]
     pub fn new(work: Work, worked: Vec<Worked>) -> Self {
-        Pasted { work, worked }
+        Pasted { work, wanted: Wanted::AsItIs, worked }
+    }
+
+    #[must_use]
+    pub fn wanting(self, wanted: Wanted) -> Self {
+        Pasted { wanted, ..self }
     }
 
     /// What `request` asks, and of which machine, or why it is invalid: it
@@ -742,7 +757,7 @@ impl Pasted {
     /// by no absolute path, or more panes than `WORKED_MAX`, or a pane by no
     /// absolute path, or a pull request's page that is no link.
     pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
-        let PasteRequest { on, work, worked } = request;
+        let PasteRequest { on, work, worked, at_head } = request;
         let work = match work {
             Some(paste_request::Work::Link(link)) => {
                 Work::Link(Link::parse(&link).ok_or_else(|| {
@@ -759,6 +774,10 @@ impl Pasted {
             },
             None => return Err("it says neither a link nor a file".to_owned()),
         };
+        let wanted = if at_head { Wanted::AtHead } else { Wanted::AsItIs };
+        if at_head && !matches!(&work, Work::Link(link) if link.kind() == Kind::Pull) {
+            return Err("at_head: only a pull request has a head".to_owned());
+        }
         if worked.len() > WORKED_MAX {
             return Err(format!("worked: more than {WORKED_MAX} panes"));
         }
@@ -773,7 +792,7 @@ impl Pasted {
             Ok(Worked { dir, pull, here })
         };
         let worked = worked.into_iter().map(pane).collect::<Result<_, String>>()?;
-        Ok((on, Pasted { work, worked }))
+        Ok((on, Pasted { work, wanted, worked }))
     }
 
     /// The question that asks it of the machine `on` names, or of the
@@ -793,7 +812,7 @@ impl Pasted {
                 paste_request::Work::File(AskedFile { path: path.clone(), from })
             },
         };
-        PasteRequest { on, work: Some(work), worked }
+        PasteRequest { on, work: Some(work), worked, at_head: self.wanted == Wanted::AtHead }
     }
 
     /// Where a key goes, on the machine this runs on, by the place of its
@@ -803,9 +822,14 @@ impl Pasted {
     /// its name is, so of a file this is never `Unready::Nowhere`.
     pub fn ready(&self) -> Result<Ready<usize>, Unready> {
         match &self.work {
-            Work::Link(link) => ready(link, &self.worked),
+            Work::Link(link) => ready(link, self.wanted, &self.worked),
             Work::File(file) => ready_file(file, &self.worked),
         }
+    }
+
+    pub fn answer(&self) -> Result<PasteResponse, Unready> {
+        let answer = self.ready()?.answer();
+        Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
     /// Where a key goes, as `ready` finds it on the machine `on`, whose daemon
@@ -847,7 +871,11 @@ impl Pasted {
     /// the session by no absolute path, or it says a file of a link or no file
     /// of a file, or it says where in words of a newer daemon's.
     pub fn answered(&self, answer: PasteResponse) -> Result<Ready<usize>, String> {
-        let PasteResponse { at, worktree, branch, file } = answer;
+        let PasteResponse { at, worktree, branch, file, at_head } = answer;
+        if self.wanted == Wanted::AtHead && !at_head {
+            return Err("started no review: its lunetad is too old to sync with the pull request"
+                .to_owned());
+        }
         if !worktree.starts_with('/') {
             return Err(format!("worktree: {worktree:?} is no absolute path"));
         }
@@ -884,7 +912,7 @@ impl Pasted {
 
 /// Where a key goes for `link` among the panes `worked`, as `Pasted::ready`
 /// says.
-fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
+fn ready(link: &Link, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
     let mut seen: HashMap<String, Looked> = HashMap::new();
     let mut hosts: HashMap<String, Option<String>> = HashMap::new();
     let mut repository_of = |dir: &str| {
@@ -896,6 +924,7 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
         Some(Found::There(at)) => {
             kind_holds(link)?;
             let dir = &worked[at].dir;
+            synced(dir, link, wanted)?;
             let (worktree, branch) = (dir.clone(), branch(dir));
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), worktree, branch, work });
@@ -917,7 +946,19 @@ fn ready(link: &Link, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
         })?;
         base(&repository, &remote, &branch)?;
     }
-    made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))
+    let ready = made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))?;
+    synced(&ready.worktree, link, wanted)?;
+    Ok(ready)
+}
+
+/// A failure is `Unready::InDoubt`: the repository is here, and no other machine
+/// should make a second worktree of it.
+fn synced(dir: &str, link: &Link, wanted: Wanted) -> Result<(), Unready> {
+    match wanted {
+        Wanted::AsItIs => Ok(()),
+        Wanted::AtHead => sync::to_head(dir, link)
+            .map_err(|why| Unready::InDoubt(format!("started no review in {dir}: {why}"))),
+    }
 }
 
 /// Why a key goes no further for `link`, of a machine that has its repository:
@@ -1391,15 +1432,31 @@ fn luneta() -> Result<PathBuf, String> {
 /// names, and `layout`'s the one `repo` is in, so that the clone luneta sees
 /// wt cloned may not be the one wt makes the worktree in.
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
-    let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
-    if let Some(name) = named {
-        return Err(format!("{name} is set, and git would take another repository for {repo}'s"));
-    }
+    git_reads(repo)?;
     let wt_add = |error| format!("wt add: {error:#}");
     let found = Repo::discover(Some(Path::new(repo))).map_err(wt_add)?;
     wt_made(repo)?;
     let made = add::run(&found, &of.to_string(), None, Fetch::Lazy).map_err(wt_add)?;
     Ok(made.path().to_owned())
+}
+
+/// Brings the worktree in `dir` to its upstream branch, by wt's own code; or why
+/// it did not.
+pub fn followed(dir: &str) -> Result<(), String> {
+    git_reads(dir)?;
+    wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
+}
+
+/// Why wt's git would not read the repository `dir` is in, where a variable
+/// tells it where another is.
+fn git_reads(dir: &str) -> Result<(), String> {
+    let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
+    match named {
+        Some(name) => {
+            Err(format!("{name} is set, and git would take another repository for {dir}'s"))
+        },
+        None => Ok(()),
+    }
 }
 
 /// Why wt makes no worktree in the repository `dir` is in, where it does not:
@@ -1887,7 +1944,7 @@ mod tests {
         let refused = |path: &str, from: Option<&str>| {
             let file = AskedFile { path: path.to_owned(), from: from.map(str::to_owned) };
             let work = Some(paste_request::Work::File(file));
-            let request = PasteRequest { on: None, work, worked: Vec::new() };
+            let request = PasteRequest { on: None, work, worked: Vec::new(), at_head: false };
             Pasted::of(request).map(drop).unwrap_err()
         };
         assert_eq!(refused("plan.txt", None), "file: \"plan.txt\" is no path of a .md file");
@@ -2196,6 +2253,35 @@ mod tests {
         assert_eq!(unnamed, "clone: \"a/b\" names no session: name cannot contain '/'");
         let relative = refused(made("w", "cdk"));
         assert_eq!(relative, "clone: \"w\" is no absolute path");
+    }
+
+    /// A far daemon older than `at_head` ignores it, and would start a review
+    /// of old code without a word.
+    #[test]
+    fn an_answer_that_does_not_say_the_worktree_is_at_the_head_is_refused() {
+        let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead);
+        let at = At::There(0);
+        let (worktree, branch, work) = ("/w/x".to_owned(), None, Readied::Link(link()));
+        let ready = Ready { at, worktree, branch, work };
+        let synced = PasteResponse { at_head: true, ..ready.clone().answer() };
+        assert_eq!(asked.answered(synced), Ok(ready.clone()));
+        let why = asked.answered(ready.clone().answer()).unwrap_err();
+        assert!(why.contains("too old to sync"), "{why}");
+        let unasked = Pasted::new(Work::Link(link()), Vec::new());
+        assert_eq!(unasked.answered(ready.clone().answer()), Ok(ready));
+    }
+
+    #[test]
+    fn only_a_pull_request_s_link_can_be_asked_at_its_head() {
+        let at_head = |work: Work| Pasted::new(work, Vec::new()).wanting(Wanted::AtHead).asked(None);
+        let (on, pasted) = Pasted::of(at_head(Work::Link(link()))).unwrap();
+        assert_eq!(on, None);
+        assert_eq!(pasted.wanted, Wanted::AtHead);
+        let plan = File::parse("/w/plan.md", None).unwrap();
+        for work in [Work::Link(issue()), Work::File(plan)] {
+            let why = Pasted::of(at_head(work)).unwrap_err();
+            assert_eq!(why, "at_head: only a pull request has a head");
+        }
     }
 
     /// A pane named by its place among those luneta said is the pane it

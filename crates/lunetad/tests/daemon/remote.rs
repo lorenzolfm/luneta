@@ -33,7 +33,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
-use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Work};
+use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
 use lunetad::{Directory, SessionName};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
@@ -42,7 +42,9 @@ use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
-use crate::host::{answered, eventually, folder_in, script, start, Host, Vars, DROPPED, LUNETA};
+use crate::host::{
+    answered, eventually, folder_in, script, start, start_as, Host, Vars, DROPPED, LUNETA, LUNETAD,
+};
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -1613,6 +1615,441 @@ fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
     });
     let asked = fs::read_to_string(&runs).unwrap();
     assert!(!asked.contains("-oProxyCommand"), "{asked}");
+}
+
+fn git_said(dir: &Path, args: &[&str]) -> String {
+    let mut git = Command::new("git");
+    lunetad::local_git(&mut git);
+    let said = git
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(said.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&said.stderr));
+    String::from_utf8(said.stdout).unwrap().trim().to_owned()
+}
+
+/// A clone wt made, whose origin is spelled as GitHub's, as wt reads it, and
+/// reached through an ssh of its own: `up` is `o/n`, and `fork` is `f/n`. Of
+/// `feat`, the branch of `o/n#7`, it has only `origin/feat`.
+fn clone_with_pull_7(host: &Host, scratch: &Path) -> PathBuf {
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(scratch, &up, &clone);
+    pushed(host, &up, "feat", "first");
+    let bare = clone.join(".bare");
+    git(&bare, &["branch", "-q", "-D", "feat"]);
+    git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    git(&bare, &["fetch", "-q", "origin"]);
+    git(&bare, &["remote", "set-url", "origin", "git@github.com:o/n.git"]);
+    let ssh = scratch.join("ssh-to-github");
+    let text = format!(
+        "case \"$*\" in\n    *\"'f/n.git'\"*) exec git upload-pack \"{0}/fork\" ;;\n    *) exec git \
+         upload-pack \"{0}/up\" ;;\nesac\n",
+        scratch.display()
+    );
+    script(&ssh, &text);
+    git(&bare, &["config", "core.sshCommand", &ssh.display().to_string()]);
+    git(&bare, &["config", "ssh.variant", "simple"]);
+    clone
+}
+
+fn pushed(host: &Host, up: &Path, parent: &str, name: &str) -> String {
+    let head = git_said(up, &["commit-tree", "-p", parent, "-m", name, "feat^{tree}"]);
+    git(up, &["update-ref", "refs/heads/feat", &head]);
+    git(up, &["update-ref", "refs/pull/7/head", &head]);
+    host.gh.pull(7, "main", &head);
+    head
+}
+
+fn reviewing_pull_7(worked: Vec<links::Worked>) -> Pasted {
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    Pasted::new(Work::Link(link), worked).wanting(Wanted::AtHead)
+}
+
+fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut answer = daemon.paste(pasted.asked(None)).await?.into_inner();
+        let ready = answer.message().await?.expect("an answer");
+        Ok(pasted.answered(ready).expect("an answer luneta reads"))
+    })
+}
+
+fn pane_in(dir: &Path) -> links::Worked {
+    links::Worked { dir: dir.display().to_string(), pull: None, here: false }
+}
+
+#[test]
+fn r_brings_the_worktree_wt_found_to_the_pull_request_s_head() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare, main) = (scratch.join("up"), clone.join(".bare"), clone.join("main"));
+    let feat = clone.join("feat");
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let at_head = |head: &str, how: &str| {
+        let ready = pasted_here(&host, &pasted).unwrap();
+        assert_eq!(ready.at, At::Session(0), "{how}");
+        assert_eq!(ready.worktree, feat.display().to_string(), "{how}");
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head, "{how}");
+    };
+
+    let local_main = git_said(&main, &["rev-parse", "main"]);
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    at_head(&pushed(&host, &up, "feat", "second"), "known only as last fetched");
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(tracked_main, git_said(&up, &["rev-parse", "main"]));
+    assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
+    assert_eq!(host.gh.viewed(), ["pr view 7 --repo github.com/o/n --json baseRefName,headRefOid"]);
+
+    at_head(&pushed(&host, &up, "feat", "third"), "a worktree there already");
+    at_head(&pushed(&host, &up, "main", "rewritten"), "rewritten");
+    at_head(&pushed(&host, &up, "main", "rewritten again"), "rewritten again");
+    git(&bare, &["worktree", "remove", "../feat"]);
+    at_head(&pushed(&host, &up, "feat", "fourth"), "a local branch whose worktree went");
+}
+
+#[test]
+fn w_leaves_the_worktree_where_it_is() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let up = scratch.join("up");
+    let feat = clone.join("feat");
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pasted = Pasted::new(Work::Link(link), vec![pane_in(&clone.join("main"))]);
+
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    pushed(&host, &up, "feat", "second");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), tracked_main);
+    assert_eq!(host.gh.viewed(), [] as [String; 0]);
+}
+
+/// A pane on the branch runs no wt, and syncs all the same. `Code::Aborted` is
+/// what has no other machine make a second worktree.
+#[test]
+fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&far, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    let pasted = reviewing_pull_7(vec![pane]);
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let head = pushed(&far, &up, "feat", "second");
+        let ready = pasted_on(&mut daemon, "far", &pasted).await.unwrap();
+        assert_eq!(ready.at, At::There(0));
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+
+        pushed(&far, &up, "feat", "third");
+        fs::write(feat.join("mine"), "mine").unwrap();
+        git(&feat, &["add", "mine"]);
+        let refused = pasted_on(&mut daemon, "far", &pasted).await.unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        let why = format!(
+            "started no review in {}: the worktree has changes that are not committed",
+            feat.display()
+        );
+        assert_eq!(refused.message(), why);
+        assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    });
+    assert_eq!(here.gh.viewed(), [] as [String; 0]);
+}
+
+/// Nothing has to move, so nothing the worktree holds is in danger, and no wt
+/// has to say what it follows: at the head is the code to review.
+#[test]
+fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let feat = clone.join("feat");
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let head = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read_to_string(feat.join("mine")).unwrap(), "mine");
+
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    git(&feat, &["switch", "-q", "--detach"]);
+    let ready = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap();
+    assert_eq!(ready.at, At::There(0));
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+}
+
+/// The sidebar's "this pane has #7" can lag a `git switch main`. wt follows what
+/// is checked out, which is not the pull request.
+#[test]
+fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let main = clone.join("main");
+    git(&main, &["branch", "-q", "--set-upstream-to=origin/main", "main"]);
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&main) };
+
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("and the head of o/n#7 is"), "{refused:?}");
+    let up_main = git_said(&scratch.join("up"), &["rev-parse", "main"]);
+    assert_eq!(git_said(&main, &["rev-parse", "HEAD"]), up_main);
+}
+
+#[test]
+fn r_from_a_directory_the_head_leaves_out_says_so() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, work, feat) = (scratch.join("up"), scratch.join("work"), clone.join("feat"));
+    git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
+    let pushed_from_work = || {
+        let head = git_said(&work, &["rev-parse", "HEAD"]);
+        git(&up, &["update-ref", "refs/heads/feat", &head]);
+        git(&up, &["update-ref", "refs/pull/7/head", &head]);
+        host.gh.pull(7, "main", &head);
+        head
+    };
+    fs::create_dir(work.join("sub")).unwrap();
+    fs::write(work.join("sub/file"), "file").unwrap();
+    git(&work, &["add", "sub"]);
+    git(&work, &["commit", "-q", "-m", "sub"]);
+    pushed_from_work();
+    let _daemon = start(host.vars()).unwrap();
+    pasted_here(&host, &reviewing_pull_7(vec![pane_in(&clone.join("main"))])).unwrap();
+    assert!(feat.join("sub/file").is_file());
+
+    git(&work, &["rm", "-rq", "sub"]);
+    git(&work, &["commit", "-q", "-m", "no sub"]);
+    let head = pushed_from_work();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat.join("sub")) };
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    let why = "the worktree moved, and where it went has no such directory";
+    assert!(refused.message().ends_with(why), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/feat"]), head);
+}
+
+#[test]
+fn r_refused_on_a_rewrite_follows_it_once_the_change_is_gone() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    let head = pushed(&host, &up, "main", "rewritten");
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("changes that are not committed"), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+
+    git(&feat, &["rm", "-qf", "mine"]);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn r_on_a_rewrite_another_fetch_saw_first_says_what_moves_the_branch() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, feat) = (scratch.join("up"), clone.join("feat"));
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+    let was = git_said(&feat, &["rev-parse", "HEAD"]);
+
+    let head = pushed(&host, &up, "main", "rewritten");
+    git(&clone.join(".bare"), &["fetch", "-q", "origin"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    let command = format!("run git switch --no-overwrite-ignore -C feat {head}");
+    assert!(refused.message().ends_with(&command), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+}
+
+#[test]
+fn r_goes_by_the_head_alone_where_no_remote_names_the_pull_request_s_repository() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare, feat) = (scratch.join("up"), clone.join(".bare"), clone.join("feat"));
+    git(&bare, &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    git(&bare, &["remote", "set-url", "origin", "git@github.com:old/n.git"]);
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    let pasted = reviewing_pull_7(vec![pane]);
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+
+    assert_eq!(pasted_here(&host, &pasted).unwrap().at, At::There(0));
+
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    let head = pushed(&host, &up, "feat", "second");
+    assert_eq!(pasted_here(&host, &pasted).unwrap().at, At::There(0));
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), tracked_main);
+
+    pushed(&host, &up, "feat", "third");
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("changes that are not committed"), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+
+    git(&bare, &["config", "core.repositoryformatversion", "99"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("git did not say the remotes of"), "{refused:?}");
+}
+
+#[test]
+fn r_runs_nothing_a_pull_request_brings() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, work, feat) = (scratch.join("up"), scratch.join("work"), clone.join("feat"));
+    git(&clone.join(".bare"), &["config", "core.hooksPath", ".githooks"]);
+    git(&clone.join(".bare"), &["config", "core.fsmonitor", ".githooks/fsmonitor"]);
+    git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+
+    let ran = scratch.join("hook-ran");
+    fs::create_dir(work.join(".githooks")).unwrap();
+    for hook in ["post-checkout", "reference-transaction", "fsmonitor"] {
+        let text = format!("echo {hook} >> \"{}\"\n", ran.display());
+        script(&work.join(".githooks").join(hook), &text);
+    }
+    git(&work, &["add", ".githooks"]);
+    git(&work, &["commit", "-q", "-m", "hooks"]);
+    let head = git_said(&work, &["rev-parse", "HEAD"]);
+    git(&up, &["update-ref", "refs/heads/feat", &head]);
+    git(&up, &["update-ref", "refs/pull/7/head", &head]);
+    host.gh.pull(7, "main", &head);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert!(!ran.exists(), "the move ran {:?}", fs::read_to_string(&ran));
+
+    let main = git_said(&up, &["commit-tree", "-p", "main", "-m", "base moves", "main^{tree}"]);
+    git(&up, &["update-ref", "refs/heads/main", &main]);
+    let head = pushed(&host, &up, "feat", "one more");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), main);
+    assert!(!ran.exists(), "the base's fetch ran {:?}", fs::read_to_string(&ran));
+}
+
+#[test]
+fn r_keeps_the_git_config_of_the_daemon_s_environment() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare) = (scratch.join("up"), clone.join(".bare"));
+    let ssh = git_said(&bare, &["config", "core.sshCommand"]);
+    git(&bare, &["config", "--unset", "core.sshCommand"]);
+    let mut lunetad = host.vars().command(LUNETAD);
+    lunetad
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.sshCommand")
+        .env("GIT_CONFIG_VALUE_0", &ssh);
+    let _daemon = start_as(lunetad).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+
+    let head = pushed(&host, &up, "feat", "one more");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&clone.join("feat"), &["rev-parse", "HEAD"]), head);
+}
+
+/// wt names the branch `f-main`, as the clone has a `main` of its own.
+#[test]
+fn r_syncs_a_pull_request_from_a_fork_s_main() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, fork, main) = (scratch.join("up"), scratch.join("fork"), clone.join("main"));
+    git(&scratch, &["clone", "-q", "up", "fork"]);
+    let opened = |name: &str, amend: bool| {
+        let amended: &[&str] = if amend { &["--amend"] } else { &[] };
+        git(&fork, &[&["commit", "-q", "--allow-empty", "-m", name], amended].concat());
+        let spec = "+refs/heads/main:refs/pull/7/head";
+        git(&up, &["fetch", "-q", &fork.display().to_string(), spec]);
+        let head = git_said(&fork, &["rev-parse", "main"]);
+        host.gh.pull(7, "main", &head);
+        head
+    };
+    host.gh.api("f\thttps://github.com/f/n.git\tgit@github.com:f/n.git\tmain\n");
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let local_main = git_said(&main, &["rev-parse", "main"]);
+    let worktree = clone.join("f-main");
+
+    let head = opened("from the fork", false);
+    let ready = pasted_here(&host, &pasted).unwrap();
+    assert_eq!(ready.worktree, worktree.display().to_string());
+    assert_eq!(ready.branch.as_deref(), Some("f-main"));
+    assert_eq!(git_said(&worktree, &["rev-parse", "HEAD"]), head);
+
+    let head = opened("rewritten on the fork", true);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&worktree, &["rev-parse", "refs/remotes/f/main"]), head);
+    assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
 }
 
 /// A machine that made the worktree, and could not then say where the key goes,

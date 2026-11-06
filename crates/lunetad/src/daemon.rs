@@ -80,7 +80,7 @@ use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
-use crate::links::{Pasted, Ready, Unready};
+use crate::links::{Pasted, Unready};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination};
 use crate::watch::Troubles;
@@ -971,7 +971,7 @@ impl Daemon for Host {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let answer = late(move || pasted.ready().map(Ready::answer).map_err(unready));
+        let answer = late(move || pasted.answer().map_err(unready));
         Ok(Response::new(Box::pin(answer)))
     }
 

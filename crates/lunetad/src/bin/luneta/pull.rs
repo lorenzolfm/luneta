@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use lunetad::links::{self, Pasted, Unready};
-pub use lunetad::links::{At, Kind, Link, Of, Readied, Work};
+pub use lunetad::links::{At, Kind, Link, Of, Readied, Wanted, Work};
 use lunetad::log;
 
 use crate::away::{self, Away};
@@ -56,19 +56,20 @@ const THIS: &str = "this machine";
 /// Finds where a key of the menu numbered `menu` goes for `work`, pasted on a
 /// row of the machine `on`, among the panes the sidebar knows of it, `worked`,
 /// or else of the machines `others`, as `first_found` says, and has the
-/// worktree made there, on a thread of its own; and hands back what it found,
-/// or why it found nothing, as `Due` does. luneta finds it on its own machine,
-/// and the daemon of another machine there.
+/// worktree made there, as `wanted`, on a thread of its own; and hands back
+/// what it found, or why it found nothing, as `Due` does. luneta finds it on
+/// its own machine, and the daemon of another machine there.
 pub fn prepare(
     menu: u64,
     on: Machine,
     work: Work,
+    wanted: Wanted,
     worked: Vec<Worked>,
     others: Others,
     events: &Sender<Event>,
 ) {
     let due = Due::new(events, move |found| Event::Pulled { menu, found });
-    thread::spawn(move || due.pay(first_found(on, &work, worked, others, asked)));
+    thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, asked)));
 }
 
 /// Where a key of the menu goes on the machine `on`, by what that machine
@@ -96,6 +97,7 @@ fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> 
 fn first_found(
     on: Machine,
     work: &Work,
+    wanted: Wanted,
     worked: Vec<Worked>,
     others: Others,
     mut ask: impl FnMut(&Machine, &Pasted) -> Result<links::Ready<usize>, Unready>,
@@ -104,7 +106,7 @@ fn first_found(
         let apart = |Worked { session, pane, works }| ((session, pane), works);
         let (panes, worked): (Vec<(Listed, u32)>, Vec<links::Worked>) =
             worked.into_iter().map(apart).unzip();
-        let ready = ask(&on, &Pasted::new(work.clone(), worked))?;
+        let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted))?;
         match ready.placed(&panes) {
             Ok(ready) => Ok(Found { on, ready }),
             // It made the worktree by now.
@@ -186,6 +188,18 @@ pub fn make(repo: &str, of: &Of) -> ExitCode {
     }
 }
 
+/// Brings the worktree in `dir` to its upstream branch, as `links::followed`
+/// does. Or prints why it did not, as `make` does.
+pub fn follow(dir: &str) -> ExitCode {
+    match links::followed(dir) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("{}{why}", links::WHY);
+            ExitCode::FAILURE
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -233,7 +247,8 @@ mod tests {
         say: impl Fn(&Machine) -> Result<links::Ready<usize>, Unready>,
     ) -> (Result<Found, String>, Vec<Machine>) {
         let asked = RefCell::new(Vec::new());
-        let found = first_found(Machine::Local, work, vec![pane(1, "/m")], others, |on, _| {
+        let panes = vec![pane(1, "/m")];
+        let found = first_found(Machine::Local, work, Wanted::AsItIs, panes, others, |on, _| {
             asked.borrow_mut().push(on.clone());
             say(on)
         });
@@ -277,6 +292,20 @@ mod tests {
         assert_eq!(ready.at, At::Session((pane(9, "/w").session, 9)));
         let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
         assert_eq!(asked, order);
+    }
+
+    #[test]
+    fn each_machine_hears_what_the_key_wants_of_the_worktree() {
+        for (wanted, at_head) in [(Wanted::AsItIs, false), (Wanted::AtHead, true)] {
+            let others = vec![remote(far(), vec![pane(7, "/f")])];
+            let heard = RefCell::new(Vec::new());
+            let found = first_found(Machine::Local, &link(), wanted, Vec::new(), others, |on, it| {
+                heard.borrow_mut().push(it.asked(None).at_head);
+                if *on == Machine::Local { nowhere() } else { Ok(there(0)) }
+            });
+            assert!(found.is_ok(), "{found:?}");
+            assert_eq!(heard.into_inner(), [at_head, at_head]);
+        }
     }
 
     /// What goes wrong on the row's machine ends the search: it says what
@@ -338,7 +367,7 @@ mod tests {
 
         let others = vec![(Machine::Local, Ok(Vec::new()))];
         let far = Machine::Remote(far());
-        let said = first_found(far, &link(), Vec::new(), others, |on, _| match on {
+        let said = first_found(far, &link(), Wanted::AsItIs, Vec::new(), others, |on, _| match on {
             Machine::Local => Err(Unready::Failed("zoxide is no program".to_owned())),
             Machine::Remote(_) => nowhere(),
         });
@@ -378,7 +407,7 @@ mod tests {
         // This machine, among the others of a row of another, is named.
         let others = vec![(Machine::Local, Ok(vec![pane(1, "/m")])), remote(vps(), Vec::new())];
         let on = Machine::Remote(far());
-        let said = first_found(on, &link(), Vec::new(), others, |on, _| match on {
+        let said = first_found(on, &link(), Wanted::AsItIs, Vec::new(), others, |on, _| match on {
             Machine::Local => Err(Unready::InDoubt("no answer".to_owned())),
             Machine::Remote(_) => nowhere(),
         });
@@ -400,7 +429,8 @@ mod tests {
     #[test]
     fn a_pane_luneta_did_not_ask_of_is_no_place_to_go() {
         let on = Machine::Remote(far());
-        let found = first_found(on, &link(), Vec::new(), Vec::new(), |_, _| Ok(there(3)));
+        let found =
+            first_found(on, &link(), Wanted::AsItIs, Vec::new(), Vec::new(), |_, _| Ok(there(3)));
         assert_eq!(found, Err(format!("far: {UNASKED}")));
     }
 }

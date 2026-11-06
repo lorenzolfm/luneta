@@ -135,6 +135,29 @@ fn with_git_told_of_another_repository_none_is_made() {
     assert!(!clone.join("feat").exists());
 }
 
+/// As for a worktree: wt's git would read the repository the variable names, and
+/// move the branch checked out there.
+#[test]
+fn with_git_told_of_another_repository_nothing_follows() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone, plain) = (scratch.join("up"), scratch.join("clone"), scratch.join("plain"));
+    cloned_as_wt(&scratch, &up, &clone);
+    git(&scratch, &["clone", "-q", &up.display().to_string(), "plain"]);
+
+    let main = clone.join("main");
+    let mut luneta = Vars::default().command(LUNETA);
+    lunetad::local_git(&mut luneta);
+    let refused =
+        luneta.env("GIT_DIR", plain.join(".git")).arg("follow").arg(&main).output().unwrap();
+    assert!(!refused.status.success());
+    let why = format!(
+        "luneta: GIT_DIR is set, and git would take another repository for {}'s",
+        main.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
+}
+
 /// An issue's link with no `https://`, which git would take for a branch's
 /// name, as wt would make a new branch of, is refused as `luneta worktree`
 /// is asked, and no worktree is made.

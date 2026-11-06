@@ -633,8 +633,10 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// `switch`, it checks that out first, the next time it is asked. It views an
 /// issue by its number as `gh issue view` does, for its page alone, which a
 /// test wrote with `issue`, and notes what it was asked, for `issues`; of an
-/// issue it was given none for, it says GitHub has none. It knows no other
-/// command.
+/// issue it was given none for, it says GitHub has none. It views a pull
+/// request by its number for its branches, which a test wrote with `pull`, and
+/// notes what it was asked, for `viewed`. Its `api` says what a test wrote with
+/// `api`. It knows no other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -649,6 +651,17 @@ impl FakeGh {
     echo "$*" >> "{pulls}/issues"
     [ -f "{pulls}/issue-$3" ] && exec cat "{pulls}/issue-$3"
     echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
+    exit 1
+fi
+if [ "$1 $2 $4" = "pr view --repo" ]; then
+    echo "$*" >> "{pulls}/viewed"
+    [ -f "{pulls}/pull-$3" ] && exec cat "{pulls}/pull-$3"
+    echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
+    exit 1
+fi
+if [ "$1" = api ]; then
+    [ -f "{pulls}/api" ] && exec cat "{pulls}/api"
+    echo "gh: Not Found (HTTP 404)" >&2
     exit 1
 fi
 if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
@@ -703,6 +716,23 @@ exec cat "{pulls}/$branch.json"
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("what gh was asked does not read: {error}"),
         }
+    }
+
+    pub fn pull(&self, number: u32, base: &str, head: &str) {
+        let said = serde_json::json!({ "baseRefName": base, "headRefOid": head });
+        fs::write(self.pulls.join(format!("pull-{number}")), said.to_string()).unwrap();
+    }
+
+    pub fn viewed(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("viewed")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
+    }
+
+    pub fn api(&self, said: &str) {
+        fs::write(self.pulls.join("api"), said).unwrap();
     }
 
     /// Has gh find `said` for `branch` from now on, as `gh pr view --json`
@@ -952,7 +982,11 @@ impl Daemon {
 /// Starts a daemon, and waits for it to say that it listens. One that ends
 /// first has refused to run, and gives how it ended and all it said.
 pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
-    let mut process = Running::spawn(vars.command(LUNETAD).stderr(Stdio::piped()));
+    start_as(vars.command(LUNETAD))
+}
+
+pub fn start_as(mut lunetad: Command) -> Result<Daemon, (ExitStatus, String)> {
+    let mut process = Running::spawn(lunetad.stderr(Stdio::piped()));
     let stderr = BufReader::new(process.child.stderr.take().unwrap());
     let (tell, heard) = mpsc::channel();
     thread::spawn(move || {
