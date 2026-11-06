@@ -1678,8 +1678,7 @@ each command brings the pinned tools it runs on.
 |---|---|
 | `dev fmt` | Format the rust, nix and proto files. `--check` only says what would change |
 | `dev check` | Whether every target compiles |
-| `dev clippy` | The lints over every target, warnings denied. A plain `cargo clippy` passes what this fails |
-| `dev clippy-mac` | The same lints over what only the Mac compiles, from any system. It links and runs nothing |
+| `dev clippy` | The lints over every target, for Linux and the Mac from either, warnings denied. A plain `cargo clippy` passes what this fails |
 | `dev lint` | statix and deadnix over the nix files, and `buf breaking` over the protocol, as another machine's daemon can run another build |
 | `dev test` | The tests on nextest, then the doctests. `-P quick` leaves out those that wait out the daemon's 30 seconds |
 | `dev mac-test <ssh destination>` | The tests on a Mac over ssh, unpushed edits included, on a copy that touches no checkout there |
