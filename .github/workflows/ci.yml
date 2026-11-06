@@ -36,11 +36,11 @@ jobs:
             experimental-features = nix-command flakes
             keep-outputs = true
 
-      # The nix store, as the last run on main left it, so that a run builds only
+      # The nix store, as the last run on main left it, so that nix builds only
       # what main has not built (#187). Each crate's dependencies are a derivation
-      # of their own (crane, in flake.nix), so a PR that changes luneta's code
-      # compiles luneta's crates and none of the others, and one that changes
-      # nothing cargo reads compiles nothing.
+      # of their own (crane, in flake.nix), so for a PR that changes luneta's code
+      # nix compiles luneta's crates and none of the others, and for one that
+      # changes nothing cargo reads it compiles nothing.
       #
       # Only main saves, and a PR restores what main saved. The Actions cache holds
       # 10 GB for the whole repo, and a PR's store would serve that PR alone while
@@ -74,8 +74,8 @@ jobs:
       - name: Bans, licenses and sources
         run: nix build -L --out-link deny .#checks.x86_64-linux.deny
 
-      # `dev clippy`'s run, as the flake's check makes it in the sandbox, against the
-      # dependencies the daemon's build compiles, so that clippy compiles none of
+      # `dev clippy`'s Linux run, as the flake's check makes it in the sandbox, against
+      # the dependencies the daemon's build compiles, so that clippy compiles none of
       # them again. Through the flake and not a bare `cargo clippy`: the invocation
       # is written down once (`clippyRun` in flake.nix), and the rust this lints with
       # is the one the flake pins rather than whatever the runner image ships. The
@@ -87,6 +87,7 @@ jobs:
         run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
 
       - name: Clippy for the Mac
+        if: ${{ !cancelled() }}
         run: nix run .#dev.commands.clippy-cross
 
       # What advisories say of the crates Cargo.lock locks: the ones known of
@@ -204,9 +205,9 @@ jobs:
       # The daemon with the features its build turns on, which are not the tests':
       # a test build turns on what the dev-dependencies ask of a crate for the daemon
       # too, rustix's `pty` among them. What is behind `cfg(target_os = "macos")`
-      # compiles on the Mac alone, so a call there that needs such a feature would
-      # pass the tests and fail the build below, which the Mac skips where the
-      # `target/` hit.
+      # compiles without them on the Mac alone, so a call there that needs such a
+      # feature would pass the tests and fail the build below, which the Mac skips
+      # where the `target/` hit.
       #
       # A check, which writes no code. On each run and not only where the build is
       # skipped, so that main saves what it checked of the dependencies with the
