@@ -2,12 +2,13 @@
 //! it. wt moves it, as `wt follow` does, and never one that holds work of its
 //! own. wt follows the branch's upstream, so this checks it came to the head.
 
+use std::env;
 use std::path::Path;
 use std::process::Command;
 
 use serde::Deserialize;
 
-use super::{ASKING, GITHUB, Link, MAKING, across, failure, luneta, remote_in, said};
+use super::{ASKING, GITHUB, Link, MAKING, failure, luneta, remote_in, said};
 use crate::git;
 use crate::program::{self, Ran};
 
@@ -21,8 +22,7 @@ struct Viewed {
 pub(super) fn to_head(dir: &str, link: &Link) -> Result<(), String> {
     let remote = remote_in(dir, link)?;
     let Viewed { base_ref_name: base, head_ref_oid: head } = viewed(link)?;
-    let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
-    across(dir, "fetch", &["--no-tags", "--", &remote, &base])?;
+    fetch(dir, &remote, &base)?;
     if here(dir)? == head {
         return Ok(());
     }
@@ -52,6 +52,24 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
     serde_json::from_slice(&said).map_err(|error| format!("gh pr view does not read: {error}"))
 }
 
+fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
+    let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
+    let mut git = Command::new("git");
+    git::local(hookless(&mut git).args(["-C", dir, "fetch", "--no-tags", "--", remote, &base]));
+    let ran = program::run_alone(&mut git, MAKING)
+        .map_err(|error| format!("git fetch could not be run: {error}"))?;
+    ran.answer().map(drop).map_err(|why| format!("git fetch: {why}"))
+}
+
+fn hookless(command: &mut Command) -> &mut Command {
+    let count = env::var("GIT_CONFIG_COUNT").ok();
+    let next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
+    command
+        .env("GIT_CONFIG_COUNT", next.saturating_add(1).to_string())
+        .env(format!("GIT_CONFIG_KEY_{next}"), "core.hooksPath")
+        .env(format!("GIT_CONFIG_VALUE_{next}"), "/dev/null")
+}
+
 fn here(dir: &str) -> Result<String, String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "rev-parse", "--verify", "HEAD"]));
@@ -68,7 +86,7 @@ fn top(dir: &str) -> Result<String, String> {
 /// stderr, and git may ask for a passphrase on the terminal of its session.
 fn follow(dir: &str) -> Result<(), String> {
     let mut luneta = Command::new(luneta()?);
-    git::local(luneta.args(["follow", dir]));
+    git::local(hookless(&mut luneta).args(["follow", dir]));
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta follow could not be run: {error}"))?;
     match ran {

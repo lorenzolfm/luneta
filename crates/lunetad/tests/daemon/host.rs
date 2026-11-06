@@ -982,7 +982,11 @@ impl Daemon {
 /// Starts a daemon, and waits for it to say that it listens. One that ends
 /// first has refused to run, and gives how it ended and all it said.
 pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
-    let mut process = Running::spawn(vars.command(LUNETAD).stderr(Stdio::piped()));
+    start_as(vars.command(LUNETAD))
+}
+
+pub fn start_as(mut lunetad: Command) -> Result<Daemon, (ExitStatus, String)> {
+    let mut process = Running::spawn(lunetad.stderr(Stdio::piped()));
     let stderr = BufReader::new(process.child.stderr.take().unwrap());
     let (tell, heard) = mpsc::channel();
     thread::spawn(move || {

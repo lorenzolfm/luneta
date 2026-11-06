@@ -715,9 +715,11 @@ says, press `r` again, and a rewrite still moves. Another fetch of the branch, a
 `git fetch` or a `wt prune`, moves that ref first, and wt can then not tell the old
 commits from yours, so the note gives the command that moves the branch. Untracked
 and ignored files do not count, as git will not overwrite one, and says so if the
-head has a file of its name. An agent already working there does not stop it: the
-key is yours to press. A machine whose `lunetad` is too old to sync starts no review
-either. `w` goes to a worktree as it is, and never moves it.
+head has a file of its name. No git hook runs for the fetch or the move, as one in a
+`core.hooksPath` inside the tree would be the author's to write. An agent already
+working there does not stop it: the key is yours to press. A machine whose `lunetad`
+is too old to sync starts no review either. `w` goes to a worktree as it is, and
+never moves it.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named

@@ -42,7 +42,9 @@ use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
-use crate::host::{answered, eventually, folder_in, script, start, Host, Vars, DROPPED, LUNETA};
+use crate::host::{
+    answered, eventually, folder_in, script, start, start_as, Host, Vars, DROPPED, LUNETA, LUNETAD,
+};
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -1912,6 +1914,67 @@ fn r_on_a_rewrite_another_fetch_saw_first_says_what_moves_the_branch() {
     let command = format!("run git switch --no-overwrite-ignore -C feat {head}");
     assert!(refused.message().ends_with(&command), "{refused:?}");
     assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), was);
+}
+
+#[test]
+fn r_runs_no_hook_a_pull_request_brings() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, work, feat) = (scratch.join("up"), scratch.join("work"), clone.join("feat"));
+    git(&clone.join(".bare"), &["config", "core.hooksPath", ".githooks"]);
+    git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
+    let _daemon = start(host.vars()).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+
+    let ran = scratch.join("hook-ran");
+    fs::create_dir(work.join(".githooks")).unwrap();
+    for hook in ["post-checkout", "reference-transaction"] {
+        let text = format!("echo {hook} >> \"{}\"\n", ran.display());
+        script(&work.join(".githooks").join(hook), &text);
+    }
+    git(&work, &["add", ".githooks"]);
+    git(&work, &["commit", "-q", "-m", "hooks"]);
+    let head = git_said(&work, &["rev-parse", "HEAD"]);
+    git(&up, &["update-ref", "refs/heads/feat", &head]);
+    git(&up, &["update-ref", "refs/pull/7/head", &head]);
+    host.gh.pull(7, "main", &head);
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert!(!ran.exists(), "the move ran {:?}", fs::read_to_string(&ran));
+
+    let main = git_said(&up, &["commit-tree", "-p", "main", "-m", "base moves", "main^{tree}"]);
+    git(&up, &["update-ref", "refs/heads/main", &main]);
+    let head = pushed(&host, &up, "feat", "one more");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), main);
+    assert!(!ran.exists(), "the base's fetch ran {:?}", fs::read_to_string(&ran));
+}
+
+#[test]
+fn r_keeps_the_git_config_of_the_daemon_s_environment() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare) = (scratch.join("up"), clone.join(".bare"));
+    let ssh = git_said(&bare, &["config", "core.sshCommand"]);
+    git(&bare, &["config", "--unset", "core.sshCommand"]);
+    let mut lunetad = host.vars().command(LUNETAD);
+    lunetad
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.sshCommand")
+        .env("GIT_CONFIG_VALUE_0", &ssh);
+    let _daemon = start_as(lunetad).unwrap();
+    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    pasted_here(&host, &pasted).unwrap();
+
+    let head = pushed(&host, &up, "feat", "one more");
+    pasted_here(&host, &pasted).unwrap();
+    assert_eq!(git_said(&clone.join("feat"), &["rev-parse", "HEAD"]), head);
 }
 
 /// wt names the branch `f-main`, as the clone has a `main` of its own.
