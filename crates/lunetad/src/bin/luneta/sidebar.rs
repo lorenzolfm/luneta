@@ -3143,6 +3143,9 @@ impl Sidebar {
         let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.pulling()) else {
             return Asked::Nothing;
         };
+        if let Some(off_branch) = waiting.off_branch(&found) {
+            self.say(off_branch);
+        }
         self.menu_did(waiting.pulled(found))
     }
 
@@ -8010,6 +8013,34 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(Some(work), Work::parse("/w/plan.md", None));
+    }
+
+    #[test]
+    fn the_notes_name_the_branch_of_a_worktree_found_off_its_own() {
+        let page = "https://github.com/lorenzolfm/luneta/issues/5";
+        let found = |branch: &str| {
+            let at = At::Session((listed("older", 10), 1));
+            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let branch = Some(branch.to_owned());
+            let ready = Ready { at, worktree: worktree.to_owned(), branch, work };
+            Found { on: Machine::Local, ready }
+        };
+        for (branch, note) in [
+            ("dev-docs", Some("#5's worktree is on dev-docs, not issue-5")),
+            ("issue-5", None),
+        ] {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.paste(page);
+            let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+            let Asked::Pull { wanted, .. } = sidebar.key(&char('w'), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            assert_eq!(wanted, Wanted::AsItIs);
+            let asked = sidebar.pulled(number, Ok(found(branch)));
+            assert!(matches!(asked, Asked::Open { .. } | Asked::OpenThere { .. }), "{asked:?}");
+            assert_eq!(sidebar.notice.as_deref(), note);
+        }
     }
 
     /// A row that says where it works by no absolute path, as an agent's

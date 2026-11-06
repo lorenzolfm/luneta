@@ -400,6 +400,25 @@ impl Work {
             Work::File(file) => file.stem.clone(),
         }
     }
+
+    fn branch(&self) -> Option<String> {
+        match self {
+            Work::Link(link) => link.branch(),
+            Work::File(file) => Some(file.branch()),
+        }
+    }
+
+    /// What a note says of a worktree found for it with `checked_out` there,
+    /// where that is not the branch luneta has wt make for it.
+    #[must_use]
+    pub fn off_branch(&self, checked_out: Option<&str>) -> Option<String> {
+        let own = self.branch().filter(|own| checked_out != Some(own.as_str()))?;
+        Some(format!("{}'s worktree is {}, not {own}", self.tab(), on_branch(checked_out)))
+    }
+}
+
+fn on_branch(checked_out: Option<&str>) -> String {
+    checked_out.map_or("on no branch".to_owned(), |branch| format!("on {branch}"))
 }
 
 impl fmt::Display for Work {
@@ -741,6 +760,7 @@ impl From<String> for Unready {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wanted {
     AsItIs,
+    OnItsBranch,
     AtHead,
 }
 
@@ -770,7 +790,7 @@ impl Pasted {
     /// by no absolute path, or more panes than `WORKED_MAX`, or a pane by no
     /// absolute path, or a pull request's page that is no link.
     pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
-        let PasteRequest { on, work, worked, at_head } = request;
+        let PasteRequest { on, work, worked, at_head, any_branch } = request;
         let work = match work {
             Some(paste_request::Work::Link(link)) => {
                 Work::Link(Link::parse(&link).ok_or_else(|| {
@@ -787,7 +807,12 @@ impl Pasted {
             },
             None => return Err("it says neither a link nor a file".to_owned()),
         };
-        let wanted = if at_head { Wanted::AtHead } else { Wanted::AsItIs };
+        let wanted = match (at_head, any_branch) {
+            (false, false) => Wanted::OnItsBranch,
+            (false, true) => Wanted::AsItIs,
+            (true, false) => Wanted::AtHead,
+            (true, true) => return Err("any_branch: a head is on its own branch".to_owned()),
+        };
         if at_head && !matches!(&work, Work::Link(link) if link.kind() == Kind::Pull) {
             return Err("at_head: only a pull request has a head".to_owned());
         }
@@ -825,7 +850,9 @@ impl Pasted {
                 paste_request::Work::File(AskedFile { path: path.clone(), from })
             },
         };
-        PasteRequest { on, work: Some(work), worked, at_head: self.wanted == Wanted::AtHead }
+        let (at_head, any_branch) =
+            (self.wanted == Wanted::AtHead, self.wanted == Wanted::AsItIs);
+        PasteRequest { on, work: Some(work), worked, at_head, any_branch }
     }
 
     /// Where a key goes, on the machine this runs on, by the place of its
@@ -836,7 +863,7 @@ impl Pasted {
     pub fn ready(&self) -> Result<Ready<usize>, Unready> {
         match &self.work {
             Work::Link(link) => ready(link, self.wanted, &self.worked),
-            Work::File(file) => ready_file(file, &self.worked),
+            Work::File(file) => ready_file(file, self.wanted, &self.worked),
         }
     }
 
@@ -949,7 +976,11 @@ fn ready(link: &Link, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>,
         },
     };
     kind_holds(link)?;
+    let work = Readied::Link(link.clone());
     if let Some(branch) = link.branch() {
+        if let Some(worktree) = moved_off(&repository, &branch, wanted)? {
+            return going_to(worktree, going, worked, work);
+        }
         let remote = match remotes_in(&repository) {
             Remotes::Listed(listed) => remote(&listed, link, ssh_host),
             Remotes::Unlisted | Remotes::Unsaid(_) => None,
@@ -959,7 +990,7 @@ fn ready(link: &Link, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>,
         })?;
         base(&repository, &remote, &branch)?;
     }
-    let ready = made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))?;
+    let ready = made_worktree(&repository, &link.wt(), going, worked, work)?;
     synced(&ready.worktree, link, wanted)?;
     Ok(ready)
 }
@@ -968,7 +999,7 @@ fn ready(link: &Link, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>,
 /// should make a second worktree of it.
 fn synced(dir: &str, link: &Link, wanted: Wanted) -> Result<(), Unready> {
     match wanted {
-        Wanted::AsItIs => Ok(()),
+        Wanted::AsItIs | Wanted::OnItsBranch => Ok(()),
         Wanted::AtHead => sync::to_head(dir, link)
             .map_err(|why| Unready::InDoubt(format!("started no review in {dir}: {why}"))),
     }
@@ -993,7 +1024,7 @@ fn kind_holds(link: &Link) -> Result<(), String> {
 /// Where a key goes for `file` among the panes `worked`, as `Pasted::ready`
 /// says: the file, read where it is, says the repository, and any pane that
 /// works in that is of it, as in no other, whichever remotes it has.
-fn ready_file(file: &File, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
+fn ready_file(file: &File, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
     let real = file.real()?;
     let (repository, common) = file.repository(&real)?;
     wt_made(&repository)?;
@@ -1010,13 +1041,52 @@ fn ready_file(file: &File, worked: &[Worked]) -> Result<Ready<usize>, Unready> {
         Going::Clone { cwd, name }
     };
     let branch = file.branch();
+    let work = Readied::File { real };
+    if let Some(worktree) = moved_off(&repository, &branch, wanted)? {
+        return going_to(worktree, going, worked, work);
+    }
     base(&repository, ORIGIN, &branch)?;
-    made_worktree(&repository, &Of::Branch(branch), going, worked, Readied::File { real })
+    made_worktree(&repository, &Of::Branch(branch), going, worked, work)
+}
+
+fn moved_off(dir: &str, own: &str, wanted: Wanted) -> Result<Option<String>, String> {
+    let Common::Of(common) = common_dir(dir) else {
+        return Err(format!("git does not say what repository {dir} is"));
+    };
+    let there = wt_makes(&common, own);
+    let mut git = Command::new("git");
+    git::local(git.args(["-C", dir, "worktree", "list", "--porcelain"]));
+    let ran = program::run(&mut git, ANSWER)
+        .map_err(|error| format!("git worktree list could not be run: {error}"))?;
+    let listed = ran.answer().map_err(|why| format!("git worktree list: {why}"))?;
+    if !sits_off(&String::from_utf8_lossy(&listed), &there, own) {
+        return Ok(None);
+    }
+    let Some(worktree) = directory(&there) else {
+        return Ok(None);
+    };
+    match wanted {
+        Wanted::AsItIs => Ok(Some(worktree)),
+        Wanted::OnItsBranch | Wanted::AtHead => Err(format!(
+            "{worktree} is {}, not {own}, so no agent starts there; w opens it",
+            on_branch(branch(&worktree).as_deref())
+        )),
+    }
+}
+
+fn wt_makes(common: &str, branch: &str) -> String {
+    let container = common.strip_suffix("/.bare").unwrap_or(common);
+    format!("{container}/{branch}")
+}
+
+fn sits_off(listed: &str, there: &str, own: &str) -> bool {
+    let head = format!("branch refs/heads/{own}");
+    let sits = |line: &str| line.strip_prefix("worktree ") == Some(there);
+    listed.lines().any(sits) && !listed.lines().any(|line| line == head)
 }
 
 /// Where a key goes once the worktree `of` is made in the repository `dir` is
-/// in: `going`, or a pane among `worked` that works in the worktree, where it
-/// was one already, as the kernel says where. An agent there is on `work`.
+/// in, as `going_to` says.
 fn made_worktree(
     dir: &str,
     of: &Of,
@@ -1024,7 +1094,18 @@ fn made_worktree(
     worked: &[Worked],
     work: Readied,
 ) -> Result<Ready<usize>, Unready> {
-    let worktree = worktree(dir, of)?;
+    going_to(worktree(dir, of)?, going, worked, work)
+}
+
+/// Where a key goes for `worktree`: `going`, or a pane among `worked` that
+/// works in it, where it was one already, as the kernel says where. An agent
+/// there is on `work`.
+fn going_to(
+    worktree: String,
+    going: Going,
+    worked: &[Worked],
+    work: Readied,
+) -> Result<Ready<usize>, Unready> {
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == worktree);
     let at = match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
         (Some((at, _)), _) => At::There(at),
@@ -1920,7 +2001,13 @@ mod tests {
         let refused = |path: &str, from: Option<&str>| {
             let file = AskedFile { path: path.to_owned(), from: from.map(str::to_owned) };
             let work = Some(paste_request::Work::File(file));
-            let request = PasteRequest { on: None, work, worked: Vec::new(), at_head: false };
+            let request = PasteRequest {
+                on: None,
+                work,
+                worked: Vec::new(),
+                at_head: false,
+                any_branch: false,
+            };
             Pasted::of(request).map(drop).unwrap_err()
         };
         assert_eq!(refused("plan.txt", None), "file: \"plan.txt\" is no path of a .md file");
@@ -2230,6 +2317,44 @@ mod tests {
             let why = Pasted::of(at_head(work)).unwrap_err();
             assert_eq!(why, "at_head: only a pull request has a head");
         }
+    }
+
+    #[test]
+    fn a_question_says_what_the_key_wants_of_the_worktree() {
+        let pasted = |wanted| Pasted::new(Work::Link(link()), Vec::new()).wanting(wanted);
+        for wanted in [Wanted::AsItIs, Wanted::OnItsBranch, Wanted::AtHead] {
+            assert_eq!(Pasted::of(pasted(wanted).asked(None)), Ok((None, pasted(wanted))));
+        }
+        let both = PasteRequest { any_branch: true, ..pasted(Wanted::AtHead).asked(None) };
+        assert_eq!(Pasted::of(both).unwrap_err(), "any_branch: a head is on its own branch");
+    }
+
+    #[test]
+    fn luneta_looks_for_a_worktree_where_wt_makes_one() {
+        let scratch = tempfile::tempdir().unwrap();
+        for name in [".bare", ".git", "cdk.git"] {
+            let bare = fs::canonicalize(scratch.path()).unwrap().join(name);
+            let bare = bare.to_str().unwrap();
+            assert!(git(scratch.path(), &["init", "-q", "--bare", bare]).is_some());
+            let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
+            let wt = Repo::discover(Some(Path::new(bare))).unwrap().container().join("issue-7");
+            assert_eq!(wt_makes(&common, "issue-7"), wt.to_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_note_names_a_worktree_s_branch_only_where_it_is_not_its_own() {
+        let file = Work::File(File::parse("/w/sync-rework.md", None).unwrap());
+        let of = |work: &Work, on| work.off_branch(on);
+        let note = "#2736's worktree is on dev-docs, not issue-2736";
+        assert_eq!(of(&Work::Link(issue()), Some("dev-docs")).as_deref(), Some(note));
+        let note = "#2736's worktree is on no branch, not issue-2736";
+        assert_eq!(of(&Work::Link(issue()), None).as_deref(), Some(note));
+        assert_eq!(of(&Work::Link(issue()), Some("issue-2736")), None);
+        let note = "sync-rework's worktree is on feat, not md-sync-rework";
+        assert_eq!(of(&file, Some("feat")).as_deref(), Some(note));
+        assert_eq!(of(&file, Some("md-sync-rework")), None);
+        assert_eq!(of(&Work::Link(link()), Some("feat")), None);
     }
 
     /// A pane named by its place among those luneta said is the pane it

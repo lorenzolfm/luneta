@@ -713,6 +713,10 @@ message PasteRequest {
   // Whether the worktree must be at the pull request's head before the answer.
   // Of anything but a pull request's link, it is invalid.
   bool at_head = 5;
+  // Whether a worktree that sits where one of what was pasted's branch would
+  // be made will do, on whichever branch it has come to, as no agent starts on
+  // it. With `at_head`, it is invalid.
+  bool any_branch = 6;
 
   message File {
     // Its path, as it was pasted: from the root, from `~/`, or else from

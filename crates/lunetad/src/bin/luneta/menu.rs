@@ -485,7 +485,8 @@ impl Pull {
     const fn wanted(self, asks: Asks) -> Wanted {
         match (self, asks) {
             (Pull::Agent, Asks::Review) => Wanted::AtHead,
-            (Pull::Worktree, _) | (Pull::Agent, Asks::Tackle) => Wanted::AsItIs,
+            (Pull::Agent, Asks::Tackle) => Wanted::OnItsBranch,
+            (Pull::Worktree, _) => Wanted::AsItIs,
         }
     }
 
@@ -1347,7 +1348,9 @@ impl Wait {
         match self {
             Wait::Pulling(pull) => match pull.wanted(Asks::of(work)) {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
-                Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
+                Wanted::AsItIs | Wanted::OnItsBranch => {
+                    format!("Making a worktree of {}…", work.tab())
+                },
             },
             Wait::Opening(_) => format!("Opening {}…", work.tab()),
             Wait::Making(session) => format!("Making session {session}…"),
@@ -1737,6 +1740,13 @@ impl Menu {
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
         }
+    }
+
+    pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
+        let (Stage::Pull { work, .. }, Ok(found)) = (&self.stage, found) else {
+            return None;
+        };
+        work.off_branch(found.ready.branch.as_deref())
     }
 
     /// What the shell of the menu's row ran, as the daemon says it now: one
@@ -3476,7 +3486,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
+        assert_eq!(wants, Wants::Pull(issue, Wanted::OnItsBranch));
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
@@ -3518,7 +3528,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
+        assert_eq!(wants, Wants::Pull(file(), Wanted::OnItsBranch));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");

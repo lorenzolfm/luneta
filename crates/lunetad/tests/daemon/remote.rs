@@ -2255,6 +2255,91 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     });
 }
 
+#[test]
+fn w_opens_the_worktree_where_an_issue_s_would_go_and_t_starts_no_agent_off_its_branch() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    far.gh.issue(8, "https://github.com/o/n/issues/8");
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_issue_7(&far, &scratch);
+    let (bare, main, moved) = (clone.join(".bare"), clone.join("main"), clone.join("issue-7"));
+    git(&bare, &["worktree", "add", "-q", "../issue-7", "feat"]);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
+        let link = Work::Link(issue.clone());
+        let panes = vec![pane_in(&main)];
+        let w = Pasted::new(link.clone(), panes.clone());
+        let t = Pasted::new(link.clone(), panes.clone()).wanting(Wanted::OnItsBranch);
+        let worktree = moved.display().to_string();
+        let refused = |on: &str| format!(
+            "{worktree} is on {on}, not issue-7, so no agent starts there; w opens it"
+        );
+
+        let opened = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        let (at, work) = (At::Session(0), Readied::Link(issue));
+        let branch = Some("feat".to_owned());
+        let answer = Ready { at, worktree: worktree.clone(), branch, work };
+        assert_eq!(opened, answer);
+        assert_eq!(rev_parse_verify(&main, "refs/heads/issue-7"), None);
+        assert_eq!(refused_there(&mut daemon, &t).await, refused("feat"));
+
+        let in_it = vec![pane_in(&main), pane_in(&moved)];
+        let there = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), in_it)).await;
+        assert_eq!(there.unwrap().at, At::There(1));
+
+        let none = Pasted::new(link.clone(), Vec::new());
+        let made = pasted_on(&mut daemon, "far", &none).await.unwrap();
+        assert!(matches!(made.at, At::Clone { .. }), "{made:?}");
+        assert_eq!(made.worktree, worktree);
+
+        git(&moved, &["switch", "-q", "--detach"]);
+        let detached = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        assert_eq!((detached.worktree, detached.branch), (worktree.clone(), None));
+        assert_eq!(refused_there(&mut daemon, &t).await, refused("no branch"));
+
+        git(&moved, &["switch", "-q", "-c", "issue-7"]);
+        for own in [&w, &t] {
+            let on_it = pasted_on(&mut daemon, "far", own).await.unwrap();
+            assert_eq!(on_it.worktree, worktree);
+            assert_eq!(on_it.branch.as_deref(), Some("issue-7"));
+        }
+
+        fs::create_dir(clone.join("issue-8")).unwrap();
+        let eight = Work::Link(Link::parse("https://github.com/o/n/issues/8").unwrap());
+        let why = refused_there(&mut daemon, &Pasted::new(eight, panes.clone())).await;
+        assert!(why.ends_with("issue-8 is already present"), "{why}");
+
+        let plan = main.join("plan.md");
+        fs::write(&plan, "written down").unwrap();
+        let plan = plan.display().to_string();
+        git(&bare, &["worktree", "add", "-q", "-b", "other", "../md-plan", "main"]);
+        let moved = clone.join("md-plan").display().to_string();
+        let file = Work::File(links::File::parse(&plan, None).unwrap());
+        let w = Pasted::new(file.clone(), panes.clone());
+        let opened = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        let (at, work) = (At::Session(0), Readied::File { real: plan.clone() });
+        let branch = Some("other".to_owned());
+        assert_eq!(opened, Ready { at, worktree: moved.clone(), branch, work });
+        assert_eq!(rev_parse_verify(&main, "refs/heads/md-plan"), None);
+        let t = Pasted::new(file, panes).wanting(Wanted::OnItsBranch);
+        assert_eq!(
+            refused_there(&mut daemon, &t).await,
+            format!("{moved} is on other, not md-plan, so no agent starts there; w opens it")
+        );
+    });
+}
+
 /// Why the daemon of the machine `far` found nothing for `pasted`.
 async fn refused_there(daemon: &mut DaemonClient<Channel>, pasted: &Pasted) -> String {
     let refused = pasted_on(daemon, "far", pasted).await.unwrap_err();
