@@ -18,7 +18,7 @@ use rustix::termios::{self, Winsize};
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::demand::{answering, moved, stop, Detached};
+use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
 use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
 use crate::remote::{hosts, FakeSsh};
 use crate::sessions::listed;
@@ -587,6 +587,38 @@ fn a_daemon_that_goes_away_is_started_again_in_moments() {
         let ended = waiting.join().unwrap();
         assert!(ended.status.success(), "{}", ended.said);
     });
+}
+
+/// An answer to `Watch` of another daemon than the one luneta reached, as a
+/// connection that closed reconnects to whichever listens by then, luneta drops:
+/// it has heard nothing, and waits on. It says so, and reaches for a daemon afresh,
+/// which asks `Info` once each time.
+#[test]
+fn an_answer_of_another_daemon_than_the_one_reached_is_dropped() {
+    const OTHER: u32 = 1;
+    let here = Host::new();
+    hosts(&here, "silent\n");
+    let notes = here.home.path().join("notes");
+    let stand_in = stand_in_watched_as(&here, OTHER, &notes);
+
+    let began = Instant::now();
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    let took = began.elapsed();
+    assert!(ended.status.success(), "{}", ended.said);
+    assert!(took >= HEARING, "it took {took:?}");
+
+    let log = fs::read_to_string(here.home.path().join(".local/state/luneta/luneta.log")).unwrap();
+    let note = format!(
+        "lunetad (pid {OTHER}) answered in the place of the one luneta reached (pid {})",
+        stand_in.pid()
+    );
+    assert!(log.contains(&note), "{log}");
+
+    let notes = fs::read_to_string(&notes).unwrap();
+    let asked = |what| notes.lines().filter(|line| *line == what).count();
+    let (infos, watches) = (asked("info"), asked("watch"));
+    assert!(infos >= 3, "it reached for a daemon {infos} times: {notes}");
+    assert!(infos.abs_diff(watches) <= 1, "{infos} of Info to {watches} of Watch: {notes}");
 }
 
 /// A lunetad that does not start, luneta starts again no more than once a

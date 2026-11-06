@@ -10,11 +10,11 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
-use lunetad::api::{InfoRequest, Version, WatchRequest};
+use lunetad::api::{Version, WatchRequest};
 use tokio::time::Instant;
 
 use crate::commands::causes;
-use crate::daemon::{self, Reach};
+use crate::daemon::{self, Current};
 use crate::host::Event;
 
 /// How often luneta reaches for a daemon at the most, from when it last began
@@ -62,19 +62,15 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
         // A daemon found afresh is asked for the whole host, as one started
         // again counts its versions afresh.
         let mut after: Option<Version> = None;
-        let failure = match daemon::reach(&folder, Reach::Current).await {
-            Ok(mut daemon) => 'reached: {
-                let claude_folder = match daemon.info(InfoRequest {}).await {
-                    // A daemon that says no folder, as one older than the
-                    // field, is taken to read luneta's, as before: one whose
-                    // environment named none lists no agents to look for.
-                    Ok(info) => info
-                        .into_inner()
-                        .claude_folder
-                        .map(|folder| PathBuf::from(OsString::from_vec(folder)))
-                        .or_else(lunetad::claude_folder),
-                    Err(status) => break 'reached causes(&status),
-                };
+        let failure = match daemon::current(&folder).await {
+            Ok(Current { mut daemon, info, .. }) => {
+                // A daemon that says no folder, as one older than the field, is
+                // taken to read luneta's, as before: one whose environment named
+                // none lists no agents to look for.
+                let claude_folder = info
+                    .claude_folder
+                    .map(|folder| PathBuf::from(OsString::from_vec(folder)))
+                    .or_else(lunetad::claude_folder);
                 // luneta is on its way out.
                 if events.send(Event::Reached { claude_folder }).is_err() {
                     return;
@@ -89,6 +85,13 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
                                 break "an answer with no version, which this luneta does not read"
                                     .to_owned();
                             };
+                            if version.pid != info.pid {
+                                break format!(
+                                    "lunetad (pid {}) answered in the place of the one luneta \
+                                     reached (pid {})",
+                                    version.pid, info.pid
+                                );
+                            }
                             after = Some(version);
                             // luneta is on its way out.
                             if events.send(Event::Daemon(Ok(host))).is_err() {

@@ -25,7 +25,7 @@ use lunetad::BRIDGED;
 use tokio::time::timeout;
 
 use crate::commands;
-use crate::daemon::{self, Reach};
+use crate::daemon;
 
 /// How much luneta hands on at once, at the most.
 const BUFFER: usize = 64 * 1024;
@@ -68,9 +68,9 @@ fn reached(path: &Path) -> Result<UnixStream, String> {
     let socket = runtime.block_on(async {
         // A daemon luneta started by then runs on, detached, as it would
         // once luneta ended.
-        let reaching = timeout(REACHING, daemon::reached(path, Reach::Current)).await;
+        let reaching = timeout(REACHING, daemon::current(path)).await;
         let late = |_| format!("no lunetad answered in {}s", REACHING.as_secs());
-        let (folder, _) = reaching.map_err(late)??;
+        let daemon::Current { folder, .. } = reaching.map_err(late)??;
         let socket = lunetad::stream(&folder).await;
         socket.map_err(|error| format!("{}: {error}", folder.socket().display()))
     })?;

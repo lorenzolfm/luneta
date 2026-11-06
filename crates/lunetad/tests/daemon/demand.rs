@@ -2,7 +2,8 @@
 //! of an older one, and it ends once zellij has had no session for a while.
 
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
@@ -59,6 +60,12 @@ const STAND_IN_PID: &str = "LUNETA_TEST_STAND_IN_PID";
 /// Set, the stand-in says that it reads zellij's sessions in this folder, and
 /// else nothing of it, as a daemon older than the field.
 const STAND_IN_READS: &str = "LUNETA_TEST_STAND_IN_READS";
+
+/// Set, the stand-in answers `Watch` as the daemon of this pid would.
+const STAND_IN_WATCH_PID: &str = "LUNETA_TEST_STAND_IN_WATCH_PID";
+
+/// Set, the stand-in notes in this file each `Info` and `Watch` it is asked.
+const STAND_IN_NOTES: &str = "LUNETA_TEST_STAND_IN_NOTES";
 
 /// `luneta watch`, run as `luneta`, and the host it wrote out.
 fn watch(host: &Host, luneta: &Path) -> api::Host {
@@ -523,13 +530,7 @@ fn luneta_watch_neither_asks_nor_stops_a_daemon_of_another_zellij_folder() {
 /// host's folder, and waits for it to answer. It says that `says` is its pid,
 /// and that it reads zellij's sessions in `reads`, if given.
 fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>) -> Running {
-    let mut command = Command::new(env::current_exe().unwrap());
-    command
-        .args(["demand::stand_in_lunetad", "--exact", "--ignored"])
-        .env(STAND_IN, host.folder())
-        .env(STAND_IN_VERSION, version)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let mut command = stand_in_command(host, version);
     if let Some(pid) = says {
         command.env(STAND_IN_PID, pid.to_string());
     }
@@ -540,6 +541,31 @@ fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>)
     let said = says.unwrap_or(stand_in.pid());
     eventually("the stand-in answers", || (answering(host)? == said).then_some(()));
     stand_in
+}
+
+/// The stand-in for a daemon newer than luneta, which luneta keeps, that answers
+/// `Watch` as the daemon of the pid `watches_as` would, and from when this
+/// returns notes in `notes` what it is asked.
+pub fn stand_in_watched_as(host: &Host, watches_as: u32, notes: &Path) -> Running {
+    let mut command = stand_in_command(host, NEWER);
+    command.env(STAND_IN_WATCH_PID, watches_as.to_string()).env(STAND_IN_NOTES, notes);
+    let stand_in = Running::spawn(&mut command);
+    eventually("the stand-in answers", || (answering(host)? == stand_in.pid()).then_some(()));
+    fs::remove_file(notes).unwrap();
+    stand_in
+}
+
+/// What runs the stand-in for a daemon of the build `version` spells in the
+/// host's folder.
+fn stand_in_command(host: &Host, version: &str) -> Command {
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args(["demand::stand_in_lunetad", "--exact", "--ignored"])
+        .env(STAND_IN, host.folder())
+        .env(STAND_IN_VERSION, version)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 /// A daemon of another version, as the test binary that `stand_in` runs
@@ -558,12 +584,21 @@ fn stand_in_lunetad() {
     };
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let reads = env::var_os(STAND_IN_READS).map(PathBuf::from);
+    let watches_as = env::var(STAND_IN_WATCH_PID).ok().map(|pid| pid.parse().unwrap());
+    let notes = env::var_os(STAND_IN_NOTES).map(PathBuf::from);
     let claim = Claim::take(Path::new(&folder)).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(StandIn { version, built, pid, reads }))
+            .add_service(DaemonServer::new(StandIn {
+                version,
+                built,
+                pid,
+                reads,
+                watches_as,
+                notes,
+            }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
@@ -578,11 +613,25 @@ struct StandIn {
     pid: u32,
     /// The folder it says it reads zellij's sessions in, if it says one.
     reads: Option<PathBuf>,
+    /// The pid of the daemon it answers `Watch` as, if not its own.
+    watches_as: Option<u32>,
+    /// The file it notes what it is asked in, if it is given one.
+    notes: Option<PathBuf>,
+}
+
+impl StandIn {
+    fn note(&self, asked: &str) {
+        if let Some(notes) = &self.notes {
+            let mut notes = OpenOptions::new().create(true).append(true).open(notes).unwrap();
+            writeln!(notes, "{asked}").unwrap();
+        }
+    }
 }
 
 #[tonic::async_trait]
 impl Daemon for StandIn {
     async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
+        self.note("info");
         let (version, built, pid) = (self.version.clone(), self.built, self.pid);
         let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
         let info = InfoResponse { version, built, pid, zellij_folder, ..InfoResponse::default() };
@@ -597,7 +646,8 @@ impl Daemon for StandIn {
     }
 
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
-        let version = Version { pid: self.pid, seq: 0 };
+        self.note("watch");
+        let version = Version { pid: self.watches_as.unwrap_or(self.pid), seq: 0 };
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
     }
 

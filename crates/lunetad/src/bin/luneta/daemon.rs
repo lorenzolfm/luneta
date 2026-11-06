@@ -30,10 +30,10 @@
 
 use std::cell::OnceCell;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_client::DaemonClient;
-use lunetad::api::InfoRequest;
+use lunetad::api::{InfoRequest, InfoResponse};
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use lunetad::program;
 use lunetad::release::{self, Build};
@@ -72,30 +72,37 @@ const SAID_MAX: u64 = 4096;
 /// How long `lunetad --version` has to answer.
 pub const VERSION_LIMIT: Duration = Duration::from_secs(2);
 
-/// Which daemon luneta wants.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
-    /// The one that runs, if one does, whatever it is: to say what runs.
-    Running,
-    /// The one that runs, or one started where none does, or in the place of
-    /// an older one, as an upgrade leaves running.
-    Current,
+/// The daemon in a folder that luneta checked, a client of it, and what it said
+/// of itself as luneta checked it.
+pub struct Current {
+    pub folder: Folder,
+    pub daemon: DaemonClient<Channel>,
+    pub info: InfoResponse,
 }
 
-/// A client of the daemon in the folder at `path`, as `wanted`, or why there
-/// is none.
-pub async fn reach(path: &Path, wanted: Reach) -> Result<DaemonClient<Channel>, String> {
-    reached(path, wanted).await.map(|(_, daemon)| daemon)
+/// A client of the daemon that runs in the folder at `path`, whatever it is, to
+/// say what runs, or why there is none.
+pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, String> {
+    let folder = folder::open(path).map_err(|refusal| refusal.to_string())?;
+    let folder = folder.ok_or_else(|| none_runs(path))?;
+    let error = match lunetad::connect(&folder).await {
+        Ok(daemon) => return Ok(daemon),
+        Err(error) => error,
+    };
+    let held = folder::held(&folder).map_err(|refusal| refusal.to_string())?;
+    Err(if held {
+        format!("{}: {}", folder.socket().display(), causes(&error))
+    } else {
+        none_runs(path)
+    })
 }
 
-/// `reach`, with the folder at `path` as luneta checked it.
-pub async fn reached(
-    path: &Path,
-    wanted: Reach,
-) -> Result<(Folder, DaemonClient<Channel>), String> {
+/// The daemon that runs in the folder at `path`, or one started where none
+/// does, or in the place of an older one, as an upgrade leaves running, or why
+/// there is none.
+pub async fn current(path: &Path) -> Result<Current, String> {
     let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
         Some(folder) => folder,
-        None if wanted == Reach::Running => return Err(none_runs(path)),
         // No daemon has run yet, as one makes the folder as it starts. luneta
         // makes it first, as it reaches into no folder that it has not
         // checked.
@@ -117,8 +124,6 @@ pub async fn reached(
     let own = lunetad::zellij_folder();
     loop {
         let why = match lunetad::connect(&folder).await {
-            // `Running` starts none, so there is none to reap.
-            Ok(daemon) if wanted == Reach::Running => return Ok((folder, daemon)),
             Ok(mut daemon) => match daemon.info(InfoRequest {}).await {
                 Ok(info) => {
                     let info = info.into_inner();
@@ -126,7 +131,8 @@ pub async fn reached(
                     let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
                     // A daemon older than the field says no folder, and is
                     // taken to read luneta's, as before.
-                    let reads = info.zellij_folder.map(OsString::from_vec).map(PathBuf::from);
+                    let reads = info.zellij_folder.as_deref();
+                    let reads = reads.map(|reads| Path::new(OsStr::from_bytes(reads)));
                     if stopped == Some(pid) {
                         format!("lunetad {version} (pid {pid}) was stopped, and has not ended")
                     } else if let Some(reads) = reads.filter(|reads| !same_folder(reads, &own)) {
@@ -139,12 +145,12 @@ pub async fn reached(
                         ));
                     } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
                         reap(started);
-                        return Ok((folder, daemon));
+                        return Ok(Current { folder, daemon, info });
                     } else {
                         match listener(&folder, pid).await {
                             Listener::Other if doubted == Some(pid) => {
                                 reap(started);
-                                return Ok((folder, daemon));
+                                return Ok(Current { folder, daemon, info });
                             },
                             Listener::Other => {
                                 doubted = Some(pid);
@@ -168,17 +174,13 @@ pub async fn reached(
             },
             Err(error) => format!("{}: {}", socket.display(), causes(&error)),
         };
-        let held = || folder::held(&folder).map_err(|refusal| refusal.to_string());
-        if wanted == Reach::Running {
-            return Err(if held()? { why } else { none_runs(path) });
-        }
         // The folder's lock is not looked at while a daemon luneta started is
         // starting: it is taken to look, and that daemon could find it taken.
         match &mut started {
             // One that holds the folder is starting, or ending: luneta waits
             // for it to answer, or to let the folder go.
             Starting::NotYet => {
-                if !held()? {
+                if !folder::held(&folder).map_err(|refusal| refusal.to_string())? {
                     started = Starting::Started(start(&folder)?);
                 }
             },
