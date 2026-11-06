@@ -128,17 +128,29 @@ pub fn branch(dir: &str) -> Option<String> {
     Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
 }
 
-pub fn names_its_head(dir: &str, branch: &str) -> Result<bool, String> {
+pub enum NamedHead {
+    OnRemote,
+    PullRef { remote_url: String },
+}
+
+pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> {
     let head = format!("refs/heads/{branch}");
     let push = says(dir, &["for-each-ref", "--format=%(push:remotename)", &head])?;
     if push.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let config = |name: &str| {
         says(dir, &["config", "--default", "", "--get", &format!("branch.{branch}.{name}")])
     };
-    let merge = config("merge")?;
-    Ok(push != config("remote")? || merge == head || merge.starts_with("refs/pull/"))
+    let (merge, remote) = (config("merge")?, config("remote")?);
+    if merge.starts_with("refs/pull/") {
+        if remote.is_empty() {
+            return Ok(None);
+        }
+        let remote_url = says(dir, &["ls-remote", "--get-url", "--", &remote])?;
+        return Ok(Some(NamedHead::PullRef { remote_url }));
+    }
+    Ok((push != remote || merge == head).then_some(NamedHead::OnRemote))
 }
 
 fn says(dir: &str, args: &[&str]) -> Result<String, String> {

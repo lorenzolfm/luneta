@@ -1162,16 +1162,48 @@ fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one
     assert_eq!(host.gh.asked(), ["main", &format!("{PARENT} main")]);
 }
 
+fn on_pull_ref(dir: &Path, branch: &str, remote: Option<&str>, number: u32) {
+    assert!(git(dir, &["branch", branch]));
+    if let Some(remote) = remote {
+        assert!(git(dir, &["config", &format!("branch.{branch}.remote"), remote]));
+    }
+    let merge = format!("refs/pull/{number}/head");
+    assert!(git(dir, &["config", &format!("branch.{branch}.merge"), &merge]));
+}
+
 #[test]
-fn a_branch_on_a_pull_ref_the_fork_cannot_resolve_is_found_in_its_parent() {
+fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_parent() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
-    forked_tree(tree.path());
-    assert!(git(tree.path(), &["config", "branch.main.remote", "https://github.com/third/repo.git"]));
-    assert!(git(tree.path(), &["config", "branch.main.merge", "refs/pull/7/head"]));
+    let dir = tree.path();
+    forked_tree(dir);
+    assert!(git(dir, &["remote", "add", "theirs", "https://github.com/Upstream/Repo.git"]));
+    assert!(git(dir, &["config", "url.https://github.com/.insteadOf", "hub:"]));
+    let of_parent = [
+        ("by_url", "https://github.com/upstream/repo.git"),
+        ("by_ssh", "git@github.com:upstream/repo.git"),
+        ("by_name", "theirs"),
+        ("by_short", "hub:upstream/repo.git"),
+    ];
+    for (number, (branch, remote)) in (1..).zip(of_parent) {
+        on_pull_ref(dir, branch, Some(remote), number);
+        host.gh.open_in(PARENT, branch, &pull(number, "OPEN"));
+    }
+    let third = "https://github.com/third/repo.git";
+    on_pull_ref(dir, "of_a_third", Some(third), 11);
+    on_pull_ref(dir, "of_a_third_pushing", Some(third), 12);
+    assert!(git(dir, &["config", "branch.of_a_third_pushing.pushRemote", "origin"]));
+    on_pull_ref(dir, "of_no_remote", None, 13);
+    assert!(git(dir, &["config", "branch.of_no_remote.pushRemote", "origin"]));
+    let of_others = ["of_a_third", "of_a_third_pushing", "of_no_remote"];
+    for (number, branch) in (11..).zip(of_others) {
+        host.gh.open_in(PARENT, branch, &pull(number, "OPEN"));
+    }
+    on_pull_ref(dir, "of_the_fork", Some("origin"), 14);
+    host.gh.open("of_the_fork", &pull(14, "CLOSED"));
+    host.gh.open_in(PARENT, "of_the_fork", &pull(15, "OPEN"));
     host.gh.fork_of("upstream", "repo");
-    host.gh.open_in(PARENT, "main", &pull(7, "OPEN"));
-    let cwd = tree.path().display().to_string();
+    let cwd = dir.display().to_string();
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
@@ -1179,11 +1211,34 @@ fn a_branch_on_a_pull_ref_the_fork_cannot_resolve_is_found_in_its_parent() {
         let host = host.host();
         host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
     };
+    let asked_of = |branch: &str| host.gh.asked().iter().any(|it| it == branch).then_some(());
+    let in_parent = |branch: &str| format!("{PARENT} {branch}");
+    let mut asked = vec!["main".to_owned()];
 
-    eventually("the parent's pull request is main's", || (found() == Some(7)).then_some(()));
+    eventually("gh asks about main", || asked_of("main"));
 
+    for (number, (branch, _)) in (1..).zip(of_parent) {
+        assert!(git(dir, &["switch", "-q", branch]));
+        eventually(&format!("the parent's pull request is {branch}'s"), || {
+            (found() == Some(number)).then_some(())
+        });
+        asked.extend([branch.to_owned(), in_parent(branch)]);
+    }
+
+    for branch in of_others {
+        assert!(git(dir, &["switch", "-q", branch]));
+        eventually(&format!("gh asks about {branch}"), || asked_of(branch));
+        asked.push(branch.to_owned());
+    }
+
+    assert!(git(dir, &["switch", "-q", "of_the_fork"]));
+    eventually("the fork's closed one stands", || (found() == Some(14)).then_some(()));
+    asked.push("of_the_fork".to_owned());
+
+    assert_eq!(host.gh.asked(), asked);
+    assert_eq!(host.gh.repositories(), 1);
     let said = daemon.said_after(Duration::from_secs(1));
-    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    assert!(!said.iter().any(|line| line.contains("gh ") || line.contains("git ")), "{said:?}");
 }
 
 #[test]

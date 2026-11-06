@@ -222,14 +222,26 @@ impl Link {
     /// ssh's config gives it, as `ssh_host` says what host ssh takes a name
     /// for.
     fn of(&self, url: &str, ssh_host: impl FnOnce(&str) -> Option<String>) -> bool {
-        let Some(Spelled { host, ssh, owner, name }) = spelled(url) else {
-            return false;
-        };
-        let github = |host: &str| host.eq_ignore_ascii_case(GITHUB);
-        owner.eq_ignore_ascii_case(&self.owner)
-            && name.eq_ignore_ascii_case(&self.name)
-            && (github(host) || (ssh && ssh_host(host).is_some_and(|host| github(&host))))
+        url_is_of(url, (GITHUB, &self.owner, &self.name), ssh_host)
     }
+}
+
+pub(crate) fn remote_is_of(url: &str, repository: (&str, &str, &str)) -> bool {
+    url_is_of(url, repository, ssh_host)
+}
+
+fn url_is_of(
+    url: &str,
+    (on, owner, name): (&str, &str, &str),
+    ssh_host: impl FnOnce(&str) -> Option<String>,
+) -> bool {
+    let Some(Spelled { host, ssh, owner: spelled_owner, name: spelled_name }) = spelled(url) else {
+        return false;
+    };
+    let on = |host: &str| host.eq_ignore_ascii_case(on);
+    spelled_owner.eq_ignore_ascii_case(owner)
+        && spelled_name.eq_ignore_ascii_case(name)
+        && (on(host) || (ssh && ssh_host(host).is_some_and(|host| on(&host))))
 }
 
 impl fmt::Display for Link {
@@ -1684,6 +1696,13 @@ mod tests {
         ] {
             assert!(!link().of(url, ssh_host), "{url}");
         }
+    }
+
+    #[test]
+    fn a_remote_is_of_a_repository_on_the_host_it_is_asked_about() {
+        let of = |url| url_is_of(url, ("git.example.com", "cashubtc", "cdk"), ssh_host);
+        assert!(of("https://git.example.com/cashubtc/cdk.git"));
+        assert!(!of("https://github.com/cashubtc/cdk.git"));
     }
 
     /// A fork's clone has the repository it forks among its remotes, by any

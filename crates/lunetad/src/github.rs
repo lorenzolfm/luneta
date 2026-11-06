@@ -20,7 +20,7 @@ use luneta_protocol::github::{PullRequest, State};
 use serde::Deserialize;
 
 use crate::core;
-use crate::git;
+use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
 use crate::program;
 use crate::watch::Troubles;
@@ -104,8 +104,25 @@ struct Owner {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fork {
-    parent: String,
+    host: String,
+    owner: String,
+    name: String,
     default_branch: String,
+}
+
+impl Fork {
+    fn parent(&self) -> String {
+        format!("{}/{}/{}", self.host, self.owner, self.name)
+    }
+
+    fn parent_may_have(&self, head: &NamedHead) -> bool {
+        match head {
+            NamedHead::OnRemote => true,
+            NamedHead::PullRef { remote_url } => {
+                links::remote_is_of(remote_url, (&self.host, &self.owner, &self.name))
+            },
+        }
+    }
 }
 
 fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
@@ -119,8 +136,12 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     let host = repository.url.split_once("://").and_then(|(_, page)| page.split('/').next());
     let host = host.filter(|host| !host.is_empty());
     let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
-    let parent = format!("{host}/{login}/{name}");
-    Ok(Some(Fork { parent, default_branch: repository.default_branch_ref.name }))
+    Ok(Some(Fork {
+        host: host.to_owned(),
+        owner: login,
+        name,
+        default_branch: repository.default_branch_ref.name,
+    }))
 }
 
 /// What gh said of the branch it was asked about.
@@ -176,6 +197,23 @@ fn fork(dir: &str, repository: &str, forks: &mut Forks) -> Result<Option<Fork>, 
     Ok(fork)
 }
 
+fn in_parent(
+    dir: &str,
+    repository: &str,
+    branch: &str,
+    forks: &mut Forks,
+) -> Result<Option<PullRequest>, String> {
+    let Some(head) = git::named_head(dir, branch)? else {
+        return Ok(None);
+    };
+    let Some(fork) = fork(dir, repository, forks)?.filter(|fork| fork.parent_may_have(&head)) else {
+        return Ok(None);
+    };
+    let done = |found: &PullRequest| matches!(found.state, State::Merged | State::Closed);
+    let stale = |found: &PullRequest| done(found) && branch == fork.default_branch;
+    Ok(find(dir, Some(&fork.parent()))?.filter(|found| !stale(found)))
+}
+
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
 /// one it finds, or none, or that `branch` is no longer checked out there.
 /// When gh did not say, as it is not logged in, or did not answer in time,
@@ -193,15 +231,7 @@ fn view(
 ) -> Result<Answer, String> {
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.state != State::Closed);
-    let found = if settled || !git::names_its_head(dir, branch)? {
-        own
-    } else if let Some(fork) = fork(dir, repository, forks)? {
-        let done = |found: &PullRequest| matches!(found.state, State::Merged | State::Closed);
-        let stale = |found: &PullRequest| done(found) && *branch == fork.default_branch;
-        find(dir, Some(&fork.parent))?.filter(|found| !stale(found)).or(own)
-    } else {
-        own
-    };
+    let found = if settled { own } else { in_parent(dir, repository, branch, forks)?.or(own) };
     if git::branch(dir).as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
@@ -330,7 +360,7 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::{Fork, fork_of, parse};
+    use super::{fork_of, parse};
 
     #[test]
     fn a_fork_s_parent_reads_as_gh_writes_it_on_the_fork_s_host() {
@@ -338,14 +368,16 @@ mod tests {
         let default = r#""defaultBranchRef":{"name":"trunk"}"#;
         let forked = |url: &str| format!(r#"{{{default},"parent":{parent},"url":"{url}"}}"#);
         let read = |said: &str| fork_of(said.as_bytes());
-        let of = |parent: &str| {
-            Ok(Some(Fork { parent: parent.to_owned(), default_branch: "trunk".to_owned() }))
-        };
-        assert_eq!(read(&forked("https://github.com/lorenzolfm/cdk")), of("github.com/cashubtc/cdk"));
+        let parent_of = |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent()));
+        let on = |host: &str| Ok(Some(format!("{host}/cashubtc/cdk")));
+        assert_eq!(parent_of(&forked("https://github.com/lorenzolfm/cdk")), on("github.com"));
         assert_eq!(
-            read(&forked("https://git.example.com/lorenzolfm/cdk")),
-            of("git.example.com/cashubtc/cdk")
+            parent_of(&forked("https://git.example.com/lorenzolfm/cdk")),
+            on("git.example.com")
         );
+        let default_branch = read(&forked("https://github.com/lorenzolfm/cdk"))
+            .map(|fork| fork.map(|fork| fork.default_branch));
+        assert_eq!(default_branch, Ok(Some("trunk".to_owned())));
         let none = format!(r#"{{{default},"parent":null,"url":"https://github.com/lorenzolfm/luneta"}}"#);
         assert_eq!(read(&none), Ok(None));
         let unnamed = |name: &str, login: &str| {
