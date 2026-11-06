@@ -667,10 +667,10 @@ if [ "$1" = api ]; then
     echo "gh: Not Found (HTTP 404)" >&2
     exit 1
 fi
-if [ "$*" = "repo view --json parent,url" ]; then
+if [ "$*" = "repo view --json parent,url,defaultBranchRef" ]; then
     echo "$*" >> "{pulls}/repositories"
     [ -f "{pulls}/repository" ] && exec cat "{pulls}/repository"
-    echo '{{"parent":null,"url":"https://github.com/owner/repo"}}'
+    echo '{{"defaultBranchRef":{{"name":"main"}},"parent":null,"url":"https://github.com/owner/repo"}}'
     exit 0
 fi
 if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
@@ -771,7 +771,12 @@ exec cat "$said"
     }
 
     pub fn fork_of(&self, owner: &str, name: &str) {
+        self.fork_of_defaulting_to(owner, name, "main");
+    }
+
+    pub fn fork_of_defaulting_to(&self, owner: &str, name: &str, default: &str) {
         let said = serde_json::json!({
+            "defaultBranchRef": { "name": default },
             "parent": { "name": name, "owner": { "login": owner } },
             "url": "https://github.com/owner/repo",
         });

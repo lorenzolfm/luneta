@@ -76,12 +76,19 @@ fn parse(said: &[u8]) -> Result<PullRequest, String> {
     Ok(PullRequest { number: viewed.number, state, url: Some(viewed.url) })
 }
 
-const REPOSITORY: &str = "parent,url";
+const REPOSITORY: &str = "parent,url,defaultBranchRef";
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Repository {
+    default_branch_ref: BranchRef,
     parent: Option<Parent>,
     url: String,
+}
+
+#[derive(Deserialize)]
+struct BranchRef {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -95,7 +102,13 @@ struct Owner {
     login: String,
 }
 
-fn parent_of(said: &[u8]) -> Result<Option<String>, String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fork {
+    parent: String,
+    default_branch: String,
+}
+
+fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     let repository: Repository = serde_json::from_slice(said).map_err(|error| error.to_string())?;
     let Some(Parent { name, owner: Owner { login } }) = repository.parent else {
         return Ok(None);
@@ -106,7 +119,8 @@ fn parent_of(said: &[u8]) -> Result<Option<String>, String> {
     let host = repository.url.split_once("://").and_then(|(_, page)| page.split('/').next());
     let host = host.filter(|host| !host.is_empty());
     let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
-    Ok(Some(format!("{host}/{login}/{name}")))
+    let parent = format!("{host}/{login}/{name}");
+    Ok(Some(Fork { parent, default_branch: repository.default_branch_ref.name }))
 }
 
 /// What gh said of the branch it was asked about.
@@ -140,26 +154,26 @@ fn find(dir: &str, base: Option<&str>) -> Result<Option<PullRequest>, String> {
     }
 }
 
-fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<String>, String> {
+fn fork(dir: &str, repository: &str, forks: &mut Forks) -> Result<Option<Fork>, String> {
     let remotes = match links::remotes_gh_reads(dir) {
         Remotes::Listed(listed) => listed,
         Remotes::Unlisted => return Ok(None),
         Remotes::Unsaid(why) => return Err(format!("git did not say the remotes of {dir}: {why}")),
     };
-    if let Some(known) = parents.get(repository)
+    if let Some(known) = forks.get(repository)
         && known.remotes == remotes
     {
-        return Ok(known.parent.clone());
+        return Ok(known.fork.clone());
     }
     let mut gh = Command::new("gh");
     git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh repo view in {dir} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
-    let parent = parent_of(&said)
+    let fork = fork_of(&said)
         .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
-    parents.insert(repository.to_owned(), Lineage { remotes, parent: parent.clone() });
-    Ok(parent)
+    forks.insert(repository.to_owned(), Lineage { remotes, fork: fork.clone() });
+    Ok(fork)
 }
 
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
@@ -175,14 +189,16 @@ fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<S
 fn view(
     dir: &str,
     (repository, branch): &Branch,
-    parents: &mut Parents,
+    forks: &mut Forks,
 ) -> Result<Answer, String> {
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.state != State::Closed);
     let found = if settled || !git::names_its_head(dir, branch)? {
         own
-    } else if let Some(parent) = parent(dir, repository, parents)? {
-        find(dir, Some(&parent))?.or(own)
+    } else if let Some(fork) = fork(dir, repository, forks)? {
+        let done = |found: &PullRequest| matches!(found.state, State::Merged | State::Closed);
+        let stale = |found: &PullRequest| done(found) && *branch == fork.default_branch;
+        find(dir, Some(&fork.parent))?.filter(|found| !stale(found)).or(own)
     } else {
         own
     };
@@ -198,10 +214,10 @@ type Branch = (String, String);
 
 struct Lineage {
     remotes: String,
-    parent: Option<String>,
+    fork: Option<Fork>,
 }
 
-type Parents = HashMap<String, Lineage>;
+type Forks = HashMap<String, Lineage>;
 
 /// Where gh stands with a branch it has been asked about.
 struct Asked {
@@ -226,7 +242,7 @@ pub fn follow(
 ) -> io::Result<()> {
     thread::Builder::new().name("gh".to_owned()).spawn(move || {
         let mut asked: HashMap<Branch, Asked> = HashMap::new();
-        let mut parents = Parents::new();
+        let mut forks = Forks::new();
         let mut troubles = Troubles::default();
         'sweep: loop {
             let Some(branches) = core::ask(&core, core::Command::Branches) else {
@@ -242,7 +258,7 @@ pub fn follow(
                 }
             }
             asked.retain(|branch, _| on.contains_key(branch));
-            parents.retain(|repository, _| on.keys().any(|(of, _)| of == repository));
+            forks.retain(|repository, _| on.keys().any(|(of, _)| of == repository));
             // A directory that came to a branch gh has said of already.
             if !tell(&core, &on, &asked) {
                 return;
@@ -253,7 +269,7 @@ pub fn follow(
             // Never asked about before all others, then the one due longest.
             due.sort_by_key(|branch| asked.get(*branch).map(|was| was.next));
             for branch in due {
-                let said = view(&on[branch][0], branch, &mut parents);
+                let said = view(&on[branch][0], branch, &mut forks);
                 let next = Instant::now() + sweep;
                 let was = asked.remove(branch).and_then(|was| was.found);
                 let (found, trouble) = match said {
@@ -314,26 +330,27 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::{parent_of, parse};
+    use super::{Fork, fork_of, parse};
 
     #[test]
     fn a_fork_s_parent_reads_as_gh_writes_it_on_the_fork_s_host() {
         let parent = r#"{"id":"R","name":"cdk","owner":{"id":"O","login":"cashubtc"}}"#;
-        let forked = |url: &str| format!(r#"{{"parent":{parent},"url":"{url}"}}"#);
-        let read = |said: &str| parent_of(said.as_bytes());
-        assert_eq!(
-            read(&forked("https://github.com/lorenzolfm/cdk")),
-            Ok(Some("github.com/cashubtc/cdk".to_owned()))
-        );
+        let default = r#""defaultBranchRef":{"name":"trunk"}"#;
+        let forked = |url: &str| format!(r#"{{{default},"parent":{parent},"url":"{url}"}}"#);
+        let read = |said: &str| fork_of(said.as_bytes());
+        let of = |parent: &str| {
+            Ok(Some(Fork { parent: parent.to_owned(), default_branch: "trunk".to_owned() }))
+        };
+        assert_eq!(read(&forked("https://github.com/lorenzolfm/cdk")), of("github.com/cashubtc/cdk"));
         assert_eq!(
             read(&forked("https://git.example.com/lorenzolfm/cdk")),
-            Ok(Some("git.example.com/cashubtc/cdk".to_owned()))
+            of("git.example.com/cashubtc/cdk")
         );
-        let none = r#"{"parent":null,"url":"https://github.com/lorenzolfm/luneta"}"#;
-        assert_eq!(read(none), Ok(None));
+        let none = format!(r#"{{{default},"parent":null,"url":"https://github.com/lorenzolfm/luneta"}}"#);
+        assert_eq!(read(&none), Ok(None));
         let unnamed = |name: &str, login: &str| {
             let parent = format!(r#"{{"name":"{name}","owner":{{"login":"{login}"}}}}"#);
-            format!(r#"{{"parent":{parent},"url":"https://github.com/lorenzolfm/cdk"}}"#)
+            format!(r#"{{{default},"parent":{parent},"url":"https://github.com/lorenzolfm/cdk"}}"#)
         };
         let unread = [
             forked("nowhere"),
@@ -342,6 +359,7 @@ mod tests {
             unnamed("", "cashubtc"),
             unnamed("cdk", ""),
             unnamed("cdk", "cashu/btc"),
+            format!(r#"{{"parent":{parent},"url":"https://github.com/lorenzolfm/cdk"}}"#),
             String::new(),
         ];
         for unread in unread {

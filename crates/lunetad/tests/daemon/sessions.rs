@@ -1107,6 +1107,62 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
 }
 
 #[test]
+fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    forked_tree(tree.path());
+    assert!(git(tree.path(), &["branch", "trunk"]));
+    for branch in ["main", "trunk"] {
+        pushes_to_origin(tree.path(), branch);
+    }
+    host.gh.fork_of_defaulting_to("upstream", "repo", "trunk");
+    host.gh.open_in(PARENT, "main", &pull(1, "MERGED"));
+    host.gh.open_in(PARENT, "trunk", &pull(2, "MERGED"));
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let found = || {
+        let host = host.host();
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+    };
+
+    eventually("another branch's merged one shows", || (found() == Some(1)).then_some(()));
+
+    let trunk_in_parent = format!("{PARENT} trunk");
+    assert!(git(tree.path(), &["switch", "-q", "trunk"]));
+    eventually("gh asks the parent about trunk", || {
+        host.gh.asked().contains(&trunk_in_parent).then_some(())
+    });
+    let said = daemon.said_after(Duration::from_secs(1));
+    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+    assert_eq!(found(), None);
+}
+
+#[test]
+fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    forked_tree(tree.path());
+    pushes_to_origin(tree.path(), "main");
+    host.gh.fork_of("upstream", "repo");
+    host.gh.open("main", &pull(1, "CLOSED"));
+    host.gh.open_in(PARENT, "main", &pull(2, "CLOSED"));
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let found = || {
+        let host = host.host();
+        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| it.number)
+    };
+
+    eventually("the fork's closed one stands", || (found() == Some(1)).then_some(()));
+
+    assert_eq!(host.gh.asked(), ["main", &format!("{PARENT} main")]);
+}
+
+#[test]
 fn a_branch_on_a_pull_ref_the_fork_cannot_resolve_is_found_in_its_parent() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();

@@ -821,6 +821,7 @@ you run shares. A pull request opened or merged shows within a minute. In a
 clone of a fork, a branch that tracks a remote branch of its name, or has a push
 remote of its own, is asked about again in the repository the fork was made from
 where `gh` finds none for it, or only a closed one, which takes one more ask.
+From there, the fork's default branch shows only one still open.
 
 To take a pull request's link from there, without asking its agent, a click on
 the number copies it, wherever the keys are, and does nothing else: a note says
