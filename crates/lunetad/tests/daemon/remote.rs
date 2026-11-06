@@ -28,8 +28,9 @@ use lunetad::api::{
     DumpScreenRequest, GoRequest, KeepImageRequest, KeepPrintedRequest, KillRequest,
     ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
-    NameSessionRequest, On, OpenRequest, OtherTabsRequest, RefugeRequest, RenameSessionRequest,
-    StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest, TurnIntoTabRequest, WatchRequest,
+    NameSessionRequest, On, OpenRequest, OtherTabsRequest, PasteRequest, RefugeRequest,
+    RenameSessionRequest, StartRequest, TranscriptEndsRequest, TurnIntoPanesRequest,
+    TurnIntoTabRequest, WatchRequest,
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
@@ -1466,7 +1467,13 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         let branch = Some("issue-7".to_owned());
         let session_at = At::Session(1);
         let work = Readied::Link(issue);
-        let answer = Ready { at: session_at, worktree: worktree.clone(), branch, work };
+        let answer = Ready {
+            at: session_at,
+            worktree: worktree.clone(),
+            branch,
+            moved_off: false,
+            work,
+        };
         assert_eq!(ready, answer);
         assert!(clone.join("issue-7").join(".git").is_file());
         let viewed = "issue view 7 --repo github.com/o/n --json url --jq .url";
@@ -2165,6 +2172,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
             at: At::Session(1),
             worktree: worktree.clone(),
             branch: branch.clone(),
+            moved_off: false,
             work: of_plan(),
         };
         assert_eq!(ready, answer);
@@ -2256,11 +2264,12 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
 }
 
 #[test]
-fn w_opens_the_worktree_where_an_issue_s_would_go_and_t_starts_no_agent_off_its_branch() {
+fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
     far.gh.issue(8, "https://github.com/o/n/issues/8");
+    far.gh.issue(9, "https://github.com/o/n/issues/9");
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_issue_7(&far, &scratch);
@@ -2279,20 +2288,15 @@ fn w_opens_the_worktree_where_an_issue_s_would_go_and_t_starts_no_agent_off_its_
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let link = Work::Link(issue.clone());
         let panes = vec![pane_in(&main)];
-        let w = Pasted::new(link.clone(), panes.clone());
-        let t = Pasted::new(link.clone(), panes.clone()).wanting(Wanted::OnItsBranch);
+        let asked = Pasted::new(link.clone(), panes.clone());
         let worktree = moved.display().to_string();
-        let refused = |on: &str| format!(
-            "{worktree} is on {on}, not issue-7, so no agent starts there; w opens it"
-        );
 
-        let opened = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let (at, work) = (At::Session(0), Readied::Link(issue));
         let branch = Some("feat".to_owned());
-        let answer = Ready { at, worktree: worktree.clone(), branch, work };
+        let answer = Ready { at, worktree: worktree.clone(), branch, moved_off: true, work };
         assert_eq!(opened, answer);
         assert_eq!(rev_parse_verify(&main, "refs/heads/issue-7"), None);
-        assert_eq!(refused_there(&mut daemon, &t).await, refused("feat"));
 
         let in_it = vec![pane_in(&main), pane_in(&moved)];
         let there = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), in_it)).await;
@@ -2304,16 +2308,21 @@ fn w_opens_the_worktree_where_an_issue_s_would_go_and_t_starts_no_agent_off_its_
         assert_eq!(made.worktree, worktree);
 
         git(&moved, &["switch", "-q", "--detach"]);
-        let detached = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        let detached = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!((detached.worktree, detached.branch), (worktree.clone(), None));
-        assert_eq!(refused_there(&mut daemon, &t).await, refused("no branch"));
+        assert!(detached.moved_off);
 
         git(&moved, &["switch", "-q", "-c", "issue-7"]);
-        for own in [&w, &t] {
-            let on_it = pasted_on(&mut daemon, "far", own).await.unwrap();
-            assert_eq!(on_it.worktree, worktree);
-            assert_eq!(on_it.branch.as_deref(), Some("issue-7"));
-        }
+        let on_it = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(on_it.worktree, worktree);
+        assert_eq!(on_it.branch.as_deref(), Some("issue-7"));
+        assert!(!on_it.moved_off);
+
+        git(&moved, &["switch", "-q", "--detach"]);
+        git(&bare, &["worktree", "add", "-q", "../beside", "issue-7"]);
+        let beside = pasted_on(&mut daemon, "far", &asked).await.unwrap();
+        assert_eq!(beside.worktree, clone.join("beside").display().to_string());
+        assert!(!beside.moved_off);
 
         fs::create_dir(clone.join("issue-8")).unwrap();
         let eight = Work::Link(Link::parse("https://github.com/o/n/issues/8").unwrap());
@@ -2326,17 +2335,23 @@ fn w_opens_the_worktree_where_an_issue_s_would_go_and_t_starts_no_agent_off_its_
         git(&bare, &["worktree", "add", "-q", "-b", "other", "../md-plan", "main"]);
         let moved = clone.join("md-plan").display().to_string();
         let file = Work::File(links::File::parse(&plan, None).unwrap());
-        let w = Pasted::new(file.clone(), panes.clone());
-        let opened = pasted_on(&mut daemon, "far", &w).await.unwrap();
+        let asked = Pasted::new(file, panes.clone());
+        let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let (at, work) = (At::Session(0), Readied::File { real: plan.clone() });
         let branch = Some("other".to_owned());
-        assert_eq!(opened, Ready { at, worktree: moved.clone(), branch, work });
+        assert_eq!(opened, Ready { at, worktree: moved, branch, moved_off: true, work });
         assert_eq!(rev_parse_verify(&main, "refs/heads/md-plan"), None);
-        let t = Pasted::new(file, panes).wanting(Wanted::OnItsBranch);
-        assert_eq!(
-            refused_there(&mut daemon, &t).await,
-            format!("{moved} is on other, not md-plan, so no agent starts there; w opens it")
-        );
+
+        git(&bare, &["worktree", "add", "-q", "-b", "nine", "../issue-9", "main"]);
+        let other = Work::Link(Link::parse("https://github.com/o/n/issues/9").unwrap());
+        let other = Pasted::new(other, panes);
+        assert!(pasted_on(&mut daemon, "far", &other).await.unwrap().moved_off);
+        let on = Some(On { destination: "far".to_owned() });
+        let older = PasteRequest { reads_moved_off: false, ..other.asked(on) };
+        let mut answer = daemon.paste(older).await.unwrap().into_inner();
+        let refused = answer.message().await.unwrap_err();
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+        assert!(refused.message().ends_with("issue-9 is already present"), "{refused:?}");
     });
 }
 

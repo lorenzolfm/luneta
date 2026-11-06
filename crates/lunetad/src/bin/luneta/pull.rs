@@ -231,7 +231,8 @@ mod tests {
     /// What a machine says where its pane of the place `at` is where a key goes.
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
-        links::Ready { at: At::Session(at), worktree: "/w/x".to_owned(), branch: None, work }
+        let worktree = "/w/x".to_owned();
+        links::Ready { at: At::Session(at), worktree, branch: None, moved_off: false, work }
     }
 
     fn nowhere() -> Result<links::Ready<usize>, Unready> {

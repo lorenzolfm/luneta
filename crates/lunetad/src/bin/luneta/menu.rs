@@ -485,8 +485,7 @@ impl Pull {
     const fn wanted(self, asks: Asks) -> Wanted {
         match (self, asks) {
             (Pull::Agent, Asks::Review) => Wanted::AtHead,
-            (Pull::Agent, Asks::Tackle) => Wanted::OnItsBranch,
-            (Pull::Worktree, _) => Wanted::AsItIs,
+            (Pull::Worktree, _) | (Pull::Agent, Asks::Tackle) => Wanted::AsItIs,
         }
     }
 
@@ -1348,9 +1347,7 @@ impl Wait {
         match self {
             Wait::Pulling(pull) => match pull.wanted(Asks::of(work)) {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
-                Wanted::AsItIs | Wanted::OnItsBranch => {
-                    format!("Making a worktree of {}…", work.tab())
-                },
+                Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
             },
             Wait::Opening(_) => format!("Opening {}…", work.tab()),
             Wait::Making(session) => format!("Making session {session}…"),
@@ -1695,10 +1692,16 @@ impl Menu {
         let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
-        let Found { on, ready: Ready { at, worktree, branch, work: readied } } = match found {
-            Ok(found) => found,
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
-        };
+        let Found { on, ready: Ready { at, worktree, branch, moved_off, work: readied } } =
+            match found {
+                Ok(found) => found,
+                Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+            };
+        let off = work.off_branch(branch.as_deref()).filter(|_| moved_off);
+        if let (Pull::Agent, Some(off)) = (pull, off) {
+            let why = format!("{worktree} is {off}, so no agent starts there; w opens it");
+            return Did::Closed(Done::Wrong(format!("menu: {work}: {why}")));
+        }
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
@@ -1743,10 +1746,14 @@ impl Menu {
     }
 
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
-        let (Stage::Pull { work, .. }, Ok(found)) = (&self.stage, found) else {
+        let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(Pull::Worktree)) } = &self.stage
+        else {
             return None;
         };
-        work.off_branch(found.ready.branch.as_deref())
+        let Ready { moved_off: true, branch, .. } = &found.as_ref().ok()?.ready else {
+            return None;
+        };
+        Some(format!("{}'s worktree is {}", work.tab(), work.off_branch(branch.as_deref())?))
     }
 
     /// What the shell of the menu's row ran, as the daemon says it now: one
@@ -3437,7 +3444,8 @@ mod tests {
         let branch = Some("feat/x".to_owned());
         let ready = |at| {
             let (worktree, branch) = (worktree.clone(), branch.clone());
-            Ok(here(Ready { at, worktree, branch, work: Readied::Link(pull_request()) }))
+            let work = Readied::Link(pull_request());
+            Ok(here(Ready { at, worktree, branch, moved_off: false, work }))
         };
         let review = [
             "claude",
@@ -3486,13 +3494,14 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(issue, Wanted::OnItsBranch));
+        assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
             at: At::Session((other.clone(), 7)),
             worktree: worktree.clone(),
             branch: Some("issue-2736".to_owned()),
+            moved_off: false,
             work: Readied::Link(link),
         };
         let (menu, wants) = stays(menu.pulled(Ok(here(ready))));
@@ -3528,7 +3537,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Pull(file(), Wanted::OnItsBranch));
+        assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
@@ -3536,6 +3545,7 @@ mod tests {
             at: At::Session((other.clone(), 7)),
             worktree: worktree.to_owned(),
             branch: Some("md-sync-rework".to_owned()),
+            moved_off: false,
             work: Readied::File { real: real.to_owned() },
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready()))));
@@ -3610,7 +3620,8 @@ mod tests {
         let name = SessionName::parse("cdk").unwrap();
         let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
         let work = Readied::Link(pull_request());
-        let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, work };
+        let worktree = "/w/cdk/feat-x".to_owned();
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
         let (menu, wants) = stays(pulling('w').pulled(Ok(here(ready))));
         assert_eq!(
             wants,
@@ -3643,7 +3654,8 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let ready = |at| {
             let work = Readied::Link(pull_request());
-            let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, work };
+            let worktree = "/w/cdk/feat-x".to_owned();
+            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
         let row = || Target::Pane(vps(), row());
@@ -3670,7 +3682,8 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let found = |at| {
             let work = Readied::Link(pull_request());
-            let ready = Ready { at, worktree: "/w/cdk/feat-x".to_owned(), branch: None, work };
+            let worktree = "/w/cdk/feat-x".to_owned();
+            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
         let rows = [session_row(), pane_row(), Target::Machine(Machine::Local)];
