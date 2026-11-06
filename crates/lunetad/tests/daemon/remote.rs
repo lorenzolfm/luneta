@@ -1917,13 +1917,51 @@ fn r_on_a_rewrite_another_fetch_saw_first_says_what_moves_the_branch() {
 }
 
 #[test]
-fn r_runs_no_hook_a_pull_request_brings() {
+fn r_goes_by_the_head_alone_where_no_remote_names_the_pull_request_s_repository() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let clone = clone_with_pull_7(&host, &scratch);
+    let (up, bare, feat) = (scratch.join("up"), clone.join(".bare"), clone.join("feat"));
+    git(&bare, &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
+    git(&bare, &["remote", "set-url", "origin", "git@github.com:old/n.git"]);
+    let _daemon = start(host.vars()).unwrap();
+    let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
+    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    let pasted = reviewing_pull_7(vec![pane]);
+    let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
+
+    assert_eq!(pasted_here(&host, &pasted).unwrap().at, At::There(0));
+
+    git(&up, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+    let head = pushed(&host, &up, "feat", "second");
+    assert_eq!(pasted_here(&host, &pasted).unwrap().at, At::There(0));
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]), tracked_main);
+
+    pushed(&host, &up, "feat", "third");
+    fs::write(feat.join("mine"), "mine").unwrap();
+    git(&feat, &["add", "mine"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("changes that are not committed"), "{refused:?}");
+    assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
+
+    git(&bare, &["config", "core.repositoryformatversion", "99"]);
+    let refused = pasted_here(&host, &pasted).unwrap_err();
+    assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+    assert!(refused.message().contains("git did not say the remotes of"), "{refused:?}");
+}
+
+#[test]
+fn r_runs_nothing_a_pull_request_brings() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_pull_7(&host, &scratch);
     let (up, work, feat) = (scratch.join("up"), scratch.join("work"), clone.join("feat"));
     git(&clone.join(".bare"), &["config", "core.hooksPath", ".githooks"]);
+    git(&clone.join(".bare"), &["config", "core.fsmonitor", ".githooks/fsmonitor"]);
     git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
     let _daemon = start(host.vars()).unwrap();
     let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
@@ -1931,7 +1969,7 @@ fn r_runs_no_hook_a_pull_request_brings() {
 
     let ran = scratch.join("hook-ran");
     fs::create_dir(work.join(".githooks")).unwrap();
-    for hook in ["post-checkout", "reference-transaction"] {
+    for hook in ["post-checkout", "reference-transaction", "fsmonitor"] {
         let text = format!("echo {hook} >> \"{}\"\n", ran.display());
         script(&work.join(".githooks").join(hook), &text);
     }

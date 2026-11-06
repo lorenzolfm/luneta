@@ -937,7 +937,14 @@ fn ready(link: &Link, wanted: Wanted, worked: &[Worked]) -> Result<Ready<usize>,
     };
     kind_holds(link)?;
     if let Some(branch) = link.branch() {
-        base(&repository, &remote_in(&repository, link)?, &branch)?;
+        let remote = match remotes_in(&repository) {
+            Remotes::Listed(listed) => remote(&listed, link, ssh_host),
+            Remotes::Unlisted | Remotes::Unsaid(_) => None,
+        };
+        let remote = remote.ok_or_else(|| {
+            format!("git no longer says a remote of {repository} is {}", link.repository())
+        })?;
+        base(&repository, &remote, &branch)?;
     }
     let ready = made_worktree(&repository, &link.wt(), going, worked, Readied::Link(link.clone()))?;
     synced(&ready.worktree, link, wanted)?;
@@ -952,14 +959,6 @@ fn synced(dir: &str, link: &Link, wanted: Wanted) -> Result<(), Unready> {
         Wanted::AtHead => sync::to_head(dir, link)
             .map_err(|why| Unready::InDoubt(format!("started no review in {dir}: {why}"))),
     }
-}
-
-fn remote_in(dir: &str, link: &Link) -> Result<String, String> {
-    let remote = match remotes_in(dir) {
-        Remotes::Listed(listed) => remote(&listed, link, ssh_host),
-        Remotes::Unlisted | Remotes::Unsaid(_) => None,
-    };
-    remote.ok_or_else(|| format!("git says no remote of {dir} is {}", link.repository()))
 }
 
 /// Why a key goes no further for `link`, of a machine that has its repository:

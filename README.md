@@ -698,28 +698,30 @@ whose answer is cut short, so that no other makes a second. With none, it names
 the machines it asked, and why it could not ask any it did not. A paste while
 zellij has the keys stays zellij's.
 
-`r` reviews the pull request as GitHub has it, so a second review after a push
-or a force-push does not read the commits the first one did. Before the agent
-starts, the menu says `⠋ Syncing #123…`, and luneta asks `gh` for the pull
-request's base and head. It fetches the base from the remote of its repository:
-only the remote-tracking ref moves, no local branch of it. A worktree at the head
-stays as it is. Any other goes to its upstream branch, as
-[`wt follow`](https://github.com/lorenzolfm/wt) takes it, with wt's own code: one
-behind fast-forwards, if it has no uncommitted changes, and one the author rewrote
-moves on the same terms, where its tip is at its remote-tracking ref, as its old
-commits were only ever the remote's. Uncommitted changes, a git operation not
-finished, commits the remote does not have, no upstream branch, a branch that does
-not come to the head or a failed fetch start no review, and the note names the
-worktree and says why. A refusal keeps the worktree's place: put right what it
-says, press `r` again, and a rewrite still moves. Another fetch of the branch, as a
-`git fetch` or a `wt prune`, moves that ref first, and wt can then not tell the old
-commits from yours, so the note gives the command that moves the branch. Untracked
-and ignored files do not count, as git will not overwrite one, and says so if the
-head has a file of its name. No git hook runs for the fetch or the move, as one in a
-`core.hooksPath` inside the tree would be the author's to write. An agent already
-working there does not stop it: the key is yours to press. A machine whose `lunetad`
-is too old to sync starts no review either. `w` goes to a worktree as it is, and
-never moves it.
+`r` reviews the pull request as GitHub has it, so a second review after a push or
+a force-push does not read the commits the first one did. Before the agent starts,
+the menu says `⠋ Syncing #123…`, and luneta asks `gh` for the pull request's base
+and head. It fetches the base from the remote of its repository: only the
+remote-tracking ref moves, no local branch of it. Where no remote names that
+repository, as one GitHub renamed since, it fetches no base, and the head alone
+decides. A worktree at the head stays as it is. Any other goes to its upstream
+branch, as [`wt follow`](https://github.com/lorenzolfm/wt) takes it, with wt's own
+code: one behind fast-forwards, if it has no uncommitted changes, and one the
+author rewrote moves on the same terms, where its tip is at its remote-tracking
+ref, as its old commits were only ever the remote's. Uncommitted changes, a git
+operation not finished, commits the remote does not have, no upstream branch, a
+branch that does not come to the head or a failed fetch start no review, and the
+note names the worktree and says why. A refusal keeps the worktree's place: put
+right what it says, press `r` again, and a rewrite still moves. Another fetch of
+the branch, as a `git fetch` or a `wt prune`, moves that ref first, and wt can
+then not tell the old commits from yours, so the note gives the command that moves
+the branch. Untracked and ignored files do not count, as git will not overwrite
+one, and says so if the head has a file of its name. Nothing in `core.hooksPath`
+or `core.fsmonitor` runs for the fetch or the move, as a path inside the tree
+would be the author's to write; a hook named by `hook.<name>.command` still does,
+so give it no such path. An agent already working there does not stop it: the key
+is yours to press. A machine whose `lunetad` is too old to sync starts no review
+either. `w` goes to a worktree as it is, and never moves it.
 
 An issue's link, pasted the same way, opens the menu for that issue. `w`
 makes a worktree of a branch for it, `issue-123`, and opens a tab there, named

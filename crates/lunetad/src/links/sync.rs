@@ -8,9 +8,14 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use super::{ASKING, GITHUB, Link, MAKING, failure, luneta, remote_in, said};
+use super::{
+    ASKING, GITHUB, Link, MAKING, Remotes, failure, luneta, remote, remotes_in, said, ssh_host,
+};
 use crate::git;
 use crate::program::{self, Ran};
+
+const NOTHING_OF_THE_TREE: [(&str, &str); 2] =
+    [("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false")];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,9 +25,11 @@ struct Viewed {
 }
 
 pub(super) fn to_head(dir: &str, link: &Link) -> Result<(), String> {
-    let remote = remote_in(dir, link)?;
+    let remote = remote_of(dir, link)?;
     let Viewed { base_ref_name: base, head_ref_oid: head } = viewed(link)?;
-    fetch(dir, &remote, &base)?;
+    if let Some(remote) = remote {
+        fetch(dir, &remote, &base)?;
+    }
     if here(dir)? == head {
         return Ok(());
     }
@@ -40,6 +47,14 @@ pub(super) fn to_head(dir: &str, link: &Link) -> Result<(), String> {
     Ok(())
 }
 
+fn remote_of(dir: &str, link: &Link) -> Result<Option<String>, String> {
+    match remotes_in(dir) {
+        Remotes::Listed(listed) => Ok(remote(&listed, link, ssh_host)),
+        Remotes::Unlisted => Ok(None),
+        Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
+    }
+}
+
 /// Asks GitHub, as git cannot tell a pull request's base.
 fn viewed(link: &Link) -> Result<Viewed, String> {
     let number = link.number.to_string();
@@ -54,20 +69,23 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
 
 fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
     let base = format!("+refs/heads/{base}:refs/remotes/{remote}/{base}");
+    let args = ["-C", dir, "fetch", "--no-tags", "--", remote, &base];
     let mut git = Command::new("git");
-    git::local(hookless(&mut git).args(["-C", dir, "fetch", "--no-tags", "--", remote, &base]));
+    git::local(trusting_no_tree(&mut git).args(args));
     let ran = program::run_alone(&mut git, MAKING)
         .map_err(|error| format!("git fetch could not be run: {error}"))?;
     ran.answer().map(drop).map_err(|why| format!("git fetch: {why}"))
 }
 
-fn hookless(command: &mut Command) -> &mut Command {
+fn trusting_no_tree(command: &mut Command) -> &mut Command {
     let count = env::var("GIT_CONFIG_COUNT").ok();
-    let next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
-    command
-        .env("GIT_CONFIG_COUNT", next.saturating_add(1).to_string())
-        .env(format!("GIT_CONFIG_KEY_{next}"), "core.hooksPath")
-        .env(format!("GIT_CONFIG_VALUE_{next}"), "/dev/null")
+    let mut next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
+    for (key, value) in NOTHING_OF_THE_TREE {
+        command.env(format!("GIT_CONFIG_KEY_{next}"), key);
+        command.env(format!("GIT_CONFIG_VALUE_{next}"), value);
+        next = next.saturating_add(1);
+    }
+    command.env("GIT_CONFIG_COUNT", next.to_string())
 }
 
 fn here(dir: &str) -> Result<String, String> {
@@ -86,7 +104,7 @@ fn top(dir: &str) -> Result<String, String> {
 /// stderr, and git may ask for a passphrase on the terminal of its session.
 fn follow(dir: &str) -> Result<(), String> {
     let mut luneta = Command::new(luneta()?);
-    git::local(hookless(&mut luneta).args(["follow", dir]));
+    git::local(trusting_no_tree(&mut luneta).args(["follow", dir]));
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta follow could not be run: {error}"))?;
     match ran {
