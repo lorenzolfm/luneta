@@ -34,6 +34,11 @@ in
         ;;
     esac
 
+    if [ ! -f rustfmt.toml ]; then
+      echo "dev fmt: no rustfmt.toml here; rebase onto main first" >&2
+      exit 2
+    fi
+
     RUSTFMT=${rustfmt} cargo fmt --all "''${rust[@]}"
     git ls-files -z --cached --others --exclude-standard '*.nix' | xargs -0 nixfmt "''${nix[@]}"
     buf format "''${proto[@]}" proto
