@@ -1176,16 +1176,12 @@ fn cloned(
     best.map(|(_, at)| at)
 }
 
-/// The directory that holds the bare repository `dir` is in, as wt keeps its
-/// worktrees: beside its hidden `.bare`, or in it, where it is not hidden.
+/// The directory that holds the repository `dir` is in, as `git::holder` says.
 fn holder(dir: &str) -> Option<String> {
     let Common::Of(common) = common_dir(dir) else {
         return None;
     };
-    let common = Path::new(&common);
-    let hidden = common.file_name()?.to_str()?.starts_with('.');
-    let holder = if hidden { common.parent()? } else { common };
-    holder.to_str().map(str::to_owned)
+    git::holder(&common)
 }
 
 /// What git starts with, in its own language, where a directory is in no

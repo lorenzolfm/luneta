@@ -5795,6 +5795,7 @@ mod tests {
         host.work_trees = vec![api::WorkTree {
             dir: "/w/c".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            repository: None,
         }];
         assert_eq!(sidebar.heard(host), None);
         let look = sidebar.titled("older | nvim".to_owned()).unwrap();
@@ -8132,6 +8133,7 @@ mod tests {
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            repository: None,
         }];
         sidebar.heard(host);
         let look = sidebar.titled("older | fold".to_owned()).expect("a look");
@@ -8294,6 +8296,7 @@ mod tests {
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            repository: None,
         }];
         sidebar.heard(host);
         sidebar.focus(Keys::Sidebar);

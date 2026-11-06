@@ -84,7 +84,7 @@ impl WorkTree {
                 })
             },
         };
-        v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) }
+        v1::WorkTree { dir: dir.to_owned(), stands: Some(stands), repository: None }
     }
 
     /// What `to_api` wrote out, read back. None for a work tree that leaves
@@ -313,7 +313,7 @@ mod tests {
             checkout(branch(""), Some(v1::Changes::default())),
         ];
         for stands in unread {
-            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands };
+            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands, repository: None };
             assert_eq!(WorkTree::of_api(&tree), None, "{tree:?}");
         }
     }

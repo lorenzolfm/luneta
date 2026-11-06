@@ -1078,8 +1078,12 @@ work on floresta", "tackle these four issues in parallel", "run
 `/thermo-nuclear-review` on that PR", "close every session but this one". The
 skill in [`skills/luneta`](skills/luneta/SKILL.md) tells Claude Code, or any
 agent that reads skills, how it goes about it: what it reads to work out what
-your words point at, a worktree for each agent it starts side by side, and
-asking you before it closes anything.
+your words point at, a worktree for each agent it starts side by side, which
+session its tabs open in, and asking you before it closes anything. A tab of
+work in a repository opens where a pasted link's does: in the session you name,
+or else yours if it works in that repository, or else another that does, or else
+a session it makes in a clone of it. In a session nobody is in, it takes you
+there first.
 
 ```sh
 npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/skills/
@@ -1650,7 +1654,8 @@ ask nor stop, and say so: one of theirs in its place would leave out the
 sessions of every luneta that reaches it.
 `luneta info` says which daemon runs, `luneta agents` lists the agents it
 finds, and `luneta sessions` the sessions, their panes and the branch each
-works on, with its pull request; none of the three starts one, and nor does
+works on, with its pull request and the directory of its repository; none of
+the three starts one, and nor does
 `luneta close`, which says it cannot tell the agents it would end while none
 runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
 itself. The daemon asks

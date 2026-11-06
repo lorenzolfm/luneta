@@ -538,6 +538,57 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     });
 }
 
+#[test]
+fn luneta_sessions_names_the_repository_each_pane_works_in() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let dirs = dirs.path().canonicalize().unwrap();
+    let (seed, app, clone, plain) =
+        (dirs.join("seed"), dirs.join("app"), dirs.join("clone"), dirs.join("plain"));
+    for dir in [&seed, &app, &plain] {
+        fs::create_dir(dir).unwrap();
+    }
+    assert!(git(&seed, &["init", "-q", "-b", "main"]));
+    commit(&seed, "file", "text\n");
+    let seeded = seed.display().to_string();
+    assert!(git(&dirs, &["clone", "-q", &seeded, "clone"]));
+    assert!(git(&app, &["clone", "-q", "--bare", &seeded, ".bare"]));
+    fs::write(app.join(".git"), "gitdir: ./.bare\n").unwrap();
+    assert!(git(&app, &["worktree", "add", "-q", "main"]));
+    assert!(git(&app, &["worktree", "add", "-q", "-b", "other", "issue-1"]));
+
+    let spelled = |dir: &Path| dir.display().to_string();
+    let (repo, clone, plain) = (spelled(&app), spelled(&clone), spelled(&plain));
+    let (main, other) = (format!("{repo}/main"), format!("{repo}/issue-1"));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    let panes = [
+        in_dir(1, &main),
+        in_dir(2, &other),
+        in_dir(3, &repo),
+        in_dir(4, &clone),
+        in_dir(5, &plain),
+    ];
+    host.zellij.list("work", &json!(panes));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says of all five", || (host.host().work_trees.len() == 5).then_some(()));
+
+    let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
+    let said = String::from_utf8(said.stdout).unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "work".to_owned(),
+            format!("  Tab #1:1  {main}  main  repo {repo}"),
+            format!("  Tab #1:2  {other}  other  repo {repo}"),
+            format!("  Tab #1:3  {repo}  no checkout  repo {repo}"),
+            format!("  Tab #1:4  {clone}  main  repo {clone}"),
+            format!("  Tab #1:5  {plain}  no repository"),
+        ],
+    );
+}
+
 /// How the work tree stands where a pane works in `cwd`, once git has said
 /// that it is a checkout there.
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {

@@ -116,6 +116,16 @@ pub fn repository(dir: &str) -> Option<String> {
     Some(common.strip_suffix('\n')?.to_owned()).filter(|common| !common.is_empty())
 }
 
+/// The directory that holds the repository whose common directory is `common`,
+/// as wt keeps its worktrees: beside a hidden `.bare`, or a clone's `.git`, or in
+/// it, where it is not hidden.
+pub fn holder(common: &str) -> Option<String> {
+    let common = Path::new(common);
+    let hidden = common.file_name()?.to_str()?.starts_with('.');
+    let holder = if hidden { common.parent()? } else { common };
+    holder.to_str().map(str::to_owned)
+}
+
 /// The branch checked out in `dir` now, named as `git status` names it: its
 /// ref without `refs/heads/`, which `--short` would keep a part of for a name
 /// a tag has too. None for a detached `HEAD`, or where git does not say.
@@ -769,7 +779,8 @@ pub fn follow(
                 asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
                 match said {
                     Ok(tree) => {
-                        if core.send(core::Command::WorkTree { dir, tree }).is_err() {
+                        let repository = repository(&dir).as_deref().and_then(holder);
+                        if core.send(core::Command::WorkTree { dir, tree, repository }).is_err() {
                             return;
                         }
                     },
