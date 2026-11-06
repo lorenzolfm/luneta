@@ -32,7 +32,10 @@ let
       name = "dev-${record.name}";
       runtimeInputs = record.tools;
       inheritPath = record.inheritPath or false;
-      inherit (record) text;
+      text = ''
+        export PATH="$PATH:''${CARGO_HOME:-''${HOME:-}/.cargo}/bin"
+        ${record.text}
+      '';
     };
 
   signature = record: "dev ${record.name} ${record.usage}";
