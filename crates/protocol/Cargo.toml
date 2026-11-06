@@ -2,6 +2,8 @@
 name = "luneta-protocol"
 version.workspace = true
 edition = "2024"
+license.workspace = true
+publish = false
 description = "What luneta's daemon and its clients both read: the protocol, and git's status"
 
 # The messages alone, without the transport. The daemon writes out the

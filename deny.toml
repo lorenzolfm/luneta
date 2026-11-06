@@ -1,7 +1,6 @@
-# What cargo-deny gates on, as `dev deny` runs it and CI does. Only
-# `advisories` is checked: `sources` would refuse the `wt` git pin in
-# crates/lunetad/Cargo.toml, which is deliberate, and `licenses` and `bans`
-# have yet to be triaged.
+# What cargo-deny gates on, as `dev deny` runs it. `advisories` needs the day's
+# database, so CI runs it as a step. The other three need no network, so they
+# are a flake check.
 
 [advisories]
 # Advisory IDs luneta is not affected by, each with why it is none.
@@ -16,4 +15,29 @@ ignore = [
   # time on luneta's own proto comments: the parser never sees input that
   # the advisory's quadratic path requires.
   { id = "RUSTSEC-2026-0433", reason = "pulldown-cmark wikilink flaw needs ENABLE_WIKILINKS, set only by prost-build on trusted input at build time" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "rev"
+allow-git = ["https://github.com/lorenzolfm/wt"]
+
+[bans]
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
 ]

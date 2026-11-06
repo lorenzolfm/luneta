@@ -1,14 +1,14 @@
 { pkgs, toolchain, ... }:
 {
   name = "deny";
-  usage = "";
-  help = "check Cargo.lock against RustSec advisories";
+  usage = "[check...]";
+  help = "cargo deny over Cargo.lock: advisories, bans, licenses and sources";
   tools = [
     toolchain
     pkgs.cargo-deny
     pkgs.git
   ];
   text = ''
-    cargo deny check advisories
+    cargo deny --locked check "$@"
   '';
 }

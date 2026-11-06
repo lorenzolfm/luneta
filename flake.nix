@@ -93,6 +93,14 @@
             ];
           };
 
+          denySrc = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              cargoFiles
+              ./deny.toml
+            ];
+          };
+
           # What luneta's speech model is built with, but for what each system
           # brings: cmake, which builds transcribe.cpp and its ggml, and on Linux
           # ALSA, which the microphone is read through, found with pkg-config.
@@ -276,6 +284,12 @@
             '';
           };
 
+          deny = craneLib.cargoDeny {
+            inherit (daemon) pname version;
+            src = denySrc;
+            cargoDenyExtraArgs = "--offline --locked";
+          };
+
           nixFiles = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.fileFilter (file: file.hasExt "nix") ./.;
@@ -293,7 +307,7 @@
           inherit dev lunetad;
 
           checks = {
-            inherit clippy;
+            inherit clippy deny;
             statix = nixLint pkgs.statix "check .";
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
           };
@@ -326,7 +340,8 @@
         default = built.lunetad;
       }) bySystem;
 
-      # clippy over the workspace and the linters over the nix files, as CI runs them.
+      # clippy over the workspace, cargo-deny over the lock and the linters over the nix
+      # files, as CI runs them.
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
     };
 }
