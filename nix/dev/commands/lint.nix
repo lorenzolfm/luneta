@@ -13,12 +13,15 @@
   text = ''
     breaking() {
       local base
-      base="$(git merge-base HEAD origin/main)" || return
+      base="$(git merge-base HEAD origin/main)" || {
+        echo "dev lint: HEAD has no merge base with origin/main" >&2
+        return 1
+      }
       (
         cd proto &&
           buf breaking \
             --against "../.git#ref=$base,subdir=proto" \
-            --config '{"version":"v2","breaking":{"use":["WIRE"]}}'
+            --config '{"version":"v2","breaking":{"use":["WIRE","RPC_NO_DELETE","PACKAGE_SERVICE_NO_DELETE"]}}'
       )
     }
 

@@ -295,7 +295,7 @@
           checks = {
             inherit clippy;
             statix = nixLint pkgs.statix "check .";
-            deadnix = nixLint pkgs.deadnix "--fail .";
+            deadnix = nixLint pkgs.deadnix "--hidden --fail .";
           };
 
           shell = pkgs.mkShell {

@@ -52,9 +52,7 @@ in
 pkgs.writeShellApplication {
   name = "dev";
   meta.description = "luneta build recipes on the flake-pinned toolchain";
-  passthru.commands = lib.listToAttrs (
-    map (record: lib.nameValuePair record.name (command record)) records
-  );
+  passthru.commands.lint = command (import ./commands/lint.nix { inherit pkgs; });
   text = ''
     paint() {
       if [ -t "$1" ] && [ -z "''${NO_COLOR:-}" ]; then
