@@ -10,20 +10,21 @@
 let
   inherit (pkgs) lib;
 
-  records = map (
-    file:
-    import (./commands + "/${file}") {
-      inherit
-        pkgs
-        toolchain
-        buildTools
-        compileEnv
-        clippyRun
-        testRun
-        testTools
-        ;
-    }
-  ) (builtins.attrNames (builtins.readDir ./commands));
+  args = {
+    inherit
+      pkgs
+      toolchain
+      buildTools
+      compileEnv
+      clippyRun
+      testRun
+      testTools
+      ;
+  };
+
+  records = map (file: import (./commands + "/${file}") args) (
+    builtins.attrNames (builtins.readDir ./commands)
+  );
 
   command =
     record:
@@ -52,7 +53,10 @@ in
 pkgs.writeShellApplication {
   name = "dev";
   meta.description = "luneta build recipes on the flake-pinned toolchain";
-  passthru.commands.lint = command (import ./commands/lint.nix { inherit pkgs; });
+  passthru.commands = {
+    lint = command (import ./commands/lint.nix args);
+    clippy-cross = command (import ./commands/clippy.nix args).cross;
+  };
   text = ''
     paint() {
       if [ -t "$1" ] && [ -z "''${NO_COLOR:-}" ]; then

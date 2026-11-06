@@ -1,17 +1,41 @@
 {
   pkgs,
+  toolchain,
   buildTools,
   compileEnv,
   clippyRun,
   ...
 }:
+let
+  target =
+    if pkgs.stdenv.hostPlatform.isDarwin then "x86_64-unknown-linux-gnu" else "aarch64-apple-darwin";
+  tools = [ (toolchain.override { targets = [ target ]; }) ] ++ buildTools ++ [ pkgs.git ];
+  buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" ''
+    [target.${target}.transcribe]
+    rustc-link-lib = ["transcribe"]
+    [target.${target}.alsa]
+    rustc-link-lib = ["asound"]
+  '';
+  crossRun = ''cargo clippy --config ${buildScriptsSkipped} --locked ${clippyRun} --target ${target} "$@" -- -D warnings'';
+in
 {
   name = "clippy";
   usage = "[args...]";
-  help = "cargo clippy over every target, warnings denied";
-  tools = buildTools ++ [ pkgs.git ];
+  help = "cargo clippy over every target, for Linux and the Mac from either, warnings denied";
+  inherit tools;
   text = ''
     ${compileEnv}
-    cargo clippy --locked ${clippyRun} "$@" -- -D warnings
+    status=0
+    cargo clippy --locked ${clippyRun} "$@" -- -D warnings || status=$?
+    ${crossRun} || status=$?
+    exit "$status"
   '';
+  cross = {
+    name = "clippy-cross";
+    inherit tools;
+    text = ''
+      ${compileEnv}
+      ${crossRun}
+    '';
+  };
 }

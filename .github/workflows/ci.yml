@@ -24,8 +24,6 @@ permissions:
 
 jobs:
   clippy:
-    # One runner, x86_64 Linux, so what is behind `cfg(target_os = "macos")`
-    # goes unlinted.
     runs-on: ubuntu-latest
 
     steps:
@@ -87,6 +85,9 @@ jobs:
       # store keeps the daemon's dependencies for the cache to save.
       - name: Clippy
         run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
+
+      - name: Clippy for the Mac
+        run: nix run .#dev.commands.clippy-cross
 
       # What advisories say of the crates Cargo.lock locks: the ones known of
       # them, which the ones no run has seen yet are the reason for. The
