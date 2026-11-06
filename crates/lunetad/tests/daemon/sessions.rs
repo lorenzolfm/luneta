@@ -1287,13 +1287,39 @@ fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
 }
 
 #[test]
-fn what_goes_wrong_in_a_fork_s_parent_names_the_parent() {
+fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    forked_tree(tree.path());
+    pushes_to_origin(tree.path(), "main");
+    assert!(git(tree.path(), &["branch", "fold"]));
+    host.gh.fork_of("upstream", "repo");
+    host.gh.open_in(PARENT, "fold", &json!({ "number": 1 }));
+    host.gh.switch("fold");
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let in_parent = format!("{PARENT} fold");
+    let asked = ["fold", in_parent.as_str(), "fold"];
+
+    eventually("gh asks about fold once git sees it", || {
+        (host.gh.asked() == asked).then_some(())
+    });
+
+    let said = daemon.said_after(Duration::from_secs(1));
+    assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
+}
+
+#[test]
+fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
     forked_tree(tree.path());
     pushes_to_origin(tree.path(), "main");
     host.gh.fork_of("upstream", "repo");
-    host.gh.open_in(PARENT, "main", &json!({ "number": 1 }));
+    host.gh.open("main", &pull(1, "CLOSED"));
+    host.gh.open_in(PARENT, "main", &json!({ "number": 2 }));
     let cwd = tree.path().display().to_string();
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
@@ -1303,6 +1329,11 @@ fn what_goes_wrong_in_a_fork_s_parent_names_the_parent() {
     eventually("the daemon says whose answer does not read", || {
         let said = daemon.said_after(Duration::from_millis(100));
         said.iter().any(|line| line.contains(&named)).then_some(())
+    });
+    eventually("the fork's closed one shows", || {
+        let host = host.host();
+        let found = host.pull_requests.into_iter().find(|it| it.dir == cwd);
+        (found.map(|it| it.number) == Some(1)).then_some(())
     });
 }
 

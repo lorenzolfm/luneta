@@ -149,6 +149,10 @@ enum Answer {
     /// The branch was still checked out as gh answered: the pull request gh
     /// found of it, or none.
     Stayed(Option<PullRequest>),
+    Partly {
+        own: Option<PullRequest>,
+        why: String,
+    },
     /// Another branch was checked out by the time gh answered, which git has
     /// yet to see: what gh said was of that one.
     Moved,
@@ -231,11 +235,21 @@ fn view(
 ) -> Result<Answer, String> {
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.state != State::Closed);
-    let found = if settled { own } else { in_parent(dir, repository, branch, forks)?.or(own) };
+    let beyond = if settled { Ok(None) } else { in_parent(dir, repository, branch, forks) };
     if git::branch(dir).as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
-    Ok(Answer::Stayed(found))
+    Ok(match beyond {
+        Ok(beyond) => Answer::Stayed(beyond.or(own)),
+        Err(why) => Answer::Partly { own, why },
+    })
+}
+
+fn standing(was: Option<PullRequest>, own: Option<PullRequest>) -> Option<PullRequest> {
+    match (was, own) {
+        (Some(was), Some(own)) if was.url == own.url => Some(own),
+        (was, own) => was.or(own),
+    }
 }
 
 /// A branch of a repository, by the repository's common directory and the
@@ -306,6 +320,10 @@ pub fn follow(
                     Ok(Answer::Stayed(found)) => (found, None),
                     // The core wakes the thread once git sees the checkout.
                     Ok(Answer::Moved) => (was, None),
+                    Ok(Answer::Partly { own, why }) => {
+                        troubles.say(why.clone());
+                        (standing(was, own), Some(why))
+                    },
                     Err(trouble) => {
                         troubles.say(trouble.clone());
                         (was, Some(trouble))
@@ -360,7 +378,24 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::{fork_of, parse};
+    use super::{fork_of, parse, standing};
+
+    #[test]
+    fn a_parent_that_does_not_say_leaves_its_own_and_takes_news_of_the_fork_s() {
+        let pull = |repository: &str, number: u32, state: State| PullRequest {
+            number: NonZeroU32::new(number).unwrap(),
+            state,
+            url: Some(format!("https://github.com/{repository}/pull/{number}")),
+        };
+        let fork_s = |state| pull("owner/repo", 5, state);
+        let parent_s = || pull("upstream/repo", 5, State::Open);
+        let closed = || fork_s(State::Closed);
+        assert_eq!(standing(Some(fork_s(State::Open)), Some(closed())), Some(closed()));
+        assert_eq!(standing(Some(parent_s()), None), Some(parent_s()));
+        assert_eq!(standing(Some(parent_s()), Some(closed())), Some(parent_s()));
+        assert_eq!(standing(None, Some(closed())), Some(closed()));
+        assert_eq!(standing(None, None), None);
+    }
 
     #[test]
     fn a_fork_s_parent_reads_as_gh_writes_it_on_the_fork_s_host() {
