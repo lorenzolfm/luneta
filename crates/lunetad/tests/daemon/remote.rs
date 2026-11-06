@@ -314,7 +314,7 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     let said = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<&str> = said.lines().collect();
     assert!(lines[0].starts_with("nowhere/  (unreached for "), "{said}");
-    let far = ["far/", "  play  (no panes listed yet)", "  work  (no panes listed yet)"];
+    let far = ["far/", "  work  (no panes listed yet)", "  play  (no panes listed yet)"];
     assert_eq!(lines[1..4], far, "{said}");
     let unread = "(lunetad could not read all of luneta's hosts file: its log says why)";
     assert_eq!(lines[4..], [unread], "{said}");

@@ -1130,15 +1130,21 @@ enum Front {
 message WorkTree {
   // The directory, as zellij spells the pane's.
   string dir = 1;
-  // One of these, always: a client that finds neither has a newer daemon's.
+  // One of these, always: a client that finds none has a newer daemon's.
   oneof stands {
-    // git failed there: the directory is in no repository, or in one git
-    // cannot read.
+    // The directory is in no repository.
     Outside outside = 2;
     Checkout checkout = 3;
+    NoCheckout no_checkout = 4;
   }
 
   message Outside {}
+
+  // In a repository, and in none of its work trees.
+  message NoCheckout {
+    // The directory that holds the repository. Always there.
+    string repository = 1;
+  }
 }
 
 // A repository's work tree: what is checked out there, and what changed.
@@ -1151,6 +1157,9 @@ message Checkout {
   // How many paths there are of each kind of change. Always there.
   Changes changes = 3;
   uint32 stashes = 4;
+  // The directory that holds the repository. Absent from a daemon older than
+  // this field.
+  optional string repository = 5;
 
   // `HEAD` names a commit, and no branch.
   message Detached {}

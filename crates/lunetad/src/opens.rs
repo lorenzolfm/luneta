@@ -115,7 +115,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             quiet(&mut zellij);
             if clients::list(zellij, session.as_str())?.is_empty() {
                 return Err(format!(
-                    "{}: open a pane beside one of its panes, or go there first",
+                    "{}: go there first, or open a pane beside one of its panes",
                     no_client(session)
                 ));
             }

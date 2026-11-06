@@ -67,8 +67,9 @@ use crate::api::daemon_client::DaemonClient;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
+use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
-use crate::{git, names, zoxide, Destination, Directory, SessionName};
+use crate::{names, zoxide, Destination, Directory, SessionName};
 
 mod sync;
 
@@ -1188,49 +1189,12 @@ fn cloned(
     best.map(|(_, at)| at)
 }
 
-/// The directory that holds the bare repository `dir` is in, as wt keeps its
-/// worktrees: beside its hidden `.bare`, or in it, where it is not hidden.
+/// The directory that holds the repository `dir` is in, as `git::holder` says.
 fn holder(dir: &str) -> Option<String> {
     let Common::Of(common) = common_dir(dir) else {
         return None;
     };
-    let common = Path::new(&common);
-    let hidden = common.file_name()?.to_str()?.starts_with('.');
-    let holder = if hidden { common.parent()? } else { common };
-    holder.to_str().map(str::to_owned)
-}
-
-/// What git starts with, in its own language, where a directory is in no
-/// repository: `(or any of the parent directories)`, or `(or any parent up to
-/// mount point /x)`. Nothing else tells that from a repository it refuses: it
-/// ends with one status for all of them.
-const IN_NO_REPOSITORY: &str = "fatal: not a git repository (or any ";
-
-/// What git says of the repository a directory is in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Common {
-    /// It is in one: the directory all its worktrees have in common, by its
-    /// real path, which tells that repository from another.
-    Of(String),
-    /// It is in none.
-    NoRepository,
-    /// git did not say, for this reason, as it refused the repository it found,
-    /// one of a newer format, or of another user, or it did not answer in time.
-    /// That says nothing of whether the directory is in one.
-    Unsaid(String),
-}
-
-impl Common {
-    /// What git's `answer` says of it: what it said, where it ended well, or
-    /// else why not.
-    fn of(answer: Result<Vec<u8>, String>) -> Common {
-        match answer.map(one_line) {
-            Ok(Some(common)) => Common::Of(common),
-            Ok(None) => Common::Unsaid("it named no directory".to_owned()),
-            Err(why) if why.starts_with(IN_NO_REPOSITORY) => Common::NoRepository,
-            Err(why) => Common::Unsaid(why),
-        }
-    }
+    git::holder(&common)
 }
 
 /// What git says of the repository `dir` is in.
@@ -1241,14 +1205,6 @@ fn common_dir(dir: &str) -> Common {
         .env("LC_ALL", "C");
     let ran = program::run(&mut git, ANSWER);
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
-}
-
-/// Whether `stderr` is git saying, in its own language, that a directory it was
-/// told to work in is gone, as a pane's can be. One it cannot go into for
-/// another reason, as a mount gone stale, may be there all the same.
-fn directory_gone(stderr: &[u8]) -> bool {
-    stderr.starts_with(b"fatal: cannot change to ")
-        && stderr.trim_ascii_end().ends_with(b": No such file or directory")
 }
 
 /// What git says of the remotes of the repository a directory is in.
@@ -1324,12 +1280,6 @@ fn branch(dir: &str) -> Option<String> {
 /// The one line git said, where it ended well.
 fn said(git: &mut Command) -> Option<String> {
     one_line(program::run(git, ANSWER).ok()?.answer().ok()?)
-}
-
-/// `said`, where it is a line of text.
-fn one_line(said: Vec<u8>) -> Option<String> {
-    let said = String::from_utf8(said).ok()?;
-    Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
 
 /// The page on GitHub of `link`'s number, as gh says: `gh issue view` answers
@@ -2095,34 +2045,6 @@ mod tests {
         let by_it_starts =
             format!("it is in no repository, and git did not say what {refused}, the row");
         assert!(by_it.starts_with(&by_it_starts), "{by_it}");
-    }
-
-    /// git tells no repository from one it refuses by its words alone, as it
-    /// ends with one status for all of them: as it says them near a mount
-    /// point too. Anything else it says, or a time it did not answer in, says
-    /// nothing of a repository.
-    #[test]
-    fn only_git_s_own_words_say_a_directory_is_in_no_repository() {
-        let said = |why: &str| Common::of(Err(why.to_owned()));
-        for why in [
-            "fatal: not a git repository (or any of the parent directories): .git",
-            "fatal: not a git repository (or any parent up to mount point /run/user)",
-        ] {
-            assert_eq!(said(why), Common::NoRepository, "{why}");
-        }
-        for why in [
-            "fatal: Expected git repo version <= 1, found 99",
-            "fatal: unknown repository extension found:",
-            "fatal: detected dubious ownership in repository at '/w'",
-            "fatal: gitfile does not point to a valid repository: /w/.git",
-            "fatal: not a git repository: /w/.bare/worktrees/gone",
-            "fatal: cannot change to '/w': No such file or directory",
-            "it did not answer in time",
-        ] {
-            assert_eq!(said(why), Common::Unsaid(why.to_owned()), "{why}");
-        }
-        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of("/w/.bare".to_owned()));
-        assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
     }
 
     /// A program that ended with `code`, having said `stdout` and `stderr`.

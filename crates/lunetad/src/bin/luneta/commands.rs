@@ -32,7 +32,8 @@ use tonic::transport::Channel;
 use crate::bridge;
 use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
-use crate::machines::{self, Added};
+use crate::machines::{self, Added, Machine};
+use crate::order::Order;
 use crate::zellij::{self, Seat};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
@@ -400,23 +401,29 @@ pub fn unread(unread: Unread) -> String {
     format!("{unread}, and its log says which")
 }
 
-/// A session to a line, with its panes under it, each by its tab and its id:
-/// where it works, then what is checked out there and what changed on it, and
-/// the pull request of its branch. A pane zellij says no directory of has `-`
-/// for one, and a directory git has said nothing of yet has nothing after it.
+/// A session to a line, as the sidebar lists them, with its panes under it, each
+/// by its tab and its id: where it works, then what is checked out there and what
+/// changed on it, and the pull request of its branch, and the directory of its
+/// repository. A pane
+/// zellij says no directory of has `-` for one, and a directory git has said
+/// nothing of has nothing after it.
 /// Then each other machine lunetad watches, as its hosts file names it, with
 /// a `/` after it, which no session's name holds, and its sessions under it,
 /// or why it has none; and a word that the file names more than these, or
 /// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after: None, kept: None }).await?.into_inner();
-    sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "");
+    let order = Order::shared();
+    let here = as_rows(&host.sessions, Some(&Machine::Local), &order);
+    sessions_of(&here, &host.work_trees, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
         match &remote.reached {
             Some(Reached::Host(host)) => {
                 println!("{machine}/");
-                sessions_of(&host.sessions, &host.work_trees, &host.pull_requests, "  ");
+                let far = machine.parse().map(Machine::Remote).ok();
+                let far = as_rows(&host.sessions, far.as_ref(), &order);
+                sessions_of(&far, &host.work_trees, &host.pull_requests, "  ");
             },
             Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
             Some(Reached::Unreached(unreached)) => {
@@ -436,17 +443,33 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// `sessions` in the order of the sidebar's rows on `machine`: oldest first, and
+/// as `order` has them.
+fn as_rows<'a>(
+    sessions: &'a [Session],
+    machine: Option<&Machine>,
+    order: &Order,
+) -> Vec<&'a Session> {
+    let mut rows: Vec<&Session> = sessions.iter().collect();
+    rows.sort_by_cached_key(|session| {
+        let started = session.started_at.and_then(|at| SystemTime::try_from(at).ok());
+        (started.is_none(), started, session.name.clone())
+    });
+    if let Some(machine) = machine {
+        order.sessions(machine, &mut rows, |session| session.name.as_str());
+    }
+    rows
+}
+
 /// The `sessions` of a host, with what it says of the `work_trees` and the
 /// `pull_requests` of their panes, as `sessions` says them, each line led by
 /// `indent`.
 fn sessions_of(
-    sessions: &[Session],
+    sessions: &[&Session],
     work_trees: &[WorkTree],
     pull_requests: &[PullRequest],
     indent: &str,
 ) {
-    let mut sessions: Vec<&Session> = sessions.iter().collect();
-    sessions.sort_by(|a, b| a.name.cmp(&b.name));
     for session in sessions {
         let Some(panes) = &session.panes else {
             println!("{indent}{}  (no panes listed yet)", session.name);
@@ -469,18 +492,26 @@ fn sessions_of(
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            println!("{indent}  {at}  {cwd}  {stands}{pulled}");
+            let repo = match tree.stands.as_ref() {
+                Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
+                Some(Stands::NoCheckout(it)) => Some(&it.repository),
+                Some(Stands::Outside(_)) | None => None,
+            };
+            let repo = repo.map_or_default(|it| format!("  repo {it}"));
+            println!("{indent}  {at}  {cwd}  {stands}{pulled}{repo}");
         }
     }
 }
 
 /// How a work tree stands, in words: its branch, or `detached`, and then how
 /// many paths of each kind changed, the stashes, and where the branch is from
-/// its upstream. A directory in no repository says so. None for an answer
+/// its upstream. A directory in no repository says so, and one in a repository
+/// but outside its work trees says that. None for an answer
 /// that leaves out what the protocol says is always there, as a newer
 /// daemon's could.
 fn stands(tree: &WorkTree) -> Option<String> {
     let checkout = match tree.stands.as_ref()? {
+        Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
         Stands::Outside(_) => return Some("no repository".to_owned()),
         Stands::Checkout(checkout) => checkout,
     };

@@ -18,7 +18,7 @@ A pane is named `<session>:<pane>`, as `luneta:11`; a session by its name alone.
 
 ```sh
 luneta here       # the pane you run in, as <session>:<pane>, by its session's name now
-luneta sessions   # each session, its panes as <tab>:<pane>, their directory, branch, changes and PR
+luneta sessions   # each session, its panes as <tab>:<pane>, their directory, branch, changes, PR and repo
 luneta agents     # each agent: <session>:<pane>, status (busy/idle/waiting/shell), pid, name
 zoxide query -l   # the directories the user works in, most used first; `zoxide query <words>` picks one
 ```
@@ -58,7 +58,9 @@ luneta close <session>[:<pane>]... [--yes <plan>]
   `<session>:<pane>`. `--cwd` defaults to your directory. Without a command,
   the pane runs the user's shell.
 - `open tab` needs a client in that session: zellij can't size a tab
-  otherwise. In a session nobody is in, use `open pane --beside` one of its panes.
+  otherwise, so in a session nobody is in it opens nothing and says so. See
+  [Which session a tab opens in](#which-session-a-tab-opens-in). `open pane
+  --beside` one of its panes needs no client, for when the user asked for a pane.
 - `open session` makes a session in `--cwd`, named for it as luneta's picker
   names one (`luneta-main` for a worktree `main` of `luneta`, `-2` when taken),
   and takes the user there. It prints the name.
@@ -76,13 +78,48 @@ luneta close <session>[:<pane>]... [--yes <plan>]
   and not at all if anything before it failed to close, so that you're still
   there to tell the user.
 
+## Which session a tab opens in
+
+A tab of work in a repository goes in the session that works in that
+repository, as a pasted link's does. Being asked from a session doesn't make it
+the right one. Take the first of these that fits, and name it with `--session`
+on every `open tab`:
+
+1. The session the user named, or the session `luneta here` names if they said
+   "here".
+2. The session `luneta here` names, if a pane of it is in that repository.
+3. Another session of this machine's with a pane in that repository. Of several,
+   the first `luneta sessions` lists.
+4. A session made for it: `luneta open session --cwd <the clone>`, with the
+   directory `zoxide query` says. It takes the user there, and prints the name.
+
+A pane that lists a `repo <dir>` in `luneta sessions` is in a repository if that
+`repo` is the directory `zoxide query` says of the repository, or holds it, or if
+the pane's own directory is that directory or in it. A pane that lists neither a
+`repo` nor `no repository` says nothing of its repository: if its directory is in
+the one `zoxide query` says, tell the user instead of making a session.
+
+If `open tab` says no client is in the session, run `luneta go <session>` and
+open the tab again, as a pasted link does. Do this without asking, and say in
+your report that you took the user there. Don't open panes instead, unless the
+user asked for panes. If `go` fails, or `open tab` still says no client, tell the
+user the session, and what you made for it.
+
+`go` and step 4 take the user from what they are doing, and what they type next
+lands in another pane. Do either only while the user is waiting on you: they
+asked for this just now and you went straight to it, as in luneta's ask box they
+always have. If you have been working on your own since, leave them where they
+are: tell them the session or the directory, and what you made for it.
+
+A tab in no repository opens in the user's session: leave `--session` out.
+
 ## Start an agent
 
 Run Claude Code as the pane's command, naming it for what it does, so the
 sidebar shows it from the start:
 
 ```sh
-luneta open tab --cwd ~/code/app --name issue-42 -- claude --name "issue-42" "let's tackle this one: https://github.com/o/app/issues/42"
+luneta open tab --session app --cwd ~/code/app --name issue-42 -- claude --name "issue-42" "let's tackle this one: https://github.com/o/app/issues/42"
 luneta open pane --beside luneta:11 -- claude --name "thermo-nuclear-review: fix-auth" "/thermo-nuclear-review"
 ```
 
@@ -99,18 +136,22 @@ own, or they edit the same files:
 1. Read each issue (`gh issue view <n>`) for a short branch name, such as `issue-42`.
 2. Make a worktree per branch with `luneta worktree --repo <dir> <branch>`, where
    `<dir>` is any directory of the repository. It puts the worktree beside the
-   others and prints where. It refuses a clone that git made; there, use
-   `git worktree add ../<branch> -b <branch>`.
-3. Open a tab per worktree in the user's session, named for the branch, with
-   `claude --name <branch> "<prompt>"` in it.
+   others and prints where. It refuses a clone that git made; there, if you run
+   in that repository, use `git worktree add ../<branch> -b <branch>`, and
+   otherwise tell the user.
+3. Open a tab per worktree in the session
+   [Which session a tab opens in](#which-session-a-tab-opens-in) picks, named for
+   the branch, with `claude --name <branch> "<prompt>"` in it.
 4. Report the tabs you opened (`<session>:<pane>` and the issue each has).
-   Don't `go` anywhere unless asked.
+   Don't `go` anywhere unless asked, or that session has nobody in it and the
+   user is waiting on you.
 
 ### A skill on a PR
 
 Find the pane whose branch is the PR's in `luneta sessions` and open a pane
 beside it. If no pane has the branch, make a worktree for the PR (`luneta
-worktree --repo <dir> <PR link>` takes a link), then open a tab there.
+worktree --repo <dir> <PR link>` takes a link), then open a tab there, in the
+session [Which session a tab opens in](#which-session-a-tab-opens-in) picks.
 
 ## New session to work on X
 

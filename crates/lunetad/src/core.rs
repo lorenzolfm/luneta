@@ -402,7 +402,9 @@ impl Known {
     fn branch(&self, dir: &str) -> Option<&str> {
         match self.trees.get(dir)? {
             WorkTree::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
-            WorkTree::Checkout { head: Head::Detached, .. } | WorkTree::Outside => None,
+            WorkTree::Checkout { head: Head::Detached, .. }
+            | WorkTree::NoCheckout { .. }
+            | WorkTree::Outside => None,
         }
     }
 

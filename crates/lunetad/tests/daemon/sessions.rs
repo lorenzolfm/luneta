@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::{Detached, Head};
-use lunetad::api::work_tree::{Outside, Stands};
+use lunetad::api::work_tree::{NoCheckout, Outside, Stands};
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
@@ -524,11 +524,18 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
     let main = Branch { name: "main".to_owned(), upstream: Some(Upstream { ahead: 1, behind: 0 }) };
-    let checkout = |head, changes, stashes| {
-        Some(Stands::Checkout(Checkout { head: Some(head), changes: Some(changes), stashes }))
+    let checkout = |dir: &str, head, changes, stashes| {
+        let repository = Some(fs::canonicalize(dir).unwrap().display().to_string());
+        Some(Stands::Checkout(Checkout {
+            head: Some(head),
+            changes: Some(changes),
+            stashes,
+            repository,
+        }))
     };
-    assert_eq!(stands(&tree), checkout(Head::Branch(main), every, 1));
-    assert_eq!(stands(&detached), checkout(Head::Detached(Detached {}), Changes::default(), 0));
+    assert_eq!(stands(&tree), checkout(&tree, Head::Branch(main), every, 1));
+    let none = Changes::default();
+    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(Detached {}), none, 0));
     assert_eq!(stands(&plain), Some(Stands::Outside(Outside {})));
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
@@ -538,13 +545,166 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     });
 }
 
+#[test]
+fn luneta_sessions_names_the_repository_each_pane_works_in() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let dirs = dirs.path().canonicalize().unwrap();
+    let (seed, app, clone, plain) =
+        (dirs.join("seed"), dirs.join("app"), dirs.join("clone"), dirs.join("plain"));
+    for dir in [&seed, &app, &plain] {
+        fs::create_dir(dir).unwrap();
+    }
+    assert!(git(&seed, &["init", "-q", "-b", "main"]));
+    commit(&seed, "file", "text\n");
+    let seeded = seed.display().to_string();
+    assert!(git(&dirs, &["clone", "-q", &seeded, "clone"]));
+    assert!(git(&app, &["clone", "-q", "--bare", &seeded, ".bare"]));
+    fs::write(app.join(".git"), "gitdir: ./.bare\n").unwrap();
+    assert!(git(&app, &["worktree", "add", "-q", "main"]));
+    assert!(git(&app, &["worktree", "add", "-q", "-b", "other", "issue-1"]));
+
+    let spelled = |dir: &Path| dir.display().to_string();
+    let (repo, clone, plain) = (spelled(&app), spelled(&clone), spelled(&plain));
+    let (main, other) = (format!("{repo}/main"), format!("{repo}/issue-1"));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    let panes = [
+        in_dir(1, &main),
+        in_dir(2, &other),
+        in_dir(3, &repo),
+        in_dir(4, &clone),
+        in_dir(5, &plain),
+    ];
+    host.zellij.list("work", &json!(panes));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says of all five", || (host.host().work_trees.len() == 5).then_some(()));
+
+    let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
+    let said = String::from_utf8(said.stdout).unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "work".to_owned(),
+            format!("  Tab #1:1  {main}  main  repo {repo}"),
+            format!("  Tab #1:2  {other}  other  repo {repo}"),
+            format!("  Tab #1:3  {repo}  no checkout  repo {repo}"),
+            format!("  Tab #1:4  {clone}  main  repo {clone}"),
+            format!("  Tab #1:5  {plain}  no repository"),
+        ],
+    );
+}
+
+#[test]
+fn luneta_sessions_lists_the_sessions_as_the_sidebar_does() {
+    let host = Host::new();
+    let _zeta = host.serve("zeta");
+    thread::sleep(Duration::from_millis(50));
+    let _alpha = host.serve("alpha");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("both are listed", || (host.host().sessions.len() == 2).then_some(()));
+    let listed = || {
+        let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
+        let said = String::from_utf8(said.stdout).unwrap();
+        let first = |line: &str| line.split_whitespace().next().unwrap().to_owned();
+        said.lines().map(first).collect::<Vec<String>>()
+    };
+    assert_eq!(listed(), ["zeta", "alpha"]);
+
+    let kept = host.home.path().join(".local/state/luneta");
+    fs::create_dir_all(&kept).unwrap();
+    fs::write(kept.join("order"), r#"{"sessions":["alpha"]}"#).unwrap();
+    assert_eq!(listed(), ["alpha", "zeta"]);
+}
+
+/// What git will not read is said nothing of, as it could be any repository:
+/// a repository it refuses is not `no repository`, nor a work tree whose index
+/// does not read `no checkout`. Why goes to the log. The directory named last
+/// is asked about last, so once git has said of it, it has been asked of all.
+#[test]
+fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let dirs = dirs.path().canonicalize().unwrap();
+    let (seed, plain) = (dirs.join("seed"), dirs.join("zz-plain"));
+    for dir in [&seed, &plain] {
+        fs::create_dir(dir).unwrap();
+    }
+    assert!(git(&seed, &["init", "-q", "-b", "main"]));
+    commit(&seed, "file", "text\n");
+    let seeded = seed.display().to_string();
+    assert!(git(&dirs, &["clone", "-q", "--bare", &seeded, ".bare"]));
+    assert!(git(&dirs, &["clone", "-q", &seeded, "broken"]));
+    assert!(git(&dirs, &["clone", "-q", &seeded, "newer"]));
+    fs::write(dirs.join("broken/.git/index"), "no index\n").unwrap();
+    assert!(git(&dirs.join("newer"), &["config", "core.repositoryformatversion", "99"]));
+
+    let spelled = |dir: &Path| dir.display().to_string();
+    let (bare, broken) = (spelled(&dirs.join(".bare")), spelled(&dirs.join("broken")));
+    let (newer, plain) = (spelled(&dirs.join("newer")), spelled(&plain));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    let panes = [in_dir(1, &bare), in_dir(2, &broken), in_dir(3, &newer), in_dir(4, &plain)];
+    host.zellij.list("work", &json!(panes));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    eventually("git says of the last", || (!host.host().work_trees.is_empty()).then_some(()));
+
+    let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
+    let said = String::from_utf8(said.stdout).unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "work".to_owned(),
+            format!("  Tab #1:1  {bare}"),
+            format!("  Tab #1:2  {broken}"),
+            format!("  Tab #1:3  {newer}"),
+            format!("  Tab #1:4  {plain}  no repository"),
+        ],
+    );
+    let logged = daemon.said_after(Duration::from_secs(1));
+    for why in [
+        format!("git did not say what repository {bare} is in"),
+        format!("git status in {broken} said"),
+        format!("git did not say what repository {newer} is in"),
+    ] {
+        assert!(logged.iter().any(|line| line.contains(&why)), "{why}: {logged:?}");
+    }
+}
+
+/// What git said of a directory stands once it will not say it again, the
+/// repository with it, as git not answering at all leaves it too.
+#[test]
+fn what_git_said_stands_once_it_will_not_read_the_repository() {
+    let host = Host::new();
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path().canonicalize().unwrap();
+    assert!(git(&dir, &["init", "-q", "-b", "main"]));
+    commit(&dir, "file", "text\n");
+    let cwd = dir.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let before = eventually("git says how it stands", || checkout(&host, &cwd));
+    assert_eq!(before.repository.as_deref(), Some(cwd.as_str()));
+
+    assert!(git(&dir, &["config", "core.repositoryformatversion", "99"]));
+    let why = format!("git did not say what repository {cwd} is in");
+    eventually("git will not read it", || {
+        let logged = daemon.said_after(Duration::from_millis(50));
+        logged.iter().any(|line| line.contains(&why)).then_some(())
+    });
+    assert_eq!(checkout(&host, &cwd), Some(before));
+}
+
 /// How the work tree stands where a pane works in `cwd`, once git has said
 /// that it is a checkout there.
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
     let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
     match tree.stands? {
         Stands::Checkout(checkout) => Some(checkout),
-        Stands::Outside(_) => None,
+        Stands::Outside(_) | Stands::NoCheckout(_) => None,
     }
 }
 
@@ -773,6 +933,24 @@ fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
     shows_at_once(&host, &cwd, "a work tree made in it", made, on_branch("first"));
 }
 
+#[test]
+fn a_checkout_taken_away_is_in_no_work_tree() {
+    let host = Host::new();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir(&work).unwrap();
+    assert!(git(&work, &["init", "-q", "-b", "main"]));
+    commit(&work, "file", "text\n");
+    let cwd = work.display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("git says it is a checkout", || checkout(&host, &cwd));
+
+    fs::remove_dir_all(&work).unwrap();
+    in_no_work_tree(&host, &cwd);
+}
+
 /// A pane that works in a repository's own folder, which git places in no
 /// work tree, has git asked nothing as git writes there, as a commit does.
 #[test]
@@ -786,7 +964,12 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    in_no_work_tree(&host, &cwd);
+    let repository = fs::canonicalize(top).unwrap().display().to_string();
+    let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
+    eventually("git says it is no checkout of its clone", || {
+        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
+        (tree.stands == of_its_clone).then_some(())
+    });
 
     let asked = noted.statuses();
     for step in 0..5 {
