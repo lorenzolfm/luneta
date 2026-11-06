@@ -10,6 +10,8 @@
     pkgs.gnused
   ];
   text = ''
+    export LC_ALL=C
+
     usage() {
       echo "usage: dev ci [pr number]" >&2
       exit 2
@@ -39,11 +41,24 @@
       printf '%.7s' "$1"
     }
 
-    fields=number,state,headRefOid,headRefName,baseRefName,mergeable
-    shape='[.number, .state, .headRefOid, .headRefName, .baseRefName, .mergeable] | @tsv'
+    fields=number,state,headRefOid,headRefName,baseRefName,mergeable,isCrossRepository
+    shape='[.number, .state, .headRefOid, .headRefName, .baseRefName, .mergeable, .isCrossRepository] | @tsv'
 
     branch="$(git symbolic-ref -q HEAD)" || branch=""
     branch="''${branch#refs/heads/}"
+    if [ -z "$number" ] && [ -z "$branch" ]; then
+      detached="$(git rev-parse HEAD)"
+      if ! number="$(
+        gh api "repos/{owner}/{repo}/commits/$detached/pulls" \
+          --jq "map(select(.head.sha == \"$detached\")) | sort_by(.state != \"open\") | .[0].number // empty" 2>"$said"
+      )"; then
+        if [[ "$(<"$said")" != *"No commit found"* ]]; then
+          cat "$said" >&2
+          exit 1
+        fi
+        number=""
+      fi
+    fi
     pr=""
     if [ -n "$number" ]; then
       pr="$(gh pr view "$number" --json "$fields" --jq "$shape")"
@@ -58,14 +73,17 @@
     state=OPEN
     base=main
     if [ -n "$pr" ]; then
-      IFS=$'\t' read -r number state head name base mergeable <<<"$pr"
+      IFS=$'\t' read -r number state head name base mergeable fork <<<"$pr"
       echo "PR #$number, $name, $state"
+      here=""
       if [ -z "''${1:-}" ]; then
         here="$(git rev-parse HEAD)"
-      else
+      elif [ "$fork" = false ]; then
         here="$(git rev-parse -q --verify "refs/heads/$name")" || here=""
       fi
-      if [ -z "$here" ]; then
+      if [ -z "$here" ] && [ "$fork" = true ]; then
+        line head "$(short "$head"), from a fork"
+      elif [ -z "$here" ]; then
         line head "$(short "$head"), and no branch $name here"
       elif [ "$here" = "$head" ]; then
         line head "$(short "$head"), the same here"
@@ -79,7 +97,7 @@
       fi
     else
       head="$(git rev-parse HEAD)"
-      echo "''${branch:-HEAD}, no PR"
+      echo "''${branch:-HEAD}, no PR at this head"
       line head "$(short "$head")"
     fi
 
@@ -125,7 +143,7 @@
           .jobs[]
           | [
               (if .status == "completed" then .conclusion else .status end),
-              (if .status == "completed" and .conclusion != "skipped" then ((.completedAt | fromdate) - (.startedAt | fromdate)) | "\(. / 60 | floor)m\(. % 60)s" else "-" end),
+              (if .status == "completed" and .conclusion != "skipped" and .completedAt >= .startedAt then ((.completedAt | fromdate) - (.startedAt | fromdate)) | "\(. / 60 | floor)m\(. % 60)s" else "-" end),
               (.databaseId | tostring),
               .name,
               ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))
@@ -145,7 +163,10 @@
         if [ ! -s "$log" ]; then
           mkdir -p target/ci
           if ! gh api --allow-escape-sequences "repos/{owner}/{repo}/actions/jobs/$job_id/logs" 2>"$said" |
-            sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' >"$log.part"; then
+            sed -E \
+              -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' \
+              -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' \
+              -e 's/\xc2[\x80-\x9f]/?/g' >"$log.part"; then
             rm -f "$log.part"
             line "" "      no log: $(<"$said")"
             continue
@@ -154,7 +175,7 @@
         fi
 
         sed -nE \
-          -e 's/.*[[:space:]](FAIL|TIMEOUT|ABORT|SIG[A-Z]+)[[:space:]]+\[[^]]*\][[:space:]]+(\([^)]*\)[[:space:]]+)?(.*)$/\3/p' \
+          -e 's/.*[[:space:]](FAIL \+ LEAK|FAIL|XFAIL|LEAK-FAIL|TIMEOUT|ABORT SIG [0-9]+|ABORT|SIG[A-Z]+)[[:space:]]+\[[^]]*\][[:space:]]+(\([^)]*\)[[:space:]]+)?(.*)$/\3/p' \
           -e 's/.*[[:space:]]test (.* - .* \(line [0-9]+\)) \.\.\. FAILED$/\1/p' \
           "$log" |
           sort -u |
