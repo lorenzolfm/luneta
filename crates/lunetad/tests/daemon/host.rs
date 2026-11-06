@@ -637,8 +637,9 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// request by its number for its branches, which a test wrote with `pull`, and
 /// notes what it was asked, for `viewed`. Its `api` says what a test wrote with
 /// `api`. Its `repo view` says the parent a test wrote with `fork_of`, and with
-/// `GH_REPO` set it finds what a test wrote with `open_in`. It knows no other
-/// command.
+/// `GH_REPO` set it finds what a test wrote with `open_in`. Of a branch whose
+/// upstream is `refs/pull/<number>/head` that it has none for, it says it can
+/// resolve no such number, as gh does. It knows no other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -684,6 +685,14 @@ branch=$(git symbolic-ref --short HEAD) || exit 1
 echo "${{GH_REPO:+$GH_REPO }}$branch" >> "{pulls}/asked"
 said="{pulls}/${{GH_REPO:+$GH_REPO/}}$branch.json"
 if [ ! -f "$said" ]; then
+    merge=$(git config "branch.$branch.merge")
+    case "$merge" in
+    refs/pull/*/head)
+        number=${{merge#refs/pull/}}
+        echo "GraphQL: Could not resolve to a PullRequest with the number of ${{number%/head}}." >&2
+        exit 1
+        ;;
+    esac
     echo "no pull requests found for branch \"$branch\"" >&2
     exit 1
 fi

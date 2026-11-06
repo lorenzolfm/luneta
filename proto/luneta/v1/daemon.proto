@@ -1181,7 +1181,8 @@ message Upstream {
 }
 
 // The pull request on GitHub of the branch checked out where a pane works, as
-// `gh pr view` finds it there: an open one before the rest. gh is asked again
+// `gh pr view` finds it there: an open one before the rest of a repository, and
+// a fork's before its parent's unless the fork's is closed. gh is asked again
 // about each branch every minute, and about one a pane has just come to at
 // once.
 message PullRequest {

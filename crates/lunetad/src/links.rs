@@ -455,7 +455,7 @@ impl fmt::Display for Of {
 
 /// Whether `part` can name an owner or a repository on GitHub: letters,
 /// digits, `-`, `_` and `.`, and more than dots.
-fn named(part: &str) -> bool {
+pub(crate) fn named(part: &str) -> bool {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
     !part.is_empty() && part.chars().all(allowed) && part.chars().any(|c| c != '.')
 }
@@ -1241,7 +1241,7 @@ fn directory_gone(stderr: &[u8]) -> bool {
 
 /// What git says of the remotes of the repository a directory is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Remotes {
+pub(crate) enum Remotes {
     /// As `git config --get-regexp` prints them.
     Listed(String),
     /// It has none, or the directory is in no repository, or is gone.
@@ -1276,9 +1276,16 @@ impl Remotes {
 
 /// What git says of the remotes of the repository `dir` is in.
 fn remotes_in(dir: &str) -> Remotes {
+    remote_keys_in(dir, r"^remote\..*\.url$")
+}
+
+pub(crate) fn remotes_gh_reads(dir: &str) -> Remotes {
+    remote_keys_in(dir, r"^remote\..*\.(url|gh-resolved)$")
+}
+
+fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
     let mut git = Command::new("git");
-    git::local(git.args(["-C", dir, "config", "--get-regexp", r"^remote\..*\.url$"]))
-        .env("LC_ALL", "C");
+    git::local(git.args(["-C", dir, "config", "--get-regexp", keys])).env("LC_ALL", "C");
     Remotes::of(program::run(&mut git, ANSWER))
 }
 

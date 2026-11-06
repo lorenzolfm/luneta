@@ -21,6 +21,7 @@ use serde::Deserialize;
 
 use crate::core;
 use crate::git;
+use crate::links::{self, Remotes};
 use crate::program;
 use crate::watch::Troubles;
 
@@ -29,7 +30,7 @@ const LIMIT: Duration = Duration::from_secs(30);
 
 /// How gh starts what it says of a branch with no pull request, which is no
 /// failure to the daemon: gh fails the same way at anything else.
-const NONE: &str = "no pull requests found";
+const NONE: [&str; 2] = ["no pull requests found", "GraphQL: Could not resolve to a PullRequest"];
 
 /// The pull request gh found of the branch checked out in a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,12 +97,16 @@ struct Owner {
 
 fn parent_of(said: &[u8]) -> Result<Option<String>, String> {
     let repository: Repository = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-    let Some(parent) = repository.parent else {
+    let Some(Parent { name, owner: Owner { login } }) = repository.parent else {
         return Ok(None);
     };
-    let host = repository.url.split('/').nth(2).filter(|host| !host.is_empty());
+    if !links::named(&login) || !links::named(&name) {
+        return Err(format!("{login}/{name} names no repository"));
+    }
+    let host = repository.url.split_once("://").and_then(|(_, page)| page.split('/').next());
+    let host = host.filter(|host| !host.is_empty());
     let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
-    Ok(Some(format!("{host}/{}/{}", parent.owner.login, parent.name)))
+    Ok(Some(format!("{host}/{login}/{name}")))
 }
 
 /// What gh said of the branch it was asked about.
@@ -117,23 +122,34 @@ enum Answer {
 fn find(dir: &str, base: Option<&str>) -> Result<Option<PullRequest>, String> {
     let mut gh = Command::new("gh");
     git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
-    if let Some(base) = base {
-        gh.env("GH_REPO", base);
-    }
+    let asked = match base {
+        Some(base) => {
+            gh.env("GH_REPO", base);
+            format!("gh pr view of {base} in {dir}")
+        },
+        None => format!("gh pr view in {dir}"),
+    };
     let ran = program::run(&mut gh, LIMIT)
-        .map_err(|error| format!("gh pr view in {dir} could not be run: {error}"))?;
+        .map_err(|error| format!("{asked} could not be run: {error}"))?;
     match ran.answer() {
         Ok(said) => parse(&said)
             .map(Some)
-            .map_err(|why| format!("gh pr view in {dir} said what does not read: {why}")),
-        Err(why) if why.starts_with(NONE) => Ok(None),
-        Err(why) => Err(format!("gh pr view in {dir}: {why}")),
+            .map_err(|why| format!("{asked} said what does not read: {why}")),
+        Err(why) if NONE.iter().any(|none| why.starts_with(none)) => Ok(None),
+        Err(why) => Err(format!("{asked}: {why}")),
     }
 }
 
 fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<String>, String> {
-    if let Some(parent) = parents.get(repository) {
-        return Ok(parent.clone());
+    let remotes = match links::remotes_gh_reads(dir) {
+        Remotes::Listed(listed) => listed,
+        Remotes::Unlisted => return Ok(None),
+        Remotes::Unsaid(why) => return Err(format!("git did not say the remotes of {dir}: {why}")),
+    };
+    if let Some(known) = parents.get(repository)
+        && known.remotes == remotes
+    {
+        return Ok(known.parent.clone());
     }
     let mut gh = Command::new("gh");
     git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
@@ -142,7 +158,7 @@ fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<S
     let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
     let parent = parent_of(&said)
         .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
-    parents.insert(repository.to_owned(), parent.clone());
+    parents.insert(repository.to_owned(), Lineage { remotes, parent: parent.clone() });
     Ok(parent)
 }
 
@@ -152,20 +168,24 @@ fn parent(dir: &str, repository: &str, parents: &mut Parents) -> Result<Option<S
 /// what is to be said of it instead.
 ///
 /// gh finds it as it does in a shell in `dir`, or else in the repository that
-/// one forks: by the branch's config for where it pushes the branch. It reads
-/// what is checked out as it starts, where git can have last looked a sweep
-/// before, so what is checked out is read again once gh has answered.
+/// one forks, for a branch git names a head of: by the branch's config for
+/// where it pushes the branch. It reads what is checked out as it starts,
+/// where git can have last looked a sweep before, so what is checked out is
+/// read again once gh has answered.
 fn view(
     dir: &str,
     (repository, branch): &Branch,
     parents: &mut Parents,
 ) -> Result<Answer, String> {
-    let mut found = find(dir, None)?;
-    if found.is_none()
-        && let Some(parent) = parent(dir, repository, parents)?
-    {
-        found = find(dir, Some(&parent))?;
-    }
+    let own = find(dir, None)?;
+    let settled = own.as_ref().is_some_and(|found| found.state != State::Closed);
+    let found = if settled || !git::names_its_head(dir, branch)? {
+        own
+    } else if let Some(parent) = parent(dir, repository, parents)? {
+        find(dir, Some(&parent))?.or(own)
+    } else {
+        own
+    };
     if git::branch(dir).as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
@@ -176,7 +196,12 @@ fn view(
 /// branch's name.
 type Branch = (String, String);
 
-type Parents = HashMap<String, Option<String>>;
+struct Lineage {
+    remotes: String,
+    parent: Option<String>,
+}
+
+type Parents = HashMap<String, Lineage>;
 
 /// Where gh stands with a branch it has been asked about.
 struct Asked {
@@ -306,7 +331,20 @@ mod tests {
         );
         let none = r#"{"parent":null,"url":"https://github.com/lorenzolfm/luneta"}"#;
         assert_eq!(read(none), Ok(None));
-        for unread in [forked("nowhere"), String::new()] {
+        let unnamed = |name: &str, login: &str| {
+            let parent = format!(r#"{{"name":"{name}","owner":{{"login":"{login}"}}}}"#);
+            format!(r#"{{"parent":{parent},"url":"https://github.com/lorenzolfm/cdk"}}"#)
+        };
+        let unread = [
+            forked("nowhere"),
+            forked("no/where/at"),
+            forked("https:///lorenzolfm/cdk"),
+            unnamed("", "cashubtc"),
+            unnamed("cdk", ""),
+            unnamed("cdk", "cashu/btc"),
+            String::new(),
+        ];
+        for unread in unread {
             assert!(read(&unread).is_err(), "{unread:?}");
         }
     }
