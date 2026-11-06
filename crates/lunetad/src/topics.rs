@@ -13,22 +13,24 @@
 //! `WatchRequest.shown` says. Once someone does again, one is made for each
 //! agent whose last prompt changed meanwhile. Nothing is kept on disk: an agent
 //! from before the daemon started keeps the name it has until its next prompt.
+//! A session that goes is remembered for `REMEMBERED`: one back by then, as
+//! `claude --resume` brings it, has its topic again, at no call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use tokio::sync::watch::Receiver;
 
 use crate::agent::{Agent, Name, Status};
 use crate::core::{self, Command};
-use crate::transcripts::{self, one_line, same_prompt, Digest, SessionId};
+use crate::transcripts::{self, one_line, Asked, Digest, SessionId};
 use crate::watch::Troubles;
 use crate::{claude, program};
 
@@ -53,6 +55,9 @@ const SHARE: usize = 256 * 1024;
 /// The most characters a topic runs to. A row shows fewer: an answer longer
 /// than this is no topic, and leaves the row as it is.
 const TOPIC_CHARS: usize = 80;
+
+/// How long a session that has gone is remembered.
+const REMEMBERED: Duration = Duration::from_mins(5);
 
 /// What the model is told, whatever the agent, in the form of Claude Code's own
 /// titles, which are what a row showed before.
@@ -93,89 +98,97 @@ struct Wrote {
 #[derive(Default)]
 struct Kept {
     /// What you last asked of it, as its transcript last said.
-    asked: Option<String>,
+    asked: Option<Asked>,
     /// Its topic, once the model has named one.
     topic: Option<Said>,
     /// When it came to its status, as it was last looked at: a turn over in
     /// less than a sweep, which the thread never saw at work, changes it too.
     status_since: Option<SystemTime>,
+    /// Whether its transcript is to be read at the next look, which a read that
+    /// fails leaves so.
+    read_due: bool,
     /// Its transcript, once found, and how long it was as last read: one no
     /// longer has nothing new to say.
     transcript: Option<(PathBuf, u64)>,
     /// What the model has yet to be told of a prompt it has not named a topic
     /// on, which a newer one takes the place of.
     due: Option<Digest>,
-    /// Whether the model is at it now.
-    writing: bool,
+    /// When it left the agents a row goes by, if it has.
+    left: Option<Instant>,
 }
 
 impl Kept {
     /// What the transcript of `id` says, where `projects` has one that has
-    /// grown since it was last read.
-    fn grown(&mut self, projects: &Path, id: &SessionId) -> Option<Digest> {
+    /// grown since it was last read, or why it could not be read.
+    fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
         let (path, was) = match self.transcript.take() {
             Some((path, was)) => (path, Some(was)),
-            None => (transcripts::find(projects, id)?, None),
+            None => match transcripts::find(projects, id) {
+                Some(path) => (path, None),
+                None => return Ok(None),
+            },
         };
-        let length = fs::metadata(&path).ok()?.len();
-        self.transcript = Some((path.clone(), length));
+        let length = fs::metadata(&path)?.len();
         if was == Some(length) {
-            return None;
+            self.transcript = Some((path, length));
+            return Ok(None);
         }
-        transcripts::told(&path, SHARE, STEPS).ok()
+        let digest = transcripts::told(&path, SHARE, STEPS)?;
+        self.transcript = Some((path, length));
+        Ok(Some(digest))
     }
 }
 
 /// What the thread has of this machine's agents.
 struct Topics {
-    /// Where Claude Code keeps its transcripts, if the daemon's environment
-    /// named a folder for it.
-    projects: Option<PathBuf>,
+    /// Where Claude Code keeps its transcripts.
+    projects: PathBuf,
     /// When the daemon started: what you asked of an agent from before then
     /// is no change it saw, and costs no call.
     began: SystemTime,
-    /// Each agent a row can go by the topic of, by its session.
+    /// Each agent a row can go by the topic of, by its session, and each that
+    /// has left them for less than `REMEMBERED`.
     kept: HashMap<SessionId, Kept>,
     /// Whether someone saw what comes of it, as it last looked.
     shown: bool,
-    /// How many calls run now.
-    writing: usize,
+    /// The sessions a call runs for now, one that has gone since among them, so
+    /// that one that comes back waits for it.
+    writing: HashSet<SessionId>,
     /// What went wrong in the calls that ended last.
     troubles: Troubles,
 }
 
 impl Topics {
-    fn new(projects: Option<PathBuf>, began: SystemTime) -> Self {
+    fn new(projects: PathBuf, began: SystemTime) -> Self {
         Topics {
             projects,
             began,
             kept: HashMap::new(),
             shown: false,
-            writing: 0,
+            writing: HashSet::new(),
             troubles: Troubles::default(),
         }
     }
 
     /// Takes in `agents`, as they stand now, while someone sees what comes of
     /// it or no one does, as `shown` says, and hands back the calls to start.
-    /// An agent that goes takes its topic with it. An agent's transcript is
-    /// read while it is at work, and as its status changes, and each agent's
-    /// once as someone comes to see again: only a prompt it did not say before
-    /// costs a call, the newest of any that came before one could start.
+    /// An agent's transcript is read while it is at work, and as its status
+    /// changes, and each agent's once as someone comes to see again: only a
+    /// prompt it did not say before costs a call, the newest of any that came
+    /// before one could start.
     fn look(&mut self, agents: &[Agent], shown: bool) -> Vec<Due> {
         let named: Vec<(SessionId, &Agent)> =
             agents.iter().filter_map(|agent| Some((topical(agent)?, agent))).collect();
-        self.kept.retain(|id, _| named.iter().any(|(named, _)| named == id));
+        self.forget_gone(&named, Instant::now());
         let back = shown && !self.shown;
         self.shown = shown;
-        let Some(projects) = self.projects.as_deref() else {
-            return Vec::new();
-        };
+        let projects = self.projects.as_path();
         for (id, agent) in named {
             let kept = self.kept.entry(id.clone()).or_insert_with(|| {
                 let mut kept = Kept::default();
                 if agent.started_at.is_none_or(|started| started < self.began) {
-                    kept.asked = kept.grown(projects, &id).and_then(|digest| digest.asked);
+                    let digest = kept.grown(projects, &id).ok().flatten();
+                    kept.asked = digest.and_then(|digest| digest.asked);
                 }
                 kept
             });
@@ -184,14 +197,19 @@ impl Topics {
             }
             let moved = agent.status == Status::Busy || agent.status_since != kept.status_since;
             kept.status_since = agent.status_since;
-            if !back && !moved {
+            kept.read_due |= back || moved;
+            if !kept.read_due {
                 continue;
             }
-            let Some(digest) = kept.grown(projects, &id) else {
+            let Ok(grown) = kept.grown(projects, &id) else {
                 continue;
             };
-            let new = digest.asked.as_deref().is_some_and(|asked| {
-                kept.asked.as_deref().is_none_or(|was| !same_prompt(was, asked))
+            kept.read_due = false;
+            let Some(digest) = grown else {
+                continue;
+            };
+            let new = digest.asked.as_ref().is_some_and(|asked| {
+                kept.asked.as_ref().is_none_or(|was| !was.same(asked))
             });
             if new {
                 kept.asked.clone_from(&digest.asked);
@@ -205,33 +223,46 @@ impl Topics {
         }
     }
 
+    /// Dates each session that has left `named`, and forgets each that left
+    /// `REMEMBERED` before `now`.
+    fn forget_gone(&mut self, named: &[(SessionId, &Agent)], now: Instant) {
+        self.kept.retain(|id, kept| {
+            if named.iter().any(|(named, _)| named == id) {
+                kept.left = None;
+                return true;
+            }
+            now.duration_since(*kept.left.get_or_insert(now)) < REMEMBERED
+        });
+    }
+
     /// The calls to start now, as many as `CALLS_MAX` leaves room for: one at
-    /// a time for an agent.
+    /// a time for an agent, and none for one that has gone.
     fn due(&mut self) -> Vec<Due> {
         let mut due = Vec::new();
         for (id, kept) in &mut self.kept {
-            if self.writing == CALLS_MAX {
+            if self.writing.len() == CALLS_MAX {
                 break;
             }
-            if kept.writing {
+            if kept.left.is_some() || self.writing.contains(id) {
                 continue;
             }
             let Some(digest) = kept.due.take() else {
                 continue;
             };
-            kept.writing = true;
-            self.writing += 1;
+            self.writing.insert(id.clone());
             let prompt = prompt(kept.topic.as_ref().map(Said::as_str), digest);
             due.push(Due { id: id.clone(), prompt });
         }
-        assert!(self.writing <= CALLS_MAX);
+        assert!(self.writing.len() <= CALLS_MAX);
         due
     }
 
-    /// Takes in what came of a call, which an agent gone since has no use for.
-    /// One that failed leaves the row as it is, until the agent's next prompt.
+    /// Takes in what came of a call, which a session forgotten since has no use
+    /// for. One that failed leaves the row as it is, until the agent's next
+    /// prompt.
     fn wrote(&mut self, Wrote { id, said }: Wrote) {
-        self.writing = self.writing.checked_sub(1).expect("a call that ended had started");
+        let started = self.writing.remove(&id);
+        assert!(started, "a call that ended had started");
         if let Err(why) = &said {
             self.troubles.say(format!("the model named no topic: {why}"));
         }
@@ -239,18 +270,15 @@ impl Topics {
         let Some(kept) = self.kept.get_mut(&id) else {
             return;
         };
-        kept.writing = false;
         if let Ok(topic) = said {
             kept.topic = Some(topic);
         }
     }
 
     /// The topic of each agent that has one, by its session's id.
-    fn topics(&self) -> HashMap<String, String> {
-        let topic = |(id, kept): (&SessionId, &Kept)| {
-            Some((id.as_str().to_owned(), String::from(kept.topic.clone()?)))
-        };
-        self.kept.iter().filter_map(topic).collect()
+    fn topics(&self) -> HashMap<SessionId, Said> {
+        let here = self.kept.iter().filter(|(_, kept)| kept.left.is_none());
+        here.filter_map(|(id, kept)| Some((id.clone(), kept.topic.clone()?))).collect()
     }
 }
 
@@ -259,7 +287,8 @@ impl Topics {
 /// names a transcript. A `claude -p` an agent runs has its pane's ids, and a row
 /// goes by the agent that ran it. A row with a given name would never show one.
 fn topical(agent: &Agent) -> Option<SessionId> {
-    let at_prompt = agent.entrypoint.as_ref().is_none_or(|word| word.as_str() == "cli");
+    let word = agent.harness.to_api().prompt_word();
+    let at_prompt = agent.entrypoint.as_ref().is_none_or(|said| Some(said.as_str()) == word);
     let given = agent.name.as_ref().is_some_and(Name::given);
     if agent.pane.is_none() || !at_prompt || given {
         return None;
@@ -333,7 +362,7 @@ fn start(Due { id, prompt }: Due, wrote: &Sender<Wrote>) -> io::Result<()> {
 pub fn follow(
     core: SyncSender<Command>,
     shown: Receiver<bool>,
-    projects: Option<PathBuf>,
+    projects: PathBuf,
     began: SystemTime,
     sweep: Duration,
 ) -> io::Result<()> {
@@ -371,8 +400,9 @@ pub fn follow(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::OpenOptions;
+    use std::fs::{OpenOptions, Permissions};
     use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -414,12 +444,16 @@ mod tests {
         }
 
         fn topics(&self) -> Topics {
-            Topics::new(Some(self.0.path().to_owned()), began())
+            Topics::new(self.0.path().to_owned(), began())
+        }
+
+        fn transcript(&self, id: &str) -> PathBuf {
+            self.0.path().join(format!("-w/{id}.jsonl"))
         }
 
         /// Adds `record` to the end of the transcript of `id`.
         fn add(&self, id: &str, record: &serde_json::Value) {
-            let path = self.0.path().join(format!("-w/{id}.jsonl"));
+            let path = self.transcript(id);
             let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
             writeln!(file, "{record}").unwrap();
         }
@@ -435,6 +469,12 @@ mod tests {
             id: SessionId::parse(id).unwrap(),
             said: Ok(Said::new(topic.to_owned()).unwrap()),
         }
+    }
+
+    /// What `topics()` says where the session `id` alone has `topic`.
+    fn only(id: &str, topic: &str) -> HashMap<SessionId, Said> {
+        let Wrote { id, said } = said(id, topic);
+        HashMap::from([(id, said.unwrap())])
     }
 
     /// An agent's prompt costs one call, whatever it does on that prompt. The
@@ -457,7 +497,7 @@ mod tests {
         assert!(prompt.contains("The topic the row goes by now: The first prompt"), "{prompt}");
         assert!(prompt.contains("The developer last asked it: fold the sessions"), "{prompt}");
         topics.wrote(said(ID, "Session folds"));
-        assert_eq!(topics.topics(), HashMap::from([(ID.to_owned(), "Session folds".to_owned())]));
+        assert_eq!(topics.topics(), only(ID, "Session folds"));
 
         let step = json!({"content": [{"type": "text", "text": "Looking."}]});
         projects.add(ID, &json!({"type": "assistant", "message": step}));
@@ -585,24 +625,119 @@ mod tests {
 
         let id = SessionId::parse(ID).unwrap();
         topics.wrote(Wrote { id, said: Err("it did not answer in time".to_owned()) });
-        assert_eq!(topics.topics(), HashMap::from([(ID.to_owned(), "Session folds".to_owned())]));
+        assert_eq!(topics.topics(), only(ID, "Session folds"));
         assert_eq!(topics.look(&busy, true), []);
         projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "now the tabs"}));
         assert_eq!(topics.look(&busy, true), []);
     }
 
-    /// An agent that goes takes its topic with it, and a call that ends after
-    /// it has no one to tell.
+    /// An agent that goes shows no topic. Back soon, as `claude --resume` brings
+    /// it, it has its topic again at no call, and its next prompt is told that
+    /// topic.
     #[test]
-    fn an_agent_that_goes_takes_its_topic_with_it() {
+    fn an_agent_back_soon_has_its_topic_and_costs_no_call() {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        assert_eq!(topics.look(&[agent(ID, Status::Busy, 2)], true).len(), 1);
+        assert_eq!(topics.look(&[agent(ID, Status::Idle, 2)], true).len(), 1);
         topics.wrote(said(ID, "Session folds"));
+
         assert_eq!(topics.look(&[], true), []);
         assert_eq!(topics.topics(), HashMap::new());
-        assert_eq!(topics.writing, 0);
+        assert_eq!(topics.look(&[agent(ID, Status::Idle, 3)], true), []);
+        assert_eq!(topics.topics(), only(ID, "Session folds"));
+
+        projects.prompted(ID, "now the tabs");
+        let due = topics.look(&[agent(ID, Status::Busy, 4)], true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("goes by now: Session folds"), "{prompt}");
+    }
+
+    /// A session gone for longer is forgotten, and a call that ends after that
+    /// has no one to tell: back, it is one the thread has not seen.
+    #[test]
+    fn a_session_gone_for_long_is_forgotten() {
+        let projects = Projects::new();
+        projects.prompted(ID, "fold the sessions");
+        let mut topics = projects.topics();
+        let busy = [agent(ID, Status::Busy, 2)];
+        assert_eq!(topics.look(&busy, true).len(), 1);
+
+        let before = Instant::now();
+        assert_eq!(topics.look(&[], true), []);
+        topics.forget_gone(&[], before + REMEMBERED.saturating_sub(Duration::from_secs(1)));
+        assert_eq!(topics.kept.len(), 1);
+        topics.forget_gone(&[], Instant::now() + REMEMBERED);
+        assert_eq!(topics.kept.len(), 0);
+        topics.wrote(said(ID, "Session folds"));
+        assert_eq!(topics.topics(), HashMap::new());
+        assert!(topics.writing.is_empty());
+
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("The row has no topic yet."), "{prompt}");
+    }
+
+    /// An agent back while its call runs waits for it, so that no two run for
+    /// one agent, and an older answer cannot come after a newer one.
+    #[test]
+    fn an_agent_back_while_its_call_runs_waits_for_it() {
+        let projects = Projects::new();
+        projects.prompted(ID, "fold the sessions");
+        let mut topics = projects.topics();
+        let busy = [agent(ID, Status::Busy, 2)];
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        assert_eq!(topics.look(&[], true), []);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true), []);
+
+        topics.wrote(said(ID, "Session folds"));
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("goes by now: Session folds"), "{prompt}");
+        assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
+    }
+
+    /// A prompt that waits for a call starts none while its agent is gone, and
+    /// does once it is back.
+    #[test]
+    fn a_prompt_that_waits_starts_only_once_its_agent_is_back() {
+        let projects = Projects::new();
+        projects.prompted(ID, "fold the sessions");
+        let mut topics = projects.topics();
+        let busy = [agent(ID, Status::Busy, 2)];
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true), []);
+
+        assert_eq!(topics.look(&[], true), []);
+        topics.wrote(said(ID, "Session folds"));
+        assert_eq!(topics.look(&[], true), []);
+        assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    /// A read that fails has not read the transcript, at work or not: the next
+    /// look reads it, and the prompt in it costs its call.
+    #[test]
+    fn a_read_that_fails_is_tried_again() {
+        for status in [Status::Busy, Status::Idle] {
+            let projects = Projects::new();
+            projects.prompted(ID, "fold the sessions");
+            let path = projects.transcript(ID);
+            let mode = |mode| fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+            let mut topics = projects.topics();
+            let agents = [agent(ID, status, 2)];
+            mode(0o000);
+            assert_eq!(topics.look(&agents, true), []);
+            mode(0o644);
+            assert_eq!(topics.look(&agents, true).len(), 1);
+        }
     }
 
     /// A row goes by the name someone gave its agent, and it goes by the agent

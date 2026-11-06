@@ -82,7 +82,7 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Unready};
 use crate::sayings::ToSay;
-use crate::remote::{Bridges, Destination};
+use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
 use crate::zellij::SessionName;
 use crate::opens::{Open, Tab};
@@ -239,11 +239,12 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
-    let (kept, shown) = (watchers.kept.subscribe(), watchers.window.subscribe());
-    let tells = remote::Tells { kept, shown };
-    remote::follow(core.clone(), tells, SWEEP, folder, Arc::clone(&bridges))?;
-    let projects = claude_folder.as_ref().map(|folder| folder.join("projects"));
-    topics::follow(core.clone(), watchers.shown.subscribe(), projects, started, SWEEP)?;
+    let standing = watchers.standing.subscribe();
+    remote::follow(core.clone(), standing, SWEEP, folder, Arc::clone(&bridges))?;
+    if let Some(claude) = &claude_folder {
+        let projects = claude.join("projects");
+        topics::follow(core.clone(), watchers.shown.subscribe(), projects, started, SWEEP)?;
+    }
     tokio::spawn(sweep_keeps(claim.folder.clone()));
     log::say(&format!("listening on {}", claim.socket.display()));
     if let Some(why) = unkept {
@@ -384,13 +385,12 @@ fn follow(
         // Looked at on each look, whether zellij has a session or not, so that
         // only a client that asked since the look before counts.
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
-        let kept = !scan.alone() || clients;
-        watchers.kept.send_if_modified(|was| mem::replace(was, kept) != kept);
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
-        watchers.window.send_if_modified(|was| mem::replace(was, window) != window);
+        let standing = Standing::of(!scan.alone() || clients || window, window);
+        watchers.standing.send_if_modified(|was| mem::replace(was, standing) != standing);
         let shown = window || far_window;
         watchers.shown.send_if_modified(|was| mem::replace(was, shown) != shown);
-        if alone.saw(!kept && !daemons, Instant::now()) >= ALONE
+        if alone.saw(standing == Standing::Idle && !daemons, Instant::now()) >= ALONE
             && let Some(end) = end.take()
         {
             let secs = ALONE.as_secs();
@@ -413,11 +413,8 @@ fn follow(
 struct Watchers {
     clients: Watching,
     daemons: Watching,
-    /// Whether the daemon is kept: runs for reasons of its own, as zellij has
-    /// a session, or a client watches it, as it last looked, or a client has
-    /// come since. Only a daemon that is kept runs ssh to the machines it
-    /// watches, and keeps their daemons running.
-    kept: tokio::sync::watch::Sender<bool>,
+    /// How the daemon stands, as it last looked, or a client has come since.
+    standing: tokio::sync::watch::Sender<Standing>,
     /// luneta's windows that watch the host, each as its `WatchRequest` says.
     windows: Watching,
     /// The daemons of other machines where one of luneta's windows watches
@@ -425,9 +422,6 @@ struct Watchers {
     /// machines its own daemon watches, and so one hop is as far as it goes,
     /// and two daemons that watch each other do not keep each other shown.
     far_windows: Watching,
-    /// Whether a window watches this daemon, as it last looked, or one has come
-    /// since, which it says to the machines it watches.
-    window: tokio::sync::watch::Sender<bool>,
     /// Whether someone sees this machine's agents, here or on another machine,
     /// as it last looked, or one has come since: only then is a topic worth its
     /// call.
@@ -435,29 +429,51 @@ struct Watchers {
 }
 
 impl Watchers {
-    /// Counts one that waits on `Watch`, until what this returns is dropped,
-    /// as `kept`, of its `WatchRequest`, says who it is: a client, where it
-    /// says nothing, and else the daemon of another machine, which is no one
-    /// where it runs for no reason of its own. It counts among those that show
-    /// the host too, where its `shown` says it is one.
-    fn waits(&self, kept: Option<bool>, shown: bool) -> [Option<Waits<'_>>; 2] {
-        let (watching, showing) = match kept {
-            None => (&self.clients, &self.windows),
-            Some(true) => (&self.daemons, &self.far_windows),
-            Some(false) => return [None, None],
+    /// Counts `waiter`, until what this returns is dropped, among those that
+    /// watch the host, and those that show it where it is one: a daemon that
+    /// runs for no reason of its own is no one.
+    fn waits(&self, waiter: Waiter) -> Option<(Waits<'_>, Option<Waits<'_>>)> {
+        let (watching, showing, standing) = match waiter {
+            Waiter::Daemon(Standing::Idle) => return None,
+            Waiter::Daemon(Standing::Kept) => (&self.daemons, None, None),
+            Waiter::Daemon(Standing::Window) => (&self.daemons, Some(&self.far_windows), None),
+            Waiter::Client => (&self.clients, None, Some(Standing::Kept)),
+            Waiter::Window => (&self.clients, Some(&self.windows), Some(Standing::Window)),
         };
+        let waits = (Waits::on(watching), showing.map(Waits::on));
         // A client keeps the daemon at once, so that it need not wait for
         // the next look for the machines the daemon watches to be reached.
-        if kept.is_none() {
-            self.kept.send_if_modified(|was| !mem::replace(was, true));
+        if let Some(standing) = standing {
+            self.standing.send_if_modified(|was| {
+                let before = mem::replace(was, (*was).max(standing));
+                before != *was
+            });
         }
-        if shown {
-            if kept.is_none() {
-                self.window.send_if_modified(|was| !mem::replace(was, true));
-            }
+        if showing.is_some() {
             self.shown.send_if_modified(|was| !mem::replace(was, true));
         }
-        [Some(Waits::on(watching)), shown.then(|| Waits::on(showing))]
+        Some(waits)
+    }
+}
+
+/// Who waits on `Watch`, as its `WatchRequest` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waiter {
+    /// A question asked once, as `luneta sessions` asks.
+    Client,
+    /// One of luneta's windows.
+    Window,
+    /// The daemon of another machine, as it stands.
+    Daemon(Standing),
+}
+
+impl Waiter {
+    fn of(request: &api::WatchRequest) -> Self {
+        match (request.kept, request.shown) {
+            (None, false) => Waiter::Client,
+            (None, true) => Waiter::Window,
+            (Some(kept), shown) => Waiter::Daemon(Standing::of(kept, shown)),
+        }
     }
 }
 
@@ -536,7 +552,7 @@ impl Daemon for Host {
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
         let request = request.into_inner();
-        let _waits = self.watchers.waits(request.kept, request.shown);
+        let _waits = self.watchers.waits(Waiter::of(&request));
         let after = request.after;
         let watched = match timeout(WATCH, self.watched(after)).await {
             Ok(watched) => watched,
@@ -1242,8 +1258,54 @@ mod tests {
     use tokio_stream::StreamExt as _;
     use tonic::Code;
 
-    use super::{talked, Alone, UNTALKED};
+    use super::{talked, Alone, Waiter, Watchers, UNTALKED};
+    use crate::api::WatchRequest;
     use crate::asks::Step;
+    use crate::remote::Standing;
+
+    /// A question says who waits, and a daemon that runs for no reason of its
+    /// own is no one, whatever else it says. A daemon says of itself what reads
+    /// back as how it stands.
+    #[test]
+    fn a_watch_request_says_who_waits() {
+        let asked = |kept, shown| Waiter::of(&WatchRequest { after: None, kept, shown });
+        assert_eq!(asked(None, false), Waiter::Client);
+        assert_eq!(asked(None, true), Waiter::Window);
+        assert_eq!(asked(Some(false), false), Waiter::Daemon(Standing::Idle));
+        assert_eq!(asked(Some(false), true), Waiter::Daemon(Standing::Idle));
+        assert_eq!(asked(Some(true), false), Waiter::Daemon(Standing::Kept));
+        assert_eq!(asked(Some(true), true), Waiter::Daemon(Standing::Window));
+        for standing in [Standing::Idle, Standing::Kept, Standing::Window] {
+            assert_eq!(Waiter::of(&standing.question(None)), Waiter::Daemon(standing));
+        }
+    }
+
+    /// A client keeps the daemon at once, a window has it say so to the machines
+    /// it watches too, and one client after it does not take that back. A daemon
+    /// of another machine shows the host where it says it has a window, but
+    /// never has this one say it has: one hop is as far as a window goes.
+    #[test]
+    fn only_a_window_here_is_said_to_other_machines() {
+        let watchers = Watchers::default();
+        let standing = || *watchers.standing.borrow();
+        let shown = || *watchers.shown.borrow();
+
+        assert!(watchers.waits(Waiter::Daemon(Standing::Idle)).is_none());
+        let _kept = watchers.waits(Waiter::Daemon(Standing::Kept));
+        assert_eq!((standing(), shown()), (Standing::Idle, false));
+        let _far = watchers.waits(Waiter::Daemon(Standing::Window));
+        assert_eq!((standing(), shown()), (Standing::Idle, true));
+
+        let watchers = Watchers::default();
+        let standing = || *watchers.standing.borrow();
+        let shown = || *watchers.shown.borrow();
+        let _client = watchers.waits(Waiter::Client);
+        assert_eq!((standing(), shown()), (Standing::Kept, false));
+        let _window = watchers.waits(Waiter::Window);
+        assert_eq!((standing(), shown()), (Standing::Window, true));
+        let _another = watchers.waits(Waiter::Client);
+        assert_eq!(standing(), Standing::Window);
+    }
 
     /// zellij is alone from the first look that finds no session, and a
     /// session, however short its life, has it start over: ending the last

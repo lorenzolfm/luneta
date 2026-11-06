@@ -332,19 +332,43 @@ fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
     (causes(error), Stopped::of(error))
 }
 
-/// What this daemon says of itself to the machines it watches, as each question
-/// does, as it changes.
-#[derive(Clone)]
-pub struct Tells {
-    /// Whether it runs for reasons of its own.
-    pub kept: Receiver<bool>,
-    /// Whether one of luneta's windows watches it.
-    pub shown: Receiver<bool>,
+/// How this daemon stands, which it says of itself to the machines it watches,
+/// as each question does. Each says more than the one before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Standing {
+    /// It runs for no reason of its own, and asks those machines nothing.
+    #[default]
+    Idle,
+    /// It runs for reasons of its own, as zellij has a session, or a client
+    /// watches it, and keeps those machines' daemons running.
+    Kept,
+    /// One of luneta's windows watches it, which shows those machines' agents.
+    Window,
+}
+
+impl Standing {
+    /// How one stands that is `kept`, with a `window` or not: one that is not
+    /// kept has no window to speak of.
+    #[must_use]
+    pub fn of(kept: bool, window: bool) -> Self {
+        match (kept, window) {
+            (false, _) => Standing::Idle,
+            (true, false) => Standing::Kept,
+            (true, true) => Standing::Window,
+        }
+    }
+
+    /// The question that says so, and asks for the host after `after`.
+    #[must_use]
+    pub fn question(self, after: Option<api::Version>) -> api::WatchRequest {
+        let shown = self == Standing::Window;
+        api::WatchRequest { after, kept: Some(self != Standing::Idle), shown }
+    }
 }
 
 /// Watches each machine the file names, from a thread of its own, and tells
 /// the core what its daemon says, or why it says nothing, as `watched` asks
-/// it, while `tells` says what this daemon says of itself. The file is read
+/// it, as `standing` says this daemon stands. The file is read
 /// once before this returns, and the core told which machines it names: the
 /// daemon's first answer has each, as one it is reaching. Then it is read
 /// again as it changes, and at least every `sweep`. Each machine's daemon is
@@ -352,7 +376,7 @@ pub struct Tells {
 /// `sharing` says, on a socket in luneta's runtime `folder`.
 pub fn follow(
     core: SyncSender<Command>,
-    tells: Tells,
+    standing: Receiver<Standing>,
     sweep: Duration,
     folder: PathBuf,
     bridges: Arc<Bridges>,
@@ -408,7 +432,7 @@ pub fn follow(
             let bridges = Arc::clone(&bridges);
             begun += 1;
             let daemon = Bridged { bridges, destination: destination.clone(), watch: begun };
-            match watch(daemon, core.clone(), tells.clone(), folder.clone()) {
+            match watch(daemon, core.clone(), standing.clone(), folder.clone()) {
                 Ok(ends) => {
                     unwatched.remove(destination);
                     watched.push((destination.clone(), ends));
@@ -488,7 +512,7 @@ pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
 fn watch(
     bridged: Bridged,
     core: SyncSender<Command>,
-    tells: Tells,
+    standing: Receiver<Standing>,
     folder: PathBuf,
 ) -> io::Result<oneshot::Sender<()>> {
     let (ends, ending) = oneshot::channel();
@@ -506,7 +530,7 @@ fn watch(
         // What runs on the runtime goes with it as the thread ends: the
         // connection to the machine's daemon, and its ssh, killed as it goes.
         runtime.block_on(async move {
-            tokio::spawn(watched(bridged, core, tells, folder));
+            tokio::spawn(watched(bridged, core, standing, folder));
             let _ = ending.await;
         });
     })?;
@@ -522,14 +546,14 @@ fn watch(
 /// last said stands meanwhile, as where the machine's daemon makes way for a
 /// newer one. Where that fails too, the core is told that the machine is
 /// unreached, and ssh is run again after a while, longer each time it fails.
-/// It asks only while `kept` says that this daemon runs for reasons of its
+/// It asks only while `standing` says that this daemon runs for reasons of its
 /// own, which each question says, and which only then keeps that one running
 /// too. The machine's daemon is in the bridges while its last question was
 /// answered.
 async fn watched(
     bridged: Bridged,
     core: SyncSender<Command>,
-    Tells { mut kept, shown }: Tells,
+    mut standing: Receiver<Standing>,
     folder: PathBuf,
 ) {
     let destination = bridged.destination.clone();
@@ -545,12 +569,11 @@ async fn watched(
         // ended, through its `luneta bridge`. Two daemons that watched each
         // other, and that nothing else kept, would else start each other's
         // again, for good.
-        if kept.wait_for(|kept| *kept).await.is_err() {
+        if standing.wait_for(|standing| *standing != Standing::Idle).await.is_err() {
             // This daemon ends.
             return;
         }
-        let (is_kept, is_shown) = (*kept.borrow(), *shown.borrow());
-        let question = api::WatchRequest { after, kept: Some(is_kept), shown: is_shown };
+        let question = standing.borrow().question(after);
         let asked = asked(&destination, &mut daemon, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,

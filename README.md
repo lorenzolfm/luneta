@@ -781,7 +781,9 @@ configure. A pi agent has no topic, as luneta does not read its transcripts.
 Until a topic comes, where a call fails, and on a machine whose lunetad is too
 old to name one, a row keeps the name it has: the title Claude Code gives its
 pane. lunetad keeps a topic in no file, so once it starts again, a row goes back
-to that title until the agent's next prompt. A bare `Claude Code` is no title,
+to that title until the agent's next prompt. An agent that goes and comes back
+within five minutes, as `claude --resume` brings it, has its topic again, at no
+call. A bare `Claude Code` is no title,
 and such a row goes by its tab, if you named it, or else by the directory the
 agent works in. The daemon has the title without the `✳` Claude Code leads it
 with, or the frame it turns there while it works, so the title changes only as

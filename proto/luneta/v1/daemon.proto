@@ -797,6 +797,7 @@ message WatchRequest {
   // window is what has the daemon keep its agents' topics, which cost a model's
   // call. Not set by a question asked once, as `luneta sessions` is, nor by a
   // luneta or a daemon older than this field, which shows or hands on no topic.
+  // A daemon that says it is not `kept` is no one, and shows no one anything.
   bool shown = 3;
 }
 

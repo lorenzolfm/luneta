@@ -5,7 +5,9 @@
 //! luneta on another machine, whose brief tells of agents of this one, and
 //! for the topics it keeps of its own.
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -34,6 +36,11 @@ const TITLE_CHARS: usize = 120;
 const ASKED_CHARS: usize = 500;
 const STEP_CHARS: usize = 300;
 
+/// The fewest characters a `last-prompt` record that Claude Code cut short runs
+/// to. It cuts at about 200, so one shorter than this that ends in `…` is what
+/// you typed.
+const CUT_CHARS: usize = 100;
+
 /// The records of the kinds the brief reads, by the `type` each names.
 const KINDS: [&str; 4] =
     [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
@@ -55,6 +62,12 @@ impl SessionId {
 
     #[must_use]
     pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for SessionId {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }
@@ -211,7 +224,7 @@ pub struct Digest {
     /// The title Claude Code gave the session.
     pub title: Option<String>,
     /// What you last asked of it.
-    pub asked: Option<String>,
+    pub asked: Option<Asked>,
     /// What it said and ran last, oldest first.
     pub steps: Vec<String>,
 }
@@ -247,7 +260,7 @@ impl Digest {
 #[must_use]
 pub fn digest(end: &str, steps: usize) -> Digest {
     let mut title = None;
-    let mut asked: Option<String> = None;
+    let mut asked: Option<Asked> = None;
     let mut last: VecDeque<String> = VecDeque::with_capacity(steps + 1);
     for line in end.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
@@ -262,11 +275,10 @@ pub fn digest(end: &str, steps: usize) -> Digest {
             // it, and a slash command only there: the later of the two is
             // what you last asked.
             Some("last-prompt") => {
-                if let Some(last) = record["lastPrompt"].as_str() {
-                    let last = one_line(last, ASKED_CHARS);
-                    if !asked.as_deref().is_some_and(|typed| cuts(&last, typed)) {
-                        asked = Some(last);
-                    }
+                if let Some(last) = record["lastPrompt"].as_str().map(Asked::recorded)
+                    && !asked.as_ref().is_some_and(|typed| last.cuts(typed))
+                {
+                    asked = Some(last);
                 }
             },
             Some("user")
@@ -274,7 +286,7 @@ pub fn digest(end: &str, steps: usize) -> Digest {
                     && record["isCompactSummary"].as_bool() != Some(true) =>
             {
                 let typed = typed_by_you(&record["message"]["content"]);
-                asked = typed.map(|typed| one_line(&typed, ASKED_CHARS)).or(asked);
+                asked = typed.as_deref().map(Asked::typed).or(asked);
             },
             Some("assistant") => {
                 let blocks = record["message"]["content"].as_array().into_iter().flatten();
@@ -291,17 +303,60 @@ pub fn digest(end: &str, steps: usize) -> Digest {
     Digest { title: title.map(|title| one_line(&title, TITLE_CHARS)), asked, steps: last.into() }
 }
 
-/// Whether `cut` is `whole`, or `whole` cut short, as Claude Code cuts what it
-/// records of a prompt to some 200 characters, and `one_line` to `ASKED_CHARS`.
-fn cuts(cut: &str, whole: &str) -> bool {
-    cut == whole || cut.strip_suffix('…').is_some_and(|start| whole.starts_with(start))
+/// What you last asked of an agent, on one line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// All of it.
+    Whole(String),
+    /// How it starts, where it was cut short.
+    Cut(String),
 }
 
-/// Whether what two digests say you last asked is one prompt: the same words,
-/// but for where either was cut short.
-#[must_use]
-pub fn same_prompt(one: &str, other: &str) -> bool {
-    cuts(one, other) || cuts(other, one)
+impl Asked {
+    /// What you typed, cut short past `ASKED_CHARS`.
+    fn typed(text: &str) -> Self {
+        let line = spaced(text);
+        if line.chars().count() <= ASKED_CHARS {
+            return Asked::Whole(line);
+        }
+        Asked::Cut(line.chars().take(ASKED_CHARS - 1).collect())
+    }
+
+    /// What a `last-prompt` record says, which Claude Code ends in `…` where it
+    /// cut a long prompt short.
+    fn recorded(text: &str) -> Self {
+        let line = spaced(text);
+        match line.strip_suffix('…') {
+            Some(start) if line.chars().count() >= CUT_CHARS => {
+                Asked::Cut(start.chars().take(ASKED_CHARS - 1).collect())
+            },
+            _ => Asked::typed(&line),
+        }
+    }
+
+    /// Whether it is `whole`, or `whole` cut short.
+    fn cuts(&self, whole: &Asked) -> bool {
+        match (self, whole) {
+            (Asked::Whole(_), _) => self == whole,
+            (Asked::Cut(start), Asked::Whole(text) | Asked::Cut(text)) => text.starts_with(start),
+        }
+    }
+
+    /// Whether it and `other` are one prompt: the same words, but for where
+    /// either was cut short.
+    #[must_use]
+    pub fn same(&self, other: &Asked) -> bool {
+        self.cuts(other) || other.cuts(self)
+    }
+}
+
+impl fmt::Display for Asked {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Asked::Whole(text) => formatter.write_str(text),
+            Asked::Cut(start) => write!(formatter, "{start}…"),
+        }
+    }
 }
 
 /// How the line Claude Code writes in your place where you stopped it starts.
@@ -359,14 +414,19 @@ pub fn on_what(input: &Value) -> Option<&str> {
 /// than `chars`, ending in `…` where it was cut.
 #[must_use]
 pub fn one_line(text: &str, chars: usize) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let line = words.join(" ");
+    let line = spaced(text);
     if line.chars().count() <= chars {
         return line;
     }
     let mut cut: String = line.chars().take(chars.saturating_sub(1)).collect();
     cut.push('…');
     cut
+}
+
+/// `text` on one line, its runs of white space one space each.
+fn spaced(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words.join(" ")
 }
 
 #[cfg(test)]
@@ -389,7 +449,7 @@ mod tests {
     /// What a transcript of these records says you last asked.
     fn asked(records: &[serde_json::Value]) -> Option<String> {
         let end: Vec<String> = records.iter().map(ToString::to_string).collect();
-        digest(&end.join("\n"), 1).asked
+        digest(&end.join("\n"), 1).asked.as_ref().map(ToString::to_string)
     }
 
     fn typed(text: &str) -> serde_json::Value {
@@ -431,13 +491,37 @@ mod tests {
     /// among them.
     #[test]
     fn a_prompt_is_the_same_where_only_a_cut_tells_it_apart() {
-        assert!(same_prompt("fold them", "fold them"));
-        assert!(same_prompt("fold…", "fold them"));
-        assert!(same_prompt("fold them", "fold…"));
-        assert!(same_prompt("fold…", "fold the…"));
-        assert!(!same_prompt("fold", "fold them"));
-        assert!(!same_prompt("fold them", "fold"));
-        assert!(!same_prompt("fold…", "sort them"));
+        let whole = |text: &str| Asked::Whole(text.to_owned());
+        let cut = |text: &str| Asked::Cut(text.to_owned());
+        assert!(whole("fold them").same(&whole("fold them")));
+        assert!(cut("fold").same(&whole("fold them")));
+        assert!(whole("fold them").same(&cut("fold")));
+        assert!(cut("fold").same(&cut("fold the")));
+        assert!(!whole("fold").same(&whole("fold them")));
+        assert!(!whole("fold them").same(&whole("fold")));
+        assert!(!cut("fold").same(&whole("sort them")));
+    }
+
+    /// A short prompt that ends in `…` is all you asked, and only a long record
+    /// that does is one Claude Code cut short.
+    #[test]
+    fn a_prompt_you_ended_in_an_ellipsis_is_not_cut_short() {
+        assert_eq!(Asked::recorded("fold…"), Asked::Whole("fold…".to_owned()));
+        assert!(!Asked::recorded("fold…").same(&Asked::typed("fold them")));
+        assert_eq!(asked(&[typed("fold them"), last("fold…")]).unwrap(), "fold…");
+        let start = "fold ".repeat(CUT_CHARS / 5);
+        assert_eq!(Asked::recorded(&format!("{start}…")), Asked::Cut(start));
+    }
+
+    /// What you typed is cut short only past `ASKED_CHARS`, and says so at that
+    /// length with its `…`.
+    #[test]
+    fn a_long_prompt_you_typed_is_cut_at_its_most() {
+        let most = "é".repeat(ASKED_CHARS);
+        assert_eq!(Asked::typed(&most), Asked::Whole(most.clone()));
+        let over = Asked::typed(&format!("{most}é"));
+        assert_eq!(over, Asked::Cut("é".repeat(ASKED_CHARS - 1)));
+        assert_eq!(over.to_string(), one_line(&format!("{most}é"), ASKED_CHARS));
     }
 
     /// A question reads the ends of no more than `IDS_MAX` transcripts, of

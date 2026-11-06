@@ -53,8 +53,7 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{
-    Agent, Client, Front, Harness, Host, NameSource, Pane, Saying, Session, Shell, Status,
-    UnreadFile, Zellij,
+    Agent, Client, Front, Harness, Host, Pane, Saying, Session, Shell, Status, UnreadFile, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::links;
@@ -4588,15 +4587,9 @@ fn status_word(agent: &Agent) -> String {
     }
 }
 
-/// The name of an agent's session, if someone gave it one, as `/rename` does:
-/// one Claude Code derives from the directory, or makes up, is no name a row
-/// goes by. A name from before Claude Code said who chose it is taken for
-/// given.
+/// The name of an agent's session, if someone gave it one.
 fn given_name(agent: &Agent) -> Option<&str> {
-    let name = agent.name.as_ref()?;
-    let source = name.source.map(NameSource::try_from);
-    let given = matches!(source, None | Some(Ok(NameSource::User | NameSource::Peer)));
-    Some(name.text.trim()).filter(|text| given && !text.is_empty())
+    agent.name.as_ref()?.given()
 }
 
 /// A directory as luneta shows one: its last two parts.
@@ -5170,7 +5163,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
-    use lunetad::api::{self, Clients, Pane, Panes, UnreadFile, Version, Zellij};
+    use lunetad::api::{self, Clients, NameSource, Pane, Panes, UnreadFile, Version, Zellij};
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 

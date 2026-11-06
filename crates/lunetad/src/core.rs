@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use luneta_protocol::git::{Head, WorkTree};
+use luneta_protocol::said::Said;
 use tokio::sync::oneshot;
 
 use crate::agent::Agent;
@@ -22,6 +23,7 @@ use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::Shell;
+use crate::transcripts::SessionId;
 use crate::zellij::{Id, Sessions, Socket};
 
 pub enum Command {
@@ -44,7 +46,7 @@ pub enum Command {
     /// What the shells with luneta's hook say now.
     Shells(Vec<Shell>),
     /// The topic of each agent that has one, by its session's id.
-    Topics(HashMap<String, String>),
+    Topics(HashMap<SessionId, Said>),
     /// What the hosts file names now.
     Hosts(Named),
     /// What the watch of `destination` has of it now.
@@ -143,7 +145,7 @@ struct Known {
     shells: Vec<Shell>,
     /// The topic the daemon keeps of each agent that has one, by its session's
     /// id.
-    topics: HashMap<String, String>,
+    topics: HashMap<SessionId, Said>,
     /// What the daemon has of each other machine the hosts file names, in its
     /// order.
     remotes: Vec<(Destination, Reached)>,

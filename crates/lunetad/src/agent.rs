@@ -52,7 +52,8 @@ pub enum Harness {
 }
 
 impl Harness {
-    fn to_api(self) -> api::Harness {
+    #[must_use]
+    pub fn to_api(self) -> api::Harness {
         match self {
             Harness::ClaudeCode => api::Harness::ClaudeCode,
             Harness::Pi => api::Harness::Pi,
@@ -139,13 +140,15 @@ pub struct Name {
 }
 
 impl Name {
-    /// Whether someone gave it, as `/rename` does: one Claude Code derives from
-    /// the directory, or makes up, is no name a row goes by. A name from before
-    /// Claude Code said who chose it is taken for given.
+    fn to_api(&self) -> api::Name {
+        let source = self.source.map(|source| source.to_api().into());
+        api::Name { text: self.text.clone().into(), source }
+    }
+
+    /// Whether someone gave it, as a row reads it.
     #[must_use]
     pub fn given(&self) -> bool {
-        let chosen = matches!(self.source, None | Some(Source::User | Source::Peer));
-        chosen && !self.text.as_str().trim().is_empty()
+        self.to_api().given().is_some()
     }
 }
 
@@ -177,6 +180,18 @@ impl Source {
             "auto" => Source::Auto,
             "hook" => Source::Hook,
             _ => Source::Other,
+        }
+    }
+
+    fn to_api(self) -> api::NameSource {
+        match self {
+            Source::User => api::NameSource::User,
+            Source::Peer => api::NameSource::Peer,
+            Source::Derived => api::NameSource::Derived,
+            Source::Collision => api::NameSource::Collision,
+            Source::Auto => api::NameSource::Auto,
+            Source::Hook => api::NameSource::Hook,
+            Source::Other => api::NameSource::Other,
         }
     }
 }
@@ -266,7 +281,7 @@ impl Agent {
     /// The agent as the API gives it, in the session `sessions` say its pane
     /// is in now, with the topic the daemon keeps of it, if it keeps one.
     #[must_use]
-    pub fn to_api(&self, sessions: &Sessions, topic: Option<String>) -> api::Agent {
+    pub fn to_api(&self, sessions: &Sessions, topic: Option<Said>) -> api::Agent {
         // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
         // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
@@ -282,17 +297,6 @@ impl Agent {
             Status::Other(word) => (Some(Reported::OtherStatus(word.clone().into())), None),
             Status::Unreported => (None, None),
         };
-        let source = |source| -> api::NameSource {
-            match source {
-                Source::User => api::NameSource::User,
-                Source::Peer => api::NameSource::Peer,
-                Source::Derived => api::NameSource::Derived,
-                Source::Collision => api::NameSource::Collision,
-                Source::Auto => api::NameSource::Auto,
-                Source::Hook => api::NameSource::Hook,
-                Source::Other => api::NameSource::Other,
-            }
-        };
         api::Agent {
             pid: self.pid,
             harness: Some(self.harness.to_api().into()),
@@ -301,10 +305,7 @@ impl Agent {
             status,
             status_since: self.status_since.map(Into::into),
             started_at: self.started_at.map(Into::into),
-            name: self.name.as_ref().map(|name| {
-                let source = name.source.map(|chose| source(chose).into());
-                api::Name { text: name.text.clone().into(), source }
-            }),
+            name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
             zellij: self.pane.as_ref().map(|named| api::Zellij {
@@ -312,7 +313,7 @@ impl Agent {
                 session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
                 pane: named.pane,
             }),
-            topic,
+            topic: topic.map(String::from),
         }
     }
 }
