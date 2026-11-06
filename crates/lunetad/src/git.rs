@@ -128,6 +128,41 @@ pub fn branch(dir: &str) -> Option<String> {
     Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
 }
 
+pub enum NamedHead {
+    OnRemote,
+    PullRef { remote_url: String },
+}
+
+pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> {
+    let head = format!("refs/heads/{branch}");
+    let push = says(dir, &["for-each-ref", "--format=%(push:remotename)", &head])?;
+    if push.is_empty() {
+        return Ok(None);
+    }
+    let config = |name: &str| {
+        says(dir, &["config", "--default", "", "--get", &format!("branch.{branch}.{name}")])
+    };
+    let (merge, remote) = (config("merge")?, config("remote")?);
+    if merge.starts_with("refs/pull/") {
+        if remote.is_empty() {
+            return Ok(None);
+        }
+        let remote_url = says(dir, &["ls-remote", "--get-url", "--", &remote])?;
+        return Ok(Some(NamedHead::PullRef { remote_url }));
+    }
+    Ok((push != remote || merge == head).then_some(NamedHead::OnRemote))
+}
+
+fn says(dir: &str, args: &[&str]) -> Result<String, String> {
+    let asked = args.join(" ");
+    let mut git = Command::new("git");
+    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]).args(args));
+    let ran = program::run(&mut git, LIMIT)
+        .map_err(|error| format!("git {asked} in {dir} could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("git {asked} in {dir}: {why}"))?;
+    Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
+}
+
 /// Where a work tree is, and the folders git keeps it in, each as the
 /// filesystem names it, as a watcher names what changes in it.
 #[derive(PartialEq, Eq)]
