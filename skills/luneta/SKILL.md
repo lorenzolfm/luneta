@@ -94,7 +94,10 @@ on every `open tab`:
    directory `zoxide query` says. It takes the user there, and prints the name.
 
 A pane is in a repository if the `repo <dir>` that `luneta sessions` lists for it
-is the directory `zoxide query` says of that repository, or holds it.
+is the directory `zoxide query` says of that repository, or holds it. A pane that
+lists neither a `repo` nor `no repository` says nothing of its repository: if its
+directory is in the one `zoxide query` says, tell the user instead of making a
+session.
 
 If `open tab` says no client is in the session, run `luneta go <session>` and
 open the tab again, as a pasted link does. Do this without asking, and say in

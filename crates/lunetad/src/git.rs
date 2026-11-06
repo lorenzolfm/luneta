@@ -36,6 +36,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::git::{self, WorkTree};
+use luneta_protocol::said::Said;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
@@ -82,38 +83,109 @@ pub fn local(command: &mut Command) -> &mut Command {
     command
 }
 
-/// What git says of the work tree in `dir`: how it stands, or that `dir` is
-/// outside one, where git fails. When git did not say, as it did not answer
-/// in time, what is to be said of it instead.
-fn status(dir: &str) -> Result<WorkTree, String> {
+/// What git says of the work tree in `dir`: how it stands, that `dir` is in a
+/// repository and in none of its work trees, as git `placed` it, or that it is
+/// in no repository. When git did not say, as it did not answer in time, or
+/// would not read the repository or the work tree, what is to be said of it
+/// instead.
+fn status(dir: &str, placed: &Placed) -> Result<WorkTree, String> {
     let [program, args @ ..] = git::command(dir);
     let mut git = Command::new(program);
     local(git.args(args));
     let ran = program::run(&mut git, LIMIT)
         .map_err(|error| format!("git status in {dir} could not be run: {error}"))?;
-    match ran {
-        Ran::Ended { status, stdout, .. } if status.success() => {
-            WorkTree::parse(&String::from_utf8_lossy(&stdout))
-                .map_err(|why| format!("git status in {dir} said {why}"))
+    let said = match ran {
+        Ran::Stuck => return Err(format!("git status in {dir} did not answer in time")),
+        ended @ Ran::Ended { .. } => ended.answer(),
+    };
+    let Some(repository) = holder_of(dir)? else {
+        return Ok(WorkTree::Outside);
+    };
+    match (said, placed) {
+        (Ok(stdout), _) => WorkTree::parse(&String::from_utf8_lossy(&stdout), repository)
+            .map_err(|why| format!("git status in {dir} said {why}")),
+        (Err(_), Placed::Outside(_)) => Ok(WorkTree::NoCheckout { repository }),
+        (Err(why), Placed::In(_) | Placed::Unsaid) => {
+            Err(format!("git status in {dir} said {why}"))
         },
-        // git ran there and failed: the directory is in no repository, or in
-        // one git cannot read.
-        Ran::Ended { .. } => Ok(WorkTree::Outside),
-        Ran::Stuck => Err(format!("git status in {dir} did not answer in time")),
     }
 }
 
-/// The repository the work tree in `dir` is of, by its common directory,
-/// which every work tree of a repository shares. None where git does not say
-/// one, as of a directory in no repository. `safe.bareRepository` is explicit
-/// as it is for `git status`, so that git finds the repository `status` does.
-pub fn repository(dir: &str) -> Option<String> {
+/// The directory that holds the repository `dir` is in, or None where it is in
+/// none, or is gone. Why not, where git did not say.
+fn holder_of(dir: &str) -> Result<Option<Said>, String> {
+    match common(dir) {
+        Common::Of(common) => holder(&common)
+            .and_then(Said::new)
+            .map(Some)
+            .ok_or_else(|| format!("no directory holds the repository {common}")),
+        Common::NoRepository => Ok(None),
+        Common::Unsaid(why) if directory_gone(why.as_bytes()) => Ok(None),
+        Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
+    }
+}
+
+/// What git starts with, in its own language, where a directory is in no
+/// repository: `(or any of the parent directories)`, or `(or any parent up to
+/// mount point /x)`. Nothing else tells that from a repository it refuses: it
+/// ends with one status for all of them.
+const IN_NO_REPOSITORY: &str = "fatal: not a git repository (or any ";
+
+/// What git says of the repository a directory is in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Common {
+    /// It is in one: the directory all its worktrees have in common, by its
+    /// real path, which tells that repository from another.
+    Of(String),
+    /// It is in none.
+    NoRepository,
+    /// git did not say, for this reason, as it refused the repository it found,
+    /// one of a newer format, or of another user, or it did not answer in time.
+    /// That says nothing of whether the directory is in one.
+    Unsaid(String),
+}
+
+impl Common {
+    /// What git's `answer` says of it: what it said, where it ended well, or
+    /// else why not.
+    #[must_use]
+    pub fn of(answer: Result<Vec<u8>, String>) -> Common {
+        match answer.map(one_line) {
+            Ok(Some(common)) => Common::Of(common),
+            Ok(None) => Common::Unsaid("it named no directory".to_owned()),
+            Err(why) if why.starts_with(IN_NO_REPOSITORY) => Common::NoRepository,
+            Err(why) => Common::Unsaid(why),
+        }
+    }
+}
+
+/// What git says of the repository `dir` is in. `safe.bareRepository` is
+/// explicit as it is for `git status`, so that git finds the repository
+/// `status` does.
+#[must_use]
+pub fn common(dir: &str) -> Common {
     let mut git = Command::new("git");
     local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]))
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
-    let common = String::from_utf8(said).ok()?;
-    Some(common.strip_suffix('\n')?.to_owned()).filter(|common| !common.is_empty())
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .env("LC_ALL", "C");
+    let ran = program::run(&mut git, LIMIT);
+    Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
+}
+
+/// Whether `stderr` is git saying, in its own language, that a directory it was
+/// told to work in is gone, as a pane's can be. One it cannot go into for
+/// another reason, as a mount gone stale, may be there all the same.
+#[must_use]
+pub fn directory_gone(stderr: &[u8]) -> bool {
+    stderr.starts_with(b"fatal: cannot change to ")
+        && stderr.trim_ascii_end().ends_with(b": No such file or directory")
+}
+
+/// `said`, where it is a line of text.
+#[must_use]
+pub fn one_line(said: Vec<u8>) -> Option<String> {
+    let said = String::from_utf8(said).ok()?;
+    Some(said.strip_suffix('\n')?.to_owned()).filter(|said| !said.is_empty())
 }
 
 /// The directory that holds the repository whose common directory is `common`,
@@ -721,8 +793,8 @@ fn ask(
         // directory with it, for as long as the mount does not.
         Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false),
     };
-    let said = status(dir);
-    let elsewhere = |now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
+    let said = status(dir, &placed);
+    let elsewhere =|now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
     let moved = anew && place(dir).is_ok_and(elsewhere);
     (placed, said, moved)
 }
@@ -779,8 +851,7 @@ pub fn follow(
                 asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
                 match said {
                     Ok(tree) => {
-                        let repository = repository(&dir).as_deref().and_then(holder);
-                        if core.send(core::Command::WorkTree { dir, tree, repository }).is_err() {
+                        if core.send(core::Command::WorkTree { dir, tree }).is_err() {
                             return;
                         }
                     },
@@ -821,7 +892,35 @@ pub fn follow(
 mod tests {
     use std::fs::{self, File};
 
-    use super::stamp;
+    use super::{stamp, Common};
+
+    /// git tells no repository from one it refuses by its words alone, as it
+    /// ends with one status for all of them: as it says them near a mount
+    /// point too. Anything else it says, or a time it did not answer in, says
+    /// nothing of a repository.
+    #[test]
+    fn only_git_s_own_words_say_a_directory_is_in_no_repository() {
+        let said = |why: &str| Common::of(Err(why.to_owned()));
+        for why in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "fatal: not a git repository (or any parent up to mount point /run/user)",
+        ] {
+            assert_eq!(said(why), Common::NoRepository, "{why}");
+        }
+        for why in [
+            "fatal: Expected git repo version <= 1, found 99",
+            "fatal: unknown repository extension found:",
+            "fatal: detected dubious ownership in repository at '/w'",
+            "fatal: gitfile does not point to a valid repository: /w/.git",
+            "fatal: not a git repository: /w/.bare/worktrees/gone",
+            "fatal: cannot change to '/w': No such file or directory",
+            "it did not answer in time",
+        ] {
+            assert_eq!(said(why), Common::Unsaid(why.to_owned()), "{why}");
+        }
+        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of("/w/.bare".to_owned()));
+        assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
+    }
 
     /// git writes its index anew, and moves it into the place of the one
     /// before. One written so with the size and the mtime of the one before

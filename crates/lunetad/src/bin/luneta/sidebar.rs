@@ -4681,7 +4681,7 @@ impl<'a> Finder<'a> {
 /// `pull_request`, or none for a detached `HEAD` or a directory in no
 /// repository.
 fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
-    let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes } = tree
+    let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes, .. } = tree
     else {
         return None;
     };
@@ -5438,7 +5438,8 @@ mod tests {
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let name = Said::new("main".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None };
-        let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
+        let changes = Changes::default();
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.heard(host);
@@ -5791,11 +5792,10 @@ mod tests {
         );
         let changes = Some(api::Changes::default());
         let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None }));
-        let checkout = api::Checkout { head, changes, stashes: 0 };
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/c".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
-            repository: None,
         }];
         assert_eq!(sidebar.heard(host), None);
         let look = sidebar.titled("older | nvim".to_owned()).unwrap();
@@ -6956,7 +6956,8 @@ mod tests {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let head = Head::Branch { name, upstream: None };
             let changes = Changes { modified, ..Changes::default() };
-            host.work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
+            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
+            host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             host.pull_requests.push(PullRequest { number, state, url: None }.to_api(dir));
         }
@@ -7122,7 +7123,8 @@ mod tests {
         let mut host = host(vec![session("s", 10, panes)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None };
-        let tree = WorkTree::Checkout { head, changes: Changes::default(), stashes: 0 };
+        let changes = Changes::default();
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/c"));
         let found = |typed: &str| {
             let mut sidebar = fresh();
@@ -7332,7 +7334,8 @@ mod tests {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None };
         let changes = Changes::default();
-        work_trees.push(WorkTree::Checkout { head, changes, stashes: 0 }.to_api(dir));
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
+        work_trees.push(tree.to_api(dir));
         if let Some((number, state, url)) = pull {
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = url.map(str::to_owned);
@@ -8129,11 +8132,11 @@ mod tests {
             name: "feat/menu".to_owned(),
             upstream: None,
         }));
-        let checkout = api::Checkout { head, changes: Some(api::Changes::default()), stashes: 0 };
+        let changes = Some(api::Changes::default());
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
-            repository: None,
         }];
         sidebar.heard(host);
         let look = sidebar.titled("older | fold".to_owned()).expect("a look");
@@ -8292,11 +8295,11 @@ mod tests {
             name: "feat/brief".to_owned(),
             upstream: None,
         }));
-        let checkout = api::Checkout { head, changes: Some(api::Changes::default()), stashes: 0 };
+        let changes = Some(api::Changes::default());
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
-            repository: None,
         }];
         sidebar.heard(host);
         sidebar.focus(Keys::Sidebar);

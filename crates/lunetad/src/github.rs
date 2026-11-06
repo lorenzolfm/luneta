@@ -150,7 +150,7 @@ pub fn follow(
             // cloned over, with a branch of the same name checked out.
             let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
             for (dir, branch) in branches {
-                if let Some(repository) = git::repository(&dir) {
+                if let git::Common::Of(repository) = git::common(&dir) {
                     on.entry((repository, branch)).or_default().push(dir);
                 }
             }

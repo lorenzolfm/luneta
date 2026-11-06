@@ -38,11 +38,15 @@ pub fn command(dir: &str) -> [&str; 12] {
 /// How a work tree stands, as git says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkTree {
-    /// git failed there: the directory is in no repository, or in one git
-    /// cannot read.
+    /// The directory is in no repository.
     Outside,
-    /// A repository's work tree: what is checked out there, and what changed.
-    Checkout { head: Head, changes: Changes, stashes: u32 },
+    /// In a repository, and in none of its work trees, as the directory that
+    /// holds a clone wt made is: the directory that holds the repository.
+    NoCheckout { repository: Said },
+    /// A repository's work tree: the directory that holds the repository,
+    /// which only a daemon older than the field does not say, what is checked
+    /// out there, and what changed.
+    Checkout { repository: Option<Said>, head: Head, changes: Changes, stashes: u32 },
 }
 
 /// What is checked out in a work tree.
@@ -76,37 +80,52 @@ impl WorkTree {
     pub fn to_api(&self, dir: &str) -> v1::WorkTree {
         let stands = match self {
             WorkTree::Outside => v1::work_tree::Stands::Outside(v1::work_tree::Outside {}),
-            WorkTree::Checkout { head, changes, stashes } => {
+            WorkTree::NoCheckout { repository } => {
+                v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
+                    repository: repository.as_str().to_owned(),
+                })
+            },
+            WorkTree::Checkout { repository, head, changes, stashes } => {
                 v1::work_tree::Stands::Checkout(v1::Checkout {
                     head: Some(head.to_api()),
                     changes: Some(changes.to_api()),
                     stashes: *stashes,
+                    repository: repository.as_ref().map(|it| it.as_str().to_owned()),
                 })
             },
         };
-        v1::WorkTree { dir: dir.to_owned(), stands: Some(stands), repository: None }
+        v1::WorkTree { dir: dir.to_owned(), stands: Some(stands) }
     }
 
     /// What `to_api` wrote out, read back. None for a work tree that leaves
-    /// out what the protocol says is always there, or names a branch with no
-    /// name: a newer daemon's.
+    /// out what the protocol says is always there, or names a branch or a
+    /// repository with no name: a newer daemon's.
     #[must_use]
     pub fn of_api(tree: &v1::WorkTree) -> Option<Self> {
         let checkout = match tree.stands.as_ref()? {
             v1::work_tree::Stands::Outside(_) => return Some(WorkTree::Outside),
+            v1::work_tree::Stands::NoCheckout(it) => {
+                let repository = Said::new(it.repository.clone())?;
+                return Some(WorkTree::NoCheckout { repository });
+            },
             v1::work_tree::Stands::Checkout(checkout) => checkout,
         };
+        let repository = match &checkout.repository {
+            Some(repository) => Some(Said::new(repository.clone())?),
+            None => None,
+        };
         Some(WorkTree::Checkout {
+            repository,
             head: Head::of_api(checkout.head.as_ref()?)?,
             changes: Changes::of_api(checkout.changes.as_ref()?),
             stashes: checkout.stashes,
         })
     }
 
-    /// What `command` prints, or the first line that does not read. git says
-    /// what is checked out ahead of the rest, and where it is from its
-    /// upstream only of a branch.
-    pub fn parse(status: &str) -> Result<Self, String> {
+    /// What `command` prints in a work tree of `repository`, or the first line
+    /// that does not read. git says what is checked out ahead of the rest, and
+    /// where it is from its upstream only of a branch.
+    pub fn parse(status: &str, repository: Said) -> Result<Self, String> {
         let (mut head, mut changes, mut stashes) = (None, Changes::default(), 0);
         for line in status.lines() {
             let unread = || format!("a line that does not read: {line}");
@@ -127,7 +146,7 @@ impl WorkTree {
             }
         }
         let head = head.ok_or("no line that says what is checked out")?;
-        Ok(WorkTree::Checkout { head, changes, stashes })
+        Ok(WorkTree::Checkout { repository: Some(repository), head, changes, stashes })
     }
 }
 
@@ -241,7 +260,11 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Head, WorkTree};
+    use super::{v1, Changes, Head, Said, WorkTree};
+
+    fn repo() -> Said {
+        Said::new("/w/repo".to_owned()).unwrap()
+    }
 
     /// What git says that does not read is no work tree, rather than one
     /// counted short: no git the tests can run says it, so it is tested here.
@@ -263,12 +286,12 @@ mod tests {
             "",
         ];
         for line in unread {
-            assert!(WorkTree::parse(&format!("{head}{line}\n")).is_err(), "{line:?}");
+            assert!(WorkTree::parse(&format!("{head}{line}\n"), repo()).is_err(), "{line:?}");
         }
         for status in ["? new\n", "# branch.head (detached)\n# branch.ab +1 -0\n"] {
-            assert!(WorkTree::parse(status).is_err(), "{status:?}");
+            assert!(WorkTree::parse(status, repo()).is_err(), "{status:?}");
         }
-        let tree = WorkTree::parse(&format!("{head}# branch.to-come 1\n? new\n")).unwrap();
+        let tree = WorkTree::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
         let WorkTree::Checkout { head: Head::Branch { name, upstream: None }, changes, .. } = tree
         else {
             panic!("main, with no upstream: {tree:?}");
@@ -278,9 +301,10 @@ mod tests {
     }
 
     /// What the daemon writes out of a work tree reads back as the same work
-    /// tree, so that luneta says of it what git said to the daemon. One
-    /// that leaves out what the protocol says is always there, or names a
-    /// branch with no name, reads as none.
+    /// tree, so that luneta says of it what git said to the daemon, a daemon
+    /// older than the field's checkout with no repository among them. One that
+    /// leaves out what the protocol says is always there, or names a branch or
+    /// a repository with no name, reads as none.
     #[test]
     fn a_work_tree_reads_back_as_the_daemon_wrote_it() {
         let statuses = [
@@ -293,14 +317,26 @@ mod tests {
             "# branch.head (detached)\n1 .T N... 100644 100644 120000 a a link\n",
         ];
         let mut trees: Vec<WorkTree> =
-            statuses.iter().map(|status| WorkTree::parse(status).unwrap()).collect();
+            statuses.iter().map(|status| WorkTree::parse(status, repo()).unwrap()).collect();
         trees.push(WorkTree::Outside);
+        trees.push(WorkTree::NoCheckout { repository: repo() });
+        trees.push(WorkTree::Checkout {
+            repository: None,
+            head: Head::Detached,
+            changes: Changes::default(),
+            stashes: 0,
+        });
         for tree in trees {
             assert_eq!(WorkTree::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
         }
 
         let checkout = |head, changes| {
-            Some(v1::work_tree::Stands::Checkout(v1::Checkout { head, changes, stashes: 0 }))
+            Some(v1::work_tree::Stands::Checkout(v1::Checkout {
+                head,
+                changes,
+                stashes: 0,
+                repository: None,
+            }))
         };
         let branch = |name: &str| {
             let branch = v1::Branch { name: name.to_owned(), upstream: None };
@@ -311,9 +347,18 @@ mod tests {
             checkout(None, Some(v1::Changes::default())),
             checkout(branch("main"), None),
             checkout(branch(""), Some(v1::Changes::default())),
+            Some(v1::work_tree::Stands::Checkout(v1::Checkout {
+                head: branch("main"),
+                changes: Some(v1::Changes::default()),
+                stashes: 0,
+                repository: Some(String::new()),
+            })),
+            Some(v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
+                repository: String::new(),
+            })),
         ];
         for stands in unread {
-            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands, repository: None };
+            let tree = v1::WorkTree { dir: "/w/repo".to_owned(), stands };
             assert_eq!(WorkTree::of_api(&tree), None, "{tree:?}");
         }
     }

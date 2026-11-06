@@ -37,7 +37,7 @@ pub enum Command {
     /// What zellij listed of the clients of `session`, asked for by `name`.
     Clients { session: Id, name: String, clients: Listed },
     /// What git said of the work tree in `dir`.
-    WorkTree { dir: String, tree: WorkTree, repository: Option<String> },
+    WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
     /// the directory.
     PullRequests(BTreeMap<String, Found>),
@@ -131,7 +131,7 @@ struct Known {
     /// What zellij last listed of each session's clients, by their ids.
     clients: HashMap<Id, Listed>,
     /// What git last said of each directory a pane works in.
-    trees: BTreeMap<String, (WorkTree, Option<String>)>,
+    trees: BTreeMap<String, WorkTree>,
     /// What gh last found of the branch in each directory a pane works in.
     pull_requests: BTreeMap<String, Found>,
     /// What the shells with the hook last said, each in the session it
@@ -215,13 +215,13 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
                 known.clients.insert(session, clients);
             },
-            Command::WorkTree { dir, tree, repository } => {
+            Command::WorkTree { dir, tree } => {
                 // One that no pane works in since git was asked.
                 if !known.dirs().contains(&dir) {
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
-                known.trees.insert(dir.clone(), (tree, repository));
+                known.trees.insert(dir.clone(), tree);
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }
@@ -400,9 +400,11 @@ impl Known {
 
     /// The branch checked out in `dir`, where git has said one is.
     fn branch(&self, dir: &str) -> Option<&str> {
-        match &self.trees.get(dir)?.0 {
+        match self.trees.get(dir)? {
             WorkTree::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
-            WorkTree::Checkout { head: Head::Detached, .. } | WorkTree::Outside => None,
+            WorkTree::Checkout { head: Head::Detached, .. }
+            | WorkTree::NoCheckout { .. }
+            | WorkTree::Outside => None,
         }
     }
 
@@ -510,14 +512,7 @@ impl Known {
         api::Host {
             version: None,
             sessions,
-            work_trees: self
-                .trees
-                .iter()
-                .map(|(dir, (tree, repository))| api::WorkTree {
-                    repository: repository.clone(),
-                    ..tree.to_api(dir)
-                })
-                .collect(),
+            work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
             agents,
             unread,
             pull_requests,

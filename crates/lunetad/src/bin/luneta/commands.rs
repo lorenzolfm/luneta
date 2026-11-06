@@ -404,7 +404,7 @@ pub fn unread(unread: Unread) -> String {
 /// where it works, then what is checked out there and what changed on it, and
 /// the pull request of its branch, and the directory of its repository. A pane
 /// zellij says no directory of has `-` for one, and a directory git has said
-/// nothing of yet has nothing after it.
+/// nothing of has nothing after it.
 /// Then each other machine lunetad watches, as its hosts file names it, with
 /// a `/` after it, which no session's name holds, and its sessions under it,
 /// or why it has none; and a word that the file names more than these, or
@@ -470,7 +470,12 @@ fn sessions_of(
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            let repo = tree.repository.as_ref().map_or_default(|it| format!("  repo {it}"));
+            let repo = match tree.stands.as_ref() {
+                Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
+                Some(Stands::NoCheckout(it)) => Some(&it.repository),
+                Some(Stands::Outside(_)) | None => None,
+            };
+            let repo = repo.map_or_default(|it| format!("  repo {it}"));
             println!("{indent}  {at}  {cwd}  {stands}{pulled}{repo}");
         }
     }
@@ -484,7 +489,7 @@ fn sessions_of(
 /// daemon's could.
 fn stands(tree: &WorkTree) -> Option<String> {
     let checkout = match tree.stands.as_ref()? {
-        Stands::Outside(_) if tree.repository.is_some() => return Some("no checkout".to_owned()),
+        Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
         Stands::Outside(_) => return Some("no repository".to_owned()),
         Stands::Checkout(checkout) => checkout,
     };
