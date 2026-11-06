@@ -81,8 +81,9 @@ pkgs.writeShellApplication {
     }
 
     enter_checkout() {
-      if ! root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)"; then
-        error "run this inside the luneta checkout (no git worktree here)"
+      root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
+      if [ ! -f "$root/crates/lunetad/Cargo.toml" ]; then
+        error "run this inside the luneta checkout"
         exit 2
       fi
       export DEV_HERE="$PWD"

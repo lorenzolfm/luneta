@@ -435,7 +435,9 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
             return None;
         },
     };
-    Some(named_by(&text, |what| troubles.say(format!("{}: {what}", path.display()))))
+    Some(named_by(&text, |what| {
+        troubles.say(format!("{}: {what}", path.display()));
+    }))
 }
 
 /// What `text`, as the hosts file has it, names: the machines, in its order,

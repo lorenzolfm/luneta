@@ -1027,7 +1027,9 @@ fn kept_image(
         let next = next.map_err(|status| format!("the image did not all come: {}", status.message()))?;
         match next {
             None => return keeping.kept(),
-            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => keeping = keeping.write(&bytes)?,
+            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => {
+                keeping = keeping.write(&bytes)?;
+            },
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }
