@@ -732,10 +732,16 @@ upstream: in a fork's clone, from the repository it forks, not from the fork.
 A branch origin has, as one you pushed from another machine, wt checks out. `t`
 does the same and starts Claude Code in the tab, told to `Tackle` the link.
 Pasted again, the link finds the worktree the first paste made: `w` takes
-zellij to a pane that works in it, and `t` starts the agent beside it. luneta
-asks `gh` first what the number is: GitHub counts issues and pull requests in
-one sequence, and a link of an issue of a pull request's number, or of none,
-makes nothing, and the menu says why.
+zellij to a pane that works in it, and `t` starts the agent beside it. That
+worktree may have moved on, as one does when an issue goes out as several pull
+requests. Where no worktree has `issue-123` checked out, and one of the
+repository sits where wt would make it, `w` goes to that one all the same, makes
+no branch, and the note says which branch it is on. `t` starts no agent on
+another branch: the menu stays open and names it, and `w` there opens the
+worktree. A directory of that name that is no worktree of the repository opens
+nothing, and the menu says why. luneta asks `gh` first what the number is:
+GitHub counts issues and pull requests in one sequence, and a link of an issue
+of a pull request's number, or of none, makes nothing, and the menu says why.
 
 A `.md` file's path, pasted the same way, opens the menu for that file, for work
 written down there and not on GitHub: one line that ends in `.md`, from the
@@ -758,7 +764,8 @@ luneta fetches origin's default branch and makes it from that: in a fork's clone
 from the fork, as a file names no other. The file is looked for once a key is
 pressed, so the menu opens for any such line, and a path that names no file says
 so then. Pasted again, the path finds the worktree the first paste made, as an
-issue's link does, and so does another file of the same name.
+issue's link does, on another branch too, and so does another file of the same
+name.
 
 An agent's row is named for the name you gave it with `/rename`, or else for
 its topic, the title Claude Code gives its pane. A bare `Claude Code` is no

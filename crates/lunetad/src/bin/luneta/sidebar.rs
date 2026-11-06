@@ -3143,6 +3143,9 @@ impl Sidebar {
         let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.pulling()) else {
             return Asked::Nothing;
         };
+        if let Some(off_branch) = waiting.off_branch(&found) {
+            self.say(off_branch);
+        }
         self.menu_did(waiting.pulled(found))
     }
 
@@ -7946,7 +7949,8 @@ mod tests {
 
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
         let work = Readied::Link(link);
-        let ready = Ready { at, worktree: "/w/n/feat".to_owned(), branch: None, work };
+        let worktree = "/w/n/feat".to_owned();
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
         let asked = Asked::Make {
             menu: 1,
             on: Machine::Local,
@@ -8010,6 +8014,65 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(Some(work), Work::parse("/w/plan.md", None));
+    }
+
+    #[test]
+    fn w_says_a_worktree_moved_off_its_branch_and_t_starts_no_agent_on_it() {
+        let page = "https://github.com/lorenzolfm/luneta/issues/5";
+        let pressed = |key: char, branch: Option<&str>, moved_off: bool| {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.paste(page);
+            let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+            let Asked::Pull { wanted, .. } = sidebar.key(&char(key), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            assert_eq!(wanted, Wanted::AsItIs);
+            let at = At::Session((listed("older", 10), 1));
+            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let branch = branch.map(str::to_owned);
+            let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off, work };
+            let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
+            (matches!(asked, Asked::Open { .. } | Asked::OpenThere { .. }), sidebar.notice)
+        };
+        let on_dev_docs = "#5's worktree is on dev-docs, not issue-5";
+        assert_eq!(pressed('w', Some("dev-docs"), true), (true, Some(on_dev_docs.to_owned())));
+        let on_none = "#5's worktree is on no branch, not issue-5";
+        assert_eq!(pressed('w', None, true), (true, Some(on_none.to_owned())));
+        assert_eq!(pressed('w', Some("issue-5"), false), (true, None));
+        assert_eq!(pressed('w', None, false), (true, None));
+
+        assert_eq!(pressed('t', Some("dev-docs"), true), (false, None));
+        assert_eq!(pressed('t', Some("issue-5"), false), (true, None));
+        assert_eq!(pressed('t', None, false), (true, None));
+    }
+
+    #[test]
+    fn w_goes_on_from_a_menu_whose_t_refused_a_worktree_that_moved_off() {
+        let page = "https://github.com/lorenzolfm/luneta/issues/5";
+        for keys in [Keys::Sidebar, Keys::Menu { lent: true }] {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(keys);
+            sidebar.paste(page);
+            let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+            let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            let at = At::Session((listed("older", 10), 1));
+            let branch = Some("dev-docs".to_owned());
+            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off: true, work };
+            let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
+            assert_eq!(asked, Asked::Nothing);
+            assert_eq!(sidebar.floating().is_some(), matches!(keys, Keys::Menu { .. }));
+            assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, None));
+            let Asked::Pull { wanted: Wanted::AsItIs, .. } =
+                sidebar.key(&char('w'), moment(161_000))
+            else {
+                panic!("no job for the key");
+            };
+        }
     }
 
     /// A row that says where it works by no absolute path, as an agent's
@@ -9556,7 +9619,8 @@ mod tests {
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
         let worktree = "/w/n/feat".to_owned();
-        let ready = Ready { at, worktree, branch: None, work: Readied::Link(link) };
+        let of_link = Readied::Link(link);
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };
         let asked = sidebar.pulled(number, Ok(Found { on: on.clone(), ready }));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
         let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);
@@ -9606,7 +9670,8 @@ mod tests {
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let at = At::Session((listed("work", 20), 3));
         let worktree = "/w/b/feat".to_owned();
-        let ready = Ready { at, worktree, branch: None, work: Readied::Link(link) };
+        let of_link = Readied::Link(link);
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };
         let asked = sidebar.pulled(number, Ok(Found { on: nixos.clone(), ready }));
         let there = |asked: &Asked| matches!(asked, Asked::OpenThere { on, .. } if *on == nixos);
         assert!(there(&asked), "{asked:?}");

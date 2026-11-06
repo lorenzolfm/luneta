@@ -88,6 +88,21 @@ fn a_worktree_is_made_beside_the_others_and_said_alone_on_stdout() {
     assert_eq!(again.stdout, made.stdout);
 }
 
+#[test]
+fn who_asks_for_a_branch_gets_no_worktree_that_moved_off_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("clone"));
+    cloned_as_wt(&scratch, &up, &clone);
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "../issue-7", "feat"]);
+
+    let refused = worktree(&clone.join("main"), "issue-7");
+    assert!(!refused.status.success());
+    assert_eq!(refused.stdout, b"");
+    let why = format!("luneta: wt add: {} is already present", clone.join("issue-7").display());
+    assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
+}
+
 /// In a clone git made, wt would make the worktree in its `.git`: luneta
 /// makes none, prints nothing on stdout, and says why on the last line of
 /// stderr, after `luneta: `, which is what luneta reads of it.
