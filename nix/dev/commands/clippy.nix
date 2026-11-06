@@ -33,6 +33,7 @@ in
         *" --fix "*) set -- --allow-dirty "$@" ;;
       esac
     fi
+    echo "dev clippy: linting for ${target}" >&2
     ${crossRun} || status=$?
     exit "$status"
   '';
