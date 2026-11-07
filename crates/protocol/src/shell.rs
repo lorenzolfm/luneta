@@ -19,7 +19,7 @@ impl Ending {
     pub fn to_api(self) -> ended::Ending {
         match self {
             Ending::Exited(status) => ended::Ending::Status(status),
-            Ending::Resumed => ended::Ending::Resumed(ended::Resumed {}),
+            Ending::Resumed => ended::Ending::Resumed(()),
         }
     }
 
@@ -28,7 +28,7 @@ impl Ending {
     pub fn of_api(ending: &ended::Ending) -> Self {
         match ending {
             ended::Ending::Status(status) => Ending::Exited(*status),
-            ended::Ending::Resumed(_) => Ending::Resumed,
+            ended::Ending::Resumed(()) => Ending::Resumed,
         }
     }
 }

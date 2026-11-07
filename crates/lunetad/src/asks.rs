@@ -355,7 +355,7 @@ impl Asked {
         };
         let user = match user {
             None => User::Untold,
-            Some(ask_request::User::Away(_)) => User::Away,
+            Some(ask_request::User::Away(())) => User::Away,
             Some(ask_request::User::Pane(UserPane { session, pane })) => {
                 let session = SessionName::running(&session).map_err(|why| format!("user: {why}"))?;
                 User::Pane { session, pane }
@@ -372,7 +372,7 @@ impl Asked {
     pub fn asked(&self, on: Option<On>) -> AskRequest {
         let user = match &self.user {
             User::Untold => None,
-            User::Away => Some(ask_request::User::Away(ask_request::Away {})),
+            User::Away => Some(ask_request::User::Away(())),
             User::Pane { session, pane } => {
                 let session = session.to_string();
                 Some(ask_request::User::Pane(UserPane { session, pane: *pane }))

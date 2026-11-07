@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lunetad::api::checkout::{Detached, Head};
-use lunetad::api::work_tree::{NoCheckout, Outside, Stands};
+use lunetad::api::checkout::Head;
+use lunetad::api::work_tree::{NoCheckout, Stands};
 use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
 use prost::Message as _;
 use serde_json::json;
@@ -535,8 +535,8 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     };
     assert_eq!(stands(&tree), checkout(&tree, Head::Branch(main), every, 1));
     let none = Changes::default();
-    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(Detached {}), none, 0));
-    assert_eq!(stands(&plain), Some(Stands::Outside(Outside {})));
+    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(()), none, 0));
+    assert_eq!(stands(&plain), Some(Stands::Outside(())));
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
     eventually("what git said of plain goes", || {
@@ -704,7 +704,7 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
     let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
     match tree.stands? {
         Stands::Checkout(checkout) => Some(checkout),
-        Stands::Outside(_) | Stands::NoCheckout(_) => None,
+        Stands::Outside(()) | Stands::NoCheckout(_) => None,
     }
 }
 
@@ -712,7 +712,7 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
 fn in_no_work_tree(host: &Host, cwd: &str) {
     eventually("git says the directory is in no work tree", || {
         let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
-        (tree.stands == Some(Stands::Outside(Outside {}))).then_some(())
+        (tree.stands == Some(Stands::Outside(()))).then_some(())
     });
 }
 

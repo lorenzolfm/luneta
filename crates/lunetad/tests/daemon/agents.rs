@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use lunetad::api::agent::{Status as Reported, WaitingFor as Waits};
 use lunetad::api::{
     self,
-    Agent, ListAgentsRequest, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor,
+    Agent, ListAgentsResponse, NameSource, Status, UnreadFile, WaitingFor,
     Zellij,
 };
 use serde_json::json;
@@ -93,7 +93,7 @@ impl Host {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
-            daemon.list_agents(ListAgentsRequest {}).await.unwrap().into_inner()
+            daemon.list_agents(()).await.unwrap().into_inner()
         })
     }
 

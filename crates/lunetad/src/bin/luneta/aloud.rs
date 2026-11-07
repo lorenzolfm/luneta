@@ -308,7 +308,7 @@ impl Queue {
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
             Some(Does::Now(utterance)) => self.first(waiting(utterance)),
-            Some(Does::Stop(_)) => self.stop(),
+            Some(Does::Stop(())) => self.stop(),
             None => {},
         }
     }
@@ -623,7 +623,6 @@ impl Aloud {
 mod tests {
     use std::time::Duration;
 
-    use lunetad::api::say::Stop;
     use lunetad::api::Say;
     use lunetad::Destination;
     use ratatui::layout::Position;
@@ -792,7 +791,7 @@ mod tests {
     fn stop_lets_go_of_what_was_to_go_first_too() {
         let mut queue = hearing();
         let said =
-            vec![saying(1, Does::Now(utterance("first", None))), saying(2, Does::Stop(Stop {}))];
+            vec![saying(1, Does::Now(utterance("first", None))), saying(2, Does::Stop(()))];
         queue.hear(here(said), true, at(1));
         assert!(!queue.busy());
     }
@@ -813,7 +812,7 @@ mod tests {
         let quiet = reading(&mut queue, 1);
         let said = vec![
             in_turn(1, "gone", None),
-            saying(2, Does::Stop(Stop {})),
+            saying(2, Does::Stop(())),
             in_turn(3, "after the stop", None),
         ];
         queue.hear(here(said), true, at(1));
@@ -924,7 +923,7 @@ mod tests {
             |aloud| drop(aloud.ended(1, Ok(()))),
             |aloud| {
                 aloud.hear(here(Vec::new()), true);
-                aloud.hear(here(vec![saying(1, Does::Stop(Stop {}))]), true);
+                aloud.hear(here(vec![saying(1, Does::Stop(()))]), true);
             },
         ];
         for ends in ended {
@@ -969,7 +968,7 @@ mod tests {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
         queue.pause(at(1));
-        let said = vec![saying(1, Does::Stop(Stop {})), in_turn(2, "after the stop", None)];
+        let said = vec![saying(1, Does::Stop(())), in_turn(2, "after the stop", None)];
         queue.hear(here(said), true, at(2));
         assert!(!queue.paused);
         assert_eq!(spoken(&mut queue), ["after the stop"]);

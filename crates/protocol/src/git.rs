@@ -79,7 +79,7 @@ impl WorkTree {
     #[must_use]
     pub fn to_api(&self, dir: &str) -> v1::WorkTree {
         let stands = match self {
-            WorkTree::Outside => v1::work_tree::Stands::Outside(v1::work_tree::Outside {}),
+            WorkTree::Outside => v1::work_tree::Stands::Outside(()),
             WorkTree::NoCheckout { repository } => {
                 v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
                     repository: repository.as_str().to_owned(),
@@ -103,7 +103,7 @@ impl WorkTree {
     #[must_use]
     pub fn of_api(tree: &v1::WorkTree) -> Option<Self> {
         let checkout = match tree.stands.as_ref()? {
-            v1::work_tree::Stands::Outside(_) => return Some(WorkTree::Outside),
+            v1::work_tree::Stands::Outside(()) => return Some(WorkTree::Outside),
             v1::work_tree::Stands::NoCheckout(it) => {
                 let repository = Said::new(it.repository.clone())?;
                 return Some(WorkTree::NoCheckout { repository });
@@ -162,7 +162,7 @@ impl Head {
     /// None for a branch with no name.
     fn of_api(head: &v1::checkout::Head) -> Option<Self> {
         match head {
-            v1::checkout::Head::Detached(_) => Some(Head::Detached),
+            v1::checkout::Head::Detached(()) => Some(Head::Detached),
             v1::checkout::Head::Branch(branch) => Some(Head::Branch {
                 name: Said::new(branch.name.clone())?,
                 upstream: branch.upstream.map(Upstream::of_api),
@@ -172,7 +172,7 @@ impl Head {
 
     fn to_api(&self) -> v1::checkout::Head {
         match self {
-            Head::Detached => v1::checkout::Head::Detached(v1::checkout::Detached {}),
+            Head::Detached => v1::checkout::Head::Detached(()),
             Head::Branch { name, upstream } => v1::checkout::Head::Branch(v1::Branch {
                 name: name.as_str().to_owned(),
                 upstream: upstream.map(Upstream::to_api),

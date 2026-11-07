@@ -42,7 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_client::DaemonClient;
-use lunetad::api::{InfoRequest, InfoResponse};
+use lunetad::api::InfoResponse;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
 use lunetad::program;
 use lunetad::release::{self, Build};
@@ -124,7 +124,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     let own = lunetad::zellij_folder();
     loop {
         let why = match lunetad::connect(&folder).await {
-            Ok(mut daemon) => match daemon.info(InfoRequest {}).await {
+            Ok(mut daemon) => match daemon.info(()).await {
                 Ok(info) => {
                     let info = info.into_inner();
                     let running = Build::of(&info.version, info.built);

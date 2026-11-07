@@ -91,7 +91,7 @@ impl Away {
     ) -> Result<(), String> {
         let (at, to) = (at.to_string(), to.to_string());
         let request = GoRequest { on: Some(self.on()), at, to, pane };
-        self.ask(|mut daemon| async move { daemon.go(request).await }).map(|_| ())
+        self.ask(|mut daemon| async move { daemon.go(request).await })
     }
 
     /// The name a session luneta makes for `dir` there takes, as
@@ -216,7 +216,7 @@ impl Away {
         };
         match answer.printed {
             Some(keep_printed_response::Printed::After(file)) => Ok(Printed::After(kept(file))),
-            Some(keep_printed_response::Printed::Nothing(_)) => Ok(Printed::Nothing),
+            Some(keep_printed_response::Printed::Nothing(())) => Ok(Printed::Nothing),
             Some(keep_printed_response::Printed::Unsure(file)) => Ok(Printed::Unsure(kept(file))),
             Some(keep_printed_response::Printed::Top(top)) => Ok(Printed::Top(top.file.map(kept))),
             None => Err(format!(
@@ -233,11 +233,11 @@ impl Away {
         let request = ClosesRequest { on: Some(self.on()), session: session.to_string(), pane };
         let answer = self.ask(|mut daemon| async move { daemon.closes(request).await })?;
         match answer.closes {
-            Some(closes_response::Closes::Pane(_)) => Ok(Closes::Pane),
+            Some(closes_response::Closes::Pane(())) => Ok(Closes::Pane),
             Some(closes_response::Closes::Tab(tab)) => {
                 Ok(Closes::Tab { id: tab.id, panes: tab.panes })
             },
-            Some(closes_response::Closes::Session(_)) => Ok(Closes::Session),
+            Some(closes_response::Closes::Session(())) => Ok(Closes::Session),
             None => Err(format!(
                 "{}: its lunetad says what closing the pane closes in words this luneta cannot \
                  read, as a newer one does",
@@ -255,7 +255,7 @@ impl Away {
         close: &Close,
     ) -> Result<(), String> {
         let request = close.asked(Some(self.on()), session, started);
-        self.ask(|mut daemon| async move { daemon.close(request).await }).map(|_| ())
+        self.ask(|mut daemon| async move { daemon.close(request).await })
     }
 
     /// The tabs of `session` there other than that of its terminal `pane`, as
@@ -284,8 +284,8 @@ impl Away {
         let request = TurnIntoTabRequest { on: Some(self.on()), session, pane, started_at };
         let answer = self.ask(|mut daemon| async move { daemon.turn_into_tab(request).await })?;
         match answer.came {
-            Some(turn_into_tab_response::Came::Done(_)) => Ok(IntoTab::Done),
-            Some(turn_into_tab_response::Came::NoClient(_)) => Ok(IntoTab::NoClient),
+            Some(turn_into_tab_response::Came::Done(())) => Ok(IntoTab::Done),
+            Some(turn_into_tab_response::Came::NoClient(())) => Ok(IntoTab::NoClient),
             None => Err(self.unread_turn()),
         }
     }
@@ -306,7 +306,7 @@ impl Away {
             TurnIntoPanesRequest { on: Some(self.on()), session, pane, beside, started_at };
         let answer = self.ask(|mut daemon| async move { daemon.turn_into_panes(request).await })?;
         match answer.came {
-            Some(turn_into_panes_response::Came::Done(_)) => Ok(IntoPanes::Done),
+            Some(turn_into_panes_response::Came::Done(())) => Ok(IntoPanes::Done),
             Some(turn_into_panes_response::Came::Partly(partly)) => {
                 let turn_into_panes_response::Partly { moved, of, why } = partly;
                 Ok(IntoPanes::Partly { moved, of, why })
@@ -331,7 +331,7 @@ impl Away {
     pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
         let (session, started_at) = (session.to_string(), Some(started.into()));
         let request = KillRequest { on: Some(self.on()), session, started_at };
-        self.ask(|mut daemon| async move { daemon.kill(request).await }).map(|_| ())
+        self.ask(|mut daemon| async move { daemon.kill(request).await })
     }
 
     /// The sessions zellij keeps to bring back there, which ended, as
@@ -355,7 +355,7 @@ impl Away {
     /// `lunetad::closes::deleted` does there, or says why it did not.
     pub fn delete(&mut self, session: &SessionName) -> Result<(), String> {
         let request = DeleteExitedRequest { on: Some(self.on()), session: session.to_string() };
-        self.ask(|mut daemon| async move { daemon.delete_exited(request).await }).map(|_| ())
+        self.ask(|mut daemon| async move { daemon.delete_exited(request).await })
     }
 
     /// Has zellij there call `session` `to`, as `lunetad::renames::renamed`
@@ -363,7 +363,7 @@ impl Away {
     pub fn rename(&mut self, session: &SessionName, to: &SessionName) -> Result<(), String> {
         let (session, to) = (session.to_string(), to.to_string());
         let request = RenameSessionRequest { on: Some(self.on()), session, to };
-        self.ask(|mut daemon| async move { daemon.rename_session(request).await }).map(|_| ())
+        self.ask(|mut daemon| async move { daemon.rename_session(request).await })
     }
 
     /// The end of each transcript `reading` reads there, by its session's

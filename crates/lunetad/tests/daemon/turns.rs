@@ -9,9 +9,8 @@ use std::time::SystemTime;
 
 use lunetad::api::other_tabs_response::Tab;
 use lunetad::api::turn_into_panes_response::Came as PanesCame;
-use lunetad::api::turn_into_panes_response::{Done as PanesDone, Partly};
+use lunetad::api::turn_into_panes_response::Partly;
 use lunetad::api::turn_into_tab_response::Came as TabCame;
-use lunetad::api::turn_into_tab_response::{Done as TabDone, NoClient};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{OtherTabsRequest, TurnIntoPanesRequest, TurnIntoTabRequest};
 use serde_json::{json, Value};
@@ -79,8 +78,8 @@ fn refused(status: &Status, why: &str) {
     assert!(status.message().contains(why), "{status:?}");
 }
 
-const TAB_DONE: Option<TabCame> = Some(TabCame::Done(TabDone {}));
-const PANES_DONE: Option<PanesCame> = Some(PanesCame::Done(PanesDone {}));
+const TAB_DONE: Option<TabCame> = Some(TabCame::Done(()));
+const PANES_DONE: Option<PanesCame> = Some(PanesCame::Done(()));
 
 fn action(said: &str) -> String {
     format!("--session work action {said}")
@@ -250,7 +249,7 @@ fn a_session_no_client_is_in_has_one_come_first() {
     let tab = (0, "Tab #1");
     host.zellij.list("work", &json!([pane(1, tab), pane(2, tab)]));
 
-    assert_eq!(into_tab(&host, 1).unwrap(), Some(TabCame::NoClient(NoClient {})));
+    assert_eq!(into_tab(&host, 1).unwrap(), Some(TabCame::NoClient(())));
 
     assert_eq!(host.zellij.opened(), [] as [String; 0]);
     assert_eq!(host.zellij.turned(), [] as [String; 0]);

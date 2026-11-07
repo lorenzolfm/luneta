@@ -6,7 +6,7 @@ use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use lunetad::api::{InfoRequest, WatchRequest};
+use lunetad::api::WatchRequest;
 use lunetad::{Unbridged, BRIDGED};
 
 use crate::demand::Detached;
@@ -73,7 +73,7 @@ fn a_client_asks_the_daemon_of_the_folder_through_luneta_bridge() {
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
         let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
-        let info = bridged.info(InfoRequest {}).await.unwrap().into_inner();
+        let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
         let first = WatchRequest { after: None, kept: None, shown: false };
         let watched = bridged.watch(first).await.unwrap().into_inner();
@@ -98,8 +98,8 @@ fn a_client_makes_a_command_afresh_for_one_that_stalls() {
     };
     runtime().block_on(async {
         let mut bridged = lunetad::through(commands).await.unwrap();
-        bridged.info(InfoRequest {}).await.expect_err("a stalled command answered");
-        let info = bridged.info(InfoRequest {}).await.unwrap().into_inner();
+        bridged.info(()).await.expect_err("a stalled command answered");
+        let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
     });
 }
@@ -112,14 +112,14 @@ fn luneta_bridge_starts_a_daemon_where_none_runs() {
     let host = Host::new();
     let pid = runtime().block_on(async {
         let mut bridged = lunetad::through(bridge(&host)).await.unwrap();
-        bridged.info(InfoRequest {}).await.unwrap().into_inner().pid
+        bridged.info(()).await.unwrap().into_inner().pid
     });
     let daemon = Detached { host: &host, pid };
 
     let folder = folder_in(host.runtime.path()).unwrap();
     let answering = runtime().block_on(async {
         let mut socket = lunetad::connect(&folder).await.unwrap();
-        socket.info(InfoRequest {}).await.unwrap().into_inner().pid
+        socket.info(()).await.unwrap().into_inner().pid
     });
     assert_eq!(answering, daemon.pid);
 }

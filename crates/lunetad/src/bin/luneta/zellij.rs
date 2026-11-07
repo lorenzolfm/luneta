@@ -401,7 +401,7 @@ pub fn answering_away(
 pub fn ended_away(destination: &Destination, seats: &[SessionName]) -> Result<Ended, String> {
     let found = Away::reach(destination, away::ANSWER)?.refuge(seats)?;
     match found.ended {
-        Some(refuge_response::Ended::Kept(_)) => Ok(Ended::Kept),
+        Some(refuge_response::Ended::Kept(())) => Ok(Ended::Kept),
         Some(refuge_response::Ended::Went(went)) => {
             let refuge = went.refuge.map(|refuge| -> Result<Refuge, String> {
                 let session = SessionName::running(&refuge.session).map_err(|why| {

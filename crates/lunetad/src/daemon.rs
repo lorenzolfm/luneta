@@ -47,32 +47,29 @@ use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::close_request;
-use crate::api::closes_response::{self, Pane, Session as WholeSession, Tab as ClosedTab};
+use crate::api::closes_response::{self, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_image_request::{Image, Part};
-use crate::api::keep_printed_response::{self, File as PrintedFile, Nothing, Top};
+use crate::api::keep_printed_response::{self, File as PrintedFile, Top};
 use crate::api::list_dirs_response::Dir;
 use crate::api::list_exited_response::Exited;
 use crate::api::list_skills_response::Skill;
 use crate::api::open_request::{self, Opens};
 use crate::api::other_tabs_response::Tab as OtherTab;
-use crate::api::refuge_response::{self, Kept, Went};
+use crate::api::refuge_response::{self, Went};
 use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
-    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
-    ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepImageRequest,
-    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
-    ListAgentsRequest, ListAgentsResponse,
-    ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
-    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
-    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, RenameSessionResponse, SayRequest, SayResponse,
-    StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
-    TurnIntoTabRequest, TurnIntoTabResponse,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, ClosesRequest,
+    ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
+    InfoResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
+    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
+    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
+    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, RenameSessionRequest, SayRequest, StartRequest, TranscriptEndsRequest,
+    TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
+    TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -529,7 +526,7 @@ struct Host {
 
 #[tonic::async_trait]
 impl Daemon for Host {
-    async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
+    async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
         Ok(Response::new(InfoResponse {
             version: release::VERSION.to_owned(),
             pid: std::process::id(),
@@ -540,10 +537,7 @@ impl Daemon for Host {
         }))
     }
 
-    async fn list_agents(
-        &self,
-        _: Request<ListAgentsRequest>,
-    ) -> Result<Response<ListAgentsResponse>, Status> {
+    async fn list_agents(&self, _: Request<()>) -> Result<Response<ListAgentsResponse>, Status> {
         self.ask(Command::List).await.map(Response::new)
     }
 
@@ -562,7 +556,7 @@ impl Daemon for Host {
         watched.map(Response::new)
     }
 
-    async fn go(&self, request: Request<GoRequest>) -> Result<Response<GoResponse>, Status> {
+    async fn go(&self, request: Request<GoRequest>) -> Result<Response<()>, Status> {
         let GoRequest { on, at, to, pane } = request.into_inner();
         let (at, to) = (named("at", &at)?, named("to", &to)?);
         if let Some(mut daemon) = self.bridged(on)? {
@@ -572,7 +566,7 @@ impl Daemon for Host {
         let went = task::spawn_blocking(move || moves::went(&at, &to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
-        Ok(Response::new(GoResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn list_clients(
@@ -616,7 +610,7 @@ impl Daemon for Host {
             before,
         };
         let ended = match found.await.map_err(|error| unfinished(&error))? {
-            moves::Ended::Kept => refuge_response::Ended::Kept(Kept {}),
+            moves::Ended::Kept => refuge_response::Ended::Kept(()),
             moves::Ended::Went(found) => {
                 refuge_response::Ended::Went(Went { refuge: found.map(refuge) })
             },
@@ -676,7 +670,7 @@ impl Daemon for Host {
         };
         let printed = match kept {
             Printed::After(kept) => keep_printed_response::Printed::After(file(kept)),
-            Printed::Nothing => keep_printed_response::Printed::Nothing(Nothing {}),
+            Printed::Nothing => keep_printed_response::Printed::Nothing(()),
             Printed::Unsure(kept) => keep_printed_response::Printed::Unsure(file(kept)),
             Printed::Top(kept) => keep_printed_response::Printed::Top(Top { file: kept.map(file) }),
         };
@@ -762,10 +756,7 @@ impl Daemon for Host {
         Ok(Response::new(DumpScreenResponse { pane, screen }))
     }
 
-    async fn start(
-        &self,
-        request: Request<StartRequest>,
-    ) -> Result<Response<StartResponse>, Status> {
+    async fn start(&self, request: Request<StartRequest>) -> Result<Response<()>, Status> {
         let StartRequest { on, at, to, cwd } = request.into_inner();
         let (at, to) = (named("at", &at)?, named("to", &to)?);
         let cwd = cwd.map(|cwd| directory("cwd", cwd)).transpose()?;
@@ -777,7 +768,7 @@ impl Daemon for Host {
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
-        Ok(Response::new(StartResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn closes(
@@ -793,17 +784,14 @@ impl Daemon for Host {
         let found = task::spawn_blocking(move || closes::closes_now(&session, pane)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let closes = match found.map_err(Status::failed_precondition)? {
-            Closes::Pane => closes_response::Closes::Pane(Pane {}),
+            Closes::Pane => closes_response::Closes::Pane(()),
             Closes::Tab { id, panes } => closes_response::Closes::Tab(ClosedTab { id, panes }),
-            Closes::Session => closes_response::Closes::Session(WholeSession {}),
+            Closes::Session => closes_response::Closes::Session(()),
         };
         Ok(Response::new(ClosesResponse { closes: Some(closes) }))
     }
 
-    async fn close(
-        &self,
-        request: Request<CloseRequest>,
-    ) -> Result<Response<CloseResponse>, Status> {
+    async fn close(&self, request: Request<CloseRequest>) -> Result<Response<()>, Status> {
         let CloseRequest { on, session, closes, started_at } = request.into_inner();
         let session = named("session", &session)?;
         let started = started_of(started_at)?;
@@ -821,7 +809,7 @@ impl Daemon for Host {
         let closed = task::spawn_blocking(move || closes::closed(&session, started, &close)).await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(CloseResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn other_tabs(
@@ -856,10 +844,8 @@ impl Daemon for Host {
         let came = task::spawn_blocking(move || turns::into_tab(&session, started, pane)).await;
         let came = came.map_err(|error| unfinished(&error))?;
         let came = match came.map_err(Status::failed_precondition)? {
-            IntoTab::Done => turn_into_tab_response::Came::Done(turn_into_tab_response::Done {}),
-            IntoTab::NoClient => {
-                turn_into_tab_response::Came::NoClient(turn_into_tab_response::NoClient {})
-            },
+            IntoTab::Done => turn_into_tab_response::Came::Done(()),
+            IntoTab::NoClient => turn_into_tab_response::Came::NoClient(()),
         };
         Ok(Response::new(TurnIntoTabResponse { came: Some(came) }))
     }
@@ -880,9 +866,7 @@ impl Daemon for Host {
             task::spawn_blocking(move || turns::into_panes(&session, started, pane, beside)).await;
         let came = came.map_err(|error| unfinished(&error))?;
         let came = match came.map_err(Status::failed_precondition)? {
-            IntoPanes::Done => {
-                turn_into_panes_response::Came::Done(turn_into_panes_response::Done {})
-            },
+            IntoPanes::Done => turn_into_panes_response::Came::Done(()),
             IntoPanes::Partly { moved, of, why } => {
                 let partly = turn_into_panes_response::Partly { moved, of, why };
                 turn_into_panes_response::Came::Partly(partly)
@@ -891,7 +875,7 @@ impl Daemon for Host {
         Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
     }
 
-    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
         let KillRequest { on, session, started_at } = request.into_inner();
         let session = named("session", &session)?;
         let started = started_of(started_at)?;
@@ -902,7 +886,7 @@ impl Daemon for Host {
         let killed = task::spawn_blocking(move || closes::killed(&session, started)).await;
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(KillResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn list_exited(
@@ -934,7 +918,7 @@ impl Daemon for Host {
     async fn delete_exited(
         &self,
         request: Request<DeleteExitedRequest>,
-    ) -> Result<Response<DeleteExitedResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let DeleteExitedRequest { on, session } = request.into_inner();
         let session = named("session", &session)?;
         if let Some(mut daemon) = self.bridged(on)? {
@@ -944,13 +928,13 @@ impl Daemon for Host {
         let deleted = task::spawn_blocking(move || closes::deleted(&session)).await;
         let deleted = deleted.map_err(|error| unfinished(&error))?;
         deleted.map_err(Status::failed_precondition)?;
-        Ok(Response::new(DeleteExitedResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn rename_session(
         &self,
         request: Request<RenameSessionRequest>,
-    ) -> Result<Response<RenameSessionResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         let RenameSessionRequest { on, session, to } = request.into_inner();
         let session = named("session", &session)?;
         let to = SessionName::parse(&to)
@@ -962,7 +946,7 @@ impl Daemon for Host {
         let renamed = task::spawn_blocking(move || renames::renamed(&session, &to)).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
-        Ok(Response::new(RenameSessionResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn transcript_ends(
@@ -1000,13 +984,13 @@ impl Daemon for Host {
 
     type PasteStream = Pin<Box<dyn Stream<Item = Result<PasteResponse, Status>> + Send>>;
 
-    async fn say(&self, request: Request<SayRequest>) -> Result<Response<SayResponse>, Status> {
+    async fn say(&self, request: Request<SayRequest>) -> Result<Response<()>, Status> {
         let say = request.into_inner().say.and_then(|say| say.does);
         let say = say.ok_or_else(|| Status::invalid_argument("it says nothing to do"))?;
         let said = ToSay::parse(say).map_err(Status::invalid_argument)?;
         let at = SystemTime::now();
         self.ask(|answer| Command::Say { said, at, answer }).await?;
-        Ok(Response::new(SayResponse {}))
+        Ok(Response::new(()))
     }
 
     async fn paste(

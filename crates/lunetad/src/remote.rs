@@ -149,7 +149,7 @@ pub enum Reached {
 impl Reached {
     pub fn to_api(&self, destination: &Destination) -> api::Remote {
         let reached = match self {
-            Reached::Reaching => remote::Reached::Reaching(remote::Reaching {}),
+            Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host.clone()),
             Reached::Unreached { since, why, stopped } => {
                 remote::Reached::Unreached(remote::Unreached {
@@ -317,12 +317,12 @@ impl Stopped {
 
     fn to_api(self) -> unreached::Stopped {
         match self {
-            Stopped::Unstarted => unreached::Stopped::Unstarted(unreached::Unstarted {}),
+            Stopped::Unstarted => unreached::Stopped::Unstarted(()),
             Stopped::Ended(code) => unreached::Stopped::Ended(unreached::Ended { code }),
-            Stopped::Said => unreached::Stopped::Said(unreached::Said {}),
-            Stopped::Silent => unreached::Stopped::Silent(unreached::Silent {}),
-            Stopped::Lost => unreached::Stopped::Lost(unreached::Lost {}),
-            Stopped::Unwatched => unreached::Stopped::Unwatched(unreached::Unwatched {}),
+            Stopped::Said => unreached::Stopped::Said(()),
+            Stopped::Silent => unreached::Stopped::Silent(()),
+            Stopped::Lost => unreached::Stopped::Lost(()),
+            Stopped::Unwatched => unreached::Stopped::Unwatched(()),
         }
     }
 }

@@ -7,7 +7,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lunetad::api::shell::{ended, Doing, Ended, Going, Ready, Stopped};
+use lunetad::api::shell::{ended, Doing, Ended, Going, Stopped};
 use lunetad::api::{self, Front};
 use prost_types::{Duration, Timestamp};
 use rustix::fs::{Mode, OFlags};
@@ -52,7 +52,7 @@ fn command(shell: &api::Shell) -> &str {
         Doing::Going(going) => &going.command,
         Doing::Ended(ended) => &ended.command,
         Doing::Stopped(stopped) => &stopped.command,
-        Doing::Ready(_) => "",
+        Doing::Ready(()) => "",
     }
 }
 
@@ -135,14 +135,14 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
             doing(Doing::Ended(Ended {
                 command: "make".to_owned(),
                 at,
-                ending: Some(ended::Ending::Resumed(ended::Resumed {})),
+                ending: Some(ended::Ending::Resumed(())),
                 took: took(7, 120),
             })),
             doing(Doing::Stopped(Stopped { command: "nvim".to_owned(), at })),
             None,
             None,
             None,
-            doing(Doing::Ready(Ready {})),
+            doing(Doing::Ready(())),
         ]
     );
     let unread = host.runtime.path().join(format!("luneta/commands/work/7.{started}"));
