@@ -1369,7 +1369,8 @@ Where git refuses one, that one stays, the others go, and luneta says which, and
 next list has it again, for whatever is left of it. So a remote branch that can't be
 deleted keeps its worktree, and one that can goes though git then refuses the
 worktree, as it does one with a submodule. Each is looked at again just before it
-goes, so one that has come to have a pane since stays too. luneta finishes what `d m`
+goes, and again once its remote branch has gone, so one that has come to have a pane
+since stays too, and luneta says the remote branch went. luneta finishes what `d m`
 began on this machine before it ends, however long that takes, with its screen as it
 last drew it.
 

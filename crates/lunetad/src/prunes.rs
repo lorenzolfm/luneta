@@ -701,6 +701,22 @@ fn removed(
     occupied: &impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
 ) -> Result<(), String> {
+    stands_as_planned(common, goes, occupied, here)?;
+    let Pushed::Goes(far) = &goes.pushed else {
+        return worktree_removed(common, &goes.worktree);
+    };
+    far_branch_deleted(common, &goes.head, far)?;
+    stands_as_planned(common, goes, occupied, here)
+        .and_then(|()| worktree_removed(common, &goes.worktree))
+        .map_err(|why| format!("{why}; its branch on {} has gone", far.remote))
+}
+
+fn stands_as_planned(
+    common: &str,
+    goes: &Goes,
+    occupied: &impl Fn() -> Result<Occupied, String>,
+    here: Option<&Path>,
+) -> Result<(), String> {
     let occupied = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
     let all = worktrees(common)?;
     let listed = all
@@ -710,11 +726,10 @@ fn removed(
     if listed.branch.as_deref() != Some(goes.branch.as_str()) {
         return Err(format!("it is no longer on {}", goes.branch));
     }
-    if let Some(why) = stays(listed, &all, &goes.head, &occupied, here)? {
-        return Err(why.to_owned());
+    match stays(listed, &all, &goes.head, &occupied, here)? {
+        Some(why) => Err(why.to_owned()),
+        None => Ok(()),
     }
-    far_branch_deleted(common, goes)?;
-    worktree_removed(common, &goes.worktree)
 }
 
 fn worktree_removed(common: &str, worktree: &str) -> Result<(), String> {
@@ -723,13 +738,11 @@ fn worktree_removed(common: &str, worktree: &str) -> Result<(), String> {
     says(git, REMOVING, "worktree remove").map(|_| ())
 }
 
-fn far_branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
-    let Pushed::Goes(RemoteBranch { remote, branch }) = &goes.pushed else {
-        return Ok(());
-    };
+fn far_branch_deleted(common: &str, head: &str, far: &RemoteBranch) -> Result<(), String> {
+    let RemoteBranch { remote, branch } = far;
     let there = format!("refs/heads/{branch}");
     let mut git = on_repository(common);
-    git.arg("push").arg(format!("--force-with-lease={there}:{}", goes.head));
+    git.arg("push").arg(format!("--force-with-lease={there}:{head}"));
     git.args(["--", remote, &format!(":{there}")]);
     says_alone(git, "push")
         .map(|_| ())
@@ -1223,6 +1236,44 @@ mod tests {
         fs::remove_file(worktree.join("new")).unwrap();
         assert_eq!(worktree_removed(common, at), Ok(()));
         assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn a_pane_that_comes_as_its_far_branch_goes_keeps_the_worktree() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let (up, repository, worktree) = (scratch.join("up"), scratch.join("r"), scratch.join("w"));
+        ran(&scratch, &["init", "-q", "--bare", "-b", "main", up.to_str().unwrap()]);
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        ran(&repository, &["remote", "add", "origin", up.to_str().unwrap()]);
+        let at = worktree.to_str().unwrap();
+        ran(&repository, &["worktree", "add", "-q", "-b", "fix", at]);
+        ran(&repository, &["push", "-q", "origin", "fix"]);
+        let common = repository.join(".git");
+        let common = common.to_str().unwrap();
+        let listed = worktrees(common).unwrap();
+        let head = listed.iter().find(|listed| listed.path == at).unwrap().head.clone();
+
+        let occupied = || {
+            let panes = if remote_heads(common, "origin")?.contains_key("fix") {
+                Vec::new()
+            } else {
+                vec![worktree.clone()]
+            };
+            Ok(Occupied { panes, agents: Vec::new() })
+        };
+        let goes = Goes {
+            head,
+            ..goes(at, Pushed::Goes(on_origin("fix")), None)
+        };
+        let planned = Planned { plan: plan_of(vec![goes]), common: common.to_owned() };
+        let outcomes = deleted(planned, occupied, None);
+        let why = "it has a pane; its branch on origin has gone";
+        assert_eq!(outcomes[0].came, Came::Stays(why.to_owned()));
+        assert!(worktree.join(".git").is_file());
+        let heads = remote_heads(common, "origin").unwrap();
+        assert!(!heads.contains_key("fix"));
     }
 
     /// Every answer comes back beside what it is of, however few threads ask.
