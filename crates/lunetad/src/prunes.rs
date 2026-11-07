@@ -701,8 +701,12 @@ fn removed(
         return Err(why.to_owned());
     }
     far_branch_deleted(common, goes)?;
+    worktree_removed(common, &goes.worktree)
+}
+
+fn worktree_removed(common: &str, worktree: &str) -> Result<(), String> {
     let mut git = on_repository(common);
-    git.args(["worktree", "remove", "--", &goes.worktree]);
+    git.args(["-c", "status.showUntrackedFiles=normal", "worktree", "remove", "--", worktree]);
     says(git, REMOVING, "worktree remove").map(|_| ())
 }
 
@@ -1136,6 +1140,38 @@ mod tests {
         assert_eq!(said("fetched"), Ok(vec!["https://x/o/f".to_owned()]));
         assert_eq!(said("pushed"), Ok(vec!["https://x/o/a".to_owned(), "https://x/o/b".to_owned()]));
         assert_eq!(said("none"), Err("none has no url".to_owned()));
+    }
+
+    fn ran(dir: &Path, args: &[&str]) {
+        let mut git = Command::new("git");
+        git::local(&mut git)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .arg("-C")
+            .arg(dir)
+            .args(args);
+        assert!(git.status().unwrap().success(), "{args:?}");
+    }
+
+    #[test]
+    fn git_refuses_to_remove_an_untracked_file_whatever_it_is_set_to_show() {
+        let scratch = tempfile::tempdir().unwrap();
+        let scratch = scratch.path().canonicalize().unwrap();
+        let (repository, worktree) = (scratch.join("r"), scratch.join("w"));
+        ran(&scratch, &["init", "-q", "-b", "main", repository.to_str().unwrap()]);
+        ran(&repository, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        ran(&repository, &["config", "status.showUntrackedFiles", "no"]);
+        let at = worktree.to_str().unwrap();
+        ran(&repository, &["worktree", "add", "-q", "-b", "w", at]);
+        fs::write(worktree.join("new"), "not yet added").unwrap();
+        let common = repository.join(".git");
+        let common = common.to_str().unwrap();
+        assert!(worktree_removed(common, at).is_err());
+        assert!(worktree.join("new").exists());
+        fs::remove_file(worktree.join("new")).unwrap();
+        assert_eq!(worktree_removed(common, at), Ok(()));
+        assert!(!worktree.exists());
     }
 
     /// Every answer comes back beside what it is of, however few threads ask.
