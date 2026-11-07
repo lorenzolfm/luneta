@@ -43,6 +43,7 @@ mod own;
 mod peers;
 mod picker;
 mod printed;
+mod prune;
 mod pull;
 mod sidebar;
 mod skills;

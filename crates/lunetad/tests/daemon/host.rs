@@ -639,7 +639,9 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// `api`. Its `repo view` says the parent a test wrote with `fork_of`, and with
 /// `GH_REPO` set it finds what a test wrote with `open_in`. Of a branch whose
 /// upstream is `refs/pull/<number>/head` that it has none for, it says it can
-/// resolve no such number, as gh does. It knows no other command.
+/// resolve no such number, as gh does. Its `pr list --base` says what a test
+/// wrote with `based_on`, or none, and notes what it was asked. It knows no
+/// other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -673,7 +675,13 @@ if [ "$*" = "repo view --json parent,url,defaultBranchRef" ]; then
     echo '{{"defaultBranchRef":{{"name":"main"}},"parent":null,"url":"https://github.com/owner/repo"}}'
     exit 0
 fi
-if [ "$*" != "pr view --json number,state,isDraft,url" ]; then
+if [ "$1 $2 $3" = "pr list --base" ]; then
+    echo "${{GH_REPO:-}} $4" >> "{pulls}/based"
+    [ -f "{pulls}/based-$4" ] && exec cat "{pulls}/based-$4"
+    echo '[]'
+    exit 0
+fi
+if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -758,7 +766,7 @@ exec cat "$said"
     pub fn open(&self, branch: &str, said: &serde_json::Value) {
         let path = self.pulls.join(format!("{branch}.json"));
         let writing = path.with_extension("writing");
-        fs::write(&writing, said.to_string()).unwrap();
+        fs::write(&writing, with_head(branch, said).to_string()).unwrap();
         fs::rename(writing, path).unwrap();
     }
 
@@ -766,8 +774,13 @@ exec cat "$said"
         let path = self.pulls.join(format!("{repository}/{branch}.json"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let writing = path.with_extension("writing");
-        fs::write(&writing, said.to_string()).unwrap();
+        fs::write(&writing, with_head(branch, said).to_string()).unwrap();
         fs::rename(writing, path).unwrap();
+    }
+
+    pub fn based_on(&self, branch: &str, number: u32) {
+        fs::write(self.pulls.join(format!("based-{branch}")), format!("[{{\"number\":{number}}}]"))
+            .unwrap();
     }
 
     pub fn fork_of(&self, owner: &str, name: &str) {
@@ -790,6 +803,16 @@ exec cat "$said"
             Err(error) => panic!("what gh was asked does not read: {error}"),
         }
     }
+}
+
+/// `said` with the head gh always says of a pull request, where a test left it
+/// out as nothing it looks at.
+fn with_head(branch: &str, said: &serde_json::Value) -> serde_json::Value {
+    let mut said = said.clone();
+    let fields = said.as_object_mut().unwrap();
+    fields.entry("headRefName").or_insert(branch.into());
+    fields.entry("headRefOid").or_insert("0".repeat(40).into());
+    said
 }
 
 /// A `git` of a test's own, beside its `zellij`, that runs the git of whoever

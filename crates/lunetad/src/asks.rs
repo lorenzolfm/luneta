@@ -68,7 +68,7 @@ pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
 /// your words point at with, and makes worktrees with. In `dontAsk` mode,
 /// Claude Code denies it any other but those your own settings allow, and a
 /// line that runs one inside another, as through `$(…)`.
-pub const ALLOWED: [&str; 15] = [
+pub const ALLOWED: [&str; 16] = [
     "Bash(luneta here:*)",
     "Bash(luneta sessions:*)",
     "Bash(luneta agents:*)",
@@ -76,6 +76,7 @@ pub const ALLOWED: [&str; 15] = [
     "Bash(luneta go:*)",
     "Bash(luneta turn:*)",
     "Bash(luneta close:*)",
+    "Bash(luneta prune:*)",
     "Bash(zoxide query:*)",
     "Bash(gh issue view:*)",
     "Bash(gh issue list:*)",
@@ -98,14 +99,14 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     Do what they ask with luneta's commands, as the luneta skill below says, and end with a \
     line or two on what you did, and where. Run one command in each call to Bash, with \
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
-    sessions, agents, open, go, turn and close, zoxide query, gh issue view and list, gh pr view \
+    sessions, agents, open, go, turn, close and prune, zoxide query, gh issue view and list, gh pr view \
     and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
     pane you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
     with no other option of claude's: luneta refuses any other command. You cannot wait for \
     the user in the middle of a turn: to ask them anything, as the skill has you ask before \
     a close, or which of two things they meant, end your turn with the question. Their \
-    answer comes as the next message. So a close takes --yes only in the turn after the one \
-    that said its plan.\n\nEach message of the user's starts with a line of luneta's in \
+    answer comes as the next message. So a close or a prune takes --yes only in the turn after \
+    the one that said its plan.\n\nEach message of the user's starts with a line of luneta's in \
     brackets, which says the pane they are in as they send it, or that they are on another \
     machine, or that luneta cannot tell: that goes for the turn, whatever one before said. \
     `luneta here` names that pane, and a close's plan marks the agent there (this runs here). \

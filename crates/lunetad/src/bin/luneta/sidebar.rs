@@ -57,6 +57,7 @@ use lunetad::api::{
 };
 use lunetad::asks::User;
 use lunetad::links;
+use lunetad::prunes;
 use lunetad::transcripts::SessionId;
 use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
@@ -86,6 +87,7 @@ use crate::order::{Colour, Order};
 use crate::own::{Look, Looked, OwnClient, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
+use crate::prune;
 use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
@@ -953,6 +955,12 @@ fn machines(host: &Host) -> Machines<'_> {
 pub enum Asked {
     /// Nothing: draw again, at most.
     Nothing,
+    /// What deleting the merged worktrees of the repository `dir` is in, on
+    /// `on`, deletes, for the menu numbered `menu`.
+    Prunes { menu: u64, on: Machine, dir: Directory },
+    /// What would go of the repository `dir` is in, on `on`, deleted where that
+    /// is `agreed`, for the menu numbered `menu`.
+    Prune { menu: u64, on: Machine, dir: Directory, agreed: Vec<prunes::Deleting> },
     /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
     /// Take the focus from zellij, as a click on the sidebar does.
@@ -2892,10 +2900,12 @@ impl Sidebar {
         });
         let trees = seen.iter().flat_map(|seen| seen.work_trees);
         let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
-        let checkout = tree.and_then(|tree| checkout(&WorkTree::of_api(tree)?, None));
+        let tree = tree.and_then(WorkTree::of_api);
+        let checkout = tree.as_ref().and_then(|tree| checkout(tree, None));
         let branch = checkout.map(|checkout| checkout.branch);
+        let repository = tree.as_ref().and_then(repository_of);
         let ran = self.ran_in(machine, &session, pane);
-        Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, ran })
+        Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, repository, ran })
     }
 
     /// What the shell in the pane `pane` of `session`, of `machine`, said it
@@ -3116,6 +3126,8 @@ impl Sidebar {
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
+            Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
+            Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
                 Asked::Closes { menu: number, on, session: session.name, pane }
             },
@@ -3133,6 +3145,42 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menu_did(menu.planned(plan))
+    }
+
+    /// `d m` of the menu numbered `menu` heard what it would delete, as `plan`
+    /// says, or why it did not: the menu goes on, while it waits on it.
+    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.sweeping()) else {
+            return Asked::Nothing;
+        };
+        if let Ok(plan) = &plan {
+            log_unasked(plan);
+        }
+        self.menu_did(waiting.swept(plan))
+    }
+
+    /// `d m` of the menu numbered `menu` heard what came of what it was told to
+    /// delete, as `pruned` says, or why it did not hear. Where what would go has
+    /// changed, nothing went, and it lists that again, while it waits on it. Else
+    /// the menu closes, while it waits on it, and a note says what stays.
+    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+        let waiting = self.menu.take_if(|it| it.number() == menu && it.pruning());
+        match pruned {
+            Ok(prunes::Pruned::Changed(plan)) => {
+                log_unasked(&plan);
+                if let Some(waiting) = waiting {
+                    return self.menu_did(waiting.changed(plan));
+                }
+                self.say("menu: nothing deleted: what would go changed".to_owned());
+            },
+            Ok(prunes::Pruned::Went(outcomes)) => {
+                if let Some(note) = prune::note(&outcomes) {
+                    self.say(note);
+                }
+            },
+            Err(why) => self.say(format!("menu: it may have deleted some worktrees: {why}")),
+        }
+        Asked::Nothing
     }
 
     /// luneta found where the key of the menu numbered `menu`, for a pull
@@ -4674,6 +4722,22 @@ impl<'a> Finder<'a> {
     }
 }
 
+fn log_unasked(plan: &prunes::Plan) {
+    for unasked in &plan.unasked {
+        log::say(&format!("{}: {}", unasked.worktree, unasked.why));
+    }
+}
+
+fn repository_of(tree: &WorkTree) -> Option<String> {
+    match tree {
+        WorkTree::NoCheckout { repository }
+        | WorkTree::Checkout { repository: Some(repository), .. } => {
+            Some(repository.as_str().to_owned())
+        },
+        WorkTree::Outside | WorkTree::Checkout { repository: None, .. } => None,
+    }
+}
+
 /// The branch checked out in a work tree, how the tree stands, and its
 /// `pull_request`, or none for a detached `HEAD` or a directory in no
 /// repository.
@@ -5185,6 +5249,7 @@ mod tests {
             titled: None,
             shell: None,
             tab_id: Some(tab),
+            held: false,
         }
     }
 
@@ -8234,6 +8299,7 @@ mod tests {
             pane: 1,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
+            repository: None,
             ran: Ran::Unhooked,
         })));
 
@@ -9536,6 +9602,73 @@ mod tests {
         assert_eq!(rule(true), ACCENT);
     }
 
+    /// `d m` on a far row asks that machine what it would delete, and `y` tells
+    /// it what you agreed to. Where it would delete something else now, the menu
+    /// lists that, or a note says nothing went once the menu has been closed.
+    /// What stays is said in a note too.
+    #[test]
+    fn d_m_on_a_far_row_goes_by_that_machine_and_a_note_says_what_stays() {
+        let mut host = machines();
+        let Reached::Host(there) = host.remotes[0].reached.as_mut().unwrap() else {
+            panic!("nixos is reached");
+        };
+        let name = Said::new("fix".to_owned()).expect("a branch's name");
+        let head = Head::Branch { name, upstream: None };
+        let repository = Said::new("/w".to_owned());
+        let tree = WorkTree::Checkout { repository, head, changes: Changes::default(), stashes: 0 };
+        there.work_trees.push(tree.to_api("/w/b"));
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+        sidebar.focus(Keys::Sidebar);
+        let place = Place::Pane(PanePlace { session: listed("main", 20), pane: 1 });
+        sidebar.cursor = Some(Spot::Remote(nixos(), place));
+        let now = moment(160_000);
+        let on = Machine::Remote(nixos());
+        sidebar.key(&char('d'), now);
+        let number = sidebar.menu.as_ref().expect("the menu").number();
+        let dir = Directory::parse("/w/b".to_owned()).unwrap();
+        let asks = Asked::Prunes { menu: number, on: on.clone(), dir: dir.clone() };
+        assert_eq!(sidebar.key(&char('m'), now), asks);
+        let goes = prunes::Goes {
+            worktree: "/w/one".to_owned(),
+            branch: "one".to_owned(),
+            head: "abc".to_owned(),
+            number: 1,
+            pushed: prunes::Pushed::Nowhere,
+            bytes: None,
+        };
+        let plan = prunes::Plan {
+            repository: "/w".to_owned(),
+            goes: vec![goes.clone()],
+            kept: Vec::new(),
+            unasked: Vec::new(),
+        };
+        assert_eq!(sidebar.prunes(number + 1, Ok(plan.clone())), Asked::Nothing);
+        assert_eq!(sidebar.prunes(number, Ok(plan.clone())), Asked::Nothing);
+        let deletes = Asked::Prune { menu: number, on, dir, agreed: plan.deletes() };
+        assert_eq!(sidebar.key(&char('y'), now), deletes);
+        assert!(sidebar.menu.as_ref().expect("the menu").pruning());
+        let changed = Ok(prunes::Pruned::Changed(plan.clone()));
+        assert_eq!(sidebar.pruned(number, changed.clone()), Asked::Nothing);
+        assert!(!sidebar.menu.as_ref().expect("the menu").pruning());
+        assert_eq!(sidebar.key(&char('y'), now), deletes);
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), now);
+        assert_eq!(sidebar.pruned(number, changed), Asked::Nothing);
+        let note = "menu: nothing deleted: what would go changed";
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+        sidebar.key(&char('d'), now);
+        let number = sidebar.menu.as_ref().expect("the menu").number();
+        sidebar.key(&char('m'), now);
+        sidebar.prunes(number, Ok(plan));
+        sidebar.key(&char('y'), now);
+        let came = prunes::Came::Stays("it has a pane".to_owned());
+        let stays = prunes::Outcome { worktree: goes.worktree, came };
+        assert_eq!(sidebar.pruned(number, Ok(prunes::Pruned::Went(vec![stays]))), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        let note = "menu: deleted 0 of 1 worktrees; one stays: it has a pane";
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+    }
+
     /// Another machine's rows go there, as this one's do: `Enter` and a click
     /// on its pane ask luneta to take its zellij there. The menu on its pane
     /// is for that pane, of that machine, which opens what a key opens. `u`
@@ -9563,7 +9696,8 @@ mod tests {
         type_in(&mut sidebar, "mn");
         let on = Machine::Remote(nixos());
         let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
-        let row = PaneRow { session, pane: 1, cwd, branch: None, ran: Ran::Unhooked };
+        let (branch, repository, ran) = (None, None, Ran::Unhooked);
+        let row = PaneRow { session, pane: 1, cwd, branch, repository, ran };
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();

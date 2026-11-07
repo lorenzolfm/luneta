@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, and close panes or delete sessions. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, or close sessions, tabs or panes, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, and delete the worktrees of merged pull requests. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, or clean up merged worktrees, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -34,7 +34,7 @@ zoxide query -l   # the directories the user works in, most used first; `zoxide 
 
 `sessions` and `agents` need lunetad, which luneta starts. The verbs below ask
 zellij themselves and work without it. Only `close` then can't tell which
-agents end.
+agents end, and `prune` deletes nothing and says so.
 
 `here`, `go`, `open session`, `close`, and `open pane`/`open tab` without
 `--beside`/`--session` need to know which session you run in. If your session
@@ -51,6 +51,7 @@ luneta go <session>[:<pane>]
 luneta turn pane <session>:<pane>
 luneta turn tab <session>:<pane> --into <session>:<pane>
 luneta close <session>[:<pane>]... [--yes <plan>]
+luneta prune [--repo <dir>] [--yes <plan>]
 ```
 
 - `open pane` opens beside your pane by default, in its tab. `open tab` opens
@@ -77,6 +78,8 @@ luneta close <session>[:<pane>]... [--yes <plan>]
   resurrect. It closes running sessions only. What holds your pane goes last,
   and not at all if anything before it failed to close, so that you're still
   there to tell the user.
+- `prune` deletes the worktrees of a repository's merged pull requests: see
+  [Merged worktrees](#merged-worktrees).
 
 ## Which session a tab opens in
 
@@ -220,3 +223,28 @@ new plan and ask again. Exit 1 means something failed.
   it last.
 - Close only what the user named or plainly meant. Never sweep up "idle"
   sessions on your own.
+
+## Merged worktrees
+
+When the user asks to clean up merged worktrees, run `luneta prune`, with `--repo
+<dir>` for a repository other than the one you run in. It deletes nothing, prints
+each worktree that would go and each that stays with why, and exits 3. Its last
+line, on stderr, names the plan:
+
+```text
+delete issue-282  #297  4.5 GB  branch issue-282, and issue-282 on origin
+keep issue-308 #310: it has a pane
+luneta: deleted nothing; run it again with --yes 9c41d07e3b2a5f18 to delete what it says
+```
+
+Show that to the user and ask. Run it again with that `--yes <plan>` only after a
+clear yes, in a later turn, with the same arguments, as for `close`. If the plan
+changed, it deletes nothing, prints the new one and exits 3: show that and ask again.
+
+Exit 0 without `--yes` means there is nothing to delete. Exit 1 means something
+failed: after `--yes`, it says which worktree stayed and why, and the others went.
+Tell the user. If it says it can't tell where the panes are, it deleted nothing. Don't
+delete worktrees or branches yourself instead: it has checked what git can't, and the
+files git ignores go with a worktree, build output included.
+
+Never run it unless the user asked.

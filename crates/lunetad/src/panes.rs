@@ -58,6 +58,7 @@ pub struct Pane {
     pub command: Option<Said>,
     /// What an agent says in its title, as `titled` has it.
     pub titled: Option<Titled>,
+    pub held: bool,
 }
 
 impl Pane {
@@ -73,6 +74,7 @@ impl Pane {
             titled: self.titled.as_ref().map(Titled::to_api),
             shell: shell.map(Shell::to_api),
             tab_id: Some(self.tab_id),
+            held: self.held,
         }
     }
 }
@@ -101,6 +103,7 @@ struct Wire {
     id: u32,
     is_plugin: bool,
     is_suppressed: bool,
+    is_held: bool,
     tab_id: u32,
     tab_position: u32,
     tab_name: String,
@@ -127,6 +130,7 @@ fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
             cwd: pane.pane_cwd.and_then(Said::new),
             command: pane.pane_command.and_then(Said::new),
             titled: titled(&pane.title),
+            held: pane.is_held,
         })
         .collect();
     let mut ids = HashSet::new();

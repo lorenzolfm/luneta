@@ -285,7 +285,10 @@ tab into panes of another tab of the session, as
 ```
 
 The Delete group, under `d`, closes the pane with `d d`, and deletes its
-session with `d s`, as [luneta's sidebar](#luneta-in-your-terminal) tells.
+session with `d s`, as [luneta's sidebar](#luneta-in-your-terminal) tells. On a
+pane's row in a repository, `d m` lists the worktrees of its merged pull
+requests, to delete once you say yes, as [Delete merged
+worktrees](#delete-merged-worktrees) tells.
 
 When what a key deletes would end an agent that is busy or waiting on you, the
 menu asks first, and says what goes:
@@ -847,7 +850,8 @@ A pane outside a repository, or on a detached `HEAD`, has no branch, and its
 row stays one line. After the branch is the number of its pull request on
 GitHub, as `fold #126`, in the colour `gh` lists it in: green while it is
 open, grey while it is a draft, and magenta once it is merged, which says the
-worktree can go. A closed one shows nothing, and neither does a branch with
+worktree may be able to go: [`d m`](#delete-merged-worktrees) checks that it can,
+and deletes it once you say yes. A closed one shows nothing, and neither does a branch with
 none, or one `gh` cannot ask about, as where it is not installed or not
 logged in. A branch too long for the line is cut short, and the number kept.
 lunetad runs `gh pr view` in the directory once for a branch of a repository,
@@ -1139,6 +1143,7 @@ npx skills add lorenzolfm/luneta          # or: cp -r skills/luneta ~/.claude/sk
 | `luneta turn pane S:P` | turns a pane into a tab of its own |
 | `luneta turn tab S:P --into S:Q` | turns the panes of the tab of `P` into panes of the tab of `Q` |
 | `luneta close S[:P]… [--yes PLAN]` | closes panes and deletes sessions |
+| `luneta prune [--repo D] [--yes PLAN]` | [deletes the worktrees of merged pull requests](#delete-merged-worktrees) and their branches |
 | `luneta here` | says which pane it runs in, as `S:P` |
 | `luneta say [TEXT]` | [reads it aloud](#read-aloud) on the machine you sit at, once what is before it has been |
 
@@ -1291,6 +1296,80 @@ without `--beside` and `--session`, say why they can't. The same goes for a
 row of this machine's while luneta's zellij is on another. `Esc` gives up the
 turn there too, and lunetad there kills `claude`. A turn takes up to ten
 minutes wherever it runs.
+
+### Delete merged worktrees
+
+A merged pull request leaves its worktree and its branch behind. `d m`, on a
+pane's row in a repository, lists those of that repository, behind a spinner
+while it asks `gh`, on the row's machine:
+
+```text
+┌─ Delete ─────────────── luneta ─┐
+│ Delete 11 merged worktrees and  │
+│ 11 remote branches?             │
+│                                 │
+│ issue-282  #297  4.5 GB         │
+│ dev-check  #293  916 MB         │
+│ …and 9 more                     │
+│ Keeps issue-308: it has a pane  │
+│ <y> Yes  <BS> Back  <ESC> Close │
+└─────────────────────────────────┘
+```
+
+`y`, or `m` again, goes ahead with what it listed, and lists it again where that
+changed while you read. `n` or `Backspace` goes back to the keys, and `Esc` closes.
+A session's row and a machine's header don't have the key, nor does a row outside
+a repository.
+
+`luneta prune [--repo DIR]` does the same on the machine it runs on, for the
+command line and for an agent. It works as `luneta close` does: without `--yes` it
+prints the list and the plan to tell `--yes`, deletes nothing, and exits 3. `--yes
+PLAN` deletes only that plan, and where anything changed since, it deletes nothing
+and prints the new one:
+
+```text
+delete issue-282  #297  4.5 GB  branch issue-282, and issue-282 on origin
+delete dev-check  #293  916 MB  branch dev-check, and dev-check on origin
+keep issue-308 #310: it has a pane
+luneta: deleted nothing; run it again with --yes bdc2bc7889bc4f9a to delete what it says
+```
+
+Nothing goes until you say yes, and there is nothing to configure. A worktree is
+listed when all of these hold:
+
+- Its pull request is merged, and the pull request's head is the worktree's `HEAD`.
+  `gh pr view` goes by the branch's name, so the state alone proves nothing.
+- It has no modified or untracked file, and no other worktree is in it, which would
+  go with it.
+- No pane in any session is in it, nor any agent, and the command isn't running from
+  it.
+- Its branch isn't the default branch, and no open pull request is based on it.
+- It isn't locked, and it isn't a clone's main worktree, which git would not remove.
+
+A worktree with a merged pull request that fails any of these is shown as kept,
+with the reason, and one `gh` or git said nothing of is too. Any other isn't
+mentioned. While lunetad doesn't answer, or has yet to list every pane, luneta can't
+tell where the panes are, so it deletes nothing and says so. A pane whose command
+has ended runs nothing, so it counts only where zellij said where it worked.
+
+What goes with each:
+
+- The worktree, with `git worktree remove`, without `--force`. Files git ignores go
+  with it, build output included, as with `wt delete`. wt's store keeps the ones it
+  links.
+- The local branch, with `git branch -D`, since git doesn't count a squash merge as
+  merged, and the head check is the proof.
+- The branch on its push remote, if you wrote the pull request and that branch is its
+  head, still at that commit. A worktree made to review someone else's pull request
+  leaves their branch alone.
+
+Where git refuses one, that one stays, the others go, and luneta says which. Each is
+looked at again just before it goes, so one that has come to have a pane since stays
+too. luneta finishes what `d m` began on this machine before it ends, however long
+that takes, with its screen as it last drew it.
+
+It asks `gh` once for each worktree of the repository, and once more for each that
+is otherwise listed, only when you run it: each counts against GitHub's hourly limit.
 
 ### Dictate
 
@@ -1634,6 +1713,7 @@ on the directories. Type, press `Enter`.
 | `t p` | turn the pane's tab into panes of another tab, which you pick where it has several |
 | `d d` | close the pane |
 | `d s` | kill the pane's session |
+| `d m` | list the [merged worktrees](#delete-merged-worktrees) of the pane's repository, to delete |
 | `y`, or the key again | go ahead with a delete that asked first |
 | `n` | back to the keys, from a delete that asked first |
 | `Backspace` | back a group, or close from the first; back to the keys from a delete that asked |
@@ -1698,7 +1778,7 @@ finds, and `luneta sessions` the sessions, their panes and the branch each
 works on, with its pull request and the directory of its repository; none of
 the three starts one, and nor does
 `luneta close`, which says it cannot tell the agents it would end while none
-runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
+runs, nor `luneta prune`, which deletes nothing while none runs. The commands an agent [drives luneta](#tell-an-agent) with ask zellij
 itself. The daemon asks
 `zellij`, `git` and `gh` on its `PATH`, which is the `PATH` of the luneta that
 started it.
