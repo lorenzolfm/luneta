@@ -136,7 +136,7 @@ pub fn name_of(path: &str) -> &str {
 }
 
 /// Where the panes and the agents of a machine work, as its daemon says.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Occupied {
     panes: Vec<PathBuf>,
     agents: Vec<PathBuf>,
@@ -189,6 +189,18 @@ struct Listed {
     main: bool,
     locked: bool,
     prunable: bool,
+}
+
+#[derive(Clone, Copy)]
+struct OnBranch<'a> {
+    listed: &'a Listed,
+    branch: &'a str,
+}
+
+impl<'a> OnBranch<'a> {
+    fn of(listed: &'a Listed) -> Option<Self> {
+        Some(OnBranch { listed, branch: listed.branch.as_deref()? })
+    }
 }
 
 fn parse_listed(said: &[u8]) -> Vec<Listed> {
@@ -415,42 +427,43 @@ pub fn plan(dir: &str, occupied: &Occupied, here: Option<&Path>) -> Result<Plan,
     let repository = git::holder(&common)
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
     let listed = worktrees(&common)?;
-    let askable: Vec<&Listed> =
-        listed.iter().filter(|it| it.branch.is_some() && !it.prunable).collect();
-    let answers = at_once(&askable, Asker::default, |asker, listed: &&Listed| {
-        let branch = listed.branch.as_deref().unwrap_or_default();
-        asker.pull_of(&listed.path, &common, branch)
+    let askable: Vec<OnBranch<'_>> =
+        listed.iter().filter(|it| !it.prunable).filter_map(OnBranch::of).collect();
+    let answers = at_once(&askable, Asker::default, |asker, on: &OnBranch<'_>| {
+        asker.pull_of(&on.listed.path, &common, on.branch)
     });
     let mut plan = Plan { repository, goes: Vec::new(), kept: Vec::new(), unasked: Vec::new() };
-    let mut merged: Vec<(&Listed, Pulled)> = Vec::new();
-    for (listed, answer) in askable.iter().zip(answers) {
+    let mut merged: Vec<(OnBranch<'_>, Pulled)> = Vec::new();
+    for (on, answer) in askable.into_iter().zip(answers) {
         match answer {
             Ok(Some(pulled)) if pulled.pull_request.state == State::Merged => {
-                merged.push((listed, pulled));
+                merged.push((on, pulled));
             },
             Ok(_) => {},
-            Err(why) => plan.unasked.push(Unasked { worktree: listed.path.clone(), why }),
+            Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
         }
     }
     let going = sorted_out(&mut plan, merged, occupied, here, &common)?;
     let based = at_once(
         &going,
         || (),
-        |(), (listed, pulled, _): &Going<'_>| match &pulled.head_repository {
-            Some(repository) => github::open_based_on(&listed.path, repository, &pulled.head_name),
+        |(), (on, pulled, _): &Going<'_>| match &pulled.head_repository {
+            Some(repository) => {
+                github::open_based_on(&on.listed.path, repository, &pulled.head_name)
+            },
             None => Ok(None),
         },
     );
     let mut remotes = Remotes { common: &common, heads: HashMap::new(), logins: HashMap::new() };
     let mut goes = Vec::new();
-    for ((listed, pulled, target), based) in going.into_iter().zip(based) {
+    for ((on, pulled, target), based) in going.into_iter().zip(based) {
         let number = pulled.pull_request.number.get();
         match based {
             Ok(None) => {
                 let pushed = remotes.pushed(target.as_ref(), &pulled);
                 goes.push(Goes {
-                    worktree: listed.path.clone(),
-                    branch: listed.branch.clone().unwrap_or_default(),
+                    worktree: on.listed.path.clone(),
+                    branch: on.branch.to_owned(),
                     head: pulled.head,
                     number,
                     pushed,
@@ -458,11 +471,11 @@ pub fn plan(dir: &str, occupied: &Occupied, here: Option<&Path>) -> Result<Plan,
                 });
             },
             Ok(Some(open)) => plan.kept.push(Kept {
-                worktree: listed.path.clone(),
+                worktree: on.listed.path.clone(),
                 number,
                 why: format!("#{open} is based on it"),
             }),
-            Err(why) => plan.unasked.push(Unasked { worktree: listed.path.clone(), why }),
+            Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
         }
     }
     let bytes = at_once(&goes, || (), |(), goes: &Goes| bytes_of(&goes.worktree));
@@ -474,22 +487,22 @@ pub fn plan(dir: &str, occupied: &Occupied, here: Option<&Path>) -> Result<Plan,
     Ok(plan)
 }
 
-type Going<'a> = (&'a Listed, Pulled, Option<(String, String)>);
+type Going<'a> = (OnBranch<'a>, Pulled, Option<(String, String)>);
 
 /// What stays of `merged` as things stand here, into `plan`, and what goes on
 /// to what the network says.
 fn sorted_out<'a>(
     plan: &mut Plan,
-    merged: Vec<(&'a Listed, Pulled)>,
+    merged: Vec<(OnBranch<'a>, Pulled)>,
     occupied: &Occupied,
     here: Option<&Path>,
     common: &str,
 ) -> Result<Vec<Going<'a>>, String> {
     let mut default = None;
     let mut going = Vec::new();
-    for (listed, pulled) in merged {
-        let (worktree, number) = (listed.path.clone(), pulled.pull_request.number.get());
-        let why = match stays(listed, &pulled.head, occupied, here) {
+    for (on, pulled) in merged {
+        let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let why = match stays(on.listed, &pulled.head, occupied, here) {
             Ok(why) => why,
             Err(why) => {
                 plan.unasked.push(Unasked { worktree, why });
@@ -502,19 +515,18 @@ fn sorted_out<'a>(
         }
         let default = match &default {
             Some(default) => default,
-            None => default.insert(github::default_branch(&listed.path)?),
+            None => default.insert(github::default_branch(&on.listed.path)?),
         };
-        let branch = listed.branch.as_deref().unwrap_or_default();
-        let target = push_target(common, branch)?;
+        let target = push_target(common, on.branch)?;
         let (remote, there) =
             target.as_ref().map(|(remote, there)| (remote.as_str(), there.as_str())).unzip();
         let far = remote.and_then(|remote| remote_default(common, remote));
         let is_default = |name: &str| name == default.as_str() || far.as_deref() == Some(name);
-        if is_default(branch) || there.is_some_and(is_default) {
+        if is_default(on.branch) || there.is_some_and(is_default) {
             plan.kept.push(Kept { worktree, number, why: DEFAULT.to_owned() });
             continue;
         }
-        going.push((listed, pulled, target));
+        going.push((on, pulled, target));
     }
     Ok(going)
 }
