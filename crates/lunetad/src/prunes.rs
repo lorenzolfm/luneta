@@ -423,10 +423,28 @@ fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, S
     Ok(heads.collect())
 }
 
+fn push_urls(common: &str, remote: &str) -> Result<Vec<String>, String> {
+    let mut git = on_repository(common);
+    git.args(["config", "--get-regexp", r"^remote\..*\.(pushurl|url)$"]);
+    let said = says(git, GIT_SAYS, "config")?;
+    let said = String::from_utf8_lossy(&said);
+    let of = |key: &str| -> Vec<String> {
+        let key = format!("remote.{remote}.{key} ");
+        said.lines().filter_map(|line| line.strip_prefix(&key)).map(str::to_owned).collect()
+    };
+    let pushes = of("pushurl");
+    let urls = if pushes.is_empty() { of("url") } else { pushes };
+    if urls.is_empty() {
+        return Err(format!("{remote} has no url"));
+    }
+    Ok(urls)
+}
+
 /// What goes of a worktree's branch on its push remote.
 struct Remotes<'a> {
     common: &'a str,
     heads: HashMap<String, Result<HashMap<String, String>, String>>,
+    urls: HashMap<String, Result<Vec<String>, String>>,
     logins: HashMap<String, Result<String, String>>,
 }
 
@@ -451,10 +469,19 @@ impl Remotes<'_> {
         if *branch != pulled.head_name {
             return Pushed::Stays("its pull request's head is another branch".to_owned());
         }
-        let Some(host) = pulled.host.as_deref() else {
-            return Pushed::Stays("its pull request's page names no host".to_owned());
+        let Some(repository) = &pulled.head_repository else {
+            return Pushed::Stays("its pull request's head repository has gone".to_owned());
         };
-        let login = self.logins.entry(host.to_owned()).or_insert_with(|| github::logged_in(host));
+        let urls = self.urls.entry(remote.clone()).or_insert_with(|| push_urls(common, remote));
+        match urls {
+            Ok(urls) if urls.iter().all(|url| repository.is_at(url)) => {},
+            Ok(_) => {
+                return Pushed::Stays(format!("{remote} is not where its pull request's head is"));
+            },
+            Err(why) => return Pushed::Stays(format!("git did not say where {remote} is: {why}")),
+        }
+        let host = &repository.host;
+        let login = self.logins.entry(host.clone()).or_insert_with(|| github::logged_in(host));
         match login {
             Ok(login) if pulled.author.as_deref() == Some(login.as_str()) => {
                 Pushed::Goes(RemoteBranch { remote: remote.clone(), branch: branch.clone() })
@@ -509,7 +536,12 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
             None => Ok(None),
         },
     );
-    let mut remotes = Remotes { common: &common, heads: HashMap::new(), logins: HashMap::new() };
+    let mut remotes = Remotes {
+        common: &common,
+        heads: HashMap::new(),
+        urls: HashMap::new(),
+        logins: HashMap::new(),
+    };
     let mut goes = Vec::new();
     for ((on, pulled, target), based) in going.into_iter().zip(based) {
         let number = pulled.pull_request.number.get();
@@ -859,6 +891,8 @@ mod tests {
 
     use luneta_protocol::github::PullRequest;
 
+    use crate::github::RepositoryName;
+
     use super::*;
 
     fn goes(worktree: &str, pushed: Pushed, bytes: Option<u64>) -> Goes {
@@ -971,14 +1005,17 @@ mod tests {
             head_name: "origin-branch".to_owned(),
             head: head.to_owned(),
             author: author.map(str::to_owned),
-            host: Some("github.com".to_owned()),
-            head_repository: None,
+            head_repository: Some(RepositoryName {
+                host: "github.com".to_owned(),
+                owner: "o".to_owned(),
+                name: "n".to_owned(),
+            }),
         }
     }
 
     /// The branch on a remote goes only where the remote has it at the pull
-    /// request's head and you wrote the pull request. gh is asked who you are
-    /// only then.
+    /// request's head, is where that head is, and you wrote the pull request. gh
+    /// is asked who you are only then.
     #[test]
     fn the_branch_on_a_remote_goes_only_at_that_head_and_if_it_is_yours() {
         let ok = |remote: &str, head: &str| {
@@ -989,6 +1026,18 @@ mod tests {
             heads: HashMap::from([
                 ("origin".to_owned(), ok("origin", "abc")),
                 ("gone".to_owned(), Err("no key".to_owned())),
+                ("unsaid".to_owned(), ok("unsaid", "abc")),
+                ("fork".to_owned(), ok("fork", "abc")),
+                ("mirrored".to_owned(), ok("mirrored", "abc")),
+            ]),
+            urls: HashMap::from([
+                ("origin".to_owned(), Ok(vec!["git@github.com:o/n.git".to_owned()])),
+                ("unsaid".to_owned(), Err("no key".to_owned())),
+                ("fork".to_owned(), Ok(vec!["https://github.com/me/n".to_owned()])),
+                (
+                    "mirrored".to_owned(),
+                    Ok(vec!["git@github.com:o/n.git".to_owned(), "git@github.com:me/n".to_owned()]),
+                ),
             ]),
             logins: HashMap::from([("github.com".to_owned(), Ok("me".to_owned()))]),
         };
@@ -1009,6 +1058,25 @@ mod tests {
             remotes.pushed(target("origin").as_ref(), &elsewhere),
             Pushed::Stays("its pull request's head is another branch".to_owned())
         );
+        let of = |remote: &str| {
+            let head_name = format!("{remote}-branch");
+            Pulled { head_name, ..pulled(Some("me"), "abc") }
+        };
+        for remote in ["fork", "mirrored"] {
+            assert_eq!(
+                remotes.pushed(target(remote).as_ref(), &of(remote)),
+                Pushed::Stays(format!("{remote} is not where its pull request's head is"))
+            );
+        }
+        assert_eq!(
+            remotes.pushed(target("unsaid").as_ref(), &of("unsaid")),
+            Pushed::Stays("git did not say where unsaid is: no key".to_owned())
+        );
+        let gone = Pulled { head_repository: None, ..pulled(Some("me"), "abc") };
+        assert_eq!(
+            remotes.pushed(target("origin").as_ref(), &gone),
+            Pushed::Stays("its pull request's head repository has gone".to_owned())
+        );
         let theirs = Pushed::Stays("someone else wrote its pull request".to_owned());
         assert_eq!(remotes.pushed(target("origin").as_ref(), &pulled(Some("them"), "abc")), theirs);
         assert_eq!(remotes.pushed(target("origin").as_ref(), &pulled(None, "abc")), theirs);
@@ -1016,6 +1084,28 @@ mod tests {
             remotes.pushed(target("gone").as_ref(), &pulled(Some("me"), "abc")),
             Pushed::Stays("git did not reach gone: no key".to_owned())
         );
+    }
+
+    #[test]
+    fn a_remote_pushes_to_each_url_its_config_has() {
+        let scratch = tempfile::tempdir().unwrap();
+        let common = scratch.path().join("r.git");
+        let common = common.to_str().unwrap();
+        let git = |args: &[&str]| {
+            let mut git = on_repository(common);
+            assert!(git.args(args).status().unwrap().success(), "{args:?}");
+        };
+        let mut init = Command::new("git");
+        assert!(init.args(["init", "-q", "--bare", common]).status().unwrap().success());
+        git(&["config", "remote.fetched.url", "https://x/o/f"]);
+        git(&["config", "remote.fetched-too.url", "https://x/o/too"]);
+        git(&["config", "remote.pushed.url", "https://x/o/u"]);
+        git(&["config", "--add", "remote.pushed.pushurl", "https://x/o/a"]);
+        git(&["config", "--add", "remote.pushed.pushurl", "https://x/o/b"]);
+        let said = |remote: &str| push_urls(common, remote);
+        assert_eq!(said("fetched"), Ok(vec!["https://x/o/f".to_owned()]));
+        assert_eq!(said("pushed"), Ok(vec!["https://x/o/a".to_owned(), "https://x/o/b".to_owned()]));
+        assert_eq!(said("none"), Err("none has no url".to_owned()));
     }
 
     /// Every answer comes back beside what it is of, however few threads ask.

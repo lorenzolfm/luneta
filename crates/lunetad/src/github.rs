@@ -9,6 +9,7 @@
 //! ask, however many directories of it they work in.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
 use std::process::Command;
@@ -82,8 +83,27 @@ pub struct Pulled {
     pub head_name: String,
     pub head: String,
     pub author: Option<String>,
-    pub host: Option<String>,
-    pub head_repository: Option<String>,
+    pub head_repository: Option<RepositoryName>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryName {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+impl RepositoryName {
+    #[must_use]
+    pub fn is_at(&self, url: &str) -> bool {
+        links::remote_is_of(url, (&self.host, &self.owner, &self.name))
+    }
+}
+
+impl fmt::Display for RepositoryName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}/{}", self.host, self.owner, self.name)
+    }
 }
 
 fn host_of(url: &str) -> Option<&str> {
@@ -99,12 +119,13 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         (Stands::Merged, _) => State::Merged,
         (Stands::Closed, _) => State::Closed,
     };
-    let host = host_of(&viewed.url).map(str::to_owned);
+    let host = host_of(&viewed.url).ok_or_else(|| format!("{} is no page", viewed.url))?;
+    let host = host.to_owned();
     let owner = viewed.head_repository_owner.map(|owner| owner.login);
     let name = viewed.head_repository.map(|repository| repository.name);
-    let head_repository = match (&host, owner, name) {
-        (Some(host), Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => {
-            Some(format!("{host}/{owner}/{name}"))
+    let head_repository = match (owner, name) {
+        (Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => {
+            Some(RepositoryName { host, owner, name })
         },
         _ => None,
     };
@@ -113,7 +134,6 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         head_name: viewed.head_ref_name,
         head: viewed.head_ref_oid,
         author: viewed.author.map(|author| author.login).filter(|login| !login.is_empty()),
-        host,
         head_repository,
     })
 }
@@ -146,23 +166,15 @@ struct Owner {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fork {
-    host: String,
-    owner: String,
-    name: String,
+    parent: RepositoryName,
     default_branch: String,
 }
 
 impl Fork {
-    fn parent(&self) -> String {
-        format!("{}/{}/{}", self.host, self.owner, self.name)
-    }
-
     fn parent_may_have(&self, head: &NamedHead) -> bool {
         match head {
             NamedHead::OnRemote => true,
-            NamedHead::PullRef { remote_url } => {
-                links::remote_is_of(remote_url, (&self.host, &self.owner, &self.name))
-            },
+            NamedHead::PullRef { remote_url } => self.parent.is_at(remote_url),
         }
     }
 }
@@ -175,13 +187,9 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     if !links::named(&login) || !links::named(&name) {
         return Err(format!("{login}/{name} names no repository"));
     }
-    let host = repository.url.split_once("://").and_then(|(_, page)| page.split('/').next());
-    let host = host.filter(|host| !host.is_empty());
-    let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
+    let host = host_of(&repository.url).ok_or_else(|| format!("{} is no page", repository.url))?;
     Ok(Some(Fork {
-        host: host.to_owned(),
-        owner: login,
-        name,
+        parent: RepositoryName { host: host.to_owned(), owner: login, name },
         default_branch: repository.default_branch_ref.name,
     }))
 }
@@ -257,7 +265,7 @@ fn in_parent(
     };
     let done = |found: &Pulled| matches!(found.pull_request.state, State::Merged | State::Closed);
     let stale = |found: &Pulled| done(found) && branch == fork.default_branch;
-    Ok(find(dir, Some(&fork.parent()))?.filter(|found| !stale(found)))
+    Ok(find(dir, Some(&fork.parent.to_string()))?.filter(|found| !stale(found)))
 }
 
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
@@ -337,13 +345,17 @@ struct Numbered {
     number: u32,
 }
 
-/// The number of an open pull request based on `branch` of `repository`, as
-/// `<host>/<owner>/<name>`, if any.
-pub fn open_based_on(dir: &str, repository: &str, branch: &str) -> Result<Option<u32>, String> {
+/// The number of an open pull request based on `branch` of `repository`, if any.
+pub fn open_based_on(
+    dir: &str,
+    repository: &RepositoryName,
+    branch: &str,
+) -> Result<Option<u32>, String> {
     let asked = format!("gh pr list of {repository} based on {branch}");
     let mut gh = Command::new("gh");
     gh.args(["pr", "list", "--base", branch, "--state", "open", "--limit", "1"]);
-    git::local(gh.args(["--json", "number"]).current_dir(dir).env("GH_REPO", repository));
+    gh.args(["--json", "number"]).current_dir(dir).env("GH_REPO", repository.to_string());
+    git::local(&mut gh);
     let ran =
         program::run(&mut gh, LIMIT).map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
@@ -489,7 +501,7 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::{fork_of, parse, standing, Pulled};
+    use super::{fork_of, parse, standing, Pulled, RepositoryName};
 
     #[test]
     fn a_parent_that_does_not_say_leaves_its_own_and_takes_news_of_the_fork_s() {
@@ -514,7 +526,8 @@ mod tests {
         let default = r#""defaultBranchRef":{"name":"trunk"}"#;
         let forked = |url: &str| format!(r#"{{{default},"parent":{parent},"url":"{url}"}}"#);
         let read = |said: &str| fork_of(said.as_bytes());
-        let parent_of = |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent()));
+        let parent_of =
+            |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent.to_string()));
         let on = |host: &str| Ok(Some(format!("{host}/cashubtc/cdk")));
         assert_eq!(parent_of(&forked("https://github.com/lorenzolfm/cdk")), on("github.com"));
         assert_eq!(
@@ -559,12 +572,15 @@ mod tests {
         };
         let me = r#"{"id":"U","is_bot":false,"login":"me","name":"Me"}"#;
         let repository = r#"{"id":"R","name":"repo"}"#;
-        let Pulled { head_name, head, author, host, head_repository, .. } =
-            viewed(me, repository, me);
+        let Pulled { head_name, head, author, head_repository, .. } = viewed(me, repository, me);
         assert_eq!((head_name.as_str(), head.as_str()), ("fix", "abc"));
         assert_eq!(author.as_deref(), Some("me"));
-        assert_eq!(host.as_deref(), Some("git.example.com"));
-        assert_eq!(head_repository.as_deref(), Some("git.example.com/me/repo"));
+        let name = |host: &str, owner: &str, name: &str| RepositoryName {
+            host: host.to_owned(),
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        };
+        assert_eq!(head_repository, Some(name("git.example.com", "me", "repo")));
         let gone = viewed(r#"{"login":""}"#, "null", "null");
         assert_eq!((gone.author, gone.head_repository), (None, None));
         let unnamed = viewed(me, r#"{"id":"","name":""}"#, r#"{"id":"","login":""}"#);
@@ -601,6 +617,7 @@ mod tests {
             viewed(r#""isDraft":false,"number":-1,"state":"OPEN""#),
             viewed(r#""isDraft":false,"number":0,"state":"OPEN""#),
             format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head}}}"#),
+            format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head},"url":"nowhere"}}"#),
             r#"{"isDraft":false,"number":1,"state":"OPEN","url":"https://x/1"}"#.to_owned(),
             String::new(),
         ];

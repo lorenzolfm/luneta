@@ -1359,9 +1359,9 @@ What goes with each:
   links.
 - The local branch, with `git branch -D`, since git doesn't count a squash merge as
   merged, and the head check is the proof.
-- The branch on its push remote, if you wrote the pull request and that branch is its
-  head, still at that commit. A worktree made to review someone else's pull request
-  leaves their branch alone.
+- The branch on its push remote, if you wrote the pull request, that remote is where
+  its head is, and that branch is its head, still at that commit. A worktree made to
+  review someone else's pull request leaves their branch alone.
 
 Where git refuses one, that one stays, the others go, and luneta says which. Each is
 looked at again just before it goes, so one that has come to have a pane since stays

@@ -31,7 +31,7 @@ fn said_by(dir: &Path, args: &[&str]) -> String {
 }
 
 /// A repository wt cloned, with `main` checked out at `main`, and its origin
-/// beside it, on the same disk.
+/// beside it, on the same disk, by the name of the repository `merged` says.
 struct Repository {
     clone: PathBuf,
     up: PathBuf,
@@ -42,6 +42,9 @@ impl Repository {
         let (up, clone) = (scratch.join("up"), scratch.join("n"));
         cloned_as_wt(scratch, &up, &clone);
         let bare = clone.join(".bare");
+        let github = "git@github.com:o/n.git";
+        git(&bare, &["config", "remote.origin.url", github]);
+        git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
         git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
         git(&bare, &["fetch", "-q", "origin"]);
         git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
@@ -593,6 +596,46 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
     assert!(repository.on_clone("wip"), "it deleted a branch with an unpushed commit");
     assert!(repository.at("one").join(".git").is_file());
     assert!(repository.on_origin("one") && repository.on_origin("other"));
+}
+
+#[test]
+fn a_branch_on_a_remote_that_is_not_where_its_head_is_stays() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("on-fork");
+    let mut said = merged(1, &head, "me");
+    said["headRepositoryOwner"]["login"] = json!("me");
+    host.gh.open("on-fork", &said);
+    let head = repository.pushed("fork-gone");
+    let mut said = merged(2, &head, "me");
+    said["headRepository"] = json!(null);
+    said["headRepositoryOwner"] = json!(null);
+    host.gh.open("fork-gone", &said);
+    let head = repository.pushed("own");
+    host.gh.open("own", &merged(3, &head, "me"));
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    let not_there = "branch on-fork; what is pushed of it stays: origin is not where its pull \
+                     request's head is";
+    assert!(said.contains(not_there), "{said}");
+    let gone = "branch fork-gone; what is pushed of it stays: its pull request's head repository \
+                has gone";
+    assert!(said.contains(gone), "{said}");
+    assert!(said.contains("branch own, and own on origin"), "{said}");
+
+    let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    for name in ["on-fork", "fork-gone", "own"] {
+        assert!(!repository.at(name).exists(), "{name} stays");
+        assert!(!repository.on_clone(name), "{name}'s branch stays");
+    }
+    assert!(repository.on_origin("on-fork"), "it deleted another repository's branch");
+    assert!(repository.on_origin("fork-gone"), "it deleted another repository's branch");
+    assert!(!repository.on_origin("own"));
 }
 
 #[test]
