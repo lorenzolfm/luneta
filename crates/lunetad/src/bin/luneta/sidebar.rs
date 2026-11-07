@@ -4728,9 +4728,6 @@ fn log_unasked(plan: &prunes::Plan) {
     }
 }
 
-/// The branch checked out in a work tree, how the tree stands, and its
-/// `pull_request`, or none for a detached `HEAD` or a directory in no
-/// repository.
 fn repository_of(tree: &WorkTree) -> Option<String> {
     match tree {
         WorkTree::NoCheckout { repository }
@@ -4741,6 +4738,9 @@ fn repository_of(tree: &WorkTree) -> Option<String> {
     }
 }
 
+/// The branch checked out in a work tree, how the tree stands, and its
+/// `pull_request`, or none for a detached `HEAD` or a directory in no
+/// repository.
 fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes, .. } = tree
     else {
@@ -5249,6 +5249,7 @@ mod tests {
             titled: None,
             shell: None,
             tab_id: Some(tab),
+            held: false,
         }
     }
 

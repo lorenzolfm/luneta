@@ -1030,6 +1030,9 @@ message Pane {
   // before it close, where `tab` does not. Absent from a daemon older than
   // this field.
   optional uint32 tab_id = 8;
+  // Whether zellij holds it: what ran in it has ended, or has yet to start, so
+  // no process works in it. It has no `cwd` then, unless it said one before.
+  bool held = 9;
 }
 
 // What an agent says in the title of its pane, without the glyph.

@@ -1305,7 +1305,8 @@ while it asks `gh`, on the row's machine:
 
 ```text
 ┌─ Delete ─────────────── luneta ─┐
-│ Delete 11 merged worktrees?     │
+│ Delete 11 merged worktrees and  │
+│ 11 remote branches?             │
 │                                 │
 │ issue-282  #297  4.5 GB         │
 │ dev-check  #293  916 MB         │
@@ -1338,7 +1339,8 @@ listed when all of these hold:
 
 - Its pull request is merged, and the pull request's head is the worktree's `HEAD`.
   `gh pr view` goes by the branch's name, so the state alone proves nothing.
-- It has no modified or untracked file.
+- It has no modified or untracked file, and no other worktree is in it, which would
+  go with it.
 - No pane in any session is in it, nor any agent, and the command isn't running from
   it.
 - Its branch isn't the default branch, and no open pull request is based on it.
@@ -1347,7 +1349,8 @@ listed when all of these hold:
 A worktree with a merged pull request that fails any of these is shown as kept,
 with the reason, and one `gh` or git said nothing of is too. Any other isn't
 mentioned. While lunetad doesn't answer, or has yet to list every pane, luneta can't
-tell where the panes are, so it deletes nothing and says so.
+tell where the panes are, so it deletes nothing and says so. A pane whose command
+has ended runs nothing, so it counts only where zellij said where it worked.
 
 What goes with each:
 
@@ -1362,7 +1365,8 @@ What goes with each:
 
 Where git refuses one, that one stays, the others go, and luneta says which. Each is
 looked at again just before it goes, so one that has come to have a pane since stays
-too.
+too. luneta finishes what `d m` began on this machine before it ends, however long
+that takes, with its screen as it last drew it.
 
 It asks `gh` once for each worktree of the repository, and once more for each that
 is otherwise listed, only when you run it: each counts against GitHub's hourly limit.

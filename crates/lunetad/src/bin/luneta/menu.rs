@@ -2273,14 +2273,25 @@ fn merged_worktrees(count: usize) -> String {
     if count == 1 { "1 merged worktree".to_owned() } else { format!("{count} merged worktrees") }
 }
 
+fn asked_of(plan: &prunes::Plan) -> String {
+    let worktrees = merged_worktrees(plan.goes.len());
+    let far = |goes: &&prunes::Goes| matches!(goes.pushed, prunes::Pushed::Goes { .. });
+    match plan.goes.iter().filter(far).count() {
+        0 => format!("Delete {worktrees}?"),
+        1 => format!("Delete {worktrees} and 1 remote branch?"),
+        count => format!("Delete {worktrees} and {count} remote branches?"),
+    }
+}
+
 /// What `d m` lists of `plan`, `width` wide, in `room` lines at most: what it
 /// asks, each worktree that goes, biggest first, as far as there is room, and
 /// then why the others stay.
 fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'static>> {
     let style = Style::new().fg(NAME);
-    let mut lines = match plan.goes.len() {
-        0 => wrap("No merged worktree to delete", width, style),
-        count => wrap(&format!("Delete {}?", merged_worktrees(count)), width, style),
+    let mut lines = if plan.goes.is_empty() {
+        wrap("No merged worktree to delete", width, style)
+    } else {
+        wrap(&asked_of(plan), width, style)
     };
     lines.push(Line::default());
     let kept = plan.kept.iter().map(|kept| (&kept.worktree, kept.why.as_str()));
@@ -3351,6 +3362,26 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+    }
+
+    #[test]
+    fn the_list_asks_of_the_branches_that_go_on_a_remote_too() {
+        let asked = |plan: prunes::Plan| {
+            let (menu, _) = stays(opened(pane_row(), Some('d')));
+            let (menu, _) = stays(menu.key(&char('m')));
+            let (menu, _) = stays(menu.swept(Ok(plan)));
+            text(&menu.lines(33, 20, 0).0)[1..3].to_vec()
+        };
+        let on_origin = |branch: &str| prunes::Pushed::Goes {
+            remote: "origin".to_owned(),
+            branch: branch.to_owned(),
+        };
+        let mut plan = merged_plan(&[("one", 1, 5), ("two", 2, 5), ("tre", 3, 5)]);
+        plan.goes[0].pushed = on_origin("one");
+        plan.goes[1].pushed = prunes::Pushed::Stays("someone else wrote it".to_owned());
+        assert_eq!(asked(plan.clone()), [" Delete 3 merged worktrees and 1", " remote branch?"]);
+        plan.goes[1].pushed = on_origin("two");
+        assert_eq!(asked(plan), [" Delete 3 merged worktrees and 2", " remote branches?"]);
     }
 
     /// With nothing to delete there is no yes to say. What goes wrong says

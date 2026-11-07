@@ -49,6 +49,7 @@ pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serd
         "is_selectable": true,
         "is_suppressed": false,
         "is_floating": false,
+        "is_held": false,
         "title": title,
         "tab_id": tab.0,
         "tab_position": tab.0,
@@ -69,6 +70,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
         titled: None,
         shell: None,
         tab_id: Some(tab.0),
+        held: false,
     }
 }
 

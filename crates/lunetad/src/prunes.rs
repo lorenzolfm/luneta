@@ -37,6 +37,7 @@ const REMOVING: Duration = Duration::from_mins(10);
 const NOT_AT_HEAD: &str = "its HEAD is not its pull request's head";
 const MAIN: &str = "it is the repository's main worktree";
 const LOCKED: &str = "it is locked";
+const HOLDS_ANOTHER: &str = "another worktree is in it";
 const CHANGED: &str = "it has modified or untracked files";
 const A_PANE: &str = "it has a pane";
 const AN_AGENT: &str = "an agent works in it";
@@ -192,8 +193,8 @@ pub struct Occupied {
 
 impl Occupied {
     /// Where `host` says they work, or why that is not all of them: a session
-    /// whose panes it has yet to list, or a pane it has yet to hear where it
-    /// works of, could be in any worktree.
+    /// whose panes it has yet to list, or a pane that may run something and
+    /// does not say where, could be in any worktree.
     pub fn of(host: &api::Host) -> Result<Occupied, String> {
         let mut panes = Vec::new();
         for session in &host.sessions {
@@ -203,12 +204,17 @@ impl Occupied {
                 .as_ref()
                 .ok_or_else(|| format!("session {name} has yet to list its panes"))?;
             for pane in &listed.panes {
-                let id = pane.id;
-                let cwd = pane
-                    .cwd
-                    .as_ref()
-                    .ok_or_else(|| format!("pane {name}:{id} has yet to say where it works"))?;
-                panes.push(PathBuf::from(cwd));
+                match &pane.cwd {
+                    Some(cwd) => panes.push(PathBuf::from(cwd)),
+                    None if pane.held => {},
+                    None => {
+                        let id = pane.id;
+                        return Err(format!(
+                            "zellij does not say where pane {name}:{id} works; close it if what \
+                             ran in it has ended"
+                        ));
+                    },
+                }
             }
         }
         let agents = host.agents.iter().map(|agent| PathBuf::from(&agent.cwd)).collect();
@@ -279,7 +285,7 @@ fn parse_listed(said: &[u8]) -> Vec<Listed> {
 fn on_repository(common: &str) -> Command {
     let mut git = Command::new("git");
     git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
-    git.arg(format!("--git-dir={common}"));
+    git.arg(format!("--git-dir={common}")).current_dir("/");
     git
 }
 
@@ -305,6 +311,7 @@ fn clean(worktree: &str) -> Result<bool, String> {
     let mut git = Command::new("git");
     git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
     git.args(["-C", worktree, "--no-optional-locks", "status", "--porcelain"]);
+    git.arg("--untracked-files=normal");
     says(git, GIT_SAYS, "status").map(|said| said.is_empty())
 }
 
@@ -320,6 +327,7 @@ fn common_of(dir: &Directory) -> Result<String, String> {
 /// of each worktree just before it goes.
 fn stays(
     listed: &Listed,
+    all: &[Listed],
     head: &str,
     occupied: &Occupied,
     here: Option<&Path>,
@@ -333,10 +341,16 @@ fn stays(
     if listed.locked {
         return Ok(Some(LOCKED));
     }
+    let worktree = Path::new(&listed.path);
+    let in_it = |other: &Listed| {
+        !other.prunable && other.path != listed.path && Path::new(&other.path).starts_with(worktree)
+    };
+    if all.iter().any(in_it) {
+        return Ok(Some(HOLDS_ANOTHER));
+    }
     if !clean(&listed.path)? {
         return Ok(Some(CHANGED));
     }
-    let worktree = Path::new(&listed.path);
     if let Some(why) = occupied.why_in(worktree) {
         return Ok(Some(why));
     }
@@ -491,7 +505,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
             Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
         }
     }
-    let going = sorted_out(&mut plan, merged, occupied, here, &common)?;
+    let going = sorted_out(&mut plan, merged, &listed, occupied, here, &common)?;
     let based = at_once(
         &going,
         || (),
@@ -542,6 +556,7 @@ type Going<'a> = (OnBranch<'a>, Pulled, Option<(String, String)>);
 fn sorted_out<'a>(
     plan: &mut Plan,
     merged: Vec<(OnBranch<'a>, Pulled)>,
+    all: &[Listed],
     occupied: &Occupied,
     here: Option<&Path>,
     common: &str,
@@ -550,7 +565,7 @@ fn sorted_out<'a>(
     let mut going = Vec::new();
     for (on, pulled) in merged {
         let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
-        let why = match stays(on.listed, &pulled.head, occupied, here) {
+        let why = match stays(on.listed, all, &pulled.head, occupied, here) {
             Ok(why) => why,
             Err(why) => {
                 plan.unasked.push(Unasked { worktree, why });
@@ -625,15 +640,15 @@ fn removed(
     here: Option<&Path>,
 ) -> Result<(), String> {
     let occupied = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
-    let listed = worktrees(common)?;
-    let listed = listed
+    let all = worktrees(common)?;
+    let listed = all
         .iter()
         .find(|listed| listed.path == goes.worktree)
         .ok_or_else(|| "git lists no such worktree now".to_owned())?;
     if listed.branch.as_deref() != Some(goes.branch.as_str()) {
         return Err(format!("it is no longer on {}", goes.branch));
     }
-    if let Some(why) = stays(listed, &goes.head, &occupied, here)? {
+    if let Some(why) = stays(listed, &all, &goes.head, &occupied, here)? {
         return Err(why.to_owned());
     }
     let mut git = on_repository(common);
@@ -924,7 +939,11 @@ mod tests {
         let host = api::Host {
             sessions: vec![session(
                 "work",
-                Some(vec![pane(1, Some("/w/a/src")), pane(2, Some("/w/bb"))]),
+                Some(vec![
+                    pane(1, Some("/w/a/src")),
+                    pane(2, Some("/w/bb")),
+                    api::Pane { held: true, ..pane(3, Some("/w/d")) },
+                ]),
             )],
             agents: vec![api::Agent { cwd: "/w/c".to_owned(), ..api::Agent::default() }],
             ..api::Host::default()
@@ -933,6 +952,7 @@ mod tests {
         assert_eq!(occupied.why_in(Path::new("/w/a")), Some(A_PANE));
         assert_eq!(occupied.why_in(Path::new("/w/b")), None);
         assert_eq!(occupied.why_in(Path::new("/w/c")), Some(AN_AGENT));
+        assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_PANE));
     }
 
     /// While the daemon has yet to say where any pane works, that pane could
@@ -943,7 +963,9 @@ mod tests {
         let unlisted = Occupied::of(&host(session("work", None)));
         assert_eq!(unlisted, Err("session work has yet to list its panes".to_owned()));
         let unsaid = Occupied::of(&host(session("work", Some(vec![pane(4, None)]))));
-        assert_eq!(unsaid, Err("pane work:4 has yet to say where it works".to_owned()));
+        let why = "zellij does not say where pane work:4 works; close it if what ran in it has \
+                   ended";
+        assert_eq!(unsaid, Err(why.to_owned()));
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {

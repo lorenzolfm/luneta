@@ -5,7 +5,7 @@
 use std::fs;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{On, PrunesRequest};
@@ -14,7 +14,7 @@ use lunetad::Directory;
 use serde_json::json;
 use tonic::Code;
 
-use crate::host::{Daemon, Host, LUNETA, answered, eventually, folder_in, start};
+use crate::host::{Daemon, Host, LUNETA, LUNETAD, answered, eventually, folder_in, start, start_as};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::sessions::listed;
 use crate::worktree::{cloned_as_wt, git};
@@ -98,9 +98,13 @@ fn serving(host: &Host, dirs: &[&Path]) -> (UnixListener, Daemon) {
         .zip(1..)
         .map(|(dir, id)| listed(id, "~", (0, "Tab #1"), Some(&dir.display().to_string())))
         .collect();
-    host.zellij.list("work", &json!(panes));
+    serving_as(host, &json!(panes), host.vars().command(LUNETAD))
+}
+
+fn serving_as(host: &Host, panes: &serde_json::Value, lunetad: Command) -> (UnixListener, Daemon) {
+    host.zellij.list("work", panes);
     let work = host.serve("work");
-    let daemon = start(host.vars()).unwrap();
+    let daemon = start_as(lunetad).unwrap();
     eventually("the daemon lists the session's panes", || {
         let sessions = host.host().sessions;
         sessions
@@ -441,6 +445,102 @@ fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
     assert!(listed.contains("keep my-main #1: it is the default branch"), "{listed}");
     assert!(listed.contains("keep my-dev #2: it is the default branch"), "{listed}");
     assert!(!listed.contains("delete "), "{listed}");
+}
+
+#[test]
+fn an_untracked_file_keeps_its_worktree_whatever_git_is_set_to_show() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    fs::write(repository.at("one").join("new"), "not yet added").unwrap();
+    git(&repository.clone.join(".bare"), &["config", "status.showUntrackedFiles", "no"]);
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let said = prune(&host, &scratch, &repository.at("main"), &[]);
+    let listed = String::from_utf8_lossy(&said.stdout);
+    assert!(listed.contains("keep one #1: it has modified or untracked files"), "{listed}");
+    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+}
+
+#[test]
+fn a_worktree_with_another_in_it_stays_until_that_one_has_gone() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("outer");
+    host.gh.open("outer", &merged(1, &head, "me"));
+    let bare = repository.clone.join(".bare");
+    fs::create_dir_all(bare.join("info")).unwrap();
+    fs::write(bare.join("info/exclude"), ".claude/\n").unwrap();
+    let inner = repository.at("outer").join(".claude/worktrees/inner");
+    git(&bare, &["worktree", "add", "-q", "-b", "inner", &inner.display().to_string(), "main"]);
+    fs::write(inner.join("new"), "not yet added").unwrap();
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let said = prune(&host, &scratch, &repository.at("main"), &[]);
+    let listed = String::from_utf8_lossy(&said.stdout);
+    assert!(listed.contains("keep outer #1: another worktree is in it"), "{listed}");
+    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+
+    fs::remove_dir_all(&inner).unwrap();
+    let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    assert!(said.contains("delete outer"), "{said}");
+}
+
+#[test]
+fn a_pane_with_nothing_running_in_it_does_not_stop_a_plan() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    let main = repository.at("main").display().to_string();
+    let mut finished = listed(2, "sh -c exit 3", (0, "Tab #1"), None);
+    finished["is_held"] = json!(true);
+    let panes = json!([listed(1, "~", (0, "Tab #1"), Some(&main)), finished]);
+    let _serving = serving_as(&host, &panes, host.vars().command(LUNETAD));
+
+    let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    assert!(said.contains("delete one"), "{said}");
+}
+
+#[test]
+fn a_plan_does_not_need_the_directory_it_runs_in() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    let gone = scratch.join("gone");
+    fs::create_dir(&gone).unwrap();
+    let mut from_there = host.vars().command(LUNETAD);
+    from_there.current_dir(&gone);
+    let main = repository.at("main").display().to_string();
+    let panes = json!([listed(1, "~", (0, "Tab #1"), Some(&main))]);
+    let _serving = serving_as(&host, &panes, from_there);
+    fs::remove_dir(&gone).unwrap();
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder).await.unwrap();
+        let main = Directory::parse(main).unwrap();
+        let asked = prunes::asked(None, &main);
+        let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
+        let plan: Plan = answer.unwrap().unwrap().into();
+        let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
+        assert_eq!(goes, ["one"]);
+    });
 }
 
 #[test]

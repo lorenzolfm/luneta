@@ -6,7 +6,7 @@ use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc::Sender;
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use lunetad::asks::Turn;
 use lunetad::prunes::{
@@ -196,9 +196,9 @@ pub fn delete(
     dir: Directory,
     agreed: Vec<Deleting>,
     events: &Sender<Event>,
-) {
+) -> JoinHandle<()> {
     let due = Due::new(events, move |pruned| Event::Pruned { menu, pruned });
-    thread::spawn(move || due.pay(deleted(&on, &dir, &agreed)));
+    thread::spawn(move || due.pay(deleted(&on, &dir, &agreed)))
 }
 
 fn deleted(on: &Machine, dir: &Directory, agreed: &[Deleting]) -> Result<Pruned, String> {

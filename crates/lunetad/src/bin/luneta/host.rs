@@ -750,7 +750,8 @@ struct App {
     /// What kills and deletes the sessions luneta's keys delete, which
     /// luneta waits for as it ends: it ends with the last session of every
     /// machine, which zellij lets go of only once the session's server has
-    /// ended.
+    /// ended. And what deletes the merged worktrees of this machine's `d m`,
+    /// which nothing else would finish.
     deleting: Vec<JoinHandle<()>>,
     /// The agents that want you, of every machine, and their notifications.
     alerts: Alerts,
@@ -2180,7 +2181,12 @@ impl App {
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
             Asked::Prune { menu, on, dir, agreed } => {
-                prune::delete(menu, on, dir, agreed, &self.events);
+                let here = on == Machine::Local;
+                let deleting = prune::delete(menu, on, dir, agreed, &self.events);
+                if here {
+                    self.deleting.retain(|deleting| !deleting.is_finished());
+                    self.deleting.push(deleting);
+                }
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
