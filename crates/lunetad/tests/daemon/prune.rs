@@ -2,6 +2,7 @@
 //! menu's `d m`: real git on a repository of a test's own, and a gh that says
 //! what the test gives it.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -578,19 +579,53 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
             vec![deleting("one", &head, Some("other"))],
             vec![deleting("one", &head, Some("one")), deleting("wip", &unpushed, None)],
         ] {
+            let agreed: BTreeSet<Deleting> = agreed.into_iter().collect();
             let told = prunes::told(None, &main, &agreed);
             let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
             let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
             let Pruned::Changed(plan) = pruned else {
                 panic!("it deleted {agreed:?}: {pruned:?}");
             };
-            assert_eq!(plan.deletes(), [deleting("one", &head, Some("one"))]);
+            assert_eq!(plan.deletes(), BTreeSet::from([deleting("one", &head, Some("one"))]));
         }
     });
     assert!(repository.at("wip").join(".git").is_file(), "it deleted a worktree it did not list");
     assert!(repository.on_clone("wip"), "it deleted a branch with an unpushed commit");
     assert!(repository.at("one").join(".git").is_file());
     assert!(repository.on_origin("one") && repository.on_origin("other"));
+}
+
+#[test]
+fn what_was_agreed_goes_in_whatever_order_it_is_told() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    for name in ["one", "two"] {
+        let head = repository.pushed(name);
+        host.gh.open(name, &merged(1, &head, "me"));
+    }
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder).await.unwrap();
+        let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
+        let asked = prunes::asked(None, &main);
+        let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
+        let plan: Plan = answer.unwrap().unwrap().into();
+        let mut told = prunes::told(None, &main, &plan.deletes());
+        told.agreed.reverse();
+        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
+        let Pruned::Went(outcomes) = pruned else {
+            panic!("it took the same plan for another: {pruned:?}");
+        };
+        assert!(outcomes.iter().all(|outcome| outcome.came == Came::Gone), "{outcomes:?}");
+    });
+    assert!(!repository.at("one").exists() && !repository.at("two").exists());
 }
 
 /// A far row's `d m` is planned and deleted on the row's machine, through the
@@ -626,7 +661,8 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert_eq!(goes, ["one"]);
         assert_eq!(plan.kept[0].why, "it has a pane");
         let Goes { pushed, .. } = &plan.goes[0];
-        let origin = Pushed::Goes { remote: "origin".to_owned(), branch: "one".to_owned() };
+        let origin =
+            Pushed::Goes(RemoteBranch { remote: "origin".to_owned(), branch: "one".to_owned() });
         assert_eq!(pushed, &origin);
         assert_eq!(here.gh.asked(), [] as [String; 0]);
 

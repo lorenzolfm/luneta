@@ -23,6 +23,7 @@
 //! bridge. Two daemons that watched each other would else keep each other
 //! running for good, or start each other again, with no one to watch either.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
@@ -1049,7 +1050,7 @@ impl Daemon for Host {
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let agreed: Vec<prunes::Deleting> = agreed.into_iter().map(Into::into).collect();
+        let agreed: BTreeSet<prunes::Deleting> = agreed.into_iter().map(Into::into).collect();
         let core = self.core.clone();
         let here = env::current_dir().ok();
         let answer = late(move || {

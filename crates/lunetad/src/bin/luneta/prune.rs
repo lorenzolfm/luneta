@@ -2,6 +2,7 @@
 //! repository whose pull requests are merged, as `lunetad::prunes` finds them
 //! on the machine it runs on, and for a far row, on that row's machine.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 use std::process::ExitCode;
@@ -137,9 +138,7 @@ fn with_it(goes: &Goes) -> String {
     let branch = &goes.branch;
     match &goes.pushed {
         Pushed::Nowhere => format!("branch {branch}"),
-        Pushed::Goes { remote, branch: there } => {
-            format!("branch {branch}, and {there} on {remote}")
-        },
+        Pushed::Goes(far) => format!("branch {branch}, and {} on {}", far.branch, far.remote),
         Pushed::Stays(why) => format!("branch {branch}; what is pushed of it stays: {why}"),
     }
 }
@@ -194,14 +193,14 @@ pub fn delete(
     menu: u64,
     on: Machine,
     dir: Directory,
-    agreed: Vec<Deleting>,
+    agreed: BTreeSet<Deleting>,
     events: &Sender<Event>,
 ) -> JoinHandle<()> {
     let due = Due::new(events, move |pruned| Event::Pruned { menu, pruned });
     thread::spawn(move || due.pay(deleted(&on, &dir, &agreed)))
 }
 
-fn deleted(on: &Machine, dir: &Directory, agreed: &[Deleting]) -> Result<Pruned, String> {
+fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result<Pruned, String> {
     match on {
         Machine::Local => {
             let here = env::current_dir().ok();
@@ -235,6 +234,8 @@ pub fn note(outcomes: &[Outcome]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use lunetad::prunes::RemoteBranch;
+
     use super::*;
 
     #[test]
@@ -284,7 +285,10 @@ mod tests {
             goes: vec![
                 goes(
                     "one",
-                    Pushed::Goes { remote: "origin".to_owned(), branch: "one".to_owned() },
+                    Pushed::Goes(RemoteBranch {
+                        remote: "origin".to_owned(),
+                        branch: "one".to_owned(),
+                    }),
                     Some(4096),
                 ),
                 goes("two-long", Pushed::Stays("moved".to_owned()), None),

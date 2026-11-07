@@ -4,7 +4,7 @@
 //! question waits on a runtime of its own, on the thread that asks it, as
 //! luneta's threads for zellij's actions are none of tokio's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::pin;
 use std::time::{Duration, Instant, SystemTime};
@@ -431,7 +431,11 @@ impl Away {
     /// deleted where that is `agreed`, as `prunes::deleted_as_agreed` does there,
     /// and says what came of that; or why it did not hear. A question that hangs
     /// up does not stop it.
-    pub fn prune(&mut self, dir: &Directory, agreed: &[Deleting]) -> Result<Pruned, String> {
+    pub fn prune(
+        &mut self,
+        dir: &Directory,
+        agreed: &BTreeSet<Deleting>,
+    ) -> Result<Pruned, String> {
         let request = prunes::told(Some(self.on()), dir, agreed);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING + prunes::DELETING, async move {

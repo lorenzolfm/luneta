@@ -37,6 +37,7 @@
 //! where every key is the menu's. While the sidebar has the focus and no menu
 //! is open, the legend at its bottom lists the keys it takes there.
 
+use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1233,7 +1234,7 @@ pub enum Wants {
     Prunes { dir: Directory },
     /// What would go of the repository `dir` is in deleted where that is
     /// `agreed`, for `pruned`.
-    Prune { dir: Directory, agreed: Vec<prunes::Deleting> },
+    Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
     /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
     /// to take its client there: from its pane `pane`, the menu's row's,
     /// which it takes the client to first, for a tab of a session it is
@@ -2275,7 +2276,7 @@ fn merged_worktrees(count: usize) -> String {
 
 fn asked_of(plan: &prunes::Plan) -> String {
     let worktrees = merged_worktrees(plan.goes.len());
-    let far = |goes: &&prunes::Goes| matches!(goes.pushed, prunes::Pushed::Goes { .. });
+    let far = |goes: &&prunes::Goes| matches!(goes.pushed, prunes::Pushed::Goes(_));
     match plan.goes.iter().filter(far).count() {
         0 => format!("Delete {worktrees}?"),
         1 => format!("Delete {worktrees} and 1 remote branch?"),
@@ -3372,9 +3373,11 @@ mod tests {
             let (menu, _) = stays(menu.swept(Ok(plan)));
             text(&menu.lines(33, 20, 0).0)[1..3].to_vec()
         };
-        let on_origin = |branch: &str| prunes::Pushed::Goes {
-            remote: "origin".to_owned(),
-            branch: branch.to_owned(),
+        let on_origin = |branch: &str| {
+            prunes::Pushed::Goes(prunes::RemoteBranch {
+                remote: "origin".to_owned(),
+                branch: branch.to_owned(),
+            })
         };
         let mut plan = merged_plan(&[("one", 1, 5), ("two", 2, 5), ("tre", 3, 5)]);
         plan.goes[0].pushed = on_origin("one");

@@ -34,7 +34,7 @@
 //! rows go there as this one's do, and their dots and folds are kept as this
 //! one's are.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::ops::Range;
@@ -960,7 +960,7 @@ pub enum Asked {
     Prunes { menu: u64, on: Machine, dir: Directory },
     /// What would go of the repository `dir` is in, on `on`, deleted where that
     /// is `agreed`, for the menu numbered `menu`.
-    Prune { menu: u64, on: Machine, dir: Directory, agreed: Vec<prunes::Deleting> },
+    Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
     /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
     /// Take the focus from zellij, as a click on the sidebar does.

@@ -3,7 +3,7 @@
 //! where it is asked, on its own machine, or for a luneta on another through
 //! that machine's daemon, and nothing here deletes anything on its own.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,10 +69,7 @@ pub enum Pushed {
     /// That remote has no such branch, or the worktree's branch has no such
     /// remote.
     Nowhere,
-    Goes {
-        remote: String,
-        branch: String,
-    },
+    Goes(RemoteBranch),
     Stays(String),
 }
 
@@ -147,10 +144,8 @@ pub struct RemoteBranch {
 
 impl Plan {
     #[must_use]
-    pub fn deletes(&self) -> Vec<Deleting> {
-        let mut deletes: Vec<Deleting> = self.goes.iter().map(Goes::does).collect();
-        deletes.sort_unstable();
-        deletes
+    pub fn deletes(&self) -> BTreeSet<Deleting> {
+        self.goes.iter().map(Goes::does).collect()
     }
 
     /// The name the repository goes by: its directory's.
@@ -163,9 +158,7 @@ impl Plan {
 impl Goes {
     fn does(&self) -> Deleting {
         let remote = match &self.pushed {
-            Pushed::Goes { remote, branch } => {
-                Some(RemoteBranch { remote: remote.clone(), branch: branch.clone() })
-            },
+            Pushed::Goes(far) => Some(far.clone()),
             Pushed::Nowhere | Pushed::Stays(_) => None,
         };
         Deleting {
@@ -393,7 +386,7 @@ fn at_once<T: Sync, S, R: Send>(
 }
 
 /// Where a push of `branch` goes, as the remote and its name there.
-fn push_target(common: &str, branch: &str) -> Result<Option<(String, String)>, String> {
+fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, String> {
     let mut git = on_repository(common);
     let head = format!("refs/heads/{branch}");
     git.args(["for-each-ref", "--format=%(push:remotename)%00%(push)", &head]);
@@ -405,7 +398,7 @@ fn push_target(common: &str, branch: &str) -> Result<Option<(String, String)>, S
     let Some(there) = tracking.strip_prefix(&format!("refs/remotes/{remote}/")) else {
         return Ok(None);
     };
-    Ok(Some((remote.to_owned(), there.to_owned())))
+    Ok(Some(RemoteBranch { remote: remote.to_owned(), branch: there.to_owned() }))
 }
 
 fn remote_default(common: &str, remote: &str) -> Option<String> {
@@ -438,8 +431,8 @@ struct Remotes<'a> {
 }
 
 impl Remotes<'_> {
-    fn pushed(&mut self, target: Option<&(String, String)>, pulled: &Pulled) -> Pushed {
-        let Some((remote, branch)) = target else {
+    fn pushed(&mut self, target: Option<&RemoteBranch>, pulled: &Pulled) -> Pushed {
+        let Some(RemoteBranch { remote, branch }) = target else {
             return Pushed::Nowhere;
         };
         let common = self.common;
@@ -464,7 +457,7 @@ impl Remotes<'_> {
         let login = self.logins.entry(host.to_owned()).or_insert_with(|| github::logged_in(host));
         match login {
             Ok(login) if pulled.author.as_deref() == Some(login.as_str()) => {
-                Pushed::Goes { remote: remote.clone(), branch: branch.clone() }
+                Pushed::Goes(RemoteBranch { remote: remote.clone(), branch: branch.clone() })
             },
             Ok(_) => Pushed::Stays("someone else wrote its pull request".to_owned()),
             Err(why) => Pushed::Stays(format!("gh did not say who you are: {why}")),
@@ -549,7 +542,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     Ok(Planned { plan, common })
 }
 
-type Going<'a> = (OnBranch<'a>, Pulled, Option<(String, String)>);
+type Going<'a> = (OnBranch<'a>, Pulled, Option<RemoteBranch>);
 
 /// What stays of `merged` as things stand here, into `plan`, and what goes on
 /// to what the network says.
@@ -581,10 +574,9 @@ fn sorted_out<'a>(
             None => default.insert(github::default_branch(&on.listed.path)?),
         };
         let target = push_target(common, on.branch)?;
-        let (remote, there) =
-            target.as_ref().map(|(remote, there)| (remote.as_str(), there.as_str())).unzip();
-        let far = remote.and_then(|remote| remote_default(common, remote));
+        let far = target.as_ref().and_then(|target| remote_default(common, &target.remote));
         let is_default = |name: &str| name == default.as_str() || far.as_deref() == Some(name);
+        let there = target.as_ref().map(|target| target.branch.as_str());
         if is_default(on.branch) || there.is_some_and(is_default) {
             plan.kept.push(Kept { worktree, number, why: DEFAULT.to_owned() });
             continue;
@@ -617,17 +609,17 @@ pub fn deleted(
 }
 
 /// Plans again in the repository `dir` is in, and deletes that where it deletes
-/// just `agreed`, as `Plan::deletes` lists it; else it says what it would delete
+/// just `agreed`, as `Plan::deletes` has it; else it says what it would delete
 /// now, and deletes nothing.
 pub fn deleted_as_agreed(
     dir: &Directory,
-    agreed: &[Deleting],
+    agreed: &BTreeSet<Deleting>,
     occupied: impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
 ) -> Result<Pruned, String> {
     let now = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
     let planned = plan(dir, &now, here)?;
-    if planned.plan.deletes() != agreed {
+    if planned.plan.deletes() != *agreed {
         return Ok(Pruned::Changed(planned.plan));
     }
     Ok(Pruned::Went(deleted(planned, occupied, here)))
@@ -668,7 +660,7 @@ fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
     git.args(["branch", "-D", "--", &goes.branch]);
     says(git, GIT_SAYS, "branch -D")
         .map_err(|why| format!("its branch {} stays: {why}", goes.branch))?;
-    let Pushed::Goes { remote, branch } = &goes.pushed else {
+    let Pushed::Goes(RemoteBranch { remote, branch }) = &goes.pushed else {
         return Ok(());
     };
     let there = format!("refs/heads/{branch}");
@@ -680,17 +672,25 @@ fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
         .map_err(|why| format!("its branch on {remote} stays: {why}"))
 }
 
+impl From<&RemoteBranch> for api::prunes_response::RemoteBranch {
+    fn from(far: &RemoteBranch) -> Self {
+        let (remote, branch) = (far.remote.clone(), far.branch.clone());
+        api::prunes_response::RemoteBranch { remote, branch }
+    }
+}
+
+impl From<api::prunes_response::RemoteBranch> for RemoteBranch {
+    fn from(far: api::prunes_response::RemoteBranch) -> Self {
+        RemoteBranch { remote: far.remote, branch: far.branch }
+    }
+}
+
 impl From<&Goes> for api::prunes_response::Goes {
     fn from(goes: &Goes) -> Self {
         use api::prunes_response::goes::Pushed as Said;
         let pushed = match &goes.pushed {
             Pushed::Nowhere => None,
-            Pushed::Goes { remote, branch } => {
-                Some(Said::Remote(api::prunes_response::RemoteBranch {
-                    remote: remote.clone(),
-                    branch: branch.clone(),
-                }))
-            },
+            Pushed::Goes(far) => Some(Said::Remote(far.into())),
             Pushed::Stays(why) => Some(Said::Stays(why.clone())),
         };
         api::prunes_response::Goes {
@@ -709,9 +709,7 @@ impl From<api::prunes_response::Goes> for Goes {
         use api::prunes_response::goes::Pushed as Said;
         let pushed = match goes.pushed {
             None => Pushed::Nowhere,
-            Some(Said::Remote(api::prunes_response::RemoteBranch { remote, branch })) => {
-                Pushed::Goes { remote, branch }
-            },
+            Some(Said::Remote(far)) => Pushed::Goes(far.into()),
             Some(Said::Stays(why)) => Pushed::Stays(why),
         };
         Goes {
@@ -767,30 +765,24 @@ impl From<PrunesResponse> for Plan {
 
 impl From<&Deleting> for api::prune_request::Deleting {
     fn from(deleting: &Deleting) -> Self {
-        let remote = deleting.remote.as_ref().map(|far| api::prunes_response::RemoteBranch {
-            remote: far.remote.clone(),
-            branch: far.branch.clone(),
-        });
         api::prune_request::Deleting {
             worktree: deleting.worktree.clone(),
             branch: deleting.branch.clone(),
             head: deleting.head.clone(),
             number: deleting.number,
-            remote,
+            remote: deleting.remote.as_ref().map(Into::into),
         }
     }
 }
 
 impl From<api::prune_request::Deleting> for Deleting {
     fn from(said: api::prune_request::Deleting) -> Self {
-        let remote =
-            said.remote.map(|far| RemoteBranch { remote: far.remote, branch: far.branch });
         Deleting {
             worktree: said.worktree,
             branch: said.branch,
             head: said.head,
             number: said.number,
-            remote,
+            remote: said.remote.map(Into::into),
         }
     }
 }
@@ -853,7 +845,7 @@ pub fn asked(on: Option<On>, dir: &Directory) -> PrunesRequest {
 /// The question that has that daemon delete what would go, where that is
 /// `agreed`.
 #[must_use]
-pub fn told(on: Option<On>, dir: &Directory, agreed: &[Deleting]) -> PruneRequest {
+pub fn told(on: Option<On>, dir: &Directory, agreed: &BTreeSet<Deleting>) -> PruneRequest {
     PruneRequest {
         on,
         dir: dir.as_str().to_owned(),
@@ -878,6 +870,10 @@ mod tests {
         Plan { repository: "/w/luneta".to_owned(), goes, kept: Vec::new(), unasked: Vec::new() }
     }
 
+    fn on_origin(branch: &str) -> RemoteBranch {
+        RemoteBranch { remote: "origin".to_owned(), branch: branch.to_owned() }
+    }
+
     /// What a plan does does not go by what a worktree takes up, nor by the
     /// order of the list, which goes by that. A branch on a remote that goes
     /// or stays is another plan, but why it stays is not.
@@ -888,7 +884,7 @@ mod tests {
         let plan = plan_of(vec![a(Some(9)), b.clone()]);
         assert_eq!(plan.deletes(), plan_of(vec![b.clone(), a(Some(1))]).deletes());
         assert_ne!(plan.deletes(), plan_of(vec![a(Some(9))]).deletes());
-        let remote = || Pushed::Goes { remote: "origin".to_owned(), branch: "fix".to_owned() };
+        let remote = || Pushed::Goes(on_origin("fix"));
         let pushed = plan_of(vec![goes("/w/a", remote(), None)]);
         let stays = |why: &str| plan_of(vec![goes("/w/a", Pushed::Stays(why.to_owned()), None)]);
         assert_ne!(pushed.deletes(), stays("moved").deletes());
@@ -996,11 +992,13 @@ mod tests {
             ]),
             logins: HashMap::from([("github.com".to_owned(), Ok("me".to_owned()))]),
         };
-        let target = |remote: &str| Some((remote.to_owned(), format!("{remote}-branch")));
-        let goes = Pushed::Goes { remote: "origin".to_owned(), branch: "origin-branch".to_owned() };
+        let target = |remote: &str| {
+            Some(RemoteBranch { remote: remote.to_owned(), branch: format!("{remote}-branch") })
+        };
+        let goes = Pushed::Goes(on_origin("origin-branch"));
         assert_eq!(remotes.pushed(target("origin").as_ref(), &pulled(Some("me"), "abc")), goes);
         assert_eq!(remotes.pushed(None, &pulled(Some("me"), "abc")), Pushed::Nowhere);
-        let elsewhere = Some(("origin".to_owned(), "other".to_owned()));
+        let elsewhere = Some(on_origin("other"));
         assert_eq!(remotes.pushed(elsewhere.as_ref(), &pulled(Some("me"), "abc")), Pushed::Nowhere);
         assert_eq!(
             remotes.pushed(target("origin").as_ref(), &pulled(Some("me"), "def")),
@@ -1033,7 +1031,7 @@ mod tests {
     fn a_plan_crosses_the_wire_whole() {
         let goes = vec![
             goes("/w/a", Pushed::Nowhere, None),
-            goes("/w/b", Pushed::Goes { remote: "o".to_owned(), branch: "x".to_owned() }, Some(7)),
+            goes("/w/b", Pushed::Goes(on_origin("x")), Some(7)),
             goes("/w/c", Pushed::Stays("moved".to_owned()), Some(0)),
         ];
         let kept = vec![Kept { worktree: "/w/d".to_owned(), number: 2, why: "pane".to_owned() }];
@@ -1043,7 +1041,7 @@ mod tests {
         let agreed = plan.deletes();
         let dir = Directory::parse("/w".to_owned()).unwrap();
         let said = told(None, &dir, &agreed).agreed.into_iter().map(Into::into);
-        assert_eq!(said.collect::<Vec<Deleting>>(), agreed);
+        assert_eq!(said.collect::<BTreeSet<Deleting>>(), agreed);
         let outcome = |worktree: &str, came| Outcome { worktree: worktree.to_owned(), came };
         let went = Pruned::Went(vec![
             outcome("/w/a", Came::Gone),
