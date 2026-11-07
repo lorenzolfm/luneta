@@ -44,7 +44,8 @@ use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
 use crate::host::{
-    answered, eventually, folder_in, script, start, start_as, Host, Vars, DROPPED, LUNETA, LUNETAD,
+    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars, DROPPED,
+    LUNETA, LUNETAD,
 };
 use crate::worktree::{cloned_as_wt, git};
 
@@ -71,8 +72,8 @@ impl FakeSsh {
     pub fn new(bin: &Path) -> Self {
         let ssh = FakeSsh { to: bin.join("ssh-to") };
         fs::create_dir(&ssh.to).unwrap();
-        let text = format!(
-            r#"quiet= batch= client=
+        let text = r#"to="${0%/*}/ssh-to"
+quiet= batch= client=
 while [ $# -gt 0 ]; do
     case "$1" in
         -T) quiet=yes; shift ;;
@@ -85,16 +86,16 @@ done
 if [ -n "$client" ] && [ -z "$quiet" ]; then
     destination="$1"
     shift
-    echo "$*" >> "{to}/$destination.clients"
-    if [ -f "{to}/$destination.refused" ]; then
+    echo "$*" >> "$to/$destination.clients"
+    if [ -f "$to/$destination.refused" ]; then
         echo "ssh: connect to host $destination port 22: Connection refused" >&2
         exit 255
     fi
-    if [ -f "{to}/$destination.drops" ]; then
-        drops=$(cat "{to}/$destination.drops")
+    if [ -f "$to/$destination.drops" ]; then
+        drops=$(cat "$to/$destination.drops")
         if [ "$drops" -gt 0 ]; then
-            echo $((drops - 1)) > "{to}/$destination.drops"
-            cat "{to}/dropped"
+            echo $((drops - 1)) > "$to/$destination.drops"
+            cat "$to/dropped"
         fi
     fi
     exit 0
@@ -105,8 +106,8 @@ if [ -z "$quiet" ] || [ -z "$batch" ]; then
 fi
 destination="$1"
 shift
-echo run >> "{to}/$destination.runs"
-if [ ! -x "{to}/$destination" ]; then
+echo run >> "$to/$destination.runs"
+if [ ! -x "$to/$destination" ]; then
     echo "ssh: Could not resolve hostname $destination: Name or service not known" >&2
     exit 255
 fi
@@ -114,12 +115,10 @@ if [ "$*" != "luneta bridge" ]; then
     echo "this ssh runs luneta bridge alone, and was asked: $*" >&2
     exit 255
 fi
-echo $$ >> "{to}/$destination.bridges"
-exec "{to}/$destination"
-"#,
-            to = ssh.to.display()
-        );
-        script(&bin.join("ssh"), &text);
+echo $$ >> "$to/$destination.bridges"
+exec "$to/$destination"
+"#;
+        shared_script(&bin.join("ssh"), text);
         ssh
     }
 
