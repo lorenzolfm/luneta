@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::process::Command;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -461,7 +462,7 @@ const ARRIVAL: Duration = Duration::from_secs(2);
 pub const START: Duration = Duration::from_secs(10);
 
 /// How often luneta asks zellij for the clients of a session its client is
-/// on its way to.
+/// on its way to, at first.
 const ARRIVING: Duration = Duration::from_millis(20);
 
 /// Takes the client from the session it was `nudged` in to the pane `pane`
@@ -982,15 +983,17 @@ impl Arrival {
 /// luneta's own client as it comes, and hands back what it answers then, and
 /// then does what waits on it. A client that comes to a session zellij makes
 /// is to be in it first, as zellij says by drawing for it: asked sooner,
-/// zellij can end that session, as `Before::Made` says.
-pub fn arrive(arrival: Arrival, events: &Sender<Event>) {
-    let events = events.clone();
+/// zellij can end that session, as `Before::Made` says. It stops once `alive`
+/// has gone, as another client took the place of the one it waits for.
+pub fn arrive(arrival: Arrival, alive: &Arc<()>, events: &Sender<Event>) {
+    let (alive, events) = (Arc::downgrade(alive), events.clone());
     thread::spawn(move || {
         let Arrival { look, before, on, after } = arrival;
         let failure = match There::on(&on) {
             Ok(mut there) => {
                 let list = || there.clients(&look.session);
-                match arriving(list, &look, before, START, START, &events) {
+                let replaced = || alive.strong_count() == 0;
+                match arriving(list, replaced, &look, before, START, START, &events) {
                     Arrived::Came => {
                         if let Some(after) = after {
                             after.came(&mut there, &events);
@@ -1374,7 +1377,7 @@ fn run(action: Action, then: Option<Then>, when: Instant, events: &Sender<Event>
                     return;
                 }
                 let list = || there.clients(&look.session);
-                match arriving(list, &look, before, ARRIVAL, START, &events) {
+                match arriving(list, || false, &look, before, ARRIVAL, START, &events) {
                     Arrived::Came => {
                         if let Some(after) = after {
                             after.came(&mut there, &events);
@@ -1438,12 +1441,13 @@ enum Arrived {
 
 /// Has `list` ask zellij for the clients of the session `look` is of until it
 /// lists one that was not there `before`, for `patience` from its first answer,
-/// or `untold` while it does not answer, and hands back what it answers then. Of
-/// a session zellij makes, the first it lists is luneta's; of one it did not
-/// list the clients of, any it lists is taken for luneta's coming, though it
-/// may be another's.
+/// or `untold` while it does not answer, or until the client was `replaced`, and
+/// hands back what it answers then. Of a session zellij makes, the first it lists
+/// is luneta's; of one it did not list the clients of, any it lists is taken for
+/// luneta's coming, though it may be another's.
 fn arriving(
     mut list: impl FnMut() -> Result<Vec<Client>, String>,
+    replaced: impl Fn() -> bool,
     look: &Look,
     before: Before,
     patience: Duration,
@@ -1453,6 +1457,9 @@ fn arriving(
     let started = Instant::now();
     let mut answered = None;
     loop {
+        if replaced() {
+            return Arrived::Stayed;
+        }
         let was = before.clients();
         let is_new = |client: &Client| was.iter().all(|was| was.id != client.id);
         match list() {
@@ -1466,13 +1473,18 @@ fn arriving(
                 return Arrived::Stayed;
             },
             Err(why) if started.elapsed() >= untold => return Arrived::Untold(why),
-            Ok(_) | Err(_) => thread::sleep(ARRIVING),
+            Ok(_) | Err(_) => thread::sleep(resting(started.elapsed())),
         }
     }
 }
 
+fn resting(waited: Duration) -> Duration {
+    ARRIVING.max(waited / 10)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io;
     use std::sync::mpsc;
 
@@ -1505,7 +1517,7 @@ mod tests {
             listed
         };
         let before = Before::Listed(vec![on_a_pane(1)]);
-        let arrived = arriving(list, &look(), before, PATIENCE, AGES, &events);
+        let arrived = arriving(list, || false, &look(), before, PATIENCE, AGES, &events);
         assert_eq!(arrived, Arrived::Came);
         let Ok(Event::Looked(looked)) = heard.try_recv() else {
             panic!("zellij's answer was not handed back");
@@ -1518,7 +1530,7 @@ mod tests {
         let (events, heard) = mpsc::channel();
         let list = || Ok(vec![on_a_pane(1)]);
         let before = Before::Listed(vec![on_a_pane(1)]);
-        let arrived = arriving(list, &look(), before, Duration::ZERO, AGES, &events);
+        let arrived = arriving(list, || false, &look(), before, Duration::ZERO, AGES, &events);
         assert_eq!(arrived, Arrived::Stayed);
         assert!(heard.try_recv().is_err());
     }
@@ -1528,9 +1540,38 @@ mod tests {
         let (events, heard) = mpsc::channel();
         let list = || Err("stuck".to_owned());
         let before = Before::Listed(Vec::new());
-        let arrived = arriving(list, &look(), before, AGES, Duration::ZERO, &events);
+        let arrived = arriving(list, || false, &look(), before, AGES, Duration::ZERO, &events);
         assert_eq!(arrived, Arrived::Untold("stuck".to_owned()));
         assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_replaced_is_asked_for_no_more() {
+        let (events, heard) = mpsc::channel();
+        let asks = Cell::new(0);
+        let list = || {
+            asks.set(asks.get() + 1);
+            Ok(Vec::new())
+        };
+        let replaced = || asks.get() == 2;
+        let before = Before::Listed(Vec::new());
+        let arrived = arriving(list, replaced, &look(), before, AGES, AGES, &events);
+        assert_eq!(arrived, Arrived::Stayed);
+        assert_eq!(asks.get(), 2);
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_that_never_comes_is_asked_for_less_and_less() {
+        assert_eq!(resting(Duration::ZERO), ARRIVING);
+        assert_eq!(resting(Duration::from_secs(5)), Duration::from_millis(500));
+        let mut waited = Duration::ZERO;
+        let mut asks = 0;
+        while waited < START {
+            waited += resting(waited);
+            asks += 1;
+        }
+        assert!(asks <= 60, "it asks {asks} times");
     }
 
     /// What zellij's client writes as its server drops it reads however its

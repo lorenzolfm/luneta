@@ -31,6 +31,7 @@ use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -456,6 +457,7 @@ struct Client {
     typed: Option<Typed>,
     /// When it started, for how long it lasted, where zellij drops it.
     started: Instant,
+    alive: Arc<()>,
 }
 
 /// How a client luneta starts comes to its session.
@@ -545,7 +547,8 @@ impl Client {
         let until = started + WAITING_MAX;
         let coming = Some(Coming::Held(Waiting { input: Vec::new(), arrival, until }));
         let (exited, making, typed) = (None, None, None);
-        Client { hosted, fails, then_pane, exited, coming, making, typed, started }
+        let alive = Arc::new(());
+        Client { hosted, fails, then_pane, exited, coming, making, typed, started, alive }
     }
 
     /// What it said as it ended on `on`, and how it ended.
@@ -1561,7 +1564,7 @@ impl App {
     /// luneta starts asks zellij about every session at once.
     fn ask(&mut self, arrival: Option<Arrival>) {
         if let Some(arrival) = arrival {
-            zellij::arrive(arrival, &self.events);
+            zellij::arrive(arrival, &self.client.alive, &self.events);
         }
         if let Some(folder) = self.daemon.take() {
             crate::watch::start(folder, self.events.clone());
@@ -2890,7 +2893,7 @@ impl App {
                         sidebar::in_session(&title, &making.arrival.look.session)
                     };
                     if let Some(making) = self.client.making.take_if(there) {
-                        zellij::arrive(making.arrival, &self.events);
+                        zellij::arrive(making.arrival, &self.client.alive, &self.events);
                     }
                     let look = self.sidebar.titled(title);
                     self.arrived(look);

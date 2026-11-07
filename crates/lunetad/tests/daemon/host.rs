@@ -179,7 +179,8 @@ fn shared_copy(text: &str) -> PathBuf {
 /// does, or as one zellij dropped does, as many as a test had it
 /// `drops_clients`, or fails, as a test had it `refuses_clients`, or stays and
 /// notes all it hears, as a test had it `listen`, for `heard`, or stays a while,
-/// and is listed from then on, as a test had it `stays_for`. A pane closing
+/// and is listed from then on, as a test had it `stays_for`, or is not, as it had
+/// it `stays_unlisted_for`. A pane closing
 /// can cut a call of a session short, once, as a test had it `silences` or
 /// `unreaches` it, or hand it another call's answer, as a test had it
 /// `answers_another`. It knows no other command.
@@ -220,7 +221,10 @@ case "$*" in
             mv "$panes/$session.listed.clients" "$panes/$session.clients"
         fi
         ;;
-    "action list-clients") asking=clients ;;
+    "action list-clients")
+        asking=clients
+        echo "$session" >> "$panes/asked-clients"
+        ;;
     "action close-pane --pane-id "* | "action close-tab-by-id "* | "delete-session --force "*)
         if [ -f "$panes/$session.refused" ]; then
             echo "zellij refused to close anything of $session" >&2
@@ -340,7 +344,11 @@ case "$*" in
         fi
         if [ -f "$panes/stays" ]; then
             stays=$(cat "$panes/stays")
-            mv "$panes/stays.clients" "$panes/$session.clients"
+            if [ -f "$panes/stays.clients" ]; then
+                mv "$panes/stays.clients" "$panes/$session.clients"
+            else
+                printf 'on screen'
+            fi
             rm "$panes/stays"
             sleep "$stays"
         fi
@@ -451,6 +459,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
     }
 
+    pub fn stays_unlisted_for(&self, time: Duration) {
+        fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
+    }
+
     pub fn stayed(&self) -> bool {
         !self.panes().join("stays").exists()
     }
@@ -467,6 +479,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => panic!("what zellij's client heard does not read: {error}"),
         }
+    }
+
+    pub fn asked_clients(&self, session: &str) -> usize {
+        self.lines("asked-clients").iter().filter(|asked| *asked == session).count()
     }
 
     /// Each pane and tab zellij was asked to open, in the order it was
