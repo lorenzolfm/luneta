@@ -333,6 +333,27 @@ fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
     assert_eq!(host.zellij.attached(), attached);
 }
 
+#[test]
+fn a_client_that_took_the_place_of_another_ends_the_asking_after_it() {
+    let host = Host::new();
+    let _project = runs(&host, "project");
+    let _next = runs(&host, "next");
+    host.zellij.stays_unlisted_for(Duration::from_secs(1));
+
+    on_terminal_with(luneta(host.vars(), &directory("project").path), |luneta| {
+        eventually("a client to stay", || host.zellij.stayed().then_some(()));
+        host.zellij.listen();
+        fs::remove_file(host.contract().join("project")).unwrap();
+        eventually("another client", || (host.zellij.attached().len() == 2).then_some(()));
+        thread::sleep(Duration::from_secs(1));
+        let asked = host.zellij.asked_clients("project");
+        assert!(asked > 0, "luneta never asked after its client");
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(host.zellij.asked_clients("project"), asked);
+        stop(luneta.pid());
+    });
+}
+
 /// On another machine it is the same, and through ssh: the client goes back to
 /// its session there, not on to one of this machine's.
 #[test]
