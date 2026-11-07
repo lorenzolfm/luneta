@@ -767,16 +767,19 @@ its topic: the subject it is on now, in a few words, without request verbs like
 never again, so as an agent comes to a new prompt, lunetad on the machine it runs
 on asks a model for the topic, told the one it has, what you last asked, and the
 agent's last few steps. The model keeps the topic unless the subject has moved,
-so "yes, go ahead" does not rename a row. It is `claude -p --model haiku`, on
-that machine's Claude Code login, with no tools, in `--safe-mode`, and with no
+so "yes, add the bullet" does not rename a row. It is `claude -p --model haiku`,
+on that machine's Claude Code login, with no tools, in `--safe-mode`, and with no
 zellij in its environment.
 
 That costs one call per agent per prompt on the machine the agent runs on, while
 a window of luneta's shows it, there or through lunetad on another machine: with
 none open, lunetad makes no call, and once one is open again, it makes one for
 each agent whose last prompt changed. At most four run at once, and an agent you
-named costs none, as its row would not show the topic. There is nothing to
-configure. A pi agent has no topic, as luneta does not read its transcripts.
+named costs none, as its row would not show the topic. Nor does a prompt made
+only of routine words, like "merge once CI passes", or a slash command like
+`/compact`, where the row has a topic to keep: any other word in it costs the
+call. There is nothing to configure. A pi agent has no topic, as luneta does not
+read its transcripts.
 
 Until a topic comes, where a call fails, and on a machine whose lunetad is too
 old to name one, a row keeps the name it has: the title Claude Code gives its

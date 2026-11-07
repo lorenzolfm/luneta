@@ -11,8 +11,10 @@
 //!
 //! A call costs, so none is made while no one sees what comes of it, as
 //! `WatchRequest.shown` says. Once someone does again, one is made for each
-//! agent whose last prompt changed meanwhile. Nothing is kept on disk: an agent
-//! from before the daemon started keeps the name it has until its next prompt.
+//! agent whose last prompt changed meanwhile. Nor is one made for a row with a
+//! topic on a prompt that names no subject to move to, as `names_no_subject`
+//! says. Nothing is kept on disk: an agent from before the daemon started keeps
+//! the name it has until its next prompt.
 //! A session that goes is remembered for `REMEMBERED`: one back by then, as
 //! `claude --resume` brings it, has its topic again, at no call.
 
@@ -79,6 +81,15 @@ const SYSTEM: &str = "You name the topic of a developer's coding session, for it
     implementation, analysis or review. No explanation after a dash or a colon, no quotes and no \
     period. Write in the language the developer wrote in, and capitalize the first letter.\n\n\
     Answer with the topic alone, on one line, and nothing else.";
+
+const ROUTINE_WORDS: &[&str] = &[
+    "a", "after", "against", "ahead", "all", "an", "and", "both", "ci", "commit", "continue",
+    "description", "do", "done", "everything", "finding", "findings", "finishes", "fix", "for",
+    "go", "green", "here", "in", "is", "it", "link", "merge", "merged", "no", "ok", "okay", "on",
+    "once", "open", "pass", "passes", "please", "pr", "proceed", "push", "rebase", "recommendation",
+    "recommendations", "sure", "sync", "thank", "thanks", "that", "the", "then", "these", "this",
+    "those", "update", "upstream", "when", "with", "yeah", "yep", "yes", "you", "your",
+];
 
 /// An agent's session the model is to name the topic of: the id it goes by, as
 /// its transcript does, and what the model is told.
@@ -213,7 +224,12 @@ impl Topics {
             });
             if new {
                 kept.asked.clone_from(&digest.asked);
-                kept.due = Some(digest);
+                let routine = digest.asked.as_ref().is_some_and(names_no_subject);
+                let coming = kept.due.is_some() || self.writing.contains(&id);
+                let stays = routine && !back && (kept.topic.is_some() || coming);
+                if !stays {
+                    kept.due = Some(digest);
+                }
             }
         }
         if shown {
@@ -294,6 +310,17 @@ fn topical(agent: &Agent) -> Option<SessionId> {
         return None;
     }
     SessionId::parse(agent.session_id.as_str())
+}
+
+fn names_no_subject(asked: &Asked) -> bool {
+    const MARKS: [char; 6] = [',', '.', ';', ':', '!', '?'];
+    let Asked::Whole(text) = asked else {
+        return false;
+    };
+    let text = text.to_lowercase();
+    let mut words = text.split_whitespace().peekable();
+    words.next_if(|word| word.strip_prefix('/').is_some_and(|name| !name.contains('/')));
+    words.all(|word| ROUTINE_WORDS.contains(&word.trim_end_matches(MARKS)))
 }
 
 /// What the model is told of an agent whose topic is `current`, where it has
@@ -515,13 +542,129 @@ mod tests {
         projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
         assert_eq!(topics.look(&busy, true), []);
 
-        projects.prompted(ID, "yes, go ahead");
+        projects.prompted(ID, "now the tabs");
         let due = topics.look(&busy, true);
         let [Due { prompt, .. }] = due.as_slice() else {
             panic!("{due:?}");
         };
         assert!(prompt.contains("The topic the row goes by now: Session folds"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: yes, go ahead"), "{prompt}");
+        assert!(prompt.contains("The developer last asked it: now the tabs"), "{prompt}");
+    }
+
+    #[test]
+    fn a_prompt_that_names_no_subject_costs_no_call_where_the_row_has_a_topic() {
+        let projects = Projects::new();
+        let busy = [agent(ID, Status::Busy, 2)];
+        let mut topics = projects.topics();
+        projects.prompted(ID, "fold the sessions");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        topics.wrote(said(ID, "Session folds"));
+
+        for routine in ["yes, go ahead", "merge once CI passes", "/compact", "/tigerstyle this pr"] {
+            projects.prompted(ID, routine);
+            assert_eq!(topics.look(&busy, true), [], "{routine}");
+            assert_eq!(topics.topics(), only(ID, "Session folds"));
+        }
+
+        projects.prompted(ID, "now the tabs");
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("goes by now: Session folds"), "{prompt}");
+        assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
+    }
+
+    #[test]
+    fn a_row_with_no_topic_coming_is_named_on_any_prompt() {
+        let projects = Projects::new();
+        let busy = [agent(ID, Status::Busy, 2)];
+        let mut topics = projects.topics();
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+
+        let id = SessionId::parse(ID).unwrap();
+        topics.wrote(Wrote { id, said: Err("it did not answer in time".to_owned()) });
+        projects.prompted(ID, "continue");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    #[test]
+    fn a_prompt_that_names_no_subject_takes_no_place_from_a_call_on_its_way() {
+        let projects = Projects::new();
+        let busy = [agent(ID, Status::Busy, 2)];
+        let mut topics = projects.topics();
+        projects.prompted(ID, "fold the sessions");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&busy, true), []);
+        topics.wrote(said(ID, "Session folds"));
+        assert_eq!(topics.look(&busy, true), []);
+
+        let projects = Projects::new();
+        let mut topics = projects.topics();
+        projects.prompted(ID, "fold the sessions");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true), []);
+        projects.prompted(ID, "go ahead");
+        assert_eq!(topics.look(&busy, true), []);
+
+        topics.wrote(said(ID, "Session folds"));
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
+    }
+
+    #[test]
+    fn a_window_back_cannot_tell_what_came_before_the_last_prompt_and_makes_the_call() {
+        let projects = Projects::new();
+        let busy = [agent(ID, Status::Busy, 2)];
+        let mut topics = projects.topics();
+        projects.prompted(ID, "fold the sessions");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        topics.wrote(said(ID, "Session folds"));
+
+        assert_eq!(topics.look(&busy, false), []);
+        projects.prompted(ID, "now the tabs");
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&busy, false), []);
+        assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    #[test]
+    fn only_a_prompt_of_routine_words_names_no_subject() {
+        let whole = |text: &str| Asked::Whole(text.to_owned());
+        let routine = [
+            "yes",
+            "OK, thanks!",
+            "Merge once CI is green.",
+            "pr link?",
+            "fix all findings in this pr",
+            "go with your recommendation",
+            "/compact",
+            "/thermo-nuclear-review this pr",
+        ];
+        for text in routine {
+            assert!(names_no_subject(&whole(text)), "{text}");
+        }
+        let subject = [
+            "fix #308",
+            "fix 1",
+            "merge the sidebar branch",
+            "what is gat?",
+            "why do tests run in release?",
+            "tackle https://github.com/lorenzolfm/luneta/issues/308",
+            "/tmp/handoff.md",
+            "/research the sidebar",
+            "do not merge",
+        ];
+        for text in subject {
+            assert!(!names_no_subject(&whole(text)), "{text}");
+        }
+        assert!(!names_no_subject(&Asked::Cut("merge once ci passes".to_owned())));
     }
 
     /// A turn over before the thread looks at the agent, which it never sees at
