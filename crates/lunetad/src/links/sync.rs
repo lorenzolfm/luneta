@@ -24,8 +24,11 @@ struct Viewed {
     head_ref_oid: String,
 }
 
-pub(super) fn to_head(dir: &str, link: &Link) -> Result<(), String> {
-    let remote = remote_of(dir, link)?;
+pub(super) fn to_head(dir: &str, link: &Link, remote: Option<&str>) -> Result<(), String> {
+    let remote = match remote {
+        Some(remote) => Some(remote.to_owned()),
+        None => remote_of(dir, link)?,
+    };
     let Viewed { base_ref_name: base, head_ref_oid: head } = viewed(link)?;
     if let Some(remote) = remote {
         fetch(dir, &remote, &base)?;

@@ -18,6 +18,7 @@ pub fn git(dir: &Path, args: &[&str]) {
     git.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(["-c", "maintenance.auto=false"])
         .arg("-C")
         .arg(dir)
         .args(args)

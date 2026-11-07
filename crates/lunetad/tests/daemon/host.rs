@@ -90,6 +90,10 @@ impl<'a> Vars<'a> {
         }
         command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
         command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "maintenance.auto")
+            .env("GIT_CONFIG_VALUE_0", "false");
+        command
     }
 }
 
