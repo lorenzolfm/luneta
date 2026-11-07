@@ -15,6 +15,7 @@ use std::time::Duration;
 use luneta_protocol::github::State;
 
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
+use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Pulled};
 use crate::program;
@@ -260,8 +261,8 @@ fn clean(worktree: &str) -> Result<bool, String> {
     says(git, GIT_SAYS, "status").map(|said| said.is_empty())
 }
 
-fn common_of(dir: &str) -> Result<String, String> {
-    match git::common(dir) {
+fn common_of(dir: &Directory) -> Result<String, String> {
+    match git::common(dir.as_str()) {
         Common::Of(common) => Ok(common),
         Common::NoRepository => Err(format!("{dir} is in no repository")),
         Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
@@ -422,7 +423,7 @@ fn bytes_of(worktree: &str) -> Option<u64> {
 /// What deleting the merged worktrees of the repository `dir` is in deletes,
 /// where the panes and agents of this machine work as `occupied` says, and this
 /// runs in `here`. Or why it cannot tell: nothing is deleted then.
-pub fn plan(dir: &str, occupied: &Occupied, here: Option<&Path>) -> Result<Plan, String> {
+pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Plan, String> {
     let common = common_of(dir)?;
     let repository = git::holder(&common)
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
@@ -535,7 +536,7 @@ fn sorted_out<'a>(
 /// it did for the plan, whichever way the others go. `occupied` says where the
 /// panes and the agents work just before each.
 pub fn deleted(
-    dir: &str,
+    dir: &Directory,
     goes: &[Goes],
     occupied: impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
@@ -711,14 +712,18 @@ pub fn outcomes_of(said: PruneResponse) -> Vec<Outcome> {
 /// The question that has the daemon of the machine `on` names say what would
 /// go in the repository `dir` is in.
 #[must_use]
-pub fn asked(on: Option<On>, dir: &str) -> PrunesRequest {
-    PrunesRequest { on, dir: dir.to_owned() }
+pub fn asked(on: Option<On>, dir: &Directory) -> PrunesRequest {
+    PrunesRequest { on, dir: dir.as_str().to_owned() }
 }
 
 /// The question that has that daemon delete `goes`.
 #[must_use]
-pub fn told(on: Option<On>, dir: &str, goes: &[Goes]) -> PruneRequest {
-    PruneRequest { on, dir: dir.to_owned(), goes: goes.iter().map(Into::into).collect() }
+pub fn told(on: Option<On>, dir: &Directory, goes: &[Goes]) -> PruneRequest {
+    PruneRequest {
+        on,
+        dir: dir.as_str().to_owned(),
+        goes: goes.iter().map(Into::into).collect(),
+    }
 }
 
 #[cfg(test)]

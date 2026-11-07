@@ -957,10 +957,10 @@ pub enum Asked {
     Nothing,
     /// What deleting the merged worktrees of the repository `dir` is in, on
     /// `on`, deletes, for the menu numbered `menu`.
-    Prunes { menu: u64, on: Machine, dir: String },
+    Prunes { menu: u64, on: Machine, dir: Directory },
     /// `goes`, of the repository `dir` is in, on `on`, deleted, for the menu
     /// numbered `menu`.
-    Prune { menu: u64, on: Machine, dir: String, goes: Vec<prunes::Goes> },
+    Prune { menu: u64, on: Machine, dir: Directory, goes: Vec<prunes::Goes> },
     /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
     /// Take the focus from zellij, as a click on the sidebar does.
@@ -9611,7 +9611,7 @@ mod tests {
         let on = Machine::Remote(nixos());
         sidebar.key(&char('d'), now);
         let number = sidebar.menu.as_ref().expect("the menu").number();
-        let dir = "/w/b".to_owned();
+        let dir = Directory::parse("/w/b".to_owned()).unwrap();
         let asks = Asked::Prunes { menu: number, on: on.clone(), dir: dir.clone() };
         assert_eq!(sidebar.key(&char('m'), now), asks);
         let goes = prunes::Goes {

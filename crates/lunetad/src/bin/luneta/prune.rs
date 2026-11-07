@@ -10,6 +10,7 @@ use std::thread;
 
 use lunetad::asks::Turn;
 use lunetad::prunes::{self, Goes, Occupied, Outcome, Plan, Pushed, name_of};
+use lunetad::Directory;
 
 use crate::away::{self, Away};
 use crate::commands;
@@ -29,7 +30,7 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(turn) => turn,
         Err(why) => return failed(&why),
     };
-    let dir = match drive::directory(repo) {
+    let dir = match drive::directory(repo).and_then(Directory::parse) {
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };
@@ -165,12 +166,12 @@ fn listed(plan: &Plan) -> Vec<String> {
 /// Asks what deleting the merged worktrees of the repository `dir` is in, on
 /// the machine `on`, deletes, for the menu numbered `menu`, on a thread of its
 /// own, and hands back what it says, as `Due` does.
-pub fn plan(menu: u64, on: Machine, dir: String, events: &Sender<Event>) {
+pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
     let due = Due::new(events, move |plan| Event::Prunes { menu, plan });
     thread::spawn(move || due.pay(planned(&on, &dir)));
 }
 
-fn planned(on: &Machine, dir: &str) -> Result<Plan, String> {
+fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
     match on {
         Machine::Local => {
             let here = env::current_dir().ok();
@@ -188,12 +189,12 @@ fn local_occupied() -> Result<Occupied, String> {
 /// Deletes `goes` of the repository `dir` is in, on the machine `on`, for the
 /// menu numbered `menu`, on a thread of its own, and hands back how each went,
 /// as `Due` does.
-pub fn delete(menu: u64, on: Machine, dir: String, goes: Vec<Goes>, events: &Sender<Event>) {
+pub fn delete(menu: u64, on: Machine, dir: Directory, goes: Vec<Goes>, events: &Sender<Event>) {
     let due = Due::new(events, move |outcomes| Event::Pruned { menu, outcomes });
     thread::spawn(move || due.pay(deleted(&on, &dir, &goes)));
 }
 
-fn deleted(on: &Machine, dir: &str, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
+fn deleted(on: &Machine, dir: &Directory, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
     match on {
         Machine::Local => {
             let here = env::current_dir().ok();

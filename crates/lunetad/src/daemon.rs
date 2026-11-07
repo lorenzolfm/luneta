@@ -1020,7 +1020,7 @@ impl Daemon for Host {
         request: Request<PrunesRequest>,
     ) -> Result<Response<Self::PrunesStream>, Status> {
         let PrunesRequest { on, dir } = request.into_inner();
-        absolute(&dir)?;
+        let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
             let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
@@ -1042,9 +1042,9 @@ impl Daemon for Host {
         request: Request<PruneRequest>,
     ) -> Result<Response<Self::PruneStream>, Status> {
         let PruneRequest { on, dir, goes } = request.into_inner();
-        absolute(&dir)?;
+        let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let told = PruneRequest { on: None, dir, goes };
+            let told = PruneRequest { on: None, dir: dir.into(), goes };
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -1122,15 +1122,6 @@ fn kept_image(
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }
-}
-
-/// That `dir` is a directory by its absolute path, or that the question is
-/// invalid.
-fn absolute(dir: &str) -> Result<(), Status> {
-    if dir.starts_with('/') {
-        return Ok(());
-    }
-    Err(Status::invalid_argument(format!("dir: {dir:?} is no absolute path")))
 }
 
 /// What `job` answers, from a thread of its own, as a stream of that answer

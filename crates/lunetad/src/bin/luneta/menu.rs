@@ -42,7 +42,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
 use lunetad::prunes;
-use lunetad::Destination;
+use lunetad::{Destination, Directory};
 use lunetad::turns::{OtherTab, Turn};
 use luneta_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
@@ -525,7 +525,7 @@ enum Entry {
     Close { key: char, session: Listed, scope: Scope },
     /// The key of the Delete group on a pane's row in a repository: lists the
     /// worktrees of its merged pull requests, by a directory of it.
-    Prune { dir: String },
+    Prune { dir: Directory },
     /// The key of the Delete group on a machine's header: forgets the machine.
     Forget(Machine),
     /// A key of the Brief group: briefs you on what the agents it covers are
@@ -589,7 +589,7 @@ enum Pressed {
     Delete { key: char, session: Listed, scope: Scope },
     /// Lists the worktrees of the merged pull requests of a repository, by a
     /// directory of it.
-    Prune(String),
+    Prune(Directory),
     /// Forgets the machine the menu is for.
     Forget(Machine),
     /// Asks for a brief of what the scope covers.
@@ -909,7 +909,7 @@ struct Delete {
 /// machine, from those luneta lists.
 enum Removes {
     /// `merged_in` is a directory of the repository the row is in, if any.
-    Row { session: Listed, scope: Scope, merged_in: Option<String> },
+    Row { session: Listed, scope: Scope, merged_in: Option<Directory> },
     Machine(Machine),
 }
 
@@ -1015,7 +1015,11 @@ impl Target {
             Target::Pane(_, row) => Removes::Row {
                 session: row.session.clone(),
                 scope: Scope::Pane(row.pane),
-                merged_in: row.repository.as_ref().and(row.cwd.clone()),
+                merged_in: row
+                    .repository
+                    .as_ref()
+                    .and(row.cwd.clone())
+                    .and_then(|cwd| Directory::parse(cwd).ok()),
             },
             Target::Machine(machine) => Removes::Machine(machine.clone()),
         }
@@ -1226,9 +1230,9 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     /// What deleting the merged worktrees of the repository `dir` is in
     /// deletes, for `prunes`.
-    Prunes { dir: String },
+    Prunes { dir: Directory },
     /// `goes`, of the repository `dir` is in, deleted, for `pruned`.
-    Prune { dir: String, goes: Vec<prunes::Goes> },
+    Prune { dir: Directory, goes: Vec<prunes::Goes> },
     /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
     /// to take its client there: from its pane `pane`, the menu's row's,
     /// which it takes the client to first, for a tab of a session it is
@@ -1325,9 +1329,9 @@ enum Stage {
     /// `dir` is in deletes, before it asks, and again before it goes ahead once
     /// you said yes to `agreed`, what it listed. Keys do nothing but close the
     /// menu.
-    Sweeping { keys: Keys, dir: String, agreed: Option<prunes::Plan> },
+    Sweeping { keys: Keys, dir: Directory, agreed: Option<prunes::Plan> },
     /// What `d m` would delete, for you to say yes to.
-    Swept { keys: Keys, dir: String, plan: prunes::Plan },
+    Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
     /// `d m` deletes the `count` worktrees you said yes to. Keys do nothing but
     /// close the menu, which does not stop it.
     Pruning { keys: Keys, count: usize },
@@ -3188,6 +3192,10 @@ mod tests {
         }
     }
 
+    fn main_dir() -> Directory {
+        Directory::parse("/w/luneta/main".to_owned()).unwrap()
+    }
+
     fn merged_plan(names: &[(&str, u32, u64)]) -> prunes::Plan {
         let goes = names.iter().map(|(name, number, megabytes)| prunes::Goes {
             worktree: format!("/w/luneta/{name}"),
@@ -3222,7 +3230,7 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('m')));
-        assert_eq!(wants, Wants::Prunes { dir: "/w/luneta/main".to_owned() });
+        assert_eq!(wants, Wants::Prunes { dir: main_dir() });
         assert!(menu.sweeping() && menu.turning());
 
         let outside = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
@@ -3315,10 +3323,10 @@ mod tests {
             let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[one, two]))));
             assert_eq!(wants, Wants::Nothing);
             let (asked, wants) = stays(asked.key(&char(key)));
-            assert_eq!(wants, Wants::Prunes { dir: "/w/luneta/main".to_owned() });
+            assert_eq!(wants, Wants::Prunes { dir: main_dir() });
             let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[two, one]))));
             let goes = merged_plan(&[two, one]).goes;
-            assert_eq!(wants, Wants::Prune { dir: "/w/luneta/main".to_owned(), goes });
+            assert_eq!(wants, Wants::Prune { dir: main_dir(), goes });
             assert!(asked.pruning() && asked.turning());
             assert_eq!(
                 text(&asked.lines(40, 9, 0).0)[1],

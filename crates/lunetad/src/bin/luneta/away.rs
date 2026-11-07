@@ -418,7 +418,7 @@ impl Away {
 
     /// What deleting the merged worktrees of the repository `dir` is in there
     /// deletes, as `prunes::plan` says there; or why it did not say.
-    pub fn prunes(&mut self, dir: &str) -> Result<Plan, String> {
+    pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
         let request = prunes::asked(Some(self.on()), dir);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::PLANNING, async move {
@@ -430,7 +430,7 @@ impl Away {
     /// Deletes `goes` of the repository `dir` is in there, as `prunes::deleted`
     /// does there, and says how each went; or why it did not hear. A question
     /// that hangs up does not stop it.
-    pub fn prune(&mut self, dir: &str, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
+    pub fn prune(&mut self, dir: &Directory, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
         let request = prunes::told(Some(self.on()), dir, goes);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(prunes::DELETING, async move {

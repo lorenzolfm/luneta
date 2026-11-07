@@ -7,9 +7,10 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use lunetad::api::On;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::{On, PrunesRequest};
 use lunetad::prunes::{self, Goes, Plan, Pushed};
+use lunetad::Directory;
 use serde_json::json;
 use tonic::Code;
 
@@ -467,7 +468,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = lunetad::connect(&folder).await.unwrap();
         let on = || Some(On { destination: "far".to_owned() });
-        let main = repository.at("main").display().to_string();
+        let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let asked = prunes::asked(on(), &main);
         let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
         let plan: Plan = answer.unwrap().unwrap().into();
@@ -490,7 +491,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert!(!repository.on_origin("one"));
         assert!(repository.at("paned").exists());
 
-        let relative = prunes::asked(on(), "n/main");
+        let relative = PrunesRequest { on: on(), dir: "n/main".to_owned() };
         let refused = daemon.prunes(relative).await.unwrap_err();
         assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
     });
