@@ -401,12 +401,26 @@ fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, Strin
     Ok(Some(RemoteBranch { remote: remote.to_owned(), branch: there.to_owned() }))
 }
 
-fn remote_default(common: &str, remote: &str) -> Option<String> {
+fn default_heard(common: &str, remote: &str) -> Option<String> {
     let mut git = on_repository(common);
     git.args(["symbolic-ref", "--quiet", &format!("refs/remotes/{remote}/HEAD")]);
     let said = says(git, GIT_SAYS, "symbolic-ref").ok()?;
     let said = String::from_utf8_lossy(&said);
     said.trim_end().strip_prefix(&format!("refs/remotes/{remote}/")).map(str::to_owned)
+}
+
+fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> {
+    if let Some(default) = default_heard(common, remote) {
+        return Ok(Some(default));
+    }
+    let mut git = on_repository(common);
+    git.args(["ls-remote", "--symref", "--", remote, "HEAD"]);
+    let said = says_alone(git, "ls-remote")?;
+    let said = String::from_utf8_lossy(&said);
+    let named = said.lines().find_map(|line| {
+        line.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD")
+    });
+    Ok(named.map(str::to_owned))
 }
 
 /// The branches of `remote`, each by its name there, at their commits. It asks
@@ -587,6 +601,7 @@ fn sorted_out<'a>(
     common: &str,
 ) -> Result<Vec<Going<'a>>, String> {
     let mut default = None;
+    let mut defaults: HashMap<String, Result<Option<String>, String>> = HashMap::new();
     let mut going = Vec::new();
     for (on, pulled) in merged {
         let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
@@ -606,7 +621,17 @@ fn sorted_out<'a>(
             None => default.insert(github::default_branch(&on.listed.path)?),
         };
         let target = push_target(common, on.branch)?;
-        let far = target.as_ref().and_then(|target| remote_default(common, &target.remote));
+        let far = target.as_ref().map(|target| {
+            let remote = &target.remote;
+            defaults.entry(remote.clone()).or_insert_with(|| remote_default(common, remote)).clone()
+        });
+        let far = match far.transpose() {
+            Ok(far) => far.flatten(),
+            Err(why) => {
+                plan.unasked.push(Unasked { worktree, why });
+                continue;
+            },
+        };
         let is_default = |name: &str| name == default.as_str() || far.as_deref() == Some(name);
         let there = target.as_ref().map(|target| target.branch.as_str());
         if is_default(on.branch) || there.is_some_and(is_default) {

@@ -483,6 +483,34 @@ fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
 }
 
 #[test]
+fn a_branch_that_is_the_default_of_a_remote_never_fetched_stays() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let bare = repository.clone.join(".bare");
+    let head = repository.pushed("dev");
+    host.gh.open("dev", &merged(1, &head, "me"));
+    git(&repository.up, &["symbolic-ref", "HEAD", "refs/heads/dev"]);
+    git(&bare, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let said = prune(&host, &scratch, &repository.at("main"), &[]);
+    let listed = String::from_utf8_lossy(&said.stdout);
+    assert!(said.status.success(), "{listed}{}", String::from_utf8_lossy(&said.stderr));
+    assert!(listed.contains("keep dev #1: it is the default branch"), "{listed}");
+
+    git(&bare, &["config", "remote.origin.url", "/nowhere"]);
+    let said = prune(&host, &scratch, &repository.at("main"), &[]);
+    let listed = String::from_utf8_lossy(&said.stdout);
+    assert_eq!(said.status.code(), Some(1), "{listed}");
+    assert!(listed.contains("keep dev: git ls-remote"), "{listed}");
+    assert!(!listed.contains("delete "), "{listed}");
+    assert!(repository.at("dev").exists());
+}
+
+#[test]
 fn an_untracked_file_keeps_its_worktree_whatever_git_is_set_to_show() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
