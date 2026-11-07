@@ -17,7 +17,7 @@ use luneta_protocol::github::State;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common};
-use crate::github::{self, Asker, Pulled};
+use crate::github::{self, Asker, Based, Pulled};
 use crate::program;
 
 /// How long a luneta waits to hear what would go: gh asks across the network,
@@ -553,8 +553,8 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
         }
     }
     let going = sorted_out(&mut plan, merged, &listed, occupied, here, &common)?;
-    let needed = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
-        why_needed(asker, &common, on, pulled)
+    let others = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
+        others_of(asker, &common, on, pulled)
     });
     let mut remotes = Remotes {
         common: &common,
@@ -563,23 +563,28 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
         logins: HashMap::new(),
     };
     let mut goes = Vec::new();
-    for ((on, pulled, target), needed) in going.into_iter().zip(needed) {
-        let number = pulled.pull_request.number.get();
-        match needed {
-            Ok(None) => {
-                let pushed = remotes.pushed(target.as_ref(), &pulled);
-                goes.push(Goes {
-                    worktree: on.listed.path.clone(),
-                    branch: on.branch.to_owned(),
-                    head: pulled.head,
-                    number,
-                    pushed,
-                    bytes: None,
-                });
+    for ((on, pulled, target), others) in going.into_iter().zip(others) {
+        let (worktree, number) = (on.listed.path.clone(), pulled.pull_request.number.get());
+        let merged_into = match others {
+            Ok(Others::Leave) => None,
+            Ok(Others::MergedInto(merged)) => Some(merged),
+            Ok(Others::Need(why)) => {
+                plan.kept.push(Kept { worktree, number, why });
+                continue;
             },
-            Ok(Some(why)) => plan.kept.push(Kept { worktree: on.listed.path.clone(), number, why }),
-            Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
-        }
+            Err(why) => {
+                plan.unasked.push(Unasked { worktree, why });
+                continue;
+            },
+        };
+        let pushed = match (remotes.pushed(target.as_ref(), &pulled), merged_into) {
+            (Pushed::Goes(_), Some(merged)) => {
+                Pushed::Stays(format!("#{merged} was merged into it"))
+            },
+            (pushed, _) => pushed,
+        };
+        let branch = on.branch.to_owned();
+        goes.push(Goes { worktree, branch, head: pulled.head, number, pushed, bytes: None });
     }
     let bytes = at_once(&goes, || (), |(), goes: &Goes| bytes_of(&goes.worktree));
     for (goes, bytes) in goes.iter_mut().zip(bytes) {
@@ -592,21 +597,30 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
 
 type Going<'a> = (OnBranch<'a>, Pulled, Option<RemoteBranch>);
 
-fn why_needed(
+enum Others {
+    Need(String),
+    MergedInto(u32),
+    Leave,
+}
+
+fn others_of(
     asker: &mut Asker,
     common: &str,
     on: &OnBranch<'_>,
     pulled: &Pulled,
-) -> Result<Option<String>, String> {
+) -> Result<Others, String> {
     let dir = &on.listed.path;
     if let Some(open) = asker.open_on_parent(dir, common, on.branch)? {
-        return Ok(Some(format!("#{open} is open on its parent")));
+        return Ok(Others::Need(format!("#{open} is open on its parent")));
     }
     let Some(repository) = &pulled.head_repository else {
-        return Ok(None);
+        return Ok(Others::Leave);
     };
-    let open = github::open_based_on(dir, repository, &pulled.head_name)?;
-    Ok(open.map(|open| format!("#{open} is based on it")))
+    Ok(match github::based_on(dir, repository, &pulled.head_name)? {
+        Based::Open(open) => Others::Need(format!("#{open} is based on it")),
+        Based::Merged(merged) => Others::MergedInto(merged),
+        Based::Neither => Others::Leave,
+    })
 }
 
 /// What stays of `merged` as things stand here, into `plan`, and what goes on

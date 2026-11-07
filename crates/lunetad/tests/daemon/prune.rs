@@ -138,8 +138,8 @@ fn planned(said: &Output) -> (String, String) {
 /// A run lists each worktree with a merged pull request: what goes, and why the
 /// rest stay, and deletes nothing. Told yes to that, it deletes the worktree,
 /// what git ignores in it included, and the branch, which git would not count
-/// as merged, here and on origin, but for a branch of someone else's, or one
-/// origin moved on from. What it did not list it leaves.
+/// as merged, here and on origin, but for a branch of someone else's, one origin
+/// moved on from, or one another was merged into. What it did not list it leaves.
 #[test]
 fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     let host = Host::new();
@@ -180,6 +180,10 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     host.gh.open("based", &merged(7, &based, "me"));
     host.gh.based_on("based", 70);
 
+    let lasting = repository.pushed("lasting");
+    host.gh.open("lasting", &merged(12, &lasting, "me"));
+    host.gh.merged_into("lasting", 120);
+
     let from = repository.pushed("from");
     host.gh.open("from", &merged(8, &from, "me"));
 
@@ -217,7 +221,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
         assert!(lines.contains(&keep), "{keep:?} in {said}");
     }
     let goes: Vec<&&str> = lines.iter().filter(|line| line.starts_with("delete ")).collect();
-    assert_eq!(goes.len(), 3, "{said}");
+    assert_eq!(goes.len(), 4, "{said}");
     let line_of = |name: &str| {
         let starts = format!("delete {name:<8}");
         **goes
@@ -237,6 +241,10 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
             .ends_with("what is pushed of it stays: origin has it at another commit"),
         "{said}"
     );
+    assert!(
+        line_of("lasting").ends_with("what is pushed of it stays: #120 was merged into it"),
+        "{said}"
+    );
     assert!(!said.contains("open"), "{said}");
     assert!(!said.contains("no-pull"), "{said}");
     assert!(repository.at("mine").exists(), "it deleted before it was told yes");
@@ -244,13 +252,14 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     let told = prune(&host, &repository.at("from"), &repository.at("main"), &["--yes", &plan]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     let printed = String::from_utf8(told.stdout).unwrap();
-    for name in ["mine", "theirs", "moved-on"] {
+    for name in ["mine", "theirs", "moved-on", "lasting"] {
         assert!(printed.contains(&format!("deleted {name}\n")), "{printed}");
         assert!(!repository.at(name).exists(), "{name} stays");
         assert!(!repository.on_clone(name), "{name}'s branch stays");
     }
     assert!(!repository.on_origin("mine"));
     assert!(repository.on_origin("theirs"), "it deleted someone else's branch");
+    assert!(repository.on_origin("lasting"), "it deleted a branch another was merged into");
     assert_eq!(
         said_by(&repository.up, &["rev-parse", "refs/heads/moved-on"]),
         since,

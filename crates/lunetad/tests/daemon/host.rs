@@ -640,8 +640,8 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// `GH_REPO` set it finds what a test wrote with `open_in`. Of a branch whose
 /// upstream is `refs/pull/<number>/head` that it has none for, it says it can
 /// resolve no such number, as gh does. Its `pr list --base` says what a test
-/// wrote with `based_on`, or none, and notes what it was asked. It knows no
-/// other command.
+/// wrote with `based_on` or `merged_into`, or none, and notes what it was asked.
+/// It knows no other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -779,8 +779,13 @@ exec cat "$said"
     }
 
     pub fn based_on(&self, branch: &str, number: u32) {
-        fs::write(self.pulls.join(format!("based-{branch}")), format!("[{{\"number\":{number}}}]"))
-            .unwrap();
+        let said = serde_json::json!([{ "number": number, "state": "OPEN" }]);
+        fs::write(self.pulls.join(format!("based-{branch}")), said.to_string()).unwrap();
+    }
+
+    pub fn merged_into(&self, branch: &str, number: u32) {
+        let said = serde_json::json!([{ "number": number, "state": "MERGED" }]);
+        fs::write(self.pulls.join(format!("based-{branch}")), said.to_string()).unwrap();
     }
 
     pub fn fork_of(&self, owner: &str, name: &str) {

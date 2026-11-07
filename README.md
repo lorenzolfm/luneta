@@ -1359,7 +1359,9 @@ What goes with each, in this order:
 
 - The branch on its push remote, if you wrote the pull request, that remote is where
   its head is, and that branch is its head, still at that commit. A worktree made to
-  review someone else's pull request leaves their branch alone.
+  review someone else's pull request leaves their branch alone, and a branch another
+  pull request was merged into stays, as a long-lived one does: the list says which.
+  Nothing tells one that only ever takes direct pushes, so read the list for those.
 - The worktree, with `git worktree remove`, without `--force`. Files git ignores go
   with it, build output included, as with `wt delete`. wt's store keeps the ones it
   links.

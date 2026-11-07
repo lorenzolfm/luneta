@@ -354,25 +354,35 @@ pub fn default_branch(dir: &str) -> Result<String, String> {
 #[derive(Deserialize)]
 struct Numbered {
     number: u32,
+    state: Stands,
 }
 
-/// The number of an open pull request based on `branch` of `repository`, if any.
-pub fn open_based_on(
-    dir: &str,
-    repository: &RepositoryName,
-    branch: &str,
-) -> Result<Option<u32>, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Based {
+    Open(u32),
+    Merged(u32),
+    Neither,
+}
+
+/// What is based on `branch` of `repository`, of its newest 100.
+pub fn based_on(dir: &str, repository: &RepositoryName, branch: &str) -> Result<Based, String> {
     let asked = format!("gh pr list of {repository} based on {branch}");
     let mut gh = Command::new("gh");
-    gh.args(["pr", "list", "--base", branch, "--state", "open", "--limit", "1"]);
-    gh.args(["--json", "number"]).current_dir(dir).env("GH_REPO", repository.to_string());
+    gh.args(["pr", "list", "--base", branch, "--state", "all", "--limit", "100"]);
+    gh.args(["--json", "number,state"]).current_dir(dir).env("GH_REPO", repository.to_string());
     git::local(&mut gh);
     let ran =
         program::run(&mut gh, LIMIT).map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
     let listed: Vec<Numbered> = serde_json::from_slice(&said)
         .map_err(|why| format!("{asked} said what does not read: {why}"))?;
-    Ok(listed.first().map(|pull| pull.number))
+    let open = listed.iter().find(|pull| matches!(pull.state, Stands::Open));
+    let merged = listed.iter().find(|pull| matches!(pull.state, Stands::Merged));
+    Ok(match (open, merged) {
+        (Some(open), _) => Based::Open(open.number),
+        (None, Some(merged)) => Based::Merged(merged.number),
+        (None, None) => Based::Neither,
+    })
 }
 
 /// Who gh is logged in as on `host`.
