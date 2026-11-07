@@ -1735,6 +1735,32 @@ Once the log is 1 MiB, it moves to `luneta.log.1`, in the place of the one
 before, where its folder lets it be locked and moved; where not, it grows on,
 and says why in it.
 
+## Developing
+
+`nix develop` is the shell to work in, with the pinned rust and what its build
+scripts need. Run cargo inside it, as the host's cargo can't build `alsa-sys`,
+which finds ALSA through the shell's `pkg-config`.
+
+`dev` holds the recipes, and works from anywhere in a checkout. It is on the
+shell's `PATH`, and `nix run .#dev -- <command>` runs it without the shell, as
+each command brings the pinned tools it runs on.
+
+| Command | What it is for |
+|---|---|
+| `dev fmt` | Format the rust, nix and proto files. `--check` only says what would change |
+| `dev check` | Whether every target compiles |
+| `dev clippy` | The lints over every target, for Linux and the Mac from either, warnings denied. A plain `cargo clippy` passes what this fails |
+| `dev lint` | statix and deadnix over the nix files, and `buf breaking` over the protocol, as another machine's daemon can run another build |
+| `dev test` | The tests on nextest, then the doctests. `-P quick` leaves out those that wait out the daemon's 30 seconds |
+| `dev mac-test <ssh destination>` | The tests on a Mac over ssh, unpushed edits included, on a copy that touches no checkout there |
+| `dev deny` | `Cargo.lock`'s crates against RustSec's advisories, and their bans, licenses and sources. `dev deny advisories` runs one of the four |
+| `dev ci [pr number]` | What CI says of this head, and whether that proves anything: whether the PR's head is the local one, a run exists, and `main` has moved. It only reads |
+| `dev skills [dir]` | The menu's skill finder against what `claude` runs in `dir` |
+| `dev clean` | `cargo clean` |
+
+Before a commit, run `dev fmt`, `dev check`, `dev clippy`, `dev lint` and
+`dev test`.
+
 ## License
 
 MIT. Zellij is MIT-licensed too.
