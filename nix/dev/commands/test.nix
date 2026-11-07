@@ -9,7 +9,7 @@
 {
   name = "test";
   usage = "[args...]";
-  help = "the tests on nextest, then the doctests; -P quick leaves out those that wait 30s";
+  help = "the tests on nextest, then the doctests; -P quick leaves out the one that waits 30s";
   tools =
     buildTools
     ++ testTools
