@@ -802,12 +802,40 @@ impl Daemon for StandIn {
     }
 }
 
+#[test]
+fn the_waits_of_half_a_minute_hold_side_by_side() {
+    let waits: [(&str, fn()); 5] = [
+        ("the daemon ends alone", the_daemon_ends_once_zellij_has_had_no_session_for_a_while),
+        ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
+        (
+            "a client keeps the machines it watches",
+            crate::remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running,
+        ),
+        (
+            "two daemons that watch each other end",
+            crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
+        ),
+        (
+            "a client that lasted starts the count again",
+            crate::starts::a_client_that_lasted_starts_the_count_of_those_zellij_drops_again,
+        ),
+    ];
+    let failed: Vec<&str> = thread::scope(|scope| {
+        let running = waits.map(|(name, wait)| {
+            let named = thread::Builder::new().name(name.to_owned());
+            (name, named.spawn_scoped(scope, wait).unwrap())
+        });
+        let ended = running.map(|(name, it)| (name, it.join()));
+        ended.into_iter().filter(|(_, ended)| ended.is_err()).map(|(name, _)| name).collect()
+    });
+    assert_eq!(failed, [] as [&str; 0]);
+}
+
 /// The daemon ends once zellij has had no session, and no client has watched
 /// it, for 30 seconds, and not before. It ends well, says why, and takes its
 /// socket with it. A client that holds a connection and never says anything
 /// does not keep it: the daemon waits for its clients to go for 5 seconds at
 /// the most. The test waits it out.
-#[test]
 fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
     let host = Host::new();
     let work = host.serve("work");
@@ -834,7 +862,6 @@ fn the_daemon_ends_once_zellij_has_had_no_session_for_a_while() {
 /// no session: a luneta asks again as soon as it is answered, on this machine
 /// or, through `luneta bridge`, on another. The test watches it for longer
 /// than it would run on alone.
-#[test]
 fn the_daemon_runs_on_while_a_client_watches_it() {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
