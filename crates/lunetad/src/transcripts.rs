@@ -275,7 +275,7 @@ pub fn digest(end: &str, steps: usize) -> Digest {
             // it, and a slash command only there: the later of the two is
             // what you last asked.
             Some("last-prompt") => {
-                if let Some(last) = record["lastPrompt"].as_str().map(Asked::recorded)
+                if let Some(last) = record["lastPrompt"].as_str().and_then(Asked::recorded)
                     && !asked.as_ref().is_some_and(|typed| last.cuts(typed))
                 {
                     asked = Some(last);
@@ -324,14 +324,17 @@ impl Asked {
 
     /// What a `last-prompt` record says, which Claude Code ends in `…` where it
     /// cut a long prompt short.
-    fn recorded(text: &str) -> Self {
+    fn recorded(text: &str) -> Option<Self> {
         let line = spaced(text);
-        match line.strip_suffix('…') {
+        if line.is_empty() {
+            return None;
+        }
+        Some(match line.strip_suffix('…') {
             Some(start) if line.chars().count() >= CUT_CHARS => {
                 Asked::Cut(start.chars().take(ASKED_CHARS - 1).collect())
             },
             _ => Asked::typed(&line),
-        }
+        })
     }
 
     /// Whether it is `whole`, or `whole` cut short.
@@ -513,6 +516,12 @@ mod tests {
         assert_eq!(asked(&[summary]), None);
     }
 
+    #[test]
+    fn a_blank_record_of_a_prompt_is_not_what_you_asked() {
+        assert_eq!(asked(&[typed("fold them"), last(" \n ")]).unwrap(), "fold them");
+        assert_eq!(asked(&[last("")]), None);
+    }
+
     /// Two digests say one prompt where the words are the same but for where
     /// either was cut short, and no two others do, a prompt that starts another
     /// among them.
@@ -533,11 +542,11 @@ mod tests {
     /// that does is one Claude Code cut short.
     #[test]
     fn a_prompt_you_ended_in_an_ellipsis_is_not_cut_short() {
-        assert_eq!(Asked::recorded("fold…"), Asked::Whole("fold…".to_owned()));
-        assert!(!Asked::recorded("fold…").same(&Asked::typed("fold them")));
+        assert_eq!(Asked::recorded("fold…"), Some(Asked::Whole("fold…".to_owned())));
+        assert!(!Asked::recorded("fold…").unwrap().same(&Asked::typed("fold them")));
         assert_eq!(asked(&[typed("fold them"), last("fold…")]).unwrap(), "fold…");
         let start = "fold ".repeat(CUT_CHARS / 5);
-        assert_eq!(Asked::recorded(&format!("{start}…")), Asked::Cut(start));
+        assert_eq!(Asked::recorded(&format!("{start}…")), Some(Asked::Cut(start)));
     }
 
     /// What you typed is cut short only past `ASKED_CHARS`, and says so at that

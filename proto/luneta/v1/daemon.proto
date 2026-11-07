@@ -1337,11 +1337,11 @@ message Agent {
   reserved 14;
   reserved "review";
   // The subject it is on now, in a few words, as the daemon has a model name it
-  // while `WatchRequest.shown` says someone sees it, on each new prompt. Never
-  // empty. Absent until an answer comes, and for good from a daemon older than
-  // this field; for an agent of pi's, one someone named, and one in no pane. It
-  // is kept in no file, and a daemon started again has none until the next
-  // prompt.
+  // while `WatchRequest.shown` says someone sees it, on a prompt that can move
+  // it. Never empty. Absent until an answer comes, and for good from a daemon
+  // older than this field; for an agent of pi's, one someone named, and one in
+  // no pane. It is kept in no file, and a daemon started again has none until
+  // the next prompt.
   optional string topic = 15;
 }
 

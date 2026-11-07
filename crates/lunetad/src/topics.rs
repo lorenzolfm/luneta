@@ -126,9 +126,15 @@ struct Kept {
     due: Option<Digest>,
     /// When it left the agents a row goes by, if it has.
     left: Option<Instant>,
+    behind: bool,
 }
 
 impl Kept {
+    fn went_unread(&mut self) {
+        self.read_due = true;
+        self.behind = true;
+    }
+
     /// What the transcript of `id` says, where `projects` has one that has
     /// grown since it was last read, or why it could not be read.
     fn grown(&mut self, projects: &Path, id: &SessionId) -> io::Result<Option<Digest>> {
@@ -160,8 +166,6 @@ struct Topics {
     /// Each agent a row can go by the topic of, by its session, and each that
     /// has left them for less than `REMEMBERED`.
     kept: HashMap<SessionId, Kept>,
-    /// Whether someone saw what comes of it, as it last looked.
-    shown: bool,
     /// The sessions a call runs for now, one that has gone since among them, so
     /// that one that comes back waits for it.
     writing: HashSet<SessionId>,
@@ -175,7 +179,6 @@ impl Topics {
             projects,
             began,
             kept: HashMap::new(),
-            shown: false,
             writing: HashSet::new(),
             troubles: Troubles::default(),
         }
@@ -191,12 +194,11 @@ impl Topics {
         let named: Vec<(SessionId, &Agent)> =
             agents.iter().filter_map(|agent| Some((topical(agent)?, agent))).collect();
         self.forget_gone(&named, Instant::now());
-        let back = shown && !self.shown;
-        self.shown = shown;
         let projects = self.projects.as_path();
         for (id, agent) in named {
             let kept = self.kept.entry(id.clone()).or_insert_with(|| {
                 let mut kept = Kept::default();
+                kept.went_unread();
                 if agent.started_at.is_none_or(|started| started < self.began) {
                     let digest = kept.grown(projects, &id).ok().flatten();
                     kept.asked = digest.and_then(|digest| digest.asked);
@@ -204,11 +206,12 @@ impl Topics {
                 kept
             });
             if !shown {
+                kept.went_unread();
                 continue;
             }
             let moved = agent.status == Status::Busy || agent.status_since != kept.status_since;
             kept.status_since = agent.status_since;
-            kept.read_due |= back || moved;
+            kept.read_due |= moved;
             if !kept.read_due {
                 continue;
             }
@@ -225,10 +228,9 @@ impl Topics {
             if new {
                 kept.asked.clone_from(&digest.asked);
                 let routine = digest.asked.as_ref().is_some_and(names_no_subject);
-                let coming = kept.due.is_some() || self.writing.contains(&id);
-                let stays = routine && !back && (kept.topic.is_some() || coming);
-                if !stays {
+                if !routine || kept.behind {
                     kept.due = Some(digest);
+                    kept.behind = false;
                 }
             }
         }
@@ -247,6 +249,7 @@ impl Topics {
                 kept.left = None;
                 return true;
             }
+            kept.went_unread();
             now.duration_since(*kept.left.get_or_insert(now)) < REMEMBERED
         });
     }
@@ -286,8 +289,9 @@ impl Topics {
         let Some(kept) = self.kept.get_mut(&id) else {
             return;
         };
-        if let Ok(topic) = said {
-            kept.topic = Some(topic);
+        match said {
+            Ok(topic) => kept.topic = Some(topic),
+            Err(_) => kept.behind |= kept.due.is_none(),
         }
     }
 
@@ -304,7 +308,7 @@ impl Topics {
 /// goes by the agent that ran it. A row with a given name would never show one.
 fn topical(agent: &Agent) -> Option<SessionId> {
     let word = agent.harness.to_api().prompt_word();
-    let at_prompt = agent.entrypoint.as_ref().is_none_or(|said| Some(said.as_str()) == word);
+    let at_prompt = agent.entrypoint.as_ref().map(Said::as_str) == word;
     let given = agent.name.as_ref().is_some_and(Name::given);
     if agent.pane.is_none() || !at_prompt || given {
         return None;
@@ -515,6 +519,19 @@ mod tests {
         HashMap::from([(id, said.unwrap())])
     }
 
+    fn failed() -> Wrote {
+        let id = SessionId::parse(ID).unwrap();
+        Wrote { id, said: Err("it did not answer in time".to_owned()) }
+    }
+
+    fn with_a_topic(projects: &Projects, agents: &[Agent]) -> Topics {
+        let mut topics = projects.topics();
+        projects.prompted(ID, "fold the sessions");
+        assert_eq!(topics.look(agents, true).len(), 1);
+        topics.wrote(said(ID, "Session folds"));
+        topics
+    }
+
     /// An agent's prompt costs one call, whatever it does on that prompt. The
     /// model is told what it asked, and that goes for the next prompt too, with
     /// the topic it named then in the place of the title Claude Code gave.
@@ -632,6 +649,128 @@ mod tests {
         projects.prompted(ID, "yes");
         assert_eq!(topics.look(&busy, false), []);
         assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    #[test]
+    fn a_window_back_makes_the_call_though_its_first_look_could_not_read() {
+        let busy = [agent(ID, Status::Busy, 2)];
+
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        assert_eq!(topics.look(&busy, false), []);
+        projects.prompted(ID, "now the tabs");
+        projects.prompted(ID, "yes");
+        let path = projects.transcript(ID);
+        let mode = |mode| fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+        mode(0o000);
+        assert_eq!(topics.look(&busy, true), []);
+        mode(0o644);
+        assert_eq!(topics.look(&busy, true).len(), 1);
+
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        assert_eq!(topics.look(&busy, false), []);
+        projects.prompted(ID, "now the tabs");
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&[], true), []);
+        assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    #[test]
+    fn a_prompt_that_names_no_subject_makes_the_call_after_an_agent_was_away() {
+        let busy = [agent(ID, Status::Busy, 2)];
+        let no_pane = [Agent { pane: None, ..agent(ID, Status::Busy, 2) }];
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        assert_eq!(topics.look(&no_pane, true), []);
+        projects.prompted(ID, "now the tabs");
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&no_pane, true), []);
+        assert_eq!(topics.look(&busy, true).len(), 1);
+    }
+
+    #[test]
+    fn a_prompt_that_names_no_subject_makes_the_call_after_one_that_failed() {
+        let busy = [agent(ID, Status::Busy, 2)];
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        topics.wrote(failed());
+
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        topics.wrote(said(ID, "Tab order"));
+        projects.prompted(ID, "thanks");
+        assert_eq!(topics.look(&busy, true), []);
+    }
+
+    #[test]
+    fn a_call_that_fails_leaves_a_prompt_that_waits_to_name_the_topic() {
+        let busy = [agent(ID, Status::Busy, 2)];
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        projects.prompted(ID, "and the panes");
+        assert_eq!(topics.look(&busy, true), []);
+        topics.wrote(failed());
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("last asked it: and the panes"), "{prompt}");
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&busy, true), []);
+        topics.wrote(said(ID, "Pane layout"));
+        assert_eq!(topics.look(&busy, true), []);
+    }
+
+    #[test]
+    fn a_call_that_fails_does_not_undo_prompts_no_one_read() {
+        let busy = [agent(ID, Status::Busy, 2)];
+        let projects = Projects::new();
+        let mut topics = with_a_topic(&projects, &busy);
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&busy, true).len(), 1);
+        projects.prompted(ID, "and the panes");
+        assert_eq!(topics.look(&busy, true), []);
+
+        assert_eq!(topics.look(&busy, false), []);
+        projects.prompted(ID, "and the tests");
+        projects.prompted(ID, "yes");
+        topics.wrote(failed());
+        let due = topics.look(&busy, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("last asked it: yes"), "{prompt}");
+    }
+
+    #[test]
+    fn a_prompt_that_names_no_subject_takes_no_place_from_one_waiting_for_room() {
+        let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
+        let projects = Projects::new();
+        let mut agents: Vec<Agent> =
+            (0..CALLS_MAX).map(|n| agent(&id(n), Status::Busy, 2)).collect();
+        for n in 0..CALLS_MAX {
+            projects.prompted(&id(n), "fold the sessions");
+        }
+        let mut topics = projects.topics();
+        let running = topics.look(&agents, true);
+        assert_eq!(running.len(), CALLS_MAX);
+
+        agents.push(agent(ID, Status::Busy, 2));
+        projects.prompted(ID, "now the tabs");
+        assert_eq!(topics.look(&agents, true), []);
+        projects.prompted(ID, "yes");
+        assert_eq!(topics.look(&agents, true), []);
+        topics.wrote(said(running[0].id.as_str(), "Session folds"));
+        let due = topics.look(&agents, true);
+        let [Due { prompt, .. }] = due.as_slice() else {
+            panic!("{due:?}");
+        };
+        assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
     }
 
     #[test]
@@ -907,9 +1046,9 @@ mod tests {
             (Agent { name: named(None), ..agent(ID, Status::Busy, 2) }, false),
             (Agent { pane: None, ..agent(ID, Status::Busy, 2) }, false),
             (Agent { entrypoint: word("sdk-cli"), ..agent(ID, Status::Busy, 2) }, false),
+            (Agent { entrypoint: None, ..agent(ID, Status::Busy, 2) }, false),
             (agent("no-uuid-here", Status::Busy, 2), false),
             (Agent { name: named(Some(Source::Derived)), ..agent(ID, Status::Busy, 2) }, true),
-            (Agent { entrypoint: None, ..agent(ID, Status::Busy, 2) }, true),
         ];
         for (agent, called) in cases {
             let projects = Projects::new();
