@@ -1352,21 +1352,24 @@ mentioned. While lunetad doesn't answer, or has yet to list every pane, luneta c
 tell where the panes are, so it deletes nothing and says so. A pane whose command
 has ended runs nothing, so it counts only where zellij said where it worked.
 
-What goes with each:
+What goes with each, in this order:
 
+- The branch on its push remote, if you wrote the pull request, that remote is where
+  its head is, and that branch is its head, still at that commit. A worktree made to
+  review someone else's pull request leaves their branch alone.
 - The worktree, with `git worktree remove`, without `--force`. Files git ignores go
   with it, build output included, as with `wt delete`. wt's store keeps the ones it
   links.
 - The local branch, with `git branch -D`, since git doesn't count a squash merge as
   merged, and the head check is the proof.
-- The branch on its push remote, if you wrote the pull request, that remote is where
-  its head is, and that branch is its head, still at that commit. A worktree made to
-  review someone else's pull request leaves their branch alone.
 
-Where git refuses one, that one stays, the others go, and luneta says which. Each is
-looked at again just before it goes, so one that has come to have a pane since stays
-too. luneta finishes what `d m` began on this machine before it ends, however long
-that takes, with its screen as it last drew it.
+Where git refuses one, that one stays, the others go, and luneta says which, and the
+next list has it again, for whatever is left of it. So a remote branch that can't be
+deleted keeps its worktree, and one that can goes though git then refuses the
+worktree, as it does one with a submodule. Each is looked at again just before it
+goes, so one that has come to have a pane since stays too. luneta finishes what `d m`
+began on this machine before it ends, however long that takes, with its screen as it
+last drew it.
 
 It asks `gh` once for each worktree of the repository, and once more for each that
 is otherwise listed, only when you run it: each counts against GitHub's hourly limit.

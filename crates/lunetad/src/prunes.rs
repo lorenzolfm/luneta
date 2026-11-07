@@ -675,23 +675,13 @@ fn removed(
     if let Some(why) = stays(listed, &all, &goes.head, &occupied, here)? {
         return Err(why.to_owned());
     }
+    far_branch_deleted(common, goes)?;
     let mut git = on_repository(common);
     git.args(["worktree", "remove", "--", &goes.worktree]);
     says(git, REMOVING, "worktree remove").map(|_| ())
 }
 
-/// Deletes the branch of a worktree that went, here and on its push remote.
-fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
-    let mut at = on_repository(common);
-    at.args(["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", goes.branch)]);
-    let at = says(at, GIT_SAYS, "rev-parse")?;
-    if String::from_utf8_lossy(&at).trim_end() != goes.head {
-        return Err(format!("its branch {} stays: it has moved", goes.branch));
-    }
-    let mut git = on_repository(common);
-    git.args(["branch", "-D", "--", &goes.branch]);
-    says(git, GIT_SAYS, "branch -D")
-        .map_err(|why| format!("its branch {} stays: {why}", goes.branch))?;
+fn far_branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
     let Pushed::Goes(RemoteBranch { remote, branch }) = &goes.pushed else {
         return Ok(());
     };
@@ -702,6 +692,21 @@ fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
     says_alone(git, "push")
         .map(|_| ())
         .map_err(|why| format!("its branch on {remote} stays: {why}"))
+}
+
+/// Deletes the branch of a worktree that went.
+fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
+    let mut at = on_repository(common);
+    at.args(["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", goes.branch)]);
+    let at = says(at, GIT_SAYS, "rev-parse")?;
+    if String::from_utf8_lossy(&at).trim_end() != goes.head {
+        return Err(format!("its branch {} stays: it has moved", goes.branch));
+    }
+    let mut git = on_repository(common);
+    git.args(["branch", "-D", "--", &goes.branch]);
+    says(git, GIT_SAYS, "branch -D")
+        .map(|_| ())
+        .map_err(|why| format!("its branch {} stays: {why}", goes.branch))
 }
 
 impl From<&RemoteBranch> for api::prunes_response::RemoteBranch {

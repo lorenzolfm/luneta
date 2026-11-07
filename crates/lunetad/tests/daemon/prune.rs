@@ -375,8 +375,39 @@ fn a_worktree_git_refuses_stays_and_the_others_go() {
     assert!(!repository.at("plain").exists());
     assert!(at.exists());
     assert!(repository.on_clone("held"));
-    assert!(repository.on_origin("held"));
+    assert!(!repository.on_origin("held"));
     assert!(!repository.on_origin("plain"));
+    let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    assert!(said.contains("branch held\n"), "{said}");
+}
+
+#[test]
+fn a_far_branch_it_could_not_delete_keeps_its_worktree_to_try_again() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    git(&repository.up, &["config", "receive.denyDeletes", "true"]);
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let (_, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
+    let why = String::from_utf8_lossy(&told.stderr);
+    assert_eq!(told.status.code(), Some(1), "{why}");
+    assert!(why.contains("one stays: its branch on origin stays: "), "{why}");
+    assert!(repository.at("one").join(".git").is_file(), "the worktree went: {why}");
+    assert!(repository.on_clone("one") && repository.on_origin("one"));
+
+    let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    assert!(said.contains("branch one, and one on origin"), "{said}");
+    git(&repository.up, &["config", "--unset", "receive.denyDeletes"]);
+    let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert!(!repository.at("one").exists());
+    assert!(!repository.on_clone("one") && !repository.on_origin("one"));
 }
 
 /// In luneta's ask box, a plan takes its yes only in the turn after the one

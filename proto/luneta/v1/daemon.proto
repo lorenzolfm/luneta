@@ -1473,7 +1473,7 @@ message PruneResponse {
     oneof came {
       // It went, with all that was to go with it.
       google.protobuf.Empty gone = 2;
-      // It went, and what stays of its branches, and why.
+      // It went, and its branch stays, and why.
       string went_but = 3;
       // It stays, and why.
       string stays = 4;
