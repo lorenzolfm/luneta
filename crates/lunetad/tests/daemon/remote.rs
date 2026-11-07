@@ -488,8 +488,7 @@ fn watch_until(host: &Host, until: Instant) {
 /// running, however long zellij there has had no session, as a client there
 /// would: `luneta bridge` would else start one again each time one ended.
 /// The test watches the one for longer than the other would run on alone.
-#[test]
-fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
+pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     let here = Host::new();
     let far = Host::new();
     let ssh = FakeSsh::new(here.zellij.bin());
@@ -509,8 +508,7 @@ fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
 /// own. Nor does either run ssh again as the other ends, which would start
 /// the other's again through its `luneta bridge`, and so on for good. The
 /// test waits it out.
-#[test]
-fn two_daemons_that_watch_each_other_and_nothing_else_end() {
+pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     let here = Host::new();
     let far = Host::new();
     let to_far = FakeSsh::new(here.zellij.bin());

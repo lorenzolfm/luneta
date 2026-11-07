@@ -2,15 +2,7 @@
 fail-fast = false
 
 [profile.quick]
-default-filter = """
-not (
-    test(=demand::the_daemon_ends_once_zellij_has_had_no_session_for_a_while)
-    | test(=demand::the_daemon_runs_on_while_a_client_watches_it)
-    | test(=remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running)
-    | test(=remote::two_daemons_that_watch_each_other_and_nothing_else_end)
-    | test(=starts::a_client_that_lasted_starts_the_count_of_those_zellij_drops_again)
-)
-"""
+default-filter = "not test(=demand::the_waits_of_half_a_minute_hold_side_by_side)"
 
 [profile.ci]
 retries = 0

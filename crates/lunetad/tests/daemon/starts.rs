@@ -312,8 +312,7 @@ fn a_client_zellij_keeps_dropping_at_once_is_given_up_on() {
     assert!(log.contains("ends: zellij dropped its client 6 times"), "{log}");
 }
 
-#[test]
-fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
+pub fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
     let host = Host::new();
     let _project = runs(&host, "project");
     let _next = runs(&host, "next");
