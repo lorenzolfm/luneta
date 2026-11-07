@@ -1544,7 +1544,11 @@ with none says so on the sidebar, and fetches nothing.
 luneta tells your desktop when an agent wants you, on this machine or on
 [another](#other-machines): one that waits on you, once it has waited 6
 seconds, as long as Claude Code waits before it tells its hooks, and one done
-with its turn, at once. Each says what the agent wants, from the end of its
+with its turn, at once, but while a luneta window has the focus, where its row
+says so. A turn is done once nothing it started runs on: one that leaves a
+command running in the background says nothing, and the turn that command's
+end begins says it once it's over. Only a wait sounds, as it holds its agent
+up until you answer. Each says what the agent wants, from the end of its
 transcript:
 
 | it reads | when the agent |
@@ -1560,23 +1564,25 @@ mode answered on its own, or one you answered in the pane, is not left up, nor
 one of a machine you forget. What an agent did before luneta could see it, as a
 wait it began before luneta started, says nothing. None comes of the pane you
 look at, while luneta's window has the focus and its zellij is on that pane,
-and one up goes once you look there. A click on one takes luneta's zellij to
-the agent's pane, as `Enter` on its row does, and brings luneta's window
-forward: through Hyprland on Linux, and on macOS by the Notification Center,
-which brings Ghostty forward.
+and one up goes once you look there; one of a turn that ended goes as a luneta
+window takes the focus. A click on one takes luneta's zellij to the agent's
+pane, as `Enter` on its row does, and brings luneta's window forward: through
+Hyprland on Linux, and on macOS by the Notification Center, which brings
+Ghostty forward.
 
 They go up on freedesktop's notification server on Linux, as swaync, dunst or
 mako, with Claude's mark where `~/.local/share/icons/notifications/claude.png`
-is one, and the freedesktop sounds through `pw-play`; on macOS through
+is one, and a wait's freedesktop sound through `pw-play`; on macOS through
 [`terminal-notifier`](https://github.com/julienXX/terminal-notifier). One
 luneta of a machine puts them up, another's would be the same, and each other
-luneta of the machine tells it what you look at in its window: none comes of a
-pane you look at in any of them, and a click goes to the one whose window had
-the focus last. A luneta that runs over ssh puts none up, as the desktop of the
-machine it runs on is not the one you sit at, nor does any while no luneta
-runs. luneta takes down what it put up as it ends, its window closed too, and
-another luneta of the machine puts up again what still wants you, without a
-sound.
+luneta of the machine tells it what you look at in its window, and when its
+window has the focus: none comes of a pane you look at in any of them, nor of a
+turn that ends while any of their windows has the focus, and a click goes to
+the one whose window had the focus last. A luneta that runs over ssh puts none
+up, as the desktop of the machine it runs on is not the one you sit at, nor
+does any while no luneta runs. luneta takes down what it put up as it ends, its
+window closed too, and another luneta of the machine puts up again what still
+wants you, without a sound.
 
 ## Getting started
 

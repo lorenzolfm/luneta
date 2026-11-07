@@ -999,6 +999,9 @@ fn run_in(
     let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
     let client = Client::new(hosted, fails, arrival, None);
     let desktop = Desktop::start(&events);
+    // Until the terminal says otherwise. One that never tells a program of its
+    // window's focus has you in it all along.
+    let focused = true;
     let mut app = App {
         client,
         started,
@@ -1008,9 +1011,7 @@ fn run_in(
         held: Held::Nothing,
         last_press: LastPress::Elsewhere,
         focus: Focus::on(Side::Zellij),
-        // Until the terminal says otherwise. One that never tells a program
-        // of its window's focus has you in it all along.
-        focused: true,
+        focused,
         burst: None,
         settling: Settling::default(),
         drawn: Drawn::Nothing,
@@ -1040,7 +1041,7 @@ fn run_in(
         drops: Drops::default(),
         gave_up: None,
         deleting: Vec::new(),
-        alerts: Alerts::default(),
+        alerts: Alerts::new(focused),
         desktop,
     };
     let ran = run_loop(terminal, &mut app, inbox);
@@ -1302,6 +1303,7 @@ impl App {
                     let acts = self.alerts.again();
                     self.alert(acts);
                 }
+                self.focus_alerts();
                 // A key may have asked before this luneta knew which one reads.
                 self.sidebar.unsay(peers::NO_READER);
                 self.hold_aloud();
@@ -1462,6 +1464,13 @@ impl App {
         looked.extend(mine);
         let mut acts = self.alerts.looked(&looked);
         acts.extend(self.alerts.ticked(now));
+        self.alert(acts);
+    }
+
+    /// Tells the notifications whether a window of luneta's of this machine
+    /// has the focus: this one's, or another's, as far as this one knows.
+    fn focus_alerts(&mut self) {
+        let acts = self.alerts.focus(self.focused || self.desktop.another_focused());
         self.alert(acts);
     }
 
@@ -2888,6 +2897,7 @@ impl App {
     fn focus_window(&mut self, focused: bool) {
         self.focused = focused;
         self.desktop.focus(focused);
+        self.focus_alerts();
         if !focused && let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
             dictation.unfocused();
         }

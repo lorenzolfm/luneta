@@ -200,6 +200,15 @@ impl Desktop {
         }
     }
 
+    /// Whether another luneta's window of this machine has the focus, as the
+    /// one that holds the lock heard: none that this one knows of otherwise.
+    pub fn another_focused(&self) -> bool {
+        match &self.role {
+            Role::Holder { peers, .. } => peers.focused(),
+            Role::Peer(_) | Role::Undecided | Role::Elsewhere => false,
+        }
+    }
+
     /// The agents whose panes you look at in another luneta's window, which
     /// has the focus.
     pub fn looks(&self) -> Vec<Key> {
@@ -280,7 +289,7 @@ mod freedesktop {
     use zbus::{Connection, Proxy, Variant};
 
     use super::{say, Order};
-    use crate::alerts::{Alert, Key, Kind};
+    use crate::alerts::{Alert, Key, Kind, Sound};
     use crate::host::Event;
 
     const SERVER: &str = "org.freedesktop.Notifications";
@@ -345,8 +354,8 @@ mod freedesktop {
                             // with it.
                             up.retain(|_, was| was.by == posted.by);
                             up.insert(alert.key.clone(), posted);
-                            if alert.sounds {
-                                sound(alert.kind);
+                            if let Some(sound) = alert.sound {
+                                play(sound);
                             }
                         },
                         Err(error) => say(events, &mut said, &why(&error)),
@@ -457,12 +466,11 @@ mod freedesktop {
         text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
     }
 
-    /// Plays the sound of a notification of `kind`, where `pw-play` can.
-    fn sound(kind: Kind) {
-        let name = match kind {
-            Kind::Asked | Kind::Plan => "window-question",
-            Kind::Permission | Kind::Wants => "bell",
-            Kind::Done => "complete",
+    /// Plays `sound`, where `pw-play` can.
+    fn play(sound: Sound) {
+        let name = match sound {
+            Sound::Question => "window-question",
+            Sound::Bell => "bell",
         };
         let file = Path::new(SOUNDS).join(format!("{name}.oga"));
         if !file.is_file() {
@@ -528,7 +536,7 @@ mod notifier {
     #[cfg(target_os = "macos")]
     use std::sync::mpsc::Sender;
 
-    use crate::alerts::{Alert, Kind};
+    use crate::alerts::{Alert, Sound};
     #[cfg(target_os = "macos")]
     use crate::alerts::Key;
     #[cfg(target_os = "macos")]
@@ -549,11 +557,10 @@ mod notifier {
             ("-message", guarded(&alert.body)),
             ("-activate", TERMINAL.to_owned()),
         ];
-        if alert.sounds {
-            let sound = match alert.kind {
-                Kind::Asked | Kind::Plan => "Glass",
-                Kind::Permission | Kind::Wants => "Ping",
-                Kind::Done => "Hero",
+        if let Some(sound) = alert.sound {
+            let sound = match sound {
+                Sound::Question => "Glass",
+                Sound::Bell => "Ping",
             };
             args.push(("-sound", sound.to_owned()));
         }
@@ -658,17 +665,17 @@ mod notifier {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::alerts::Key;
+        use crate::alerts::{Key, Kind};
         use crate::machines::Machine;
 
-        fn alert(kind: Kind, body: &str, sounds: bool) -> Alert {
+        fn alert(kind: Kind, body: &str, sound: Option<Sound>) -> Alert {
             let (key, title) = (Key { on: Machine::Local, pid: 41 }, "fix — needs permission");
-            Alert { key, kind, title: title.to_owned(), body: body.to_owned(), sounds }
+            Alert { key, kind, title: title.to_owned(), body: body.to_owned(), sound }
         }
 
         /// A notification goes up by its group, which a click runs luneta
         /// with, quoted for `sh`; what it says is text to macOS whatever it
-        /// starts with, and it sounds but where it was up before.
+        /// starts with, and it sounds as its alert says.
         #[test]
         fn a_notification_goes_up_by_its_group_and_runs_luneta_on_a_click() {
             let luneta = Path::new("/nix/x/bin/luneta");
@@ -676,7 +683,7 @@ mod notifier {
             let socket = r"'/var/it'\''s/alerts.sock'";
             let said = format!("'/nix/x/bin/luneta' clicked --socket {socket} 'luneta-41'");
             assert_eq!(clicked, said);
-            let rm = alert(Kind::Permission, "-rf: rm", true);
+            let rm = alert(Kind::Permission, "-rf: rm", Some(Sound::Bell));
             let args = posting(&rm, "luneta-41", Some(&clicked));
             let value = |args: &[String], flag: &str| {
                 let at = args.iter().position(|arg| arg == flag)?;
@@ -691,7 +698,7 @@ mod notifier {
             for text in ["[x] done", "(wip) fix", "{a = b;}", "<b>it</b>", "\"Done\" said", r"\n"] {
                 assert_eq!(guarded(text), format!("\\{text}"));
             }
-            let again = posting(&alert(Kind::Done, "All done.", false), "luneta-41", None);
+            let again = posting(&alert(Kind::Done, "All done.", None), "luneta-41", None);
             assert_eq!((value(&again, "-sound"), value(&again, "-execute")), (None, None));
         }
     }
