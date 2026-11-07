@@ -475,24 +475,25 @@ impl Alerts {
         acts
     }
 
-    /// The notifications up as far as luneta knows, to read for again, as
-    /// this luneta takes over putting them up from another of this machine,
-    /// which took them down as it ended.
+    /// The waits up as far as luneta knows, to read for again, as this luneta
+    /// takes over putting them up from another of this machine, which took
+    /// them down as it ended: no turn that ended goes up again.
     pub fn again(&mut self) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
-            let want = match &followed.state {
-                State::Idle(Told::Shown) => Want::Done,
-                State::Waiting { wait, hold: Hold::Told(Told::Shown), .. } => {
-                    Want::Wait(wait.clone())
+            let wait = match &mut followed.state {
+                State::Idle(told) => {
+                    *told = Told::Not;
+                    continue;
                 },
-                State::Busy | State::Idle(_) | State::Waiting { .. } | State::Quiet => continue,
+                State::Waiting { wait, hold: Hold::Told(told), .. } if *told == Told::Shown => {
+                    self.numbered += 1;
+                    *told = Told::Reading(self.numbered);
+                    wait.clone()
+                },
+                State::Busy | State::Waiting { .. } | State::Quiet => continue,
             };
-            self.numbered += 1;
-            if let Some(told) = followed.state.told() {
-                *told = Told::Reading(self.numbered);
-            }
-            acts.push(Act::Read(followed.due(key, self.numbered, want, true)));
+            acts.push(Act::Read(followed.due(key, self.numbered, Want::Wait(wait), true)));
         }
         acts
     }
@@ -1044,18 +1045,18 @@ mod tests {
         assert_eq!(sound(Want::Done, false), None);
     }
 
-    /// What is up goes up again, without a sound, once this luneta takes
-    /// over putting the notifications up; what is on its way up goes up as
-    /// it was, and what is not up does not.
+    /// A wait up goes up again, without a sound, once this luneta takes over
+    /// putting the notifications up; one on its way up goes up as it was, and
+    /// what is not up does not. A turn that ended does not, up or on its way.
     #[test]
-    fn what_is_up_goes_up_again_quietly_for_a_luneta_that_takes_over() {
+    fn a_wait_up_goes_up_again_quietly_for_a_luneta_that_takes_over() {
         let mut alerts = Alerts::default();
         let now = Instant::now();
         let busy = |pid| seated(pid, Doing::Busy);
         alerts.heard(here(vec![busy(1), busy(2), busy(3), busy(4)]), now);
         let waiting = |pid| seated(pid, waits(Wait::Permission, 2));
-        let four = here(vec![seated(1, Doing::Idle), waiting(2), waiting(3), busy(4)]);
-        let acts = alerts.heard(four, now);
+        let four = |one| here(vec![seated(1, one), waiting(2), waiting(3), busy(4)]);
+        let acts = alerts.heard(four(Doing::Idle), now);
         shown(&mut alerts, &acts);
         let ticked = alerts.ticked(now + HELD);
         let read_for = |pid| {
@@ -1069,9 +1070,7 @@ mod tests {
         assert!(alerts.read(&read(&two)));
 
         let acts = alerts.again();
-        let mut again = reads(&acts);
-        again.sort_by_key(|(pid, _)| *pid);
-        assert_eq!(again, [(1, Want::Done), (2, Want::Wait(Wait::Permission))]);
+        assert_eq!(reads(&acts), [(2, Want::Wait(Wait::Permission))]);
         for act in &acts {
             let Act::Read(due) = act else { unreachable!("it only reads") };
             assert!(due.again && Alert::of(due, None).sound.is_none(), "{due:?}");
@@ -1080,7 +1079,19 @@ mod tests {
         assert!(!alerts.read(&read(&two)), "what was read before goes up no more");
         assert!(alerts.read(&read(&three)), "what was on its way up goes up as it was");
         assert_eq!(Alert::of(&three, None).sound, Some(Sound::Bell));
-        assert_eq!(reads(&alerts.again()).len(), 3, "each that is up goes up again");
+        let acts = alerts.again();
+        assert_eq!(reads(&acts).len(), 2, "each wait up goes up again");
+        shown(&mut alerts, &acts);
+
+        alerts.heard(four(Doing::Busy), now);
+        let acts = alerts.heard(four(Doing::Idle), now);
+        assert_eq!(reads(&acts), [(1, Want::Done)]);
+        let mut again = reads(&alerts.again());
+        again.sort_by_key(|(pid, _)| *pid);
+        let wait = Want::Wait(Wait::Permission);
+        assert_eq!(again, [(2, wait.clone()), (3, wait)], "nor what is on its way up of a turn");
+        let Act::Read(done) = &acts[0] else { unreachable!("it reads for the turn") };
+        assert!(!alerts.read(&read(done)));
     }
 
     /// An agent that ends takes its notification with it; one of a machine

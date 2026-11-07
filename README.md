@@ -1565,10 +1565,12 @@ one of a machine you forget. What an agent did before luneta could see it, as a
 wait it began before luneta started, says nothing. None comes of the pane you
 look at, while luneta's window has the focus and its zellij is on that pane,
 and one up goes once you look there; one of a turn that ended goes as a luneta
-window takes the focus. A click on one takes luneta's zellij to the agent's
-pane, as `Enter` on its row does, and brings luneta's window forward: through
-Hyprland on Linux, and on macOS by the Notification Center, which brings
-Ghostty forward.
+window takes the focus. In a terminal that never tells a program of its
+window's focus, luneta takes its window to have the focus all along, so dones
+might not go up while it runs. A click on one takes luneta's zellij to the
+agent's pane, as `Enter` on its row does, and brings luneta's window forward:
+through Hyprland on Linux, and on macOS by the Notification Center, which
+brings Ghostty forward.
 
 They go up on freedesktop's notification server on Linux, as swaync, dunst or
 mako, with Claude's mark where `~/.local/share/icons/notifications/claude.png`
@@ -1581,8 +1583,8 @@ turn that ends while any of their windows has the focus, and a click goes to
 the one whose window had the focus last. A luneta that runs over ssh puts none
 up, as the desktop of the machine it runs on is not the one you sit at, nor
 does any while no luneta runs. luneta takes down what it put up as it ends, its
-window closed too, and another luneta of the machine puts up again what still
-wants you, without a sound.
+window closed too, and another luneta of the machine puts up again each wait
+that was up, without a sound.
 
 ## Getting started
 
