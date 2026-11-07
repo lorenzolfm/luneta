@@ -1377,8 +1377,10 @@ since stays too, and luneta says the remote branch went. luneta finishes what `d
 began on this machine before it ends, however long that takes, with its screen as it
 last drew it.
 
-It asks `gh` once for each worktree of the repository, and once more for each that
-is otherwise listed, only when you run it: each counts against GitHub's hourly limit.
+It asks `gh` once or twice for each worktree of the repository, up to twice more for
+each that is otherwise listed, a few times to learn what the repository forks and who
+you are, and all of that again once you say yes. It asks only when you run it, and
+each ask counts against GitHub's hourly limit.
 
 ### Dictate
 
