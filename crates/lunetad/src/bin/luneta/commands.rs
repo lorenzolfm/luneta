@@ -15,11 +15,11 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
-use lunetad::api::say::{Does, Stop};
+use lunetad::api::say::Does;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, InfoRequest, ListAgentsRequest, ListAgentsResponse, PullRequest, Say, SayRequest,
-    Session, Status, UnreadFile, Utterance, Version, WatchRequest, WorkTree, Zellij,
+    Agent, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status, UnreadFile, Utterance,
+    Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
@@ -188,7 +188,7 @@ where
 /// stdin, from the pane this runs in, first where `now` says; or has it `stop`.
 fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
     let does = if stop {
-        Does::Stop(Stop {})
+        Does::Stop(())
     } else {
         let text = match text.map_or_else(from_stdin, |text| Ok(text.to_owned())) {
             Ok(text) => text,
@@ -272,7 +272,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             eprintln!("luneta: what ssh said of it is in {log}");
             ExitCode::FAILURE
         },
-        Ok(Some(Reached::Reaching(_)) | None) => {
+        Ok(Some(Reached::Reaching(())) | None) => {
             println!("{destination}: lunetad reaches it still; `luneta sessions` says how it went");
             ExitCode::SUCCESS
         },
@@ -302,7 +302,7 @@ async fn first_reach(
         let named = host.remotes.into_iter().find(|remote| remote.destination == spelled);
         match named.and_then(|remote| remote.reached) {
             // Not read yet, or not reached yet, or a newer daemon's.
-            None | Some(Reached::Reaching(_)) => after = host.version,
+            None | Some(Reached::Reaching(())) => after = host.version,
             reached => return Ok(reached),
         }
     }
@@ -321,13 +321,13 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     let runtime = runtime()?;
     runtime.block_on(async {
         let mut daemon = daemon::running(folder).await?;
-        let listed = daemon.list_agents(ListAgentsRequest {}).await;
+        let listed = daemon.list_agents(()).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
     })
 }
 
 async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let info = daemon.info(InfoRequest {}).await?.into_inner();
+    let info = daemon.info(()).await?.into_inner();
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
     let build = release::spelled(&info.version, info.built);
     match started.and_then(|at| at.elapsed().ok()) {
@@ -339,7 +339,7 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
 
 /// One line to an agent, by its session and pane, as `line` writes it.
 async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let listed = daemon.list_agents(ListAgentsRequest {}).await?.into_inner();
+    let listed = daemon.list_agents(()).await?.into_inner();
     let mut rows: Vec<(String, &Agent)> =
         listed.agents.iter().map(|agent| (seat(agent.zellij.as_ref()), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -426,7 +426,7 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
                 let far = as_rows(&host.sessions, far.as_ref(), &order);
                 sessions_of(&far, &host.work_trees, &host.pull_requests, "  ");
             },
-            Some(Reached::Reaching(_)) => println!("{machine}/  (reaching it)"),
+            Some(Reached::Reaching(())) => println!("{machine}/  (reaching it)"),
             Some(Reached::Unreached(unreached)) => {
                 let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
                 let long = since.and_then(|at| at.elapsed().ok());
@@ -496,7 +496,7 @@ fn sessions_of(
             let repo = match tree.stands.as_ref() {
                 Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
                 Some(Stands::NoCheckout(it)) => Some(&it.repository),
-                Some(Stands::Outside(_)) | None => None,
+                Some(Stands::Outside(())) | None => None,
             };
             let repo = repo.map_or_default(|it| format!("  repo {it}"));
             println!("{indent}  {at}  {cwd}  {stands}{pulled}{repo}");
@@ -513,13 +513,13 @@ fn sessions_of(
 fn stands(tree: &WorkTree) -> Option<String> {
     let checkout = match tree.stands.as_ref()? {
         Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
-        Stands::Outside(_) => return Some("no repository".to_owned()),
+        Stands::Outside(()) => return Some("no repository".to_owned()),
         Stands::Checkout(checkout) => checkout,
     };
     let head = checkout.head.as_ref()?;
     let changes = checkout.changes?;
     let mut said = vec![match head {
-        Head::Detached(_) => "detached".to_owned(),
+        Head::Detached(()) => "detached".to_owned(),
         Head::Branch(branch) => branch.name.clone(),
     }];
     let counts = [

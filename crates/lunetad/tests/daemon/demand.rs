@@ -15,17 +15,15 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, CloseResponse,
-    ClosesRequest, ClosesResponse, DeleteExitedRequest, DeleteExitedResponse, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, GoResponse, InfoRequest, InfoResponse, KeepImageRequest,
-    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, KillResponse,
-    ListAgentsRequest, ListAgentsResponse,
-    ListClientsRequest, ListClientsResponse, ListContentsRequest, ListContentsResponse,
-    ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest,
-    ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse,
-    OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, RenameSessionResponse, StartRequest, StartResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, ClosesRequest,
+    ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
+    InfoResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
+    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
+    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
+    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
+    RefugeResponse, RenameSessionRequest, StartRequest, TranscriptEndsRequest,
+    TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
     TurnIntoTabResponse, Version, WatchRequest,
 };
 use lunetad::{folder, release, Claim};
@@ -97,7 +95,7 @@ fn told(host: &Host) -> Option<InfoResponse> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.ok()?;
-        Some(daemon.info(InfoRequest {}).await.ok()?.into_inner())
+        Some(daemon.info(()).await.ok()?.into_inner())
     })
 }
 
@@ -630,7 +628,7 @@ impl StandIn {
 
 #[tonic::async_trait]
 impl Daemon for StandIn {
-    async fn info(&self, _: Request<InfoRequest>) -> Result<Response<InfoResponse>, Status> {
+    async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
         self.note("info");
         let (version, built, pid) = (self.version.clone(), self.built, self.pid);
         let zellij_folder = self.reads.as_ref().map(|reads| reads.as_os_str().as_bytes().to_vec());
@@ -638,10 +636,7 @@ impl Daemon for StandIn {
         Ok(Response::new(info))
     }
 
-    async fn list_agents(
-        &self,
-        _: Request<ListAgentsRequest>,
-    ) -> Result<Response<ListAgentsResponse>, Status> {
+    async fn list_agents(&self, _: Request<()>) -> Result<Response<ListAgentsResponse>, Status> {
         Ok(Response::new(ListAgentsResponse::default()))
     }
 
@@ -651,7 +646,7 @@ impl Daemon for StandIn {
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
     }
 
-    async fn go(&self, _: Request<GoRequest>) -> Result<Response<GoResponse>, Status> {
+    async fn go(&self, _: Request<GoRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
@@ -740,7 +735,7 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in has no screen"))
     }
 
-    async fn start(&self, _: Request<StartRequest>) -> Result<Response<StartResponse>, Status> {
+    async fn start(&self, _: Request<StartRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
@@ -748,11 +743,11 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
-    async fn close(&self, _: Request<CloseRequest>) -> Result<Response<CloseResponse>, Status> {
+    async fn close(&self, _: Request<CloseRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
-    async fn kill(&self, _: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+    async fn kill(&self, _: Request<KillRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
@@ -763,17 +758,14 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in keeps no session"))
     }
 
-    async fn delete_exited(
-        &self,
-        _: Request<DeleteExitedRequest>,
-    ) -> Result<Response<DeleteExitedResponse>, Status> {
+    async fn delete_exited(&self, _: Request<DeleteExitedRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
     async fn rename_session(
         &self,
         _: Request<RenameSessionRequest>,
-    ) -> Result<Response<RenameSessionResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 
@@ -805,10 +797,7 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in keeps no image"))
     }
 
-    async fn say(
-        &self,
-        _: Request<api::SayRequest>,
-    ) -> Result<Response<api::SayResponse>, Status> {
+    async fn say(&self, _: Request<api::SayRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in reads nothing aloud"))
     }
 }

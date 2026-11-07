@@ -21,7 +21,7 @@ use lunetad::api::{
 };
 use lunetad::api::list_skills_response::Skill;
 use lunetad::api::open_request::{self, Opens};
-use lunetad::api::refuge_response::{Ended, Kept, Went};
+use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
     self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
@@ -688,7 +688,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
         let detached = RefugeRequest { on: on("far"), seats: seats("work") };
         let found = daemon.refuge(detached).await.unwrap().into_inner();
-        assert_eq!(found.ended, Some(Ended::Kept(Kept {})));
+        assert_eq!(found.ended, Some(Ended::Kept(())));
 
         // A question that names no session, or none the client was in, asks
         // nothing of zellij, here or there.
@@ -812,7 +812,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let tab = closes_response::Tab { id: 3, panes: vec![4] };
         assert_eq!(two, Some(closes_response::Closes::Tab(tab)));
         let idle = daemon.closes(closes("idle")).await.unwrap().into_inner().closes;
-        let whole = closes_response::Closes::Session(closes_response::Session {});
+        let whole = closes_response::Closes::Session(());
         assert_eq!(idle, Some(whole));
         // What it closes goes while zellij lists it as the close says: a pane
         // another holds its tab open beside, and a tab with its terminals.
@@ -858,7 +858,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             started_at,
         };
         let came = daemon.turn_into_panes(turn).await.unwrap().into_inner().came;
-        let done = turn_into_panes_response::Came::Done(turn_into_panes_response::Done {});
+        let done = turn_into_panes_response::Came::Done(());
         assert_eq!(came, Some(done));
         let stacked = "--session turning action stack-panes -- terminal_9 terminal_4";
         assert_eq!(far.zellij.turned(), [stacked]);
@@ -870,8 +870,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let session = "held".to_owned();
         let turn = TurnIntoTabRequest { on: on("far"), session, pane: 4, started_at };
         let came = daemon.turn_into_tab(turn).await.unwrap().into_inner().came;
-        let none = turn_into_tab_response::NoClient {};
-        assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(none)));
+        assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(())));
 
         // A session there is killed by when it started, as its daemon lists
         // it, and deleted.

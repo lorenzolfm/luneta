@@ -482,7 +482,7 @@ impl Marked {
                 };
                 (mark, told(ended.at)?, ended.command.as_str())
             },
-            Doing::Stopped(_) | Doing::Ready(_) => return None,
+            Doing::Stopped(_) | Doing::Ready(()) => return None,
         };
         Some((Marked { mark, since: Some(since) }, command))
     }
@@ -537,7 +537,7 @@ fn ran(shell: &Shell) -> Ran {
         Some(Doing::Going(going)) => said(&going.command).map(Ran::Going),
         Some(Doing::Stopped(stopped)) => said(&stopped.command).map(Ran::Stopped),
         Some(Doing::Ended(ended)) => ended_last(ended).map(Ran::Ended),
-        Some(Doing::Ready(_)) => Some(Ran::Ready),
+        Some(Doing::Ready(())) => Some(Ran::Ready),
         // A daemon newer than this luneta's.
         None => None,
     };
@@ -557,7 +557,7 @@ fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<menu::Ended> {
 fn long_at(shell: &Shell) -> Option<SystemTime> {
     match shell.doing.as_ref()? {
         Doing::Going(going) => told(going.since)?.checked_add(LONG),
-        Doing::Ended(_) | Doing::Stopped(_) | Doing::Ready(_) => None,
+        Doing::Ended(_) | Doing::Stopped(_) | Doing::Ready(()) => None,
     }
 }
 
@@ -797,11 +797,11 @@ impl Away {
                 "luneta there failed"
             },
             Some(Stopped::Ended(_)) => "ssh ended",
-            Some(Stopped::Unstarted(_)) => "ssh did not start",
-            Some(Stopped::Said(_)) => "its login prints",
-            Some(Stopped::Silent(_)) => "no answer",
-            Some(Stopped::Lost(_)) => "lost",
-            Some(Stopped::Unwatched(_)) => "not watched",
+            Some(Stopped::Unstarted(())) => "ssh did not start",
+            Some(Stopped::Said(())) => "its login prints",
+            Some(Stopped::Silent(())) => "no answer",
+            Some(Stopped::Lost(())) => "lost",
+            Some(Stopped::Unwatched(())) => "not watched",
             // A newer daemon's.
             None => "unreached",
         };
@@ -933,7 +933,7 @@ fn machines(host: &Host) -> Machines<'_> {
                 unread_files: &host.unread_files,
                 sayings: &host.sayings,
             }),
-            Some(Reached::Reaching(_)) => Err(Away::Reaching),
+            Some(Reached::Reaching(())) => Err(Away::Reaching),
             Some(Reached::Unreached(unreached)) => Err(Away::of(unreached)),
             None => Err(Away::Unreached {
                 since: None,
@@ -1714,7 +1714,7 @@ impl Sidebar {
         let remote = host.remotes.iter().find(|remote| remote.destination == named);
         match remote.and_then(|remote| remote.reached.as_ref()) {
             Some(Reached::Host(host)) => &host.sessions,
-            Some(Reached::Reaching(_) | Reached::Unreached(_)) | None => &[],
+            Some(Reached::Reaching(()) | Reached::Unreached(_)) | None => &[],
         }
     }
 
@@ -6544,7 +6544,7 @@ mod tests {
         assert_eq!(said(Doing::Ended(Ended { at: None, ..untimed })), Ran::Unknown);
         assert_eq!(said(going("", 100, Front::Working)), Ran::Unknown);
         assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
-        assert_eq!(said(Doing::Ready(api::shell::Ready {})), Ran::Ready);
+        assert_eq!(said(Doing::Ready(())), Ran::Ready);
     }
 
     /// A command in a shell has an agent's marks, its row named for it: the
@@ -6580,7 +6580,7 @@ mod tests {
                     in_shell(6, ended("cargo run", None, 7_000)),
                     in_shell(7, ended("ls", Some(0), 20)),
                     in_shell(8, stopped),
-                    in_shell(9, Doing::Ready(api::shell::Ready {})),
+                    in_shell(9, Doing::Ready(())),
                 ],
             )],
             Vec::new(),
@@ -9417,7 +9417,7 @@ mod tests {
             remotes: vec![
                 remote("nixos", nixos),
                 remote("me@vps", down(100)),
-                remote("pi", Reached::Reaching(remote::Reaching {})),
+                remote("pi", Reached::Reaching(())),
             ],
             ..host(vec![session("main", 10, vec![pane(1, 0, "/w/a", "fish")])], Vec::new())
         }
@@ -9788,7 +9788,7 @@ mod tests {
         host.remotes.insert(0, remote("empty", up(Vec::new(), Vec::new())));
         let luneta = pane(2, 0, "/w", "/run/current-system/sw/bin/luneta");
         host.remotes[3] = remote("pi", up(vec![session("pi", 10, vec![luneta])], Vec::new()));
-        host.remotes.push(remote("far", Reached::Reaching(remote::Reaching {})));
+        host.remotes.push(remote("far", Reached::Reaching(())));
         sidebar.heard(host);
         let none = Err::<Vec<SessionName>, _>;
         let empty = || ("empty".parse().unwrap(), none(NoRefuge::NoneListed));

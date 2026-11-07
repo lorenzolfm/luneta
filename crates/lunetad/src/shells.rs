@@ -131,9 +131,9 @@ impl Shell {
 
     #[must_use]
     pub fn to_api(&self) -> api::Shell {
-        use api::shell::{Doing as Told, Ended, Going, Ready, Stopped};
+        use api::shell::{Doing as Told, Ended, Going, Stopped};
         let doing = match &self.doing {
-            Doing::Ready => Told::Ready(Ready {}),
+            Doing::Ready => Told::Ready(()),
             Doing::Going { command, since, front } => Told::Going(Going {
                 command: command.as_str().to_owned(),
                 since: Some((*since).into()),

@@ -28,7 +28,7 @@ fn read(saying: &Saying) -> Read<'_> {
     let (how, utterance) = match does {
         Does::InTurn(utterance) => ("in turn", utterance),
         Does::Now(utterance) => ("now", utterance),
-        Does::Stop(_) => return ("stop", "", None),
+        Does::Stop(()) => return ("stop", "", None),
     };
     let speaker = utterance.speaker.as_ref();
     let from = speaker.map(|it| (it.named.as_str(), it.session.as_deref(), it.pane));

@@ -10,13 +10,14 @@ syntax = "proto3";
 package luneta.v1;
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 service Daemon {
   // Which daemon runs, and since when.
-  rpc Info(InfoRequest) returns (InfoResponse);
+  rpc Info(google.protobuf.Empty) returns (InfoResponse);
   // The agents that run on the host, each as it stands now.
-  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
   // The host as it stands: its zellij sessions, their panes and clients, what
   // the shell in each pane says through luneta's hook, how the work trees
   // those panes are in stand, the pull requests of the branches checked out
@@ -28,7 +29,7 @@ service Daemon {
   // session, or to a pane, as `zellij action switch-session` and
   // `focus-pane-id` do. It answers once zellij has taken the action, which
   // moves the client a moment after, or with what zellij said as it failed.
-  rpc Go(GoRequest) returns (GoResponse);
+  rpc Go(GoRequest) returns (google.protobuf.Empty);
   // The clients of a session, as `zellij action list-clients` lists them now.
   rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
   // Where a client that ended in one of a few sessions goes on, as its
@@ -77,7 +78,7 @@ service Daemon {
   // --cwd` does: or to one that runs by that name, or one it keeps to bring
   // back, which it brings back, as it does. It answers once zellij has taken
   // the action, or with what zellij said as it failed.
-  rpc Start(StartRequest) returns (StartResponse);
+  rpc Start(StartRequest) returns (google.protobuf.Empty);
   // What closing a terminal of a session closes with it, as zellij lists the
   // session's panes now: the pane alone, its tab, or the session.
   rpc Closes(ClosesRequest) returns (ClosesResponse);
@@ -88,7 +89,7 @@ service Daemon {
   // would take the session along now, or a session that took the name since,
   // stays. It answers once zellij has, or
   // with what zellij said as it failed, or why it closed nothing.
-  rpc Close(CloseRequest) returns (CloseResponse);
+  rpc Close(CloseRequest) returns (google.protobuf.Empty);
   // The tabs of the session of a terminal other than its own, as zellij lists
   // the session's panes now, in their order, each by a terminal in it: for its
   // tab's panes to turn into panes beside that terminal.
@@ -107,7 +108,7 @@ service Daemon {
   // bring it back with, as `zellij delete-session --force` does. It answers
   // once the session's server has ended, or with why it did not: a session
   // that took the name since stays.
-  rpc Kill(KillRequest) returns (KillResponse);
+  rpc Kill(KillRequest) returns (google.protobuf.Empty);
   // The sessions zellij keeps to bring back, which ended, as `zellij
   // list-sessions` lists them now, for luneta's picker to list.
   rpc ListExited(ListExitedRequest) returns (ListExitedResponse);
@@ -115,11 +116,11 @@ service Daemon {
   // `zellij delete-session` does, so that it cannot bring it back. It
   // answers once zellij has, or with what zellij said as it failed: a
   // session that runs by the name stays.
-  rpc DeleteExited(DeleteExitedRequest) returns (DeleteExitedResponse);
+  rpc DeleteExited(DeleteExitedRequest) returns (google.protobuf.Empty);
   // Has zellij call a session that runs by another name, as `zellij action
   // rename-session` does, for luneta's picker. It answers once zellij has,
   // or with what zellij said as it failed, as where a session has the name.
-  rpc RenameSession(RenameSessionRequest) returns (RenameSessionResponse);
+  rpc RenameSession(RenameSessionRequest) returns (google.protobuf.Empty);
   // The ends of transcripts of Claude Code's sessions, as luneta's brief
   // reads them in the daemon's Claude Code folder: of each, the last records
   // that tell what its agent is doing, whole ones alone, as many as a share
@@ -168,7 +169,7 @@ service Daemon {
   // `Host.sayings`, for luneta's window to read, here or on another machine.
   // What says nothing, is too long, or names a session by what zellij takes
   // for no name, is answered as an invalid argument.
-  rpc Say(SayRequest) returns (SayResponse);
+  rpc Say(SayRequest) returns (google.protobuf.Empty);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -192,8 +193,6 @@ message GoRequest {
   optional uint32 pane = 4;
 }
 
-message GoResponse {}
-
 message ListClientsRequest {
   On on = 1;
   string session = 2;
@@ -216,13 +215,11 @@ message RefugeResponse {
   // What became of the client's session: one of these, always. A client
   // that finds none has a newer daemon's.
   oneof ended {
-    Kept kept = 1;
+    // It runs still, as none of `seats` is gone: the client detached, or the
+    // daemon cannot read all of zellij's folder, which could hold it.
+    google.protobuf.Empty kept = 1;
     Went went = 2;
   }
-
-  // It runs still, as none of `seats` is gone: the client detached, or the
-  // daemon cannot read all of zellij's folder, which could hold it.
-  message Kept {}
 
   // It went with the client, as one of `seats` is gone.
   message Went {
@@ -308,7 +305,7 @@ message KeepPrintedResponse {
     File after = 1;
     // Nothing follows the line the command was typed on, the first the pane
     // holds: it printed nothing.
-    Nothing nothing = 2;
+    google.protobuf.Empty nothing = 2;
     // Nothing follows the last line that holds the command after a word,
     // which may be a line it printed: all the pane holds, up to and with
     // that line.
@@ -326,8 +323,6 @@ message KeepPrintedResponse {
     uint64 lines = 2;
     uint64 left_out = 3;
   }
-
-  message Nothing {}
 
   message Top {
     // Absent where the pane holds nothing.
@@ -416,8 +411,6 @@ message StartRequest {
   optional string cwd = 4;
 }
 
-message StartResponse {}
-
 message ClosesRequest {
   On on = 1;
   string session = 2;
@@ -430,15 +423,13 @@ message ClosesResponse {
   // newer daemon's.
   oneof closes {
     // The pane alone: something else holds its tab open.
-    Pane pane = 1;
+    google.protobuf.Empty pane = 1;
     // Its tab: nothing else holds the tab open.
     Tab tab = 2;
     // Its session: nothing else holds the tab open, and the session has no
     // other tab.
-    Session session = 3;
+    google.protobuf.Empty session = 3;
   }
-
-  message Pane {}
 
   message Tab {
     uint32 id = 1;
@@ -446,8 +437,6 @@ message ClosesResponse {
     // ones.
     repeated uint32 panes = 2;
   }
-
-  message Session {}
 }
 
 message CloseRequest {
@@ -467,8 +456,6 @@ message CloseRequest {
   // it stays. A question without it is invalid.
   google.protobuf.Timestamp started_at = 5;
 }
-
-message CloseResponse {}
 
 message OtherTabsRequest {
   On on = 1;
@@ -506,15 +493,11 @@ message TurnIntoTabResponse {
   oneof came {
     // It moved. Its tab keeps its other panes, and names the new one where
     // someone named it.
-    Done done = 1;
+    google.protobuf.Empty done = 1;
     // Nothing moved: the session has no client to make room for a new tab, and
     // one that comes there can ask again.
-    NoClient no_client = 2;
+    google.protobuf.Empty no_client = 2;
   }
-
-  message Done {}
-
-  message NoClient {}
 }
 
 message TurnIntoPanesRequest {
@@ -535,12 +518,10 @@ message TurnIntoPanesResponse {
   // none has a newer daemon's.
   oneof came {
     // All that were there moved, and the tab they left goes.
-    Done done = 1;
+    google.protobuf.Empty done = 1;
     // Some did, and the rest stay in their tab.
     Partly partly = 2;
   }
-
-  message Done {}
 
   message Partly {
     uint32 moved = 1;
@@ -559,8 +540,6 @@ message KillRequest {
   // stays. A question without it is invalid.
   google.protobuf.Timestamp started_at = 3;
 }
-
-message KillResponse {}
 
 message ListExitedRequest {
   On on = 1;
@@ -585,8 +564,6 @@ message DeleteExitedRequest {
   string session = 2;
 }
 
-message DeleteExitedResponse {}
-
 message RenameSessionRequest {
   On on = 1;
   // The session that runs.
@@ -595,8 +572,6 @@ message RenameSessionRequest {
   // luneta's are held to. One that is not, as one too long, is invalid.
   string to = 3;
 }
-
-message RenameSessionResponse {}
 
 message TranscriptEndsRequest {
   On on = 1;
@@ -636,7 +611,7 @@ message AskRequest {
     // zellij takes, or else the question is invalid, and its terminal.
     UserPane pane = 6;
     // On another machine, where luneta's zellij is: in none of its panes.
-    Away away = 7;
+    google.protobuf.Empty away = 7;
   }
   // The key of the turn, and of the turn before, absent for the first: a
   // close the agent runs takes a yes only to a plan said in the turn before.
@@ -647,8 +622,6 @@ message AskRequest {
     string session = 1;
     uint32 pane = 2;
   }
-
-  message Away {}
 }
 
 // A step of a turn of the agent, as `claude` says it. One with none of
@@ -864,10 +837,8 @@ message Say {
     // Read at once, before what waits, and cutting off what is being read.
     Utterance now = 2;
     // Stop what is being read, and let go of what waits.
-    Stop stop = 3;
+    google.protobuf.Empty stop = 3;
   }
-
-  message Stop {}
 }
 
 // What to read aloud, and who it comes from.
@@ -883,8 +854,6 @@ message SayRequest {
   // Always there.
   Say say = 1;
 }
-
-message SayResponse {}
 
 // What `Say` took, as `Host.sayings` lists it.
 message Saying {
@@ -906,13 +875,11 @@ message Remote {
   // One of these, always: a client that finds none has a newer daemon's.
   oneof reached {
     // The first ssh to it runs, which takes 10 seconds at the most.
-    Reaching reaching = 2;
+    google.protobuf.Empty reaching = 2;
     // Its host, as its daemon last said: `Remote.Host`, the inner scope's.
     Host host = 3;
     Unreached unreached = 4;
   }
-
-  message Reaching {}
 
   // A machine's host, as its daemon says it, but for its version, and for
   // the machines that daemon watches, which are its own. Two daemons that
@@ -949,25 +916,23 @@ message Remote {
     oneof stopped {
       // ssh did not start on this machine, or what it said could not be
       // read.
-      Unstarted unstarted = 3;
+      google.protobuf.Empty unstarted = 3;
       // ssh ended before it reached lunetad there.
       Ended ended = 4;
       // Something there said what is not `luneta bridge`'s word first, as a
       // login shell that prints does.
-      Said said = 5;
+      google.protobuf.Empty said = 5;
       // ssh neither reached lunetad there nor ended in 10 seconds, as it
       // does that waits on a machine that does not answer.
-      Silent silent = 6;
+      google.protobuf.Empty silent = 6;
       // ssh reached lunetad there, and what came after did not do: the
       // connection broke, or its daemon answered with an error, or with what
       // this one does not read.
-      Lost lost = 7;
+      google.protobuf.Empty lost = 7;
       // The daemon could not start a thread to watch it from, nor a
       // runtime, as one out of processes or files cannot.
-      Unwatched unwatched = 8;
+      google.protobuf.Empty unwatched = 8;
     }
-
-    message Unstarted {}
 
     message Ended {
       // Its exit code: 255 where ssh did not get in, 127 where the shell
@@ -976,14 +941,6 @@ message Remote {
       // session's name. Absent where a signal ended it.
       optional int32 code = 1;
     }
-
-    message Said {}
-
-    message Silent {}
-
-    message Lost {}
-
-    message Unwatched {}
   }
 }
 
@@ -1079,7 +1036,8 @@ message Shell {
     Going going = 1;
     Ended ended = 2;
     Stopped stopped = 3;
-    Ready ready = 4;
+    // At its prompt, and it has run nothing yet.
+    google.protobuf.Empty ready = 4;
   }
 
   // A command it runs.
@@ -1104,12 +1062,10 @@ message Shell {
       int32 status = 3;
       // `fg` brought it back, and the shell cannot say its exit status, as
       // fish cannot after `fg`. The line typed was `fg`, not `command`.
-      Resumed resumed = 5;
+      google.protobuf.Empty resumed = 5;
     }
     // How long it ran, to the millisecond. Always there.
     google.protobuf.Duration took = 4;
-
-    message Resumed {}
   }
 
   // A job it stopped, with `Ctrl z`, which waits to be brought back.
@@ -1118,9 +1074,6 @@ message Shell {
     // When it stopped. Always there.
     google.protobuf.Timestamp at = 2;
   }
-
-  // At its prompt, and it has run nothing yet.
-  message Ready {}
 }
 
 // What the command in front of a terminal does, by how the terminal takes keys
@@ -1147,12 +1100,10 @@ message WorkTree {
   // One of these, always: a client that finds none has a newer daemon's.
   oneof stands {
     // The directory is in no repository.
-    Outside outside = 2;
+    google.protobuf.Empty outside = 2;
     Checkout checkout = 3;
     NoCheckout no_checkout = 4;
   }
-
-  message Outside {}
 
   // In a repository, and in none of its work trees.
   message NoCheckout {
@@ -1165,7 +1116,8 @@ message WorkTree {
 message Checkout {
   // One of these, always.
   oneof head {
-    Detached detached = 1;
+    // `HEAD` names a commit, and no branch.
+    google.protobuf.Empty detached = 1;
     Branch branch = 2;
   }
   // How many paths there are of each kind of change. Always there.
@@ -1174,9 +1126,6 @@ message Checkout {
   // The directory that holds the repository. Absent from a daemon older than
   // this field.
   optional string repository = 5;
-
-  // `HEAD` names a commit, and no branch.
-  message Detached {}
 }
 
 message Branch {
@@ -1235,8 +1184,6 @@ enum PullRequestState {
   PULL_REQUEST_STATE_CLOSED = 4;
 }
 
-message InfoRequest {}
-
 message InfoResponse {
   // The release of luneta the daemon was built from, as Cargo.toml names it.
   // Every commit is of one release until the next, so `built` is what tells
@@ -1265,8 +1212,6 @@ message InfoResponse {
   // a client older than this field reads it.
   optional uint64 built = 6;
 }
-
-message ListAgentsRequest {}
 
 message ListAgentsResponse {
   // In no order a client can count on.

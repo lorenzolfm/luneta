@@ -73,7 +73,7 @@ impl Sayings {
         let does = match said.0 {
             Does::InTurn(utterance) => Does::InTurn(placed(utterance, sessions)),
             Does::Now(utterance) => Does::Now(placed(utterance, sessions)),
-            Does::Stop(stop) => Does::Stop(stop),
+            Does::Stop(()) => Does::Stop(()),
         };
         self.numbered += 1;
         let say = Some(api::Say { does: Some(does) });
@@ -123,7 +123,7 @@ mod tests {
         let does = sayings.iter().filter_map(|saying| saying.say.as_ref()?.does.as_ref());
         does.map(|does| match does {
             Does::InTurn(utterance) | Does::Now(utterance) => utterance.text.as_str(),
-            Does::Stop(_) => "stop",
+            Does::Stop(()) => "stop",
         })
         .collect()
     }
@@ -172,7 +172,7 @@ mod tests {
         assert!(ToSay::parse(does(" \n\t", None)).is_err());
         assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX + 1), None)).is_err());
         assert!(ToSay::parse(does(&"a".repeat(BYTES_MAX), None)).is_ok());
-        assert!(ToSay::parse(Does::Stop(api::say::Stop {})).is_ok());
+        assert!(ToSay::parse(Does::Stop(())).is_ok());
     }
 
     /// A session's name is said too, and goes in each answer of `Watch`.
