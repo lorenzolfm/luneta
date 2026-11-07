@@ -27,7 +27,7 @@ use lunetad::images::{self, Png};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
-use lunetad::prunes::{self, Goes, Outcome, Plan};
+use lunetad::prunes::{self, Deleting, Plan, Pruned};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::turns::{IntoPanes, IntoTab, OtherTab};
@@ -427,16 +427,17 @@ impl Away {
         Ok(answer.into())
     }
 
-    /// Deletes `goes` of the repository `dir` is in there, as `prunes::deleted`
-    /// does there, and says how each went; or why it did not hear. A question
-    /// that hangs up does not stop it.
-    pub fn prune(&mut self, dir: &Directory, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
-        let request = prunes::told(Some(self.on()), dir, goes);
+    /// Has the repository `dir` is in there planned again, and what would go
+    /// deleted where that is `agreed`, as `prunes::deleted_as_agreed` does there,
+    /// and says what came of that; or why it did not hear. A question that hangs
+    /// up does not stop it.
+    pub fn prune(&mut self, dir: &Directory, agreed: &[Deleting]) -> Result<Pruned, String> {
+        let request = prunes::told(Some(self.on()), dir, agreed);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(prunes::DELETING, async move {
+        let answer = self.answer_of(prunes::PLANNING + prunes::DELETING, async move {
             timeout(patience, daemon.prune(request)).await
         })?;
-        Ok(prunes::outcomes_of(answer))
+        prunes::pruned_of(answer)
     }
 
     /// The one answer of a stream the daemon there answers `asking` with, by

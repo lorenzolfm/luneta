@@ -1029,8 +1029,9 @@ impl Daemon for Host {
         let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
         let here = env::current_dir().ok();
         let answer = late(move || {
-            let plan = prunes::plan(&dir, &occupied, here.as_deref());
-            plan.as_ref().map(PrunesResponse::from).map_err(Status::failed_precondition)
+            let planned = prunes::plan(&dir, &occupied, here.as_deref());
+            let said = planned.map(|planned| PrunesResponse::from(planned.plan()));
+            said.map_err(Status::failed_precondition)
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1041,14 +1042,14 @@ impl Daemon for Host {
         &self,
         request: Request<PruneRequest>,
     ) -> Result<Response<Self::PruneStream>, Status> {
-        let PruneRequest { on, dir, goes } = request.into_inner();
+        let PruneRequest { on, dir, agreed } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let told = PruneRequest { on: None, dir: dir.into(), goes };
+            let told = PruneRequest { on: None, dir: dir.into(), agreed };
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let goes: Vec<prunes::Goes> = goes.into_iter().map(Into::into).collect();
+        let agreed: Vec<prunes::Deleting> = agreed.into_iter().map(Into::into).collect();
         let core = self.core.clone();
         let here = env::current_dir().ok();
         let answer = late(move || {
@@ -1057,9 +1058,9 @@ impl Daemon for Host {
                 let host = host.flatten().ok_or("lunetad's core did not say")?;
                 Occupied::of(&host)
             };
-            let outcomes = prunes::deleted(&dir, &goes, occupied, here.as_deref())
+            let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
                 .map_err(Status::failed_precondition)?;
-            Ok(PruneResponse { outcomes: outcomes.iter().map(Into::into).collect() })
+            Ok(PruneResponse::from(&pruned))
         });
         Ok(Response::new(Box::pin(answer)))
     }

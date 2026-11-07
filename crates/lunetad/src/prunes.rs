@@ -88,29 +88,68 @@ pub struct Unasked {
     pub why: String,
 }
 
+#[derive(Debug)]
+pub struct Planned {
+    plan: Plan,
+    common: String,
+}
+
+impl Planned {
+    #[must_use]
+    pub fn plan(&self) -> &Plan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub fn into_plan(self) -> Plan {
+        self.plan
+    }
+}
+
 /// What one of a plan's worktrees came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub worktree: String,
-    pub gone: bool,
-    pub trouble: Option<String>,
+    pub came: Came,
 }
 
-/// What a plan does, whichever way it is listed and whatever a worktree takes
-/// up, which goes on changing: two plans that say the same are one.
-pub type Deletes<'a> = Vec<(&'a str, &'a str, &'a str, u32, Option<(&'a str, &'a str)>)>;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Came {
+    Gone,
+    WentBut(String),
+    Stays(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pruned {
+    Changed(Plan),
+    Went(Vec<Outcome>),
+}
+
+/// What a plan does of a worktree, whichever way it is listed and whatever a
+/// worktree takes up, which goes on changing: two plans that say the same are
+/// one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Deleting {
+    pub worktree: String,
+    pub branch: String,
+    pub head: String,
+    pub number: u32,
+    pub remote: Option<RemoteBranch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RemoteBranch {
+    pub remote: String,
+    pub branch: String,
+}
 
 impl Plan {
     #[must_use]
-    pub fn deletes(&self) -> Deletes<'_> {
-        let mut deletes: Deletes<'_> = self.goes.iter().map(Goes::does).collect();
+    pub fn deletes(&self) -> Vec<Deleting> {
+        let mut deletes: Vec<Deleting> = self.goes.iter().map(Goes::does).collect();
         deletes.sort_unstable();
         deletes
-    }
-
-    #[must_use]
-    pub fn same_as(&self, other: &Plan) -> bool {
-        self.deletes() == other.deletes()
     }
 
     /// The name the repository goes by: its directory's.
@@ -121,12 +160,20 @@ impl Plan {
 }
 
 impl Goes {
-    fn does(&self) -> (&str, &str, &str, u32, Option<(&str, &str)>) {
-        let pushed = match &self.pushed {
-            Pushed::Goes { remote, branch } => Some((remote.as_str(), branch.as_str())),
+    fn does(&self) -> Deleting {
+        let remote = match &self.pushed {
+            Pushed::Goes { remote, branch } => {
+                Some(RemoteBranch { remote: remote.clone(), branch: branch.clone() })
+            },
             Pushed::Nowhere | Pushed::Stays(_) => None,
         };
-        (&self.worktree, &self.branch, &self.head, self.number, pushed)
+        Deleting {
+            worktree: self.worktree.clone(),
+            branch: self.branch.clone(),
+            head: self.head.clone(),
+            number: self.number,
+            remote,
+        }
     }
 }
 
@@ -423,7 +470,7 @@ fn bytes_of(worktree: &str) -> Option<u64> {
 /// What deleting the merged worktrees of the repository `dir` is in deletes,
 /// where the panes and agents of this machine work as `occupied` says, and this
 /// runs in `here`. Or why it cannot tell: nothing is deleted then.
-pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Plan, String> {
+pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Planned, String> {
     let common = common_of(dir)?;
     let repository = git::holder(&common)
         .ok_or_else(|| format!("no directory holds the repository {common}"))?;
@@ -485,7 +532,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
     }
     goes.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.worktree.cmp(&b.worktree)));
     plan.goes = goes;
-    Ok(plan)
+    Ok(Planned { plan, common })
 }
 
 type Going<'a> = (OnBranch<'a>, Pulled, Option<(String, String)>);
@@ -532,29 +579,43 @@ fn sorted_out<'a>(
     Ok(going)
 }
 
-/// Deletes each of `goes`, of the repository `dir` is in, where it stands as
-/// it did for the plan, whichever way the others go. `occupied` says where the
-/// panes and the agents work just before each.
+/// Deletes each of what `planned` lists, where it stands as it did for the
+/// plan, whichever way the others go. `occupied` says where the panes and the
+/// agents work just before each.
 pub fn deleted(
-    dir: &Directory,
-    goes: &[Goes],
+    planned: Planned,
     occupied: impl Fn() -> Result<Occupied, String>,
     here: Option<&Path>,
-) -> Result<Vec<Outcome>, String> {
-    let common = common_of(dir)?;
-    Ok(goes
-        .iter()
-        .map(|goes| {
-            let (gone, trouble) = match removed(&common, goes, &occupied, here) {
-                Ok(()) => match branch_deleted(&common, goes) {
-                    Ok(()) => (true, None),
-                    Err(why) => (true, Some(why)),
-                },
-                Err(why) => (false, Some(why)),
-            };
-            Outcome { worktree: goes.worktree.clone(), gone, trouble }
-        })
-        .collect())
+) -> Vec<Outcome> {
+    let Planned { plan, common } = planned;
+    let outcome = |goes: Goes| {
+        let came = match removed(&common, &goes, &occupied, here) {
+            Ok(()) => match branch_deleted(&common, &goes) {
+                Ok(()) => Came::Gone,
+                Err(why) => Came::WentBut(why),
+            },
+            Err(why) => Came::Stays(why),
+        };
+        Outcome { worktree: goes.worktree, came }
+    };
+    plan.goes.into_iter().map(outcome).collect()
+}
+
+/// Plans again in the repository `dir` is in, and deletes that where it deletes
+/// just `agreed`, as `Plan::deletes` lists it; else it says what it would delete
+/// now, and deletes nothing.
+pub fn deleted_as_agreed(
+    dir: &Directory,
+    agreed: &[Deleting],
+    occupied: impl Fn() -> Result<Occupied, String>,
+    here: Option<&Path>,
+) -> Result<Pruned, String> {
+    let now = occupied().map_err(|why| format!("luneta cannot tell its panes: {why}"))?;
+    let planned = plan(dir, &now, here)?;
+    if planned.plan.deletes() != agreed {
+        return Ok(Pruned::Changed(planned.plan));
+    }
+    Ok(Pruned::Went(deleted(planned, occupied, here)))
 }
 
 fn removed(
@@ -689,24 +750,82 @@ impl From<PrunesResponse> for Plan {
     }
 }
 
-impl From<&Outcome> for api::prune_response::Outcome {
-    fn from(outcome: &Outcome) -> Self {
-        api::prune_response::Outcome {
-            worktree: outcome.worktree.clone(),
-            gone: outcome.gone,
-            trouble: outcome.trouble.clone(),
+impl From<&Deleting> for api::prune_request::Deleting {
+    fn from(deleting: &Deleting) -> Self {
+        let remote = deleting.remote.as_ref().map(|far| api::prunes_response::RemoteBranch {
+            remote: far.remote.clone(),
+            branch: far.branch.clone(),
+        });
+        api::prune_request::Deleting {
+            worktree: deleting.worktree.clone(),
+            branch: deleting.branch.clone(),
+            head: deleting.head.clone(),
+            number: deleting.number,
+            remote,
         }
     }
 }
 
-#[must_use]
-pub fn outcomes_of(said: PruneResponse) -> Vec<Outcome> {
-    let outcomes = said.outcomes.into_iter().map(|outcome| Outcome {
-        worktree: outcome.worktree,
-        gone: outcome.gone,
-        trouble: outcome.trouble,
-    });
-    outcomes.collect()
+impl From<api::prune_request::Deleting> for Deleting {
+    fn from(said: api::prune_request::Deleting) -> Self {
+        let remote =
+            said.remote.map(|far| RemoteBranch { remote: far.remote, branch: far.branch });
+        Deleting {
+            worktree: said.worktree,
+            branch: said.branch,
+            head: said.head,
+            number: said.number,
+            remote,
+        }
+    }
+}
+
+impl From<&Pruned> for PruneResponse {
+    fn from(pruned: &Pruned) -> Self {
+        use api::prune_response::outcome::Came as SaidCame;
+        use api::prune_response::{Answer, Outcomes};
+        let said = |outcome: &Outcome| api::prune_response::Outcome {
+            worktree: outcome.worktree.clone(),
+            came: Some(match &outcome.came {
+                Came::Gone => SaidCame::Gone(()),
+                Came::WentBut(why) => SaidCame::WentBut(why.clone()),
+                Came::Stays(why) => SaidCame::Stays(why.clone()),
+            }),
+        };
+        let answer = match pruned {
+            Pruned::Changed(plan) => Answer::Changed(plan.into()),
+            Pruned::Went(outcomes) => {
+                Answer::Deleted(Outcomes { outcomes: outcomes.iter().map(said).collect() })
+            },
+        };
+        PruneResponse { answer: Some(answer) }
+    }
+}
+
+/// What a daemon said came of a `Prune`, or that it does not read: one that says
+/// nothing of a worktree may have deleted it all the same.
+pub fn pruned_of(said: PruneResponse) -> Result<Pruned, String> {
+    use api::prune_response::Answer;
+    match said.answer {
+        Some(Answer::Changed(plan)) => Ok(Pruned::Changed(plan.into())),
+        Some(Answer::Deleted(deleted)) => {
+            let outcomes = deleted.outcomes.into_iter().map(outcome_of);
+            outcomes.collect::<Result<_, _>>().map(Pruned::Went)
+        },
+        None => Err("lunetad's answer says nothing of how it went".to_owned()),
+    }
+}
+
+fn outcome_of(said: api::prune_response::Outcome) -> Result<Outcome, String> {
+    use api::prune_response::outcome::Came as SaidCame;
+    let worktree = said.worktree;
+    let came = match said.came {
+        Some(SaidCame::Gone(())) => Came::Gone,
+        Some(SaidCame::WentBut(why)) => Came::WentBut(why),
+        Some(SaidCame::Stays(why)) => Came::Stays(why),
+        None => return Err(format!("lunetad's answer says nothing of how {worktree} went")),
+    };
+    Ok(Outcome { worktree, came })
 }
 
 /// The question that has the daemon of the machine `on` names say what would
@@ -716,13 +835,14 @@ pub fn asked(on: Option<On>, dir: &Directory) -> PrunesRequest {
     PrunesRequest { on, dir: dir.as_str().to_owned() }
 }
 
-/// The question that has that daemon delete `goes`.
+/// The question that has that daemon delete what would go, where that is
+/// `agreed`.
 #[must_use]
-pub fn told(on: Option<On>, dir: &Directory, goes: &[Goes]) -> PruneRequest {
+pub fn told(on: Option<On>, dir: &Directory, agreed: &[Deleting]) -> PruneRequest {
     PruneRequest {
         on,
         dir: dir.as_str().to_owned(),
-        goes: goes.iter().map(Into::into).collect(),
+        agreed: agreed.iter().map(Into::into).collect(),
     }
 }
 
@@ -751,16 +871,17 @@ mod tests {
         let (a, b) =
             (|bytes| goes("/w/a", Pushed::Nowhere, bytes), goes("/w/b", Pushed::Nowhere, None));
         let plan = plan_of(vec![a(Some(9)), b.clone()]);
-        assert!(plan.same_as(&plan_of(vec![b.clone(), a(Some(1))])));
-        assert!(!plan.same_as(&plan_of(vec![a(Some(9))])));
+        assert_eq!(plan.deletes(), plan_of(vec![b.clone(), a(Some(1))]).deletes());
+        assert_ne!(plan.deletes(), plan_of(vec![a(Some(9))]).deletes());
         let remote = || Pushed::Goes { remote: "origin".to_owned(), branch: "fix".to_owned() };
         let pushed = plan_of(vec![goes("/w/a", remote(), None)]);
         let stays = |why: &str| plan_of(vec![goes("/w/a", Pushed::Stays(why.to_owned()), None)]);
-        assert!(!pushed.same_as(&stays("moved")));
-        assert!(stays("moved").same_as(&stays("no agent")));
-        assert!(stays("moved").same_as(&plan_of(vec![goes("/w/a", Pushed::Nowhere, None)])));
+        assert_ne!(pushed.deletes(), stays("moved").deletes());
+        assert_eq!(stays("moved").deletes(), stays("no agent").deletes());
+        let nowhere = plan_of(vec![goes("/w/a", Pushed::Nowhere, None)]);
+        assert_eq!(stays("moved").deletes(), nowhere.deletes());
         let moved = Goes { head: "def".to_owned(), ..goes("/w/a", Pushed::Nowhere, None) };
-        assert!(!plan_of(vec![moved]).same_as(&stays("moved")));
+        assert_ne!(plan_of(vec![moved]).deletes(), stays("moved").deletes());
     }
 
     /// The first it lists is the main one, a bare repository's too, which has
@@ -897,9 +1018,30 @@ mod tests {
         let unasked = vec![Unasked { worktree: "/w/e".to_owned(), why: "gh".to_owned() }];
         let plan = Plan { repository: "/w".to_owned(), goes, kept, unasked };
         assert_eq!(Plan::from(PrunesResponse::from(&plan)), plan);
-        let outcome =
-            Outcome { worktree: "/w/a".to_owned(), gone: true, trouble: Some("x".to_owned()) };
-        let said = PruneResponse { outcomes: vec![(&outcome).into()] };
-        assert_eq!(outcomes_of(said), [outcome]);
+        let agreed = plan.deletes();
+        let dir = Directory::parse("/w".to_owned()).unwrap();
+        let said = told(None, &dir, &agreed).agreed.into_iter().map(Into::into);
+        assert_eq!(said.collect::<Vec<Deleting>>(), agreed);
+        let outcome = |worktree: &str, came| Outcome { worktree: worktree.to_owned(), came };
+        let went = Pruned::Went(vec![
+            outcome("/w/a", Came::Gone),
+            outcome("/w/b", Came::WentBut("x".to_owned())),
+            outcome("/w/c", Came::Stays("y".to_owned())),
+        ]);
+        assert_eq!(pruned_of(PruneResponse::from(&went)).as_ref(), Ok(&went));
+        let changed = Pruned::Changed(plan);
+        assert_eq!(pruned_of(PruneResponse::from(&changed)).as_ref(), Ok(&changed));
+    }
+
+    #[test]
+    fn an_answer_that_says_nothing_of_how_it_went_does_not_read() {
+        use api::prune_response::{Answer, Outcome, Outcomes};
+        assert!(pruned_of(PruneResponse { answer: None }).is_err());
+        let outcomes = vec![Outcome { worktree: "/w/a".to_owned(), came: None }];
+        let answer = Some(Answer::Deleted(Outcomes { outcomes }));
+        assert_eq!(
+            pruned_of(PruneResponse { answer }),
+            Err("lunetad's answer says nothing of how /w/a went".to_owned())
+        );
     }
 }

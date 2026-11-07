@@ -9,7 +9,7 @@ use std::process::Output;
 
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{On, PrunesRequest};
-use lunetad::prunes::{self, Goes, Plan, Pushed};
+use lunetad::prunes::{self, Came, Deleting, Goes, Plan, Pruned, Pushed, RemoteBranch};
 use lunetad::Directory;
 use serde_json::json;
 use tonic::Code;
@@ -443,6 +443,56 @@ fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
     assert!(!listed.contains("delete "), "{listed}");
 }
 
+#[test]
+fn the_daemon_deletes_only_what_it_would_plan_itself() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    repository.pushed("wip");
+    git(&repository.at("wip"), &["commit", "-q", "--allow-empty", "-m", "unpushed"]);
+    let unpushed = said_by(&repository.at("wip"), &["rev-parse", "HEAD"]);
+    let head = repository.pushed("one");
+    host.gh.open("one", &merged(1, &head, "me"));
+    git(&repository.up, &["branch", "other", &head]);
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = lunetad::connect(&folder).await.unwrap();
+        let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
+        let deleting = |name: &str, head: &str, remote: Option<&str>| Deleting {
+            worktree: repository.at(name).display().to_string(),
+            branch: name.to_owned(),
+            head: head.to_owned(),
+            number: 1,
+            remote: remote.map(|branch| RemoteBranch {
+                remote: "origin".to_owned(),
+                branch: branch.to_owned(),
+            }),
+        };
+        for agreed in [
+            vec![deleting("wip", &unpushed, None)],
+            vec![deleting("one", &head, Some("other"))],
+            vec![deleting("one", &head, Some("one")), deleting("wip", &unpushed, None)],
+        ] {
+            let told = prunes::told(None, &main, &agreed);
+            let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+            let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
+            let Pruned::Changed(plan) = pruned else {
+                panic!("it deleted {agreed:?}: {pruned:?}");
+            };
+            assert_eq!(plan.deletes(), [deleting("one", &head, Some("one"))]);
+        }
+    });
+    assert!(repository.at("wip").join(".git").is_file(), "it deleted a worktree it did not list");
+    assert!(repository.on_clone("wip"), "it deleted a branch with an unpushed commit");
+    assert!(repository.at("one").join(".git").is_file());
+    assert!(repository.on_origin("one") && repository.on_origin("other"));
+}
+
 /// A far row's `d m` is planned and deleted on the row's machine, through the
 /// daemon luneta watches: git and gh run there, and what the panes there say.
 #[test]
@@ -480,13 +530,13 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert_eq!(pushed, &origin);
         assert_eq!(here.gh.asked(), [] as [String; 0]);
 
-        let told = prunes::told(on(), &main, &plan.goes);
+        let told = prunes::told(on(), &main, &plan.deletes());
         let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
-        let outcomes = prunes::outcomes_of(answer.unwrap().unwrap());
-        assert!(
-            outcomes.iter().all(|outcome| outcome.gone && outcome.trouble.is_none()),
-            "{outcomes:?}"
-        );
+        let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
+        let Pruned::Went(outcomes) = pruned else {
+            panic!("it deleted nothing: {pruned:?}");
+        };
+        assert!(outcomes.iter().all(|outcome| outcome.came == Came::Gone), "{outcomes:?}");
         assert!(!repository.at("one").exists());
         assert!(!repository.on_origin("one"));
         assert!(repository.at("paned").exists());

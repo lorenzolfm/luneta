@@ -158,8 +158,8 @@ pub enum Event {
     Pulled { menu: u64, found: Result<Found, String> },
     /// What `d m` of the menu numbered `menu` would delete.
     Prunes { menu: u64, plan: Result<prunes::Plan, String> },
-    /// How deleting what `d m` of the menu numbered `menu` was told to went.
-    Pruned { menu: u64, outcomes: Result<Vec<prunes::Outcome>, String> },
+    /// What came of what `d m` of the menu numbered `menu` was told to delete.
+    Pruned { menu: u64, pruned: Result<prunes::Pruned, String> },
     /// What the pane of the menu numbered `menu` printed after its last
     /// command's line, as luneta kept it, or why it kept nothing.
     Printed { menu: u64, printed: Result<Printed, String> },
@@ -1341,7 +1341,10 @@ impl App {
                 let asked = self.sidebar.prunes(menu, plan);
                 self.follow(asked);
             },
-            Event::Pruned { menu, outcomes } => self.sidebar.pruned(menu, outcomes),
+            Event::Pruned { menu, pruned } => {
+                let asked = self.sidebar.pruned(menu, pruned);
+                self.follow(asked);
+            },
             Event::Briefed { number, written } => {
                 if let Some(Over::Brief(briefing)) = &mut self.focus.over
                     && briefing.number() == number
@@ -2176,8 +2179,8 @@ impl App {
                 pull::prepare(menu, on, work, wanted, worked, others, &self.events);
             },
             Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
-            Asked::Prune { menu, on, dir, goes } => {
-                prune::delete(menu, on, dir, goes, &self.events);
+            Asked::Prune { menu, on, dir, agreed } => {
+                prune::delete(menu, on, dir, agreed, &self.events);
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });

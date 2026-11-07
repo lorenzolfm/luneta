@@ -958,9 +958,9 @@ pub enum Asked {
     /// What deleting the merged worktrees of the repository `dir` is in, on
     /// `on`, deletes, for the menu numbered `menu`.
     Prunes { menu: u64, on: Machine, dir: Directory },
-    /// `goes`, of the repository `dir` is in, on `on`, deleted, for the menu
-    /// numbered `menu`.
-    Prune { menu: u64, on: Machine, dir: Directory, goes: Vec<prunes::Goes> },
+    /// What would go of the repository `dir` is in, on `on`, deleted where that
+    /// is `agreed`, for the menu numbered `menu`.
+    Prune { menu: u64, on: Machine, dir: Directory, agreed: Vec<prunes::Deleting> },
     /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
     /// Take the focus from zellij, as a click on the sidebar does.
@@ -3127,7 +3127,7 @@ impl Sidebar {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
-            Wants::Prune { dir, goes } => Asked::Prune { menu: number, on, dir, goes },
+            Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
                 Asked::Closes { menu: number, on, session: session.name, pane }
             },
@@ -3154,26 +3154,33 @@ impl Sidebar {
             return Asked::Nothing;
         };
         if let Ok(plan) = &plan {
-            for unasked in &plan.unasked {
-                log::say(&format!("{}: {}", unasked.worktree, unasked.why));
-            }
+            log_unasked(plan);
         }
         self.menu_did(waiting.swept(plan))
     }
 
-    /// `d m` of the menu numbered `menu` deleted what it was told to, as
-    /// `outcomes` says, or why it did not hear how that went. The menu closes,
-    /// while it waits on it, and a note says what stays.
-    pub fn pruned(&mut self, menu: u64, outcomes: Result<Vec<prunes::Outcome>, String>) {
-        self.menu.take_if(|it| it.number() == menu && it.pruning());
-        match outcomes {
-            Ok(outcomes) => {
+    /// `d m` of the menu numbered `menu` heard what came of what it was told to
+    /// delete, as `pruned` says, or why it did not hear. Where what would go has
+    /// changed, nothing went, and it lists that again, while it waits on it. Else
+    /// the menu closes, while it waits on it, and a note says what stays.
+    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+        let waiting = self.menu.take_if(|it| it.number() == menu && it.pruning());
+        match pruned {
+            Ok(prunes::Pruned::Changed(plan)) => {
+                log_unasked(&plan);
+                if let Some(waiting) = waiting {
+                    return self.menu_did(waiting.changed(plan));
+                }
+                self.say("menu: nothing deleted: what would go changed".to_owned());
+            },
+            Ok(prunes::Pruned::Went(outcomes)) => {
                 if let Some(note) = prune::note(&outcomes) {
                     self.say(note);
                 }
             },
             Err(why) => self.say(format!("menu: it may have deleted some worktrees: {why}")),
         }
+        Asked::Nothing
     }
 
     /// luneta found where the key of the menu numbered `menu`, for a pull
@@ -4712,6 +4719,12 @@ impl<'a> Finder<'a> {
             });
         let fit = (exact, other.map_or(score, |other| score.max(other)));
         Some((fit, if lit { hits } else { Vec::new() }))
+    }
+}
+
+fn log_unasked(plan: &prunes::Plan) {
+    for unasked in &plan.unasked {
+        log::say(&format!("{}: {}", unasked.worktree, unasked.why));
     }
 }
 
@@ -9588,9 +9601,10 @@ mod tests {
         assert_eq!(rule(true), ACCENT);
     }
 
-    /// `d m` on a far row asks that machine what it would delete, and has it
-    /// delete that once you say yes, as `y` plans it again first. What stays is
-    /// said in a note, and what went wrong too, once the menu has been closed.
+    /// `d m` on a far row asks that machine what it would delete, and `y` tells
+    /// it what you agreed to. Where it would delete something else now, the menu
+    /// lists that, or a note says nothing went once the menu has been closed.
+    /// What stays is said in a note too.
     #[test]
     fn d_m_on_a_far_row_goes_by_that_machine_and_a_note_says_what_stays() {
         let mut host = machines();
@@ -9630,12 +9644,25 @@ mod tests {
         };
         assert_eq!(sidebar.prunes(number + 1, Ok(plan.clone())), Asked::Nothing);
         assert_eq!(sidebar.prunes(number, Ok(plan.clone())), Asked::Nothing);
-        assert_eq!(sidebar.key(&char('y'), now), asks);
-        let deletes = Asked::Prune { menu: number, on, dir, goes: plan.goes.clone() };
-        assert_eq!(sidebar.prunes(number, Ok(plan)), deletes);
-        let trouble = Some("it has a pane".to_owned());
-        let stays = prunes::Outcome { worktree: goes.worktree, gone: false, trouble };
-        sidebar.pruned(number, Ok(vec![stays]));
+        let deletes = Asked::Prune { menu: number, on, dir, agreed: plan.deletes() };
+        assert_eq!(sidebar.key(&char('y'), now), deletes);
+        assert!(sidebar.menu.as_ref().expect("the menu").pruning());
+        let changed = Ok(prunes::Pruned::Changed(plan.clone()));
+        assert_eq!(sidebar.pruned(number, changed.clone()), Asked::Nothing);
+        assert!(!sidebar.menu.as_ref().expect("the menu").pruning());
+        assert_eq!(sidebar.key(&char('y'), now), deletes);
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), now);
+        assert_eq!(sidebar.pruned(number, changed), Asked::Nothing);
+        let note = "menu: nothing deleted: what would go changed";
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+        sidebar.key(&char('d'), now);
+        let number = sidebar.menu.as_ref().expect("the menu").number();
+        sidebar.key(&char('m'), now);
+        sidebar.prunes(number, Ok(plan));
+        sidebar.key(&char('y'), now);
+        let came = prunes::Came::Stays("it has a pane".to_owned());
+        let stays = prunes::Outcome { worktree: goes.worktree, came };
+        assert_eq!(sidebar.pruned(number, Ok(prunes::Pruned::Went(vec![stays]))), Asked::Nothing);
         assert!(sidebar.menu.is_none());
         let note = "menu: deleted 0 of 1 worktrees; one stays: it has a pane";
         assert_eq!(sidebar.notice.as_deref(), Some(note));

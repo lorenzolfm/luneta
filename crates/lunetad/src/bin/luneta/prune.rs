@@ -9,7 +9,9 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use lunetad::asks::Turn;
-use lunetad::prunes::{self, Goes, Occupied, Outcome, Plan, Pushed, name_of};
+use lunetad::prunes::{
+    self, Came, Deleting, Goes, Occupied, Outcome, Plan, Planned, Pruned, Pushed, name_of,
+};
 use lunetad::Directory;
 
 use crate::away::{self, Away};
@@ -39,11 +41,12 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Err(why) => return failed(&untold(&why)),
     };
     let here = env::current_dir().ok();
-    let plan = match prunes::plan(&dir, &occupied, here.as_deref()) {
-        Ok(plan) => plan,
+    let planned = match prunes::plan(&dir, &occupied, here.as_deref()) {
+        Ok(planned) => planned,
         Err(why) => return failed(&why),
     };
-    for line in listed(&plan) {
+    let plan = planned.plan();
+    for line in listed(plan) {
         println!("{line}");
     }
     if plan.goes.is_empty() {
@@ -56,17 +59,14 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
             "{name}: no merged worktree to delete of those it could ask about"
         ));
     }
-    let agreed = Agreed::of_prune(&plan, turn.map(Turn::key));
+    let agreed = Agreed::of_prune(plan, turn.map(Turn::key));
     let takes = match turn {
         None => Some(agreed),
-        Some(turn) => turn.before().map(|before| Agreed::of_prune(&plan, Some(before))),
+        Some(turn) => turn.before().map(|before| Agreed::of_prune(plan, Some(before))),
     };
     if yes.is_some() && yes == takes {
         let occupied = || commands::occupied(folder);
-        return match prunes::deleted(&dir, &plan.goes, occupied, here.as_deref()) {
-            Ok(outcomes) => said_of(&outcomes),
-            Err(why) => failed(&why),
-        };
+        return said_of(&prunes::deleted(planned, occupied, here.as_deref()));
     }
     eprintln!("luneta: {}", unagreed(yes, agreed));
     ExitCode::from(PLANNED)
@@ -100,15 +100,15 @@ fn said_of(outcomes: &[Outcome]) -> ExitCode {
     let mut well = true;
     for outcome in outcomes {
         let name = name_of(&outcome.worktree);
-        match (outcome.gone, &outcome.trouble) {
-            (true, None) => println!("deleted {name}"),
-            (true, Some(why)) => {
+        match &outcome.came {
+            Came::Gone => println!("deleted {name}"),
+            Came::WentBut(why) => {
                 println!("deleted {name}");
                 eprintln!("luneta: {name}: {why}");
                 well = false;
             },
-            (false, why) => {
-                eprintln!("luneta: {name} stays: {}", why.as_deref().unwrap_or("git said nothing"));
+            Came::Stays(why) => {
+                eprintln!("luneta: {name} stays: {why}");
                 well = false;
             },
         }
@@ -175,7 +175,8 @@ fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
     match on {
         Machine::Local => {
             let here = env::current_dir().ok();
-            prunes::plan(dir, &local_occupied().map_err(|why| untold(&why))?, here.as_deref())
+            let occupied = local_occupied().map_err(|why| untold(&why))?;
+            prunes::plan(dir, &occupied, here.as_deref()).map(Planned::into_plan)
         },
         Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.prunes(dir),
     }
@@ -186,21 +187,27 @@ fn local_occupied() -> Result<Occupied, String> {
     commands::occupied(&folder)
 }
 
-/// Deletes `goes` of the repository `dir` is in, on the machine `on`, for the
-/// menu numbered `menu`, on a thread of its own, and hands back how each went,
-/// as `Due` does.
-pub fn delete(menu: u64, on: Machine, dir: Directory, goes: Vec<Goes>, events: &Sender<Event>) {
-    let due = Due::new(events, move |outcomes| Event::Pruned { menu, outcomes });
-    thread::spawn(move || due.pay(deleted(&on, &dir, &goes)));
+/// Deletes what would go of the repository `dir` is in, on the machine `on`,
+/// where that is `agreed`, for the menu numbered `menu`, on a thread of its own,
+/// and hands back what came of that, as `Due` does.
+pub fn delete(
+    menu: u64,
+    on: Machine,
+    dir: Directory,
+    agreed: Vec<Deleting>,
+    events: &Sender<Event>,
+) {
+    let due = Due::new(events, move |pruned| Event::Pruned { menu, pruned });
+    thread::spawn(move || due.pay(deleted(&on, &dir, &agreed)));
 }
 
-fn deleted(on: &Machine, dir: &Directory, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
+fn deleted(on: &Machine, dir: &Directory, agreed: &[Deleting]) -> Result<Pruned, String> {
     match on {
         Machine::Local => {
             let here = env::current_dir().ok();
-            prunes::deleted(dir, goes, local_occupied, here.as_deref())
+            prunes::deleted_as_agreed(dir, agreed, local_occupied, here.as_deref())
         },
-        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.prune(dir, goes),
+        Machine::Remote(destination) => Away::reach(destination, away::ANSWER)?.prune(dir, agreed),
     }
 }
 
@@ -208,21 +215,21 @@ fn deleted(on: &Machine, dir: &Directory, goes: &[Goes]) -> Result<Vec<Outcome>,
 /// and why.
 pub fn note(outcomes: &[Outcome]) -> Option<String> {
     let mut stays: Vec<String> = Vec::new();
+    let mut gone = 0;
     for outcome in outcomes {
         let name = name_of(&outcome.worktree);
-        match (outcome.gone, &outcome.trouble) {
-            (true, None) => {},
-            (true, Some(why)) => stays.push(format!("{name} went, but {why}")),
-            (false, why) => {
-                let why = why.as_deref().unwrap_or("git said nothing");
-                stays.push(format!("{name} stays: {why}"));
+        match &outcome.came {
+            Came::Gone => gone += 1,
+            Came::WentBut(why) => {
+                gone += 1;
+                stays.push(format!("{name} went, but {why}"));
             },
+            Came::Stays(why) => stays.push(format!("{name} stays: {why}")),
         }
     }
     if stays.is_empty() {
         return None;
     }
-    let gone = outcomes.iter().filter(|outcome| outcome.gone).count();
     Some(format!("menu: deleted {gone} of {} worktrees; {}", outcomes.len(), stays.join("; ")))
 }
 
@@ -242,19 +249,18 @@ mod tests {
         assert_eq!(size(1024 * MIB), "1.0 GB");
     }
 
-    fn outcome(name: &str, gone: bool, trouble: Option<&str>) -> Outcome {
-        let trouble = trouble.map(str::to_owned);
-        Outcome { worktree: format!("/w/{name}"), gone, trouble }
+    fn outcome(name: &str, came: Came) -> Outcome {
+        Outcome { worktree: format!("/w/{name}"), came }
     }
 
     /// A note says which stayed and why, and none where everything went.
     #[test]
     fn a_note_names_what_stays() {
-        assert_eq!(note(&[outcome("a", true, None)]), None);
+        assert_eq!(note(&[outcome("a", Came::Gone)]), None);
         let said = note(&[
-            outcome("a", true, None),
-            outcome("b", false, Some("it has a pane")),
-            outcome("c", true, Some("its branch on origin stays: no key")),
+            outcome("a", Came::Gone),
+            outcome("b", Came::Stays("it has a pane".to_owned())),
+            outcome("c", Came::WentBut("its branch on origin stays: no key".to_owned())),
         ]);
         let want = "menu: deleted 2 of 3 worktrees; b stays: it has a pane; c went, but its branch \
                     on origin stays: no key";

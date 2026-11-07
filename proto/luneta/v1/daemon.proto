@@ -177,10 +177,11 @@ service Daemon {
   // seconds after the question. While the daemon has yet to list every pane, or
   // the directory is in no repository, it answers with why not.
   rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
-  // Deletes what `Prunes` said should go, each worktree in turn, and says how
-  // each went. One that changed since stays, and git may refuse one: the others
-  // go. It answers once, as `Prunes` does, and a question that hangs up does not
-  // stop it.
+  // Plans again, and where it would delete just what it is told was agreed,
+  // deletes that, each worktree in turn, and says how each went. Else it says
+  // what it would delete now, and deletes nothing. One that changes as it goes
+  // stays, and git may refuse one: the others go. It answers once, as `Prunes`
+  // does, and a question that hangs up does not stop it.
   rpc Prune(PruneRequest) returns (stream PruneResponse);
 }
 
@@ -1440,17 +1441,39 @@ message PruneRequest {
   // A directory of the repository, by its absolute path: one by another path is
   // invalid.
   string dir = 2;
-  repeated PrunesResponse.Goes goes = 3;
+  // What you said yes to, by worktree.
+  repeated Deleting agreed = 3;
+
+  message Deleting {
+    string worktree = 1;
+    string branch = 2;
+    string head = 3;
+    uint32 number = 4;
+    // Its branch on its push remote, where that goes with it.
+    PrunesResponse.RemoteBranch remote = 5;
+  }
 }
 
 message PruneResponse {
-  repeated Outcome outcomes = 1;
+  oneof answer {
+    // What it would delete now, which is not what was agreed: nothing went.
+    PrunesResponse changed = 1;
+    Outcomes deleted = 2;
+  }
+
+  message Outcomes {
+    repeated Outcome outcomes = 1;
+  }
 
   message Outcome {
     string worktree = 1;
-    // Whether the worktree went.
-    bool gone = 2;
-    // What stays of it, and why, where anything does.
-    optional string trouble = 3;
+    oneof came {
+      // It went, with all that was to go with it.
+      google.protobuf.Empty gone = 2;
+      // It went, and what stays of its branches, and why.
+      string went_but = 3;
+      // It stays, and why.
+      string stays = 4;
+    }
   }
 }

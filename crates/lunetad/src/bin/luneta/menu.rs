@@ -1231,8 +1231,9 @@ pub enum Wants {
     /// What deleting the merged worktrees of the repository `dir` is in
     /// deletes, for `prunes`.
     Prunes { dir: Directory },
-    /// `goes`, of the repository `dir` is in, deleted, for `pruned`.
-    Prune { dir: Directory, goes: Vec<prunes::Goes> },
+    /// What would go of the repository `dir` is in deleted where that is
+    /// `agreed`, for `pruned`.
+    Prune { dir: Directory, agreed: Vec<prunes::Deleting> },
     /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
     /// to take its client there: from its pane `pane`, the menu's row's,
     /// which it takes the client to first, for a tab of a session it is
@@ -1326,15 +1327,14 @@ enum Stage {
     /// what it asks.
     Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
     /// `d m` waits to hear what deleting the merged worktrees of the repository
-    /// `dir` is in deletes, before it asks, and again before it goes ahead once
-    /// you said yes to `agreed`, what it listed. Keys do nothing but close the
-    /// menu.
-    Sweeping { keys: Keys, dir: Directory, agreed: Option<prunes::Plan> },
+    /// `dir` is in deletes, before it asks. Keys do nothing but close the menu.
+    Sweeping { keys: Keys, dir: Directory },
     /// What `d m` would delete, for you to say yes to.
     Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
-    /// `d m` deletes the `count` worktrees you said yes to. Keys do nothing but
-    /// close the menu, which does not stop it.
-    Pruning { keys: Keys, count: usize },
+    /// `d m` deletes the `count` worktrees you said yes to, of the repository
+    /// `dir` is in, or hears that what would go changed. Keys do nothing but close
+    /// the menu, which does not stop it.
+    Pruning { keys: Keys, dir: Directory, count: usize },
     /// zellij opens what a key asked for, in `session`, for luneta to take
     /// its client there. Keys do nothing but close the menu.
     Opening { keys: Keys, session: Listed },
@@ -1612,7 +1612,7 @@ impl Menu {
                 },
                 Pressed::Prune(dir) => {
                     let wants = Wants::Prunes { dir: dir.clone() };
-                    stays(Stage::Sweeping { keys, dir, agreed: None }, wants)
+                    stays(Stage::Sweeping { keys, dir }, wants)
                 },
                 Pressed::Forget(Machine::Remote(destination)) => {
                     Did::Closed(Done::Forget(destination))
@@ -1685,8 +1685,8 @@ impl Menu {
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Swept { keys, dir, plan } => match answer(key, DELETE_MERGED) {
                 Answer::Yes if !plan.goes.is_empty() => {
-                    let wants = Wants::Prunes { dir: dir.clone() };
-                    stays(Stage::Sweeping { keys, dir, agreed: Some(plan) }, wants)
+                    let wants = Wants::Prune { dir: dir.clone(), agreed: plan.deletes() };
+                    stays(Stage::Pruning { keys, dir, count: plan.goes.len() }, wants)
                 },
                 Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
@@ -1764,23 +1764,26 @@ impl Menu {
     }
 
     /// What `d m` does, now that it heard what it would delete, as `plan` says,
-    /// or why it did not: lists it for you to say yes to. Going ahead after you
-    /// said yes deletes what you were asked about, and once that changed while
-    /// you read, it lists it again.
+    /// or why it did not: lists it for you to say yes to.
     pub fn swept(self, plan: Result<prunes::Plan, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Sweeping { keys, dir, agreed } = stage else {
+        let Stage::Sweeping { keys, dir } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let plan = match plan {
             Ok(plan) => plan,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: nothing deleted: {why}"))),
         };
-        if agreed.is_some_and(|agreed| agreed.same_as(&plan)) {
-            let stage = Stage::Pruning { keys, count: plan.goes.len() };
-            let wants = Wants::Prune { dir, goes: plan.goes };
-            return Did::Stays(Menu { number, target, stage }, wants);
-        }
+        Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
+    }
+
+    /// What `d m` does, now that what it would delete has changed from what you
+    /// said yes to, as `plan` says, and nothing went: lists it again.
+    pub fn changed(self, plan: prunes::Plan) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Pruning { keys, dir, .. } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
         Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
     }
 
@@ -2081,7 +2084,7 @@ impl Menu {
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
-            Stage::Pruning { keys, count } => {
+            Stage::Pruning { keys, count, .. } => {
                 let doing = format!("Deleting {}…", merged_worktrees(*count));
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 let repository = self.target.repository_name().to_owned();
@@ -3309,9 +3312,9 @@ mod tests {
         );
     }
 
-    /// `y`, or the key again, plans it again and deletes what you were asked
-    /// about, on the row's machine; once that changed, it lists it again.
-    /// Nothing goes at the first answer, nor on any other key.
+    /// `y`, or the key again, tells the row's machine what you were asked about;
+    /// once that changed, it lists it again. Nothing goes at the first answer,
+    /// nor on any other key.
     #[test]
     fn the_list_goes_ahead_on_yes_with_what_it_listed_alone() {
         let (one, two) = (("one", 1, 5), ("two", 2, 5));
@@ -3323,10 +3326,8 @@ mod tests {
             let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[one, two]))));
             assert_eq!(wants, Wants::Nothing);
             let (asked, wants) = stays(asked.key(&char(key)));
-            assert_eq!(wants, Wants::Prunes { dir: main_dir() });
-            let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[two, one]))));
-            let goes = merged_plan(&[two, one]).goes;
-            assert_eq!(wants, Wants::Prune { dir: main_dir(), goes });
+            let agreed = merged_plan(&[two, one]).deletes();
+            assert_eq!(wants, Wants::Prune { dir: main_dir(), agreed });
             assert!(asked.pruning() && asked.turning());
             assert_eq!(
                 text(&asked.lines(40, 9, 0).0)[1],
@@ -3337,8 +3338,9 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&char('y')));
-        let (menu, wants) = stays(menu.swept(Ok(merged_plan(&[one]))));
+        let (menu, wants) = stays(menu.changed(merged_plan(&[one])));
         assert_eq!(wants, Wants::Nothing, "it deleted what changed since you read it");
+        assert!(!menu.pruning());
         assert_eq!(text(&menu.lines(40, 9, 0).0)[1], " Delete 1 merged worktree?");
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the pane");
