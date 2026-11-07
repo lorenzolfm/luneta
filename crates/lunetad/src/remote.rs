@@ -332,17 +332,51 @@ fn unreached(error: &(dyn Error + 'static)) -> (String, Stopped) {
     (causes(error), Stopped::of(error))
 }
 
+/// How this daemon stands, which it says of itself to the machines it watches,
+/// as each question does. Each says more than the one before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Standing {
+    /// It runs for no reason of its own, and asks those machines nothing.
+    #[default]
+    Idle,
+    /// It runs for reasons of its own, as zellij has a session, or a client
+    /// watches it, and keeps those machines' daemons running.
+    Kept,
+    /// One of luneta's windows watches it, which shows those machines' agents.
+    Window,
+}
+
+impl Standing {
+    /// How one stands that is `kept`, with a `window` or not: one that is not
+    /// kept has no window to speak of.
+    #[must_use]
+    pub fn of(kept: bool, window: bool) -> Self {
+        match (kept, window) {
+            (false, _) => Standing::Idle,
+            (true, false) => Standing::Kept,
+            (true, true) => Standing::Window,
+        }
+    }
+
+    /// The question that says so, and asks for the host after `after`.
+    #[must_use]
+    pub fn question(self, after: Option<api::Version>) -> api::WatchRequest {
+        let shown = self == Standing::Window;
+        api::WatchRequest { after, kept: Some(self != Standing::Idle), shown }
+    }
+}
+
 /// Watches each machine the file names, from a thread of its own, and tells
 /// the core what its daemon says, or why it says nothing, as `watched` asks
-/// it, while `kept` says whether this daemon runs for reasons of its own. The
-/// file is read once before this returns, and the core told which machines it
-/// names: the daemon's first answer has each, as one it is reaching. Then it
-/// is read again as it changes, and at least every `sweep`. Each machine's
-/// daemon is in `bridges` while it is reached, and its ssh shares its
-/// connection, as `sharing` says, on a socket in luneta's runtime `folder`.
+/// it, as `standing` says this daemon stands. The file is read
+/// once before this returns, and the core told which machines it names: the
+/// daemon's first answer has each, as one it is reaching. Then it is read
+/// again as it changes, and at least every `sweep`. Each machine's daemon is
+/// in `bridges` while it is reached, and its ssh shares its connection, as
+/// `sharing` says, on a socket in luneta's runtime `folder`.
 pub fn follow(
     core: SyncSender<Command>,
-    kept: Receiver<bool>,
+    standing: Receiver<Standing>,
     sweep: Duration,
     folder: PathBuf,
     bridges: Arc<Bridges>,
@@ -398,7 +432,7 @@ pub fn follow(
             let bridges = Arc::clone(&bridges);
             begun += 1;
             let daemon = Bridged { bridges, destination: destination.clone(), watch: begun };
-            match watch(daemon, core.clone(), kept.clone(), folder.clone()) {
+            match watch(daemon, core.clone(), standing.clone(), folder.clone()) {
                 Ok(ends) => {
                     unwatched.remove(destination);
                     watched.push((destination.clone(), ends));
@@ -478,7 +512,7 @@ pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
 fn watch(
     bridged: Bridged,
     core: SyncSender<Command>,
-    kept: Receiver<bool>,
+    standing: Receiver<Standing>,
     folder: PathBuf,
 ) -> io::Result<oneshot::Sender<()>> {
     let (ends, ending) = oneshot::channel();
@@ -496,7 +530,7 @@ fn watch(
         // What runs on the runtime goes with it as the thread ends: the
         // connection to the machine's daemon, and its ssh, killed as it goes.
         runtime.block_on(async move {
-            tokio::spawn(watched(bridged, core, kept, folder));
+            tokio::spawn(watched(bridged, core, standing, folder));
             let _ = ending.await;
         });
     })?;
@@ -512,14 +546,14 @@ fn watch(
 /// last said stands meanwhile, as where the machine's daemon makes way for a
 /// newer one. Where that fails too, the core is told that the machine is
 /// unreached, and ssh is run again after a while, longer each time it fails.
-/// It asks only while `kept` says that this daemon runs for reasons of its
+/// It asks only while `standing` says that this daemon runs for reasons of its
 /// own, which each question says, and which only then keeps that one running
 /// too. The machine's daemon is in the bridges while its last question was
 /// answered.
 async fn watched(
     bridged: Bridged,
     core: SyncSender<Command>,
-    mut kept: Receiver<bool>,
+    mut standing: Receiver<Standing>,
     folder: PathBuf,
 ) {
     let destination = bridged.destination.clone();
@@ -535,12 +569,12 @@ async fn watched(
         // ended, through its `luneta bridge`. Two daemons that watched each
         // other, and that nothing else kept, would else start each other's
         // again, for good.
-        if kept.wait_for(|kept| *kept).await.is_err() {
+        if standing.wait_for(|standing| *standing != Standing::Idle).await.is_err() {
             // This daemon ends.
             return;
         }
-        let is_kept = *kept.borrow();
-        let asked = asked(&destination, &mut daemon, after, is_kept, &said, &folder).await;
+        let question = standing.borrow().question(after);
+        let asked = asked(&destination, &mut daemon, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
             Err((why, stopped)) => {
@@ -606,17 +640,16 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
     core.send(Command::Remote { destination: destination.clone(), reached }).is_ok()
 }
 
-/// What the daemon of `destination` answers `Watch` after `after`, and its
-/// version, through the client in `daemon`, made first where there is none,
-/// or why it answers none. It is told whether this daemon is `kept`. One that
-/// failed a question is kept: it makes a connection afresh for the next. What
+/// What the daemon of `destination` answers `question`, and its version, through
+/// the client in `daemon`, made first where there is none, or why it answers
+/// none. One that failed a question is kept: it makes a connection afresh for
+/// the next. What
 /// ssh says goes in the log as `heard` says it, with what it `said` before.
 /// ssh shares its connection on a socket in `folder`.
 async fn asked(
     destination: &Destination,
     daemon: &mut Option<DaemonClient<Channel>>,
-    after: Option<api::Version>,
-    kept: bool,
+    question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
 ) -> Result<(api::Version, api::Host), (String, Stopped)> {
@@ -626,7 +659,7 @@ async fn asked(
         let reached = client::through(ssh(destination, said, folder)).await;
         daemon.insert(reached.map_err(|error| unreached(&error))?)
     };
-    let watched = daemon.watch(api::WatchRequest { after, kept: Some(kept) }).await;
+    let watched = daemon.watch(question).await;
     let host = watched.map_err(|status| unreached(&status))?.into_inner();
     // One with no version would be asked after again at once, as a first
     // look, for as long as it answers so.

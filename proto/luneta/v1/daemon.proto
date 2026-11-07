@@ -799,6 +799,13 @@ message WatchRequest {
   // watched each other would else keep each other running for good, with
   // nothing else to.
   optional bool kept = 2;
+  // Whether someone sees the agents this names: set by a window of luneta's, and
+  // by the daemon of another machine where one watches that daemon. One such
+  // window is what has the daemon keep its agents' topics, which cost a model's
+  // call. Not set by a question asked once, as `luneta sessions` is, nor by a
+  // luneta or a daemon older than this field, which shows or hands on no topic.
+  // A daemon that says it is not `kept` is no one, and shows no one anything.
+  bool shown = 3;
 }
 
 // A state of the host, as one daemon counts them.
@@ -1336,6 +1343,13 @@ message Agent {
   // The review of a pull request it ran, a skill at a time.
   reserved 14;
   reserved "review";
+  // The subject it is on now, in a few words, as the daemon has a model name it
+  // while `WatchRequest.shown` says someone sees it, on a prompt that can move
+  // it. Never empty. Absent until an answer comes, and for good from a daemon
+  // older than this field; for an agent of pi's, one someone named, and one in
+  // no pane. It is kept in no file, and a daemon started again has none until
+  // the next prompt.
+  optional string topic = 15;
 }
 
 // A harness an agent runs in.

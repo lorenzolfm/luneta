@@ -76,8 +76,9 @@ the order their panes were opened within each. Which agent wants you is the job
 of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
-An agent goes by the name you gave it with `/rename`, or else the title Claude
-Code gives its pane, its tab or its directory. Two agents named alike are told apart by their panes, as
+An agent goes by the name you gave it with `/rename`, or else [its
+topic](#luneta-in-your-terminal), the title Claude Code gives its pane, its tab or its
+directory. Two agents named alike are told apart by their panes, as
 `luneta/main:4`, and by their sessions too when they sit in two, as
 `luneta/main (review:4)`. A search finds an agent by what its row shows, the
 pane that tells it apart as well, by its session's name, or by the last two
@@ -768,15 +769,43 @@ issue's link does, on another branch too, and so does another file of the same
 name.
 
 An agent's row is named for the name you gave it with `/rename`, or else for
-its topic, the title Claude Code gives its pane. A bare `Claude Code` is no
-topic, and such a row goes by its tab, if you named it, or else by the
-directory the agent works in. The daemon has the title without the `✳` Claude
-Code leads it with, or the frame it turns there while it works, so the title
-changes only as the topic does. A pane you renamed in zellij has your name for
-its title, and no topic: its row goes by its tab or its directory. A pane with
-no agent in it goes by what runs in it, and a shell at its prompt by its tab,
-if you named it, as an agent does, or else by its directory's last two parts,
-as `luneta/main`, where fish would title it `~/P/m/l/main`.
+its topic: the subject it is on now, in a few words, without request verbs like
+"fix" or "investigate". Claude Code titles a session on its first prompt and
+never again, so as an agent comes to a new prompt, lunetad on the machine it runs
+on asks a model for the topic, told the one it has, what you last asked, and the
+agent's last few steps. The model keeps the topic unless the subject has moved,
+so "yes, add the bullet" does not rename a row. It is `claude -p --model haiku`,
+on that machine's Claude Code login, with no tools, in `--safe-mode`, and with no
+zellij in its environment. It runs with lunetad's environment and not the
+agent's. If an `.envrc` points an agent at Bedrock or a gateway, what you ask it
+and its last few steps still go wherever lunetad's environment says, and a
+lunetad started in that directory sends every agent's there. An agent you named
+sends nothing.
+
+That costs one call per agent per prompt on the machine the agent runs on, while
+a window of luneta's shows it, there or through lunetad on another machine: with
+none open, lunetad makes no call, and once one is open again, it makes one for
+each agent whose last prompt changed. At most four run at once, and an agent you
+named costs none, as its row would not show the topic. Nor does a prompt made
+only of routine words, like "merge once CI passes", or a slash command like
+`/compact`, where the row has a topic to keep: any other word in it costs the
+call. There is nothing to configure. A pi agent has no topic, as luneta does not
+read its transcripts.
+
+Until a topic comes, where a call fails, and on a machine whose lunetad is too
+old to name one, a row keeps the name it has: the title Claude Code gives its
+pane. lunetad keeps a topic in no file, so once it starts again, a row goes back
+to that title until the agent's next prompt. An agent that goes and comes back
+within five minutes, as `claude --resume` brings it, has its topic again, at no
+call. A bare `Claude Code` is no title,
+and such a row goes by its tab, if you named it, or else by the directory the
+agent works in. The daemon has the title without the `✳` Claude Code leads it
+with, or the frame it turns there while it works, so the title changes only as
+Claude Code changes it. A pane you renamed in zellij has your name for its title,
+which is no agent's: its row goes by its topic, or else its tab or its directory.
+A pane with no agent in it goes by what runs in it, and a shell at its prompt by
+its tab, if you named it, as an agent does, or else by its directory's last two
+parts, as `luneta/main`, where fish would title it `~/P/m/l/main`.
 
 A command in a shell with the [hook](#hook-the-shell) has the marks an agent
 has, once it has run for a second: the spinner while it works, `●` while it

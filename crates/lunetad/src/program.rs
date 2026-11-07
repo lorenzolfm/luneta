@@ -5,7 +5,7 @@
 //! longer is stuck, and is killed, as one is whose answer is no longer wanted.
 
 use std::convert::Infallible;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -40,15 +40,29 @@ impl Ran {
         match self {
             Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
             Ran::Ended { status, stderr, .. } => {
-                let said = String::from_utf8_lossy(&stderr);
-                match said.lines().map(str::trim).find(|line| !line.is_empty()) {
-                    Some(line) => Err(line.to_owned()),
-                    None => Err(status.to_string()),
-                }
+                Err(first_line(&stderr).unwrap_or_else(|| status.to_string()))
             },
             Ran::Stuck => Err("it did not answer in time".to_owned()),
         }
     }
+
+    /// As `answer` says, of a program that can say why it failed on its stdout
+    /// instead, as `claude -p` does.
+    pub fn answer_why_on_either(self) -> Result<Vec<u8>, String> {
+        match self {
+            Ran::Ended { status, stdout, stderr } if !status.success() => {
+                let why = first_line(&stdout).or_else(|| first_line(&stderr));
+                Err(why.unwrap_or_else(|| status.to_string()))
+            },
+            ran => ran.answer(),
+        }
+    }
+}
+
+/// The first line of `said` that says anything.
+fn first_line(said: &[u8]) -> Option<String> {
+    let said = String::from_utf8_lossy(said);
+    said.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned)
 }
 
 /// Runs `command` with nothing on its stdin, for no longer than `limit`. What
@@ -59,6 +73,25 @@ impl Ran {
 /// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     run_up_to(command, limit, SAID_MAX)
+}
+
+/// Runs `command` as `run` does, with `stdin` on its stdin, in place of nothing.
+pub fn run_reading(command: &mut Command, limit: Duration, stdin: Stdio) -> io::Result<Ran> {
+    let kills = Kills::Program;
+    let Ok(ran) = running::<Infallible>(command, limit, None, kills, stdin, SAID_MAX)?;
+    Ok(ran)
+}
+
+/// A stdin that says `words` and ends, said from a thread of its own, as more
+/// of them than a pipe holds wait for a program to read them. Words a program
+/// ended without reading go nowhere.
+pub fn saying(words: &str) -> io::Result<Stdio> {
+    let (stdin, mut says) = io::pipe()?;
+    let words = words.to_owned();
+    in_thread(move || {
+        let _ = says.write_all(words.as_bytes());
+    })?;
+    Ok(Stdio::from(stdin))
 }
 
 /// Runs `command` as `run` does, where it may say up to `most` bytes on its
@@ -320,7 +353,41 @@ mod tests {
 
     use rustix::process::{self, Pid, Signal};
 
-    use super::{Ran, SAID_MAX, alone, run, run_alone, run_up_to, run_while, run_while_reading};
+    use super::{
+        Ran, SAID_MAX, alone, run, run_alone, run_reading, run_up_to, run_while, run_while_reading,
+        saying,
+    };
+
+    /// A program reads what it is told to the end, however much more of it
+    /// there is than a pipe holds, and need not read it at all.
+    #[test]
+    fn a_program_hears_what_it_is_told_and_need_not_listen() {
+        let words = "x".repeat(1024 * 1024);
+        let limit = Duration::from_secs(10);
+        let ran = run_reading(&mut Command::new("cat"), limit, saying(&words).unwrap()).unwrap();
+        assert_eq!(ran.answer().unwrap(), words.as_bytes());
+        let ran = run_reading(&mut Command::new("true"), limit, saying(&words).unwrap()).unwrap();
+        assert_eq!(ran.answer(), Ok(Vec::new()));
+    }
+
+    /// A program that fails is taken at its word on either stream, its stdout
+    /// first, where `answer` reads only its stderr: `claude -p` says why on its
+    /// stdout.
+    #[test]
+    fn a_program_that_fails_can_say_why_on_either_stream() {
+        let ran = |script: &str| {
+            let mut sh = Command::new("sh");
+            run(sh.args(["-c", script]), Duration::from_secs(10)).unwrap()
+        };
+        let logged_out = "echo; echo 'Not logged in'; exit 1";
+        assert_eq!(ran(logged_out).answer_why_on_either(), Err("Not logged in".to_owned()));
+        assert_eq!(ran(logged_out).answer(), Err("exit status: 1".to_owned()));
+        let both = "echo out; echo err >&2; exit 1";
+        assert_eq!(ran(both).answer_why_on_either(), Err("out".to_owned()));
+        assert_eq!(ran("echo err >&2; exit 1").answer_why_on_either(), Err("err".to_owned()));
+        assert_eq!(ran("exit 3").answer_why_on_either(), Err("exit status: 3".to_owned()));
+        assert_eq!(ran("echo fine").answer_why_on_either(), Ok(b"fine\n".to_vec()));
+    }
 
     /// A file handed a program on its stdin, and the lock on it with it, is
     /// held for as long as what the program left running holds it, past the

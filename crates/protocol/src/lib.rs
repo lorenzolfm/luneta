@@ -48,11 +48,31 @@ impl v1::Agent {
     /// cannot tell.
     #[must_use]
     pub fn at_a_prompt(&self) -> bool {
-        let word = match self.runs_in() {
-            v1::Harness::ClaudeCode => "cli",
-            v1::Harness::Pi => "tui",
-            v1::Harness::Unspecified => return false,
-        };
-        self.entrypoint.as_deref() == Some(word)
+        let word = self.runs_in().prompt_word();
+        word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
+    }
+}
+
+impl v1::Harness {
+    /// Its word for the agent a person talks to at a prompt.
+    #[must_use]
+    pub fn prompt_word(self) -> Option<&'static str> {
+        match self {
+            v1::Harness::ClaudeCode => Some("cli"),
+            v1::Harness::Pi => Some("tui"),
+            v1::Harness::Unspecified => None,
+        }
+    }
+}
+
+impl v1::Name {
+    /// The name, if someone gave it, as `/rename` does: one Claude Code derives
+    /// from the directory, or makes up, is no name a row goes by. A name from
+    /// before Claude Code said who chose it is taken for given.
+    #[must_use]
+    pub fn given(&self) -> Option<&str> {
+        let source = self.source.map(v1::NameSource::try_from);
+        let given = matches!(source, None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer)));
+        Some(self.text.trim()).filter(|text| given && !text.is_empty())
     }
 }
