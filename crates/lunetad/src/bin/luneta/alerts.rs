@@ -1,9 +1,12 @@
 //! The desktop's notifications of the agents that want you, of this machine
 //! and of each other that lunetad reaches: of one that waits on you, once it
-//! has waited `HELD`, and of one done with its turn, at once. Each goes once
-//! its agent no longer wants you, or once you look at its pane, as you do
-//! while luneta's window has the focus and its zellij is on that pane, or
-//! another luneta's of this machine. None comes of a pane you look at.
+//! has waited `HELD`, and of one done with its turn, at once, but while a
+//! window of luneta's of this machine has the focus, where its row says so.
+//! A turn is done once nothing it started runs on. Only a wait sounds. Each
+//! goes once its agent no longer wants you, or once you look at its pane, as
+//! you do while luneta's window has the focus and its zellij is on that pane,
+//! or another luneta's of this machine; and one of a turn that ended goes as
+//! a window of luneta's takes the focus. None comes of a pane you look at.
 //!
 //! What a notification says is in the end of its agent's transcript, which
 //! is read before it goes up: the tool a permission is for, which tells a
@@ -72,14 +75,14 @@ pub enum Wait {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doing {
     Busy,
-    /// Its turn is over, though a command it started in the background may
-    /// run on.
+    /// Its turn is over, and nothing it started runs on.
     Idle,
     /// It waits on you, since when Claude Code says: a wait since another
     /// moment is another wait.
     Waiting { wait: Wait, since: Option<SystemTime> },
-    /// What says nothing: a word luneta does not know, or one of Claude
-    /// Code's own dialogs, which you opened.
+    /// What says nothing: a turn over while a command it started in the
+    /// background runs on, whose end begins another; a word luneta does not
+    /// know; or one of Claude Code's own dialogs, which you opened.
     Quiet,
 }
 
@@ -91,9 +94,7 @@ impl Doing {
         };
         match Status::try_from(*known) {
             Ok(Status::Busy) => Doing::Busy,
-            // Claude Code says `shell` of a turn that is over while a command
-            // it started in the background runs on.
-            Ok(Status::Idle | Status::Shell) => Doing::Idle,
+            Ok(Status::Idle) => Doing::Idle,
             Ok(Status::Waiting) => {
                 let wait = match &agent.waiting_for {
                     Some(Waits::KnownWaitingFor(known)) => match WaitingFor::try_from(*known) {
@@ -108,7 +109,9 @@ impl Doing {
                 let since = agent.status_since.and_then(|at| at.try_into().ok());
                 Doing::Waiting { wait, since }
             },
-            Ok(Status::Unspecified) | Err(_) => Doing::Quiet,
+            // Claude Code says `shell` of a turn that is over while a command
+            // it started in the background runs on.
+            Ok(Status::Shell | Status::Unspecified) | Err(_) => Doing::Quiet,
         }
     }
 }
@@ -272,8 +275,16 @@ impl Followed {
     /// The agent of `key` does as `doing` says, as heard at `now`: what the
     /// desktop is to do of it. Whatever it does since makes what was up of it
     /// stale. A wait that begins is held; and a turn that ends is said at
-    /// once, numbered after `numbered`.
-    fn does(&mut self, key: &Key, doing: Doing, now: Instant, numbered: &mut u64) -> Vec<Act> {
+    /// once, numbered after `numbered`, but where a window of luneta's has
+    /// the focus, as `focused` says.
+    fn does(
+        &mut self,
+        key: &Key,
+        doing: Doing,
+        now: Instant,
+        numbered: &mut u64,
+        focused: bool,
+    ) -> Vec<Act> {
         if self.state.is(&doing) {
             return Vec::new();
         }
@@ -281,7 +292,8 @@ impl Followed {
         if self.state.is_up() {
             acts.push(Act::Close(key.clone()));
         }
-        self.state = if matches!((&self.state, &doing), (State::Busy, Doing::Idle)) {
+        let ended = matches!((&self.state, &doing), (State::Busy, Doing::Idle));
+        self.state = if ended && !focused {
             *numbered += 1;
             acts.push(Act::Read(self.due(key, *numbered, Want::Done, false)));
             State::Idle(Told::Reading(*numbered))
@@ -310,9 +322,40 @@ pub struct Alerts {
     listed: HashMap<Machine, HashSet<Listed>>,
     /// The number of the last notification read for.
     numbered: u64,
+    /// Whether a window of luneta's of this machine has the focus, as luneta
+    /// last heard: no turn that ends is said then, as its row says it.
+    focused: bool,
 }
 
 impl Alerts {
+    /// The notifications of no agent yet, with a window of luneta's that has
+    /// the focus where `focused` says.
+    pub fn new(focused: bool) -> Alerts {
+        Alerts { focused, ..Alerts::default() }
+    }
+
+    /// A window of luneta's of this machine has the focus, or none has, as
+    /// `focused` says: what is up of each turn that ended goes as one takes
+    /// it, and no turn that ends is said until none has it. A wait is said
+    /// all the same, as it holds its agent up until you answer.
+    pub fn focus(&mut self, focused: bool) -> Vec<Act> {
+        let took = focused && !self.focused;
+        self.focused = focused;
+        let mut acts = Vec::new();
+        if !took {
+            return acts;
+        }
+        for (key, followed) in &mut self.followed {
+            if let State::Idle(told) = &mut followed.state
+                && told.is_up()
+            {
+                acts.push(Act::Close(key.clone()));
+                *told = Told::Not;
+            }
+        }
+        acts
+    }
+
     /// Takes in what runs on each machine lunetad watches, as `machines`
     /// says, at `now`: what the desktop is to do, where an agent came to wait
     /// on you, or is done, or does anything else since, or ended. A machine
@@ -344,7 +387,8 @@ impl Alerts {
                     followed.place = place;
                     followed.label = label;
                     followed.transcript = transcript;
-                    acts.extend(followed.does(&key, doing, now, &mut self.numbered));
+                    let focused = self.focused;
+                    acts.extend(followed.does(&key, doing, now, &mut self.numbered, focused));
                 } else {
                     let placed = before.as_ref().is_some_and(|was| was.contains(&place.session));
                     let state = State::new(doing, now, !placed);
@@ -431,24 +475,25 @@ impl Alerts {
         acts
     }
 
-    /// The notifications up as far as luneta knows, to read for again, as
-    /// this luneta takes over putting them up from another of this machine,
-    /// which took them down as it ended.
+    /// The waits up as far as luneta knows, to read for again, as this luneta
+    /// takes over putting them up from another of this machine, which took
+    /// them down as it ended: no turn that ended goes up again.
     pub fn again(&mut self) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
-            let want = match &followed.state {
-                State::Idle(Told::Shown) => Want::Done,
-                State::Waiting { wait, hold: Hold::Told(Told::Shown), .. } => {
-                    Want::Wait(wait.clone())
+            let wait = match &mut followed.state {
+                State::Idle(told) => {
+                    *told = Told::Not;
+                    continue;
                 },
-                State::Busy | State::Idle(_) | State::Waiting { .. } | State::Quiet => continue,
+                State::Waiting { wait, hold: Hold::Told(told), .. } if *told == Told::Shown => {
+                    self.numbered += 1;
+                    *told = Told::Reading(self.numbered);
+                    wait.clone()
+                },
+                State::Busy | State::Waiting { .. } | State::Quiet => continue,
             };
-            self.numbered += 1;
-            if let Some(told) = followed.state.told() {
-                *told = Told::Reading(self.numbered);
-            }
-            acts.push(Act::Read(followed.due(key, self.numbered, want, true)));
+            acts.push(Act::Read(followed.due(key, self.numbered, Want::Wait(wait), true)));
         }
         acts
     }
@@ -493,6 +538,15 @@ pub enum Kind {
     Done,
 }
 
+/// What a notification sounds as it goes up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// Of a question, or a plan, for you to answer.
+    Question,
+    /// Of anything else the agent waits on you for.
+    Bell,
+}
+
 /// A notification, as it goes up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
@@ -500,9 +554,9 @@ pub struct Alert {
     pub kind: Kind,
     pub title: String,
     pub body: String,
-    /// Whether it sounds as it goes up: as it does but where it was up
-    /// before.
-    pub sounds: bool,
+    /// What it sounds as it goes up, if anything: a wait does, but where it
+    /// was up before, and a turn that ended never does.
+    pub sound: Option<Sound>,
 }
 
 impl Alert {
@@ -547,8 +601,13 @@ impl Alert {
             Machine::Local => format!("{} — {headline}", due.label),
             Machine::Remote(destination) => format!("{} on {destination} — {headline}", due.label),
         };
+        let sound = match kind {
+            Kind::Asked | Kind::Plan => Some(Sound::Question),
+            Kind::Permission | Kind::Wants => Some(Sound::Bell),
+            Kind::Done => None,
+        };
         let (key, body) = (due.key.clone(), one_line(&body, BODY_CHARS));
-        Alert { key, kind, title, body, sounds: !due.again }
+        Alert { key, kind, title, body, sound: sound.filter(|_| !due.again) }
     }
 }
 
@@ -917,38 +976,87 @@ mod tests {
         assert_eq!(alerts.ticked(later + HELD), [], "one seen as it was held");
     }
 
-    /// A turn that is over says so, though a command the agent started in
-    /// the background runs on, as Claude Code says `shell` then; and that
-    /// command's end says nothing more.
+    /// A turn over while a command the agent started in the background runs
+    /// on, as Claude Code says `shell` then, says nothing: the turn that
+    /// command's end begins says it, once it is over with nothing running.
+    /// One whose command ends with no turn after it, as one you stopped,
+    /// says nothing either.
     #[test]
-    fn a_turn_over_with_a_command_running_on_is_done_too() {
+    fn a_turn_over_with_a_command_running_on_says_nothing_until_the_agent_is_done() {
         let shell = Agent {
             pid: 1,
             status: Some(Reported::KnownStatus(Status::Shell.into())),
             ..Agent::default()
         };
-        assert_eq!(Doing::of(&shell), Doing::Idle);
+        assert_eq!(Doing::of(&shell), Doing::Quiet);
         let mut alerts = Alerts::default();
         let now = Instant::now();
-        alerts.heard(here(vec![seated(1, Doing::Busy)]), now);
-        let acts = alerts.heard(here(vec![seated(1, Doing::of(&shell))]), now);
+        let one = |doing| here(vec![seated(1, doing)]);
+        alerts.heard(one(Doing::Busy), now);
+        assert_eq!(alerts.heard(one(Doing::of(&shell)), now), []);
+        assert_eq!(alerts.heard(one(Doing::Busy), now), [], "its command ended");
+        let acts = alerts.heard(one(Doing::Idle), now);
         assert_eq!(reads(&acts), [(1, Want::Done)]);
         shown(&mut alerts, &acts);
-        assert_eq!(alerts.heard(here(vec![seated(1, Doing::Idle)]), now), []);
+
+        assert_eq!(closes(&alerts.heard(one(Doing::Busy), now)), [key(1)]);
+        assert_eq!(alerts.heard(one(Doing::of(&shell)), now), []);
+        assert_eq!(alerts.heard(one(Doing::Idle), now), [], "you stopped its command");
     }
 
-    /// What is up goes up again, without a sound, once this luneta takes
-    /// over putting the notifications up; what is on its way up goes up as
-    /// it was, and what is not up does not.
+    /// No turn that ends is said while a window of luneta's has the focus,
+    /// as its row says it there, nor once that window lets the focus go;
+    /// and one up goes as a window takes it. A wait is said all the same.
     #[test]
-    fn what_is_up_goes_up_again_quietly_for_a_luneta_that_takes_over() {
+    fn no_turn_that_ends_is_said_while_a_window_of_luneta_s_has_the_focus() {
+        let mut alerts = Alerts::new(true);
+        let now = Instant::now();
+        let two = |one: Doing, two: Doing| here(vec![seated(1, one), seated(2, two)]);
+        alerts.heard(two(Doing::Busy, Doing::Busy), now);
+        let acts = alerts.heard(two(Doing::Idle, waits(Wait::Permission, 2)), now);
+        assert_eq!(acts, []);
+        let acts = alerts.ticked(now + HELD);
+        assert_eq!(reads(&acts), [(2, Want::Wait(Wait::Permission))]);
+        shown(&mut alerts, &acts);
+        assert_eq!(alerts.focus(false), []);
+        assert_eq!(alerts.heard(two(Doing::Idle, waits(Wait::Permission, 2)), now), []);
+
+        alerts.heard(two(Doing::Busy, waits(Wait::Permission, 2)), now);
+        let acts = alerts.heard(two(Doing::Idle, waits(Wait::Permission, 2)), now);
+        assert_eq!(reads(&acts), [(1, Want::Done)]);
+        shown(&mut alerts, &acts);
+        assert_eq!(closes(&alerts.focus(true)), [key(1)], "the wait stays up");
+        assert_eq!(alerts.focus(true), [], "it went once");
+        assert_eq!(alerts.focus(false), []);
+        assert_eq!(alerts.heard(two(Doing::Idle, waits(Wait::Permission, 2)), now), []);
+    }
+
+    /// Only a wait sounds as it goes up, and not where it was up before; a
+    /// turn that ended never does.
+    #[test]
+    fn only_a_wait_sounds() {
+        let sound = |want, again| {
+            Alert::of(&Due { again, ..due(want, Machine::Local) }, None).sound
+        };
+        assert_eq!(sound(Want::Wait(Wait::Input), false), Some(Sound::Question));
+        assert_eq!(sound(Want::Wait(Wait::Permission), false), Some(Sound::Bell));
+        assert_eq!(sound(Want::Wait(Wait::Unsaid), false), Some(Sound::Bell));
+        assert_eq!(sound(Want::Wait(Wait::Permission), true), None);
+        assert_eq!(sound(Want::Done, false), None);
+    }
+
+    /// A wait up goes up again, without a sound, once this luneta takes over
+    /// putting the notifications up; one on its way up goes up as it was, and
+    /// what is not up does not. A turn that ended does not, up or on its way.
+    #[test]
+    fn a_wait_up_goes_up_again_quietly_for_a_luneta_that_takes_over() {
         let mut alerts = Alerts::default();
         let now = Instant::now();
         let busy = |pid| seated(pid, Doing::Busy);
         alerts.heard(here(vec![busy(1), busy(2), busy(3), busy(4)]), now);
         let waiting = |pid| seated(pid, waits(Wait::Permission, 2));
-        let four = here(vec![seated(1, Doing::Idle), waiting(2), waiting(3), busy(4)]);
-        let acts = alerts.heard(four, now);
+        let four = |one| here(vec![seated(1, one), waiting(2), waiting(3), busy(4)]);
+        let acts = alerts.heard(four(Doing::Idle), now);
         shown(&mut alerts, &acts);
         let ticked = alerts.ticked(now + HELD);
         let read_for = |pid| {
@@ -962,18 +1070,28 @@ mod tests {
         assert!(alerts.read(&read(&two)));
 
         let acts = alerts.again();
-        let mut again = reads(&acts);
-        again.sort_by_key(|(pid, _)| *pid);
-        assert_eq!(again, [(1, Want::Done), (2, Want::Wait(Wait::Permission))]);
+        assert_eq!(reads(&acts), [(2, Want::Wait(Wait::Permission))]);
         for act in &acts {
             let Act::Read(due) = act else { unreachable!("it only reads") };
-            assert!(due.again && !Alert::of(due, None).sounds, "{due:?}");
+            assert!(due.again && Alert::of(due, None).sound.is_none(), "{due:?}");
             assert!(alerts.read(&read(due)), "{due:?} goes up");
         }
         assert!(!alerts.read(&read(&two)), "what was read before goes up no more");
         assert!(alerts.read(&read(&three)), "what was on its way up goes up as it was");
-        assert!(Alert::of(&three, None).sounds);
-        assert_eq!(reads(&alerts.again()).len(), 3, "each that is up goes up again");
+        assert_eq!(Alert::of(&three, None).sound, Some(Sound::Bell));
+        let acts = alerts.again();
+        assert_eq!(reads(&acts).len(), 2, "each wait up goes up again");
+        shown(&mut alerts, &acts);
+
+        alerts.heard(four(Doing::Busy), now);
+        let acts = alerts.heard(four(Doing::Idle), now);
+        assert_eq!(reads(&acts), [(1, Want::Done)]);
+        let mut again = reads(&alerts.again());
+        again.sort_by_key(|(pid, _)| *pid);
+        let wait = Want::Wait(Wait::Permission);
+        assert_eq!(again, [(2, wait.clone()), (3, wait)], "nor what is on its way up of a turn");
+        let Act::Read(done) = &acts[0] else { unreachable!("it reads for the turn") };
+        assert!(!alerts.read(&read(done)));
     }
 
     /// An agent that ends takes its notification with it; one of a machine

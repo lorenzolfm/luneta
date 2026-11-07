@@ -3,22 +3,24 @@
 //! other waits for the lock, to take it once that one ends, and to put up
 //! again what that one took down as it ended; and until then it tells that
 //! one, on a socket of that one's, what it looks at and when its window
-//! takes the focus. So no notification comes of a pane you look at in any
-//! of them, and a click on one goes to the luneta whose window had the
+//! takes the focus and lets it go. So no notification comes of a pane you
+//! look at in any of them, nor of a turn that ends while any of their windows
+//! has the focus, and a click on one goes to the luneta whose window had the
 //! focus last.
 //!
-//! What they say is a line each: `focused`, as a window takes the focus;
-//! `looks` and the groups of the agents of the pane a luneta looks at, while
-//! its window has the focus, or none; and `clicked` and the group of an
-//! agent, which `luneta clicked` tells the luneta that holds the lock, and
-//! which that one tells the one whose window had the focus last, to go to
-//! that agent's pane. A group names an agent, as `group` says, and names
-//! its notification on macOS too. And `selected` and what you selected, in
-//! base64, or nothing, as you press `Alt u` in a luneta that does not hold the
-//! lock: the one that does reads aloud for them all. And `stopped`, as you press
-//! `Alt Shift u` in one. And `dictating` and `dictated`, as you begin and end
-//! dictating in one, as what plays waits on the microphone, wherever it is you
-//! dictate.
+//! What they say is a line each: `focused` and `unfocused`, as a window takes
+//! the focus and lets it go; `looks` and the groups of the agents of the pane a
+//! luneta looks at, while its window has the focus, or none; and `clicked` and
+//! the group of an agent, which `luneta clicked` tells the luneta that holds
+//! the lock, and which that one tells the one whose window had the focus last,
+//! to go to that agent's pane. A group names an agent, as `group` says, and
+//! names its notification on macOS too. And `selected` and what you selected,
+//! in base64, or nothing, as you press `Alt u` in a luneta that does not hold
+//! the lock: the one that does reads aloud for them all. And `stopped`, as you
+//! press `Alt Shift u` in one. And `dictating` and `dictated`, as you begin and
+//! end dictating in one, as what plays waits on the microphone, wherever it is
+//! you dictate. And `unfocuses`, first, from one that says `unfocused`, which
+//! no older one does.
 
 use std::collections::HashMap;
 use base64::Engine as _;
@@ -88,8 +90,12 @@ pub enum Heard {
 pub enum Peered {
     /// It came: what this one writes to it on.
     Came(UnixStream),
+    /// It says when its window lets the focus go.
+    Unfocuses,
     /// Its window took the focus.
     Focused,
+    /// Its window let the focus go.
+    Unfocused,
     /// It looks at the panes of these agents, in its window, which has the
     /// focus.
     Looks(Vec<Key>),
@@ -102,7 +108,10 @@ pub enum Peered {
 /// What one luneta tells another.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Line {
+    /// That it says `unfocused`, which a luneta older than that never does.
+    Unfocuses,
     Focused,
+    Unfocused,
     Looks(Vec<Key>),
     Clicked(Key),
     /// `Alt u`, with what is selected there, which may be nothing.
@@ -122,7 +131,9 @@ impl Line {
     fn parse(text: &str) -> Option<Line> {
         let mut words = text.split_whitespace();
         let line = match words.next()? {
+            "unfocuses" => Line::Unfocuses,
             "focused" => Line::Focused,
+            "unfocused" => Line::Unfocused,
             "looks" => Line::Looks(words.by_ref().map(key_of).collect::<Option<_>>()?),
             "clicked" => Line::Clicked(key_of(words.next()?)?),
             "selected" => {
@@ -140,7 +151,9 @@ impl Line {
     /// Its words, and the end of the line.
     fn said(&self) -> String {
         match self {
+            Line::Unfocuses => "unfocuses\n".to_owned(),
             Line::Focused => "focused\n".to_owned(),
+            Line::Unfocused => "unfocused\n".to_owned(),
             Line::Looks(keys) => {
                 keys.iter().fold("looks".to_owned(), |line, key| line + " " + &group(key)) + "\n"
             },
@@ -256,7 +269,9 @@ fn hear(number: u64, stream: UnixStream, events: &Sender<Event>) {
             Line::Clicked(key) => Event::Clicked(key),
             Line::Selected(selected) => Event::ReadAloud(selected),
             Line::Stopped => Event::StopAloud,
+            Line::Unfocuses => Event::Peers(Heard::Peer(number, Peered::Unfocuses)),
             Line::Focused => Event::Peers(Heard::Peer(number, Peered::Focused)),
+            Line::Unfocused => Event::Peers(Heard::Peer(number, Peered::Unfocused)),
             Line::Looks(keys) => Event::Peers(Heard::Peer(number, Peered::Looks(keys))),
             Line::Dictating(now) => Event::Peers(Heard::Peer(number, Peered::Dictating(now))),
         };
@@ -299,7 +314,15 @@ pub struct Peers {
     peers: HashMap<u64, Peer>,
     /// The one whose window took the focus last, where one did since this
     /// luneta's did.
-    last: Option<u64>,
+    last: Option<Last>,
+}
+
+/// The luneta whose window took the focus last, of those this one hears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Last {
+    number: u64,
+    /// Whether its window has the focus still.
+    focused: bool,
 }
 
 struct Peer {
@@ -309,6 +332,9 @@ struct Peer {
     looks: Vec<Key>,
     /// Whether you dictate in it: this goes as it goes, however it ended.
     dictating: bool,
+    /// Whether it says when its window lets the focus go: the window of one
+    /// that does not is taken to have let it go as it took it.
+    unfocuses: bool,
 }
 
 impl Peers {
@@ -316,11 +342,24 @@ impl Peers {
     pub fn heard(&mut self, number: u64, peered: Peered) {
         match peered {
             Peered::Came(stream) => {
-                self.peers.insert(number, Peer { stream, looks: Vec::new(), dictating: false });
+                let peer = Peer { stream, looks: Vec::new(), dictating: false, unfocuses: false };
+                self.peers.insert(number, peer);
+            },
+            Peered::Unfocuses => {
+                if let Some(peer) = self.peers.get_mut(&number) {
+                    peer.unfocuses = true;
+                }
             },
             Peered::Focused => {
-                if self.peers.contains_key(&number) {
-                    self.last = Some(number);
+                if let Some(peer) = self.peers.get(&number) {
+                    self.last = Some(Last { number, focused: peer.unfocuses });
+                }
+            },
+            Peered::Unfocused => {
+                if let Some(last) = &mut self.last
+                    && last.number == number
+                {
+                    last.focused = false;
                 }
             },
             Peered::Looks(looks) => {
@@ -339,7 +378,7 @@ impl Peers {
 
     fn gone(&mut self, number: u64) {
         self.peers.remove(&number);
-        if self.last == Some(number) {
+        if self.last.is_some_and(|last| last.number == number) {
             self.last = None;
         }
     }
@@ -347,6 +386,12 @@ impl Peers {
     /// This luneta's window took the focus.
     pub fn here(&mut self) {
         self.last = None;
+    }
+
+    /// Whether another's window has the focus: the one whose window took it
+    /// last, until it lets it go, or this one's takes it.
+    pub fn focused(&self) -> bool {
+        self.last.is_some_and(|last| last.focused)
     }
 
     /// The agents of the panes the others look at.
@@ -363,7 +408,7 @@ impl Peers {
     /// another, that the notification of `key`'s agent was clicked: whether
     /// it was told. One that cannot be told is gone.
     pub fn hand(&mut self, key: &Key) -> bool {
-        let Some(number) = self.last else {
+        let Some(Last { number, .. }) = self.last else {
             return false;
         };
         let line = Line::Clicked(key.clone()).said();
@@ -514,14 +559,15 @@ fn talk(
         }
         told
     };
-    let mut talking = tell(Line::Looks(looks.clone()))
+    let mut talking = tell(Line::Unfocuses)
+        && tell(Line::Looks(looks.clone()))
         && (!*focused || tell(Line::Focused))
         && (!*dictating || tell(Line::Dictating(true)));
     while talking {
         match telling.recv_timeout(AGAIN) {
             Ok(Tell::Focus(now)) => {
                 *focused = now;
-                talking = !now || tell(Line::Focused);
+                talking = tell(if now { Line::Focused } else { Line::Unfocused });
             },
             Ok(Tell::Looks(now)) => {
                 *looks = now;
@@ -581,7 +627,9 @@ mod tests {
     #[test]
     fn a_line_reads_back_as_what_it_said() {
         let lines = [
+            Line::Unfocuses,
             Line::Focused,
+            Line::Unfocused,
             Line::Looks(Vec::new()),
             Line::Looks(vec![key(41), far(7)]),
             Line::Selected(String::new()),
@@ -662,12 +710,42 @@ mod tests {
         reaching.focus(true);
         let (number, peered) = next(&heard);
         peers.heard(number, peered);
-        assert_eq!(peers.last, Some(number), "its window has the focus again");
+        assert_eq!(peers.last, Some(Last { number, focused: true }), "its window has it again");
+        reaching.focus(false);
+        let (number, peered) = next(&heard);
+        peers.heard(number, peered);
+        assert!(!peers.focused(), "its window let the focus go");
+        assert!(peers.hand(&key(41)), "its window had the focus last");
+        assert_eq!(clicked(&heard_clicks, Duration::from_secs(5)), Some(key(41)));
+        reaching.focus(true);
+        let (number, peered) = next(&heard);
+        peers.heard(number, peered);
+        peers.here();
+        assert!(!peers.focused(), "this luneta's window took the focus");
         drop(reaching);
         let (number, peered) = next(&heard);
         assert!(matches!(peered, Peered::Gone));
         peers.heard(number, peered);
         assert!(!peers.hand(&key(41)), "the luneta that went is told nothing");
+    }
+
+    /// A luneta older than `unfocused` never says that its window let the focus
+    /// go: a click goes to it all the same, once its window took the focus last,
+    /// but its window is not taken to have the focus.
+    #[test]
+    fn an_older_luneta_s_window_is_not_taken_to_have_the_focus() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let socket = folder.path().join(SOCKET);
+        let (events, heard) = mpsc::channel();
+        listen(&socket, events).expect("it listens");
+        let mut older = UnixStream::connect(&socket).expect("it reaches the one that listens");
+        older.write_all(b"looks\nfocused\n").expect("it tells");
+
+        let mut peers = Peers::default();
+        hear_until(&heard, &mut peers, |peers| peers.last.is_some());
+        assert!(!peers.focused());
+        assert!(peers.hand(&key(41)), "its window had the focus last");
+        assert_eq!(lines(older).next(), Some(Line::Clicked(key(41))));
     }
 
     /// Takes in what the others say until `done`, within a few seconds.
@@ -724,6 +802,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("it listens");
         let (stream, _) = listener.accept().expect("the other comes");
         let mut said = lines(stream);
+        assert_eq!(said.next(), Some(Line::Unfocuses));
         assert_eq!(said.next(), Some(Line::Looks(Vec::new())));
         drop((said, listener));
         reaching.stopped();
