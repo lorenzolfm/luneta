@@ -170,6 +170,18 @@ service Daemon {
   // What says nothing, is too long, or names a session by what zellij takes
   // for no name, is answered as an invalid argument.
   rpc Say(SayRequest) returns (google.protobuf.Empty);
+  // Says what `Prune` would delete in the repository a directory is in: each
+  // worktree whose pull request is merged at its `HEAD`, and each with a merged
+  // pull request that stays, and why. It deletes nothing. It answers once, as
+  // late as gh takes: a stream too, as the start of every answer is cut five
+  // seconds after the question. While the daemon has yet to list every pane, or
+  // the directory is in no repository, it answers with why not.
+  rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
+  // Deletes what `Prunes` said should go, each worktree in turn, and says how
+  // each went. One that changed since stays, and git may refuse one: the others
+  // go. It answers once, as `Prunes` does, and a question that hangs up does not
+  // stop it.
+  rpc Prune(PruneRequest) returns (stream PruneResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -1370,4 +1382,75 @@ message Zellij {
   optional string session = 2;
   // The pane's id, which is unique within its session and not across them.
   uint32 pane = 3;
+}
+
+message PrunesRequest {
+  On on = 1;
+  // A directory of the repository, by its absolute path: one by another path is
+  // invalid.
+  string dir = 2;
+}
+
+message PrunesResponse {
+  // The directory that holds the repository.
+  string repository = 1;
+  repeated Goes goes = 2;
+  repeated Kept kept = 3;
+  repeated Unasked unasked = 4;
+
+  message Goes {
+    // The worktree, by the path git lists it at.
+    string worktree = 1;
+    string branch = 2;
+    // The commit its `HEAD` and its pull request's head are at.
+    string head = 3;
+    // Its pull request's number.
+    uint32 number = 4;
+    // Its branch on its push remote: which goes with it, or why it stays, and
+    // neither where that remote has no such branch.
+    oneof pushed {
+      RemoteBranch remote = 5;
+      string stays = 6;
+    }
+    // What it takes up. Absent where `du` did not say.
+    optional uint64 bytes = 7;
+  }
+
+  message RemoteBranch {
+    string remote = 1;
+    string branch = 2;
+  }
+
+  // A worktree with a merged pull request that stays.
+  message Kept {
+    string worktree = 1;
+    uint32 number = 2;
+    string why = 3;
+  }
+
+  // A worktree gh or git said nothing of, which stays.
+  message Unasked {
+    string worktree = 1;
+    string why = 2;
+  }
+}
+
+message PruneRequest {
+  On on = 1;
+  // A directory of the repository, by its absolute path: one by another path is
+  // invalid.
+  string dir = 2;
+  repeated PrunesResponse.Goes goes = 3;
+}
+
+message PruneResponse {
+  repeated Outcome outcomes = 1;
+
+  message Outcome {
+    string worktree = 1;
+    // Whether the worktree went.
+    bool gone = 2;
+    // What stays of it, and why, where anything does.
+    optional string trouble = 3;
+  }
 }

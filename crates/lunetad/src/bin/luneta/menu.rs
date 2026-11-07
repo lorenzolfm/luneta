@@ -15,9 +15,10 @@
 //! opens the Turn group: the pane into a tab of its own, or its tab into panes
 //! of another you pick, what runs in them running on. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
-//! asks first when that would end an agent at work, and on a machine's header
-//! forgets the machine. `b` opens the Brief group, which briefs you on every
-//! session, the row's session, or the agent in its pane, or on a machine's
+//! asks first when that would end an agent at work, or on a pane's row in a
+//! repository lists the worktrees of its merged pull requests, to delete once
+//! you say yes, and on a machine's header forgets the machine. `b` opens the
+//! Brief group, which briefs you on every session, the row's session, or the agent in its pane, or on a machine's
 //! header, the machine's sessions. luneta has no
 //! configuration to read keys for skills from, and the Claude group's are its
 //! own.
@@ -40,6 +41,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::said::Said;
+use lunetad::prunes;
 use lunetad::Destination;
 use lunetad::turns::{OtherTab, Turn};
 use luneta_protocol::shell::Ending;
@@ -54,6 +56,7 @@ use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
+use crate::prune;
 use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
@@ -110,6 +113,8 @@ const DELETE: char = 'd';
 const DELETE_NAME: &str = "Delete";
 const DELETE_ROW: char = 'd';
 const DELETE_SESSION: char = 's';
+const DELETE_MERGED: char = 'm';
+const DELETE_MERGED_DOES: &str = "delete merged worktrees";
 
 /// The key of luneta's own Brief group, and its name.
 const BRIEF: char = 'b';
@@ -518,6 +523,9 @@ enum Entry {
     /// A key of the Delete group: closes the pane the menu is for, or deletes
     /// its session, `session`.
     Close { key: char, session: Listed, scope: Scope },
+    /// The key of the Delete group on a pane's row in a repository: lists the
+    /// worktrees of its merged pull requests, by a directory of it.
+    Prune { dir: String },
     /// The key of the Delete group on a machine's header: forgets the machine.
     Forget(Machine),
     /// A key of the Brief group: briefs you on what the agents it covers are
@@ -545,6 +553,7 @@ impl Entry {
             | Entry::Start { key, .. }
             | Entry::Close { key, .. }
             | Entry::Tab { key, .. } => *key,
+            Entry::Prune { .. } => DELETE_MERGED,
             Entry::Forget(_) => DELETE_ROW,
             Entry::New(new) => new.key(),
             Entry::Turn(turning) => turning.key(),
@@ -578,6 +587,9 @@ enum Pressed {
     /// Closes the pane the menu is for, or deletes its session, `session`,
     /// by `key`.
     Delete { key: char, session: Listed, scope: Scope },
+    /// Lists the worktrees of the merged pull requests of a repository, by a
+    /// directory of it.
+    Prune(String),
     /// Forgets the machine the menu is for.
     Forget(Machine),
     /// Asks for a brief of what the scope covers.
@@ -607,8 +619,9 @@ impl Keys {
     /// last, `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, and `n m` the box for a machine's destination, `t t` turns the
     /// pane into a tab and `t p` its tab into panes of another, `d d` deletes
-    /// what the menu is for, as `removes` says, and `d s` deletes its
-    /// session, or on a machine's header `d d` alone forgets the machine, and
+    /// what the menu is for, as `removes` says, `d s` deletes its session,
+    /// and on a row in a repository, `d m` its merged worktrees, or on a
+    /// machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
     /// what the menu is for, or on a machine's header, its sessions.
     fn new(removes: Removes) -> Self {
@@ -639,10 +652,14 @@ impl Keys {
                 key: DELETE,
                 name: DELETE_NAME,
                 entries: match removes {
-                    Removes::Row { session, scope } => vec![
-                        Entry::Close { key: DELETE_ROW, session: session.clone(), scope },
-                        Entry::Close { key: DELETE_SESSION, session, scope: Scope::Session },
-                    ],
+                    Removes::Row { session, scope, merged_in } => {
+                        let mut entries = vec![
+                            Entry::Close { key: DELETE_ROW, session: session.clone(), scope },
+                            Entry::Close { key: DELETE_SESSION, session, scope: Scope::Session },
+                        ];
+                        entries.extend(merged_in.map(|dir| Entry::Prune { dir }));
+                        entries
+                    },
                     Removes::Machine(machine) => vec![Entry::Forget(machine)],
                 },
             },
@@ -728,6 +745,7 @@ impl Keys {
             Entry::Close { key, session, scope } => {
                 return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
             },
+            Entry::Prune { dir } => return Pressed::Prune(dir.clone()),
             Entry::Forget(machine) => return Pressed::Forget(machine.clone()),
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
@@ -890,7 +908,8 @@ struct Delete {
 /// the pane or the session, of `session`; on a machine's header, the
 /// machine, from those luneta lists.
 enum Removes {
-    Row { session: Listed, scope: Scope },
+    /// `merged_in` is a directory of the repository the row is in, if any.
+    Row { session: Listed, scope: Scope, merged_in: Option<String> },
     Machine(Machine),
 }
 
@@ -914,6 +933,8 @@ pub struct PaneRow {
     pub pane: u32,
     pub cwd: Option<String>,
     pub branch: Option<String>,
+    /// The directory that holds the repository it works in, where git has said.
+    pub repository: Option<String>,
     pub ran: Ran,
 }
 
@@ -966,6 +987,16 @@ impl Target {
         }
     }
 
+    /// The name of the repository its pane works in, where git has said.
+    fn repository_name(&self) -> &str {
+        match self {
+            Target::Pane(_, PaneRow { repository: Some(repository), .. }) => {
+                prunes::name_of(repository)
+            },
+            Target::Pane(..) | Target::Session(..) | Target::Machine(_) => "",
+        }
+    }
+
     /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
@@ -979,10 +1010,12 @@ impl Target {
     fn removes(&self) -> Removes {
         match self {
             Target::Session(_, session) => {
-                Removes::Row { session: session.clone(), scope: Scope::Session }
+                Removes::Row { session: session.clone(), scope: Scope::Session, merged_in: None }
             },
-            Target::Pane(_, row) => {
-                Removes::Row { session: row.session.clone(), scope: Scope::Pane(row.pane) }
+            Target::Pane(_, row) => Removes::Row {
+                session: row.session.clone(),
+                scope: Scope::Pane(row.pane),
+                merged_in: row.repository.as_ref().and(row.cwd.clone()),
             },
             Target::Machine(machine) => Removes::Machine(machine.clone()),
         }
@@ -1191,6 +1224,11 @@ pub enum Wants {
     /// What the delete key deletes planned, for `planned`: for a pane, once
     /// zellij has said what closing it closes: of `session`.
     Plan { session: Listed, scope: Scope },
+    /// What deleting the merged worktrees of the repository `dir` is in
+    /// deletes, for `prunes`.
+    Prunes { dir: String },
+    /// `goes`, of the repository `dir` is in, deleted, for `pruned`.
+    Prune { dir: String, goes: Vec<prunes::Goes> },
     /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
     /// to take its client there: from its pane `pane`, the menu's row's,
     /// which it takes the client to first, for a tab of a session it is
@@ -1283,6 +1321,16 @@ enum Stage {
     /// A delete key that asks before it goes ahead: what it would do, and
     /// what it asks.
     Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
+    /// `d m` waits to hear what deleting the merged worktrees of the repository
+    /// `dir` is in deletes, before it asks, and again before it goes ahead once
+    /// you said yes to `agreed`, what it listed. Keys do nothing but close the
+    /// menu.
+    Sweeping { keys: Keys, dir: String, agreed: Option<prunes::Plan> },
+    /// What `d m` would delete, for you to say yes to.
+    Swept { keys: Keys, dir: String, plan: prunes::Plan },
+    /// `d m` deletes the `count` worktrees you said yes to. Keys do nothing but
+    /// close the menu, which does not stop it.
+    Pruning { keys: Keys, count: usize },
     /// zellij opens what a key asked for, in `session`, for luneta to take
     /// its client there. Keys do nothing but close the menu.
     Opening { keys: Keys, session: Listed },
@@ -1402,6 +1450,9 @@ impl Menu {
             Stage::Planning { .. }
             | Stage::Choosing(_)
             | Stage::Asking { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Swept { .. }
+            | Stage::Pruning { .. }
             | Stage::Opening { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
@@ -1427,12 +1478,25 @@ impl Menu {
             Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Swept { .. }
+            | Stage::Pruning { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }
             | Stage::Ssh { .. } => None,
         }
+    }
+
+    /// Whether `d m` waits to hear what it would delete.
+    pub fn sweeping(&self) -> bool {
+        matches!(self.stage, Stage::Sweeping { .. })
+    }
+
+    /// Whether `d m` waits for what you said yes to to be deleted.
+    pub fn pruning(&self) -> bool {
+        matches!(self.stage, Stage::Pruning { .. })
     }
 
     /// Whether a key of the Turn group waits for zellij to list the other
@@ -1542,6 +1606,10 @@ impl Menu {
                     let delete = Delete { key, session, scope };
                     stays(Stage::Planning { keys, delete, agreed: None }, wants)
                 },
+                Pressed::Prune(dir) => {
+                    let wants = Wants::Prunes { dir: dir.clone() };
+                    stays(Stage::Sweeping { keys, dir, agreed: None }, wants)
+                },
                 Pressed::Forget(Machine::Remote(destination)) => {
                     Did::Closed(Done::Forget(destination))
                 },
@@ -1562,6 +1630,8 @@ impl Menu {
                 },
             },
             Stage::Planning { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Pruning { .. }
             | Stage::Opening { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
@@ -1602,11 +1672,24 @@ impl Menu {
                 }
             },
             stage @ (Stage::Planning { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Pruning { .. }
             | Stage::Opening { .. }
             | Stage::Listing { .. }
             | Stage::Turning { .. }
             | Stage::Reading { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
+            Stage::Swept { keys, dir, plan } => match answer(key, DELETE_MERGED) {
+                Answer::Yes if !plan.goes.is_empty() => {
+                    let wants = Wants::Prunes { dir: dir.clone() };
+                    stays(Stage::Sweeping { keys, dir, agreed: Some(plan) }, wants)
+                },
+                Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Answer::Close => Did::Closed(Done::Nothing),
+                Answer::Yes | Answer::Nothing => {
+                    stays(Stage::Swept { keys, dir, plan }, Wants::Nothing)
+                },
+            },
             Stage::Asking { keys, delete, plan, asks } => match answer(key, delete.key) {
                 Answer::Yes => {
                     let session = delete.session.clone();
@@ -1676,6 +1759,27 @@ impl Menu {
         Did::Closed(Done::Act(target.machine().clone(), plan.act))
     }
 
+    /// What `d m` does, now that it heard what it would delete, as `plan` says,
+    /// or why it did not: lists it for you to say yes to. Going ahead after you
+    /// said yes deletes what you were asked about, and once that changed while
+    /// you read, it lists it again.
+    pub fn swept(self, plan: Result<prunes::Plan, String>) -> Did {
+        let Menu { number, target, stage } = self;
+        let Stage::Sweeping { keys, dir, agreed } = stage else {
+            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        };
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: nothing deleted: {why}"))),
+        };
+        if agreed.is_some_and(|agreed| agreed.same_as(&plan)) {
+            let stage = Stage::Pruning { keys, count: plan.goes.len() };
+            let wants = Wants::Prune { dir, goes: plan.goes };
+            return Did::Stays(Menu { number, target, stage }, wants);
+        }
+        Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
+    }
+
     /// What the key of the menu for a pull request, an issue or a file that
     /// waits does, now that luneta found where it goes, as `found` says, or
     /// why it found nothing: on the machine it found it on, the row's or
@@ -1717,7 +1821,8 @@ impl Menu {
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
-            let row = PaneRow { session: session.clone(), pane, cwd, branch, ran };
+            let repository = None;
+            let row = PaneRow { session: session.clone(), pane, cwd, branch, repository, ran };
             let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { work: work.clone(), step };
@@ -1856,9 +1961,14 @@ impl Menu {
 
     /// Whether its spinner turns: while a key of the menu for a pull request,
     /// an issue or a file waits for its worktree, and then for zellij to open
-    /// it.
+    /// it, and while `d m` waits.
     pub fn turning(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Waiting(_), .. })
+        matches!(
+            self.stage,
+            Stage::Pull { step: Step::Waiting(_), .. }
+                | Stage::Sweeping { .. }
+                | Stage::Pruning { .. }
+        )
     }
 
     /// Whether the search box over the skills is open.
@@ -1871,6 +1981,9 @@ impl Menu {
             // It keeps its width as you type too.
             Stage::Ssh { .. } => true,
             Stage::Asking { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Swept { .. }
+            | Stage::Pruning { .. }
             | Stage::Pull { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
@@ -1958,6 +2071,25 @@ impl Menu {
                     &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
                 ),
             ),
+            Stage::Sweeping { keys, .. } => {
+                let repository = self.target.repository_name();
+                let doing = format!("Asking gh about the worktrees of {repository}…");
+                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+                (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
+            },
+            Stage::Pruning { keys, count } => {
+                let doing = format!("Deleting {}…", merged_worktrees(*count));
+                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+                let repository = self.target.repository_name().to_owned();
+                (title(keys), repository, body, keyed(width, &[(Hint::Esc, "Close")]))
+            },
+            Stage::Swept { keys, plan, .. } => {
+                let back = [(Hint::Backspace, "Back"), (Hint::Esc, "Close")];
+                let yes = [(Hint::Char('y'), "Yes"), back[0], back[1]];
+                let hints: &[(Hint, &str)] = if plan.goes.is_empty() { &back } else { &yes };
+                let body = swept_lines(plan, width, body_room);
+                (title(keys), plan.repository_name().to_owned(), body, keyed(width, hints))
+            },
             Stage::Ssh { typed, wrong, .. } => {
                 let typed = sidebar::tail(&format!("{typed}_"), width.saturating_sub(2));
                 let mut body = vec![Line::from(vec![
@@ -2129,6 +2261,86 @@ pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Lin
     lines.collect()
 }
 
+/// `count` merged worktrees, in words.
+fn merged_worktrees(count: usize) -> String {
+    if count == 1 { "1 merged worktree".to_owned() } else { format!("{count} merged worktrees") }
+}
+
+/// What `d m` lists of `plan`, `width` wide, in `room` lines at most: what it
+/// asks, each worktree that goes, biggest first, as far as there is room, and
+/// then why the others stay.
+fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'static>> {
+    let style = Style::new().fg(NAME);
+    let mut lines = match plan.goes.len() {
+        0 => wrap("No merged worktree to delete", width, style),
+        count => wrap(&format!("Delete {}?", merged_worktrees(count)), width, style),
+    };
+    lines.push(Line::default());
+    let kept = plan.kept.iter().map(|kept| (&kept.worktree, kept.why.as_str()));
+    let unasked = plan.unasked.iter().map(|unasked| (&unasked.worktree, "luneta could not ask"));
+    let keeps: Vec<Vec<Line<'static>>> = kept
+        .chain(unasked)
+        .map(|(worktree, why)| {
+            wrap(&format!("Keeps {}: {why}", prunes::name_of(worktree)), width, style)
+        })
+        .collect();
+    let left = room.saturating_sub(lines.len());
+    let keeping: usize = keeps.iter().map(Vec::len).sum();
+    let goes_room = left.saturating_sub(keeping.min(left / 2));
+    let goes = goes_lines(&plan.goes, width, goes_room);
+    let keep_room = left.saturating_sub(goes.len());
+    lines.extend(goes);
+    let mut used = 0;
+    for (at, keep) in keeps.iter().enumerate() {
+        let rest = keeps.len() - at;
+        let room_for_more = if rest > 1 { keep_room.saturating_sub(1) } else { keep_room };
+        if used + keep.len() > room_for_more {
+            if keep_room > used {
+                lines.push(Line::styled(format!(" …and {rest} more stay"), style));
+            }
+            break;
+        }
+        lines.extend(keep.iter().cloned());
+        used += keep.len();
+    }
+    lines
+}
+
+/// The worktrees of `goes`, a line each, in `room` lines at most: its name, its
+/// pull request's number and what it takes up, in columns, and how many more
+/// there are, on the last, where they do not all fit.
+fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'static>> {
+    let shown = if goes.len() <= room { goes.len() } else { room.saturating_sub(1) };
+    let numbers: Vec<String> = goes.iter().map(|goes| format!("#{}", goes.number)).collect();
+    let size = |goes: &prunes::Goes| goes.bytes.map_or("?".to_owned(), prune::size);
+    let sizes: Vec<String> = goes.iter().map(size).collect();
+    let widest = |all: &[String]| all.iter().take(shown).map(|it| it.width()).max().unwrap_or(0);
+    let (numbers_wide, sizes_wide) = (widest(&numbers), widest(&sizes));
+    let names: Vec<&str> = goes.iter().map(|goes| prunes::name_of(&goes.worktree)).collect();
+    let names_room = width.saturating_sub(numbers_wide + sizes_wide + 6);
+    let longest = names.iter().take(shown).map(|name| name.width()).max().unwrap_or(0);
+    let names_wide = longest.min(names_room);
+    let mut lines = Vec::with_capacity(room);
+    for at in 0..shown {
+        let name = sidebar::cut(names[at], names_wide);
+        let gap = " ".repeat(names_wide.saturating_sub(name.width()));
+        let (number, size) = (&numbers[at], &sizes[at]);
+        let number_gap = " ".repeat(numbers_wide - number.width());
+        let size_gap = " ".repeat(sizes_wide - size.width());
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(format!("{name}{gap}  "), Style::new().fg(NAME)),
+            Span::styled(format!("{number}{number_gap}  "), Style::new().fg(gruvbox::PURPLE)),
+            Span::styled(format!("{size_gap}{size}"), Style::new().fg(TAG)),
+        ]));
+    }
+    if shown < goes.len() && room > 0 {
+        let more = goes.len() - shown;
+        lines.push(Line::styled(format!(" …and {more} more"), Style::new().fg(NAME)));
+    }
+    lines
+}
+
 /// What the rule over the menu names: the groups opened.
 fn title(keys: &Keys) -> String {
     let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
@@ -2228,6 +2440,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Turn(turning) => spans.push(does(turning.does())),
         Entry::Tab { name, .. } => spans.push(does(name)),
         Entry::Close { scope, .. } => spans.push(does(scope.does())),
+        Entry::Prune { .. } => spans.push(does(DELETE_MERGED_DOES)),
         Entry::Forget(_) => spans.push(does(FORGET_DOES)),
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
@@ -2444,6 +2657,7 @@ mod tests {
             pane: 4,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
+            repository: Some("/w/luneta".to_owned()),
             ran: Ran::Unhooked,
         }
     }
@@ -2972,6 +3186,194 @@ mod tests {
             }
             assert_eq!(closed(opened(row.clone(), Some('a'))), Done::Ask(row));
         }
+    }
+
+    fn merged_plan(names: &[(&str, u32, u64)]) -> prunes::Plan {
+        let goes = names.iter().map(|(name, number, megabytes)| prunes::Goes {
+            worktree: format!("/w/luneta/{name}"),
+            branch: (*name).to_owned(),
+            head: "abc".to_owned(),
+            number: *number,
+            pushed: prunes::Pushed::Nowhere,
+            bytes: Some(megabytes * 1024 * 1024),
+        });
+        prunes::Plan {
+            repository: "/w/luneta".to_owned(),
+            goes: goes.collect(),
+            kept: Vec::new(),
+            unasked: Vec::new(),
+        }
+    }
+
+    /// `d m` is offered on a pane's row in a repository, by the directory it
+    /// works in, and nowhere else: not on one git has yet to place, nor a row of
+    /// no directory, nor a machine's header.
+    #[test]
+    fn the_merged_worktrees_key_is_on_a_row_in_a_repository_alone() {
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0),
+            [
+                "─ Delete ──────── luneta/main ─",
+                " d  close the pane",
+                " s  delete the session",
+                " m  delete merged worktrees",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        let (menu, wants) = stays(menu.key(&char('m')));
+        assert_eq!(wants, Wants::Prunes { dir: "/w/luneta/main".to_owned() });
+        assert!(menu.sweeping() && menu.turning());
+
+        let outside = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
+        let unplaced = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        for target in [outside, unplaced, session_row(), local_header(), remote_header()] {
+            let (menu, _) = stays(opened(target.clone(), Some('d')));
+            let (menu, wants) = stays(menu.key(&char('m')));
+            assert_eq!(wants, Wants::Nothing, "{target:?}");
+            assert!(!menu.sweeping(), "{target:?}");
+        }
+    }
+
+    /// What `d m` lists fills what room there is: what it asks, each worktree
+    /// that goes, biggest first as it was planned, why the others stay, and the
+    /// keys. Short of room, it says how many more go.
+    #[test]
+    fn the_list_says_what_goes_as_far_as_there_is_room_and_why_the_rest_stay() {
+        let goes = [("issue-282", 297, 4608), ("dev-check", 293, 916), ("dev-ci", 303, 6)];
+        let mut plan = merged_plan(&goes);
+        plan.kept.push(prunes::Kept {
+            worktree: "/w/luneta/issue-308".to_owned(),
+            number: 310,
+            why: "it has a pane".to_owned(),
+        });
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, wants) = stays(menu.swept(Ok(plan)));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(!menu.turning());
+        assert_eq!(
+            text(&menu.lines(33, 20, 0).0),
+            [
+                "─ Delete ─────────────── luneta ─",
+                " Delete 3 merged worktrees?",
+                "",
+                " issue-282  #297  4.5 GB",
+                " dev-check  #293  916 MB",
+                " dev-ci     #303    6 MB",
+                " Keeps issue-308: it has a pane",
+                " <y> Yes  <BS> Back  <ESC> Close",
+            ]
+        );
+        assert_eq!(
+            text(&menu.lines(33, 7, 0).0),
+            [
+                "─ Delete ─────────────── luneta ─",
+                " Delete 3 merged worktrees?",
+                "",
+                " issue-282  #297  4.5 GB",
+                " …and 2 more",
+                " Keeps issue-308: it has a pane",
+                " <y> Yes  <BS> Back  <ESC> Close",
+            ]
+        );
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let mut plan = merged_plan(&[]);
+        for name in ["k1", "k2", "k3"] {
+            plan.kept.push(prunes::Kept {
+                worktree: format!("/w/luneta/{name}"),
+                number: 1,
+                why: "it is locked".to_owned(),
+            });
+        }
+        let (menu, _) = stays(menu.swept(Ok(plan)));
+        assert_eq!(
+            text(&menu.lines(33, 6, 0).0),
+            [
+                "─ Delete ─────────────── luneta ─",
+                " No merged worktree to delete",
+                "",
+                " Keeps k1: it is locked",
+                " …and 2 more stay",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+    }
+
+    /// `y`, or the key again, plans it again and deletes what you were asked
+    /// about, on the row's machine; once that changed, it lists it again.
+    /// Nothing goes at the first answer, nor on any other key.
+    #[test]
+    fn the_list_goes_ahead_on_yes_with_what_it_listed_alone() {
+        let (one, two) = (("one", 1, 5), ("two", 2, 5));
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        for key in ['y', 'm'] {
+            let (asked, _) = stays(opened(pane_row(), Some('d')));
+            let (asked, _) = stays(asked.key(&char('m')));
+            let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[one, two]))));
+            assert_eq!(wants, Wants::Nothing);
+            let (asked, wants) = stays(asked.key(&char(key)));
+            assert_eq!(wants, Wants::Prunes { dir: "/w/luneta/main".to_owned() });
+            let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[two, one]))));
+            let goes = merged_plan(&[two, one]).goes;
+            assert_eq!(wants, Wants::Prune { dir: "/w/luneta/main".to_owned(), goes });
+            assert!(asked.pruning() && asked.turning());
+            assert_eq!(
+                text(&asked.lines(40, 9, 0).0)[1],
+                format!(" {} Deleting 2 merged worktrees…", Mark::Busy.glyph(0).0)
+            );
+        }
+        let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one, two]))));
+        let (menu, wants) = stays(menu.key(&char('x')));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, _) = stays(menu.key(&char('y')));
+        let (menu, wants) = stays(menu.swept(Ok(merged_plan(&[one]))));
+        assert_eq!(wants, Wants::Nothing, "it deleted what changed since you read it");
+        assert_eq!(text(&menu.lines(40, 9, 0).0)[1], " Delete 1 merged worktree?");
+        let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the pane");
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
+        let (menu, _) = stays(menu.key(&char('n')));
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the pane");
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
+        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+    }
+
+    /// With nothing to delete there is no yes to say. What goes wrong says
+    /// nothing went, and while it waits a key but `Esc` does nothing.
+    #[test]
+    fn nothing_to_delete_asks_nothing() {
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let (waiting, wants) = stays(menu.key(&char('y')));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(waiting.sweeping());
+        let (listed, _) = stays(waiting.swept(Ok(merged_plan(&[]))));
+        assert_eq!(
+            text(&listed.lines(33, 9, 0).0),
+            [
+                "─ Delete ─────────────── luneta ─",
+                " No merged worktree to delete",
+                "",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        let (listed, wants) = stays(listed.key(&char('y')));
+        assert_eq!(wants, Wants::Nothing);
+        assert!(!listed.sweeping());
+
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        let wrong = closed(menu.swept(Err("lunetad does not answer".to_owned())));
+        assert_eq!(wrong, Done::Wrong("menu: nothing deleted: lunetad does not answer".to_owned()));
+
+        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(menu.key(&char('m')));
+        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
     }
 
     /// On a machine's header, the Delete group forgets the machine, and on

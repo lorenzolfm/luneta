@@ -23,6 +23,7 @@
 //! bridge. Two daemons that watched each other would else keep each other
 //! running for good, or start each other again, with no one to watch either.
 
+use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
@@ -66,7 +67,8 @@ use crate::api::{
     KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
     ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
+    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse,
+    PrunesRequest, PrunesResponse, RefugeRequest,
     RefugeResponse, RenameSessionRequest, SayRequest, StartRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
     TurnIntoTabResponse,
@@ -75,6 +77,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
+use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Unready};
@@ -1010,6 +1013,57 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
+    type PrunesStream = Pin<Box<dyn Stream<Item = Result<PrunesResponse, Status>> + Send>>;
+
+    async fn prunes(
+        &self,
+        request: Request<PrunesRequest>,
+    ) -> Result<Response<Self::PrunesStream>, Status> {
+        let PrunesRequest { on, dir } = request.into_inner();
+        absolute(&dir)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let answer = daemon.prunes(prunes::asked(None, &dir)).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let host = self.watched(None).await?;
+        let occupied = Occupied::of(&host).map_err(Status::failed_precondition)?;
+        let here = env::current_dir().ok();
+        let answer = late(move || {
+            let plan = prunes::plan(&dir, &occupied, here.as_deref());
+            plan.as_ref().map(PrunesResponse::from).map_err(Status::failed_precondition)
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
+    type PruneStream = Pin<Box<dyn Stream<Item = Result<PruneResponse, Status>> + Send>>;
+
+    async fn prune(
+        &self,
+        request: Request<PruneRequest>,
+    ) -> Result<Response<Self::PruneStream>, Status> {
+        let PruneRequest { on, dir, goes } = request.into_inner();
+        absolute(&dir)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let told = PruneRequest { on: None, dir, goes };
+            let answer = daemon.prune(told).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let goes: Vec<prunes::Goes> = goes.into_iter().map(Into::into).collect();
+        let core = self.core.clone();
+        let here = env::current_dir().ok();
+        let answer = late(move || {
+            let occupied = || {
+                let host = core::ask(&core, |answer| Command::Watch { after: None, answer });
+                let host = host.flatten().ok_or("lunetad's core did not say")?;
+                Occupied::of(&host)
+            };
+            let outcomes = prunes::deleted(&dir, &goes, occupied, here.as_deref())
+                .map_err(Status::failed_precondition)?;
+            Ok(PruneResponse { outcomes: outcomes.iter().map(Into::into).collect() })
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
 
     async fn keep_image(
@@ -1068,6 +1122,15 @@ fn kept_image(
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }
+}
+
+/// That `dir` is a directory by its absolute path, or that the question is
+/// invalid.
+fn absolute(dir: &str) -> Result<(), Status> {
+    if dir.starts_with('/') {
+        return Ok(());
+    }
+    Err(Status::invalid_argument(format!("dir: {dir:?} is no absolute path")))
 }
 
 /// What `job` answers, from a thread of its own, as a stream of that answer

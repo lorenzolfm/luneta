@@ -27,15 +27,18 @@ use lunetad::images::{self, Png};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
+use lunetad::prunes::{self, Goes, Outcome, Plan};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
 use lunetad::turns::{IntoPanes, IntoTab, OtherTab};
 use lunetad::zoxide::Dir;
 use lunetad::{log, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
-use tonic::Status;
+use tonic::{Response, Status, Streaming};
 
 use crate::daemon;
 
@@ -411,6 +414,53 @@ impl Away {
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
+    }
+
+    /// What deleting the merged worktrees of the repository `dir` is in there
+    /// deletes, as `prunes::plan` says there; or why it did not say.
+    pub fn prunes(&mut self, dir: &str) -> Result<Plan, String> {
+        let request = prunes::asked(Some(self.on()), dir);
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_of(prunes::PLANNING, async move {
+            timeout(patience, daemon.prunes(request)).await
+        })?;
+        Ok(answer.into())
+    }
+
+    /// Deletes `goes` of the repository `dir` is in there, as `prunes::deleted`
+    /// does there, and says how each went; or why it did not hear. A question
+    /// that hangs up does not stop it.
+    pub fn prune(&mut self, dir: &str, goes: &[Goes]) -> Result<Vec<Outcome>, String> {
+        let request = prunes::told(Some(self.on()), dir, goes);
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_of(prunes::DELETING, async move {
+            timeout(patience, daemon.prune(request)).await
+        })?;
+        Ok(prunes::outcomes_of(answer))
+    }
+
+    /// The one answer of a stream the daemon there answers `asking` with, by
+    /// `patience` for it to start and `late` after that for it to come.
+    fn answer_of<T>(
+        &mut self,
+        late: Duration,
+        asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
+    ) -> Result<T, String> {
+        let on = &self.on;
+        let secs = self.patience.as_secs_f32();
+        self.runtime.block_on(async {
+            let mut answer = match asking.await {
+                Ok(Ok(answer)) => answer.into_inner(),
+                Ok(Err(status)) => return Err(on.said(&status)),
+                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+            };
+            match timeout(late, answer.message()).await {
+                Ok(Ok(Some(said))) => Ok(said),
+                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
+                Ok(Err(status)) => Err(on.said(&status)),
+                Err(_) => Err(format!("{on}: lunetad said nothing for {}s", late.as_secs())),
+            }
+        })
     }
 
     /// Has the daemon there keep `png`, as `lunetad::images` does there, and

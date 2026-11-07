@@ -21,6 +21,8 @@ mod mouse;
 #[cfg(test)]
 mod pi;
 #[cfg(test)]
+mod prune;
+#[cfg(test)]
 mod remote;
 #[cfg(test)]
 mod say;
