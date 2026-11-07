@@ -577,8 +577,8 @@ struct Repository {
 /// What git says of whether a directory is in the pull request's repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Looked {
-    /// It is, so.
-    Of(Repository),
+    /// It is, so, by the remote of this name.
+    Of(Repository, String),
     /// It is not.
     NotOf,
     /// git did not say its remotes, for this reason, so it may be.
@@ -589,7 +589,14 @@ impl Looked {
     /// The repository, where it is the pull request's.
     fn repository(&self) -> Option<Repository> {
         match self {
-            Looked::Of(repository) => Some(*repository),
+            Looked::Of(repository, _) => Some(*repository),
+            Looked::NotOf | Looked::Unsaid(_) => None,
+        }
+    }
+
+    fn remote(&self) -> Option<&str> {
+        match self {
+            Looked::Of(_, remote) => Some(remote),
             Looked::NotOf | Looked::Unsaid(_) => None,
         }
     }
@@ -600,7 +607,9 @@ impl Looked {
 fn repository(dir: &str, link: &Link, ssh_host: impl FnMut(&str) -> Option<String>) -> Looked {
     match remotes_in(dir) {
         Remotes::Listed(listed) => match remote(&listed, link, ssh_host) {
-            Some(remote) => Looked::Of(Repository { by: Remote::of(&remote), layout: layout(dir) }),
+            Some(remote) => {
+                Looked::Of(Repository { by: Remote::of(&remote), layout: layout(dir) }, remote)
+            },
             None => Looked::NotOf,
         },
         Remotes::Unlisted => Looked::NotOf,
@@ -961,7 +970,7 @@ fn ready(
         Some(Found::There(at)) => {
             kind_holds(link)?;
             let dir = &worked[at].dir;
-            synced(dir, link, wanted)?;
+            synced(dir, link, wanted, None)?;
             let (worktree, branch) = (dir.clone(), branch(dir));
             let work = Readied::Link(link.clone());
             return Ok(Ready { at: At::There(at), worktree, branch, moved_off: false, work });
@@ -974,30 +983,32 @@ fn ready(
     };
     kind_holds(link)?;
     let work = Readied::Link(link.clone());
+    let remote = seen.get(&repository).and_then(Looked::remote);
     if let Some(branch) = link.branch() {
         if reads_moved_off && let Some(moved) = moved_off(&repository, &branch)? {
             return moved.ready(going, worked, work);
         }
-        let remote = match remotes_in(&repository) {
-            Remotes::Listed(listed) => remote(&listed, link, ssh_host),
-            Remotes::Unlisted | Remotes::Unsaid(_) => None,
-        };
         let remote = remote.ok_or_else(|| {
-            format!("git no longer says a remote of {repository} is {}", link.repository())
+            format!("git does not say a remote of {repository} is {}", link.repository())
         })?;
-        base(&repository, &remote, &branch)?;
+        base(&repository, remote, &branch)?;
     }
     let ready = made_worktree(&repository, &link.wt(), going, worked, work)?;
-    synced(&ready.worktree, link, wanted)?;
+    synced(&ready.worktree, link, wanted, remote)?;
     Ok(ready)
 }
 
 /// A failure is `Unready::InDoubt`: the repository is here, and no other machine
 /// should make a second worktree of it.
-fn synced(dir: &str, link: &Link, wanted: Wanted) -> Result<(), Unready> {
+fn synced(
+    dir: &str,
+    link: &Link,
+    wanted: Wanted,
+    remote: Option<&str>,
+) -> Result<(), Unready> {
     match wanted {
         Wanted::AsItIs => Ok(()),
-        Wanted::AtHead => sync::to_head(dir, link)
+        Wanted::AtHead => sync::to_head(dir, link, remote)
             .map_err(|why| Unready::InDoubt(format!("started no review in {dir}: {why}"))),
     }
 }
@@ -1242,7 +1253,7 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     };
     let unsaid = |(dir, it): (&'_ String, &'_ Looked)| match it {
         Looked::Unsaid(why) => Some((dir.clone(), why.clone())),
-        Looked::Of(_) | Looked::NotOf => None,
+        Looked::Of(..) | Looked::NotOf => None,
     };
     match (laid_out(Layout::Git), laid_out(Layout::Unsaid)) {
         (Some(dir), _) => Unready::Failed(format!(
@@ -1576,6 +1587,10 @@ mod tests {
     }
 
     /// One git cloned, that is the pull request's by its origin.
+    fn of(repository: Repository) -> Looked {
+        Looked::Of(repository, ORIGIN.to_owned())
+    }
+
     const BY_GIT: Repository = Repository { by: Remote::Origin, layout: Layout::Git };
 
     /// One that is the pull request's by its origin, where git did not say
@@ -1864,14 +1879,14 @@ mod tests {
         assert_eq!(
             no_clone(&link(), &seen(&[
                 ("/dots", Looked::NotOf),
-                ("/w/cdk/src", Looked::Of(BY_GIT)),
+                ("/w/cdk/src", of(BY_GIT)),
             ])),
             by_git()
         );
         assert_eq!(
             no_clone(&link(), &seen(&[
-                ("/a/cdk", Looked::Of(UNSAID)),
-                ("/w/cdk/src", Looked::Of(BY_GIT)),
+                ("/a/cdk", of(UNSAID)),
+                ("/w/cdk/src", of(BY_GIT)),
                 ("/mnt/stuck", stuck()),
             ])),
             by_git()
@@ -1882,11 +1897,11 @@ mod tests {
             )
         };
         assert_eq!(
-            no_clone(&link(), &seen(&[("/dots", Looked::NotOf), ("/a/cdk", Looked::Of(UNSAID))])),
+            no_clone(&link(), &seen(&[("/dots", Looked::NotOf), ("/a/cdk", of(UNSAID))])),
             unsaid()
         );
         assert_eq!(
-            no_clone(&link(), &seen(&[("/a/cdk", Looked::Of(UNSAID)), ("/mnt/stuck", stuck())])),
+            no_clone(&link(), &seen(&[("/a/cdk", of(UNSAID)), ("/mnt/stuck", stuck())])),
             unsaid()
         );
         assert_eq!(

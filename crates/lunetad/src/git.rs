@@ -88,7 +88,7 @@ pub fn local(command: &mut Command) -> &mut Command {
 /// in no repository. When git did not say, as it did not answer in time, or
 /// would not read the repository or the work tree, what is to be said of it
 /// instead.
-fn status(dir: &str, placed: &Placed) -> Result<WorkTree, String> {
+fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree, String> {
     let [program, args @ ..] = git::command(dir);
     let mut git = Command::new(program);
     local(git.args(args));
@@ -98,7 +98,12 @@ fn status(dir: &str, placed: &Placed) -> Result<WorkTree, String> {
         Ran::Stuck => return Err(format!("git status in {dir} did not answer in time")),
         ended @ Ran::Ended { .. } => ended.answer(),
     };
-    let Some(repository) = holder_of(dir)? else {
+    let told = common.and_then(Path::to_str).filter(|_| said.is_ok());
+    let repository = match told {
+        Some(common) => Some(holder_said(common)?),
+        None => holder_of(dir)?,
+    };
+    let Some(repository) = repository else {
         return Ok(WorkTree::Outside);
     };
     match (said, placed) {
@@ -115,14 +120,17 @@ fn status(dir: &str, placed: &Placed) -> Result<WorkTree, String> {
 /// none, or is gone. Why not, where git did not say.
 fn holder_of(dir: &str) -> Result<Option<Said>, String> {
     match common(dir) {
-        Common::Of(common) => holder(&common)
-            .and_then(Said::new)
-            .map(Some)
-            .ok_or_else(|| format!("no directory holds the repository {common}")),
+        Common::Of(common) => holder_said(&common).map(Some),
         Common::NoRepository => Ok(None),
         Common::Unsaid(why) if directory_gone(why.as_bytes()) => Ok(None),
         Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
     }
+}
+
+fn holder_said(common: &str) -> Result<Said, String> {
+    holder(common)
+        .and_then(Said::new)
+        .ok_or_else(|| format!("no directory holds the repository {common}"))
 }
 
 /// What git starts with, in its own language, where a directory is in no
@@ -808,12 +816,12 @@ fn ask(
     wake: &SyncSender<()>,
     troubles: &mut Troubles,
 ) -> (Placed, Result<WorkTree, String>, bool) {
-    let (placed, anew) = match place(dir) {
+    let (placed, anew, common) = match place(dir) {
         Ok(Some(place)) => {
-            let top = place.top.clone();
+            let (top, common) = (place.top.clone(), place.common.clone());
             let (tree, anew) = Tree::watch(trees.remove(&top), place, wake, troubles);
             trees.insert(top.clone(), tree);
-            (Placed::In(top), anew)
+            (Placed::In(top), anew, Some(common))
         },
         Ok(None) => {
             let before = match before {
@@ -821,14 +829,14 @@ fn ask(
                 Some(Placed::In(_) | Placed::Unsaid) | None => None,
             };
             let (outside, anew) = Outside::watch(Path::new(dir), before, wake, troubles);
-            (Placed::Outside(outside), anew)
+            (Placed::Outside(outside), anew, None)
         },
         // git is killed once it has not answered in time, but a read here of
         // a mount that does not answer would hold this thread, and each
         // directory with it, for as long as the mount does not.
-        Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false),
+        Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false, None),
     };
-    let said = status(dir, &placed);
+    let said = status(dir, &placed, common.as_deref());
     let elsewhere = |now: Option<Place>| now.map(|place| place.top).as_deref() != placed.top();
     let moved = anew && place(dir).is_ok_and(elsewhere);
     (placed, said, moved)
