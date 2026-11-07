@@ -3,7 +3,9 @@
 
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -126,6 +128,27 @@ pub fn script(path: &Path, text: &str) {
     install(&draft, path);
 }
 
+pub fn shared_script(path: &Path, text: &str) {
+    symlink(shared_copy(text), path).unwrap();
+}
+
+fn shared_copy(text: &str) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let tools = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tools");
+    let copy = tools.join(format!("{:016x}", hasher.finish()));
+    if copy.exists() {
+        return copy;
+    }
+    fs::create_dir_all(&tools).unwrap();
+    let draft = tempfile::tempdir_in(&tools).unwrap();
+    let program = draft.path().join("tool");
+    script(&program, text);
+    Command::new(&program).arg("--version").output().unwrap();
+    fs::rename(&program, &copy).unwrap();
+    copy
+}
+
 /// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
 /// lists the panes of a session as a test has it: what it wrote with `list`.
 /// It lists the session's clients too, as the test wrote them with `clients`,
@@ -169,112 +192,113 @@ impl FakeZellij {
         let zellij = FakeZellij { bin: tempfile::tempdir().unwrap() };
         fs::create_dir(zellij.panes()).unwrap();
         let text = format!(
-            r#"asked="$*"
+            r#"panes="${{0%/*}}/panes"
+asked="$*"
 session="$2"
 [ "$1" = --session ] && shift 2
 [ "$1" = delete-session ] && session="${{3:-$2}}"
 socket="$ZELLIJ_SOCKET_DIR/contract_version_1/$session"
 cache="$HOME/{CACHE}"
 kept="$cache/contract_version_1/session_info/$session"
-if [ "$1" = action ] && [ -f "{panes}/$session.$2.silent" ]; then
-    rm "{panes}/$session.$2.silent"
+if [ "$1" = action ] && [ -f "$panes/$session.$2.silent" ]; then
+    rm "$panes/$session.$2.silent"
     case "$2" in
-        new-pane | new-tab) echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened" ;;
+        new-pane | new-tab) echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "$panes/opened" ;;
     esac
     exit 0
 fi
-if [ "$1" = action ] && [ -f "{panes}/$session.$2.once" ]; then
-    once=$(cat "{panes}/$session.$2.once")
-    rm "{panes}/$session.$2.once"
+if [ "$1" = action ] && [ -f "$panes/$session.$2.once" ]; then
+    once=$(cat "$panes/$session.$2.once")
+    rm "$panes/$session.$2.once"
     eval "$once"
 fi
 case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json")
         asking=laid
-        if [ -f "{panes}/$session.listed.clients" ]; then
-            mv "{panes}/$session.listed.clients" "{panes}/$session.clients"
+        if [ -f "$panes/$session.listed.clients" ]; then
+            mv "$panes/$session.listed.clients" "$panes/$session.clients"
         fi
         ;;
     "action list-clients") asking=clients ;;
     "action close-pane --pane-id "* | "action close-tab-by-id "* | "delete-session --force "*)
-        if [ -f "{panes}/$session.refused" ]; then
+        if [ -f "$panes/$session.refused" ]; then
             echo "zellij refused to close anything of $session" >&2
             exit 1
         fi
-        if [ -f "{panes}/$session.gone" ]; then
+        if [ -f "$panes/$session.gone" ]; then
             echo "Session: \"$session\" not found." >&2
             exit 2
         fi
-        echo "$asked" >> "{panes}/closed"
+        echo "$asked" >> "$panes/closed"
         [ "$1" = delete-session ] && [ -n "$session" ] || exit 0
         echo "A session by the name \"$session\" exists and is active, but will be force killed and deleted."
         rm -f "$socket"
         rm -rf "$kept"
-        if [ -f "{panes}/$session.renews" ]; then
-            touch "$ZELLIJ_SOCKET_DIR/contract_version_1/$(cat "{panes}/$session.renews")"
+        if [ -f "$panes/$session.renews" ]; then
+            touch "$ZELLIJ_SOCKET_DIR/contract_version_1/$(cat "$panes/$session.renews")"
         fi
-        if [ -f "{panes}/$session.rewrites" ]; then
+        if [ -f "$panes/$session.rewrites" ]; then
             mkdir -p "$kept"
             : > "$kept/session-layout.kdl"
         fi
-        if [ -f "{panes}/$session.unkept" ]; then
+        if [ -f "$panes/$session.unkept" ]; then
             echo "Session: \"$session\" not found." >&2
             exit 2
         fi
         exit 0
         ;;
     "action switch-session "* | "action focus-pane-id "*)
-        echo "$asked" >> "{panes}/went"
-        if [ -f "{panes}/$session.focused.clients" ]; then
-            mv "{panes}/$session.focused.clients" "{panes}/$session.clients"
+        echo "$asked" >> "$panes/went"
+        if [ -f "$panes/$session.focused.clients" ]; then
+            mv "$panes/$session.focused.clients" "$panes/$session.clients"
         fi
         exit 0
         ;;
     "action stack-panes -- "*" terminal_9 terminal_4294967295")
-        echo "$asked" >> "{panes}/tucked"
+        echo "$asked" >> "$panes/tucked"
         exit 0
         ;;
     "action stack-panes -- "*)
-        echo "$asked" >> "{panes}/turned"
+        echo "$asked" >> "$panes/turned"
         case "$*" in
             *" terminal_4294967295") focuses=no ;;
             *) focuses=yes ;;
         esac
-        if [ "$focuses" = yes ] || [ ! -f "{panes}/$session.tight" ]; then
-            for next in "{panes}/$session".stacks.*; do
-                [ -f "$next" ] && mv "$next" "{panes}/$session.json"
+        if [ "$focuses" = yes ] || [ ! -f "$panes/$session.tight" ]; then
+            for next in "$panes/$session".stacks.*; do
+                [ -f "$next" ] && mv "$next" "$panes/$session.json"
                 break
             done
         fi
-        if [ "$focuses" = yes ] && [ -f "{panes}/$session.stacked.clients" ]; then
-            mv "{panes}/$session.stacked.clients" "{panes}/$session.clients"
+        if [ "$focuses" = yes ] && [ -f "$panes/$session.stacked.clients" ]; then
+            mv "$panes/$session.stacked.clients" "$panes/$session.clients"
         fi
         exit 0
         ;;
     "action toggle-fullscreen "*)
-        echo "$asked" >> "{panes}/turned"
+        echo "$asked" >> "$panes/turned"
         exit 0
         ;;
     "action toggle-pane-embed-or-floating "*)
-        echo "$asked" >> "{panes}/turned"
+        echo "$asked" >> "$panes/turned"
         exit 0
         ;;
     "action new-pane "*)
-        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
+        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "$panes/opened"
         echo terminal_9
         exit 0
         ;;
     "action new-tab "*)
-        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "{panes}/opened"
-        if [ -f "{panes}/$session.opened.json" ]; then
-            mv "{panes}/$session.opened.json" "{panes}/$session.json"
+        echo "${{ZELLIJ_PANE_ID:--}} $asked" >> "$panes/opened"
+        if [ -f "$panes/$session.opened.json" ]; then
+            mv "$panes/$session.opened.json" "$panes/$session.json"
         fi
         echo 3
         exit 0
         ;;
     "action dump-screen "*)
-        exec cat "{panes}/$session.dump"
+        exec cat "$panes/$session.dump"
         ;;
     "list-sessions --no-formatting")
         listed=
@@ -292,32 +316,32 @@ case "$*" in
         exit 0
         ;;
     "action rename-session "*)
-        echo "$asked" >> "{panes}/renamed"
+        echo "$asked" >> "$panes/renamed"
         exit 0
         ;;
     "attach "*)
-        echo "$asked" >> "{panes}/attached"
-        if [ -f "{panes}/listen" ]; then
+        echo "$asked" >> "$panes/attached"
+        if [ -f "$panes/listen" ]; then
             stty raw -echo
             printf '\033[?1000h\033[?1002h\033[?1006hon screen'
-            exec cat > "{panes}/heard"
+            exec cat > "$panes/heard"
         fi
-        if [ -f "{panes}/refused-clients" ]; then
+        if [ -f "$panes/refused-clients" ]; then
             echo "this zellij attaches no client"
             exit 1
         fi
-        if [ -f "{panes}/drops" ]; then
-            drops=$(cat "{panes}/drops")
+        if [ -f "$panes/drops" ]; then
+            drops=$(cat "$panes/drops")
             if [ "$drops" -gt 0 ]; then
-                echo $((drops - 1)) > "{panes}/drops"
-                cat "{panes}/dropped"
+                echo $((drops - 1)) > "$panes/drops"
+                cat "$panes/dropped"
                 exit 0
             fi
         fi
-        if [ -f "{panes}/stays" ]; then
-            stays=$(cat "{panes}/stays")
-            mv "{panes}/stays.clients" "{panes}/$session.clients"
-            rm "{panes}/stays"
+        if [ -f "$panes/stays" ]; then
+            stays=$(cat "$panes/stays")
+            mv "$panes/stays.clients" "$panes/$session.clients"
+            rm "$panes/stays"
             sleep "$stays"
         fi
         exit 0
@@ -332,7 +356,7 @@ case "$*" in
             exit 2
         fi
         rm -r "$kept"
-        echo "$asked" >> "{panes}/closed"
+        echo "$asked" >> "$panes/closed"
         echo "Session: \"$session\" successfully deleted."
         exit 0
         ;;
@@ -342,27 +366,25 @@ case "$*" in
         ;;
 esac
 if [ "$asking" = panes ]; then
-    echo "$session" >> "{panes}/asked"
+    echo "$session" >> "$panes/asked"
 fi
-if [ -f "{panes}/$session.hung" ]; then
+if [ -f "$panes/$session.hung" ]; then
     exec sleep 5
 fi
-if [ ! -f "{panes}/$session.json" ]; then
+if [ ! -f "$panes/$session.json" ]; then
     echo "Session '$session' not found." >&2
     exit 1
 fi
 if [ "$asking" != clients ]; then
-    exec cat "{panes}/$session.json"
+    exec cat "$panes/$session.json"
 fi
-if [ -f "{panes}/$session.clients" ]; then
-    exec cat "{panes}/$session.clients"
+if [ -f "$panes/$session.clients" ]; then
+    exec cat "$panes/$session.clients"
 fi
 echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
-"#,
-            panes = zellij.panes().display()
+"#
         );
-        let path = zellij.bin().join("zellij");
-        script(&path, &text);
+        shared_script(&zellij.bin().join("zellij"), &text);
         zellij
     }
 
@@ -657,33 +679,33 @@ impl FakeGh {
     fn new(bin: &Path) -> Self {
         let gh = FakeGh { pulls: bin.join("pulls") };
         fs::create_dir(&gh.pulls).unwrap();
-        let text = format!(
-            r#"if [ "$1 $2" = "issue view" ]; then
-    echo "$*" >> "{pulls}/issues"
-    [ -f "{pulls}/issue-$3" ] && exec cat "{pulls}/issue-$3"
+        let text = r#"pulls="${0%/*}/pulls"
+if [ "$1 $2" = "issue view" ]; then
+    echo "$*" >> "$pulls/issues"
+    [ -f "$pulls/issue-$3" ] && exec cat "$pulls/issue-$3"
     echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
     exit 1
 fi
 if [ "$1 $2 $4" = "pr view --repo" ]; then
-    echo "$*" >> "{pulls}/viewed"
-    [ -f "{pulls}/pull-$3" ] && exec cat "{pulls}/pull-$3"
+    echo "$*" >> "$pulls/viewed"
+    [ -f "$pulls/pull-$3" ] && exec cat "$pulls/pull-$3"
     echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
     exit 1
 fi
 if [ "$1" = api ]; then
-    [ -f "{pulls}/api" ] && exec cat "{pulls}/api"
+    [ -f "$pulls/api" ] && exec cat "$pulls/api"
     echo "gh: Not Found (HTTP 404)" >&2
     exit 1
 fi
 if [ "$*" = "repo view --json parent,url,defaultBranchRef" ]; then
-    echo "$*" >> "{pulls}/repositories"
-    [ -f "{pulls}/repository" ] && exec cat "{pulls}/repository"
-    echo '{{"defaultBranchRef":{{"name":"main"}},"parent":null,"url":"https://github.com/owner/repo"}}'
+    echo "$*" >> "$pulls/repositories"
+    [ -f "$pulls/repository" ] && exec cat "$pulls/repository"
+    echo '{"defaultBranchRef":{"name":"main"},"parent":null,"url":"https://github.com/owner/repo"}'
     exit 0
 fi
 if [ "$1 $2 $3" = "pr list --base" ]; then
-    echo "${{GH_REPO:-}} $4" >> "{pulls}/based"
-    [ -f "{pulls}/based-$4" ] && exec cat "{pulls}/based-$4"
+    echo "${GH_REPO:-} $4" >> "$pulls/based"
+    [ -f "$pulls/based-$4" ] && exec cat "$pulls/based-$4"
     echo '[]'
     exit 0
 fi
@@ -691,19 +713,19 @@ if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,aut
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
-if [ -f "{pulls}/switch" ]; then
-    git switch -q "$(cat "{pulls}/switch")" || exit 1
-    rm "{pulls}/switch"
+if [ -f "$pulls/switch" ]; then
+    git switch -q "$(cat "$pulls/switch")" || exit 1
+    rm "$pulls/switch"
 fi
 branch=$(git symbolic-ref --short HEAD) || exit 1
-echo "${{GH_REPO:+$GH_REPO }}$branch" >> "{pulls}/asked"
-said="{pulls}/${{GH_REPO:+$GH_REPO/}}$branch.json"
+echo "${GH_REPO:+$GH_REPO }$branch" >> "$pulls/asked"
+said="$pulls/${GH_REPO:+$GH_REPO/}$branch.json"
 if [ ! -f "$said" ]; then
     merge=$(git config "branch.$branch.merge")
     case "$merge" in
     refs/pull/*/head)
-        number=${{merge#refs/pull/}}
-        echo "GraphQL: Could not resolve to a PullRequest with the number of ${{number%/head}}." >&2
+        number=${merge#refs/pull/}
+        echo "GraphQL: Could not resolve to a PullRequest with the number of ${number%/head}." >&2
         exit 1
         ;;
     esac
@@ -711,11 +733,8 @@ if [ ! -f "$said" ]; then
     exit 1
 fi
 exec cat "$said"
-"#,
-            pulls = gh.pulls.display()
-        );
-        let path = bin.join("gh");
-        script(&path, &text);
+"#;
+        shared_script(&bin.join("gh"), text);
         gh
     }
 
@@ -843,17 +862,16 @@ impl NotedGit {
         let text = format!(
             r#"for arg; do
     if [ "$arg" = status ]; then
-        echo "$*" >> "{notes}"
+        echo "$*" >> "${{0%/*}}/statuses"
         break
     fi
 done
 exec "{git}" "$@"
 "#,
-            notes = noted.notes.display(),
             git = git.expect("git is on the PATH").display()
         );
         let path = bin.join("git");
-        script(&path, &text);
+        shared_script(&path, &text);
         // Run once here, and not first in the daemon's first ask: macOS looks
         // a program over the first time it runs, which took that ask a quarter
         // of a second more, and the daemon rests from a directory as long as
