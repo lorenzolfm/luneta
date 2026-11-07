@@ -9,6 +9,7 @@
 //! ask, however many directories of it they work in.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
 use std::process::Command;
@@ -41,7 +42,8 @@ pub struct Found {
 }
 
 /// What gh is asked of a pull request: `--json` takes them so.
-const VIEWED: &str = "number,state,isDraft,url";
+const VIEWED: &str =
+    "number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner";
 
 /// A pull request as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
@@ -53,6 +55,16 @@ struct Viewed {
     is_draft: bool,
     /// Its page, of the repository gh found it in.
     url: String,
+    head_ref_name: String,
+    head_ref_oid: String,
+    author: Option<Owner>,
+    head_repository: Option<HeadRepository>,
+    head_repository_owner: Option<Owner>,
+}
+
+#[derive(Deserialize)]
+struct HeadRepository {
+    name: String,
 }
 
 /// A pull request's state, as GitHub spells it.
@@ -64,8 +76,42 @@ enum Stands {
     Merged,
 }
 
+/// A pull request, with what tells whose head it is, for `prunes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pulled {
+    pub pull_request: PullRequest,
+    pub head_name: String,
+    pub head: String,
+    pub author: Option<String>,
+    pub head_repository: Option<RepositoryName>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryName {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+impl RepositoryName {
+    #[must_use]
+    pub fn is_at(&self, url: &str) -> bool {
+        links::remote_is_of(url, (&self.host, &self.owner, &self.name))
+    }
+}
+
+impl fmt::Display for RepositoryName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}/{}", self.host, self.owner, self.name)
+    }
+}
+
+fn host_of(url: &str) -> Option<&str> {
+    url.split_once("://")?.1.split('/').next().filter(|host| !host.is_empty())
+}
+
 /// What gh wrote of a pull request, or why it does not read.
-fn parse(said: &[u8]) -> Result<PullRequest, String> {
+fn parse(said: &[u8]) -> Result<Pulled, String> {
     let viewed: Viewed = serde_json::from_slice(said).map_err(|error| error.to_string())?;
     let state = match (viewed.state, viewed.is_draft) {
         (Stands::Open, false) => State::Open,
@@ -73,7 +119,23 @@ fn parse(said: &[u8]) -> Result<PullRequest, String> {
         (Stands::Merged, _) => State::Merged,
         (Stands::Closed, _) => State::Closed,
     };
-    Ok(PullRequest { number: viewed.number, state, url: Some(viewed.url) })
+    let host = host_of(&viewed.url).ok_or_else(|| format!("{} is no page", viewed.url))?;
+    let host = host.to_owned();
+    let owner = viewed.head_repository_owner.map(|owner| owner.login);
+    let name = viewed.head_repository.map(|repository| repository.name);
+    let head_repository = match (owner, name) {
+        (Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => {
+            Some(RepositoryName { host, owner, name })
+        },
+        _ => None,
+    };
+    Ok(Pulled {
+        pull_request: PullRequest { number: viewed.number, state, url: Some(viewed.url) },
+        head_name: viewed.head_ref_name,
+        head: viewed.head_ref_oid,
+        author: viewed.author.map(|author| author.login).filter(|login| !login.is_empty()),
+        head_repository,
+    })
 }
 
 const REPOSITORY: &str = "parent,url,defaultBranchRef";
@@ -104,23 +166,15 @@ struct Owner {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fork {
-    host: String,
-    owner: String,
-    name: String,
+    parent: RepositoryName,
     default_branch: String,
 }
 
 impl Fork {
-    fn parent(&self) -> String {
-        format!("{}/{}/{}", self.host, self.owner, self.name)
-    }
-
     fn parent_may_have(&self, head: &NamedHead) -> bool {
         match head {
             NamedHead::OnRemote => true,
-            NamedHead::PullRef { remote_url } => {
-                links::remote_is_of(remote_url, (&self.host, &self.owner, &self.name))
-            },
+            NamedHead::PullRef { remote_url } => self.parent.is_at(remote_url),
         }
     }
 }
@@ -133,13 +187,9 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     if !links::named(&login) || !links::named(&name) {
         return Err(format!("{login}/{name} names no repository"));
     }
-    let host = repository.url.split_once("://").and_then(|(_, page)| page.split('/').next());
-    let host = host.filter(|host| !host.is_empty());
-    let host = host.ok_or_else(|| format!("{} is no page", repository.url))?;
+    let host = host_of(&repository.url).ok_or_else(|| format!("{} is no page", repository.url))?;
     Ok(Some(Fork {
-        host: host.to_owned(),
-        owner: login,
-        name,
+        parent: RepositoryName { host: host.to_owned(), owner: login, name },
         default_branch: repository.default_branch_ref.name,
     }))
 }
@@ -148,9 +198,9 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
 enum Answer {
     /// The branch was still checked out as gh answered: the pull request gh
     /// found of it, or none.
-    Stayed(Option<PullRequest>),
+    Stayed(Option<Pulled>),
     Partly {
-        own: Option<PullRequest>,
+        own: Option<Pulled>,
         why: String,
     },
     /// Another branch was checked out by the time gh answered, which git has
@@ -158,7 +208,7 @@ enum Answer {
     Moved,
 }
 
-fn find(dir: &str, base: Option<&str>) -> Result<Option<PullRequest>, String> {
+fn find(dir: &str, base: Option<&str>) -> Result<Option<Pulled>, String> {
     let mut gh = Command::new("gh");
     git::local(gh.args(["pr", "view", "--json", VIEWED]).current_dir(dir));
     let asked = match base {
@@ -206,16 +256,16 @@ fn in_parent(
     repository: &str,
     branch: &str,
     forks: &mut Forks,
-) -> Result<Option<PullRequest>, String> {
+) -> Result<Option<Pulled>, String> {
     let Some(head) = git::named_head(dir, branch)? else {
         return Ok(None);
     };
     let Some(fork) = fork(dir, repository, forks)?.filter(|fork| fork.parent_may_have(&head)) else {
         return Ok(None);
     };
-    let done = |found: &PullRequest| matches!(found.state, State::Merged | State::Closed);
-    let stale = |found: &PullRequest| done(found) && branch == fork.default_branch;
-    Ok(find(dir, Some(&fork.parent()))?.filter(|found| !stale(found)))
+    let done = |found: &Pulled| matches!(found.pull_request.state, State::Merged | State::Closed);
+    let stale = |found: &Pulled| done(found) && branch == fork.default_branch;
+    Ok(find(dir, Some(&fork.parent.to_string()))?.filter(|found| !stale(found)))
 }
 
 /// What gh says of the pull request of `branch`, checked out in `dir`: the
@@ -234,7 +284,7 @@ fn view(
     forks: &mut Forks,
 ) -> Result<Answer, String> {
     let own = find(dir, None)?;
-    let settled = own.as_ref().is_some_and(|found| found.state != State::Closed);
+    let settled = own.as_ref().is_some_and(|found| found.pull_request.state != State::Closed);
     let beyond = if settled { Ok(None) } else { in_parent(dir, repository, branch, forks) };
     if git::branch(dir).as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
@@ -255,6 +305,99 @@ fn standing(was: Option<PullRequest>, own: Option<PullRequest>) -> Option<PullRe
 /// A branch of a repository, by the repository's common directory and the
 /// branch's name.
 type Branch = (String, String);
+
+/// Asks gh for what `prunes` needs of it, which only a sweep you asked for
+/// does: one `view` for each worktree, as `follow` asks of a branch.
+#[derive(Default)]
+pub struct Asker {
+    forks: Forks,
+}
+
+impl Asker {
+    pub fn pull_of(
+        &mut self,
+        dir: &str,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<Pulled>, String> {
+        let asked = (repository.to_owned(), branch.to_owned());
+        match view(dir, &asked, &mut self.forks)? {
+            Answer::Stayed(found) => Ok(found),
+            Answer::Partly { why, .. } => Err(why),
+            Answer::Moved => Err(format!("{dir} moved off {branch} as gh answered")),
+        }
+    }
+
+    pub fn open_on_parent(
+        &mut self,
+        dir: &str,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<u32>, String> {
+        let found = in_parent(dir, repository, branch, &mut self.forks)?;
+        let open = |found: &Pulled| matches!(found.pull_request.state, State::Open | State::Draft);
+        Ok(found.filter(open).map(|found| found.pull_request.number.get()))
+    }
+}
+
+pub fn default_branch(dir: &str) -> Result<String, String> {
+    let mut gh = Command::new("gh");
+    git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
+    let ran = program::run(&mut gh, LIMIT)
+        .map_err(|error| format!("gh repo view in {dir} could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
+    let repository: Repository = serde_json::from_slice(&said)
+        .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
+    Ok(repository.default_branch_ref.name)
+}
+
+#[derive(Deserialize)]
+struct Numbered {
+    number: u32,
+    state: Stands,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Based {
+    Open(u32),
+    Merged(u32),
+    Neither,
+}
+
+/// What is based on `branch` of `repository`, of its newest 100.
+pub fn based_on(dir: &str, repository: &RepositoryName, branch: &str) -> Result<Based, String> {
+    let asked = format!("gh pr list of {repository} based on {branch}");
+    let mut gh = Command::new("gh");
+    gh.args(["pr", "list", "--base", branch, "--state", "all", "--limit", "100"]);
+    gh.args(["--json", "number,state"]).current_dir(dir).env("GH_REPO", repository.to_string());
+    git::local(&mut gh);
+    let ran =
+        program::run(&mut gh, LIMIT).map_err(|error| format!("{asked} could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
+    let listed: Vec<Numbered> = serde_json::from_slice(&said)
+        .map_err(|why| format!("{asked} said what does not read: {why}"))?;
+    let open = listed.iter().find(|pull| matches!(pull.state, Stands::Open));
+    let merged = listed.iter().find(|pull| matches!(pull.state, Stands::Merged));
+    Ok(match (open, merged) {
+        (Some(open), _) => Based::Open(open.number),
+        (None, Some(merged)) => Based::Merged(merged.number),
+        (None, None) => Based::Neither,
+    })
+}
+
+/// Who gh is logged in as on `host`.
+pub fn logged_in(host: &str) -> Result<String, String> {
+    let mut gh = Command::new("gh");
+    git::local(gh.args(["api", "user", "--hostname", host, "--jq", ".login"]));
+    let ran = program::run(&mut gh, LIMIT)
+        .map_err(|error| format!("gh api user could not be run: {error}"))?;
+    let said = ran.answer().map_err(|why| format!("gh api user: {why}"))?;
+    let login = String::from_utf8_lossy(&said).trim().to_owned();
+    if login.is_empty() {
+        return Err("gh api user named no one".to_owned());
+    }
+    Ok(login)
+}
 
 struct Lineage {
     remotes: String,
@@ -316,13 +459,14 @@ pub fn follow(
                 let said = view(&on[branch][0], branch, &mut forks);
                 let next = Instant::now() + sweep;
                 let was = asked.remove(branch).and_then(|was| was.found);
+                let of = |found: Option<Pulled>| found.map(|found| found.pull_request);
                 let (found, trouble) = match said {
-                    Ok(Answer::Stayed(found)) => (found, None),
+                    Ok(Answer::Stayed(found)) => (of(found), None),
                     // The core wakes the thread once git sees the checkout.
                     Ok(Answer::Moved) => (was, None),
                     Ok(Answer::Partly { own, why }) => {
                         troubles.say(why.clone());
-                        (standing(was, own), Some(why))
+                        (standing(was, of(own)), Some(why))
                     },
                     Err(trouble) => {
                         troubles.say(trouble.clone());
@@ -378,7 +522,7 @@ mod tests {
 
     use luneta_protocol::github::{PullRequest, State};
 
-    use super::{fork_of, parse, standing};
+    use super::{fork_of, parse, standing, Pulled, RepositoryName};
 
     #[test]
     fn a_parent_that_does_not_say_leaves_its_own_and_takes_news_of_the_fork_s() {
@@ -403,7 +547,8 @@ mod tests {
         let default = r#""defaultBranchRef":{"name":"trunk"}"#;
         let forked = |url: &str| format!(r#"{{{default},"parent":{parent},"url":"{url}"}}"#);
         let read = |said: &str| fork_of(said.as_bytes());
-        let parent_of = |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent()));
+        let parent_of =
+            |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent.to_string()));
         let on = |host: &str| Ok(Some(format!("{host}/cashubtc/cdk")));
         assert_eq!(parent_of(&forked("https://github.com/lorenzolfm/cdk")), on("github.com"));
         assert_eq!(
@@ -434,21 +579,52 @@ mod tests {
         }
     }
 
+    /// The head goes by the repository it is on, on the host of the pull
+    /// request's page: a fork's, deleted since, has none, and a ghost no author.
+    #[test]
+    fn a_pull_request_says_whose_head_it_is() {
+        let viewed = |author: &str, repository: &str, owner: &str| {
+            let said = format!(
+                r#"{{"isDraft":false,"number":1,"state":"MERGED","headRefName":"fix",
+                "headRefOid":"abc","author":{author},"headRepository":{repository},
+                "headRepositoryOwner":{owner},"url":"https://git.example.com/up/repo/pull/1"}}"#
+            );
+            parse(said.as_bytes()).unwrap()
+        };
+        let me = r#"{"id":"U","is_bot":false,"login":"me","name":"Me"}"#;
+        let repository = r#"{"id":"R","name":"repo"}"#;
+        let Pulled { head_name, head, author, head_repository, .. } = viewed(me, repository, me);
+        assert_eq!((head_name.as_str(), head.as_str()), ("fix", "abc"));
+        assert_eq!(author.as_deref(), Some("me"));
+        let name = |host: &str, owner: &str, name: &str| RepositoryName {
+            host: host.to_owned(),
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        };
+        assert_eq!(head_repository, Some(name("git.example.com", "me", "repo")));
+        let gone = viewed(r#"{"login":""}"#, "null", "null");
+        assert_eq!((gone.author, gone.head_repository), (None, None));
+        let unnamed = viewed(me, r#"{"id":"","name":""}"#, r#"{"id":"","login":""}"#);
+        assert_eq!(unnamed.head_repository, None);
+    }
+
     /// A draft is open: one closed or merged is closed or merged, though
     /// GitHub still says it is a draft. What does not read, as a state GitHub
     /// has not spelled before, or a number it does not count, or one with no
     /// page, is no pull request.
     #[test]
     fn a_pull_request_reads_as_gh_writes_it() {
-        let read = |said: &str| parse(said.as_bytes());
+        let read = |said: &str| parse(said.as_bytes()).map(|pulled| pulled.pull_request);
         let state = |said: &str| read(said).map(|pull_request| pull_request.state);
         let number = NonZeroU32::new(126).unwrap();
         let url = "https://github.com/owner/repo/pull/126";
+        let head = r#""headRefName":"fold","headRefOid":"abc""#;
+        let open = format!(r#""isDraft":false,"number":126,"state":"OPEN",{head}"#);
         assert_eq!(
-            read(&format!(r#"{{"isDraft":false,"number":126,"state":"OPEN","url":"{url}"}}"#)),
+            read(&format!(r#"{{{open},"url":"{url}"}}"#)),
             Ok(PullRequest { number, state: State::Open, url: Some(url.to_owned()) })
         );
-        let page = r#""url":"https://github.com/owner/repo/pull/1""#;
+        let page = format!(r#"{head},"url":"https://github.com/owner/repo/pull/1""#);
         let viewed = |fields: &str| format!("{{{fields},{page}}}");
         let draft = viewed(r#""isDraft":true,"number":1,"state":"OPEN""#);
         assert_eq!(state(&draft), Ok(State::Draft));
@@ -461,7 +637,9 @@ mod tests {
             viewed(r#""number":1,"state":"OPEN""#),
             viewed(r#""isDraft":false,"number":-1,"state":"OPEN""#),
             viewed(r#""isDraft":false,"number":0,"state":"OPEN""#),
-            r#"{"isDraft":false,"number":1,"state":"OPEN"}"#.to_owned(),
+            format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head}}}"#),
+            format!(r#"{{"isDraft":false,"number":1,"state":"OPEN",{head},"url":"nowhere"}}"#),
+            r#"{"isDraft":false,"number":1,"state":"OPEN","url":"https://x/1"}"#.to_owned(),
             String::new(),
         ];
         for said in unread {

@@ -235,7 +235,7 @@ pub fn hosts(host: &Host, text: &str) {
 
 /// The host of the machine `host`'s daemon watches as `destination`, once
 /// it has reached it and `wanted` takes what it says.
-fn reached(
+pub fn reached(
     host: &Host,
     destination: &str,
     wanted: impl Fn(&remote::Host) -> bool,

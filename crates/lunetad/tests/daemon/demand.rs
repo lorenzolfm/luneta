@@ -21,7 +21,8 @@ use lunetad::api::{
     KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
     ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, RefugeRequest,
+    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse,
+    PrunesRequest, PrunesResponse, RefugeRequest,
     RefugeResponse, RenameSessionRequest, StartRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
     TurnIntoTabResponse, Version, WatchRequest,
@@ -786,6 +787,18 @@ impl Daemon for StandIn {
 
     async fn paste(&self, _: Request<PasteRequest>) -> Result<Response<Self::PasteStream>, Status> {
         Err(Status::unimplemented("a stand-in makes no worktree"))
+    }
+
+    type PrunesStream = tokio_stream::Empty<Result<PrunesResponse, Status>>;
+
+    async fn prunes(&self, _: Request<PrunesRequest>) -> Result<Response<Self::PrunesStream>, Status> {
+        Err(Status::unimplemented("a stand-in deletes no worktree"))
+    }
+
+    type PruneStream = tokio_stream::Empty<Result<PruneResponse, Status>>;
+
+    async fn prune(&self, _: Request<PruneRequest>) -> Result<Response<Self::PruneStream>, Status> {
+        Err(Status::unimplemented("a stand-in deletes no worktree"))
     }
 
     type KeepImageStream = tokio_stream::Empty<Result<KeepImageResponse, Status>>;

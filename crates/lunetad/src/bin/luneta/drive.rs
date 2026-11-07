@@ -50,6 +50,7 @@ use lunetad::asks::{Turn, User};
 use lunetad::cli::PaneId;
 use lunetad::clients::Client;
 use lunetad::opens;
+use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
 
 use crate::close::{self, Act, Doing, Plan, Untold};
@@ -545,7 +546,7 @@ fn moved_from(before: &[Client], after: &[Client], moved: &[PaneId]) -> Option<C
 /// What a close exits with where it closes nothing, as it was not told yes to
 /// the plan it says: neither 1, for what failed, nor clap's 2, for what it
 /// cannot read.
-const PLANNED: u8 = 3;
+pub const PLANNED: u8 = 3;
 
 /// What a close was told yes to: the plans it said, as one word an agent
 /// hands back with `--yes`. It is of what each plan does and the agents it
@@ -569,6 +570,15 @@ impl Agreed {
         turn.hash(&mut hasher);
         Agreed(hasher.finish())
     }
+
+    /// The word for what `plan` deletes, said in the turn of the ask box `turn`
+    /// is the key of, if any.
+    pub fn of_prune(plan: &prunes::Plan, turn: Option<u64>) -> Self {
+        let mut hasher = DefaultHasher::new();
+        plan.deletes().hash(&mut hasher);
+        turn.hash(&mut hasher);
+        Agreed(hasher.finish())
+    }
 }
 
 impl fmt::Display for Agreed {
@@ -580,13 +590,13 @@ impl fmt::Display for Agreed {
 /// A plan as `--yes` spells it: as a close says it.
 pub fn agreed(spelled: &str) -> Result<Agreed, String> {
     let read = u64::from_str_radix(spelled, 16);
-    read.map(Agreed).map_err(|_| format!("{spelled} is no plan a close said"))
+    read.map(Agreed).map_err(|_| format!("{spelled} is no plan luneta said"))
 }
 
 /// The turn of luneta's ask box this runs in, as `zellij::here` reads it
 /// in the variables of its agent: none outside the box. Or why they do not
 /// read.
-fn turn_here() -> Result<Option<Turn>, String> {
+pub fn turn_here() -> Result<Option<Turn>, String> {
     Ok(zellij::here()?.and_then(|seat| seat.turn()))
 }
 
@@ -898,7 +908,7 @@ fn started(session: &str, running: &[(String, SystemTime)]) -> Result<SystemTime
 /// else this one, as zellij takes it, in words. Its `.` and `..` are taken
 /// out, as `plain` does, so that a session is named for the directory they
 /// lead to.
-fn directory(cwd: Option<&Path>) -> Result<String, String> {
+pub fn directory(cwd: Option<&Path>) -> Result<String, String> {
     let here = env::current_dir().map_err(|error| format!("no directory to open in: {error}"))?;
     let dir = plain(&cwd.map_or_else(|| here.clone(), |cwd| here.join(cwd)));
     if !dir.is_dir() {

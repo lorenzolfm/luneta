@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +24,7 @@ use lunetad::api::{
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
 pub use lunetad::log::causes;
+use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
 use lunetad::{release, Destination};
 use prost::Message as _;
@@ -34,12 +35,14 @@ use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added, Machine};
 use crate::order::Order;
+use crate::prune;
 use crate::zellij::{self, Seat};
 
 /// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
 /// `bridge` start a lunetad where none runs, as a program reads the host by
 /// them: the rest say that none does, or, for `close`, that it cannot tell the
-/// agents, or, for `ssh`, that it reaches the machine once one runs.
+/// agents, or, for `ssh`, that it reaches the machine once one runs, or, for
+/// `prune`, that it cannot tell where the panes are, and deletes nothing.
 #[derive(Subcommand)]
 pub enum Command {
     /// Say which lunetad runs, and for how long it has.
@@ -110,6 +113,18 @@ pub enum Command {
         #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
         yes: Option<Agreed>,
     },
+    /// Delete the worktrees of a repository whose pull requests are merged, with
+    /// their branches, as the menu's `d m` does. Without `--yes`, say what would
+    /// go, what stays and why, and the plan to tell `--yes`, and delete nothing.
+    /// It asks gh of each worktree of the repository.
+    Prune {
+        /// A directory of the repository. Without one, this one.
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        /// Delete them, while what would go is still the plan said as `PLAN`.
+        #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
+        yes: Option<Agreed>,
+    },
     /// Read text aloud on the machine you sit at, whichever machine this runs
     /// on: queue it, after what waits to be read, and return once lunetad has
     /// it, without waiting for it to be read. It fails at once where no
@@ -152,6 +167,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Go { to } => drive::go(to, folder),
         Command::Turn { what } => drive::turn(what),
         Command::Close { what, yes } => drive::close(what, *yes, folder),
+        Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
     }
 }
@@ -323,6 +339,19 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
         let mut daemon = daemon::running(folder).await?;
         let listed = daemon.list_agents(()).await;
         listed.map(tonic::Response::into_inner).map_err(|error| causes(&error))
+    })
+}
+
+/// Where the panes and the agents of this machine work, as lunetad says now, or
+/// why it does not say: none runs, or it does not answer, or it has yet to list
+/// them. It starts none, as `agents` does not.
+pub fn occupied(folder: &Path) -> Result<Occupied, String> {
+    let runtime = runtime()?;
+    runtime.block_on(async {
+        let mut daemon = daemon::running(folder).await?;
+        let asked = daemon.watch(WatchRequest { after: None, kept: None, shown: false }).await;
+        let host = asked.map_err(|error| causes(&error))?.into_inner();
+        Occupied::of(&host)
     })
 }
 

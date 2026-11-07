@@ -49,6 +49,7 @@ use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::log::{self, Process};
+use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::Destination;
 use ratatui::backend::CrosstermBackend;
@@ -81,6 +82,7 @@ use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
+use crate::prune;
 use crate::own::{Before, Look, Looked};
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
@@ -154,6 +156,10 @@ pub enum Event {
     /// issue or a file, goes, and on which machine, with the worktree made;
     /// or why luneta found nothing.
     Pulled { menu: u64, found: Result<Found, String> },
+    /// What `d m` of the menu numbered `menu` would delete.
+    Prunes { menu: u64, plan: Result<prunes::Plan, String> },
+    /// What came of what `d m` of the menu numbered `menu` was told to delete.
+    Pruned { menu: u64, pruned: Result<prunes::Pruned, String> },
     /// What the pane of the menu numbered `menu` printed after its last
     /// command's line, as luneta kept it, or why it kept nothing.
     Printed { menu: u64, printed: Result<Printed, String> },
@@ -744,7 +750,8 @@ struct App {
     /// What kills and deletes the sessions luneta's keys delete, which
     /// luneta waits for as it ends: it ends with the last session of every
     /// machine, which zellij lets go of only once the session's server has
-    /// ended.
+    /// ended. And what deletes the merged worktrees of this machine's `d m`,
+    /// which nothing else would finish.
     deleting: Vec<JoinHandle<()>>,
     /// The agents that want you, of every machine, and their notifications.
     alerts: Alerts,
@@ -1329,6 +1336,14 @@ impl App {
             },
             Event::Printed { menu, printed } => {
                 let asked = self.sidebar.printed(menu, printed);
+                self.follow(asked);
+            },
+            Event::Prunes { menu, plan } => {
+                let asked = self.sidebar.prunes(menu, plan);
+                self.follow(asked);
+            },
+            Event::Pruned { menu, pruned } => {
+                let asked = self.sidebar.pruned(menu, pruned);
                 self.follow(asked);
             },
             Event::Briefed { number, written } => {
@@ -2163,6 +2178,15 @@ impl App {
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
                 pull::prepare(menu, on, work, wanted, worked, others, &self.events);
+            },
+            Asked::Prunes { menu, on, dir } => prune::plan(menu, on, dir, &self.events),
+            Asked::Prune { menu, on, dir, agreed } => {
+                let here = on == Machine::Local;
+                let deleting = prune::delete(menu, on, dir, agreed, &self.events);
+                if here {
+                    self.deleting.retain(|deleting| !deleting.is_finished());
+                    self.deleting.push(deleting);
+                }
             },
             Asked::Find { menu, on, cwd } => {
                 skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
