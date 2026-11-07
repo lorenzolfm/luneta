@@ -186,9 +186,22 @@ pub struct Occupied {
 
 impl Occupied {
     /// Where `host` says they work, or why that is not all of them: a session
-    /// whose panes it has yet to list, or a pane that may run something and
-    /// does not say where, could be in any worktree.
+    /// it may leave out or whose panes it has yet to list, an agent whose session
+    /// file it cannot read and in no pane it can name, or a pane that may run
+    /// something and does not say where, could be in any worktree.
     pub fn of(host: &api::Host) -> Result<Occupied, String> {
+        if host.unread_sockets != Some(0) {
+            return Err("lunetad did not read all of zellij's folder, and may leave out a session \
+                        that runs"
+                .to_owned());
+        }
+        host.unread_seats().map_err(|unplaced| unplaced.to_string())?;
+        if let Some(file) = host.unread_files.iter().find(|file| file.zellij.is_none()) {
+            let pid = file.pid;
+            return Err(format!(
+                "lunetad cannot read the session file of agent {pid}, which runs outside zellij"
+            ));
+        }
         let mut panes = Vec::new();
         for session in &host.sessions {
             let name = &session.name;
@@ -1010,6 +1023,7 @@ mod tests {
                 ]),
             )],
             agents: vec![api::Agent { cwd: "/w/c".to_owned(), ..api::Agent::default() }],
+            unread_sockets: Some(0),
             ..api::Host::default()
         };
         let occupied = Occupied::of(&host).unwrap();
@@ -1023,13 +1037,50 @@ mod tests {
     /// be in any worktree.
     #[test]
     fn a_pane_the_daemon_has_yet_to_place_tells_nothing() {
-        let host = |session| api::Host { sessions: vec![session], ..api::Host::default() };
+        let host = |session| api::Host {
+            sessions: vec![session],
+            unread_sockets: Some(0),
+            ..api::Host::default()
+        };
         let unlisted = Occupied::of(&host(session("work", None)));
         assert_eq!(unlisted, Err("session work has yet to list its panes".to_owned()));
         let unsaid = Occupied::of(&host(session("work", Some(vec![pane(4, None)]))));
         let why = "zellij does not say where pane work:4 works; close it if what ran in it has \
                    ended";
         assert_eq!(unsaid, Err(why.to_owned()));
+    }
+
+    #[test]
+    fn what_the_daemon_could_not_read_could_be_in_any_worktree() {
+        let sockets = |unread_sockets| api::Host { unread_sockets, ..api::Host::default() };
+        let left_out = "lunetad did not read all of zellij's folder, and may leave out a session \
+                        that runs";
+        for unread in [Some(1), None] {
+            assert_eq!(Occupied::of(&sockets(unread)), Err(left_out.to_owned()));
+        }
+        assert!(Occupied::of(&sockets(Some(0))).is_ok());
+
+        let files = |unread, unread_files| api::Host {
+            unread,
+            unread_files,
+            ..sockets(Some(0))
+        };
+        let file = |zellij| api::UnreadFile { pid: 9, zellij };
+        let in_pane = |session: Option<&str>| {
+            let session = session.map(str::to_owned);
+            Some(api::Zellij { named: "work".to_owned(), session, pane: 4 })
+        };
+        assert!(Occupied::of(&files(1, vec![file(in_pane(Some("work")))])).is_ok());
+        let unplaced = "lunetad cannot read 1 of Claude Code's session files, nor tell where its \
+                        agent runs";
+        for unplaced_files in [vec![], vec![file(in_pane(None))]] {
+            assert_eq!(Occupied::of(&files(1, unplaced_files)), Err(unplaced.to_owned()));
+        }
+        assert_eq!(
+            Occupied::of(&files(1, vec![file(None)])),
+            Err("lunetad cannot read the session file of agent 9, which runs outside zellij"
+                .to_owned())
+        );
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {

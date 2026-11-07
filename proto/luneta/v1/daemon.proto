@@ -174,8 +174,8 @@ service Daemon {
   // worktree whose pull request is merged at its `HEAD`, and each with a merged
   // pull request that stays, and why. It deletes nothing. It answers once, as
   // late as gh takes: a stream too, as the start of every answer is cut five
-  // seconds after the question. While the daemon has yet to list every pane, or
-  // the directory is in no repository, it answers with why not.
+  // seconds after the question. While the daemon cannot tell where every pane
+  // and agent is, or the directory is in no repository, it answers with why not.
   rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
   // Plans again, and where it would delete just what it is told was agreed,
   // deletes that, each worktree in turn, and says how each went. Else it says

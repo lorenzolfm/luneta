@@ -1348,9 +1348,11 @@ listed when all of these hold:
 
 A worktree with a merged pull request that fails any of these is shown as kept,
 with the reason, and one `gh` or git said nothing of is too. Any other isn't
-mentioned. While lunetad doesn't answer, or has yet to list every pane, luneta can't
-tell where the panes are, so it deletes nothing and says so. A pane whose command
-has ended runs nothing, so it counts only where zellij said where it worked.
+mentioned. While lunetad doesn't answer, has yet to list every pane, can't read all of
+zellij's folder, or can't read the session file of an agent outside zellij's panes,
+luneta can't tell where the panes and agents are, so it deletes nothing and says so. A
+pane whose command has ended runs nothing, so it counts only where zellij said where
+it worked.
 
 What goes with each, in this order:
 
