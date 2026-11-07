@@ -409,6 +409,39 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
     assert!(!repository.at("one").exists());
 }
 
+#[test]
+fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    let bare = repository.clone.join(".bare");
+    let head = said_by(&repository.at("main"), &["rev-parse", "HEAD"]);
+    let pushes_to = |branch: &str, there: &str| {
+        let at = repository.at(branch).display().to_string();
+        git(&bare, &["worktree", "add", "-q", "-b", branch, &at, "main"]);
+        let refspec = format!("refs/heads/{branch}:refs/heads/{there}");
+        git(&bare, &["config", "--add", "remote.origin.push", &refspec]);
+        git(&bare, &["config", &format!("branch.{branch}.remote"), "origin"]);
+        let merge = format!("refs/heads/{there}");
+        git(&bare, &["config", &format!("branch.{branch}.merge"), &merge]);
+    };
+    pushes_to("my-main", "main");
+    pushes_to("my-dev", "dev");
+    git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/dev"]);
+    host.gh.open("my-main", &merged(1, &head, "me"));
+    host.gh.open("my-dev", &merged(2, &head, "me"));
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let said = prune(&host, &scratch, &repository.at("main"), &[]);
+    let listed = String::from_utf8_lossy(&said.stdout);
+    assert!(said.status.success(), "{listed}{}", String::from_utf8_lossy(&said.stderr));
+    assert!(listed.contains("keep my-main #1: it is the default branch"), "{listed}");
+    assert!(listed.contains("keep my-dev #2: it is the default branch"), "{listed}");
+    assert!(!listed.contains("delete "), "{listed}");
+}
+
 /// A far row's `d m` is planned and deleted on the row's machine, through the
 /// daemon luneta watches: git and gh run there, and what the panes there say.
 #[test]

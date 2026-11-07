@@ -381,6 +381,9 @@ impl Remotes<'_> {
         if *there != pulled.head {
             return Pushed::Stays(format!("{remote} has it at another commit"));
         }
+        if *branch != pulled.head_name {
+            return Pushed::Stays("its pull request's head is another branch".to_owned());
+        }
         let Some(host) = pulled.host.as_deref() else {
             return Pushed::Stays("its pull request's page names no host".to_owned());
         };
@@ -503,10 +506,11 @@ fn sorted_out<'a>(
         };
         let branch = listed.branch.as_deref().unwrap_or_default();
         let target = push_target(common, branch)?;
-        let remote = target.as_ref().map(|(remote, _)| remote.as_str());
-        if branch == default.as_str()
-            || remote.and_then(|remote| remote_default(common, remote)).as_deref() == Some(branch)
-        {
+        let (remote, there) =
+            target.as_ref().map(|(remote, there)| (remote.as_str(), there.as_str())).unzip();
+        let far = remote.and_then(|remote| remote_default(common, remote));
+        let is_default = |name: &str| name == default.as_str() || far.as_deref() == Some(name);
+        if is_default(branch) || there.is_some_and(is_default) {
             plan.kept.push(Kept { worktree, number, why: DEFAULT.to_owned() });
             continue;
         }
@@ -808,7 +812,7 @@ mod tests {
         let number = NonZeroU32::new(1).unwrap();
         Pulled {
             pull_request: PullRequest { number, state: State::Merged, url: None },
-            head_name: "fix".to_owned(),
+            head_name: "origin-branch".to_owned(),
             head: head.to_owned(),
             author: author.map(str::to_owned),
             host: Some("github.com".to_owned()),
@@ -841,6 +845,11 @@ mod tests {
         assert_eq!(
             remotes.pushed(target("origin").as_ref(), &pulled(Some("me"), "def")),
             Pushed::Stays("origin has it at another commit".to_owned())
+        );
+        let elsewhere = Pulled { head_name: "fix".to_owned(), ..pulled(Some("me"), "abc") };
+        assert_eq!(
+            remotes.pushed(target("origin").as_ref(), &elsewhere),
+            Pushed::Stays("its pull request's head is another branch".to_owned())
         );
         let theirs = Pushed::Stays("someone else wrote its pull request".to_owned());
         assert_eq!(remotes.pushed(target("origin").as_ref(), &pulled(Some("them"), "abc")), theirs);
