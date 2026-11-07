@@ -51,7 +51,7 @@ impl Ran {
     pub fn answer_why_on_either(self) -> Result<Vec<u8>, String> {
         match self {
             Ran::Ended { status, stdout, stderr } if !status.success() => {
-                let why = first_line(&stderr).or_else(|| first_line(&stdout));
+                let why = first_line(&stdout).or_else(|| first_line(&stderr));
                 Err(why.unwrap_or_else(|| status.to_string()))
             },
             ran => ran.answer(),
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(ran.answer(), Ok(Vec::new()));
     }
 
-    /// A program that fails is taken at its word on either stream, its stderr
+    /// A program that fails is taken at its word on either stream, its stdout
     /// first, where `answer` reads only its stderr: `claude -p` says why on its
     /// stdout.
     #[test]
@@ -383,7 +383,8 @@ mod tests {
         assert_eq!(ran(logged_out).answer_why_on_either(), Err("Not logged in".to_owned()));
         assert_eq!(ran(logged_out).answer(), Err("exit status: 1".to_owned()));
         let both = "echo out; echo err >&2; exit 1";
-        assert_eq!(ran(both).answer_why_on_either(), Err("err".to_owned()));
+        assert_eq!(ran(both).answer_why_on_either(), Err("out".to_owned()));
+        assert_eq!(ran("echo err >&2; exit 1").answer_why_on_either(), Err("err".to_owned()));
         assert_eq!(ran("exit 3").answer_why_on_either(), Err("exit status: 3".to_owned()));
         assert_eq!(ran("echo fine").answer_why_on_either(), Ok(b"fine\n".to_vec()));
     }

@@ -769,7 +769,11 @@ on asks a model for the topic, told the one it has, what you last asked, and the
 agent's last few steps. The model keeps the topic unless the subject has moved,
 so "yes, add the bullet" does not rename a row. It is `claude -p --model haiku`,
 on that machine's Claude Code login, with no tools, in `--safe-mode`, and with no
-zellij in its environment.
+zellij in its environment. It runs with lunetad's environment and not the
+agent's. If an `.envrc` points an agent at Bedrock or a gateway, what you ask it
+and its last few steps still go wherever lunetad's environment says, and a
+lunetad started in that directory sends every agent's there. An agent you named
+sends nothing.
 
 That costs one call per agent per prompt on the machine the agent runs on, while
 a window of luneta's shows it, there or through lunetad on another machine: with
