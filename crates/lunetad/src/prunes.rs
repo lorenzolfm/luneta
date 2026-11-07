@@ -553,16 +553,9 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
         }
     }
     let going = sorted_out(&mut plan, merged, &listed, occupied, here, &common)?;
-    let based = at_once(
-        &going,
-        || (),
-        |(), (on, pulled, _): &Going<'_>| match &pulled.head_repository {
-            Some(repository) => {
-                github::open_based_on(&on.listed.path, repository, &pulled.head_name)
-            },
-            None => Ok(None),
-        },
-    );
+    let needed = at_once(&going, Asker::default, |asker, (on, pulled, _): &Going<'_>| {
+        why_needed(asker, &common, on, pulled)
+    });
     let mut remotes = Remotes {
         common: &common,
         heads: HashMap::new(),
@@ -570,9 +563,9 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
         logins: HashMap::new(),
     };
     let mut goes = Vec::new();
-    for ((on, pulled, target), based) in going.into_iter().zip(based) {
+    for ((on, pulled, target), needed) in going.into_iter().zip(needed) {
         let number = pulled.pull_request.number.get();
-        match based {
+        match needed {
             Ok(None) => {
                 let pushed = remotes.pushed(target.as_ref(), &pulled);
                 goes.push(Goes {
@@ -584,11 +577,7 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
                     bytes: None,
                 });
             },
-            Ok(Some(open)) => plan.kept.push(Kept {
-                worktree: on.listed.path.clone(),
-                number,
-                why: format!("#{open} is based on it"),
-            }),
+            Ok(Some(why)) => plan.kept.push(Kept { worktree: on.listed.path.clone(), number, why }),
             Err(why) => plan.unasked.push(Unasked { worktree: on.listed.path.clone(), why }),
         }
     }
@@ -602,6 +591,23 @@ pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result
 }
 
 type Going<'a> = (OnBranch<'a>, Pulled, Option<RemoteBranch>);
+
+fn why_needed(
+    asker: &mut Asker,
+    common: &str,
+    on: &OnBranch<'_>,
+    pulled: &Pulled,
+) -> Result<Option<String>, String> {
+    let dir = &on.listed.path;
+    if let Some(open) = asker.open_on_parent(dir, common, on.branch)? {
+        return Ok(Some(format!("#{open} is open on its parent")));
+    }
+    let Some(repository) = &pulled.head_repository else {
+        return Ok(None);
+    };
+    let open = github::open_based_on(dir, repository, &pulled.head_name)?;
+    Ok(open.map(|open| format!("#{open} is based on it")))
+}
 
 /// What stays of `merged` as things stand here, into `plan`, and what goes on
 /// to what the network says.

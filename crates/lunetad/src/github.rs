@@ -327,6 +327,17 @@ impl Asker {
             Answer::Moved => Err(format!("{dir} moved off {branch} as gh answered")),
         }
     }
+
+    pub fn open_on_parent(
+        &mut self,
+        dir: &str,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<u32>, String> {
+        let found = in_parent(dir, repository, branch, &mut self.forks)?;
+        let open = |found: &Pulled| matches!(found.pull_request.state, State::Open | State::Draft);
+        Ok(found.filter(open).map(|found| found.pull_request.number.get()))
+    }
 }
 
 pub fn default_branch(dir: &str) -> Result<String, String> {

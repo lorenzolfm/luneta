@@ -1343,7 +1343,8 @@ listed when all of these hold:
   go with it.
 - No pane in any session is in it, nor any agent, and the command isn't running from
   it.
-- Its branch isn't the default branch, and no open pull request is based on it.
+- Its branch isn't the default branch, no open pull request is based on it, and, in a
+  fork, no pull request of that branch is open on the repository it forks.
 - It isn't locked, and it isn't a clone's main worktree, which git would not remove.
 
 A worktree with a merged pull request that fails any of these is shown as kept,

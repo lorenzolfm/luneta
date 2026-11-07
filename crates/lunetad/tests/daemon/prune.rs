@@ -730,6 +730,53 @@ fn what_was_agreed_goes_in_whatever_order_it_is_told() {
     assert!(!repository.at("one").exists() && !repository.at("two").exists());
 }
 
+#[test]
+fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
+    let host = Host::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = scratch.path().canonicalize().unwrap();
+    let repository = Repository::new(&scratch);
+    host.gh.api("me\n");
+    host.gh.fork_of("parent", "n");
+    let parent = "github.com/parent/n";
+    let on_parent = |number: u32, state: &str, head: &str| {
+        let mut said = merged(number, head, "me");
+        said["state"] = json!(state);
+        said["url"] = json!(format!("https://github.com/parent/n/pull/{number}"));
+        said
+    };
+    let open = repository.pushed("open-there");
+    host.gh.open("open-there", &merged(1, &open, "me"));
+    host.gh.open_in(parent, "open-there", &on_parent(10, "OPEN", &open));
+    let draft = repository.pushed("draft-there");
+    host.gh.open("draft-there", &merged(2, &draft, "me"));
+    let mut said = on_parent(20, "OPEN", &draft);
+    said["isDraft"] = json!(true);
+    host.gh.open_in(parent, "draft-there", &said);
+    let closed = repository.pushed("closed-there");
+    host.gh.open("closed-there", &merged(3, &closed, "me"));
+    host.gh.open_in(parent, "closed-there", &on_parent(30, "CLOSED", &closed));
+    let merged_there = repository.pushed("merged-there");
+    host.gh.open_in(parent, "merged-there", &on_parent(40, "MERGED", &merged_there));
+    let _serving = serving(&host, &[&repository.at("main")]);
+
+    let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
+    assert!(said.contains("keep open-there #1: #10 is open on its parent"), "{said}");
+    assert!(said.contains("keep draft-there #2: #20 is open on its parent"), "{said}");
+    assert!(said.contains("delete closed-there"), "{said}");
+    assert!(said.contains("delete merged-there"), "{said}");
+
+    let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
+    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    for name in ["open-there", "draft-there"] {
+        assert!(repository.at(name).join(".git").is_file(), "{name} went");
+        assert!(repository.on_clone(name) && repository.on_origin(name), "{name}'s branch went");
+    }
+    for name in ["closed-there", "merged-there"] {
+        assert!(!repository.at(name).exists(), "{name} stays");
+    }
+}
+
 /// A far row's `d m` is planned and deleted on the row's machine, through the
 /// daemon luneta watches: git and gh run there, and what the panes there say.
 #[test]
