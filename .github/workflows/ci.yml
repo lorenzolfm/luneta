@@ -196,6 +196,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           CARGO_INCREMENTAL: 0
+          NEXTEST_DOUBLE_SPAWN: 0
         run: |
           nix develop --profile devshell -c sh -ec '
             cargo nextest run --locked --profile ci $LUNETA_TEST_RUN

@@ -23,6 +23,13 @@ pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 /// its commands beside it, in the same `luneta`.
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
+/// Where zellij 0.45 keeps its cache, in the home.
+const CACHE: &str = if cfg!(target_os = "macos") {
+    "Library/Caches/org.Zellij-Contributors.Zellij"
+} else {
+    ".cache/zellij"
+};
+
 /// The variables that the daemon and the CLI find their folders by: their
 /// own, their state's, where the log is, Claude Code's and zellij's, its
 /// cache among them. `None` leaves one unset, so that nothing a test runs
@@ -149,7 +156,7 @@ pub fn script(path: &Path, text: &str) {
 /// does, or as one zellij dropped does, as many as a test had it
 /// `drops_clients`, or fails, as a test had it `refuses_clients`, or stays and
 /// notes all it hears, as a test had it `listen`, for `heard`, or stays a while,
-/// as a test had it `stays_for`. A pane closing
+/// and is listed from then on, as a test had it `stays_for`. A pane closing
 /// can cut a call of a session short, once, as a test had it `silences` or
 /// `unreaches` it, or hand it another call's answer, as a test had it
 /// `answers_another`. It knows no other command.
@@ -167,10 +174,7 @@ session="$2"
 [ "$1" = --session ] && shift 2
 [ "$1" = delete-session ] && session="${{3:-$2}}"
 socket="$ZELLIJ_SOCKET_DIR/contract_version_1/$session"
-case "$(uname)" in
-    Darwin) cache="$HOME/Library/Caches/org.Zellij-Contributors.Zellij" ;;
-    *) cache="$HOME/.cache/zellij" ;;
-esac
+cache="$HOME/{CACHE}"
 kept="$cache/contract_version_1/session_info/$session"
 if [ "$1" = action ] && [ -f "{panes}/$session.$2.silent" ]; then
     rm "{panes}/$session.$2.silent"
@@ -312,6 +316,7 @@ case "$*" in
         fi
         if [ -f "{panes}/stays" ]; then
             stays=$(cat "{panes}/stays")
+            mv "{panes}/stays.clients" "{panes}/$session.clients"
             rm "{panes}/stays"
             sleep "$stays"
         fi
@@ -420,6 +425,7 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     }
 
     pub fn stays_for(&self, time: Duration) {
+        fs::write(self.panes().join("stays.clients"), clients_said(&[(1, "terminal_1")])).unwrap();
         fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
     }
 
@@ -883,12 +889,7 @@ impl Host {
     /// The folder zellij 0.45 writes what it keeps of each session in, in
     /// its cache in the home.
     fn metadata(&self) -> PathBuf {
-        let cache = if cfg!(target_os = "macos") {
-            "Library/Caches/org.Zellij-Contributors.Zellij"
-        } else {
-            ".cache/zellij"
-        };
-        self.home.path().join(cache).join("contract_version_1/session_info")
+        self.home.path().join(CACHE).join("contract_version_1/session_info")
     }
 
     /// Puts a file where zellij keeps what it keeps of each session, so that
