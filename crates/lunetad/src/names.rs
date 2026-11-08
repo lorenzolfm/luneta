@@ -2,6 +2,7 @@
 //! picker's directories name one, and the names zellij has, which it takes a
 //! client to a session of rather than make one, on the machine it runs on.
 
+use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::time::SystemTime;
 
 use crate::metadata;
 use crate::zellij::{self, SessionName};
+use crate::Directory;
 
 /// The file zellij keeps how a session is laid out in, in the session's
 /// folder in its cache, to bring it back from once it ends: zellij lists a
@@ -102,13 +104,52 @@ pub fn kept() -> Option<Vec<String>> {
 /// the time just before luneta read which names zellij has. A session of the
 /// name that started then or after is one zellij made since: one renamed to
 /// the name keeps the time it started at. Or why it takes none.
-pub fn free_for(dir: &str) -> Result<(SessionName, SystemTime), String> {
+pub fn free_for(dir: &Directory) -> Result<(SessionName, SystemTime), String> {
     let unnamed = || format!("no session can be named for {dir}");
-    let name = session_for(Path::new(dir)).ok_or_else(unnamed)?;
+    let name = session_for(Path::new(dir.as_str())).ok_or_else(unnamed)?;
     let since = SystemTime::now();
     let sessions = named().ok_or("luneta cannot tell which sessions zellij has")?;
     let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
     Ok((name.free(&names), since))
+}
+
+/// Where a session luneta makes starts: in a directory, or in the home of
+/// the user of the machine it is made on, which only that machine knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Starts {
+    In(Directory),
+    Home,
+}
+
+impl Starts {
+    /// The directory it starts in: none for the home.
+    #[must_use]
+    pub fn dir(&self) -> Option<&str> {
+        match self {
+            Starts::In(dir) => Some(dir.as_str()),
+            Starts::Home => None,
+        }
+    }
+}
+
+/// The name a session luneta makes that starts as `starts` says takes, as
+/// `free_for` names it, with the time it gives, and the directory it named
+/// the session for, where it starts; or why it takes none.
+pub fn free_at(starts: Starts) -> Result<(SessionName, SystemTime, Directory), String> {
+    let dir = match starts {
+        Starts::In(dir) => dir,
+        Starts::Home => home()?,
+    };
+    let (name, since) = free_for(&dir)?;
+    Ok((name, since, dir))
+}
+
+/// The home of the user this runs as, as `HOME` names it, where a session
+/// luneta makes for no directory starts; or why it has none.
+fn home() -> Result<Directory, String> {
+    let unset = "HOME is not set to an absolute path, for a session in the home";
+    let home = env::var_os("HOME").ok_or(unset)?.into_string().map_err(|_| unset)?;
+    Directory::parse(home).map_err(|_| unset.to_owned())
 }
 
 /// Whether zellij would make a session called `to` now, rather than take a

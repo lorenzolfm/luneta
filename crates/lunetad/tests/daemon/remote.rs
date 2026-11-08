@@ -770,14 +770,24 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         fs::create_dir(&work).unwrap();
         let work = work.to_str().unwrap().to_owned();
         let before = SystemTime::now();
-        let named = NameSessionRequest { on: on("far"), dir: work.clone() };
+        let named = NameSessionRequest { on: on("far"), dir: Some(work.clone()) };
         let named = daemon.name_session(named).await.unwrap().into_inner();
-        assert_eq!(named.name, "work-2");
+        assert_eq!((named.name.as_str(), named.dir.as_deref()), ("work-2", Some(work.as_str())));
         // Just before the daemon there read the names, by its clock.
         let named_at = named.named_at.map(|at| SystemTime::try_from(at).unwrap());
         assert!(named_at.is_some_and(|at| at >= before && at <= SystemTime::now()), "{named_at:?}");
-        let relative = NameSessionRequest { on: on("far"), dir: "work".to_owned() };
+        let relative = NameSessionRequest { on: on("far"), dir: Some("work".to_owned()) };
         invalid(daemon.name_session(relative).await.unwrap_err());
+        // With no directory, it is named there for the home of the daemon's
+        // user there, which is not this machine's.
+        let homes = [(on("far"), &far), (None, &here)];
+        for (on, host) in homes {
+            let home = NameSessionRequest { on, dir: None };
+            let named = daemon.name_session(home).await.unwrap().into_inner();
+            let name = host.home.path().file_name().and_then(|name| name.to_str());
+            assert_eq!(Some(named.name.as_str()), name);
+            assert_eq!(named.dir.as_deref(), host.home.path().to_str());
+        }
         let (at, to, cwd) = ("work".to_owned(), named.name.clone(), Some("work".to_owned()));
         invalid(daemon.start(StartRequest { on: on("far"), at, to, cwd }).await.unwrap_err());
         let (at, cwd) = ("work".to_owned(), Some(work.clone()));

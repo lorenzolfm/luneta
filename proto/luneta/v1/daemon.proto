@@ -345,7 +345,10 @@ message KeepPrintedResponse {
 
 message NameSessionRequest {
   On on = 1;
-  string dir = 2;
+  // The directory, by its absolute path: one by another, as an empty one, is
+  // invalid. Absent for the home of the daemon's user, which a daemon older
+  // than this absence takes for an empty one.
+  optional string dir = 2;
 }
 
 message NameSessionResponse {
@@ -355,6 +358,11 @@ message NameSessionResponse {
   // as `OpenRequest.Tab` takes it for its `alone_since`. A daemon older than
   // this field says none.
   google.protobuf.Timestamp named_at = 2;
+  // The directory it named the session for, by its absolute path, where the
+  // session starts: the one asked, or the home of the daemon's user for none.
+  // Absent from a daemon older than this field, which names it for the one
+  // asked.
+  optional string dir = 3;
 }
 
 message CheckNameRequest {

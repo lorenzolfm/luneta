@@ -259,7 +259,9 @@ The New group, under `n`, opens where the pane works: `n p` your shell in a
 pane of its own beside that pane, `n t` a tab of its session, and `n s` a
 session, which you go to. The session is named as the picker's directories
 name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
-when a session has that name.
+when a session has that name. On a machine's header, which has no pane, `n s`
+makes the session in your home on that machine, named for it too, as
+`lorenzo`; on a session's row, the group has only `n m`.
 
 ```text
 ╭─ New ─── luneta/sidebar ─╮
@@ -575,9 +577,12 @@ too.
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
 your groups from yet. In their place, its Claude group has keys for a few
-skills, built in. `Alt a` opens the same menu floating at the bottom right of
-zellij's side, for the pane zellij is on, wherever the keys are and folded or
-not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
+skills, built in. It lists only the keys that work on the row: on a session's
+row, `a`, `n m`, `d d`, `d s` and the Brief group, on another machine's header,
+`a`, `n s`, `n m`, `d d` and the Brief group, and on this machine's the same but
+`d d`. A key it does not list does nothing. `Alt a` opens the same menu
+floating at the bottom right of zellij's side, for the pane zellij is on,
+wherever the keys are and folded or not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
 click off its box closes it, and gives the keys back to zellij, or to the
 sidebar if it had them. A click on an entry presses its key, and on
 `<BS> - Back` or `<ESC> - Close` does what it says; a delete asks first, as its
@@ -614,7 +619,8 @@ leaves another entry under the pointer, as `d` opens Delete onto
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
 tab and in the directory it works in, `n t` a tab of its session there, and
 `n s` a session there, named as the picker's directories name the directory,
-with a `-2` when a session that runs, or one that ended, has that name. Each
+with a `-2` when a session that runs, or one that ended, has that name. On a
+machine's header, `n s` makes the session in your home on that machine. Each
 takes zellij there, and gives it the keys. A tab of another session opens once
 zellij is there: zellij makes a tab as big as a client of its session, and
 most have none attached.
@@ -1061,8 +1067,10 @@ The menu on another machine's pane opens what it opens here, there: `n p`,
 `n t` and the agents of the Claude group open in zellij on that machine, `c f`
 and `c e` keep what the pane printed in a file there, for the agent there to
 read, `/` finds the skills of the pane's directory there, and `n s` makes a
-session there, named as that machine names one; luneta's zellij goes to what
-opened, as `Enter` would. `t t` and `t p` turn panes there, and luneta's zellij
+session there, named as that machine names one, and on its header in your
+home there, which lunetad there knows; luneta's zellij goes to what opened, as
+`Enter` would. While lunetad does not reach the machine, `n s` on its header
+says so. `t t` and `t p` turn panes there, and luneta's zellij
 goes to the pane they turned. `d d` and `d s` close and delete there what they
 do here, and ask first by that machine's agents. The session luneta's zellij is
 in there is deleted once zellij is in the newest other session of that
@@ -1719,24 +1727,25 @@ on the directories. Type, press `Enter`.
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 
-`Alt a` opens the menu, for the pane zellij is on:
+`Alt a` opens the menu, for the pane zellij is on, and `m` in the sidebar, for
+the highlighted row, which lists only the keys that work on that row:
 
-| key | does |
-|---|---|
-| *a key it shows* | open its group, or start its agent |
-| `n p` | open your shell in a pane beside the pane |
-| `n t` | open a tab of the pane's session |
-| `n s` | start a session where the pane works, and go there |
-| `n m` | add a machine, by what you type ssh to it |
-| `t t` | turn the pane into a tab of its own |
-| `t p` | turn the pane's tab into panes of another tab, which you pick where it has several |
-| `d d` | close the pane |
-| `d s` | kill the pane's session |
-| `d m` | list the [merged worktrees](#delete-merged-worktrees) of the pane's repository, to delete |
-| `y`, or the key again | go ahead with a delete that asked first |
-| `n` | back to the keys, from a delete that asked first |
-| `Backspace` | back a group, or close from the first; back to the keys from a delete that asked |
-| `Esc` / `Ctrl-c` | close |
+| key | does | on |
+|---|---|---|
+| *a key it shows* | open its group, or start its agent | any row |
+| `n p` | open your shell in a pane beside the pane | a pane |
+| `n t` | open a tab of the pane's session | a pane |
+| `n s` | start a session where the pane works, or in your home on a machine's header, and go there | a pane, a machine's header |
+| `n m` | add a machine, by what you type ssh to it | any row |
+| `t t` | turn the pane into a tab of its own | a pane |
+| `t p` | turn the pane's tab into panes of another tab, which you pick where it has several | a pane |
+| `d d` | close the pane; on a session's row, kill the session; on another machine's header, forget the machine | any row but this machine's header |
+| `d s` | kill the row's session | a pane, a session's row |
+| `d m` | list the [merged worktrees](#delete-merged-worktrees) of the pane's repository, to delete | a pane in a repository |
+| `y`, or the key again | go ahead with a delete that asked first | any row |
+| `n` | back to the keys, from a delete that asked first | any row |
+| `Backspace` | back a group, or close from the first; back to the keys from a delete that asked | any row |
+| `Esc` / `Ctrl-c` | close | any row |
 
 ---
 

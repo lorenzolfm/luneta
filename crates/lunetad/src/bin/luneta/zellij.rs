@@ -25,11 +25,11 @@ pub use lunetad::closes::{
 pub use lunetad::ended::{exited, Exited};
 pub use lunetad::renames::renamed;
 use lunetad::closes::running_in;
-pub use lunetad::names::session_for;
+pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{clients, moves, Destination, SocketId};
+use lunetad::{clients, moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -1053,19 +1053,27 @@ impl Unused {
     }
 }
 
-/// The name a session luneta makes for `dir` on this machine takes, as
-/// `lunetad::names::free_for` names it, or why it takes none.
-pub fn unused_for(dir: &str) -> Result<Unused, String> {
-    let (name, since) = lunetad::names::free_for(dir)?;
-    Ok(Unused { on: Machine::Local, name, since: Some(since) })
+/// The name a session luneta makes on `destination` takes, that starts as
+/// `starts` says, as its daemon there names it within `away::QUICK`, as
+/// luneta's screen waits on it, and the directory it named it for; or why it
+/// takes none.
+fn name_away(destination: &Destination, starts: &Starts) -> Result<(Unused, Directory), String> {
+    let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(starts));
+    let (name, since, dir) = named?;
+    Ok((Unused { on: Machine::Remote(destination.clone()), name, since }, dir))
 }
 
-/// The name a session luneta makes for `dir` on `destination` takes, as its
-/// daemon there names it within `away::QUICK`, as luneta's screen waits on
-/// it, or why it takes none.
-pub fn name_away(destination: &Destination, dir: &str) -> Result<Unused, String> {
-    let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(dir));
-    named.map(|(name, since)| Unused { on: Machine::Remote(destination.clone()), name, since })
+/// The name a session luneta makes on `on` takes, that starts as `starts`
+/// says, as `lunetad::names::free_at` and `name_away` name it, and the
+/// directory it is named for, which luneta makes it in. Or why it takes none.
+pub fn unused_at(on: &Machine, starts: Starts) -> Result<(Unused, Directory), String> {
+    match on {
+        Machine::Local => {
+            let (name, since, dir) = lunetad::names::free_at(starts)?;
+            Ok((Unused { on: Machine::Local, name, since: Some(since) }, dir))
+        },
+        Machine::Remote(destination) => name_away(destination, &starts),
+    }
 }
 
 /// What luneta knows of the clients of `session` on `destination`, which
@@ -1113,9 +1121,10 @@ pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused,
 pub fn makes_away(
     destination: &Destination,
     to: &SessionName,
-    cwd: &str,
+    cwd: &Directory,
 ) -> Result<Unused, String> {
-    let named = name_away(destination, cwd).map_err(|why| format!("no session made: {why}"))?;
+    let named = name_away(destination, &Starts::In(cwd.clone()));
+    let (named, _) = named.map_err(|why| format!("no session made: {why}"))?;
     if named.name != *to {
         return Err(format!(
             "no session made: {to} is taken on {destination} now, which names one {} for {cwd}",
