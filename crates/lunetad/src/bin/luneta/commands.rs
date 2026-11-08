@@ -346,12 +346,17 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
 /// why it does not say: none runs, or it does not answer, or it has yet to list
 /// them. It starts none, as `agents` does not.
 pub fn occupied(folder: &Path) -> Result<Occupied, String> {
+    Occupied::of(&host(folder)?)
+}
+
+/// The host as the daemon in `folder` says it stands now, or why it does not
+/// say.
+pub fn host(folder: &Path) -> Result<lunetad::api::Host, String> {
     let runtime = runtime()?;
     runtime.block_on(async {
         let mut daemon = daemon::running(folder).await?;
         let asked = daemon.watch(WatchRequest { after: None, kept: None, shown: false }).await;
-        let host = asked.map_err(|error| causes(&error))?.into_inner();
-        Occupied::of(&host)
+        Ok(asked.map_err(|error| causes(&error))?.into_inner())
     })
 }
 

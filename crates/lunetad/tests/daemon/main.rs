@@ -9,6 +9,8 @@ mod agents;
 #[cfg(test)]
 mod bridge;
 #[cfg(test)]
+mod carries;
+#[cfg(test)]
 mod demand;
 #[cfg(test)]
 mod drive;

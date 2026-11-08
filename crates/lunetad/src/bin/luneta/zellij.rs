@@ -28,11 +28,13 @@ use lunetad::closes::running_in;
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
+use lunetad::carries::{self, Carry, Moved};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{clients, moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
+use crate::commands;
 use crate::due::Due;
 use crate::host::{Event, Nudged};
 use crate::icons;
@@ -701,6 +703,10 @@ pub enum After {
     /// Kill the session the client left, which it was in, the one that
     /// started at `started`, and delete it.
     Kill { session: SessionName, started: SystemTime },
+    /// Move panes to another session, as `carry` does, now that the client
+    /// has left the session they leave, or come to the one they go to: told
+    /// once done, or else as it is dropped undone.
+    Carry(Due<Moved>, Carry),
 }
 
 impl After {
@@ -714,6 +720,9 @@ impl After {
     pub fn untold(self, events: &Sender<Event>) {
         match self {
             After::Open(owed, _) | After::IntoTab(owed, ..) => {
+                owed.pay(Err("luneta cannot tell when zellij's client is there".to_owned()));
+            },
+            After::Carry(owed, _) => {
                 owed.pay(Err("luneta cannot tell when zellij's client is there".to_owned()));
             },
             After::Kill { session, .. } => {
@@ -731,6 +740,7 @@ impl After {
             (After::Open(owed, open), there) => {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
             },
+            (After::Carry(owed, carry), there) => owed.pay(there.carry(&carry)),
             (After::IntoTab(owed, place), there) => {
                 let (session, started) = (place.session.name(), place.session.started());
                 let came = there.turn_into_tab(session, started, place.pane);
@@ -760,6 +770,9 @@ impl After {
             After::Open(owed, _) | After::IntoTab(owed, ..) => {
                 owed.pay(Err("zellij did not take its client there".to_owned()));
             },
+            After::Carry(owed, _) => {
+                owed.pay(Err("zellij did not take its client there".to_owned()));
+            },
             After::Kill { session, .. } => {
                 // luneta is on its way out.
                 let _ = events.send(Event::Notice(format!("\"{session}\" stays")));
@@ -772,6 +785,7 @@ impl After {
     fn failed(self, why: String, events: &Sender<Event>) {
         match self {
             After::Open(owed, _) | After::IntoTab(owed, ..) => owed.pay(Err(why)),
+            After::Carry(owed, _) => owed.pay(Err(why)),
             kill @ After::Kill { .. } => kill.stayed(events),
         }
     }
@@ -868,6 +882,25 @@ fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, event
         });
         owed.pay(came);
     });
+}
+
+/// Has zellij on the machine `on` move what `carry` says to another session
+/// there, on a thread of its own, and hands back what it moved, or why it
+/// closed nothing, as `owed` does. It moves no client.
+pub fn carry(on: &Machine, carry: Carry, owed: Due<Moved>) {
+    let on = on.clone();
+    thread::spawn(move || owed.pay(There::on(&on).and_then(|mut there| there.carry(&carry))));
+}
+
+/// Moves what `carry` says on this machine, as `carries::carried` does, by
+/// what its daemon says of the host now: of what runs in each pane, and the
+/// agents in them, which it alone reads.
+fn carried_here(carry: &Carry) -> Result<Moved, String> {
+    let folder = lunetad::folder::find()
+        .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
+    let host = commands::host(&folder)?;
+    let planned = carry.planned(&host.sessions, &host.agents)?;
+    carries::carried(&folder, carry, &planned)
 }
 
 /// Asks zellij on the machine `on`, on a thread of its own, what closing the
@@ -1289,6 +1322,15 @@ impl There {
         match self {
             There::Here => turns::into_panes(session, started, pane, beside),
             There::Away(away) => away.turn_into_panes(session, started, pane, beside),
+        }
+    }
+
+    /// Has zellij move what `carry` says, as `lunetad::carries::carried`
+    /// does, and says what it moved, or why it closed nothing.
+    fn carry(&mut self, carry: &Carry) -> Result<Moved, String> {
+        match self {
+            There::Here => carried_here(carry),
+            There::Away(away) => away.carry(carry),
         }
     }
 

@@ -49,6 +49,7 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTit
 use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
+use lunetad::carries::Moved;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
@@ -89,7 +90,7 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
+use crate::sidebar::{self, Asked, Follows, HereAgent, Keys, Listed, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
@@ -138,6 +139,10 @@ pub enum Event {
     /// What zellij opened for the menu numbered `menu`: the terminal, or why
     /// none.
     Opened { menu: u64, opened: Result<u32, String> },
+    /// What came of moving panes of `on` to `to`, another session there, with
+    /// zellij's client on the pane `follows`, if on one of them: what moved,
+    /// or why nothing closed.
+    Carried { on: Machine, to: Listed, follows: Option<u32>, carried: Result<Moved, String> },
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },
@@ -1316,6 +1321,10 @@ impl App {
                 let asked = self.sidebar.closes(menu, closes);
                 self.follow(asked);
             },
+            Event::Carried { on, to, follows, carried } => {
+                let asked = self.sidebar.carried(on, &to, follows, carried);
+                self.follow(asked);
+            },
             Event::Tabs { menu, tabs } => {
                 let asked = self.sidebar.tabs(menu, tabs);
                 self.follow(asked);
@@ -2159,6 +2168,21 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
+            Asked::Carry { on, carry, landing, follows } => {
+                let (machine, to) = (on.clone(), landing.session().clone());
+                let owed = Due::new(&self.events, move |carried| Event::Carried {
+                    on: machine,
+                    to,
+                    follows: follows.pane(),
+                    carried,
+                });
+                match follows {
+                    Follows::First(_) => {
+                        self.go(&on, &landing.place(), Some(After::Carry(owed, carry)));
+                    },
+                    Follows::Stays | Follows::After(_) => zellij::carry(&on, carry, owed),
+                }
+            },
             Asked::Tabs { menu, on, session, pane } => {
                 zellij::other_tabs(menu, &on, session, pane, &self.events);
             },
@@ -2506,7 +2530,9 @@ impl App {
             // The session it leaves ends once it has left it, which the
             // sidebar says until then.
             Some(After::Kill { .. }) => self.sidebar.leaving(place),
-            Some(After::Open(..) | After::IntoTab(..)) | None => self.sidebar.went(place),
+            Some(After::Open(..) | After::IntoTab(..) | After::Carry(..)) | None => {
+                self.sidebar.went(place)
+            },
         };
         zellij::go(&nudged, place.listed().name(), place.pane(), then, after, &self.events);
         true

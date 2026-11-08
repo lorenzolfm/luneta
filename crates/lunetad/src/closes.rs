@@ -37,7 +37,7 @@ pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
 
 /// What closing the terminal `pane` closes among `laid`, the panes of its
 /// session, or why it closes nothing: it is gone.
-fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {
+pub(crate) fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {
     match together(laid, &BTreeSet::from([pane]))? {
         Closing::Session => Ok(Closes::Session),
         Closing::Parts { mut tabs, .. } => {

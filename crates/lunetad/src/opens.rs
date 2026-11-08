@@ -105,10 +105,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             if !runs.is_empty() {
                 command.arg("--").args(runs);
             }
-            let said = answered(&mut command)?;
-            let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
-            let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
-            pane.map(terminal).ok_or_else(unnamed)
+            terminal_said(&answered(&mut command)?).map(terminal)
         },
         Open::Tab { session, tab, alone_since } => {
             let mut zellij = Command::new("zellij");
@@ -126,6 +123,30 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned())
         },
     }
+}
+
+/// The terminal zellij `said` it opened a pane as, `terminal_<id>`, or why
+/// there is none.
+fn terminal_said(said: &str) -> Result<u32, String> {
+    let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
+    pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
+}
+
+/// Opens your shell beside the pane `beside` of `session`, in its tab, and in
+/// `cwd`, as `opening` opens a pane, with no client moved, and says the
+/// terminal it opened: as a command, which closes as it ends, as a pane of
+/// zellij's own shell does. zellij starts its own shell in the directory of
+/// the pane it opens one beside, whatever `--cwd` says, and a command where
+/// it says.
+pub fn shell_beside(session: &SessionName, beside: u32, cwd: &str) -> Result<u32, String> {
+    let shell = shell(login_shell(), env::var_os(SHELL_VAR));
+    let mut command = Command::new("zellij");
+    quiet(&mut command);
+    command.env(cli::PANE_VAR, beside.to_string());
+    let session = session.as_str();
+    command.args(["--session", session, "action", "new-pane", "--no-focus", "--cwd", cwd]);
+    command.args(["--close-on-exit", "--"]).arg(shell);
+    terminal_said(&answered(&mut command)?)
 }
 
 /// Why no tab opens in `session`, which no client is in.
