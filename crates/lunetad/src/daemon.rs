@@ -62,17 +62,17 @@ use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Went};
 use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
-    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse, CloseRequest, ClosesRequest,
-    ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    InfoResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
-    KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
-    ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
-    ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
-    OpenResponse, OtherTabsRequest, OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse,
-    PrunesRequest, PrunesResponse, RefugeRequest,
-    RefugeResponse, RenameSessionRequest, SayRequest, StartRequest, TranscriptEndsRequest,
-    TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse, TurnIntoTabRequest,
-    TurnIntoTabResponse,
+    self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
+    CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
+    DumpScreenResponse, GoRequest, InfoResponse, KeepImageRequest, KeepImageResponse,
+    KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
+    ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
+    ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
+    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest,
+    OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
+    PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, StartRequest,
+    TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
+    TurnIntoTabRequest, TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -92,9 +92,9 @@ use crate::transcripts::Reading;
 use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::{
-    claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves, names,
-    opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics, turns,
-    watch, zellij, zoxide,
+    carries, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
+    names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics,
+    turns, watch, zellij, zoxide,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -877,6 +877,29 @@ impl Daemon for Host {
             },
         };
         Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
+    }
+
+    type CarryStream = Pin<Box<dyn Stream<Item = Result<CarryResponse, Status>> + Send>>;
+
+    async fn carry(
+        &self,
+        request: Request<CarryRequest>,
+    ) -> Result<Response<Self::CarryStream>, Status> {
+        let (on, carry) =
+            carries::Carry::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let answer = daemon.carry(carry.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let host = self.watched(None).await?;
+        let (sessions, agents) = (&host.sessions, &host.agents);
+        let planned = carries::planned(sessions, agents, &carry.from, carry.pane, carry.whole);
+        let planned = planned.map_err(Status::failed_precondition)?;
+        let answer = late(move || {
+            let carried = carries::carried(&carry, &planned).map_err(Status::failed_precondition)?;
+            Ok(carries::answer(&carried))
+        });
+        Ok(Response::new(Box::pin(answer)))
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {

@@ -23,6 +23,10 @@
 //! by its row. A session moves among its machine's alone. On a machine's
 //! header, `v` and the mouse move the machines so, each with every row under
 //! it. The order and the colours are kept for every luneta, and the next.
+//! `V` picks a pane, or its tab, for another session of its machine, which
+//! `J` and `K` take it to and `Enter` moves it to, as the mouse drags it there
+//! by its row, or a tab by its bracket: zellij moves no pane between
+//! sessions, so what runs in it starts again there, as `carries` says.
 //!
 //! Over the sessions, a header for each machine: this one, by its host's
 //! name, and each machine luneta's hosts file names, which lunetad watches
@@ -53,11 +57,13 @@ use lunetad::api::remote::unreached::Stopped;
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::shell::Doing;
 use lunetad::api::{
-    Agent, Client, Front, Harness, Host, Pane, Saying, Session, Shell, Status, UnreadFile, Zellij,
+    Agent, Client, Front, Harness, Host, Pane, Saying, Session, Shell, Status, UnreadFile,
 };
 use lunetad::asks::User;
 use lunetad::links;
+use lunetad::carries::{self, Carry, Lands, Planned, Whole};
 use lunetad::prunes;
+use lunetad::seats::seated;
 use lunetad::transcripts::SessionId;
 use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
@@ -133,6 +139,9 @@ const EDGE: &str = "│";
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
+/// The column of the sidebar the bracket is on, after the mark's: a press on
+/// either lifts the tab, as the mark is a cell wide and a hand is not.
+const BRACKET_COLUMN: u16 = 1;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
@@ -221,6 +230,11 @@ impl Listed {
     /// Its pane `pane`, as the news keeps it.
     fn key(&self, pane: u32) -> Key {
         Key { session: self.kept, pane }
+    }
+
+    /// It, as a move to another session names one.
+    fn seat(&self) -> carries::Seat {
+        carries::Seat { session: self.name.clone(), started: self.started() }
     }
 
     /// A session of the tests', whose socket is the first there is.
@@ -988,6 +1002,12 @@ pub enum Asked {
     /// Ask zellij on `on` which tabs of `session` are not that of its pane
     /// `pane`, for the menu numbered `menu` to turn that tab into.
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
+    /// Have zellij on `on` move what `carry` says to `to`, another session
+    /// there, and take zellij's client to where its pane `follows` opens, if
+    /// it was on one of them. Where the client is to leave first, as its
+    /// session ends with the move, or `to` has no client to make room for a
+    /// tab, it goes to `first` before.
+    Carry { on: Machine, carry: Carry, to: Listed, follows: Option<u32>, first: Option<Place> },
     /// Have zellij on `on` turn the pane `place` as `turn` says, for the menu
     /// numbered `menu`, which takes its client there once zellij says it did.
     /// A session with no client to make room for a tab has it come there
@@ -1130,8 +1150,11 @@ pub struct Sidebar {
     /// focus going.
     pending: Pending,
     /// What `v` and the left button do to the order of the machines and
-    /// their sessions.
+    /// their sessions, and what `V` and the left button move to another.
     moving: Moving,
+    /// The row a move to another session takes the highlight to, once the
+    /// pane it opened there shows, until a key or a click.
+    arriving: Option<Spot>,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
     revealed: Option<Spot>,
@@ -1198,8 +1221,9 @@ enum Pending {
 }
 
 /// What `v` and the left button do to the order of the machines and their
-/// sessions, and what the left button selects of the text: one thing at a
-/// time, so that no selection lasts under a row the mouse lifted.
+/// sessions, what `V` and the left button move to another session, and what
+/// the left button selects of the text: one thing at a time, so that no
+/// selection lasts under a row the mouse lifted.
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
@@ -1207,12 +1231,19 @@ enum Moving {
     /// `v` selected `anchor`: the selection holds it, the highlight's
     /// session, or machine, and those between, each with its rows.
     Selected(Movable),
+    /// `V` picked a pane, or its tab, for another session, where it lands
+    /// as `Enter` sets it down: nowhere yet while the landing is None, as
+    /// where it is.
+    Carrying(Carrying, Option<Landing>),
+    /// Setting it down would end its session, as it is all the session has:
+    /// it waits for `y` to say it may.
+    Asking(Carrying, Landing),
     /// The left button is down on the sidebar at `at`, on luneta's terminal:
-    /// a click once it lets go on the line it went down on. On a session's
-    /// row, or a machine's header, `lifts` says what is there, which goes
-    /// with the mouse once that moves a line. A pane's row goes nowhere. It
-    /// sweeps, from anywhere else, or once it moves past the cells around `at`.
-    Down { at: Position, lifts: Option<Movable> },
+    /// a click once it lets go on the line it went down on. On a row that
+    /// lifts, `lifts` says what is there, which goes with the mouse once that
+    /// moves a line. It sweeps, from anywhere else, or once it moves past the
+    /// cells around `at`.
+    Down { at: Position, lifts: Option<Lifting> },
     Lifted(Lift),
     /// The left button drags over the text, which is copied as it lets go.
     Sweeping(Sweep),
@@ -1310,11 +1341,79 @@ impl Spans {
     }
 }
 
-/// A machine or a session the mouse lifted by its row, which goes where the
-/// mouse takes it, with the rows under it, once it lets go.
+/// What the left button lifts by a row: a machine or a session, which moves
+/// among its kind, or a pane, or its tab, on its way to another session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Lifting {
+    Moved(Movable),
+    Carried(Carrying),
+}
+
+/// A pane of a session of `machine`, or every pane of its tab, as `whole`
+/// says, on its way to another session of the machine, and never to
+/// another's: what `V` picks, or the mouse lifts by its row, or a tab by its
+/// bracket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Carrying {
+    machine: Machine,
+    place: PanePlace,
+    whole: Whole,
+}
+
+impl Carrying {
+    /// Its row: that of the pane it was picked by.
+    fn spot(&self) -> Spot {
+        Spot::on(&self.machine, Place::Pane(self.place.clone()))
+    }
+}
+
+/// Where what is carried lands, in another session of its machine: in a tab
+/// of its own there, by the session's row; or beside a pane of it, by the
+/// pane's, in its tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Landing {
+    Tab(Listed),
+    Beside(PanePlace),
+}
+
+impl Lifting {
+    /// The row it was lifted by.
+    fn spot(&self) -> Spot {
+        match self {
+            Lifting::Moved(movable) => movable.spot(),
+            Lifting::Carried(carrying) => carrying.spot(),
+        }
+    }
+}
+
+impl Landing {
+    fn session(&self) -> &Listed {
+        match self {
+            Landing::Tab(session) | Landing::Beside(PanePlace { session, .. }) => session,
+        }
+    }
+
+    /// Where it is, as a go takes zellij's client there.
+    fn place(&self) -> Place {
+        match self {
+            Landing::Tab(session) => Place::Session(session.clone()),
+            Landing::Beside(place) => Place::Pane(place.clone()),
+        }
+    }
+
+    fn lands(&self) -> Lands {
+        match self {
+            Landing::Tab(_) => Lands::Tab,
+            Landing::Beside(place) => Lands::Beside(place.pane),
+        }
+    }
+}
+
+/// What the mouse lifted by its row, which goes where the mouse takes it,
+/// with the rows under it, once it lets go.
 #[derive(Debug)]
 struct Lift {
-    lifted: Movable,
+    lifted: Lifting,
     /// The line of the sidebar the mouse is on.
     line: u16,
     /// Whether the mouse is over the sidebar. Let go anywhere else, the row
@@ -2368,12 +2467,39 @@ impl Sidebar {
         let here_spot = here_pane.map(|place| Spot::on(&self.on, Place::Pane(place)));
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
         // A selection, and what the mouse lifted, go with the row they
-        // started on.
-        if let Moving::Selected(movable) | Moving::Lifted(Lift { lifted: movable, .. }) =
-            &self.moving
-            && self.row_of(&movable.spot()).is_none()
+        // started on; and a move to another session where it lands, too.
+        let gone = |spot: Spot| self.row_of(&spot).is_none();
+        let landing_gone = |machine: &Machine, landing: &Landing| {
+            gone(Spot::on(machine, landing.place()))
+        };
+        match &self.moving {
+            Moving::Selected(movable)
+            | Moving::Lifted(Lift { lifted: Lifting::Moved(movable), .. })
+                if gone(movable.spot()) =>
+            {
+                self.moving = Moving::Still;
+            },
+            Moving::Carrying(carrying, _)
+            | Moving::Asking(carrying, _)
+            | Moving::Lifted(Lift { lifted: Lifting::Carried(carrying), .. })
+                if gone(carrying.spot()) =>
+            {
+                self.moving = Moving::Still;
+            },
+            Moving::Carrying(carrying, Some(landing))
+                if landing_gone(&carrying.machine, landing) =>
+            {
+                self.moving = Moving::Carrying(carrying.clone(), None);
+            },
+            Moving::Asking(carrying, landing) if landing_gone(&carrying.machine, landing) => {
+                self.moving = Moving::Still;
+            },
+            _ => {},
+        }
+        if let Some(arriving) = &self.arriving
+            && self.row_of(arriving).is_some()
         {
-            self.moving = Moving::Still;
+            self.cursor = self.arriving.take();
         }
         // The highlight goes past what a delete took away, once it is gone.
         if let Some(closing) = &self.closing {
@@ -2425,6 +2551,8 @@ impl Sidebar {
                 matches!(row, Row::Session { machine, .. } if machine == of)
             },
             Moving::Still
+            | Moving::Carrying(..)
+            | Moving::Asking(..)
             | Moving::Down { .. }
             | Moving::Lifted(_)
             | Moving::Sweeping(_)
@@ -2558,6 +2686,7 @@ impl Sidebar {
         }
         self.notice = None;
         self.copied = None;
+        self.arriving = None;
         let pending = std::mem::take(&mut self.pending);
         if let Some(menu) = self.menu.take() {
             return self.menu_did(menu.key(key));
@@ -2568,6 +2697,14 @@ impl Sidebar {
         if let Some(term) = self.search() {
             let term = term.to_owned();
             return self.search_key(key, term);
+        }
+        if let Moving::Asking(..) = self.moving {
+            return self.asking_key(key);
+        }
+        if let Moving::Carrying(..) = self.moving
+            && let Some(asked) = self.carrying_key(key)
+        {
+            return asked;
         }
         if let Moving::Selected(_) = self.moving
             && let Some(asked) = self.selected_key(key)
@@ -2598,6 +2735,7 @@ impl Sidebar {
                 Some(Top::Command(Command::Search)) => self.find(String::new()),
                 Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
                 Some(Top::Command(Command::Reorder)) => self.select(),
+                Some(Top::Command(Command::Carry)) => self.carry(),
                 Some(Top::Command(Command::Open)) => return self.browse(),
                 // Without a selection, there is nothing to move.
                 Some(Top::Shift(_)) => {},
@@ -2706,11 +2844,281 @@ impl Sidebar {
         self.moving = Moving::Selected(movable);
     }
 
-    /// Ends the selection, the highlight on a row it stops on without one.
+    /// Ends the selection, the highlight on a row it stops on without one,
+    /// and puts back what `V` picked.
     fn unselect(&mut self) {
-        if let Moving::Selected(_) = self.moving {
+        if let Moving::Selected(_) | Moving::Carrying(..) | Moving::Asking(..) = self.moving {
             self.moving = Moving::Still;
             self.settle(None, false);
+        }
+    }
+
+    /// What a key does while `V` carries a pane, or its tab: `J` and `K`, `j`
+    /// and `k` and the arrows, move where it lands, among the rows of the
+    /// other sessions of its machine, the lit rows showing it there; `V` takes
+    /// up its tab, or puts back a tab; `Enter` sets it down there; and `Esc`
+    /// puts it back, doing nothing else. Any other key puts it back too, and
+    /// does what it does without it, for which it is None.
+    fn carrying_key(&mut self, key: &KeyEvent) -> Option<Asked> {
+        match key.code {
+            KeyCode::Down => self.step_landing(1),
+            KeyCode::Up => self.step_landing(-1),
+            KeyCode::Esc => self.unselect(),
+            KeyCode::Enter => return Some(self.set_down()),
+            KeyCode::Char(c) => match Top::of(c) {
+                Some(Top::Move(by) | Top::Shift(by)) => self.step_landing(by),
+                Some(Top::Command(Command::Carry)) => self.widen(),
+                _ => {
+                    self.unselect();
+                    return None;
+                },
+            },
+            _ => {
+                self.unselect();
+                return None;
+            },
+        }
+        Some(Asked::Nothing)
+    }
+
+    /// What a key does while a move asks whether it may end its session:
+    /// `y` moves it, and any other key puts it back, doing nothing else.
+    fn asking_key(&mut self, key: &KeyEvent) -> Asked {
+        let Moving::Asking(carrying, landing) = std::mem::take(&mut self.moving) else {
+            return Asked::Nothing;
+        };
+        if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
+            return self.carried_off(carrying, &landing, true);
+        }
+        self.settle(None, false);
+        Asked::Nothing
+    }
+
+    /// Picks the pane of the highlighted row, of whichever machine, for `J`
+    /// and `K` to take to another session of it; or says why it cannot go,
+    /// as what runs in it would be cut short. A session's row, or a
+    /// machine's header, picks nothing.
+    fn carry(&mut self) {
+        let Some(spot) = self.cursor.clone() else {
+            return;
+        };
+        let Some(Place::Pane(place)) = spot.place().cloned() else {
+            return;
+        };
+        let carrying = Carrying { machine: spot.machine(), place, whole: Whole::Pane };
+        match self.carry_plan(&carrying) {
+            Ok(_) => self.moving = Moving::Carrying(carrying, None),
+            Err(why) => self.notify(format!("not moved: {why}")),
+        }
+    }
+
+    /// `V` again: what `V` picked takes up the rest of its tab, where it
+    /// shares one, or else goes back, as a tab does.
+    fn widen(&mut self) {
+        let Moving::Carrying(carrying, landing) = &self.moving else {
+            return;
+        };
+        let tab = Carrying { whole: Whole::Tab, ..carrying.clone() };
+        if carrying.whole == Whole::Tab || self.carried_rows(&tab).len() < 2 {
+            self.unselect();
+            return;
+        }
+        match self.carry_plan(&tab) {
+            Ok(_) => self.moving = Moving::Carrying(tab, landing.clone()),
+            Err(why) => self.notify(format!("not moved: {why}")),
+        }
+    }
+
+    /// What moving `carrying` takes along, as its machine's daemon last
+    /// said, or why it moves nothing: what runs in one of them would be cut
+    /// short, as `carries::planned` says.
+    fn carry_plan(&self, carrying: &Carrying) -> Result<Planned, String> {
+        let seen = self.seen(&carrying.machine).ok_or("its machine's daemon says nothing")?;
+        let seat = carrying.place.session.seat();
+        carries::planned(seen.sessions, seen.agents, &seat, carrying.place.pane, carrying.whole)
+    }
+
+    /// The rows of what `carrying` takes: its pane's, or those of its tab's
+    /// panes, next to each other, as a session's panes go by their tab.
+    fn carried_rows(&self, carrying: &Carrying) -> Range<usize> {
+        let Some(at) = self.row_of(&carrying.spot()) else {
+            return 0..0;
+        };
+        if carrying.whole == Whole::Pane {
+            return at..at + 1;
+        }
+        let tab_of = |row: &Row| match row {
+            Row::Pane { machine, session, pane, .. } if *machine == carrying.machine => {
+                let pane = self.pane_of(machine, session, *pane)?;
+                Some((session.clone(), pane.tab))
+            },
+            _ => None,
+        };
+        let Some(tab) = tab_of(&self.rows[at]) else {
+            return at..at + 1;
+        };
+        let same = |index: &usize| tab_of(&self.rows[*index]).as_ref() == Some(&tab);
+        let start = (0..at).rev().take_while(same).last().unwrap_or(at);
+        let end = (at + 1..self.rows.len()).take_while(same).last().map_or(at + 1, |end| end + 1);
+        start..end
+    }
+
+    /// Where `carrying` can land, each by its row, in their order: the rows
+    /// of the other sessions of its machine, each session's own and those of
+    /// its panes it lists.
+    fn landings(&self, carrying: &Carrying) -> Vec<(usize, Landing)> {
+        let landings = self.rows.iter().enumerate();
+        landings.filter_map(|(at, _)| Some((at, self.landing_at(carrying, at)?))).collect()
+    }
+
+    /// Where `carrying` lands by the row `at`: in a tab of its own on another
+    /// session's row of its machine, or beside a pane on another session's
+    /// pane's; and nowhere on any other row.
+    fn landing_at(&self, carrying: &Carrying, at: usize) -> Option<Landing> {
+        let own = &carrying.place.session;
+        match &self.rows[at] {
+            Row::Session { machine, session, .. }
+                if *machine == carrying.machine && session != own =>
+            {
+                Some(Landing::Tab(session.clone()))
+            },
+            Row::Pane { machine, session, pane, .. }
+                if *machine == carrying.machine && session != own =>
+            {
+                Some(Landing::Beside(PanePlace { session: session.clone(), pane: *pane }))
+            },
+            _ => None,
+        }
+    }
+
+    /// Moves where what `V` carries lands `by` places, down or up, among
+    /// where it can, and no further than the first or the last: from where it
+    /// is, the first below it, or above.
+    fn step_landing(&mut self, by: isize) {
+        let Moving::Carrying(carrying, landing) = &self.moving else {
+            return;
+        };
+        let landings = self.landings(carrying);
+        let Some(from) = self.row_of(&carrying.spot()) else {
+            return;
+        };
+        let on = landing.as_ref().and_then(|landing| {
+            landings.iter().position(|(_, it)| it == landing)
+        });
+        let to = match on {
+            Some(at) => Some(at.saturating_add_signed(by).min(landings.len().saturating_sub(1))),
+            None if by > 0 => landings.iter().position(|(row, _)| *row > from),
+            None => landings.iter().rposition(|(row, _)| *row < from),
+        };
+        if let Some((_, landing)) = to.and_then(|to| landings.get(to)) {
+            self.moving = Moving::Carrying(carrying.clone(), Some(landing.clone()));
+        }
+    }
+
+    /// `Enter` while `V` carries: sets it down where it lands, as `land_on`
+    /// does; with nowhere to land yet, puts it back.
+    fn set_down(&mut self) -> Asked {
+        match std::mem::take(&mut self.moving) {
+            Moving::Carrying(carrying, Some(landing)) => self.land_on(carrying, landing),
+            kept => {
+                self.moving = kept;
+                self.unselect();
+                Asked::Nothing
+            },
+        }
+    }
+
+    /// Sets `carrying` down on `landing`: has luneta move it, once more
+    /// nothing would be cut short, as the daemon last said; or first asks
+    /// whether it may end its session, where it is all the session has.
+    fn land_on(&mut self, carrying: Carrying, landing: Landing) -> Asked {
+        self.cursor = Some(carrying.spot());
+        let planned = match self.carry_plan(&carrying) {
+            Ok(planned) => planned,
+            Err(why) => {
+                self.notify(format!("not moved: {why}"));
+                self.settle(None, false);
+                return Asked::Nothing;
+            },
+        };
+        let own = &carrying.place.session;
+        let panes = self.seen(&carrying.machine).and_then(|seen| {
+            let mut sessions = seen.sessions.iter();
+            let session = sessions.find(|session| Listed::of(session).as_ref() == Some(own))?;
+            Some(session.panes.as_ref().map_or(0, |panes| panes.panes.len()))
+        });
+        if panes.is_some_and(|panes| panes <= planned.goes.len()) {
+            self.moving = Moving::Asking(carrying, landing);
+            return Asked::Nothing;
+        }
+        self.carried_off(carrying, &landing, false)
+    }
+
+    /// Has luneta move `carrying` to `landing`, where it may end its session
+    /// as `ending` says, and take zellij's client with it where it is on one
+    /// of its panes: there first, where the session it leaves ends, or the
+    /// one it goes to has no client to make room for a tab.
+    fn carried_off(&mut self, carrying: Carrying, landing: &Landing, ending: bool) -> Asked {
+        self.moving = Moving::Still;
+        self.settle(None, false);
+        let Carrying { machine, place, whole } = carrying;
+        let carrying = Carrying { machine: machine.clone(), place: place.clone(), whole };
+        let panes: Vec<u32> = self.carry_plan(&carrying).map_or_else(
+            |_| vec![place.pane],
+            |planned| planned.goes.iter().map(|(pane, _)| *pane).collect(),
+        );
+        let here = self.here_place().ok().filter(|_| machine == self.on);
+        let follows = here
+            .filter(|here| here.session == place.session && panes.contains(&here.pane))
+            .map(|here| here.pane);
+        let to = landing.session().clone();
+        let clientless = || {
+            let sessions = self.seen(&machine).map_or(&[][..], |seen| seen.sessions);
+            let session = sessions.iter().find(|session| Listed::of(session).as_ref() == Some(&to));
+            session.is_none_or(|session| {
+                session.clients.as_ref().is_none_or(|clients| clients.clients.is_empty())
+            })
+        };
+        let leaves = ending || (matches!(landing, Landing::Tab(_)) && clientless());
+        let first = follows.filter(|_| leaves).map(|_| landing.place());
+        let carry = Carry {
+            from: place.session.seat(),
+            pane: place.pane,
+            whole,
+            to: to.seat(),
+            lands: landing.lands(),
+            ending,
+        };
+        Asked::Carry { on: machine, carry, to, follows, first }
+    }
+
+    /// What came of moving panes of `on` to `to`, as luneta asked, with
+    /// zellij's client on the pane `follows`, if on one of them: each by the
+    /// terminal it opened as there. The client goes to its pane's, and the
+    /// highlight to the first that opened, once it shows. Or why they did
+    /// not move, which the notes say.
+    pub fn carried(
+        &mut self,
+        on: Machine,
+        to: &Listed,
+        follows: Option<u32>,
+        carried: Result<Vec<(u32, u32)>, String>,
+    ) -> Asked {
+        let carried = match carried {
+            Ok(carried) => carried,
+            Err(why) => {
+                self.notify(format!("move: {why}"));
+                return Asked::Nothing;
+            },
+        };
+        let opened = |pane: u32| Place::Pane(PanePlace { session: to.clone(), pane });
+        if let Some((_, first)) = carried.first() {
+            self.arriving = Some(Spot::on(&on, opened(*first)));
+        }
+        let followed = follows.and_then(|pane| carried.iter().find(|(from, _)| *from == pane));
+        match followed {
+            Some((_, terminal)) => Asked::Go { on, place: opened(*terminal) },
+            None => Asked::Nothing,
         }
     }
 
@@ -2822,20 +3230,20 @@ impl Sidebar {
     /// lands where its row is nearest to the line the mouse holds it on, a
     /// session among those of its machine alone, and goes back while the
     /// mouse is off the sidebar.
-    fn landing(&self, lift: &Lift) -> Option<(Spans, Range<usize>)> {
-        let at = self.row_of(&lift.lifted.spot())?;
-        let spans = self.spans(&lift.lifted);
+    fn landing(&self, movable: &Movable, line: u16, over: bool) -> Option<(Spans, Range<usize>)> {
+        let at = self.row_of(&movable.spot())?;
+        let spans = self.spans(movable);
         let rows = spans.rows();
         let from = rows.iter().position(|span| span.contains(&at))?;
         let lifted = rows[from].clone();
-        if !lift.over {
+        if !over {
             return Some((spans, lifted));
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
         // The line the lifted rows start on: the mouse holds the row it
         // lifted, under any session of its name it goes with.
         let above = HEADER + lines(lifted.start..at);
-        let top = (self.top + usize::from(lift.line)) as isize - above as isize;
+        let top = (self.top + usize::from(line)) as isize - above as isize;
         // The line each place among the others starts on, with the lifted
         // rows out of them, and the line after the last: from where the
         // first of them starts, under the header of their machine for
@@ -2852,6 +3260,46 @@ impl Sidebar {
         let distance = |gap: &usize| ((gaps[*gap] as isize - top).unsigned_abs(), *gap != from);
         let to = (0..gaps.len()).min_by_key(distance).unwrap_or(from);
         Some((spans.moved(from..from + 1, to), lifted))
+    }
+
+    /// Where what the mouse carries lands, with the pointer on the line `line`
+    /// of the sidebar, `over` it or not: by the row under the pointer as the
+    /// rows lie where nothing is carried, which shows with what it carries
+    /// under it, and so goes on landing there while the pointer stays.
+    /// Nowhere while the pointer is off the sidebar, or on a row of its own
+    /// session, or of another machine.
+    fn carry_landing(&self, carrying: &Carrying, line: u16, over: bool) -> Option<Landing> {
+        if !over {
+            return None;
+        }
+        let line = (self.top + usize::from(line)).checked_sub(HEADER)?;
+        self.landing_at(carrying, self.row_at(line)?)
+    }
+
+    /// The row what lands on `landing` shows after: the pane's it goes
+    /// beside, or the last of the session it opens a tab of, as a tab opens
+    /// after the others.
+    fn shows_after(&self, machine: &Machine, landing: &Landing) -> Option<usize> {
+        let at = self.row_of(&Spot::on(machine, landing.place()))?;
+        let Landing::Tab(session) = landing else {
+            return Some(at);
+        };
+        let of_session = |row: &Row| matches!(row, Row::Pane { session: of, .. } if of == session);
+        let panes = self.rows[at + 1..].iter().take_while(|row| of_session(row)).count();
+        Some(at + panes)
+    }
+
+    /// What the left button lifts by the row `at`, pressed on its column
+    /// `column`: a machine by its header, a session by its row, and a pane by
+    /// its row, or its tab by the bracket that joins it to the others.
+    fn lifting(&self, at: usize, column: u16) -> Option<Lifting> {
+        let Row::Pane { machine, session, pane, bracket, .. } = &self.rows[at] else {
+            return Movable::of(self.rows[at].spot()).map(Lifting::Moved);
+        };
+        let on_bracket = bracket.is_some() && column <= BRACKET_COLUMN;
+        let whole = if on_bracket { Whole::Tab } else { Whole::Pane };
+        let place = PanePlace { session: session.clone(), pane: *pane };
+        Some(Lifting::Carried(Carrying { machine: machine.clone(), place, whole }))
     }
 
     /// Opens the menu for the highlighted row, on the group `key` opens, or on
@@ -3670,8 +4118,10 @@ impl Sidebar {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.close_menu();
                 self.unselect();
+                self.arriving = None;
                 let row = self.line_of(mouse.row, area).and_then(|line| self.row_at(line));
-                let lifts = row.and_then(|at| Movable::of(self.rows[at].spot()));
+                let column = mouse.column.saturating_sub(area.x);
+                let lifts = row.and_then(|at| self.lifting(at, column));
                 let at = Position::new(mouse.column, mouse.row);
                 self.moving = Moving::Down { at, lifts };
                 Asked::Nothing
@@ -3713,10 +4163,21 @@ impl Sidebar {
                 return Asked::Nothing;
             },
             Moving::Down { at, lifts } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
-            Moving::Selected(_) | Moving::Swept(..) | Moving::Still => return Asked::Nothing,
+            Moving::Selected(_)
+            | Moving::Carrying(..)
+            | Moving::Asking(..)
+            | Moving::Swept(..)
+            | Moving::Still => return Asked::Nothing,
         };
         let typed = matches!(self.search, Some(Search::Typed { .. }));
-        let lifts = lifts.filter(|lifts| !typed && self.row_of(&lifts.spot()).is_some());
+        let mut lifts = lifts.filter(|lifts| !typed && self.row_of(&lifts.spot()).is_some());
+        if let Some(Lifting::Carried(carrying)) = &lifts
+            && let Err(why) = self.carry_plan(carrying)
+        {
+            self.notify(format!("not moved: {why}"));
+            lifts = None;
+            self.moving = Moving::Down { at: from, lifts: None };
+        }
         if let Some(lifted) = lifts {
             self.moving = Moving::Lifted(Lift { lifted, line, over, scrolled: None });
             return Asked::Take;
@@ -3737,15 +4198,23 @@ impl Sidebar {
         let over = (area.left()..area.right()).contains(&mouse.column);
         match std::mem::take(&mut self.moving) {
             Moving::Down { at, .. } if over && mouse.row == at.y => self.click(at, area),
-            Moving::Lifted(mut lift) => {
-                lift.line = mouse.row.saturating_sub(area.y);
-                lift.over = over;
+            Moving::Lifted(Lift { lifted: Lifting::Moved(movable), .. }) => {
+                let line = mouse.row.saturating_sub(area.y);
                 self.reorder();
-                self.cursor = Some(lift.lifted.spot());
-                match self.landing(&lift) {
-                    Some((spans, _)) if spans != self.spans(&lift.lifted) => self.keep(spans),
+                self.cursor = Some(movable.spot());
+                match self.landing(&movable, line, over) {
+                    Some((spans, _)) if spans != self.spans(&movable) => self.keep(spans),
                     _ => self.settle(None, false),
                 }
+                Asked::Nothing
+            },
+            Moving::Lifted(Lift { lifted: Lifting::Carried(carrying), .. }) => {
+                let line = mouse.row.saturating_sub(area.y);
+                if let Some(landing) = self.carry_landing(&carrying, line, over) {
+                    return self.land_on(carrying, landing);
+                }
+                self.cursor = Some(carrying.spot());
+                self.settle(None, false);
                 Asked::Nothing
             },
             Moving::Sweeping(mut sweep) => {
@@ -3758,7 +4227,10 @@ impl Sidebar {
                 Asked::CopyText(text)
             },
             // A selection is the keys', and no press of the sidebar's.
-            kept @ (Moving::Selected(_) | Moving::Swept(..)) => {
+            kept @ (Moving::Selected(_)
+            | Moving::Carrying(..)
+            | Moving::Asking(..)
+            | Moving::Swept(..)) => {
                 self.moving = kept;
                 Asked::Nothing
             },
@@ -3944,18 +4416,27 @@ impl Sidebar {
         self.room = room;
         let highlight = self.highlight();
         let landing = match &self.moving {
-            Moving::Lifted(lift) => self.landing(lift),
-            Moving::Still
-            | Moving::Selected(_)
-            | Moving::Down { .. }
-            | Moving::Sweeping(_)
-            | Moving::Swept(..) => None,
+            Moving::Lifted(Lift { lifted: Lifting::Moved(movable), line, over, .. }) => {
+                self.landing(movable, *line, *over)
+            },
+            _ => None,
         };
+        let carried = match &self.moving {
+            Moving::Lifted(Lift { lifted: Lifting::Carried(carrying), line, over, .. }) => {
+                Some((carrying.clone(), self.carry_landing(carrying, *line, *over), false))
+            },
+            Moving::Carrying(carrying, landing) => Some((carrying.clone(), landing.clone(), true)),
+            Moving::Asking(carrying, landing) => {
+                Some((carrying.clone(), Some(landing.clone()), true))
+            },
+            _ => None,
+        };
+        let lifted = landing.is_some() || matches!(carried, Some((_, _, false)));
         match highlight {
             Highlight::Lit(at) => {
                 // The mouse scrolls the rows under what it lifted.
                 if let Some(at) = at
-                    && landing.is_none()
+                    && !lifted
                 {
                     self.reveal(at, room);
                 }
@@ -3978,22 +4459,31 @@ impl Sidebar {
             let none = if typed { " no match" } else { " no sessions" };
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
-        let lit = match (&landing, highlight) {
-            (Some((_, lifted)), _) => Some((lifted.clone(), LIT)),
-            (None, Highlight::Lit(at)) => {
+        let carried_rows = carried.as_ref().map(|(carrying, ..)| self.carried_rows(carrying));
+        let landed_on = carried.as_ref().and_then(|(carrying, landing, _)| {
+            let landing = landing.as_ref()?;
+            let after = self.shows_after(&carrying.machine, landing)?;
+            Some((self.row_of(&Spot::on(&carrying.machine, landing.place()))?, after))
+        });
+        let lit = match (&landing, &carried_rows, highlight) {
+            (Some((_, lifted)), _, _) => Some((lifted.clone(), LIT)),
+            (None, Some(rows), _) => Some((rows.clone(), LIT)),
+            (None, None, Highlight::Lit(at)) => {
                 let held = self.selected().map(|(spans, held)| {
                     let rows = spans.rows();
                     rows[held.start].start..rows[held.end - 1].end
                 });
                 held.or(at.map(|at| at..at + 1)).map(|rows| (rows, LIT))
             },
-            (None, Highlight::Resting(at)) => Some((at..at + 1, RESTING)),
-            (None, Highlight::Off) => None,
+            (None, None, Highlight::Resting(at)) => Some((at..at + 1, RESTING)),
+            (None, None, Highlight::Off) => None,
         };
-        let order = match &landing {
-            Some((spans, _)) => self.landed(&spans.rows()),
-            None => (0..self.rows.len()).collect::<Vec<_>>(),
+        let order = match (&landing, &carried_rows, landed_on) {
+            (Some((spans, _)), _, _) => self.landed(&spans.rows()),
+            (None, Some(rows), Some((_, after))) => set_down(self.rows.len(), rows, after),
+            _ => (0..self.rows.len()).collect::<Vec<_>>(),
         };
+        let mut carried_lines: Option<Range<usize>> = None;
         let mut drawn: Vec<Line<'static>> = Vec::new();
         // Where each number is, by its line among all those of the rows. None
         // takes a click under what the mouse lifted.
@@ -4004,15 +4494,20 @@ impl Sidebar {
         for at in order {
             let row = &self.rows[at];
             let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
-            let background = on.map(|(_, background)| *background);
+            let target = landed_on.is_some_and(|(target, _)| target == at);
+            let background = on.map(|(_, background)| *background).or(target.then_some(RESTING));
             let RowLines { lines: row_drawn, number, cuts: row_cuts } =
                 row_lines(row, width, frame, now);
-            if landing.is_none()
+            if !lifted
                 && let Some(number) = number
             {
                 numbers.push(NumberAt { line: drawn.len() + number.line, ..number });
             }
             let first = drawn.len();
+            if carried_rows.as_ref().is_some_and(|rows| rows.contains(&at)) {
+                let start = carried_lines.as_ref().map_or(first, |lines| lines.start);
+                carried_lines = Some(start..first + row_drawn.len());
+            }
             cuts.extend(row_cuts.into_iter().map(|cut| CutAt { line: first + cut.line, ..cut }));
             rows.push((row.spot(), row_drawn.len()));
             for mut line in row_drawn {
@@ -4020,6 +4515,13 @@ impl Sidebar {
                     line = line.patch_style(Style::new().bg(background));
                 }
                 drawn.push(line);
+            }
+        }
+        if let (Some((_, _, true)), Some(lines)) = (&carried, carried_lines) {
+            if lines.start < self.top {
+                self.top = lines.start;
+            } else if lines.end > self.top + room {
+                self.top = lines.end.saturating_sub(room).min(lines.start);
             }
         }
         self.top = self.top.min(drawn.len().saturating_sub(1));
@@ -4249,6 +4751,18 @@ impl Sidebar {
         {
             let going = format!("Going to {session}; this session ends once you are there");
             notes.say(&going, width, Style::new().fg(NAME));
+        }
+        if let Moving::Asking(carrying, landing) = &self.moving {
+            let what = match carrying.whole {
+                Whole::Pane => "this pane",
+                Whole::Tab => "this tab",
+            };
+            let (from, to) = (carrying.place.session.name(), landing.session().name());
+            let asks = format!(
+                "Moving {what} to {to} ends {from}, as it is all {from} has: y moves it, any \
+                 other key keeps it"
+            );
+            notes.say(&asks, width, Style::new().fg(NAME));
         }
         let mut buttons = Spots::default();
         if let Some(aloud) = &self.aloud {
@@ -4487,79 +5001,20 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
 
 /// `items` with those `taken` put back before the one at `to` of those left,
 /// or after the last of them.
+/// The rows, by their index, of `count`, in the order they show while those
+/// `carried` show after the row `after`, as they land there.
+fn set_down(count: usize, carried: &Range<usize>, after: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).filter(|at| !carried.contains(at)).collect();
+    let place = order.iter().position(|at| *at == after).map_or(order.len(), |place| place + 1);
+    order.splice(place..place, carried.clone());
+    order
+}
+
 fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
     let left = items.iter().enumerate().filter(|(at, _)| !taken.contains(at));
     let mut moved: Vec<T> = left.map(|(_, item)| item.clone()).collect();
     moved.splice(to..to, items[taken].iter().cloned());
     moved
-}
-
-/// The agent in each pane, by its session and the pane's id. A pane holds one:
-/// the agent started at a prompt, or else the one that started first. An
-/// agent is in the session the daemon follows its pane to, or, where the
-/// daemon cannot tell, the one `found` finds.
-fn seated<'a>(agents: &'a [Agent], sessions: &'a [Session]) -> HashMap<(&'a str, u32), &'a Agent> {
-    let mut seated: HashMap<(&str, u32), &Agent> = HashMap::new();
-    for agent in agents {
-        let Some(zellij) = &agent.zellij else {
-            continue;
-        };
-        let Some(session) = zellij.session.as_deref().or_else(|| found(agent, zellij, sessions))
-        else {
-            continue;
-        };
-        let rank = |agent: &Agent| {
-            let started = agent.started_at.as_ref().map(|at| (at.seconds, at.nanos));
-            (!agent.at_a_prompt(), started)
-        };
-        seated
-            .entry((session, zellij.pane))
-            .and_modify(|seat| {
-                if rank(agent) < rank(seat) {
-                    *seat = agent;
-                }
-            })
-            .or_insert(agent);
-    }
-    seated
-}
-
-/// The session of an agent the daemon cannot follow to one, as it cannot one
-/// renamed before it started, found by where it works: the one session that
-/// lists a pane of the agent's id that works where the agent does. Of more
-/// than one, the session the agent's environment names, or else, for Claude
-/// Code's, the one whose pane runs `claude` or an agent titled, if one alone
-/// does: what a pane runs tells of no other harness's agent.
-fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
-    if agent.cwd.is_empty() {
-        return None;
-    }
-    let pane = |session: &'a Session| {
-        let mut panes = session.panes.iter().flat_map(|panes| &panes.panes);
-        let pane = panes.find(|pane| {
-            pane.id == zellij.pane && pane.cwd.as_deref() == Some(agent.cwd.as_str())
-        })?;
-        Some((session.name.as_str(), pane))
-    };
-    let holders: Vec<(&str, &Pane)> = sessions.iter().filter_map(pane).collect();
-    if let [(only, _)] = holders.as_slice() {
-        return Some(only);
-    }
-    if let Some((named, _)) = holders.iter().find(|(name, _)| *name == zellij.named) {
-        return Some(named);
-    }
-    match agent.runs_in() {
-        Harness::ClaudeCode => {},
-        Harness::Pi | Harness::Unspecified => return None,
-    }
-    let claude = |pane: &Pane| {
-        pane.command.as_deref().is_some_and(|run| run.contains("claude")) || pane.titled.is_some()
-    };
-    let mut claudes = holders.iter().filter(|(_, pane)| claude(pane));
-    match (claudes.next(), claudes.next()) {
-        (Some((one, _)), None) => Some(one),
-        _ => None,
-    }
 }
 
 /// What can be read of `agent`'s transcript: Claude Code's alone, by its id.
@@ -5366,7 +5821,8 @@ mod tests {
 
     /// The sidebar as `drawn` draws it, at `now`. Each cell is in gruvbox's
     /// colours, on the terminal's background or, on the highlight, the one
-    /// that says whether the sidebar has the focus.
+    /// that says whether the sidebar has the focus; and focused, the softer
+    /// one, on the row a move lands on.
     fn drawn_at(
         sidebar: &mut Sidebar,
         focused: bool,
@@ -5378,8 +5834,8 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         sidebar.focus(if focused { Keys::Sidebar } else { Keys::Zellij });
         sidebar.draw(&mut buffer, area, now);
-        let lit = if focused { LIT } else { RESTING };
-        in_gruvbox(&buffer, &[Color::Reset, lit]);
+        let lit: &[Color] = if focused { &[LIT, RESTING] } else { &[RESTING] };
+        in_gruvbox(&buffer, &[&[Color::Reset], lit].concat());
         buffer
     }
 
@@ -5871,10 +6327,10 @@ mod tests {
         assert_eq!(lit, [6, 7]);
         // The legend leaves the rows four lines, which scroll a line for
         // the pane to show whole, and stay so once the focus goes.
-        let (_, lit) = seen(&mut sidebar, true, 32, 19);
+        let (_, lit) = seen(&mut sidebar, true, 32, 20);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 19);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 20);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
@@ -5932,7 +6388,7 @@ mod tests {
         }
         assert_eq!(cursor(&sidebar), second);
         // Tall enough for the legend to leave newer's row on screen.
-        let area = Rect::new(0, 0, 32, 20);
+        let area = Rect::new(0, 0, 32, 21);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -6121,7 +6577,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the title and the rule along the top and the
         // legend at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 17)[3..5].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 18)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -6207,7 +6663,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 17);
+        let area = Rect::new(0, 0, 32, 18);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
@@ -6875,7 +7331,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 18, now).0[4].clone()
+            seen_at(sidebar, true, 32, 19, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -7125,7 +7581,7 @@ mod tests {
     /// session's name: those under this machine's header down to the blank
     /// above the legend.
     fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
-        let lines = screen(sidebar, true, 32, 26);
+        let lines = screen(sidebar, true, 32, 27);
         let rows = lines[sessions_from(&lines)..].iter().take_while(|line| !line.is_empty());
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
@@ -7140,7 +7596,7 @@ mod tests {
     /// The last line of the sidebar, focused: the keys the search takes, or
     /// else the last of the legend.
     fn bottom(sidebar: &mut Sidebar) -> String {
-        screen(sidebar, true, 32, 16)[15].clone()
+        screen(sidebar, true, 32, 17)[16].clone()
     }
 
     /// The search at the bottom of the sidebar, focused: its rule, what is
@@ -7513,7 +7969,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
         let now = moment(160_000);
         assert_eq!(sidebar.keys_clicked(Keyed::Legend, &char('y'), now), Asked::Nothing);
-        let clicked = clicks(&mut sidebar, 17);
+        let clicked = clicks(&mut sidebar, 18);
         assert_eq!(clicked[1], (" p  PR link".to_owned(), Some(on_legend('p'))));
         let copied = sidebar.keys_clicked(Keyed::Legend, &char('p'), now);
         assert_eq!(copied, Asked::Copy(link()));
@@ -7751,12 +8207,12 @@ mod tests {
     /// Each line of the sidebar drawn 32 by 19, from the line `from` down, as
     /// text, and what a click a few columns into it hits.
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
-        let area = Rect::new(0, 0, 32, 19);
+        let area = Rect::new(0, 0, 32, 20);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
-        (from..19).map(click).collect()
+        (from..20).map(click).collect()
     }
 
     fn on_legend(c: char) -> Hit {
@@ -7785,6 +8241,7 @@ mod tests {
             (" /  Search", Some(on_legend('/'))),
             (" u  Unread", Some(on_legend('u'))),
             (" v  Reorder", Some(on_legend('v'))),
+            (" V  Move pane", Some(on_legend('V'))),
             (" o  Open PR", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
@@ -7795,7 +8252,7 @@ mod tests {
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
         sidebar.keys_clicked(Keyed::Legend, &char('n'), moment(160_000));
-        let clicked = clicks(&mut sidebar, 13);
+        let clicked = clicks(&mut sidebar, 14);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         assert_eq!(menu, [
@@ -7816,11 +8273,11 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
-        let delete = clicks(&mut sidebar, 16);
+        let delete = clicks(&mut sidebar, 17);
         assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        assert_eq!(clicks(&mut sidebar, 16), delete);
+        assert_eq!(clicks(&mut sidebar, 17), delete);
         let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
         assert_ne!(deleted, Asked::Nothing);
     }
@@ -7843,7 +8300,7 @@ mod tests {
             runs: crate::skills::Runs::ForAnyone,
         };
         sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
-        let clicked = clicks(&mut sidebar, 14);
+        let clicked = clicks(&mut sidebar, 15);
         let skills: Vec<(&str, Option<Hit>)> =
             clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
@@ -8901,7 +9358,7 @@ mod tests {
     /// The rows the sidebar draws under this machine's header, focused, with
     /// no rule after a session's name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
-        let (lines, lit) = seen(sidebar, true, 32, 26);
+        let (lines, lit) = seen(sidebar, true, 32, 27);
         let from = sessions_from(&lines);
         let rows = lines[from..].iter().take_while(|line| !line.is_empty());
         let rows = rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect();
@@ -8958,20 +9415,23 @@ mod tests {
         assert!(matches!(sidebar.moving, Moving::Still));
     }
 
-    /// A press on a pane's row lifts nothing. One on a session's row lifts the
-    /// session once the mouse moves a line, and takes the focus: it shows where
-    /// it lands, lit, with its panes, the others making room. Let go, it stays
-    /// where it showed, for the daemon's next list too.
+    /// A press on the row of a pane that runs a program lifts nothing, and a
+    /// note says why. One on a session's row lifts the session once the mouse
+    /// moves a line, and takes the focus: it shows where it lands, lit, with
+    /// its panes, the others making room. Let go, it stays where it showed,
+    /// for the daemon's next list too.
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 26);
+        let area = Rect::new(0, 0, 32, 27);
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
         assert_eq!(act(MouseEventKind::Down(left), 10, 5), Asked::Nothing);
         assert_eq!(act(MouseEventKind::Drag(left), 10, 7), Asked::Nothing);
         act(MouseEventKind::Up(left), 10, 7);
+        assert_eq!(sidebar.notice.as_deref(), Some("not moved: it runs `a-p-i-x`"));
+        sidebar.clear_notice();
         assert_eq!(drawn_rows(&mut sidebar).0, before);
 
         // notes's row, under bipa's, past zed's.
@@ -9372,8 +9832,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 19);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 19)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 20);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 20)[HEADER].clone();
         assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
@@ -10595,5 +11055,261 @@ mod tests {
             assert_eq!(marked(aloud::Shown::Reading { whose, text, paused }), paused);
             assert_eq!(marked(aloud::Shown::Fetching { got: 0, paused }), paused);
         }
+    }
+
+    /// Two sessions to move panes between: work, the older, with a shell alone
+    /// in its tab, and a tab named auth that holds a shell and an agent at its
+    /// prompt; and play, with a shell alone. The sidebar has the keys, on the
+    /// first pane.
+    fn carrying() -> Sidebar {
+        let mut sidebar = fresh();
+        let auth = |pane: Pane| Pane { tab_name: "auth".to_owned(), ..pane };
+        let work = vec![
+            pane(1, 0, "/w/a", "fish"),
+            auth(pane(2, 1, "/w/b", "fish")),
+            auth(pane(3, 1, "/w/luneta/main", "claude")),
+        ];
+        let play = vec![pane(5, 0, "/w/p", "fish")];
+        let fold = Agent {
+            session_id: "0b7e1c2a-5d1f-4c8e-9a43-1f2e3d4c5b6a".to_owned(),
+            status_since: None,
+            ..agent("work", 3, Status::Idle, Some("fold"))
+        };
+        let agents = vec![fold];
+        sidebar.heard(host(vec![session("work", 10, work), session("play", 20, play)], agents));
+        sidebar.focus(Keys::Sidebar);
+        sidebar
+    }
+
+    /// What has luneta move the pane `pane` of work, or its tab, to play,
+    /// where it `lands`, the session staying, with zellij's client nowhere
+    /// on it.
+    fn carried_off(pane: u32, whole: Whole, lands: Lands) -> Asked {
+        let carry = Carry {
+            from: listed("work", 10).seat(),
+            pane,
+            whole,
+            to: listed("play", 20).seat(),
+            lands,
+            ending: false,
+        };
+        let to = listed("play", 20);
+        Asked::Carry { on: Machine::Local, carry, to, follows: None, first: None }
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::from(KeyCode::Enter)
+    }
+
+    /// The rows each line shows, by the end of its text, and which are lit.
+    fn ends_shown(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
+        let (rows, lit) = drawn_rows(sidebar);
+        let end = |row: &String| row.rsplit(' ').next().unwrap_or_default().to_owned();
+        (rows.iter().map(end).collect(), lit)
+    }
+
+    /// `V` picks the highlighted pane for another session, and `J` and `K`,
+    /// as `j` and `k`, take where it lands among the rows of the other
+    /// sessions, no further than the first or the last: a session's row opens
+    /// a tab of its own there, which shows after its panes, and a pane's row
+    /// has it beside that pane, under it. What lands is lit, and so is what it
+    /// lands on, softer. `Enter` has luneta move it, and the rows stay as they
+    /// are until the daemon says otherwise.
+    #[test]
+    fn v_picks_a_pane_and_j_and_k_take_where_it_lands() {
+        let mut sidebar = carrying();
+        let (listed, _) = ends_shown(&mut sidebar);
+        assert_eq!(listed, ["work", "w/a", "auth", "fold", "play", "w/p"]);
+        type_in(&mut sidebar, "V");
+        assert_eq!(ends_shown(&mut sidebar), (listed.clone(), vec![1]));
+        type_in(&mut sidebar, "J");
+        let tab = ["work", "auth", "fold", "play", "w/p", "w/a"];
+        assert_eq!(ends_shown(&mut sidebar), (tab.map(str::to_owned).to_vec(), vec![3, 5]));
+        type_in(&mut sidebar, "jJ");
+        let beside = ["work", "auth", "fold", "play", "w/p", "w/a"];
+        assert_eq!(ends_shown(&mut sidebar), (beside.map(str::to_owned).to_vec(), vec![4, 5]));
+        type_in(&mut sidebar, "K");
+        assert_eq!(ends_shown(&mut sidebar).1, [3, 5]);
+        type_in(&mut sidebar, "kK");
+        assert_eq!(ends_shown(&mut sidebar).1, [3, 5]);
+        type_in(&mut sidebar, "J");
+
+        let asked = sidebar.key(&enter(), moment(160_000));
+        assert_eq!(asked, carried_off(1, Whole::Pane, Lands::Beside(5)));
+        assert!(matches!(sidebar.moving, Moving::Still));
+        assert_eq!(ends_shown(&mut sidebar).0, listed);
+        assert_eq!(cursor(&sidebar), Some(pane_of("work", 10, 1)));
+    }
+
+    /// Where it lands is nowhere but another session's rows: with none below
+    /// it, `J` leaves it where it is, and `Enter` there, or `Esc`, puts it
+    /// back. Any other key puts it back too, and does what it does.
+    #[test]
+    fn a_pane_picked_goes_back_where_it_lands_nowhere() {
+        let mut sidebar = carrying();
+        let rows = ends_shown(&mut sidebar).0;
+        type_in(&mut sidebar, "GVJ");
+        assert_eq!(ends_shown(&mut sidebar), (rows.clone(), vec![5]));
+        assert_eq!(sidebar.key(&enter(), moment(160_000)), Asked::Nothing);
+        assert!(matches!(sidebar.moving, Moving::Still));
+
+        type_in(&mut sidebar, "VK");
+        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
+        assert_eq!(ends_shown(&mut sidebar), (rows.clone(), vec![5]));
+
+        type_in(&mut sidebar, "VKu");
+        assert!(matches!(sidebar.moving, Moving::Still));
+        assert_eq!(ends_shown(&mut sidebar).0, rows);
+        assert!(sidebar.news.is_unread(listed("play", 20).key(5)));
+    }
+
+    /// `V` again takes up the rest of the pane's tab, which goes whole, by
+    /// every pane of it; and once more puts the tab back. A pane alone in its
+    /// tab has no rest to take up, and goes back.
+    #[test]
+    fn v_again_takes_up_the_pane_s_tab() {
+        let mut sidebar = carrying();
+        type_in(&mut sidebar, "jVV");
+        assert_eq!(ends_shown(&mut sidebar).1, [2, 3]);
+        type_in(&mut sidebar, "J");
+        let (rows, lit) = ends_shown(&mut sidebar);
+        assert_eq!(rows, ["work", "w/a", "play", "w/p", "auth", "fold"]);
+        assert_eq!(lit, [2, 4, 5]);
+        assert_eq!(sidebar.key(&enter(), moment(160_000)), carried_off(2, Whole::Tab, Lands::Tab));
+
+        type_in(&mut sidebar, "VVV");
+        assert!(matches!(sidebar.moving, Moving::Still));
+        type_in(&mut sidebar, "ggVV");
+        assert!(matches!(sidebar.moving, Moving::Still));
+    }
+
+    /// What would be cut short, as what runs in a pane, or in a pane of its
+    /// tab, picks nothing, and a note says why.
+    #[test]
+    fn what_would_be_cut_short_is_not_picked() {
+        let mut sidebar = carrying();
+        let mut host = sidebar.host.clone().unwrap();
+        host.agents[0].status = Some(Reported::KnownStatus(Status::Busy.into()));
+        sidebar.heard(host);
+        type_in(&mut sidebar, "jjV");
+        assert!(matches!(sidebar.moving, Moving::Still));
+        assert_eq!(sidebar.notice.as_deref(), Some("not moved: its agent is at work"));
+        type_in(&mut sidebar, "kV");
+        assert!(matches!(sidebar.moving, Moving::Carrying(..)));
+        type_in(&mut sidebar, "V");
+        assert!(matches!(sidebar.moving, Moving::Carrying(_, None)), "{:?}", sidebar.moving);
+        let why = "not moved: pane 3 of its tab: its agent is at work";
+        assert_eq!(sidebar.notice.as_deref(), Some(why));
+    }
+
+    /// Moving the last pane of a session ends it, so the move asks first, and
+    /// says so: `y` moves it, letting the session end, and any other key puts
+    /// it back, doing nothing else.
+    #[test]
+    fn moving_a_session_s_last_pane_asks_first() {
+        let mut sidebar = carrying();
+        type_in(&mut sidebar, "GVK");
+        assert_eq!(sidebar.key(&enter(), moment(160_000)), Asked::Nothing);
+        assert!(matches!(sidebar.moving, Moving::Asking(..)));
+        let notes = screen(&mut sidebar, true, 120, 30).join("\n");
+        let asks = "Moving this pane to work ends play, as it is all play has: y moves it";
+        assert!(notes.contains(asks), "{notes}");
+        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        assert!(matches!(sidebar.moving, Moving::Still));
+        assert!(sidebar.menu.is_none());
+
+        type_in(&mut sidebar, "VK");
+        sidebar.key(&enter(), moment(160_000));
+        let carry = Carry {
+            from: listed("play", 20).seat(),
+            pane: 5,
+            whole: Whole::Pane,
+            to: listed("work", 10).seat(),
+            lands: Lands::Beside(3),
+            ending: true,
+        };
+        let to = listed("work", 10);
+        let asked = Asked::Carry { on: Machine::Local, carry, to, follows: None, first: None };
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), asked);
+    }
+
+    /// zellij's client on the pane that moves goes with it: there first, where
+    /// the session it leaves ends with the move, or the one it goes to has no
+    /// client to make room for a tab, and then to where it opened. Once it
+    /// opened, the highlight goes to its row as that shows; and a move that
+    /// failed says why.
+    #[test]
+    fn zellij_s_client_goes_with_the_pane_it_is_on() {
+        let mut sidebar = carrying();
+        let look = sidebar.titled("play | fish".to_owned()).expect("a look");
+        let clients = vec![Client { id: 1, pane: Some(5) }];
+        sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
+        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "VK");
+        sidebar.key(&enter(), moment(160_000));
+        let Asked::Carry { follows, first, .. } = sidebar.key(&char('y'), moment(160_000)) else {
+            panic!("no move");
+        };
+        assert_eq!((follows, first), (Some(5), Some(pane_of("work", 10, 3))));
+
+        let work = listed("work", 10);
+        let opened = sidebar.carried(Machine::Local, &work, Some(5), Ok(vec![(5, 7)]));
+        assert_eq!(opened, go_here(pane_of("work", 10, 7)));
+        let unfollowed = sidebar.carried(Machine::Local, &work, None, Ok(vec![(5, 8)]));
+        assert_eq!(unfollowed, Asked::Nothing);
+        let mut host = sidebar.host.clone().unwrap();
+        host.sessions[0].panes.as_mut().unwrap().panes.push(pane(8, 2, "/w/p", "fish"));
+        sidebar.heard(host);
+        assert_eq!(cursor(&sidebar), Some(pane_of("work", 10, 8)));
+
+        let failed = Err("closed pane 5 of play, but zellij opened none".to_owned());
+        assert_eq!(sidebar.carried(Machine::Local, &work, None, failed), Asked::Nothing);
+        let said = "move: closed pane 5 of play, but zellij opened none";
+        assert_eq!(sidebar.notice.as_deref(), Some(said));
+    }
+
+    /// A press on a pane's row lifts it once the mouse goes straight off its
+    /// line, and takes the focus, and one on the bracket of its tab lifts the
+    /// tab: what it lifted shows under the row of another session the pointer
+    /// is on, lit, and lands there as it lets go. On its own session, or off
+    /// the sidebar, it goes back. Along its line first, it sweeps the text.
+    #[test]
+    fn a_pane_dragged_lands_beside_the_row_it_is_let_go_on() {
+        let mut sidebar = carrying();
+        let area = Rect::new(0, 0, 32, 27);
+        let (listed, _) = ends_shown(&mut sidebar);
+        let left = MouseButton::Left;
+        let from = sessions_from(&screen(&mut sidebar, true, 32, 27));
+        let line = |row: usize| u16::try_from(from + row).unwrap();
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, line(1)), area);
+        let dragged = sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, line(5)), area);
+        assert_eq!(dragged, Asked::Take);
+        let beside = ["work", "auth", "fold", "play", "w/p", "w/a"];
+        assert_eq!(ends_shown(&mut sidebar), (beside.map(str::to_owned).to_vec(), vec![4, 5]));
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, line(5)), area);
+        assert_eq!(up, carried_off(1, Whole::Pane, Lands::Beside(5)));
+
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, line(1)), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, line(2)), area);
+        assert_eq!(ends_shown(&mut sidebar).0, listed);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, line(5)), area);
+        assert_eq!(ends_shown(&mut sidebar).0, listed);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 40, line(5)), area);
+        assert_eq!(up, Asked::Nothing);
+
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 1, line(3)), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 1, line(4)), area);
+        let (rows, lit) = ends_shown(&mut sidebar);
+        assert_eq!(rows, ["work", "w/a", "play", "w/p", "auth", "fold"]);
+        assert_eq!(lit, [2, 4, 5]);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 1, line(4)), area);
+        assert_eq!(up, carried_off(3, Whole::Tab, Lands::Tab));
+
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, line(1)), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 13, line(1)), area);
+        sidebar.mouse(mouse(MouseEventKind::Drag(left), 13, line(5)), area);
+        let up = sidebar.mouse(mouse(MouseEventKind::Up(left), 13, line(5)), area);
+        assert!(matches!(up, Asked::CopyText(_)), "{up:?}");
     }
 }

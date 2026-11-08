@@ -1,7 +1,20 @@
 //! How a command a shell ran ended, as the shell hook says it to the daemon,
-//! and the daemon to its clients.
+//! and the daemon to its clients; and which programs are shells.
 
 use crate::v1::shell::ended;
+
+/// The shells, by their binaries' names, whose name says only that a pane is
+/// at its prompt.
+pub const SHELLS: [&str; 7] = ["bash", "dash", "elvish", "fish", "nu", "sh", "zsh"];
+
+/// Whether the command line `command`, as zellij spells one, runs a shell: its
+/// binary is named as one, a login shell's leading `-` and all.
+#[must_use]
+pub fn is_shell(command: &str) -> bool {
+    let program = command.split_whitespace().next().unwrap_or_default();
+    let program = program.rsplit('/').next().unwrap_or(program);
+    SHELLS.contains(&program.strip_prefix('-').unwrap_or(program))
+}
 
 /// How a command ended, where its shell can say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

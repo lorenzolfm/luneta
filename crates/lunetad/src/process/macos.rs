@@ -41,6 +41,15 @@ pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     with(pid, refresh, |process| process.environ().to_vec())
 }
 
+/// The command line `pid` runs, an argument to a string. None for one that
+/// ended, or whose arguments the kernel shows none of.
+#[must_use]
+pub fn args(pid: u32) -> Option<Vec<OsString>> {
+    let refresh = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    let args = with(pid, refresh, |process| process.cmd().to_vec())?;
+    Some(args).filter(|args| !args.is_empty())
+}
+
 /// Waits for `pid` to end, as kqueue says. A process that has ended already, or
 /// is gone, kqueue finds none of, as the event it could not add says, in place
 /// of the event it waits for.

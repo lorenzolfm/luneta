@@ -21,6 +21,7 @@ use lunetad::api::{
     RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
+use lunetad::carries::{self, Carry};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
@@ -442,6 +443,19 @@ impl Away {
             timeout(patience, daemon.prune(request)).await
         })?;
         prunes::pruned_of(answer)
+    }
+
+    /// Has zellij there move what `carry` says to another session there, as
+    /// `lunetad::carries::carried` does there, and says the terminal each
+    /// pane opened as, by the one it closed; or why none moved. A question
+    /// that hangs up does not stop it.
+    pub fn carry(&mut self, carry: &Carry) -> Result<Vec<(u32, u32)>, String> {
+        let request = carry.asked(Some(self.on()));
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_of(carries::CARRYING, async move {
+            timeout(patience, daemon.carry(request)).await
+        })?;
+        Ok(answer.carried.into_iter().map(|carried| (carried.from, carried.terminal)).collect())
     }
 
     /// The one answer of a stream the daemon there answers `asking` with, by

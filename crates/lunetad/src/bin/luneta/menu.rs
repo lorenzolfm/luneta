@@ -200,19 +200,24 @@ pub enum Command {
     /// Selects the session of the highlighted row, or the machine of the
     /// highlighted header, for `Top::Shift` to move, and ends the selection.
     Reorder,
+    /// Picks the highlighted pane to move to another session, then its tab,
+    /// and puts it back.
+    Carry,
     /// Opens the pull request of the highlighted row in your browser.
     Open,
 }
 
 impl Command {
     /// Every command, in the order the legend lists them.
-    const ALL: [Command; 4] = [Command::Search, Command::Unread, Command::Reorder, Command::Open];
+    const ALL: [Command; 5] =
+        [Command::Search, Command::Unread, Command::Reorder, Command::Carry, Command::Open];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Unread => 'u',
             Command::Reorder => 'v',
+            Command::Carry => 'V',
             Command::Open => 'o',
         }
     }
@@ -224,6 +229,7 @@ impl Command {
             Command::Search => "Search",
             Command::Unread => "Unread",
             Command::Reorder => "Reorder",
+            Command::Carry => "Move pane",
             Command::Open => "Open PR",
         }
     }
@@ -249,7 +255,7 @@ pub enum Top {
     /// key drops the first: `Esc` does only that, as in vim.
     First,
     /// Moves the sessions, or the machines, a selection holds so many places
-    /// down, or up. Without a selection, nothing.
+    /// down, or up, or where what `V` picked lands. Without either, nothing.
     Shift(isize),
     /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),
@@ -2900,12 +2906,13 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
-            text(&legend(31, 12).0),
+            text(&legend(31, 13).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
+                " V  Move pane",
                 " o  Open PR",
                 " y  Yank ▸",
                 " a  Ask",
@@ -2922,6 +2929,7 @@ mod tests {
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('o'), Some(Top::Command(Command::Open)));
+        assert_eq!(Top::of('V'), Some(Top::Command(Command::Carry)));
         assert_eq!(Top::of('y'), Some(Top::Yank));
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);

@@ -8,6 +8,7 @@
 mod agent;
 pub mod api;
 pub mod asks;
+pub mod carries;
 mod claude;
 pub mod cli;
 mod client;
@@ -40,6 +41,7 @@ mod remote;
 pub mod renames;
 pub mod sayings;
 pub mod screens;
+pub mod seats;
 mod shells;
 pub mod skills;
 pub mod state;

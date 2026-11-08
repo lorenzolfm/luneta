@@ -19,7 +19,7 @@ pub const WIDTH: usize = 1;
 
 /// The shells, whose name says only that a pane is at its prompt: each has the
 /// terminal for its icon, and a row of one is named for its directory.
-pub const SHELLS: [&str; 7] = ["bash", "dash", "elvish", "fish", "nu", "sh", "zsh"];
+pub use luneta_protocol::shell::SHELLS;
 
 /// `dev-terminal`, for a shell.
 const TERMINAL: &str = "\u{e795}";

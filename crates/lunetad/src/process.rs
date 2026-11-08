@@ -1,7 +1,7 @@
 //! What the daemon reads of another process: when it started, spelled as Claude
-//! Code records it and as a time, and the environment it started with; and when
-//! it ends, which it hears. Each system has its own way to say them, and a
-//! backend of its own.
+//! Code records it and as a time, the environment it started with, and the
+//! command line it runs; and when it ends, which it hears. Each system has its
+//! own way to say them, and a backend of its own.
 
 use std::io;
 
@@ -21,7 +21,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("lunetad reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, start, started, Domain};
+pub use os::{args, environ, start, started, Domain};
 
 /// Waits for the process `pid` to end, or says why it cannot tell. One that has
 /// ended already has at once, whether or not its parent has waited for it. A
@@ -57,6 +57,22 @@ mod tests {
             assert!(before <= started, "dated {started:?}, started after {before:?}");
             assert!(started <= after + Duration::from_secs(1), "dated {started:?}, by {after:?}");
         }
+    }
+
+    /// A process's command line reads as it was started, an argument to a
+    /// string, an empty one and one with a space among them; and one that
+    /// ended has none. The shell runs on past its sleep, so it stays a shell.
+    #[test]
+    fn a_process_s_command_line_reads_as_it_was_started() {
+        let script = "sleep 60; :";
+        let mut child = Command::new("sh").args(["-c", script, "a b", ""]).spawn().unwrap();
+        let args = super::args(child.id()).expect("a process that runs has its arguments");
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args[1..], ["-c", script, "a b", ""], "{args:?}");
+        assert!(args[0].ends_with("sh"), "{args:?}");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(super::args(child.id()), None);
     }
 
     /// Whether `ends` says the process `pid` has ended within `limit`, as it
