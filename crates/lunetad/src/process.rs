@@ -62,14 +62,15 @@ mod tests {
 
     /// A process's command line reads as it was started, an argument to a
     /// string, an empty one and one with a space among them; and one that
-    /// ended has none. The shell runs on past its sleep, so it stays a shell.
-    /// It is read once the shell has said it runs: the kernel lets its parent
-    /// go on from `exec` before it has laid out the arguments to read.
+    /// ended has none. The shell waits on a line it reads itself, so it stays
+    /// a shell, and starts nothing that would outlive it. It is read once the
+    /// shell has said it runs: the kernel lets its parent go on from `exec`
+    /// before it has laid out the arguments to read.
     #[test]
     fn a_process_s_command_line_reads_as_it_was_started() {
-        let script = "echo; sleep 60; :";
+        let script = "echo; read -r line; :";
         let mut shell = Command::new("sh");
-        shell.args(["-c", script, "a b", ""]).stdout(Stdio::piped());
+        shell.args(["-c", script, "a b", ""]).stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = shell.spawn().unwrap();
         let mut said = [0];
         child.stdout.take().unwrap().read_exact(&mut said).unwrap();
