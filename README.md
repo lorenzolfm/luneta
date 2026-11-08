@@ -953,9 +953,9 @@ Code's at its prompt resumes its session there, as `claude --resume` does, in
 the directory it started in and with the options it started with, but those
 that pick or name a session; a shell at its prompt starts anew in the
 directory it works in. What would be cut short stays, and a note says why: a
-shell that runs a command, or holds one stopped, an agent at work or that waits
-for an answer, a program, pi's agents for now, and a pane whose command
-ended. A tab goes whole or not at all, and a pane that alone holds its tab
+shell that runs a command or a script, or holds one stopped, an agent at work
+or that waits for an answer, a program, pi's agents for now, and a pane whose
+command ended. A tab goes whole or not at all, and a pane that alone holds its tab
 open for floating panes stays, as they would close with it. Each pane closes
 first, and opens once what ran in it has ended, so that no two agents write
 one transcript. Its scrollback stays behind, and so does its dot, as the new

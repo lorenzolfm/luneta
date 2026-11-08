@@ -22,7 +22,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use luneta_protocol::shell::is_shell;
+use luneta_protocol::shell::prompts;
 use luneta_protocol::tab;
 
 use crate::api::agent::Status as Reported;
@@ -180,7 +180,7 @@ pub fn again(pane: &Pane, agent: Option<&Agent>) -> Result<Again, String> {
         Some(Doing::Ended(_) | Doing::Ready(())) => Ok(Again::Shell { cwd: cwd()? }),
         None => match pane.command.as_deref() {
             None => Err("zellij has yet to say what runs in it".to_owned()),
-            Some(command) if is_shell(command) => Ok(Again::Shell { cwd: cwd()? }),
+            Some(command) if prompts(command) => Ok(Again::Shell { cwd: cwd()? }),
             Some(command) => Err(format!("it runs `{command}`")),
         },
     }
@@ -809,9 +809,10 @@ mod tests {
     }
 
     /// A shell at its prompt starts anew where it works, as its hook says, or
-    /// as what runs in front of it is a shell, where it has no hook. One that
-    /// runs a command, or holds one stopped, stays, and so does a program,
-    /// what ended, and what zellij has yet to say.
+    /// as what runs in front of it is a shell with nothing to run, where it
+    /// has no hook. One that runs a command, or holds one stopped, stays, and
+    /// so does one that runs a script, or what `-c` gave it, a program, what
+    /// ended, and what zellij has yet to say.
     #[test]
     fn a_shell_at_its_prompt_alone_starts_again() {
         let shell = Ok(Again::Shell { cwd: "/w/luneta".to_owned() });
@@ -832,6 +833,9 @@ mod tests {
             Err("it holds `vim`, stopped".to_owned())
         );
         assert_eq!(again(&pane(1, 0, "htop -d 5"), None), Err("it runs `htop -d 5`".to_owned()));
+        for command in ["sh -c npm run dev", "bash deploy.sh", "/bin/bash -lc make watch"] {
+            assert_eq!(again(&pane(1, 0, command), None), Err(format!("it runs `{command}`")));
+        }
         let held = Pane { held: true, ..pane(1, 0, "fish") };
         assert!(again(&held, None).unwrap_err().contains("ended"));
         let unsaid = Pane { command: None, ..pane(1, 0, "fish") };
