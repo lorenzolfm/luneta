@@ -1294,7 +1294,8 @@ message PullRequest {
   // Empty from a daemon older than this field, which did not say.
   string url = 4;
   // How its checks stand on its head, as gh says them with it. Absent from a
-  // daemon older than this field.
+  // daemon older than this field, or where gh wrote them in a way the daemon
+  // does not read.
   Checks checks = 5;
 }
 

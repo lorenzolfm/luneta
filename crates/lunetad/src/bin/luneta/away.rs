@@ -23,7 +23,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::carries::{self, Carry, Moved};
-use lunetad::checks::{self, Failed, Failing, Log};
+use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
@@ -239,11 +239,11 @@ impl Away {
         }
     }
 
-    /// The checks of the pull request of the page `url`, as gh says them
-    /// there, with the log of each that failed kept there, as
+    /// The checks of the pull request of `page`, as gh says them there, with
+    /// the log of each that failed kept there, as
     /// `lunetad::checks::kept_failing` keeps them, or why it found none.
-    pub fn checks(&mut self, url: &str) -> Result<Failing, String> {
-        let request = KeepChecksRequest { on: Some(self.on()), url: url.to_owned() };
+    pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
+        let request = KeepChecksRequest { on: Some(self.on()), url: page.url().to_owned() };
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
         let answer = self.answer_of(checks::FETCHING, async move {
             timeout(patience, daemon.keep_checks(request)).await

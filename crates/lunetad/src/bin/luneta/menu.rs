@@ -42,7 +42,6 @@
 //! is open, the legend at its bottom lists the keys it takes there.
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -59,7 +58,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::brief;
-use crate::checks::{self, Failing};
+use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
@@ -1132,16 +1131,23 @@ impl PaneRow {
     }
 
     /// The pull request a key that starts an agent on its checks that failed
-    /// asks of, by its number and its page, beside the pane, or why there is
-    /// none: one open, or a draft, that its daemon says the page of.
-    fn pulled(&self) -> Result<(Beside, NonZeroU32, String), String> {
+    /// asks of, by its page, beside the pane, or why there is none: one open,
+    /// or a draft, that its daemon says the page of, of its number.
+    fn pulled(&self) -> Result<(Beside, PullPage), String> {
         let beside = self.beside()?;
         let pane = beside.pane;
         let Some(PullRequest { number, state, url, .. }) = &self.pull_request else {
             return Err(format!("menu: gh has found no pull request of pane {pane}'s branch"));
         };
         match (state, url) {
-            (State::Open | State::Draft, Some(url)) => Ok((beside, *number, url.clone())),
+            (State::Open | State::Draft, Some(url)) => {
+                let pull = PullPage::parse(url);
+                let pull = pull.map_err(|why| format!("menu: #{number}: {why}"))?;
+                if pull.number() != *number {
+                    return Err(format!("menu: the page of #{number} is of #{}", pull.number()));
+                }
+                Ok((beside, pull))
+            },
             (State::Merged, _) => Err(format!("menu: #{number} is merged")),
             (State::Closed, _) => Err(format!("menu: #{number} is closed")),
             (State::Open | State::Draft, None) => Err(format!(
@@ -1302,8 +1308,8 @@ pub enum Wants {
     /// after the line `ended` was typed on, for `printed`.
     Printed { session: Listed, pane: u32, ended: Ended },
     /// luneta to keep the log of each check that failed on the head of the
-    /// pull request of the page `url`, for `checked`.
-    Checks { url: String },
+    /// pull request of `page`, for `checked`.
+    Checks { page: PullPage },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, in place
@@ -1405,9 +1411,9 @@ enum Stage {
     /// nothing but close the menu.
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     /// `c c` waits for luneta to keep the log of each check that failed on
-    /// the head of the pull request `number`, of the page `url`, for an agent
-    /// on them beside the pane. Keys do nothing but close the menu.
-    Fetching { keys: Keys, beside: Beside, number: NonZeroU32, url: String },
+    /// the head of the pull request of `page`, for an agent on them beside
+    /// the pane. Keys do nothing but close the menu.
+    Fetching { keys: Keys, beside: Beside, page: PullPage },
     /// The menu for `work`, which a paste opened, at `step`. Once luneta has
     /// found where its keys go, its target is there.
     Pull { work: Work, step: Step },
@@ -1648,9 +1654,9 @@ impl Menu {
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 (Pressed::Checks, Target::Pane(_, row)) => match row.pulled() {
-                    Ok((beside, number, url)) => {
-                        let wants = Wants::Checks { url: url.clone() };
-                        stays(Stage::Fetching { keys, beside, number, url }, wants)
+                    Ok((beside, page)) => {
+                        let wants = Wants::Checks { page: page.clone() };
+                        stays(Stage::Fetching { keys, beside, page }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -2013,10 +2019,10 @@ impl Menu {
     /// it opens none, and says so.
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
         let Menu { number: menu, target, stage } = self;
-        let Stage::Fetching { keys, beside: Beside { session, pane, cwd }, number, url } = stage
-        else {
+        let Stage::Fetching { keys, beside: Beside { session, pane, cwd }, page } = stage else {
             return Did::Stays(Menu { number: menu, target, stage }, Wants::Nothing);
         };
+        let number = page.number();
         let failing = match checks {
             Ok(failing) => failing,
             Err(why) => {
@@ -2033,7 +2039,7 @@ impl Menu {
                 "menu: no check failed on the head of #{number}{pending}"
             )));
         }
-        let prompt = checks::prompt(number, &url, &failing);
+        let prompt = checks::prompt(&page, &failing);
         let command = claude_reading(prompt, &checks::files(&failing));
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
@@ -2218,8 +2224,8 @@ impl Menu {
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
-            Stage::Fetching { keys, number, .. } => {
-                let doing = format!("Asking gh about the checks of #{number}…");
+            Stage::Fetching { keys, page, .. } => {
+                let doing = format!("Asking gh about the checks of #{}…", page.number());
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
             },
@@ -2787,6 +2793,7 @@ fn skill_line(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use lunetad::Directory;
@@ -3201,14 +3208,14 @@ mod tests {
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
         let (menu, _) = stays(opened(pull_row(State::Draft, Some(PULL)), Some('c')));
         let (menu, wants) = stays(menu.key(&char('c')));
-        assert_eq!(wants, Wants::Checks { url: PULL.to_owned() });
+        assert_eq!(wants, Wants::Checks { page: PullPage::parse(PULL).unwrap() });
         assert!(menu.fetching());
         let body = text(&menu.lines(40, 4, 0).0);
         assert!(body.iter().any(|line| line.ends_with("Asking gh about the checks of #328…")));
         let (menu, wants) = stays(menu.key(&char('c')));
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.checked(Ok(failing(2, 0))));
-        let prompt = checks::prompt(NonZeroU32::new(328).unwrap(), PULL, &failing(2, 0));
+        let prompt = checks::prompt(&PullPage::parse(PULL).unwrap(), &failing(2, 0));
         let read = "Read(//run/luneta/checks/1.log)";
         let command = ["claude", "--allowedTools", read, "--", &prompt];
         let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
@@ -3236,9 +3243,9 @@ mod tests {
         );
     }
 
-    /// Only an open pull request, or a draft, whose page its daemon says, has
-    /// checks to start an agent on: the menu says why it starts none on a
-    /// row with another, or none.
+    /// Only an open pull request, or a draft, whose page its daemon says, as
+    /// the page of its number, has checks to start an agent on: the menu says
+    /// why it starts none on a row with another, or none.
     #[test]
     fn a_key_for_the_checks_needs_an_open_pull_request() {
         let refused = |target: Target| {
@@ -3250,6 +3257,16 @@ mod tests {
         assert_eq!(refused(pane_row()), wrong(none));
         assert_eq!(refused(pull_row(State::Merged, Some(PULL))), wrong("menu: #328 is merged"));
         assert_eq!(refused(pull_row(State::Closed, Some(PULL))), wrong("menu: #328 is closed"));
+        let issue = "https://github.com/owner/luneta/issues/328";
+        assert_eq!(
+            refused(pull_row(State::Open, Some(issue))),
+            wrong(&format!("menu: #328: {issue} is no page of a pull request"))
+        );
+        let other = "https://github.com/owner/luneta/pull/329";
+        assert_eq!(
+            refused(pull_row(State::Open, Some(other))),
+            wrong("menu: the page of #328 is of #329")
+        );
         assert_eq!(
             refused(pull_row(State::Open, None)),
             wrong("menu: pane 4's lunetad does not say the page of #328, as an older one does not")

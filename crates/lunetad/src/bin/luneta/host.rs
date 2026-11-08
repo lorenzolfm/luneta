@@ -2240,7 +2240,7 @@ impl App {
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
             },
-            Asked::Checks { menu, on, url } => checks::fetch(menu, &on, url, &self.events),
+            Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
                 let folder = self.claude_folder.clone();

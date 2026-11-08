@@ -3,11 +3,10 @@
 //! log of each job of GitHub Actions that failed, as `lunetad::checks` keeps
 //! them, on the machine the pane is on.
 
-use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::thread;
 
-pub use lunetad::checks::{Failed, Failing, Log};
+pub use lunetad::checks::{Failed, Failing, Log, PullPage};
 use lunetad::printed::Kept;
 
 use crate::away::{self, Away};
@@ -16,11 +15,12 @@ use crate::host::Event;
 use crate::machines::Machine;
 
 
-/// What an agent is told of `failing`, the checks of the pull request
-/// `number`, of the page `url`: what to do, and where each log is, or why there
-/// is none, and how many have yet to end.
-pub fn prompt(number: NonZeroU32, url: &str, failing: &Failing) -> String {
+/// What an agent is told of `failing`, the checks of the pull request of
+/// `page`: what to do, and where each log is, or why there is none, and how
+/// many have yet to end.
+pub fn prompt(page: &PullPage, failing: &Failing) -> String {
     let Failing { head, failed, pending, .. } = failing;
+    let (number, url) = (page.number(), page.url());
     let asks = format!("Fix the checks that failed on pull request #{number}, {url}, at its head");
     let mut said = vec![format!("{asks} {head}.")];
     said.extend(failed.iter().map(|Failed { name, link, log }| match log {
@@ -60,18 +60,18 @@ fn kept_file(failed: &Failed) -> Option<&str> {
     }
 }
 
-/// Has gh on `on` say the checks of the pull request of the page `url`, and
-/// keep the log of each that failed, there, for the menu numbered `menu`, on
-/// a thread of its own, and hands back what it found, or why it found
-/// nothing, as `Due` does.
-pub fn fetch(menu: u64, on: &Machine, url: String, events: &Sender<Event>) {
+/// Has gh on `on` say the checks of the pull request of `page`, and keep the
+/// log of each that failed, there, for the menu numbered `menu`, on a thread
+/// of its own, and hands back what it found, or why it found nothing, as
+/// `Due` does.
+pub fn fetch(menu: u64, on: &Machine, page: PullPage, events: &Sender<Event>) {
     let on = on.clone();
     let due = Due::new(events, move |checks| Event::Checks { menu, checks });
     thread::spawn(move || {
         let checks = match &on {
-            Machine::Local => lunetad::checks::kept_failing(&url),
+            Machine::Local => lunetad::checks::kept_failing(&page),
             Machine::Remote(destination) => {
-                Away::reach(destination, away::ANSWER).and_then(|mut away| away.checks(&url))
+                Away::reach(destination, away::ANSWER).and_then(|mut away| away.checks(&page))
             },
         };
         due.pay(checks);
@@ -95,8 +95,7 @@ mod tests {
     /// and its page, and how many others have yet to end.
     #[test]
     fn the_agent_is_told_each_check_that_failed_and_where_its_log_is() {
-        let number = NonZeroU32::new(328).unwrap();
-        let url = "https://github.com/owner/repo/pull/328";
+        let page = PullPage::parse("https://github.com/owner/repo/pull/328").unwrap();
         let failing = Failing {
             head: "abc123".to_owned(),
             failed: vec![
@@ -109,7 +108,7 @@ mod tests {
             passed: 3,
         };
         assert_eq!(
-            prompt(number, url, &failing),
+            prompt(&page, &failing),
             "Fix the checks that failed on pull request #328, \
              https://github.com/owner/repo/pull/328, at its head abc123. `ci / clippy` failed: \
              its failed steps' log is in /run/checks/1.log. `ci / mac` failed: the last 2000 of \
@@ -120,8 +119,8 @@ mod tests {
         assert_eq!(files(&failing), ["/run/checks/1.log", "/run/checks/2.log"]);
 
         let one = Failing { pending: 1, failed: failing.failed[..1].to_vec(), ..failing.clone() };
-        assert!(prompt(number, url, &one).ends_with(" One other check has yet to end."));
+        assert!(prompt(&page, &one).ends_with(" One other check has yet to end."));
         let none = Failing { pending: 0, ..one };
-        assert!(prompt(number, url, &none).ends_with("/run/checks/1.log."));
+        assert!(prompt(&page, &none).ends_with("/run/checks/1.log."));
     }
 }

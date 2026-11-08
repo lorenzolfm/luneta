@@ -10,6 +10,7 @@
 //! makes one of each job, and statuses, as other services set them. gh fetches
 //! the log of a job of GitHub Actions alone, of the steps that failed.
 
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -174,20 +175,41 @@ fn job_of(link: &str) -> Option<Job> {
     Some(Job { repository: format!("{host}/{owner}/{name}"), id })
 }
 
-/// The pull request of a page, `https://<host>/<owner>/<repo>/pull/<n>`, as gh
-/// takes it, or why it is none.
-pub fn page(url: &str) -> Result<&str, String> {
-    let path = url.strip_prefix("https://").ok_or_else(|| format!("{url} is no https page"))?;
-    let parts: Vec<&str> = path.split('/').collect();
-    let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
-    let number = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    match parts.as_slice() {
-        [host, owner, name, "pull", pull]
-            if [host, owner, name].into_iter().all(named) && number(pull) =>
-        {
-            Ok(url)
-        },
-        _ => Err(format!("{url} is no page of a pull request")),
+/// A pull request's page, `https://<host>/<owner>/<repo>/pull/<n>`, as gh
+/// takes it, and the number it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullPage {
+    url: String,
+    number: NonZeroU32,
+}
+
+impl PullPage {
+    /// The pull request of the page `url`, or why it is none.
+    pub fn parse(url: &str) -> Result<PullPage, String> {
+        let path = url.strip_prefix("https://").ok_or_else(|| format!("{url} is no https page"))?;
+        let parts: Vec<&str> = path.split('/').collect();
+        let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
+        let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        let number = match parts.as_slice() {
+            [host, owner, name, "pull", pull]
+                if [host, owner, name].into_iter().all(named) && digits(pull) =>
+            {
+                pull.parse().ok()
+            },
+            _ => None,
+        };
+        let number = number.ok_or_else(|| format!("{url} is no page of a pull request"))?;
+        Ok(PullPage { url: url.to_owned(), number })
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    #[must_use]
+    pub fn number(&self) -> NonZeroU32 {
+        self.number
     }
 }
 
@@ -218,28 +240,33 @@ pub struct Failing {
     pub passed: u32,
 }
 
-/// The pull request, as `gh pr view --json headRefOid,statusCheckRollup`
+/// The pull request, as `gh pr view --json state,headRefOid,statusCheckRollup`
 /// writes it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
+    state: String,
     head_ref_oid: String,
     #[serde(default)]
     status_check_rollup: Option<serde_json::Value>,
 }
 
-/// Asks gh how the checks of the pull request of the page `url` stand on its
-/// head now, and keeps the log of each that failed, of those of GitHub Actions,
-/// in luneta's runtime folder, or says why it found none.
-pub fn kept_failing(url: &str) -> Result<Failing, String> {
-    let url = page(url)?;
+/// Asks gh how the pull request of `page` stands now, and the checks of its
+/// head, and keeps the log of each that failed, of those of GitHub Actions,
+/// in luneta's runtime folder, or says why it found none: of one no longer
+/// open, nor a draft, none.
+pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
+    let url = page.url();
     let mut gh = Command::new("gh");
-    git::local(gh.args(["pr", "view", url, "--json", "headRefOid,statusCheckRollup"]));
+    git::local(gh.args(["pr", "view", url, "--json", "state,headRefOid,statusCheckRollup"]));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view {url} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("gh pr view {url}: {why}"))?;
     let viewed: Viewed = serde_json::from_slice(&said)
         .map_err(|why| format!("gh pr view {url} said what does not read: {why}"))?;
+    if viewed.state != "OPEN" {
+        return Err(format!("{url} is {} now", viewed.state.to_lowercase()));
+    }
     let checks = checks_of(viewed.status_check_rollup)
         .ok_or_else(|| format!("gh pr view {url} said checks that do not read"))?;
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
@@ -257,10 +284,18 @@ fn fetch(job: &Job) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("{asked}: {why}"))
 }
 
+/// What becomes of the log of a check that failed: its job's fetched, or
+/// none, as it is no job's, or one past the first `LOGS_MAX` jobs.
+enum Plan {
+    Fetch(Job),
+    NoJob,
+    Past,
+}
+
 /// The checks of `head` that failed, of `checks`, each with its log as
 /// `fetch` gets it, kept in a file of its own in the folder `FOLDER` of
-/// luneta's folder `runtime`, for the first `LOGS_MAX` of them: fetched side
-/// by side, so that the ask takes as long as the slowest.
+/// luneta's folder `runtime`, for the first `LOGS_MAX` of their jobs: fetched
+/// side by side, so that the ask takes as long as the slowest.
 fn keep(
     runtime: &Path,
     head: String,
@@ -271,22 +306,27 @@ fn keep(
     let Checks { pending, passed, .. } = counted(checks);
     let failed: Vec<&Check> =
         checks.iter().filter(|check| check.stands == Stands::Failed).collect();
-    let log = |at: usize, check: &Check| match check.link.as_deref().and_then(job_of) {
-        _ if at >= LOGS_MAX => {
-            Log::Unkept(format!("luneta fetches no more than {LOGS_MAX} logs"))
+    let mut jobs = 0;
+    let plans = failed.iter().map(|check| match check.link.as_deref().and_then(job_of) {
+        None => Plan::NoJob,
+        Some(_) if jobs >= LOGS_MAX => Plan::Past,
+        Some(job) => {
+            jobs += 1;
+            Plan::Fetch(job)
         },
-        None => Log::Unkept(NO_JOB.to_owned()),
-        Some(job) => match fetch(&job).and_then(|log| write(runtime, &log, now)) {
+    });
+    let plans: Vec<Plan> = plans.collect();
+    let log = |plan: Plan| match plan {
+        Plan::NoJob => Log::Unkept(NO_JOB.to_owned()),
+        Plan::Past => Log::Unkept(format!("luneta fetches no more than {LOGS_MAX} logs")),
+        Plan::Fetch(job) => match fetch(&job).and_then(|log| write(runtime, &log, now)) {
             Ok(kept) => Log::Kept(kept),
             Err(why) => Log::Unkept(why),
         },
     };
     let logs: Vec<Log> = thread::scope(|scope| {
-        let fetching: Vec<_> = failed
-            .iter()
-            .enumerate()
-            .map(|(at, check)| scope.spawn(move || log(at, check)))
-            .collect();
+        let fetching: Vec<_> =
+            plans.into_iter().map(|plan| scope.spawn(move || log(plan))).collect();
         let joined = fetching.into_iter().map(thread::ScopedJoinHandle::join);
         joined.map(|log| log.unwrap_or_else(|_| Log::Unkept(PANICKED.to_owned()))).collect()
     });
@@ -422,22 +462,25 @@ mod tests {
         }
     }
 
-    /// Only an `https` page of a pull request is one gh is asked of.
+    /// Only an `https` page of a pull request is one gh is asked of, and it
+    /// says the number.
     #[test]
     fn only_a_pull_request_s_page_is_asked_of() {
         let url = "https://github.com/owner/repo/pull/328";
-        assert_eq!(page(url), Ok(url));
+        let page = PullPage::parse(url).unwrap();
+        assert_eq!((page.url(), page.number().get()), (url, 328));
         for url in [
             "http://github.com/owner/repo/pull/328",
             "https://github.com/owner/repo/issues/328",
             "https://github.com/owner/repo/pull/328/files",
             "https://github.com/owner/repo/pull/",
             "https://github.com/owner/repo/pull/x",
+            "https://github.com/owner/repo/pull/0",
             "https://github.com/owner/repo?/pull/1",
             "--repo",
             "",
         ] {
-            assert!(page(url).is_err(), "{url}");
+            assert!(PullPage::parse(url).is_err(), "{url}");
         }
     }
 
@@ -454,7 +497,8 @@ mod tests {
 
     /// Each check that failed is listed, in gh's order: one of GitHub Actions
     /// with its log, its last lines, in a file of its own; any other, and one
-    /// whose log gh did not give, with why. Past `LOGS_MAX`, none is fetched.
+    /// whose log gh did not give, with why. Past `LOGS_MAX` jobs, none is
+    /// fetched, and a check of no job counts as none of them.
     #[test]
     fn each_check_that_failed_keeps_its_log() {
         let root = tempfile::tempdir().unwrap();
@@ -511,6 +555,19 @@ mod tests {
         assert!(failing.failed[..LOGS_MAX].iter().all(|failed| matches!(failed.log, Log::Kept(_))));
         let last = &failing.failed[LOGS_MAX].log;
         assert_eq!(last, &Log::Unkept(format!("luneta fetches no more than {LOGS_MAX} logs")));
+
+        let mut first: Vec<String> =
+            (0..LOGS_MAX).map(|at| status(&format!("ext/{at}"), "FAILURE")).collect();
+        first.push(run("test", "COMPLETED", "FAILURE", 2));
+        let fetch = |job: &Job| {
+            assert_eq!(job.id, 2, "fetched job {}", job.id);
+            Ok(b"failed\n".to_vec())
+        };
+        let first = checks_of(Some(rollup(&first))).unwrap();
+        let failing = keep(&runtime, "abc".to_owned(), &first, fetch, now);
+        let no_job = Log::Unkept(NO_JOB.to_owned());
+        assert!(failing.failed[..LOGS_MAX].iter().all(|failed| failed.log == no_job));
+        assert!(matches!(failing.failed[LOGS_MAX].log, Log::Kept(_)));
     }
 
     /// A long log keeps its last `TAIL` lines, and says how many it left out.

@@ -1046,8 +1046,8 @@ pub enum Asked {
     /// numbered `menu`.
     Printed { menu: u64, on: Machine, session: SessionName, pane: u32, ended: menu::Ended },
     /// Keep the log of each check that failed on the head of the pull request
-    /// of the page `url`, on `on`, for the menu numbered `menu`.
-    Checks { menu: u64, on: Machine, url: String },
+    /// of `page`, on `on`, for the menu numbered `menu`.
+    Checks { menu: u64, on: Machine, page: checks::PullPage },
     /// Have the model write this brief, and show it.
     Brief(Brief),
     /// Open the ask box, for this row.
@@ -3615,7 +3615,7 @@ impl Sidebar {
             Wants::Printed { session, pane, ended } => {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
-            Wants::Checks { url } => Asked::Checks { menu: number, on, url },
+            Wants::Checks { page } => Asked::Checks { menu: number, on, page },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
@@ -5287,8 +5287,7 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
-    let open = matches!(pull_request.state, State::Open | State::Draft);
-    let checks = pull_request.checks.filter(|_| open).and_then(|checks| checks.verdict());
+    let checks = pull_request.verdict();
     let number = pull_request.number;
     let link = pull_request.url.as_deref().and_then(Link::parse);
     let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);

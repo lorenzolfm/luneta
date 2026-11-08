@@ -656,7 +656,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         "conclusion": conclusion, "detailsUrl": job,
     });
     let rollup = serde_json::json!([run("test", "FAILURE"), run("clippy", "SUCCESS")]);
-    far.gh.checks(328, "abc", &rollup);
+    far.gh.checks(328, "OPEN", "abc", &rollup);
+    far.gh.checks(329, "MERGED", "def", &rollup);
     far.gh.log(7, "test\tRun\terror[E0308]\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
@@ -764,7 +765,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         invalid(daemon.keep_printed(untyped).await.unwrap_err());
 
         // The logs of a pull request's checks that failed are kept there, as
-        // gh there fetches them.
+        // gh there fetches them, and none of one merged since.
         let checks = |url: &str| KeepChecksRequest { on: on("far"), url: url.to_owned() };
         let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
         let kept = kept.unwrap().into_inner().message().await.unwrap().unwrap();
@@ -778,7 +779,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
         assert_eq!(fs::read_to_string(path).unwrap(), "test\tRun\terror[E0308]\n");
         let asked = [
-            "pr view https://github.com/o/n/pull/328 --json headRefOid,statusCheckRollup",
+            "pr view https://github.com/o/n/pull/328 --json state,headRefOid,statusCheckRollup",
             "run view --job 7 --log-failed -R github.com/o/n",
         ];
         assert_eq!(far.gh.checked(), asked);
@@ -787,6 +788,12 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let unknown = daemon.keep_checks(checks("https://github.com/o/n/pull/9")).await;
         let unknown = unknown.unwrap().into_inner().message().await.unwrap_err();
         assert_eq!(unknown.code(), Code::FailedPrecondition, "{unknown:?}");
+        let merged = daemon.keep_checks(checks("https://github.com/o/n/pull/329")).await;
+        let merged = merged.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(merged.code(), Code::FailedPrecondition, "{merged:?}");
+        assert_eq!(merged.message(), "https://github.com/o/n/pull/329 is merged now");
+        let fetched = far.gh.checked().into_iter().filter(|asked| asked.starts_with("run view"));
+        assert_eq!(fetched.count(), 1);
 
         // A screen there is dumped there: of the terminal asked, or else of
         // the one a client coming to the session would be on, as zellij there

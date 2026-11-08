@@ -581,21 +581,20 @@ fn stands(tree: &WorkTree) -> Option<String> {
 /// what its checks come to, where it has any. None for one that does not
 /// read, as a newer daemon's could send.
 fn pulled(pull_request: &PullRequest) -> Option<String> {
-    let github::PullRequest { number, state, checks, .. } =
-        github::PullRequest::of_api(pull_request)?;
-    let state = match state {
+    let pull_request = github::PullRequest::of_api(pull_request)?;
+    let state = match pull_request.state {
         State::Open => "open",
         State::Draft => "draft",
-        State::Merged => return Some(format!("#{number} merged")),
-        State::Closed => return Some(format!("#{number} closed")),
+        State::Merged => "merged",
+        State::Closed => "closed",
     };
-    let checks = match checks.and_then(|checks| checks.verdict()) {
+    let checks = match pull_request.verdict() {
         Some(Verdict::Failing) => ", checks failing",
         Some(Verdict::Pending) => ", checks pending",
         Some(Verdict::Passing) => ", checks passing",
         None => "",
     };
-    Some(format!("#{number} {state}{checks}"))
+    Some(format!("#{} {state}{checks}", pull_request.number))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.

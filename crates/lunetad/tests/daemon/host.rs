@@ -719,7 +719,7 @@ if [ "$1 $2 $4" = "pr view --repo" ]; then
     echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
     exit 1
 fi
-if [ "$1 $2 $4 $5" = "pr view --json headRefOid,statusCheckRollup" ]; then
+if [ "$1 $2 $4 $5" = "pr view --json state,headRefOid,statusCheckRollup" ]; then
     echo "$*" >> "$pulls/checked"
     [ -f "$pulls/checks-${3##*/}" ] && exec cat "$pulls/checks-${3##*/}"
     echo "GraphQL: Could not resolve to a PullRequest with the number of ${3##*/}." >&2
@@ -822,10 +822,14 @@ exec cat "$said"
     }
 
     /// Has gh say `rollup` of the checks of the pull request numbered
-    /// `number`, at `head`, as `gh pr view <page> --json
-    /// headRefOid,statusCheckRollup` writes it, of whichever repository.
-    pub fn checks(&self, number: u32, head: &str, rollup: &serde_json::Value) {
-        let said = serde_json::json!({ "headRefOid": head, "statusCheckRollup": rollup });
+    /// `number`, in `state`, at `head`, as `gh pr view <page> --json
+    /// state,headRefOid,statusCheckRollup` writes it, of whichever repository.
+    pub fn checks(&self, number: u32, state: &str, head: &str, rollup: &serde_json::Value) {
+        let said = serde_json::json!({
+            "state": state,
+            "headRefOid": head,
+            "statusCheckRollup": rollup,
+        });
         fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
     }
 

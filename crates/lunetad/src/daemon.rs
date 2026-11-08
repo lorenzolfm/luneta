@@ -696,13 +696,14 @@ impl Daemon for Host {
         request: Request<KeepChecksRequest>,
     ) -> Result<Response<Self::KeepChecksStream>, Status> {
         let KeepChecksRequest { on, url } = request.into_inner();
-        checks::page(&url).map_err(|why| Status::invalid_argument(format!("url: {why}")))?;
+        let page = checks::PullPage::parse(&url)
+            .map_err(|why| Status::invalid_argument(format!("url: {why}")))?;
         if let Some(mut daemon) = self.bridged(on)? {
             let answer = daemon.keep_checks(KeepChecksRequest { on: None, url }).await?;
             return Ok(Response::new(Box::pin(answer.into_inner())));
         }
         let answer = late(move || {
-            let kept = checks::kept_failing(&url).map_err(Status::failed_precondition)?;
+            let kept = checks::kept_failing(&page).map_err(Status::failed_precondition)?;
             Ok(kept_checks(kept))
         });
         Ok(Response::new(Box::pin(answer)))

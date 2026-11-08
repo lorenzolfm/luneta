@@ -9,7 +9,8 @@ use crate::v1;
 /// A pull request: its number, which GitHub counts from one, its state, its
 /// page on GitHub, which says the repository the number counts in, and how
 /// the checks of its head stand. A daemon older than the page did not say it,
-/// and one older than the checks did not say them.
+/// and one older than the checks did not say them, nor does one where gh
+/// wrote them in a way it does not read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: NonZeroU32,
@@ -62,6 +63,17 @@ pub enum State {
 }
 
 impl PullRequest {
+    /// What its checks come to while it is open, or a draft: none once it is
+    /// merged or closed, whatever they did, or where its daemon did not say
+    /// them.
+    #[must_use]
+    pub fn verdict(&self) -> Option<Verdict> {
+        match self.state {
+            State::Open | State::Draft => self.checks?.verdict(),
+            State::Merged | State::Closed => None,
+        }
+    }
+
     /// The pull request as the API gives it, of the branch checked out in
     /// `dir`.
     #[must_use]
@@ -151,5 +163,19 @@ mod tests {
         assert_eq!(checks(1, 0, 5), Some(Verdict::Pending));
         assert_eq!(checks(0, 0, 5), Some(Verdict::Passing));
         assert_eq!(checks(0, 0, 0), None);
+    }
+
+    /// A pull request says what its checks come to while it is open, or a
+    /// draft, and nothing once it is merged or closed, or with none said.
+    #[test]
+    fn only_an_open_pull_request_says_its_checks() {
+        let number = NonZeroU32::new(126).unwrap();
+        let failed = Some(Checks { pending: 0, failed: 1, passed: 0 });
+        let verdict = |state, checks| PullRequest { number, state, url: None, checks }.verdict();
+        assert_eq!(verdict(State::Open, failed), Some(Verdict::Failing));
+        assert_eq!(verdict(State::Draft, failed), Some(Verdict::Failing));
+        assert_eq!(verdict(State::Merged, failed), None);
+        assert_eq!(verdict(State::Closed, failed), None);
+        assert_eq!(verdict(State::Open, None), None);
     }
 }
