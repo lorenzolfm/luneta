@@ -18,7 +18,8 @@ use lunetad::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest,
     ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    InfoResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    InfoResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
+    KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
     ListContentsResponse, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, ListSkillsResponse, NameSessionRequest, NameSessionResponse, OpenRequest,
@@ -650,6 +651,15 @@ impl Daemon for StandIn {
 
     async fn go(&self, _: Request<GoRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
+    }
+
+    type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
+
+    async fn keep_checks(
+        &self,
+        _: Request<KeepChecksRequest>,
+    ) -> Result<Response<Self::KeepChecksStream>, Status> {
+        Err(Status::unimplemented("a stand-in asks gh nothing"))
     }
 
     async fn list_clients(

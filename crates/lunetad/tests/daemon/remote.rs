@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use lunetad::api::remote::unreached::{self, Stopped};
 use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
+use lunetad::api::keep_checks_response::{failed, Failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
     close_request, closes_response, list_exited_response, other_tabs_response,
@@ -25,7 +26,8 @@ use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
     self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
-    DumpScreenRequest, GoRequest, KeepImageRequest, KeepPrintedRequest, KillRequest,
+    DumpScreenRequest, GoRequest, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
+    KillRequest,
     ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListExitedRequest, ListSkillsRequest,
     NameSessionRequest, On, OpenRequest, OtherTabsRequest, PasteRequest, RefugeRequest,
@@ -648,6 +650,14 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     });
     far.zellij.stacks_into("turning", 1, &serde_json::json!([there, beside]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
+    let job = "https://github.com/o/n/actions/runs/42/job/7";
+    let run = |name: &str, conclusion: &str| serde_json::json!({
+        "__typename": "CheckRun", "name": name, "workflowName": "ci", "status": "COMPLETED",
+        "conclusion": conclusion, "detailsUrl": job,
+    });
+    let rollup = serde_json::json!([run("test", "FAILURE"), run("clippy", "SUCCESS")]);
+    far.gh.checks(328, "abc", &rollup);
+    far.gh.log(7, "test\tRun\terror[E0308]\n");
     let dir = tempfile::tempdir().unwrap();
     let skill = dir.path().join(".claude/skills/near");
     fs::create_dir_all(&skill).unwrap();
@@ -752,6 +762,31 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let (session, typed) = ("work".to_owned(), String::new());
         let untyped = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
         invalid(daemon.keep_printed(untyped).await.unwrap_err());
+
+        // The logs of a pull request's checks that failed are kept there, as
+        // gh there fetches them.
+        let checks = |url: &str| KeepChecksRequest { on: on("far"), url: url.to_owned() };
+        let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
+        let kept = kept.unwrap().into_inner().message().await.unwrap().unwrap();
+        assert_eq!((kept.head.as_str(), kept.pending, kept.passed), ("abc", 0, 1));
+        let [Failed { name, link, log: Some(failed::Log::Kept(File { path, lines: 1, .. })) }] =
+            kept.failed.as_slice()
+        else {
+            panic!("kept {kept:?}");
+        };
+        assert_eq!((name.as_str(), link.as_str()), ("ci / test", job));
+        assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
+        assert_eq!(fs::read_to_string(path).unwrap(), "test\tRun\terror[E0308]\n");
+        let asked = [
+            "pr view https://github.com/o/n/pull/328 --json headRefOid,statusCheckRollup",
+            "run view --job 7 --log-failed -R github.com/o/n",
+        ];
+        assert_eq!(far.gh.checked(), asked);
+        assert_eq!(here.gh.checked(), [] as [String; 0]);
+        invalid(daemon.keep_checks(checks("https://github.com/o/n/issues/328")).await.unwrap_err());
+        let unknown = daemon.keep_checks(checks("https://github.com/o/n/pull/9")).await;
+        let unknown = unknown.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(unknown.code(), Code::FailedPrecondition, "{unknown:?}");
 
         // A screen there is dumped there: of the terminal asked, or else of
         // the one a client coming to the session would be on, as zellij there

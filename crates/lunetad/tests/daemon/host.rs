@@ -719,6 +719,18 @@ if [ "$1 $2 $4" = "pr view --repo" ]; then
     echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
     exit 1
 fi
+if [ "$1 $2 $4 $5" = "pr view --json headRefOid,statusCheckRollup" ]; then
+    echo "$*" >> "$pulls/checked"
+    [ -f "$pulls/checks-${3##*/}" ] && exec cat "$pulls/checks-${3##*/}"
+    echo "GraphQL: Could not resolve to a PullRequest with the number of ${3##*/}." >&2
+    exit 1
+fi
+if [ "$1 $2 $3 $5 $6" = "run view --job --log-failed -R" ]; then
+    echo "$*" >> "$pulls/checked"
+    [ -f "$pulls/log-$4" ] && exec cat "$pulls/log-$4"
+    echo "failed to get run log: HTTP 404: Not Found" >&2
+    exit 1
+fi
 if [ "$1" = api ]; then
     [ -f "$pulls/api" ] && exec cat "$pulls/api"
     echo "gh: Not Found (HTTP 404)" >&2
@@ -736,7 +748,7 @@ if [ "$1 $2 $3" = "pr list --base" ]; then
     echo '[]'
     exit 0
 fi
-if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner" ]; then
+if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -803,6 +815,29 @@ exec cat "$said"
 
     pub fn viewed(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("viewed")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
+    }
+
+    /// Has gh say `rollup` of the checks of the pull request numbered
+    /// `number`, at `head`, as `gh pr view <page> --json
+    /// headRefOid,statusCheckRollup` writes it, of whichever repository.
+    pub fn checks(&self, number: u32, head: &str, rollup: &serde_json::Value) {
+        let said = serde_json::json!({ "headRefOid": head, "statusCheckRollup": rollup });
+        fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
+    }
+
+    /// Has gh say `log` of the failed steps of the job numbered `job`.
+    pub fn log(&self, job: u64, log: &str) {
+        fs::write(self.pulls.join(format!("log-{job}")), log).unwrap();
+    }
+
+    /// What gh has been asked of checks and their logs, in the order it was
+    /// asked.
+    pub fn checked(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("checked")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("what gh was asked does not read: {error}"),

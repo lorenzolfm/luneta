@@ -395,6 +395,7 @@ mod tests {
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
             repository: None,
+            pull_request: None,
             ran: Ran::Unhooked,
         };
         Target::Pane(machine, row)

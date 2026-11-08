@@ -11,17 +11,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::keep_checks_response::{self, failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
     closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
-    DumpScreenRequest, GoRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    DumpScreenRequest, GoRequest, KeepChecksRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, OtherTabsRequest,
     RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::carries::{self, Carry, Moved};
+use lunetad::checks::{self, Failed, Failing, Log};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
@@ -235,6 +237,38 @@ impl Away {
                 self.on
             )),
         }
+    }
+
+    /// The checks of the pull request of the page `url`, as gh says them
+    /// there, with the log of each that failed kept there, as
+    /// `lunetad::checks::kept_failing` keeps them, or why it found none.
+    pub fn checks(&mut self, url: &str) -> Result<Failing, String> {
+        let request = KeepChecksRequest { on: Some(self.on()), url: url.to_owned() };
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_of(checks::FETCHING, async move {
+            timeout(patience, daemon.keep_checks(request)).await
+        })?;
+        let newer = || {
+            format!(
+                "{}: its lunetad says the log of a check in words this luneta cannot read, as a \
+                 newer one does",
+                self.on
+            )
+        };
+        let read = |check: keep_checks_response::Failed| {
+            let log = match check.log.ok_or_else(newer)? {
+                failed::Log::Kept(File { path, lines, left_out }) => Log::Kept(Kept {
+                    file: path,
+                    lines: usize::try_from(lines).unwrap_or(usize::MAX),
+                    left_out: usize::try_from(left_out).unwrap_or(usize::MAX),
+                }),
+                failed::Log::Unkept(why) => Log::Unkept(why),
+            };
+            let link = Some(check.link).filter(|link| !link.is_empty());
+            Ok(Failed { name: check.name, link, log })
+        };
+        let failed = answer.failed.into_iter().map(read).collect::<Result<_, String>>()?;
+        Ok(Failing { head: answer.head, failed, pending: answer.pending, passed: answer.passed })
     }
 
     /// What closing the terminal `pane` of `session` there closes, as

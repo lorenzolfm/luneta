@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use clap::Subcommand;
-use luneta_protocol::github::{self, State};
+use luneta_protocol::github::{self, State, Verdict};
 use luneta_protocol::unread::Unread;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::checkout::Head;
@@ -577,17 +577,25 @@ fn stands(tree: &WorkTree) -> Option<String> {
     Some(said.join(", "))
 }
 
-/// A pull request, in words: its number and its state. None for one that
-/// does not read, as a newer daemon's could send.
+/// A pull request, in words: its number and its state, and while it is open,
+/// what its checks come to, where it has any. None for one that does not
+/// read, as a newer daemon's could send.
 fn pulled(pull_request: &PullRequest) -> Option<String> {
-    let github::PullRequest { number, state, .. } = github::PullRequest::of_api(pull_request)?;
+    let github::PullRequest { number, state, checks, .. } =
+        github::PullRequest::of_api(pull_request)?;
     let state = match state {
         State::Open => "open",
         State::Draft => "draft",
-        State::Merged => "merged",
-        State::Closed => "closed",
+        State::Merged => return Some(format!("#{number} merged")),
+        State::Closed => return Some(format!("#{number} closed")),
     };
-    Some(format!("#{number} {state}"))
+    let checks = match checks.and_then(|checks| checks.verdict()) {
+        Some(Verdict::Failing) => ", checks failing",
+        Some(Verdict::Pending) => ", checks pending",
+        Some(Verdict::Passing) => ", checks passing",
+        None => "",
+    };
+    Some(format!("#{number} {state}{checks}"))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.

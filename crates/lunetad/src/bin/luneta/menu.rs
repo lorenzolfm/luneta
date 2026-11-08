@@ -7,8 +7,9 @@
 //! row's pane can run, for an agent to start on the one you pick, beside that
 //! pane. `a` opens the ask box, for an agent to do what you say in words, as
 //! the menu would. `c` opens the Claude group, a key for each of a few skills, which
-//! starts an agent on it there, and `f` and `e`, which start one on what the
-//! command a shell ran last printed, to fix what went wrong or explain it.
+//! starts an agent on it there, `f` and `e`, which start one on what the
+//! command a shell ran last printed, to fix what went wrong or explain it, and
+//! `c`, which starts one on the checks that failed on its pull request.
 //! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in, or
 //! on a machine's header in the home of its user there, or a machine for
@@ -41,9 +42,11 @@
 //! is open, the legend at its bottom lists the keys it takes there.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
 use lunetad::prunes;
 use lunetad::{Destination, Directory};
@@ -56,6 +59,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::brief;
+use crate::checks::{self, Failing};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
 use crate::machines::Machine;
@@ -87,6 +91,11 @@ const SKILL_KEYS: [(char, &str); 3] = [
     ('m', "/make-illegal-states-unrepresentable"),
     ('s', "/tigerstyle"),
 ];
+
+/// The key of the Claude group that starts an agent on the checks that failed
+/// on the head of the pane's pull request, and what the menu says it does.
+const CHECKS: char = 'c';
+const CHECKS_DOES: &str = "fix the failing checks";
 
 /// The skill an agent reviews a pull request with: the Claude group's `t`,
 /// and the `r` of the menu for a pull request, which gives it the link.
@@ -403,8 +412,8 @@ impl Last {
     }
 }
 
-/// No key of the Claude group's skills is one of `Last`'s, which would hide
-/// it.
+/// No key of the Claude group's skills is one of `Last`'s, or `CHECKS`, nor
+/// one of `Last`'s `CHECKS`, which would hide it.
 const _: () = {
     let mut at = 0;
     while at < Last::ALL.len() {
@@ -412,8 +421,10 @@ const _: () = {
         while skill < SKILL_KEYS.len() {
             let alike = SKILL_KEYS[skill].0 == Last::ALL[at].key();
             assert!(!alike, "two keys alike in the Claude group");
+            assert!(SKILL_KEYS[skill].0 != CHECKS, "two keys alike in the Claude group");
             skill += 1;
         }
+        assert!(Last::ALL[at].key() != CHECKS, "two keys alike in the Claude group");
         at += 1;
     }
 };
@@ -498,6 +509,9 @@ enum Entry {
     /// A key of the Claude group: starts an agent on what the command the
     /// pane's shell ran last printed.
     Last(Last),
+    /// The key of the Claude group that starts an agent on the checks that
+    /// failed on the pane's pull request.
+    Checks,
     /// A key of the New group: opens a pane, a tab or a session.
     New(New),
     /// A key of the Turn group: turns the pane the menu is for, or its tab.
@@ -549,6 +563,7 @@ impl Entry {
             Entry::Search
             | Entry::Start { .. }
             | Entry::Last(_)
+            | Entry::Checks
             | Entry::New(New::Pane | New::Tab)
             | Entry::Turn(_) => pane.then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
@@ -576,6 +591,7 @@ impl Entry {
             Entry::New(new) => new.key(),
             Entry::Turn(turning) => turning.key(),
             Entry::Last(last) => last.key(),
+            Entry::Checks => CHECKS,
             Entry::Brief(scope) => scope.key(),
             Entry::Command(command) => command.key(),
             Entry::YankPull => YANK_PULL,
@@ -598,6 +614,8 @@ enum Pressed {
     Start(String),
     /// Starts an agent on what the pane's shell printed last.
     Last(Last),
+    /// Starts an agent on the checks that failed on the pane's pull request.
+    Checks,
     /// Opens a pane, a tab or a session.
     New(New),
     /// Turns the pane the menu is for, or its tab.
@@ -645,9 +663,10 @@ impl Keys {
     /// the skills, `a`, which opens the ask box, and the Claude, New, Turn,
     /// Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
-    /// last, `n p`, `n t` and `n s` open a pane, a tab and a
-    /// session, and `n m` the box for a machine's destination, `t t` turns the
-    /// pane into a tab and `t p` its tab into panes of another, `d d` deletes
+    /// last, `c c` one on the checks that failed on its pull request, `n p`,
+    /// `n t` and `n s` open a pane, a tab and a session, and `n m` the box for
+    /// a machine's destination, `t t` turns the pane into a tab and `t p` its
+    /// tab into panes of another, `d d` deletes
     /// what the menu is for, as `removes` says, `d s` deletes its session,
     /// and on a row in a repository, `d m` its merged worktrees, or on
     /// another machine's header `d d` alone forgets the machine, and
@@ -665,6 +684,7 @@ impl Keys {
                     .into_iter()
                     .map(start)
                     .chain(Last::ALL.map(Entry::Last))
+                    .chain([Entry::Checks])
                     .collect(),
             },
             Entry::Group {
@@ -769,6 +789,7 @@ impl Keys {
         match &entries[at] {
             Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
             Entry::Last(last) => return Pressed::Last(*last),
+            Entry::Checks => return Pressed::Checks,
             Entry::New(new) => return Pressed::New(*new),
             Entry::Turn(turning) => return Pressed::Turn(*turning),
             Entry::Close { key, session, scope } => {
@@ -954,8 +975,8 @@ pub enum Target {
 }
 
 /// A pane's row, as the menu is for it: the directory the pane works in, or
-/// its agent while zellij has not said, the branch checked out there, and
-/// what its shell said it ran last, as the daemon last said.
+/// its agent while zellij has not said, the branch checked out there, its
+/// pull request, and what its shell said it ran last, as the daemon last said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
     pub session: Listed,
@@ -964,6 +985,8 @@ pub struct PaneRow {
     pub branch: Option<String>,
     /// The directory that holds the repository it works in, where git has said.
     pub repository: Option<String>,
+    /// The pull request of that branch, where gh has found one.
+    pub pull_request: Option<PullRequest>,
     pub ran: Ran,
 }
 
@@ -1108,6 +1131,26 @@ impl PaneRow {
         Ok(Beside { session: self.session.clone(), pane, cwd })
     }
 
+    /// The pull request a key that starts an agent on its checks that failed
+    /// asks of, by its number and its page, beside the pane, or why there is
+    /// none: one open, or a draft, that its daemon says the page of.
+    fn pulled(&self) -> Result<(Beside, NonZeroU32, String), String> {
+        let beside = self.beside()?;
+        let pane = beside.pane;
+        let Some(PullRequest { number, state, url, .. }) = &self.pull_request else {
+            return Err(format!("menu: gh has found no pull request of pane {pane}'s branch"));
+        };
+        match (state, url) {
+            (State::Open | State::Draft, Some(url)) => Ok((beside, *number, url.clone())),
+            (State::Merged, _) => Err(format!("menu: #{number} is merged")),
+            (State::Closed, _) => Err(format!("menu: #{number} is closed")),
+            (State::Open | State::Draft, None) => Err(format!(
+                "menu: pane {pane}'s lunetad does not say the page of #{number}, as an older \
+                 one does not"
+            )),
+        }
+    }
+
     /// What a key that starts an agent on what the pane's shell printed
     /// last starts it on, beside the pane, in the directory it works in, or
     /// why it starts none: the shell must be at its prompt, after a command
@@ -1155,15 +1198,16 @@ fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
     command
 }
 
-/// Claude Code on `prompt`, let read `file`, where there is one, with no
-/// question asked: luneta keeps what a shell printed outside the directory
+/// Claude Code on `prompt`, let read `files`, with no question asked: luneta
+/// keeps what a shell printed, and the logs of checks, outside the directory
 /// the agent works in, where Claude Code asks first. It asks for a file no
 /// rule can name.
-fn claude_reading(prompt: String, file: Option<&str>) -> Vec<String> {
+fn claude_reading(prompt: String, files: &[&str]) -> Vec<String> {
     let mut command = vec![CLAUDE.to_owned()];
-    if let Some(rule) = file.and_then(read_rule) {
+    let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
+    if !rules.is_empty() {
         command.push("--allowedTools".to_owned());
-        command.push(rule);
+        command.extend(rules);
         // The flag takes every word after it as another tool, up to this.
         command.push("--".to_owned());
     }
@@ -1257,6 +1301,9 @@ pub enum Wants {
     /// luneta to keep what the shell in the pane `pane` of `session` printed
     /// after the line `ended` was typed on, for `printed`.
     Printed { session: Listed, pane: u32, ended: Ended },
+    /// luneta to keep the log of each check that failed on the head of the
+    /// pull request of the page `url`, for `checked`.
+    Checks { url: String },
     /// zellij to make the session `session`, that starts in `cwd`, for luneta
     /// to take its client there, and then to open a tab of it in `tab_cwd`,
     /// named `name`, with `command` in it, or your shell for none, in place
@@ -1357,6 +1404,10 @@ enum Stage {
     /// printed after `ended`, for an agent on it beside the pane. Keys do
     /// nothing but close the menu.
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
+    /// `c c` waits for luneta to keep the log of each check that failed on
+    /// the head of the pull request `number`, of the page `url`, for an agent
+    /// on them beside the pane. Keys do nothing but close the menu.
+    Fetching { keys: Keys, beside: Beside, number: NonZeroU32, url: String },
     /// The menu for `work`, which a paste opened, at `step`. Once luneta has
     /// found where its keys go, its target is there.
     Pull { work: Work, step: Step },
@@ -1468,6 +1519,7 @@ impl Menu {
             | Stage::Picking { .. }
             | Stage::Turning { .. }
             | Stage::Reading { .. }
+            | Stage::Fetching { .. }
             | Stage::Pull { .. }
             | Stage::Ssh { .. } => None,
         }
@@ -1494,6 +1546,7 @@ impl Menu {
             | Stage::Listing { .. }
             | Stage::Picking { .. }
             | Stage::Reading { .. }
+            | Stage::Fetching { .. }
             | Stage::Pull { .. }
             | Stage::Ssh { .. } => None,
         }
@@ -1518,6 +1571,12 @@ impl Menu {
     /// Whether a key waits for luneta to keep what the pane's shell printed.
     pub fn reading(&self) -> bool {
         matches!(self.stage, Stage::Reading { .. })
+    }
+
+    /// Whether `c c` waits for luneta to keep the logs of the checks that
+    /// failed.
+    pub fn fetching(&self) -> bool {
+        matches!(self.stage, Stage::Fetching { .. })
     }
 
     /// Whether a key of the menu for a pull request, an issue or a file waits
@@ -1556,6 +1615,7 @@ impl Menu {
                     Pressed::Search
                     | Pressed::Start(_)
                     | Pressed::Last(_)
+                    | Pressed::Checks
                     | Pressed::New(New::Pane | New::Tab)
                     | Pressed::Turn(_),
                     Target::Session(..) | Target::Machine(_),
@@ -1584,6 +1644,13 @@ impl Menu {
                         let (session, pane) = (beside.session.clone(), beside.pane);
                         let wants = Wants::Printed { session, pane, ended: ended.clone() };
                         stays(Stage::Reading { keys, last, beside, ended }, wants)
+                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                (Pressed::Checks, Target::Pane(_, row)) => match row.pulled() {
+                    Ok((beside, number, url)) => {
+                        let wants = Wants::Checks { url: url.clone() };
+                        stays(Stage::Fetching { keys, beside, number, url }, wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1662,6 +1729,7 @@ impl Menu {
             | Stage::Picking { .. }
             | Stage::Turning { .. }
             | Stage::Reading { .. }
+            | Stage::Fetching { .. }
             | Stage::Pull { .. }
                 if closes(key) =>
             {
@@ -1703,6 +1771,7 @@ impl Menu {
             | Stage::Listing { .. }
             | Stage::Turning { .. }
             | Stage::Reading { .. }
+            | Stage::Fetching { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Swept { keys, dir, plan } => match answer(key, DELETE_MERGED) {
                 Answer::Yes if !plan.goes.is_empty() => {
@@ -1844,13 +1913,20 @@ impl Menu {
                 claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
             },
             (Pull::Agent, Readied::File { real }) => {
-                claude_reading(format!("{TACKLE} {real}"), Some(real))
+                claude_reading(format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
-            let repository = None;
-            let row = PaneRow { session: session.clone(), pane, cwd, branch, repository, ran };
+            let row = PaneRow {
+                session: session.clone(),
+                pane,
+                cwd,
+                branch,
+                repository: None,
+                pull_request: None,
+                ran,
+            };
             let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { work: work.clone(), step };
@@ -1924,10 +2000,45 @@ impl Menu {
             )));
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
-        let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, printed.file()) };
+        let files: Vec<&str> = printed.file().into_iter().collect();
+        let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, &files) };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
         Did::Stays(Menu { number, target, stage }, wants)
+    }
+
+    /// What `c c` does, now that luneta kept the logs of the checks that
+    /// failed, as `checks` says, or why it kept none: opens an agent on them
+    /// beside the pane, and waits for zellij to open it. Where none failed,
+    /// it opens none, and says so.
+    pub fn checked(self, checks: Result<Failing, String>) -> Did {
+        let Menu { number: menu, target, stage } = self;
+        let Stage::Fetching { keys, beside: Beside { session, pane, cwd }, number, url } = stage
+        else {
+            return Did::Stays(Menu { number: menu, target, stage }, Wants::Nothing);
+        };
+        let failing = match checks {
+            Ok(failing) => failing,
+            Err(why) => {
+                return Did::Closed(Done::Wrong(format!("menu: the checks of #{number}: {why}")));
+            },
+        };
+        if failing.failed.is_empty() {
+            let pending = match failing.pending {
+                0 => String::new(),
+                1 => ", and one has yet to end".to_owned(),
+                pending => format!(", and {pending} have yet to end"),
+            };
+            return Did::Closed(Done::Wrong(format!(
+                "menu: no check failed on the head of #{number}{pending}"
+            )));
+        }
+        let prompt = checks::prompt(number, &url, &failing);
+        let command = claude_reading(prompt, &checks::files(&failing));
+        let opens = Opens::Pane { beside: pane, command };
+        let stage = Stage::Opening { keys, session: session.clone() };
+        let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
+        Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
     /// Fills the search box with what the finder said, while it is open.
@@ -2013,6 +2124,7 @@ impl Menu {
             | Stage::Sweeping { .. }
             | Stage::Swept { .. }
             | Stage::Pruning { .. }
+            | Stage::Fetching { .. }
             | Stage::Pull { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
@@ -2105,6 +2217,11 @@ impl Menu {
                 let doing = format!("Asking gh about the worktrees of {repository}…");
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
+            },
+            Stage::Fetching { keys, number, .. } => {
+                let doing = format!("Asking gh about the checks of #{number}…");
+                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+                (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Pruning { keys, count, .. } => {
                 let doing = format!("Deleting {}…", merged_worktrees(*count));
@@ -2476,6 +2593,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         },
         Entry::Start { prompt, .. } => spans.push(does(prompt)),
         Entry::Last(last) => spans.push(does(last.does())),
+        Entry::Checks => spans.push(does(CHECKS_DOES)),
         Entry::New(new) => spans.push(does(new.does())),
         Entry::Turn(turning) => spans.push(does(turning.does())),
         Entry::Tab { name, .. } => spans.push(does(name)),
@@ -2698,6 +2816,7 @@ mod tests {
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             repository: Some("/w/luneta".to_owned()),
+            pull_request: None,
             ran: Ran::Unhooked,
         }
     }
@@ -2948,7 +3067,7 @@ mod tests {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 10, 0).0),
             [
                 "─ Claude ──────── luneta/main ─",
                 " t  /thermo-nuclear-review",
@@ -2956,6 +3075,7 @@ mod tests {
                 " s  /tigerstyle",
                 " f  fix the last command",
                 " e  explain the last command",
+                " c  fix the failing checks",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
@@ -3044,6 +3164,98 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('f')));
         let done = closed(menu.printed(Err("zellij: no such pane".to_owned())));
         assert_eq!(done, Done::Wrong("menu: what pane 4 printed: zellij: no such pane".to_owned()));
+    }
+
+    /// The pull request of `row()`'s branch, open and on GitHub, which `c c`
+    /// asks of.
+    fn pull_row(state: State, url: Option<&str>) -> Target {
+        let pull_request = Some(PullRequest {
+            number: NonZeroU32::new(328).unwrap(),
+            state,
+            url: url.map(str::to_owned),
+            checks: None,
+        });
+        Target::Pane(Machine::Local, PaneRow { pull_request, ..row() })
+    }
+
+    const PULL: &str = "https://github.com/owner/luneta/pull/328";
+
+    /// The checks of `PULL` that failed on its head, the first `count` of
+    /// `ci / test`, whose log is kept, and `ext`, which has none; and how many
+    /// have yet to end.
+    fn failing(count: usize, pending: u32) -> Failing {
+        let kept = Kept { file: "/run/luneta/checks/1.log".to_owned(), lines: 40, left_out: 0 };
+        let failed = |name: &str, log| checks::Failed { name: name.to_owned(), link: None, log };
+        let failed = [
+            failed("ci / test", checks::Log::Kept(kept)),
+            failed("ext", checks::Log::Unkept("no job".to_owned())),
+        ];
+        Failing { head: "abc".to_owned(), failed: failed[..count].to_vec(), pending, passed: 1 }
+    }
+
+    /// `c c` has luneta keep the log of each check that failed on the head of
+    /// the row's pull request, saying so meanwhile, and once they are kept,
+    /// starts an agent on them beside the pane, in its directory, let read
+    /// each log. Keys do nothing meanwhile but close the menu.
+    #[test]
+    fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
+        let (menu, _) = stays(opened(pull_row(State::Draft, Some(PULL)), Some('c')));
+        let (menu, wants) = stays(menu.key(&char('c')));
+        assert_eq!(wants, Wants::Checks { url: PULL.to_owned() });
+        assert!(menu.fetching());
+        let body = text(&menu.lines(40, 4, 0).0);
+        assert!(body.iter().any(|line| line.ends_with("Asking gh about the checks of #328…")));
+        let (menu, wants) = stays(menu.key(&char('c')));
+        assert_eq!(wants, Wants::Nothing);
+        let (menu, wants) = stays(menu.checked(Ok(failing(2, 0))));
+        let prompt = checks::prompt(NonZeroU32::new(328).unwrap(), PULL, &failing(2, 0));
+        let read = "Read(//run/luneta/checks/1.log)";
+        let command = ["claude", "--allowedTools", read, "--", &prompt];
+        let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
+        assert_eq!(wants, beside_row(opens));
+        assert!(menu.opening().is_some());
+
+        let fetched = |checks: Result<Failing, String>| {
+            let (menu, _) = stays(opened(pull_row(State::Open, Some(PULL)), Some('c')));
+            let (menu, _) = stays(menu.key(&char('c')));
+            closed(menu.checked(checks))
+        };
+        let wrong = |why: &str| Done::Wrong(why.to_owned());
+        assert_eq!(
+            fetched(Err("gh: not logged in".to_owned())),
+            wrong("menu: the checks of #328: gh: not logged in")
+        );
+        assert_eq!(fetched(Ok(failing(0, 0))), wrong("menu: no check failed on the head of #328"));
+        assert_eq!(
+            fetched(Ok(failing(0, 1))),
+            wrong("menu: no check failed on the head of #328, and one has yet to end")
+        );
+        assert_eq!(
+            fetched(Ok(failing(0, 3))),
+            wrong("menu: no check failed on the head of #328, and 3 have yet to end")
+        );
+    }
+
+    /// Only an open pull request, or a draft, whose page its daemon says, has
+    /// checks to start an agent on: the menu says why it starts none on a
+    /// row with another, or none.
+    #[test]
+    fn a_key_for_the_checks_needs_an_open_pull_request() {
+        let refused = |target: Target| {
+            let (menu, _) = stays(opened(target, Some('c')));
+            closed(menu.key(&char('c')))
+        };
+        let wrong = |why: &str| Done::Wrong(why.to_owned());
+        let none = "menu: gh has found no pull request of pane 4's branch";
+        assert_eq!(refused(pane_row()), wrong(none));
+        assert_eq!(refused(pull_row(State::Merged, Some(PULL))), wrong("menu: #328 is merged"));
+        assert_eq!(refused(pull_row(State::Closed, Some(PULL))), wrong("menu: #328 is closed"));
+        assert_eq!(
+            refused(pull_row(State::Open, None)),
+            wrong("menu: pane 4's lunetad does not say the page of #328, as an older one does not")
+        );
+        let unsaid = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
     /// Only a shell at its prompt, after a command its hook said the end of,
@@ -3796,18 +4008,19 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('c')));
         let zellij = "z".repeat(7);
         let rule = format!("─ Claude {} luneta/main ─", "─".repeat(18));
-        assert_eq!(floated(drawing(&menu), 50, 9)[1..], [
+        assert_eq!(floated(drawing(&menu), 50, 10)[1..], [
             format!("{zellij}┌{rule}┐"),
             format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
             format!("{zellij}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
             format!("{zellij}│{:<41}│", " s  /tigerstyle"),
             format!("{zellij}│{:<41}│", " f  fix the last command"),
             format!("{zellij}│{:<41}│", " e  explain the last command"),
+            format!("{zellij}│{:<41}│", " c  fix the failing checks"),
             format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
         // Narrower than the keys take, the box is as wide as zellij's side.
-        let narrow = floated(drawing(&menu), 30, 9);
+        let narrow = floated(drawing(&menu), 30, 10);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
@@ -4154,7 +4367,7 @@ mod tests {
             let prompt = format!("Tackle {file}");
             let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
             assert_eq!(
-                claude_reading(prompt.clone(), Some(file)),
+                claude_reading(prompt.clone(), &[file]),
                 command.map(str::to_owned).to_vec(),
                 "{file}"
             );
@@ -4167,7 +4380,7 @@ mod tests {
         ] {
             let prompt = format!("Tackle {file}");
             assert_eq!(
-                claude_reading(prompt.clone(), Some(file)),
+                claude_reading(prompt.clone(), &[file]),
                 ["claude".to_owned(), prompt],
                 "{file:?}"
             );

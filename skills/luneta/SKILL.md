@@ -18,7 +18,7 @@ A pane is named `<session>:<pane>`, as `luneta:11`; a session by its name alone.
 
 ```sh
 luneta here       # the pane you run in, as <session>:<pane>, by its session's name now
-luneta sessions   # each session, its panes as <tab>:<pane>, their directory, branch, changes, PR and repo
+luneta sessions   # each session, its panes as <tab>:<pane>, their directory, branch, changes, PR (with its checks) and repo
 luneta agents     # each agent: <session>:<pane>, status (busy/idle/waiting/shell), pid, name
 zoxide query -l   # the directories the user works in, most used first; `zoxide query <words>` picks one
 ```

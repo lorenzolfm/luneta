@@ -50,6 +50,13 @@ service Daemon {
   // text, and the daemon keeps what follows that line, up to the prompt the
   // shell waits at. A file goes a day on.
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
+  // Keeps the log of each check of a pull request that failed on its head, as
+  // gh fetches the failed steps' log of a job of GitHub Actions, in a file for
+  // the daemon's user alone, for an agent there to read, as luneta's menu does
+  // for `c c`. A file goes a day on. It answers once, as `Prunes` does, since
+  // gh can take longer than an answer has; a question that hangs up does not
+  // stop it.
+  rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
   // The name a session luneta makes for a directory takes, as its picker's
   // directories name one: the directory's own, or its repository's and its
   // own where it is a worktree of one, with a `-2` where a session that runs,
@@ -356,6 +363,39 @@ message KeepPrintedResponse {
   message Top {
     // Absent where the pane holds nothing.
     File file = 1;
+  }
+}
+
+message KeepChecksRequest {
+  On on = 1;
+  // The pull request, by its page on GitHub, as `PullRequest.url` says it:
+  // one that is no `https` page of a pull request is invalid.
+  string url = 2;
+}
+
+message KeepChecksResponse {
+  // The commit the checks ran on, the pull request's head as gh said it.
+  string head = 1;
+  // Each check that failed, in the order gh lists them.
+  repeated Failed failed = 2;
+  // How many have yet to end, and how many ended and did not fail.
+  uint32 pending = 3;
+  uint32 passed = 4;
+
+  message Failed {
+    // As GitHub names it: a job's name, or a status's context.
+    string name = 1;
+    // Its page, where GitHub says one: empty for none.
+    string link = 2;
+    // What it holds of the log: one of these, always. A client that finds
+    // none has a newer daemon's.
+    oneof log {
+      // The failed steps' log, its last lines, kept in a file.
+      KeepPrintedResponse.File kept = 3;
+      // Why none was kept, in words: a check of no job of GitHub Actions,
+      // or one gh could not fetch the log of.
+      string unkept = 4;
+    }
   }
 }
 
@@ -1253,6 +1293,20 @@ message PullRequest {
   // fork's clone has, can be any of them, or the one the fork was made from.
   // Empty from a daemon older than this field, which did not say.
   string url = 4;
+  // How its checks stand on its head, as gh says them with it. Absent from a
+  // daemon older than this field.
+  Checks checks = 5;
+}
+
+// How many checks of a pull request's head have yet to end, ended and
+// failed, and ended and did not: GitHub's checks of GitHub Actions and of
+// other apps, and the statuses other services set. A check that failed is
+// one that ended in failure, timed out, was cancelled, or waits for an
+// action, and a status that failed or erred.
+message Checks {
+  uint32 pending = 1;
+  uint32 failed = 2;
+  uint32 passed = 3;
 }
 
 enum PullRequestState {
