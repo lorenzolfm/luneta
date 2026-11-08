@@ -115,9 +115,10 @@ service Daemon {
   // harness's, a program, a pane whose command ended. Nor does a pane that
   // would take floating panes along, nor one that would end its session, but
   // where the question says it may. It answers once each is open there, with
-  // the terminal each opened as, or with why none moved, or with what it
-  // closed and did not open again, and how to start that by hand. It answers
-  // once, as `Prunes` does, and a question that hangs up does not stop it.
+  // the terminal each opened as, or with what it closed and did not open
+  // again, and how to start that by hand, beside those that did; or with why
+  // it closed nothing. It answers once, as `Prunes` does, and a question that
+  // hangs up does not stop it.
   rpc Carry(CarryRequest) returns (stream CarryResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers
@@ -592,6 +593,10 @@ message CarryRequest {
 message CarryResponse {
   // The terminals it opened, each by the one it closed, in their order.
   repeated Carried carried = 1;
+  // What it closed and did not open again, and what starts each of those by
+  // hand: absent where each opened. A move that closes nothing answers with
+  // why instead.
+  optional string stranded = 2;
 
   message Carried {
     uint32 from = 1;

@@ -49,6 +49,7 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTit
 use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
+use lunetad::carries::Moved;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
@@ -139,14 +140,9 @@ pub enum Event {
     /// none.
     Opened { menu: u64, opened: Result<u32, String> },
     /// What came of moving panes of `on` to `to`, another session there, with
-    /// zellij's client on the pane `follows`, if on one of them: the terminal
-    /// each opened as, by the one it closed, or why none moved.
-    Carried {
-        on: Machine,
-        to: Listed,
-        follows: Option<u32>,
-        carried: Result<Vec<(u32, u32)>, String>,
-    },
+    /// zellij's client on the pane `follows`, if on one of them: what moved,
+    /// or why nothing closed.
+    Carried { on: Machine, to: Listed, follows: Option<u32>, carried: Result<Moved, String> },
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },

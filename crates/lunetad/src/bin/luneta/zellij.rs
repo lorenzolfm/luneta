@@ -28,7 +28,7 @@ use lunetad::closes::running_in;
 pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
-use lunetad::carries::{self, Carry};
+use lunetad::carries::{self, Carry, Moved};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{clients, moves, Destination, SocketId};
 pub use lunetad::SessionName;
@@ -706,7 +706,7 @@ pub enum After {
     /// Move panes to another session, as `carry` does, now that the client
     /// has left the session they leave, or come to the one they go to: told
     /// once done, or else as it is dropped undone.
-    Carry(Due<Vec<(u32, u32)>>, Carry),
+    Carry(Due<Moved>, Carry),
 }
 
 impl After {
@@ -885,10 +885,9 @@ fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, event
 }
 
 /// Has zellij on the machine `on` move what `carry` says to another session
-/// there, on a thread of its own, and hands back the terminal each pane opened
-/// as there, by the one it closed, or why none moved, as `owed` does. It moves
-/// no client.
-pub fn carry(on: &Machine, carry: Carry, owed: Due<Vec<(u32, u32)>>) {
+/// there, on a thread of its own, and hands back what it moved, or why it
+/// closed nothing, as `owed` does. It moves no client.
+pub fn carry(on: &Machine, carry: Carry, owed: Due<Moved>) {
     let on = on.clone();
     thread::spawn(move || owed.pay(There::on(&on).and_then(|mut there| there.carry(&carry))));
 }
@@ -896,7 +895,7 @@ pub fn carry(on: &Machine, carry: Carry, owed: Due<Vec<(u32, u32)>>) {
 /// Moves what `carry` says on this machine, as `carries::carried` does, by
 /// what its daemon says of the host now: of what runs in each pane, and the
 /// agents in them, which it alone reads.
-fn carried_here(carry: &Carry) -> Result<Vec<(u32, u32)>, String> {
+fn carried_here(carry: &Carry) -> Result<Moved, String> {
     let folder = lunetad::folder::find()
         .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
     let host = commands::host(&folder)?;
@@ -1318,15 +1317,17 @@ impl There {
         }
     }
 
-    /// What closing the terminal `pane` of `session` closes, as
-    /// `lunetad::closes::closes_now` says, or why it closes nothing.
-    fn carry(&mut self, carry: &Carry) -> Result<Vec<(u32, u32)>, String> {
+    /// Has zellij move what `carry` says, as `lunetad::carries::carried`
+    /// does, and says what it moved, or why it closed nothing.
+    fn carry(&mut self, carry: &Carry) -> Result<Moved, String> {
         match self {
             There::Here => carried_here(carry),
             There::Away(away) => away.carry(carry),
         }
     }
 
+    /// What closing the terminal `pane` of `session` closes, as
+    /// `lunetad::closes::closes_now` says, or why it closes nothing.
     fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
         match self {
             There::Here => closes_now(session, pane),

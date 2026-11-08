@@ -900,8 +900,8 @@ impl Daemon for Host {
         let planned = planned.map_err(Status::failed_precondition)?;
         let folder = self.folder.clone();
         let answer = late(move || {
-            let carried = carries::carried(&folder, &carry, &planned);
-            Ok(carries::answer(&carried.map_err(Status::failed_precondition)?))
+            let moved = carries::carried(&folder, &carry, &planned);
+            Ok(carries::answer(&moved.map_err(Status::failed_precondition)?))
         });
         Ok(Response::new(Box::pin(answer)))
     }

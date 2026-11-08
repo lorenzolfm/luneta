@@ -187,7 +187,8 @@ fn shared_copy(text: &str) -> PathBuf {
 /// it `stays_unlisted_for`. A pane closing
 /// can cut a call of a session short, once, as a test had it `silences` or
 /// `unreaches` it, or hand it another call's answer, as a test had it
-/// `answers_another`. It knows no other command.
+/// `answers_another`, or fail it, as a test had it `fails` it. It knows no
+/// other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -567,6 +568,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
             _ => format!("echo \"{gone}\" >&2; echo other; echo another; exit 0"),
         };
         self.write(&format!("{session}.{action}.once"), &ends);
+    }
+
+    /// Has the next `action`, a command of `zellij action`, in `session` fail,
+    /// saying `why`, as zellij does what it cannot do.
+    pub fn fails(&self, session: &str, action: &str, why: &str) {
+        self.write(&format!("{session}.{action}.once"), &format!("echo '{why}' >&2; exit 1"));
     }
 
     /// Has the next `action`, a command of `zellij action`, in `session` end

@@ -552,18 +552,35 @@ fn ended(pid: u32) -> bool {
     matches!(heard.recv_timeout(ENDING), Ok(Ok(())))
 }
 
+/// What a move did once it closed what it takes: each pane opened again, the
+/// terminal each opened as by the one it closed, in their order; or some did
+/// not, those that did said, with what it closed and did not open again, and
+/// what starts each of those by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Moved {
+    All(Vec<(u32, u32)>),
+    Stranded { opened: Vec<(u32, u32)>, why: String },
+}
+
+impl Moved {
+    /// What the daemon answered of a move.
+    #[must_use]
+    pub fn of(answer: CarryResponse) -> Moved {
+        let each = |carried: carry_response::Carried| (carried.from, carried.terminal);
+        let opened = answer.carried.into_iter().map(each).collect();
+        match answer.stranded {
+            None => Moved::All(opened),
+            Some(why) => Moved::Stranded { opened, why },
+        }
+    }
+}
+
 /// Moves what `planned` takes of `carry`, alone on its machine, whose lunetad
 /// keeps `folder`: closes the pane, or its tab, or the session where it may,
 /// and opens each pane again where it lands, once what ran in it has ended.
-/// It answers with the terminal each opened as, by the one it closed, in
-/// their order; or why it moved nothing, as `alone`, `leaves` and `landing`
-/// say, or a session that took a name since; or what it closed and did not
-/// open again, which is said, with what starts each by hand.
-pub fn carried(
-    folder: &Path,
-    carry: &Carry,
-    planned: &Planned,
-) -> Result<Vec<(u32, u32)>, String> {
+/// It answers with what it `Moved`, or why it closed nothing, as `alone`,
+/// `leaves` and `landing` say, or a session that took a name since.
+pub fn carried(folder: &Path, carry: &Carry, planned: &Planned) -> Result<Moved, String> {
     let _alone = alone(folder)?;
     let Carry { from, to, lands, .. } = carry;
     closes::same_session(&from.session, from.started)?;
@@ -600,11 +617,12 @@ pub fn carried(
             && !ended(*pid)
         {
             let secs = ENDING.as_secs();
-            return Err(format!(
+            let why = format!(
                 "{closed}, but its agent, {pid}, did not end in {secs}s, and opened nowhere: once \
                  it has, start pane {pane} again by hand: {}",
                 by_hand(&going)
-            ));
+            );
+            return Ok(Moved::Stranded { opened: Vec::new(), why });
         }
     }
     let mut carried = Vec::with_capacity(going.len());
@@ -632,27 +650,32 @@ pub fn carried(
                 beside = Some(terminal);
             },
             Err(why) => {
-                return Err(format!(
+                let why = format!(
                     "{closed}, but zellij opened {at} of {} again in {}: {why}. Start the rest \
                      by hand: {}",
                     going.len(),
                     to.session,
                     by_hand(&going[at..])
-                ));
+                );
+                return Ok(Moved::Stranded { opened: carried, why });
             },
         }
     }
-    Ok(carried)
+    Ok(Moved::All(carried))
 }
 
-/// What the daemon answers of what it `carried`.
+/// What the daemon answers of what it `Moved`.
 #[must_use]
-pub fn answer(carried: &[(u32, u32)]) -> CarryResponse {
+pub fn answer(moved: &Moved) -> CarryResponse {
     let each = |(from, terminal): &(u32, u32)| carry_response::Carried {
         from: *from,
         terminal: *terminal,
     };
-    CarryResponse { carried: carried.iter().map(each).collect() }
+    let (opened, stranded) = match moved {
+        Moved::All(opened) => (opened, None),
+        Moved::Stranded { opened, why } => (opened, Some(why.clone())),
+    };
+    CarryResponse { carried: opened.iter().map(each).collect(), stranded }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use lunetad::api::carry_request::Lands;
 use lunetad::api::carry_response::Carried;
-use lunetad::api::{self, CarryRequest};
+use lunetad::api::{self, CarryRequest, CarryResponse};
 use serde_json::{json, Value};
 use tonic::{Code, Status};
 
@@ -58,18 +58,28 @@ fn asked(host: &Host, pane: u32, tab: bool, lands: Lands, ending: bool) -> Carry
     }
 }
 
-/// What the daemon of `host` answers `asked`: the terminals it opened, by the
-/// ones it closed.
-fn carried(host: &Host, asked: CarryRequest) -> Result<Vec<(u32, u32)>, Status> {
+/// What the daemon of `host` answers `asked`.
+fn answered(host: &Host, asked: CarryRequest) -> Result<CarryResponse, Status> {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let mut answer = daemon.carry(asked).await?.into_inner();
-        let answer = answer.message().await?.expect("lunetad answers once");
-        let each = |Carried { from, terminal }| (from, terminal);
-        Ok(answer.carried.into_iter().map(each).collect())
+        Ok(answer.message().await?.expect("lunetad answers once"))
     })
+}
+
+/// The terminals an answer says opened, by the ones that closed.
+fn opened(answer: &CarryResponse) -> Vec<(u32, u32)> {
+    answer.carried.iter().map(|Carried { from, terminal }| (*from, *terminal)).collect()
+}
+
+/// What the daemon of `host` answers `asked`, where each pane opened again:
+/// the terminals it opened, by the ones it closed.
+fn carried(host: &Host, asked: CarryRequest) -> Result<Vec<(u32, u32)>, Status> {
+    let answer = answered(host, asked)?;
+    assert_eq!(answer.stranded, None, "{answer:?}");
+    Ok(opened(&answer))
 }
 
 fn refused(status: &Status, why: &str) {
@@ -213,6 +223,31 @@ fn a_tab_goes_whole_to_a_tab_of_its_own_named_as_it_was() {
     assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 1"]);
     let tab = "- --session play action new-tab --no-focus --cwd /w/b --name auth --close-on-exit";
     opened_as(&host.zellij.opened(), &[tab.to_owned(), shell_opened(7, "/w/d")]);
+}
+
+/// What zellij fails to open once the tab closed is said, with what starts it
+/// by hand, beside what did open.
+#[test]
+fn what_does_not_open_again_is_said_beside_what_did() {
+    let tab = (1, "auth");
+    let work =
+        json!([shell(1, (0, "Tab #1"), "/w/a"), shell(4, tab, "/w/d"), shell(2, tab, "/w/b")]);
+    let play = json!([shell(5, (0, "Tab #1"), "/w/p")]);
+    let (host, _kept) = two_sessions(&work, &play);
+    host.zellij.clients("play", &[(1, "terminal_5")]);
+    let opened_into = json!([shell(5, (0, "Tab #1"), "/w/p"), shell(7, (3, "auth"), "/w/b")]);
+    host.zellij.opens_into("play", &opened_into);
+    host.zellij.fails("play", "new-pane", "no room");
+
+    let answer = answered(&host, asked(&host, 4, true, Lands::NewTab(()), false)).unwrap();
+
+    assert_eq!(opened(&answer), [(2, 7)]);
+    let stranded = answer.stranded.unwrap_or_default();
+    let said = "closed the tab of pane 4 of work, but zellij opened 1 of 2 again in play";
+    assert!(stranded.starts_with(said), "{stranded}");
+    assert!(stranded.contains("no room"), "{stranded}");
+    assert!(stranded.ends_with("Start the rest by hand: your shell in /w/d"), "{stranded}");
+    assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 1"]);
 }
 
 /// Has the daemon of `host` read `agent` as Claude Code's, with `status`.

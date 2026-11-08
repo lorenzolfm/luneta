@@ -973,7 +973,8 @@ first, in the notes: `y` moves it, and any other key keeps it. zellij's client
 goes with the pane it is on, first to the other session where the session it
 leaves ends, or where the tab it opens has no client there to make room for
 it; any other client stays where it is. What fails once the pane closed is
-said, with the command that starts it again by hand.
+said, with the command that starts it again by hand, and the client still goes
+to its pane where that one opened.
 
 With the mouse, a press on a session's row, or on a machine's header, lifts
 it once the mouse moves a line, and the sidebar takes the keys. It shows where

@@ -61,7 +61,7 @@ use lunetad::api::{
 };
 use lunetad::asks::User;
 use lunetad::links;
-use lunetad::carries::{self, Carry, Lands, Planned, Whole};
+use lunetad::carries::{self, Carry, Lands, Moved, Planned, Whole};
 use lunetad::prunes;
 use lunetad::seats::seated;
 use lunetad::transcripts::SessionId;
@@ -3093,19 +3093,23 @@ impl Sidebar {
     }
 
     /// What came of moving panes of `on` to `to`, as luneta asked, with
-    /// zellij's client on the pane `follows`, if on one of them: each by the
-    /// terminal it opened as there. The client goes to its pane's, and the
-    /// highlight to the first that opened, once it shows. Or why they did
-    /// not move, which the notes say.
+    /// zellij's client on the pane `follows`, if on one of them: each that
+    /// opened by the terminal it opened as there. The client goes to its
+    /// pane's, and the highlight to the first that opened, once it shows.
+    /// What did not open, or why nothing closed, the notes say.
     pub fn carried(
         &mut self,
         on: Machine,
         to: &Listed,
         follows: Option<u32>,
-        carried: Result<Vec<(u32, u32)>, String>,
+        carried: Result<Moved, String>,
     ) -> Asked {
         let carried = match carried {
-            Ok(carried) => carried,
+            Ok(Moved::All(carried)) => carried,
+            Ok(Moved::Stranded { opened, why }) => {
+                self.notify(format!("move: {why}"));
+                opened
+            },
             Err(why) => {
                 self.notify(format!("move: {why}"));
                 return Asked::Nothing;
@@ -11236,8 +11240,8 @@ mod tests {
     /// zellij's client on the pane that moves goes with it: there first, where
     /// the session it leaves ends with the move, or the one it goes to has no
     /// client to make room for a tab, and then to where it opened. Once it
-    /// opened, the highlight goes to its row as that shows; and a move that
-    /// failed says why.
+    /// opened, the highlight goes to its row as that shows. A move that
+    /// opened some says what did not open, and one that closed nothing why.
     #[test]
     fn zellij_s_client_goes_with_the_pane_it_is_on() {
         let mut sidebar = carrying();
@@ -11254,19 +11258,24 @@ mod tests {
         assert_eq!((follows, first), (Some(5), Some(pane_of("work", 10, 3))));
 
         let work = listed("work", 10);
-        let opened = sidebar.carried(Machine::Local, &work, Some(5), Ok(vec![(5, 7)]));
+        let opened = sidebar.carried(Machine::Local, &work, Some(5), Ok(Moved::All(vec![(5, 7)])));
         assert_eq!(opened, go_here(pane_of("work", 10, 7)));
-        let unfollowed = sidebar.carried(Machine::Local, &work, None, Ok(vec![(5, 8)]));
+        let unfollowed = sidebar.carried(Machine::Local, &work, None, Ok(Moved::All(vec![(5, 8)])));
         assert_eq!(unfollowed, Asked::Nothing);
         let mut host = sidebar.host.clone().unwrap();
         host.sessions[0].panes.as_mut().unwrap().panes.push(pane(8, 2, "/w/p", "fish"));
         sidebar.heard(host);
         assert_eq!(cursor(&sidebar), Some(pane_of("work", 10, 8)));
 
-        let failed = Err("closed pane 5 of play, but zellij opened none".to_owned());
-        assert_eq!(sidebar.carried(Machine::Local, &work, None, failed), Asked::Nothing);
-        let said = "move: closed pane 5 of play, but zellij opened none";
-        assert_eq!(sidebar.notice.as_deref(), Some(said));
+        let why = "closed the tab of pane 5 of play, but zellij opened 1 of 2 again in work";
+        let stranded = Moved::Stranded { opened: vec![(5, 7)], why: why.to_owned() };
+        let opened = sidebar.carried(Machine::Local, &work, Some(5), Ok(stranded));
+        assert_eq!(opened, go_here(pane_of("work", 10, 7)));
+        assert_eq!(sidebar.notice, Some(format!("move: {why}")));
+
+        let failed = Err("its agent, 4003, ended".to_owned());
+        assert_eq!(sidebar.carried(Machine::Local, &work, Some(5), failed), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("move: its agent, 4003, ended"));
     }
 
     /// A press on a pane's row lifts it once the mouse goes straight off its
