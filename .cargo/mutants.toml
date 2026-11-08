@@ -1,0 +1,15 @@
+# The same runner as `dev test`.
+test_tool = "nextest"
+
+# Above nextest's limit on one test in `.config/nextest.toml`, so nextest ends a hung mutant first,
+# and it reads as caught.
+minimum_test_timeout = 200
+
+# One failure is enough to catch a mutant, so stop there, and stop the tests still running. Left to
+# `fail-fast = false` in `.config/nextest.toml`, a second hung test runs out the timeout above, and
+# the mutant reads as timed out.
+additional_cargo_test_args = ["--max-fail=1:immediate"]
+
+# The text of an error is for a person. A test of that text only repeats the literal, so this class
+# needs no test.
+exclude_re = ['<impl (std::fmt::|core::fmt::|fmt::)?Display for \w*Error(<.*>)?>::fmt']
