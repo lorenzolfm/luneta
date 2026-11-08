@@ -52,7 +52,7 @@ use lunetad::asks::User;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
-use lunetad::Destination;
+use lunetad::{Destination, Directory};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -2167,8 +2167,8 @@ impl App {
             },
             Asked::Start { on, starts } => {
                 match zellij::unused_at(&on, starts) {
-                    Ok((unused, cwd)) => {
-                        self.make(Ok(unused), cwd.as_deref(), None);
+                    Ok((unused, dir)) => {
+                        self.make(Ok(unused), Some(dir.as_str()), None);
                     },
                     Err(why) => self.sidebar.notify(format!("menu: {why}")),
                 }
@@ -2180,9 +2180,9 @@ impl App {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
-                    Machine::Remote(destination) => {
-                        zellij::makes_away(destination, &session, &cwd)
-                    },
+                    Machine::Remote(destination) => Directory::parse(cwd.clone())
+                        .map_err(|why| format!("no session made: {why}"))
+                        .and_then(|dir| zellij::makes_away(destination, &session, &dir)),
                 };
                 let owed = zellij::owed(menu, &self.events);
                 if !self.make(unused, Some(cwd.as_str()), Some((owed, tab))) {
@@ -2266,7 +2266,7 @@ impl App {
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
                     Machine::Remote(destination) => {
-                        zellij::makes_away(destination, &session, cwd.as_str())
+                        zellij::makes_away(destination, &session, &cwd)
                     },
                 };
                 self.make(unused, Some(cwd.as_str()), None);

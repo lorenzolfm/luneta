@@ -25,11 +25,11 @@ pub use lunetad::closes::{
 pub use lunetad::ended::{exited, Exited};
 pub use lunetad::renames::renamed;
 use lunetad::closes::running_in;
-pub use lunetad::names::session_for;
+pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{clients, moves, Destination, SocketId};
+use lunetad::{clients, moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -1053,54 +1053,26 @@ impl Unused {
     }
 }
 
-/// Where a session luneta makes starts: in a directory, by its absolute
-/// path, or in the home of the user of the machine it is made on, which only
-/// that machine's daemon knows of another.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Starts {
-    In(String),
-    Home,
-}
-
-impl Starts {
-    /// The directory it starts in: none for the home.
-    pub fn dir(&self) -> Option<&str> {
-        match self {
-            Starts::In(dir) => Some(dir),
-            Starts::Home => None,
-        }
-    }
-}
-
-/// The name a session luneta makes for `dir` on this machine takes, as
-/// `lunetad::names::free_for` names it, or why it takes none.
-pub fn unused_for(dir: &str) -> Result<Unused, String> {
-    let (name, since) = lunetad::names::free_for(dir)?;
-    Ok(Unused { on: Machine::Local, name, since: Some(since) })
-}
-
 /// The name a session luneta makes on `destination` takes, that starts as
 /// `starts` says, as its daemon there names it within `away::QUICK`, as
-/// luneta's screen waits on it, or why it takes none.
-pub fn name_away(destination: &Destination, starts: &Starts) -> Result<Unused, String> {
+/// luneta's screen waits on it, and the directory it named it for; or why it
+/// takes none.
+fn name_away(destination: &Destination, starts: &Starts) -> Result<(Unused, Directory), String> {
     let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(starts));
-    named.map(|(name, since)| Unused { on: Machine::Remote(destination.clone()), name, since })
+    let (name, since, dir) = named?;
+    Ok((Unused { on: Machine::Remote(destination.clone()), name, since }, dir))
 }
 
 /// The name a session luneta makes on `on` takes, that starts as `starts`
-/// says, as `unused_for` and `name_away` name it, and the directory luneta
-/// makes it in: none for the home of another machine's user, where ssh
-/// starts zellij's client there. Or why it takes none.
-pub fn unused_at(on: &Machine, starts: Starts) -> Result<(Unused, Option<String>), String> {
-    match (on, starts) {
-        (Machine::Local, Starts::In(dir)) => Ok((unused_for(&dir)?, Some(dir))),
-        (Machine::Local, Starts::Home) => {
-            let home = String::from(lunetad::names::home()?);
-            Ok((unused_for(&home)?, Some(home)))
+/// says, as `lunetad::names::free_at` and `name_away` name it, and the
+/// directory it is named for, which luneta makes it in. Or why it takes none.
+pub fn unused_at(on: &Machine, starts: Starts) -> Result<(Unused, Directory), String> {
+    match on {
+        Machine::Local => {
+            let (name, since, dir) = lunetad::names::free_at(starts)?;
+            Ok((Unused { on: Machine::Local, name, since: Some(since) }, dir))
         },
-        (Machine::Remote(destination), starts) => {
-            Ok((name_away(destination, &starts)?, starts.dir().map(str::to_owned)))
-        },
+        Machine::Remote(destination) => name_away(destination, &starts),
     }
 }
 
@@ -1149,10 +1121,10 @@ pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused,
 pub fn makes_away(
     destination: &Destination,
     to: &SessionName,
-    cwd: &str,
+    cwd: &Directory,
 ) -> Result<Unused, String> {
-    let named = name_away(destination, &Starts::In(cwd.to_owned()));
-    let named = named.map_err(|why| format!("no session made: {why}"))?;
+    let named = name_away(destination, &Starts::In(cwd.clone()));
+    let (named, _) = named.map_err(|why| format!("no session made: {why}"))?;
     if named.name != *to {
         return Err(format!(
             "no session made: {to} is taken on {destination} now, which names one {} for {cwd}",

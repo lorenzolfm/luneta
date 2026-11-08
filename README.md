@@ -578,11 +578,11 @@ The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
 your groups from yet. In their place, its Claude group has keys for a few
 skills, built in. It lists only the keys that work on the row: on a session's
-row, `a`, `n m`, `d d`, `d s` and the Brief group, and on a machine's header,
-`a`, `n s`, `n m`, `d d` and the Brief group. A key it does not list does
-nothing. `Alt a` opens the same menu floating at the bottom right of
-zellij's side, for the pane zellij is on, wherever the keys are and folded or
-not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
+row, `a`, `n m`, `d d`, `d s` and the Brief group, on another machine's header,
+`a`, `n s`, `n m`, `d d` and the Brief group, and on this machine's the same but
+`d d`. A key it does not list does nothing. `Alt a` opens the same menu
+floating at the bottom right of zellij's side, for the pane zellij is on,
+wherever the keys are and folded or not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
 click off its box closes it, and gives the keys back to zellij, or to the
 sidebar if it had them. A click on an entry presses its key, and on
 `<BS> - Back` or `<ESC> - Close` does what it says; a delete asks first, as its
@@ -1739,7 +1739,7 @@ the highlighted row, which lists only the keys that work on that row:
 | `n m` | add a machine, by what you type ssh to it | any row |
 | `t t` | turn the pane into a tab of its own | a pane |
 | `t p` | turn the pane's tab into panes of another tab, which you pick where it has several | a pane |
-| `d d` | close the pane; on a session's row, kill the session; on a machine's header, forget the machine | any row |
+| `d d` | close the pane; on a session's row, kill the session; on another machine's header, forget the machine | any row but this machine's header |
 | `d s` | kill the row's session | a pane, a session's row |
 | `d m` | list the [merged worktrees](#delete-merged-worktrees) of the pane's repository, to delete | a pane in a repository |
 | `y`, or the key again | go ahead with a delete that asked first | any row |

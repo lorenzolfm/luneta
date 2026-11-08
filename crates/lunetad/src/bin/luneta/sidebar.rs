@@ -10236,9 +10236,9 @@ mod tests {
         type_in(&mut sidebar, "ggkhh");
         assert_eq!(sidebar.cursor, Some(Spot::Machine(Machine::Local)));
         type_in(&mut sidebar, "d");
+        assert!(sidebar.menu.is_none());
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        let stays = "menu: luneta lists this machine always; it forgets only the others";
-        assert_eq!(sidebar.notice.as_deref(), Some(stays));
+        assert_eq!(sidebar.notice, None);
     }
 
     /// This machine, `mac`, with the sessions `main` and `work`, and the

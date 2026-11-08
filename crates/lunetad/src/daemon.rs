@@ -82,6 +82,7 @@ use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::links::{Pasted, Unready};
+use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
@@ -686,20 +687,19 @@ impl Daemon for Host {
         request: Request<NameSessionRequest>,
     ) -> Result<Response<NameSessionResponse>, Status> {
         let NameSessionRequest { on, dir } = request.into_inner();
-        let dir = dir.map(|dir| directory("dir", dir)).transpose()?;
+        let starts = match dir {
+            Some(dir) => Starts::In(directory("dir", dir)?),
+            None => Starts::Home,
+        };
         if let Some(mut daemon) = self.bridged(on)? {
-            let dir = dir.map(String::from);
+            let dir = starts.dir().map(str::to_owned);
             return daemon.name_session(NameSessionRequest { on: None, dir }).await;
         }
-        let named = task::spawn_blocking(move || {
-            let dir = dir.map_or_else(names::home, Ok)?;
-            names::free_for(dir.as_str())
-        })
-        .await;
+        let named = task::spawn_blocking(move || names::free_at(starts)).await;
         let named = named.map_err(|error| unfinished(&error))?;
-        let (name, since) = named.map_err(Status::failed_precondition)?;
-        let named_at = Some(since.into());
-        Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at }))
+        let (name, since, dir) = named.map_err(Status::failed_precondition)?;
+        let (named_at, dir) = (Some(since.into()), Some(dir.into()));
+        Ok(Response::new(NameSessionResponse { name: name.to_string(), named_at, dir }))
     }
 
     async fn check_name(

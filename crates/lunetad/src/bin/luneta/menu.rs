@@ -18,12 +18,13 @@
 //! opens the Delete group, which closes the pane or deletes its session, and
 //! asks first when that would end an agent at work, or on a pane's row in a
 //! repository lists the worktrees of its merged pull requests, to delete once
-//! you say yes, and on a machine's header forgets the machine. `b` opens the
+//! you say yes, and on another machine's header forgets the machine. `b` opens the
 //! Brief group, which briefs you on every session, the row's session, or the agent in its pane, or on a machine's
 //! header, the machine's sessions. luneta has no
 //! configuration to read keys for skills from, and the Claude group's are its
 //! own. The menu lists only the keys that work on its kind of row: a session's
-//! row and a machine's header have no pane, and none of the keys that need one.
+//! row and a machine's header have no pane, and none of the keys that need one,
+//! and this machine's header nothing to delete.
 //!
 //! A pull request's link pasted with the sidebar's keys, or in the menu,
 //! opens it for that pull request instead: `w` makes a worktree of it, in a
@@ -161,10 +162,6 @@ const YANK_PULL_DOES: &str = "PR link";
 /// What `y` waits for: its group in the legend holds them, and the bottom of
 /// the sidebar lists them while it waits.
 const YANKS: [Entry; 1] = [Entry::YankPull];
-
-/// What the menu says of the key that forgets a machine, on this one's
-/// header.
-const LOCAL_STAYS: &str = "menu: luneta lists this machine always; it forgets only the others";
 
 /// A key of the sidebar's own that does more than move the highlight or fold
 /// a session. The legend lists each before the menu's keys, and a key of the
@@ -508,8 +505,9 @@ enum Entry {
     /// The key of the Delete group on a pane's row in a repository: lists the
     /// worktrees of its merged pull requests, by a directory of it.
     Prune { dir: Directory },
-    /// The key of the Delete group on a machine's header: forgets the machine.
-    Forget(Machine),
+    /// The key of the Delete group on another machine's header: forgets the
+    /// machine.
+    Forget(Destination),
     /// A key of the Brief group: briefs you on what the agents it covers are
     /// doing.
     Brief(brief::Scope),
@@ -605,7 +603,7 @@ enum Pressed {
     /// directory of it.
     Prune(Directory),
     /// Forgets the machine the menu is for.
-    Forget(Machine),
+    Forget(Destination),
     /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
     /// Opens the ask box.
@@ -628,8 +626,9 @@ struct Keys {
 impl Keys {
     /// The keys of the menu for `target`: those of `every` that work on its
     /// kind of row, as `Entry::on` says. A pane's row has them all; a
-    /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; and a
-    /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group.
+    /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; another
+    /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group; and
+    /// this one's the same but `d d`.
     fn new(target: &Target) -> Self {
         let every = Keys::every(target.removes()).into_iter();
         let root = every.filter_map(|entry| entry.on(target)).collect();
@@ -644,11 +643,11 @@ impl Keys {
     /// session, and `n m` the box for a machine's destination, `t t` turns the
     /// pane into a tab and `t p` its tab into panes of another, `d d` deletes
     /// what the menu is for, as `removes` says, `d s` deletes its session,
-    /// and on a row in a repository, `d m` its merged worktrees, or on a
-    /// machine's header `d d` alone forgets the machine, and
+    /// and on a row in a repository, `d m` its merged worktrees, or on
+    /// another machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
     /// what the menu is for, or on a machine's header, its sessions.
-    fn every(removes: Removes) -> Vec<Entry> {
+    fn every(removes: Option<Removes>) -> Vec<Entry> {
         let start = |(key, prompt)| Entry::Start { key, prompt };
         vec![
             Entry::Search,
@@ -676,7 +675,7 @@ impl Keys {
                 key: DELETE,
                 name: DELETE_NAME,
                 entries: match removes {
-                    Removes::Row { session, scope, merged_in } => {
+                    Some(Removes::Row { session, scope, merged_in }) => {
                         let mut entries = vec![
                             Entry::Close { key: DELETE_ROW, session: session.clone(), scope },
                             Entry::Close { key: DELETE_SESSION, session, scope: Scope::Session },
@@ -684,7 +683,8 @@ impl Keys {
                         entries.extend(merged_in.map(|dir| Entry::Prune { dir }));
                         entries
                     },
-                    Removes::Machine(machine) => vec![Entry::Forget(machine)],
+                    Some(Removes::Machine(destination)) => vec![Entry::Forget(destination)],
+                    None => Vec::new(),
                 },
             },
             Entry::Group {
@@ -699,12 +699,12 @@ impl Keys {
     /// lists as a group, then the keys at the top of the menu on any row, but
     /// for those a command has, or the sidebar moves with, which `m` reaches.
     /// It shows the Delete group's key and not what it deletes, which is the
-    /// row's, so any row's will do.
+    /// row's.
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
-        root.extend(Keys::every(Removes::Machine(Machine::Local)).into_iter().filter(shown));
+        root.extend(Keys::every(None).into_iter().filter(shown));
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -769,7 +769,7 @@ impl Keys {
                 return Pressed::Delete { key: *key, session: session.clone(), scope: *scope };
             },
             Entry::Prune { dir } => return Pressed::Prune(dir.clone()),
-            Entry::Forget(machine) => return Pressed::Forget(machine.clone()),
+            Entry::Forget(destination) => return Pressed::Forget(destination.clone()),
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
@@ -928,12 +928,12 @@ struct Delete {
 }
 
 /// What the Delete group's keys take away: on a session's row or a pane's,
-/// the pane or the session, of `session`; on a machine's header, the
+/// the pane or the session, of `session`; on another machine's header, the
 /// machine, from those luneta lists.
 enum Removes {
     /// `merged_in` is a directory of the repository the row is in, if any.
     Row { session: Listed, scope: Scope, merged_in: Option<Directory> },
-    Machine(Machine),
+    Machine(Destination),
 }
 
 /// What the menu is for: the row highlighted as it opened, of the machine
@@ -1029,13 +1029,15 @@ impl Target {
     }
 
     /// What luneta's Delete group takes away on the row: its pane, or on a
-    /// session's row, its session; or on a machine's header, the machine.
-    fn removes(&self) -> Removes {
+    /// session's row, its session; or on another machine's header, the
+    /// machine. None on this one's, which luneta lists always.
+    fn removes(&self) -> Option<Removes> {
         match self {
             Target::Session(_, session) => {
-                Removes::Row { session: session.clone(), scope: Scope::Session, merged_in: None }
+                let session = session.clone();
+                Some(Removes::Row { session, scope: Scope::Session, merged_in: None })
             },
-            Target::Pane(_, row) => Removes::Row {
+            Target::Pane(_, row) => Some(Removes::Row {
                 session: row.session.clone(),
                 scope: Scope::Pane(row.pane),
                 merged_in: row
@@ -1043,8 +1045,11 @@ impl Target {
                     .as_ref()
                     .and(row.cwd.clone())
                     .and_then(|cwd| Directory::parse(cwd).ok()),
+            }),
+            Target::Machine(Machine::Remote(destination)) => {
+                Some(Removes::Machine(destination.clone()))
             },
-            Target::Machine(machine) => Removes::Machine(machine.clone()),
+            Target::Machine(Machine::Local) => None,
         }
     }
 
@@ -1076,22 +1081,25 @@ impl Target {
 struct Beside {
     session: Listed,
     pane: u32,
-    cwd: String,
+    cwd: Directory,
 }
 
 impl PaneRow {
     /// The pane a key starts an agent or opens a pane beside, and the
     /// directory it works in, where a tab or a session opens too, or why
     /// there is none: a pane the daemon has said no directory of yet, nor of
-    /// an agent in it, opens nothing, rather than wherever zellij runs.
+    /// an agent in it, opens nothing, rather than wherever zellij runs, nor
+    /// one it said by no absolute path.
     fn beside(&self) -> Result<Beside, String> {
+        let pane = self.pane;
         let Some(cwd) = self.cwd.clone() else {
             return Err(format!(
-                "menu: luneta does not know yet where pane {} works; try again in a moment",
-                self.pane
+                "menu: luneta does not know yet where pane {pane} works; try again in a moment"
             ));
         };
-        Ok(Beside { session: self.session.clone(), pane: self.pane, cwd })
+        let cwd =
+            Directory::parse(cwd).map_err(|why| format!("menu: where pane {pane} works, {why}"))?;
+        Ok(Beside { session: self.session.clone(), pane, cwd })
     }
 
     /// What a key that starts an agent on what the pane's shell printed
@@ -1552,7 +1560,7 @@ impl Menu {
                 (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { cwd, .. }) => {
                         keys.search = Some(Search::new());
-                        stays(Stage::Choosing(keys), Wants::Skills(cwd))
+                        stays(Stage::Choosing(keys), Wants::Skills(cwd.into()))
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1561,7 +1569,7 @@ impl Menu {
                         let command = claude(&prompt, row.branch.as_deref());
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd, opens })
+                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1584,7 +1592,7 @@ impl Menu {
                     Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Pane { beside: pane, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd, opens })
+                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1592,7 +1600,7 @@ impl Menu {
                     Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Tab { name: None, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd, opens })
+                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1624,12 +1632,7 @@ impl Menu {
                     let wants = Wants::Prunes { dir: dir.clone() };
                     stays(Stage::Sweeping { keys, dir }, wants)
                 },
-                (Pressed::Forget(Machine::Remote(destination)), _) => {
-                    Did::Closed(Done::Forget(destination))
-                },
-                (Pressed::Forget(Machine::Local), _) => {
-                    Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned()))
-                },
+                (Pressed::Forget(destination), _) => Did::Closed(Done::Forget(destination)),
                 (Pressed::Brief(scope), _) => Did::Closed(Done::Brief(target.brief(scope))),
                 (Pressed::Ask, _) => Did::Closed(Done::Ask(target.clone())),
             },
@@ -1917,7 +1920,8 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, printed.file()) };
         let stage = Stage::Opening { keys, session: session.clone() };
-        Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
+        let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
+        Did::Stays(Menu { number, target, stage }, wants)
     }
 
     /// Fills the search box with what the finder said, while it is open.
@@ -2763,7 +2767,8 @@ mod tests {
 
         // luneta goes to a new session itself.
         let (menu, _) = stays(opened(pane_row(), Some('n')));
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(Machine::Local, Starts::In(cwd)));
+        let start = Done::Start(Machine::Local, Starts::In(main_dir()));
+        assert_eq!(closed(menu.key(&char('s'))), start);
     }
 
     fn esc() -> KeyEvent {
@@ -3173,8 +3178,7 @@ mod tests {
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: Vec::new() }));
         assert_eq!(menu.target(), &pane);
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
-        let cwd = "/w/luneta/main".to_owned();
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), Starts::In(cwd)));
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), Starts::In(main_dir())));
 
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
@@ -3245,7 +3249,7 @@ mod tests {
 
         let outside = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
         let unplaced = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
-        for target in [outside, unplaced, session_row(), local_header(), remote_header()] {
+        for target in [outside, unplaced, session_row(), remote_header()] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing, "{target:?}");
@@ -3415,9 +3419,10 @@ mod tests {
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
     }
 
-    /// On a machine's header, the Delete group forgets the machine, and on
-    /// this one's says it cannot; the Brief group briefs you on every
-    /// session of every machine, or on the machine's, from any header.
+    /// On another machine's header, the Delete group forgets the machine,
+    /// and this one's has none, as luneta lists it always; the Brief group
+    /// briefs you on every session of every machine, or on the machine's,
+    /// from any header.
     #[test]
     fn a_machine_s_header_has_the_menu_forget_it() {
         let (menu, _) = stays(opened(remote_header(), Some('d')));
@@ -3430,8 +3435,7 @@ mod tests {
             ]
         );
         assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
-        let (menu, _) = stays(opened(local_header(), Some('d')));
-        assert_eq!(closed(menu.key(&char('d'))), Done::Wrong(LOCAL_STAYS.to_owned()));
+        assert!(Menu::open(1, local_header(), Some(DELETE)).is_none());
 
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         for (header, machine) in [(local_header(), Machine::Local), (remote_header(), vps())] {
@@ -3464,7 +3468,14 @@ mod tests {
             " <ESC> - Close",
         ];
         assert_eq!(root(session_row()), session);
-        assert_eq!(root(local_header()), session);
+        assert_eq!(root(remote_header()), session);
+        assert_eq!(root(local_header()), [
+            "─ luneta ──────────────────────",
+            " a  Ask",
+            " n  New ▸",
+            " b  Brief ▸",
+            " <ESC> - Close",
+        ]);
         let new = |target: Target| {
             let (menu, _) = stays(opened(target, Some(NEW)));
             text(&menu.lines(31, 9, 0).0)
@@ -3509,6 +3520,10 @@ mod tests {
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where pane 4 works")));
+        let relative = Target::Pane(Machine::Local, PaneRow { cwd: Some("w".to_owned()), ..row() });
+        let (menu, _) = stays(opened(relative, Some(NEW)));
+        let why = "menu: where pane 4 works, \"w\" is no absolute path".to_owned();
+        assert_eq!(closed(menu.key(&char('s'))), Done::Wrong(why));
     }
 
     #[test]

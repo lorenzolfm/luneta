@@ -99,10 +99,14 @@ impl Away {
     }
 
     /// The name a session luneta makes there takes, that starts as `starts`
-    /// says, as `lunetad::names::free_for` names it there, with the time just
+    /// says, as `lunetad::names::free_at` names it there, with the time just
     /// before it read which names zellij there has, by that machine's clock,
-    /// as `named_by` reads them; or why it takes none.
-    pub fn name(&mut self, starts: &Starts) -> Result<(SessionName, Option<SystemTime>), String> {
+    /// and the directory it named it for, as `named_by` reads them; or why it
+    /// takes none.
+    pub fn name(
+        &mut self,
+        starts: &Starts,
+    ) -> Result<(SessionName, Option<SystemTime>, Directory), String> {
         let dir = starts.dir().map(str::to_owned);
         let request = NameSessionRequest { on: Some(self.on()), dir };
         let named = self.answer(|mut daemon| async move { daemon.name_session(request).await })?;
@@ -577,16 +581,18 @@ async fn heard(
 }
 
 /// The name the daemon of `on` gives a session in `answer`, that starts as
-/// `starts` says, and the time it read zellij's names at there: none from a
-/// daemon older than that time, which names the session all the same, as for
-/// one to start. Or why it names none zellij would make: one older than a
-/// session in the home takes the home for an empty directory, which is none.
+/// `starts` says, the time it read zellij's names at there, and the
+/// directory it named it for: no time from a daemon older than that time,
+/// which names the session all the same, as for one to start, and the one
+/// asked from a daemon older than that directory. Or why it names none
+/// zellij would make: one older than a session in the home takes the home
+/// for an empty directory, which is none.
 fn named_by(
     on: &Destination,
     starts: &Starts,
     answer: Result<NameSessionResponse, Status>,
-) -> Result<(SessionName, Option<SystemTime>), String> {
-    let NameSessionResponse { name, named_at } = match (answer, starts) {
+) -> Result<(SessionName, Option<SystemTime>, Directory), String> {
+    let NameSessionResponse { name, named_at, dir } = match (answer, starts) {
         (Ok(answer), _) => answer,
         (Err(status), Starts::Home) if status.code() == Code::InvalidArgument => {
             let older = "its lunetad, or this one, is older than a session in its home";
@@ -596,7 +602,13 @@ fn named_by(
     };
     let name = SessionName::parse(&name)
         .map_err(|why| format!("{on}: lunetad named a session \"{name}\": {why}"))?;
-    Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok())))
+    let dir = match (dir, starts) {
+        (Some(dir), _) => Directory::parse(dir)
+            .map_err(|why| format!("{on}: lunetad named {name} for a directory: {why}"))?,
+        (None, Starts::In(dir)) => dir.clone(),
+        (None, Starts::Home) => return Err(format!("{on}: lunetad named {name} for no directory")),
+    };
+    Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok()), dir))
 }
 
 /// The directories in `answer`, in its order: those by an absolute path,
@@ -691,35 +703,46 @@ mod tests {
     }
 
     /// The daemon there names a session to make, and says when it read
-    /// zellij's names there. One older than that time says none, and its
-    /// name stands all the same, as for a session to start. A name zellij
-    /// would not take is none. One older than a session in the home calls
-    /// one there invalid, and luneta says it is older.
+    /// zellij's names there, and which directory it named it for. One older
+    /// than that time says none, and its name stands all the same, as for a
+    /// session to start; one older than that directory names it for the one
+    /// asked. A name zellij would not take is none, as is a directory by no
+    /// absolute path. One older than a session in the home calls one there
+    /// invalid, and luneta says it is older.
     #[test]
     fn a_session_is_named_there_by_a_daemon_old_or_new() {
         let on = "nixos".parse().unwrap();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let answer = |name: &str, at: Option<SystemTime>| {
-            Ok(NameSessionResponse { name: name.to_owned(), named_at: at.map(Into::into) })
+        let answer = |name: &str, at: Option<SystemTime>, dir: Option<&str>| {
+            let (name, named_at, dir) = (name.to_owned(), at.map(Into::into), dir.map(Into::into));
+            Ok(NameSessionResponse { name, named_at, dir })
         };
+        let path = |path: &str| Directory::parse(path.to_owned()).unwrap();
         let cdk = SessionName::running("cdk-2").unwrap();
-        let dir = Starts::In("/w/cdk".to_owned());
-        assert_eq!(named_by(&on, &dir, answer("cdk-2", Some(at))), Ok((cdk.clone(), Some(at))));
-        assert_eq!(named_by(&on, &dir, answer("cdk-2", None)), Ok((cdk, None)));
+        let dir = Starts::In(path("/w/cdk"));
+        let named = named_by(&on, &dir, answer("cdk-2", Some(at), Some("/w/cdk")));
+        assert_eq!(named, Ok((cdk.clone(), Some(at), path("/w/cdk"))));
+        let named = named_by(&on, &dir, answer("cdk-2", None, None));
+        assert_eq!(named, Ok((cdk, None, path("/w/cdk"))));
         let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
-        assert_eq!(named_by(&on, &dir, answer("../x", None)), Err(why.to_owned()));
+        assert_eq!(named_by(&on, &dir, answer("../x", None, None)), Err(why.to_owned()));
         let long = "x".repeat(lunetad::SESSION_NAME_BYTES_MAX + 1);
         let why = "name must be shorter than 61 bytes";
         let why = format!("nixos: lunetad named a session \"{long}\": {why}");
-        assert_eq!(named_by(&on, &dir, answer(&long, None)), Err(why));
+        assert_eq!(named_by(&on, &dir, answer(&long, None, None)), Err(why));
 
         let me = SessionName::running("me").unwrap();
-        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at))), Ok((me, Some(at))));
+        let named = named_by(&on, &Starts::Home, answer("me", Some(at), Some("/home/me")));
+        assert_eq!(named, Ok((me, Some(at), path("/home/me"))));
+        let why = "nixos: lunetad named me for no directory".to_owned();
+        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at), None)), Err(why));
+        let why = "nixos: lunetad named me for a directory: \"me\" is no absolute path".to_owned();
+        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at), Some("me"))), Err(why));
         let empty = || Err(Status::invalid_argument("dir: \"\" is no absolute path"));
         let older = "nixos: its lunetad, or this one, is older than a session in its home";
         assert_eq!(named_by(&on, &Starts::Home, empty()), Err(older.to_owned()));
         let said = "nixos: dir: \"\" is no absolute path".to_owned();
-        assert_eq!(named_by(&on, &Starts::In(String::new()), empty()), Err(said));
+        assert_eq!(named_by(&on, &dir, empty()), Err(said));
         let unreached = Err(Status::unavailable("lunetad does not reach nixos now"));
         let said = "nixos: lunetad does not reach nixos now".to_owned();
         assert_eq!(named_by(&on, &Starts::Home, unreached), Err(said));
