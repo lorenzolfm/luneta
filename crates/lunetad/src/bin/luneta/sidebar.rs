@@ -92,7 +92,7 @@ use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
-use crate::zellij::{Closes, Open, SessionName, Tab, Within};
+use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
@@ -993,11 +993,12 @@ pub enum Asked {
     /// A session with no client to make room for a tab has it come there
     /// first, while what stays takes it nowhere.
     Turn { menu: u64, on: Machine, place: PanePlace, turn: Turn },
-    /// Take zellij's client to a session it makes on `on`, that starts in
-    /// `cwd`, named for it as the picker's directories name it, with a `-2`
-    /// where a session has that name: one that runs, or one that ended, which
-    /// zellij keeps to bring back, as zellij there says then.
-    Start { on: Machine, cwd: String },
+    /// Take zellij's client to a session it makes on `on`, that starts where
+    /// `starts` says, named for that directory as the picker's directories
+    /// name it, with a `-2` where a session has that name: one that runs, or
+    /// one that ended, which zellij keeps to bring back, as zellij there says
+    /// then.
+    Start { on: Machine, starts: Starts },
     /// Take zellij's client to a session it makes on `on`, `session`, that
     /// starts in `cwd`, and have zellij open a tab of it once it is there, in
     /// `tab_cwd`, named `name`, with `command` in it, or your shell for none,
@@ -3072,7 +3073,13 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Start(on, cwd) => Asked::Start { on, cwd },
+                    Done::Start(on, starts) => match self.out_of_reach(&on) {
+                        Some(why) => {
+                            self.say(why);
+                            Asked::Nothing
+                        },
+                        None => Asked::Start { on, starts },
+                    },
                     Done::Go(on, place) => Asked::Go { on, place },
                     Done::Act(on, act) => self.delete(on, act),
                     Done::Brief(briefed) => self.brief(briefed),
@@ -3277,10 +3284,21 @@ impl Sidebar {
     /// does not reach, whether or not lunetad answers now: luneta knows none
     /// of its sessions, nor which one to leave for first.
     pub fn plan(&self, on: &Machine, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
-        if let Machine::Remote(destination) = on && self.seen(on).is_none() {
-            return Err(format!("menu: lunetad does not reach {destination} now"));
+        if let Some(why) = self.out_of_reach(on) {
+            return Err(why);
         }
         close::plan(&self.subject(on, listed, deletes))
+    }
+
+    /// What the menu says of a key that acts on `on`, another machine, while
+    /// lunetad does not reach it: none where it does, or `on` is this one.
+    fn out_of_reach(&self, on: &Machine) -> Option<String> {
+        match on {
+            Machine::Remote(destination) if self.seen(on).is_none() => {
+                Some(format!("menu: lunetad does not reach {destination} now"))
+            },
+            Machine::Remote(_) | Machine::Local => None,
+        }
     }
 
     /// What the delete is for, as the sidebar knows it: `listed`, of the
@@ -10077,6 +10095,29 @@ mod tests {
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
         assert_eq!(sidebar.on_header(), None);
+    }
+
+    /// `n s` on a machine's header starts a session on that machine, in the
+    /// home of its user there; on one lunetad does not reach now, or is
+    /// reaching, it starts none, and says so.
+    #[test]
+    fn n_s_on_a_machine_s_header_starts_a_session_in_its_home() {
+        let mut sidebar = fresh();
+        sidebar.heard(machines());
+        sidebar.focus(Keys::Sidebar);
+        for on in [Machine::Local, Machine::Remote(nixos())] {
+            sidebar.cursor = Some(Spot::Machine(on.clone()));
+            type_in(&mut sidebar, "n");
+            let start = Asked::Start { on, starts: Starts::Home };
+            assert_eq!(sidebar.key(&char('s'), moment(160_000)), start);
+        }
+        for far in ["me@vps", "pi"] {
+            sidebar.cursor = Some(Spot::Machine(Machine::Remote(far.parse().unwrap())));
+            type_in(&mut sidebar, "n");
+            assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
+            let refused = format!("menu: lunetad does not reach {far} now");
+            assert_eq!(sidebar.notice.as_deref(), Some(refused.as_str()));
+        }
     }
 
     /// What is pasted in the box `n m` opens goes in it, on one line, and a

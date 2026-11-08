@@ -11,7 +11,8 @@
 //! command a shell ran last printed, to fix what went wrong or explain it.
 //! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in, or
-//! a machine for lunetad to watch through ssh, by what you type ssh to it. `t`
+//! on a machine's header in the home of its user there, or a machine for
+//! lunetad to watch through ssh, by what you type ssh to it. `t`
 //! opens the Turn group: the pane into a tab of its own, or its tab into panes
 //! of another you pick, what runs in them running on. `d`
 //! opens the Delete group, which closes the pane or deletes its session, and
@@ -21,7 +22,8 @@
 //! Brief group, which briefs you on every session, the row's session, or the agent in its pane, or on a machine's
 //! header, the machine's sessions. luneta has no
 //! configuration to read keys for skills from, and the Claude group's are its
-//! own.
+//! own. The menu lists only the keys that work on its kind of row: a session's
+//! row and a machine's header have no pane, and none of the keys that need one.
 //!
 //! A pull request's link pasted with the sidebar's keys, or in the menu,
 //! opens it for that pull request instead: `w` makes a worktree of it, in a
@@ -62,7 +64,7 @@ use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
 use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
-use crate::zellij::SessionName;
+use crate::zellij::{SessionName, Starts};
 
 /// The key that opens the search over the skills, at the top of the menu, and
 /// what the menu says it does.
@@ -159,28 +161,6 @@ const YANK_PULL_DOES: &str = "PR link";
 /// What `y` waits for: its group in the legend holds them, and the bottom of
 /// the sidebar lists them while it waits.
 const YANKS: [Entry; 1] = [Entry::YankPull];
-
-/// What the menu says of a key that starts an agent, or opens a pane, a tab
-/// or a session, on a session's row, which the highlight is only on while it
-/// lists none of the session's panes: folded, or with none to list.
-const NO_ROW_PANE: &str = "menu: a session's row has no pane to open beside, nor a directory to \
-                           open in; highlight a pane, unfolding its session first if it is folded";
-
-/// What the menu says of such a key on a machine's header.
-const NO_MACHINE_PANE: &str = "menu: a machine's header has no pane to open beside, nor a \
-                               directory to open in; highlight a pane, unfolding the machine first \
-                               if it is folded";
-
-/// What the menu says of a key of the Turn group on a session's row, which
-/// lists no pane while the highlight is on it.
-const NO_ROW_TURN: &str =
-    "menu: a session's row has no pane to turn; highlight a pane, unfolding its session first if \
-     it is folded";
-
-/// What the menu says of such a key on a machine's header.
-const NO_MACHINE_TURN: &str =
-    "menu: a machine's header has no pane to turn; highlight a pane, unfolding the machine first \
-     if it is folded";
 
 /// What the menu says of the key that forgets a machine, on this one's
 /// header.
@@ -321,7 +301,8 @@ pub enum New {
     Pane,
     /// A tab of that pane's session.
     Tab,
-    /// A session, named for the directory, as the picker's directories are.
+    /// A session, named for the directory, as the picker's directories are;
+    /// or on a machine's header, for the home of its user.
     Session,
     /// A machine for lunetad to watch through ssh, by its destination, typed
     /// in a box: on any row.
@@ -548,6 +529,38 @@ enum Entry {
 }
 
 impl Entry {
+    /// The entry as the menu for `target` lists it: a key that works on its
+    /// kind of row, or a group with those of its keys that do; or none, for
+    /// a key that does not, or a group left with none. A key built for the
+    /// row, as the Delete group's are, works on it.
+    fn on(self, target: &Target) -> Option<Entry> {
+        let pane = matches!(target, Target::Pane(..));
+        let session = matches!(target, Target::Session(..));
+        match self {
+            Entry::Group { key, name, entries } => {
+                let entries: Vec<Entry> =
+                    entries.into_iter().filter_map(|entry| entry.on(target)).collect();
+                (!entries.is_empty()).then_some(Entry::Group { key, name, entries })
+            },
+            Entry::Search
+            | Entry::Start { .. }
+            | Entry::Last(_)
+            | Entry::New(New::Pane | New::Tab)
+            | Entry::Turn(_) => pane.then_some(self),
+            Entry::New(New::Session) => (!session).then_some(self),
+            Entry::New(New::Machine)
+            | Entry::Ask
+            | Entry::Brief(_)
+            | Entry::Close { .. }
+            | Entry::Prune { .. }
+            | Entry::Forget(_)
+            | Entry::Tab { .. }
+            | Entry::Command(_)
+            | Entry::YankPull
+            | Entry::Pull(..) => Some(self),
+        }
+    }
+
     fn key(&self) -> char {
         match self {
             Entry::Group { key, .. }
@@ -613,9 +626,19 @@ struct Keys {
 }
 
 impl Keys {
-    /// The menu's keys: `/`, which opens the search over the skills, `a`,
-    /// which opens the ask box, and the Claude, New, Turn, Delete and Brief
-    /// groups: `c t`, `c m` and `c s` start an
+    /// The keys of the menu for `target`: those of `every` that work on its
+    /// kind of row, as `Entry::on` says. A pane's row has them all; a
+    /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; and a
+    /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group.
+    fn new(target: &Target) -> Self {
+        let every = Keys::every(target.removes()).into_iter();
+        let root = every.filter_map(|entry| entry.on(target)).collect();
+        Keys { root, open: Vec::new(), search: None }
+    }
+
+    /// The menu's keys, on whatever row: `/`, which opens the search over
+    /// the skills, `a`, which opens the ask box, and the Claude, New, Turn,
+    /// Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
     /// last, `n p`, `n t` and `n s` open a pane, a tab and a
     /// session, and `n m` the box for a machine's destination, `t t` turns the
@@ -625,9 +648,9 @@ impl Keys {
     /// machine's header `d d` alone forgets the machine, and
     /// `b z`, `b s` and `b h` brief you on every session, its session and
     /// what the menu is for, or on a machine's header, its sessions.
-    fn new(removes: Removes) -> Self {
+    fn every(removes: Removes) -> Vec<Entry> {
         let start = |(key, prompt)| Entry::Start { key, prompt };
-        let root = vec![
+        vec![
             Entry::Search,
             Entry::Ask,
             Entry::Group {
@@ -669,20 +692,19 @@ impl Keys {
                 name: BRIEF_NAME,
                 entries: brief::Scope::ALL.into_iter().map(Entry::Brief).collect(),
             },
-        ];
-        Keys { root, open: Vec::new(), search: None }
+        ]
     }
 
     /// The legend: the sidebar's commands, and what `y` waits on, which it
-    /// lists as a group, then the keys at the top of the menu, but for those
-    /// a command has, or the sidebar moves with, which `m` reaches. It shows
-    /// the Delete group's key and not what it deletes, which is the row's, so
-    /// any row's will do.
+    /// lists as a group, then the keys at the top of the menu on any row, but
+    /// for those a command has, or the sidebar moves with, which `m` reaches.
+    /// It shows the Delete group's key and not what it deletes, which is the
+    /// row's, so any row's will do.
     fn legend() -> Self {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
-        root.extend(Keys::new(Removes::Machine(Machine::Local)).root.into_iter().filter(shown));
+        root.extend(Keys::every(Removes::Machine(Machine::Local)).into_iter().filter(shown));
         Keys { root, open: Vec::new(), search: None }
     }
 
@@ -1026,37 +1048,6 @@ impl Target {
         }
     }
 
-    /// The pane's row a key of the Turn group turns, or why there is none: a
-    /// session's row has no pane, nor a machine's header.
-    fn turned(&self) -> Result<&PaneRow, String> {
-        match self {
-            Target::Session(..) => Err(NO_ROW_TURN.to_owned()),
-            Target::Pane(_, row) => Ok(row),
-            Target::Machine(_) => Err(NO_MACHINE_TURN.to_owned()),
-        }
-    }
-
-    /// The pane a key starts an agent or opens a pane beside, or why there
-    /// is none: a session's row has no pane, nor a machine's header.
-    fn beside(&self) -> Result<Beside, String> {
-        match self {
-            Target::Session(..) => Err(NO_ROW_PANE.to_owned()),
-            Target::Pane(_, row) => row.beside(),
-            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
-        }
-    }
-
-    /// What a key that starts an agent on what the pane's shell printed
-    /// last starts it on, beside the pane, or why it starts none: a
-    /// session's row has no pane, nor a machine's header.
-    fn ended(&self) -> Result<(Beside, Ended), String> {
-        match self {
-            Target::Session(..) => Err(NO_ROW_PANE.to_owned()),
-            Target::Pane(_, row) => row.ended(),
-            Target::Machine(_) => Err(NO_MACHINE_PANE.to_owned()),
-        }
-    }
-
     /// What a key of the Brief group briefs you on, as `scope` says, by the
     /// row, of whichever machine: every session of every machine; or on a
     /// machine's header, its sessions; or the row's session, or the agent in
@@ -1267,8 +1258,8 @@ pub enum Done {
     /// Say why what a key asked went wrong.
     Wrong(String),
     /// Take luneta's zellij to a session it makes, on the machine, that
-    /// starts in `cwd`.
-    Start(Machine, String),
+    /// starts where `Starts` says.
+    Start(Machine, Starts),
     /// Take luneta's zellij to the pane that has the pull request's branch
     /// checked out, on the machine.
     Go(Machine, Place),
@@ -1414,7 +1405,7 @@ impl Menu {
     /// group leaves the sidebar to do. None, and no menu, for a key the menu
     /// has not.
     pub fn open(number: u64, target: Target, key: Option<char>) -> Option<Did> {
-        let keys = Keys::new(target.removes());
+        let keys = Keys::new(&target);
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
@@ -1427,7 +1418,7 @@ impl Menu {
 
     /// The menu numbered `number` for `target`, on its first group.
     pub fn new(number: u64, target: Target) -> Menu {
-        let keys = Keys::new(target.removes());
+        let keys = Keys::new(&target);
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
@@ -1535,33 +1526,46 @@ impl Menu {
     /// What `key` does to the menu, and what that leaves the sidebar to do.
     /// What a key opens, it opens beside the pane of the menu's row, in the
     /// directory it works in, and the menu waits for zellij to say it has,
-    /// but for a session, which leaves the menu done.
+    /// but for a session, which leaves the menu done: on a machine's header,
+    /// one in the home of its user. A key the menu does not list for its row
+    /// does nothing, as `Entry::on` says.
     pub fn key(self, key: &KeyEvent) -> Did {
         let Menu { number, target, stage } = self;
         let stays = |stage: Stage, wants: Wants| {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
         match stage {
-            Stage::Choosing(mut keys) => match keys.key(key) {
-                Pressed::Close => Did::Closed(Done::Nothing),
-                Pressed::Moved | Pressed::Nothing => stays(Stage::Choosing(keys), Wants::Nothing),
-                Pressed::Search => match target.beside() {
+            Stage::Choosing(mut keys) => match (keys.key(key), &target) {
+                (Pressed::Close, _) => Did::Closed(Done::Nothing),
+                (Pressed::Moved | Pressed::Nothing, _)
+                | (
+                    Pressed::Search
+                    | Pressed::Start(_)
+                    | Pressed::Last(_)
+                    | Pressed::New(New::Pane | New::Tab)
+                    | Pressed::Turn(_),
+                    Target::Session(..) | Target::Machine(_),
+                )
+                | (Pressed::New(New::Session), Target::Session(..)) => {
+                    stays(Stage::Choosing(keys), Wants::Nothing)
+                },
+                (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { cwd, .. }) => {
                         keys.search = Some(Search::new());
                         stays(Stage::Choosing(keys), Wants::Skills(cwd))
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::Start(prompt) => match target.beside() {
+                (Pressed::Start(prompt), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
-                        let command = claude(&prompt, target.branch());
+                        let command = claude(&prompt, row.branch.as_deref());
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::Last(last) => match target.ended() {
+                (Pressed::Last(last), Target::Pane(_, row)) => match row.ended() {
                     Ok((beside, ended)) => {
                         let (session, pane) = (beside.session.clone(), beside.pane);
                         let wants = Wants::Printed { session, pane, ended: ended.clone() };
@@ -1569,58 +1573,65 @@ impl Menu {
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                // A machine is added from any row: it needs no pane.
-                Pressed::New(new) => match (new, target.beside()) {
-                    (New::Machine, _) => {
-                        let stage = Stage::Ssh { keys, typed: String::new(), wrong: None };
-                        stays(stage, Wants::Nothing)
-                    },
-                    (_, Err(reason)) => Did::Closed(Done::Wrong(reason)),
-                    (New::Pane, Ok(Beside { session, pane, cwd })) => {
+                (Pressed::New(New::Machine), _) => {
+                    let stage = Stage::Ssh { keys, typed: String::new(), wrong: None };
+                    stays(stage, Wants::Nothing)
+                },
+                (Pressed::New(New::Session), Target::Machine(machine)) => {
+                    Did::Closed(Done::Start(machine.clone(), Starts::Home))
+                },
+                (Pressed::New(New::Pane), Target::Pane(_, row)) => match row.beside() {
+                    Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Pane { beside: pane, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
-                    (New::Tab, Ok(Beside { session, pane, cwd })) => {
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                (Pressed::New(New::Tab), Target::Pane(_, row)) => match row.beside() {
+                    Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Tab { name: None, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
-                    (New::Session, Ok(Beside { cwd, .. })) => {
-                        Did::Closed(Done::Start(target.machine().clone(), cwd))
-                    },
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::Turn(turning) => match target.turned() {
-                    Ok(row) => {
-                        let (session, pane) = (row.session.clone(), row.pane);
-                        match turning {
-                            TurnKey::PaneIntoTab => {
-                                let stage = Stage::Turning { keys, session: session.clone() };
-                                stays(stage, Wants::Turn { session, pane, turn: Turn::PaneIntoTab })
-                            },
-                            TurnKey::TabIntoPanes => {
-                                let stage = Stage::Listing { keys, session: session.clone(), pane };
-                                stays(stage, Wants::Tabs { session, pane })
-                            },
-                        }
+                (Pressed::New(New::Session), Target::Pane(machine, row)) => match row.beside() {
+                    Ok(Beside { cwd, .. }) => {
+                        Did::Closed(Done::Start(machine.clone(), Starts::In(cwd)))
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                Pressed::Delete { key, session, scope } => {
+                (Pressed::Turn(turning), Target::Pane(_, row)) => {
+                    let (session, pane) = (row.session.clone(), row.pane);
+                    match turning {
+                        TurnKey::PaneIntoTab => {
+                            let stage = Stage::Turning { keys, session: session.clone() };
+                            stays(stage, Wants::Turn { session, pane, turn: Turn::PaneIntoTab })
+                        },
+                        TurnKey::TabIntoPanes => {
+                            let stage = Stage::Listing { keys, session: session.clone(), pane };
+                            stays(stage, Wants::Tabs { session, pane })
+                        },
+                    }
+                },
+                (Pressed::Delete { key, session, scope }, _) => {
                     let wants = Wants::Plan { session: session.clone(), scope };
                     let delete = Delete { key, session, scope };
                     stays(Stage::Planning { keys, delete, agreed: None }, wants)
                 },
-                Pressed::Prune(dir) => {
+                (Pressed::Prune(dir), _) => {
                     let wants = Wants::Prunes { dir: dir.clone() };
                     stays(Stage::Sweeping { keys, dir }, wants)
                 },
-                Pressed::Forget(Machine::Remote(destination)) => {
+                (Pressed::Forget(Machine::Remote(destination)), _) => {
                     Did::Closed(Done::Forget(destination))
                 },
-                Pressed::Forget(Machine::Local) => Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned())),
-                Pressed::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
-                Pressed::Ask => Did::Closed(Done::Ask(target.clone())),
+                (Pressed::Forget(Machine::Local), _) => {
+                    Did::Closed(Done::Wrong(LOCAL_STAYS.to_owned()))
+                },
+                (Pressed::Brief(scope), _) => Did::Closed(Done::Brief(target.brief(scope))),
+                (Pressed::Ask, _) => Did::Closed(Done::Ask(target.clone())),
             },
             Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
                 Typed::Close => Did::Closed(Done::Nothing),
@@ -2752,7 +2763,7 @@ mod tests {
 
         // luneta goes to a new session itself.
         let (menu, _) = stays(opened(pane_row(), Some('n')));
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(Machine::Local, cwd));
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(Machine::Local, Starts::In(cwd)));
     }
 
     fn esc() -> KeyEvent {
@@ -2855,21 +2866,6 @@ mod tests {
         assert_eq!(menu.lines(31, 9, 0).0[1].to_string(), " t  pane into tab");
         let (menu, _) = stays(listing().tabs(Ok(vec![other_tab(7, "a"), other_tab(2, "b")])));
         assert_eq!(closed(menu.key(&esc())), Done::Nothing);
-    }
-
-    /// A session's row and a machine's header have no pane to turn, and say
-    /// so as the key is pressed.
-    #[test]
-    fn a_key_of_the_turn_group_needs_a_pane_s_row() {
-        for (target, why) in [
-            (session_row(), NO_ROW_TURN),
-            (Target::Machine(Machine::Local), NO_MACHINE_TURN),
-        ] {
-            for key in ['t', 'p'] {
-                let (menu, _) = stays(opened(target.clone(), Some(TURN)));
-                assert_eq!(closed(menu.key(&char(key))), Done::Wrong(why.to_owned()));
-            }
-        }
     }
 
     #[test]
@@ -3069,7 +3065,6 @@ mod tests {
             "menu: what pane 4's shell ran is in words this luneta cannot read, as a newer \
              lunetad's"
         );
-        assert_eq!(refused(session_row()), NO_ROW_PANE);
     }
 
     /// `a` closes the menu for the sidebar to open the ask box, for the row
@@ -3179,7 +3174,7 @@ mod tests {
         assert_eq!(menu.target(), &pane);
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
         let cwd = "/w/luneta/main".to_owned();
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), cwd));
+        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), Starts::In(cwd)));
 
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
@@ -3422,8 +3417,7 @@ mod tests {
 
     /// On a machine's header, the Delete group forgets the machine, and on
     /// this one's says it cannot; the Brief group briefs you on every
-    /// session of every machine, or on the machine's, from any header; and a
-    /// key that opens beside a pane says the header has none.
+    /// session of every machine, or on the machine's, from any header.
     #[test]
     fn a_machine_s_header_has_the_menu_forget_it() {
         let (menu, _) = stays(opened(remote_header(), Some('d')));
@@ -3449,14 +3443,68 @@ mod tests {
                 assert_eq!(closed(menu.key(&char(key))), Done::Brief(briefed), "{key}");
             }
         }
-        let (menu, _) = stays(opened(remote_header(), Some('n')));
-        assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_MACHINE_PANE.to_owned()));
+    }
+
+    /// The menu for a session's row or a machine's header lists only the
+    /// keys that work there, each group with those of its own, and none left
+    /// with none. A key it does not list does nothing, at the top of the
+    /// sidebar too, where it opens no menu.
+    #[test]
+    fn the_menu_lists_only_the_keys_that_work_on_its_row() {
+        let root = |target: Target| {
+            let (menu, _) = stays(opened(target, None));
+            text(&menu.lines(31, 9, 0).0)
+        };
+        let session = [
+            "─ luneta ──────────────────────",
+            " a  Ask",
+            " n  New ▸",
+            " d  Delete ▸",
+            " b  Brief ▸",
+            " <ESC> - Close",
+        ];
+        assert_eq!(root(session_row()), session);
+        assert_eq!(root(local_header()), session);
+        let new = |target: Target| {
+            let (menu, _) = stays(opened(target, Some(NEW)));
+            text(&menu.lines(31, 9, 0).0)
+        };
+        assert_eq!(new(session_row()), [
+            "─ New ─────────────────────────",
+            " m  new machine",
+            " <BS> - Back, <ESC> - Close",
+        ]);
+        assert_eq!(new(remote_header()), [
+            "─ New ─────────────────────────",
+            " s  new session",
+            " m  new machine",
+            " <BS> - Back, <ESC> - Close",
+        ]);
+        let (menu, _) = stays(opened(session_row(), Some(DELETE)));
+        let deletes = [" d  delete the session", " s  delete the session"];
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], deletes);
+
+        let press = |target: &Target, group: Option<char>, key: char| {
+            let (menu, _) = stays(opened(target.clone(), group));
+            let (menu, wants) = stays(menu.key(&char(key)));
+            (text(&menu.lines(31, 9, 0).0)[0].clone(), wants)
+        };
+        let first = || ("─ luneta ──────────────────────".to_owned(), Wants::Nothing);
+        let new = || ("─ New ─────────────────────────".to_owned(), Wants::Nothing);
+        for target in [session_row(), local_header(), remote_header()] {
+            for group in [SEARCH, SKILLS, TURN] {
+                assert!(Menu::open(1, target.clone(), Some(group)).is_none(), "{group}");
+                assert_eq!(press(&target, None, group), first(), "{group}");
+            }
+            for key in ['p', 't'] {
+                assert_eq!(press(&target, Some(NEW), key), new(), "{key}");
+            }
+        }
+        assert_eq!(press(&session_row(), Some(NEW), 's'), new());
     }
 
     #[test]
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
-        let (menu, _) = stays(opened(session_row(), Some('n')));
-        assert_eq!(closed(menu.key(&char('p'))), Done::Wrong(NO_ROW_PANE.to_owned()));
         let unknown = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));

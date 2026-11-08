@@ -345,7 +345,10 @@ message KeepPrintedResponse {
 
 message NameSessionRequest {
   On on = 1;
-  string dir = 2;
+  // The directory, by its absolute path: one by another, as an empty one, is
+  // invalid. Absent for the home of the daemon's user, which a daemon older
+  // than this absence takes for an empty one.
+  optional string dir = 2;
 }
 
 message NameSessionResponse {

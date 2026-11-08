@@ -686,11 +686,16 @@ impl Daemon for Host {
         request: Request<NameSessionRequest>,
     ) -> Result<Response<NameSessionResponse>, Status> {
         let NameSessionRequest { on, dir } = request.into_inner();
-        let dir = directory("dir", dir)?;
+        let dir = dir.map(|dir| directory("dir", dir)).transpose()?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.name_session(NameSessionRequest { on: None, dir: dir.into() }).await;
+            let dir = dir.map(String::from);
+            return daemon.name_session(NameSessionRequest { on: None, dir }).await;
         }
-        let named = task::spawn_blocking(move || names::free_for(dir.as_str())).await;
+        let named = task::spawn_blocking(move || {
+            let dir = dir.map_or_else(names::home, Ok)?;
+            names::free_for(dir.as_str())
+        })
+        .await;
         let named = named.map_err(|error| unfinished(&error))?;
         let (name, since) = named.map_err(Status::failed_precondition)?;
         let named_at = Some(since.into());

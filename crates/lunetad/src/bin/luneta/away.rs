@@ -38,9 +38,10 @@ use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
-use tonic::{Response, Status, Streaming};
+use tonic::{Code, Response, Status, Streaming};
 
 use crate::daemon;
+use crate::zellij::Starts;
 
 /// How long luneta waits for an answer on a thread of its own: the daemon
 /// answers in 5 seconds, or says it did not, and a connection that stalls
@@ -97,14 +98,15 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.go(request).await })
     }
 
-    /// The name a session luneta makes for `dir` there takes, as
-    /// `lunetad::names::free_for` names it there, with the time just before
-    /// it read which names zellij there has, by that machine's clock, as
-    /// `named_by` reads them; or why it takes none.
-    pub fn name(&mut self, dir: &str) -> Result<(SessionName, Option<SystemTime>), String> {
-        let request = NameSessionRequest { on: Some(self.on()), dir: dir.to_owned() };
-        let named = self.ask(|mut daemon| async move { daemon.name_session(request).await })?;
-        named_by(&self.on, named)
+    /// The name a session luneta makes there takes, that starts as `starts`
+    /// says, as `lunetad::names::free_for` names it there, with the time just
+    /// before it read which names zellij there has, by that machine's clock,
+    /// as `named_by` reads them; or why it takes none.
+    pub fn name(&mut self, starts: &Starts) -> Result<(SessionName, Option<SystemTime>), String> {
+        let dir = starts.dir().map(str::to_owned);
+        let request = NameSessionRequest { on: Some(self.on()), dir };
+        let named = self.answer(|mut daemon| async move { daemon.name_session(request).await })?;
+        named_by(&self.on, starts, named)
     }
 
     /// The time just before zellij there read which names it has, by that
@@ -519,12 +521,23 @@ impl Away {
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
+        self.answer(asked)?.map_err(|status| self.on.said(&status))
+    }
+
+    /// What the daemon answers `asked`, within its patience, or what it
+    /// refused it with, or that it did not answer.
+    fn answer<T, F>(
+        &mut self,
+        asked: impl FnOnce(DaemonClient<Channel>) -> F,
+    ) -> Result<Result<T, Status>, String>
+    where
+        F: Future<Output = Result<tonic::Response<T>, Status>>,
+    {
         let (patience, daemon) = (self.patience, self.daemon.clone());
         let asked = async move { tokio::time::timeout(patience, asked(daemon)).await };
         let (on, secs) = (&self.on, self.patience.as_secs_f32());
         match self.runtime.block_on(asked) {
-            Ok(Ok(answer)) => Ok(answer.into_inner()),
-            Ok(Err(status)) => Err(on.said(&status)),
+            Ok(answer) => Ok(answer.map(Response::into_inner)),
             Err(_) => Err(format!("{on}: lunetad did not answer in {secs}s")),
         }
     }
@@ -563,15 +576,24 @@ async fn heard(
     }
 }
 
-/// The name the daemon of `on` gives a session in `answer`, and the time it
-/// read zellij's names at there: none from a daemon older than that time,
-/// which names the session all the same, as for one to start. Or why it
-/// names none zellij would make.
+/// The name the daemon of `on` gives a session in `answer`, that starts as
+/// `starts` says, and the time it read zellij's names at there: none from a
+/// daemon older than that time, which names the session all the same, as for
+/// one to start. Or why it names none zellij would make: one older than a
+/// session in the home takes the home for an empty directory, which is none.
 fn named_by(
     on: &Destination,
-    answer: NameSessionResponse,
+    starts: &Starts,
+    answer: Result<NameSessionResponse, Status>,
 ) -> Result<(SessionName, Option<SystemTime>), String> {
-    let NameSessionResponse { name, named_at } = answer;
+    let NameSessionResponse { name, named_at } = match (answer, starts) {
+        (Ok(answer), _) => answer,
+        (Err(status), Starts::Home) if status.code() == Code::InvalidArgument => {
+            let older = "its lunetad, or this one, is older than a session in its home";
+            return Err(format!("{on}: {older}"));
+        },
+        (Err(status), _) => return Err(on.said(&status)),
+    };
     let name = SessionName::parse(&name)
         .map_err(|why| format!("{on}: lunetad named a session \"{name}\": {why}"))?;
     Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok())))
@@ -671,24 +693,36 @@ mod tests {
     /// The daemon there names a session to make, and says when it read
     /// zellij's names there. One older than that time says none, and its
     /// name stands all the same, as for a session to start. A name zellij
-    /// would not take is none.
+    /// would not take is none. One older than a session in the home calls
+    /// one there invalid, and luneta says it is older.
     #[test]
     fn a_session_is_named_there_by_a_daemon_old_or_new() {
         let on = "nixos".parse().unwrap();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let answer = |name: &str, at: Option<SystemTime>| NameSessionResponse {
-            name: name.to_owned(),
-            named_at: at.map(Into::into),
+        let answer = |name: &str, at: Option<SystemTime>| {
+            Ok(NameSessionResponse { name: name.to_owned(), named_at: at.map(Into::into) })
         };
         let cdk = SessionName::running("cdk-2").unwrap();
-        assert_eq!(named_by(&on, answer("cdk-2", Some(at))), Ok((cdk.clone(), Some(at))));
-        assert_eq!(named_by(&on, answer("cdk-2", None)), Ok((cdk, None)));
+        let dir = Starts::In("/w/cdk".to_owned());
+        assert_eq!(named_by(&on, &dir, answer("cdk-2", Some(at))), Ok((cdk.clone(), Some(at))));
+        assert_eq!(named_by(&on, &dir, answer("cdk-2", None)), Ok((cdk, None)));
         let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
-        assert_eq!(named_by(&on, answer("../x", None)), Err(why.to_owned()));
+        assert_eq!(named_by(&on, &dir, answer("../x", None)), Err(why.to_owned()));
         let long = "x".repeat(lunetad::SESSION_NAME_BYTES_MAX + 1);
         let why = "name must be shorter than 61 bytes";
         let why = format!("nixos: lunetad named a session \"{long}\": {why}");
-        assert_eq!(named_by(&on, answer(&long, None)), Err(why));
+        assert_eq!(named_by(&on, &dir, answer(&long, None)), Err(why));
+
+        let me = SessionName::running("me").unwrap();
+        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at))), Ok((me, Some(at))));
+        let empty = || Err(Status::invalid_argument("dir: \"\" is no absolute path"));
+        let older = "nixos: its lunetad, or this one, is older than a session in its home";
+        assert_eq!(named_by(&on, &Starts::Home, empty()), Err(older.to_owned()));
+        let said = "nixos: dir: \"\" is no absolute path".to_owned();
+        assert_eq!(named_by(&on, &Starts::In(String::new()), empty()), Err(said));
+        let unreached = Err(Status::unavailable("lunetad does not reach nixos now"));
+        let said = "nixos: lunetad does not reach nixos now".to_owned();
+        assert_eq!(named_by(&on, &Starts::Home, unreached), Err(said));
     }
 
     /// The directories another machine's zoxide knows are those of the

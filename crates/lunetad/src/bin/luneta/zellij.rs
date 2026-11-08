@@ -1053,6 +1053,25 @@ impl Unused {
     }
 }
 
+/// Where a session luneta makes starts: in a directory, by its absolute
+/// path, or in the home of the user of the machine it is made on, which only
+/// that machine's daemon knows of another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Starts {
+    In(String),
+    Home,
+}
+
+impl Starts {
+    /// The directory it starts in: none for the home.
+    pub fn dir(&self) -> Option<&str> {
+        match self {
+            Starts::In(dir) => Some(dir),
+            Starts::Home => None,
+        }
+    }
+}
+
 /// The name a session luneta makes for `dir` on this machine takes, as
 /// `lunetad::names::free_for` names it, or why it takes none.
 pub fn unused_for(dir: &str) -> Result<Unused, String> {
@@ -1060,12 +1079,29 @@ pub fn unused_for(dir: &str) -> Result<Unused, String> {
     Ok(Unused { on: Machine::Local, name, since: Some(since) })
 }
 
-/// The name a session luneta makes for `dir` on `destination` takes, as its
-/// daemon there names it within `away::QUICK`, as luneta's screen waits on
-/// it, or why it takes none.
-pub fn name_away(destination: &Destination, dir: &str) -> Result<Unused, String> {
-    let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(dir));
+/// The name a session luneta makes on `destination` takes, that starts as
+/// `starts` says, as its daemon there names it within `away::QUICK`, as
+/// luneta's screen waits on it, or why it takes none.
+pub fn name_away(destination: &Destination, starts: &Starts) -> Result<Unused, String> {
+    let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(starts));
     named.map(|(name, since)| Unused { on: Machine::Remote(destination.clone()), name, since })
+}
+
+/// The name a session luneta makes on `on` takes, that starts as `starts`
+/// says, as `unused_for` and `name_away` name it, and the directory luneta
+/// makes it in: none for the home of another machine's user, where ssh
+/// starts zellij's client there. Or why it takes none.
+pub fn unused_at(on: &Machine, starts: Starts) -> Result<(Unused, Option<String>), String> {
+    match (on, starts) {
+        (Machine::Local, Starts::In(dir)) => Ok((unused_for(&dir)?, Some(dir))),
+        (Machine::Local, Starts::Home) => {
+            let home = String::from(lunetad::names::home()?);
+            Ok((unused_for(&home)?, Some(home)))
+        },
+        (Machine::Remote(destination), starts) => {
+            Ok((name_away(destination, &starts)?, starts.dir().map(str::to_owned)))
+        },
+    }
 }
 
 /// What luneta knows of the clients of `session` on `destination`, which
@@ -1115,7 +1151,8 @@ pub fn makes_away(
     to: &SessionName,
     cwd: &str,
 ) -> Result<Unused, String> {
-    let named = name_away(destination, cwd).map_err(|why| format!("no session made: {why}"))?;
+    let named = name_away(destination, &Starts::In(cwd.to_owned()));
+    let named = named.map_err(|why| format!("no session made: {why}"))?;
     if named.name != *to {
         return Err(format!(
             "no session made: {to} is taken on {destination} now, which names one {} for {cwd}",

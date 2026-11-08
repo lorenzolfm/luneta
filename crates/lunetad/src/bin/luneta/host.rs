@@ -2165,12 +2165,13 @@ impl App {
             Asked::Turn { menu, on, place, turn } => {
                 zellij::turn(menu, &on, place, turn, &self.events);
             },
-            Asked::Start { on, cwd } => {
-                let unused = match &on {
-                    Machine::Local => zellij::unused_for(&cwd),
-                    Machine::Remote(destination) => zellij::name_away(destination, &cwd),
-                };
-                self.make(unused.map_err(|why| format!("menu: {why}")), Some(cwd.as_str()), None);
+            Asked::Start { on, starts } => {
+                match zellij::unused_at(&on, starts) {
+                    Ok((unused, cwd)) => {
+                        self.make(Ok(unused), cwd.as_deref(), None);
+                    },
+                    Err(why) => self.sidebar.notify(format!("menu: {why}")),
+                }
                 self.leave();
             },
             // The menu waits until zellij has opened it, and takes the keys
