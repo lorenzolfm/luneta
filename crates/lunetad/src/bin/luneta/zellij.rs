@@ -899,8 +899,7 @@ fn carried_here(carry: &Carry) -> Result<Moved, String> {
     let folder = lunetad::folder::find()
         .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
     let host = commands::host(&folder)?;
-    let (sessions, agents) = (&host.sessions, &host.agents);
-    let planned = carries::planned(sessions, agents, &carry.from, carry.pane, carry.whole)?;
+    let planned = carry.planned(&host.sessions, &host.agents)?;
     carries::carried(&folder, carry, &planned)
 }
 

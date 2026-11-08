@@ -895,8 +895,7 @@ impl Daemon for Host {
             return Ok(Response::new(Box::pin(answer)));
         }
         let host = self.watched(None).await?;
-        let (sessions, agents) = (&host.sessions, &host.agents);
-        let planned = carries::planned(sessions, agents, &carry.from, carry.pane, carry.whole);
+        let planned = carry.planned(&host.sessions, &host.agents);
         let planned = planned.map_err(Status::failed_precondition)?;
         let folder = self.folder.clone();
         let answer = late(move || {

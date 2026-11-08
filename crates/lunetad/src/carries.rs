@@ -96,19 +96,42 @@ pub enum Lands {
 }
 
 /// The pane `pane` of `from`, or every pane of its tab, as `whole` says, on
-/// its way to `to`, where it `lands`. Where it would end `from`, as the last
-/// of its panes does, it goes only where `ending` says it may: you said so.
+/// its way to `to`, another session, where it `lands`. Where it would end
+/// `from`, as the last of its panes does, it goes only where `ending` says it
+/// may: you said so.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Carry {
-    pub from: Seat,
-    pub pane: u32,
-    pub whole: Whole,
-    pub to: Seat,
-    pub lands: Lands,
-    pub ending: bool,
+    from: Seat,
+    pane: u32,
+    whole: Whole,
+    to: Seat,
+    lands: Lands,
+    ending: bool,
 }
 
 impl Carry {
+    /// What goes, as its fields say, or why it cannot: it would go to the
+    /// session it leaves.
+    pub fn new(
+        from: Seat,
+        pane: u32,
+        whole: Whole,
+        to: Seat,
+        lands: Lands,
+        ending: bool,
+    ) -> Result<Carry, String> {
+        if from.session == to.session {
+            return Err(format!("to: {} is the session it leaves", to.session));
+        }
+        Ok(Carry { from, pane, whole, to, lands, ending })
+    }
+
+    /// What it takes along, among `sessions` and their `agents`, as
+    /// `planned` says.
+    pub fn planned(&self, sessions: &[Session], agents: &[Agent]) -> Result<Planned, String> {
+        planned(sessions, agents, &self.from, self.pane, self.whole)
+    }
+
     /// The question that has zellij carry it on the machine `on` names, or on
     /// the daemon's own, where it names none.
     #[must_use]
@@ -139,16 +162,13 @@ impl Carry {
             request;
         let from = Seat::of("session", &session, started_at)?;
         let to = Seat::of("to", &to, to_started_at)?;
-        if from.session == to.session {
-            return Err(format!("to: {} is the session it leaves", to.session));
-        }
         let lands = match lands {
             Some(Landing::Beside(beside)) => Lands::Beside(beside),
             Some(Landing::NewTab(())) => Lands::Tab,
             None => return Err("lands: neither beside a pane nor in a tab".to_owned()),
         };
         let whole = if tab { Whole::Tab } else { Whole::Pane };
-        Ok((on, Carry { from, pane, whole, to, lands, ending }))
+        Ok((on, Carry::new(from, pane, whole, to, lands, ending)?))
     }
 }
 
@@ -157,7 +177,7 @@ impl Carry {
 pub enum Again {
     /// Claude Code's agent `pid` resumes its session `id`, where it started,
     /// `cwd`.
-    Resumed { pid: u32, id: String, cwd: String },
+    Resumed { pid: u32, id: SessionId, cwd: String },
     /// Your shell, where the pane worked.
     Shell { cwd: String },
 }
@@ -222,11 +242,10 @@ fn resumed(agent: &Agent) -> Result<Again, String> {
             return Err("its agent says nothing of what it does".to_owned());
         },
     }
-    if SessionId::parse(&agent.session_id).is_none() {
+    let Some(id) = SessionId::parse(&agent.session_id) else {
         return Err(format!("its agent's session has no id to resume: {:?}", agent.session_id));
-    }
-    let (pid, id, cwd) = (agent.pid, agent.session_id.clone(), agent.cwd.clone());
-    Ok(Again::Resumed { pid, id, cwd })
+    };
+    Ok(Again::Resumed { pid: agent.pid, id, cwd: agent.cwd.clone() })
 }
 
 /// The panes a move takes, in the order they open again, each by its id with
@@ -384,7 +403,7 @@ const RUNTIMES: [&str; 2] = ["node", "bun"];
 /// out, each with what it takes, as `TAKES` says, and not what it was asked as
 /// it started, which its session holds already, nor anything after `--`. Or
 /// why there is none: an argument that is no text, or no program.
-pub fn resuming(args: &[OsString], id: &str) -> Result<Vec<String>, String> {
+pub fn resuming(args: &[OsString], id: &SessionId) -> Result<Vec<String>, String> {
     let mut texts = Vec::with_capacity(args.len());
     for arg in args {
         texts.push(arg.to_str().ok_or_else(|| format!("{} is no text", arg.display()))?);
@@ -429,7 +448,7 @@ pub fn resuming(args: &[OsString], id: &str) -> Result<Vec<String>, String> {
             kept.extend(option.into_iter().map(str::to_owned));
         }
     }
-    kept.extend(["--resume".to_owned(), id.to_owned()]);
+    kept.extend(["--resume".to_owned(), id.as_str().to_owned()]);
     Ok(kept)
 }
 
@@ -694,8 +713,12 @@ mod tests {
         args.iter().map(OsString::from).collect()
     }
 
+    fn id() -> SessionId {
+        SessionId::parse(ID).unwrap()
+    }
+
     fn resumed_from(started: &[&str]) -> Vec<String> {
-        resuming(&args(started), ID).unwrap()
+        resuming(&args(started), &id()).unwrap()
     }
 
     fn with_resume(kept: &[&str]) -> Vec<String> {
@@ -772,9 +795,9 @@ mod tests {
     fn a_command_line_that_does_not_read_resumes_nothing() {
         use std::os::unix::ffi::OsStringExt;
 
-        assert!(resuming(&[], ID).is_err());
+        assert!(resuming(&[], &id()).is_err());
         let garbled = vec![OsString::from("claude"), OsString::from_vec(vec![0xff])];
-        assert!(resuming(&garbled, ID).unwrap_err().contains("is no text"));
+        assert!(resuming(&garbled, &id()).unwrap_err().contains("is no text"));
     }
 
     /// What a hand types to start it again is quoted where a shell would read
@@ -842,8 +865,7 @@ mod tests {
         let pane = pane(3, 0, "claude");
         let again = |agent: &Agent| super::again(&pane, Some(agent));
         let idle = agent(3, Status::Idle);
-        let resumed =
-            Again::Resumed { pid: 4003, id: ID.to_owned(), cwd: "/w/luneta/main".to_owned() };
+        let resumed = Again::Resumed { pid: 4003, id: id(), cwd: "/w/luneta/main".to_owned() };
         assert_eq!(again(&idle), Ok(resumed));
         assert!(again(&agent(3, Status::Busy)).unwrap_err().contains("at work"));
         assert!(again(&agent(3, Status::Waiting)).unwrap_err().contains("waits for an answer"));

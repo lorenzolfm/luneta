@@ -90,7 +90,7 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, Listed, PanePlace, Place, Sidebar};
+use crate::sidebar::{self, Asked, Follows, HereAgent, Keys, Listed, PanePlace, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
@@ -2168,19 +2168,19 @@ impl App {
                     self.sidebar.close_menu();
                 }
             },
-            Asked::Carry { on, carry, to, follows, first } => {
-                let machine = on.clone();
+            Asked::Carry { on, carry, landing, follows } => {
+                let (machine, to) = (on.clone(), landing.session().clone());
                 let owed = Due::new(&self.events, move |carried| Event::Carried {
                     on: machine,
                     to,
-                    follows,
+                    follows: follows.pane(),
                     carried,
                 });
-                match first {
-                    Some(place) => {
-                        self.go(&on, &place, Some(After::Carry(owed, carry)));
+                match follows {
+                    Follows::First(_) => {
+                        self.go(&on, &landing.place(), Some(After::Carry(owed, carry)));
                     },
-                    None => zellij::carry(&on, carry, owed),
+                    Follows::Stays | Follows::After(_) => zellij::carry(&on, carry, owed),
                 }
             },
             Asked::Tabs { menu, on, session, pane } => {

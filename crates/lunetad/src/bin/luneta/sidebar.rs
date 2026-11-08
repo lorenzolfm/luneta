@@ -1002,12 +1002,10 @@ pub enum Asked {
     /// Ask zellij on `on` which tabs of `session` are not that of its pane
     /// `pane`, for the menu numbered `menu` to turn that tab into.
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
-    /// Have zellij on `on` move what `carry` says to `to`, another session
-    /// there, and take zellij's client to where its pane `follows` opens, if
-    /// it was on one of them. Where the client is to leave first, as its
-    /// session ends with the move, or `to` has no client to make room for a
-    /// tab, it goes to `first` before.
-    Carry { on: Machine, carry: Carry, to: Listed, follows: Option<u32>, first: Option<Place> },
+    /// Have zellij on `on` move what `carry` says to where it lands, in
+    /// another session there, and take zellij's client with it as `follows`
+    /// says.
+    Carry { on: Machine, carry: Carry, landing: Landing, follows: Follows },
     /// Have zellij on `on` turn the pane `place` as `turn` says, for the menu
     /// numbered `menu`, which takes its client there once zellij says it did.
     /// A session with no client to make room for a tab has it come there
@@ -1371,9 +1369,30 @@ impl Carrying {
 /// of its own there, by the session's row; or beside a pane of it, by the
 /// pane's, in its tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Landing {
+pub enum Landing {
     Tab(Listed),
     Beside(PanePlace),
+}
+
+/// Where zellij's client goes with what moves: it stays, on none of it; or
+/// it goes to the pane it is on, by its id, once that opens where it lands,
+/// and `First` goes there before, as the session it leaves ends with the
+/// move, or the one it goes to has no client to make room for a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Follows {
+    Stays,
+    After(u32),
+    First(u32),
+}
+
+impl Follows {
+    /// The pane it is on, which it goes with.
+    pub fn pane(self) -> Option<u32> {
+        match self {
+            Follows::Stays => None,
+            Follows::After(pane) | Follows::First(pane) => Some(pane),
+        }
+    }
 }
 
 impl Lifting {
@@ -1387,14 +1406,14 @@ impl Lifting {
 }
 
 impl Landing {
-    fn session(&self) -> &Listed {
+    pub fn session(&self) -> &Listed {
         match self {
             Landing::Tab(session) | Landing::Beside(PanePlace { session, .. }) => session,
         }
     }
 
     /// Where it is, as a go takes zellij's client there.
-    fn place(&self) -> Place {
+    pub fn place(&self) -> Place {
         match self {
             Landing::Tab(session) => Place::Session(session.clone()),
             Landing::Beside(place) => Place::Pane(place.clone()),
@@ -2888,7 +2907,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
-            return self.carried_off(carrying, &landing, true);
+            return self.carried_off(carrying, landing, true);
         }
         self.settle(None, false);
         Asked::Nothing
@@ -3051,14 +3070,14 @@ impl Sidebar {
             self.moving = Moving::Asking(carrying, landing);
             return Asked::Nothing;
         }
-        self.carried_off(carrying, &landing, false)
+        self.carried_off(carrying, landing, false)
     }
 
     /// Has luneta move `carrying` to `landing`, where it may end its session
     /// as `ending` says, and take zellij's client with it where it is on one
     /// of its panes: there first, where the session it leaves ends, or the
     /// one it goes to has no client to make room for a tab.
-    fn carried_off(&mut self, carrying: Carrying, landing: &Landing, ending: bool) -> Asked {
+    fn carried_off(&mut self, carrying: Carrying, landing: Landing, ending: bool) -> Asked {
         self.moving = Moving::Still;
         self.settle(None, false);
         let Carrying { machine, place, whole } = carrying;
@@ -3068,28 +3087,31 @@ impl Sidebar {
             |planned| planned.goes.iter().map(|(pane, _)| *pane).collect(),
         );
         let here = self.here_place().ok().filter(|_| machine == self.on);
-        let follows = here
+        let on_one = here
             .filter(|here| here.session == place.session && panes.contains(&here.pane))
             .map(|here| here.pane);
-        let to = landing.session().clone();
+        let to = landing.session();
         let clientless = || {
             let sessions = self.seen(&machine).map_or(&[][..], |seen| seen.sessions);
-            let session = sessions.iter().find(|session| Listed::of(session).as_ref() == Some(&to));
+            let session = sessions.iter().find(|session| Listed::of(session).as_ref() == Some(to));
             session.is_none_or(|session| {
                 session.clients.as_ref().is_none_or(|clients| clients.clients.is_empty())
             })
         };
         let leaves = ending || (matches!(landing, Landing::Tab(_)) && clientless());
-        let first = follows.filter(|_| leaves).map(|_| landing.place());
-        let carry = Carry {
-            from: place.session.seat(),
-            pane: place.pane,
-            whole,
-            to: to.seat(),
-            lands: landing.lands(),
-            ending,
+        let follows = match on_one {
+            None => Follows::Stays,
+            Some(pane) if leaves => Follows::First(pane),
+            Some(pane) => Follows::After(pane),
         };
-        Asked::Carry { on: machine, carry, to, follows, first }
+        let (from, lands) = (place.session.seat(), landing.lands());
+        match Carry::new(from, place.pane, whole, to.seat(), lands, ending) {
+            Ok(carry) => Asked::Carry { on: machine, carry, landing, follows },
+            Err(why) => {
+                self.notify(format!("not moved: {why}"));
+                Asked::Nothing
+            },
+        }
     }
 
     /// What came of moving panes of `on` to `to`, as luneta asked, with
@@ -11089,16 +11111,13 @@ mod tests {
     /// where it `lands`, the session staying, with zellij's client nowhere
     /// on it.
     fn carried_off(pane: u32, whole: Whole, lands: Lands) -> Asked {
-        let carry = Carry {
-            from: listed("work", 10).seat(),
-            pane,
-            whole,
-            to: listed("play", 20).seat(),
-            lands,
-            ending: false,
+        let play = listed("play", 20);
+        let carry = Carry::new(listed("work", 10).seat(), pane, whole, play.seat(), lands, false);
+        let landing = match lands {
+            Lands::Beside(beside) => Landing::Beside(PanePlace { session: play, pane: beside }),
+            Lands::Tab => Landing::Tab(play),
         };
-        let to = listed("play", 20);
-        Asked::Carry { on: Machine::Local, carry, to, follows: None, first: None }
+        Asked::Carry { on: Machine::Local, carry: carry.unwrap(), landing, follows: Follows::Stays }
     }
 
     fn enter() -> KeyEvent {
@@ -11224,16 +11243,11 @@ mod tests {
 
         type_in(&mut sidebar, "VK");
         sidebar.key(&enter(), moment(160_000));
-        let carry = Carry {
-            from: listed("play", 20).seat(),
-            pane: 5,
-            whole: Whole::Pane,
-            to: listed("work", 10).seat(),
-            lands: Lands::Beside(3),
-            ending: true,
-        };
-        let to = listed("work", 10);
-        let asked = Asked::Carry { on: Machine::Local, carry, to, follows: None, first: None };
+        let work = listed("work", 10);
+        let (from, beside) = (listed("play", 20).seat(), Lands::Beside(3));
+        let carry = Carry::new(from, 5, Whole::Pane, work.seat(), beside, true).unwrap();
+        let landing = Landing::Beside(PanePlace { session: work, pane: 3 });
+        let asked = Asked::Carry { on: Machine::Local, carry, landing, follows: Follows::Stays };
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), asked);
     }
 
@@ -11252,10 +11266,10 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "VK");
         sidebar.key(&enter(), moment(160_000));
-        let Asked::Carry { follows, first, .. } = sidebar.key(&char('y'), moment(160_000)) else {
+        let Asked::Carry { follows, landing, .. } = sidebar.key(&char('y'), moment(160_000)) else {
             panic!("no move");
         };
-        assert_eq!((follows, first), (Some(5), Some(pane_of("work", 10, 3))));
+        assert_eq!((follows, landing.place()), (Follows::First(5), pane_of("work", 10, 3)));
 
         let work = listed("work", 10);
         let opened = sidebar.carried(Machine::Local, &work, Some(5), Ok(Moved::All(vec![(5, 7)])));
