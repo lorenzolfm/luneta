@@ -17,6 +17,8 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fs::{File, TryLockError};
+use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
@@ -47,6 +49,12 @@ const ENDING: Duration = Duration::from_secs(5);
 /// How long a move takes at the most: zellij's answers to a few questions,
 /// and an agent's end.
 pub const CARRYING: Duration = Duration::from_secs(15);
+
+/// The file a move holds a lock on in lunetad's folder, from its first look
+/// at zellij to its last open: one moves at a time on a machine, as two of
+/// one pane would both close it, zellij taking a close of a pane that is
+/// gone, and both open it again.
+pub const MOVING: &str = "carry.lock";
 
 /// A session, by its name, and when it started: one that took the name since
 /// is another.
@@ -523,6 +531,18 @@ fn quoted(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
+/// The lock on `MOVING` in `folder`, lunetad's, which lets go as it drops, or
+/// why there is none: another move holds it.
+fn alone(folder: &Path) -> Result<File, String> {
+    let path = folder.join(MOVING);
+    let lock = File::create(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err("another move is under way".to_owned()),
+        Err(TryLockError::Error(error)) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
 /// Whether the process `pid` ends within `ENDING`.
 fn ended(pid: u32) -> bool {
     let (tell, heard) = mpsc::channel();
@@ -532,13 +552,19 @@ fn ended(pid: u32) -> bool {
     matches!(heard.recv_timeout(ENDING), Ok(Ok(())))
 }
 
-/// Moves what `planned` takes of `carry`: closes the pane, or its tab, or the
-/// session where it may, and opens each pane again where it lands, once what
-/// ran in it has ended. It answers with the terminal each opened as, by the
-/// one it closed, in their order; or why it moved nothing, as `leaves` and
-/// `landing` say, or a session that took a name since; or what it closed and
-/// did not open again, which is said, with what starts each by hand.
-pub fn carried(carry: &Carry, planned: &Planned) -> Result<Vec<(u32, u32)>, String> {
+/// Moves what `planned` takes of `carry`, alone on its machine, whose lunetad
+/// keeps `folder`: closes the pane, or its tab, or the session where it may,
+/// and opens each pane again where it lands, once what ran in it has ended.
+/// It answers with the terminal each opened as, by the one it closed, in
+/// their order; or why it moved nothing, as `alone`, `leaves` and `landing`
+/// say, or a session that took a name since; or what it closed and did not
+/// open again, which is said, with what starts each by hand.
+pub fn carried(
+    folder: &Path,
+    carry: &Carry,
+    planned: &Planned,
+) -> Result<Vec<(u32, u32)>, String> {
+    let _alone = alone(folder)?;
     let Carry { from, to, lands, .. } = carry;
     closes::same_session(&from.session, from.started)?;
     closes::same_session(&to.session, to.started)?;

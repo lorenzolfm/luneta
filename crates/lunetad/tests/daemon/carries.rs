@@ -3,7 +3,7 @@
 //! closes, and opens anew there, what it ran starting again, and nothing
 //! closes that could not.
 
-use std::fs;
+use std::fs::{self, File};
 use std::thread;
 use std::time::Duration;
 
@@ -116,6 +116,27 @@ fn a_shell_at_its_prompt_moves_beside_a_pane_of_another_session() {
     assert_eq!(host.zellij.closed(), ["--session work action close-pane --pane-id terminal_2"]);
     opened_as(&host.zellij.opened(), &[shell_opened(5, "/w/b")]);
     assert_eq!(host.zellij.went(), Vec::<String>::new());
+}
+
+/// One move at a time on a machine: while another holds the lock, a move
+/// closes nothing, as two of one pane would both close it, and both open it
+/// again. Once that one lets go, it moves.
+#[test]
+fn a_move_goes_only_while_no_other_is_under_way() {
+    let work = json!([shell(1, (0, "Tab #1"), "/w/a"), shell(2, (0, "Tab #1"), "/w/b")]);
+    let play = json!([shell(5, (0, "Tab #1"), "/w/p")]);
+    let (host, _kept) = two_sessions(&work, &play);
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let another = File::create(folder.path().join(lunetad::carries::MOVING)).unwrap();
+    another.try_lock().unwrap();
+
+    let stays = carried(&host, asked(&host, 2, false, Lands::Beside(5), false)).unwrap_err();
+    refused(&stays, "another move is under way");
+    assert_eq!(host.zellij.closed(), Vec::<String>::new());
+
+    drop(another);
+    let carried = carried(&host, asked(&host, 2, false, Lands::Beside(5), false)).unwrap();
+    assert_eq!(carried, [(2, 9)]);
 }
 
 /// What runs in front of a shell, a program, stays, and nothing closes.

@@ -251,7 +251,8 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, sockets, claude_folder, core, watchers, bridges };
+    let folder = claim.folder.clone();
+    let host = Host { started, folder, sockets, claude_folder, core, watchers, bridges };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     // Once the daemon has been alone long enough, or the thread that would say
@@ -517,6 +518,8 @@ impl Drop for Waits<'_> {
 /// What the daemon answers from.
 struct Host {
     started: SystemTime,
+    /// The folder it holds.
+    folder: PathBuf,
     /// The folder it reads zellij's sessions in.
     sockets: PathBuf,
     /// The folder it reads Claude Code's sessions in, if its environment
@@ -895,9 +898,10 @@ impl Daemon for Host {
         let (sessions, agents) = (&host.sessions, &host.agents);
         let planned = carries::planned(sessions, agents, &carry.from, carry.pane, carry.whole);
         let planned = planned.map_err(Status::failed_precondition)?;
+        let folder = self.folder.clone();
         let answer = late(move || {
-            let carried = carries::carried(&carry, &planned).map_err(Status::failed_precondition)?;
-            Ok(carries::answer(&carried))
+            let carried = carries::carried(&folder, &carry, &planned);
+            Ok(carries::answer(&carried.map_err(Status::failed_precondition)?))
         });
         Ok(Response::new(Box::pin(answer)))
     }

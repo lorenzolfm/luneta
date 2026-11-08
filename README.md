@@ -958,7 +958,7 @@ or that waits for an answer, a program, pi's agents for now, and a pane whose
 command ended. A tab goes whole or not at all, and a pane that alone holds its tab
 open for floating panes stays, as they would close with it. Each pane closes
 first, and opens once what ran in it has ended, so that no two agents write
-one transcript. Its scrollback stays behind, and so does its dot, as the new
+one transcript, and a machine moves one at a time: another says so meanwhile. Its scrollback stays behind, and so does its dot, as the new
 pane has an id of its own; a tab's splits do too, and its panes open side by
 side in the order of their ids.
 

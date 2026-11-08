@@ -902,7 +902,7 @@ fn carried_here(carry: &Carry) -> Result<Vec<(u32, u32)>, String> {
     let host = commands::host(&folder)?;
     let (sessions, agents) = (&host.sessions, &host.agents);
     let planned = carries::planned(sessions, agents, &carry.from, carry.pane, carry.whole)?;
-    carries::carried(carry, &planned)
+    carries::carried(&folder, carry, &planned)
 }
 
 /// Asks zellij on the machine `on`, on a thread of its own, what closing the
