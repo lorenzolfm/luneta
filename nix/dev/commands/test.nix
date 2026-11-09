@@ -1,23 +1,14 @@
 {
-  pkgs,
-  buildTools,
   compileEnv,
   testRun,
-  testTools,
+  testKit,
   ...
 }:
 {
   name = "test";
   usage = "[args...]";
   help = "the tests on nextest, then the doctests; -P quick leaves out the one that waits 30s";
-  tools =
-    buildTools
-    ++ testTools
-    ++ [
-      pkgs.bash
-      pkgs.gawk
-      pkgs.gnused
-    ];
+  tools = testKit;
   text = ''
     ${compileEnv}
     case "''${TERM:-dumb}" in
