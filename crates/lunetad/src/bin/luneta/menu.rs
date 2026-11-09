@@ -1388,10 +1388,10 @@ enum Stage {
 /// lunetad lists, or in one zellij makes for it, by its name; or to turn what
 /// a key of the Turn group asked for, in a session lunetad lists.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Opening<'a> {
-    In(&'a Listed),
-    Made(&'a SessionName),
-    Turned(&'a Listed),
+pub enum Opening {
+    In(Listed),
+    Made(SessionName),
+    Turned(Listed),
 }
 
 /// How far the menu for a pull request, an issue or a file is, with its keys,
@@ -1496,16 +1496,16 @@ impl Menu {
 
     /// Where the menu waits for zellij to open what a key asked for, or to
     /// turn it, while it does.
-    pub fn opening(&self) -> Option<Opening<'_>> {
+    pub fn opening(&self) -> Option<Opening> {
         match &self.stage {
             Stage::Opening { session, .. }
             | Stage::Pull { step: Step::Waiting(Wait::Opening(session)), .. } => {
-                Some(Opening::In(session))
+                Some(Opening::In(session.clone()))
             },
             Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => {
-                Some(Opening::Made(session))
+                Some(Opening::Made(session.clone()))
             },
-            Stage::Turning { session, .. } => Some(Opening::Turned(session)),
+            Stage::Turning { session, .. } => Some(Opening::Turned(session.clone())),
             Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }
@@ -1570,7 +1570,6 @@ impl Menu {
                 | Stage::Fetching { .. }
                 | Stage::Opening { .. }
                 | Stage::Listing { .. }
-                | Stage::Picking { .. }
                 | Stage::Turning { .. }
                 | Stage::Pull { step: Step::Waiting(_), .. }
         )
@@ -1617,6 +1616,38 @@ impl Menu {
             | Stage::Opening { .. }
             | Stage::Listing { .. }
             | Stage::Picking { .. }
+            | Stage::Turning { .. }
+            | Stage::Reading { .. }
+            | Stage::Fetching { .. }
+            | Stage::Ssh { .. } => None,
+        }
+    }
+
+    /// What the notes say of the menu, once the keys left it and an answer
+    /// left it waiting on keys: what it would have shown, and how to have it
+    /// again.
+    pub fn left(&self) -> Option<String> {
+        match &self.stage {
+            Stage::Pull { work, step: Step::Choosing { wrong: Some(wrong) }, .. } => {
+                Some(format!("menu: {wrong} once {} is pasted again", work.tab()))
+            },
+            Stage::Swept { .. } => Some(
+                "menu: nothing deleted: the menu closed before you said yes; d m asks again"
+                    .to_owned(),
+            ),
+            Stage::Picking { session, tabs, .. } => Some(format!(
+                "menu: not turned: {} has {} other tabs to pick from; t p asks again",
+                session.name(),
+                tabs.len()
+            )),
+            Stage::Pull { step: Step::Choosing { wrong: None } | Step::Waiting(_), .. }
+            | Stage::Choosing(_)
+            | Stage::Planning { .. }
+            | Stage::Asking { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Pruning { .. }
+            | Stage::Opening { .. }
+            | Stage::Listing { .. }
             | Stage::Turning { .. }
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
@@ -3059,7 +3090,7 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn: Turn::PaneIntoTab });
-        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+        assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(closed(menu.key(&esc())), Done::Nothing);
@@ -3075,7 +3106,7 @@ mod tests {
         let (menu, wants) = stays(menu.tabs(Ok(vec![other_tab(7, "Tab #2")])));
         let turn = Turn::TabIntoPanes { beside: 7 };
         assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
-        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+        assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
 
         let Done::Wrong(none) = closed(listing().tabs(Ok(Vec::new()))) else {
             panic!("no reason");
@@ -3114,7 +3145,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('2')));
         let turn = Turn::TabIntoPanes { beside: 2 };
         assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
-        assert_eq!(menu.opening(), Some(Opening::Turned(&listed())));
+        assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
 
         let (menu, _) = stays(listing().tabs(Ok(vec![other_tab(7, "a"), other_tab(2, "b")])));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
@@ -4387,7 +4418,7 @@ mod tests {
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             let cwd = worktree.clone();
             assert_eq!(wants, Wants::Open { session: other.clone(), pane: 7, cwd, opens });
-            assert_eq!(menu.opening(), Some(Opening::In(&other)));
+            assert_eq!(menu.opening(), Some(Opening::In(other.clone())));
             let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
             assert_eq!((&row.session, row.pane), (&other, 7));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
@@ -4605,7 +4636,7 @@ mod tests {
                 command: Vec::new(),
             }
         );
-        assert_eq!(menu.opening(), Some(Opening::Made(&name)));
+        assert_eq!(menu.opening(), Some(Opening::Made(name)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
         // Why luneta found nothing closes the menu, and says so.

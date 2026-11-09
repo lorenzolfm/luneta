@@ -1086,6 +1086,49 @@ pub enum Asked {
     Forget(Destination),
 }
 
+impl Asked {
+    /// The menu an answer to what is asked goes to, if any.
+    fn menu(&self) -> Option<u64> {
+        match self {
+            Asked::Prunes { menu, .. }
+            | Asked::Prune { menu, .. }
+            | Asked::Closes { menu, .. }
+            | Asked::Open { menu, .. }
+            | Asked::OpenThere { menu, .. }
+            | Asked::Tabs { menu, .. }
+            | Asked::Turn { menu, .. }
+            | Asked::Make { menu, .. }
+            | Asked::Pull { menu, .. }
+            | Asked::Find { menu, .. }
+            | Asked::Printed { menu, .. }
+            | Asked::Checks { menu, .. } => Some(*menu),
+            Asked::Nothing
+            | Asked::Go { .. }
+            | Asked::Take
+            | Asked::Copy(_)
+            | Asked::CopyText(_)
+            | Asked::Browse(_)
+            | Asked::Leave
+            | Asked::Delete { .. }
+            | Asked::Carry { .. }
+            | Asked::Start { .. }
+            | Asked::Brief(_)
+            | Asked::Ask(_)
+            | Asked::Ssh(_)
+            | Asked::Forget(_) => None,
+        }
+    }
+}
+
+/// Where the sidebar holds a menu that waits on what a key of it asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// Open, with the keys, or floating over zellij.
+    Open,
+    /// In `working`, after the keys left it.
+    Kept,
+}
+
 /// The rows the top of the sidebar takes, as `top` draws them.
 const HEADER: usize = 3;
 
@@ -1882,28 +1925,38 @@ impl Sidebar {
     }
 
     /// The menu a key of which luneta heard of, numbered `menu`, where it waits
-    /// on it, as `keep` says, and whether it is still open: the one open, which
+    /// on it, as `keep` says, and where the sidebar held it: the one open, which
     /// the key leaves open, or the one that closed while what its key started
     /// went on. It takes the menu off the sidebar, for luneta to take what the
     /// key asked for on from it. None where no menu of that number waits on
     /// it, as where luneta heard of one it never opened, or of one whose wait
     /// another key ended.
-    fn take_waited(&mut self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<(Menu, bool)> {
-        if self.menu.as_ref().is_some_and(|it| it.number() == menu && keep(it)) {
-            let waited = self.menu.take()?;
-            return Some((waited, true));
-        }
-        let working = self.working.remove(&menu).filter(keep)?;
-        Some((working, false))
+    fn take_waited(&mut self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<(Menu, Held)> {
+        let (waited, held, ()) = self.take_seen(menu, |it| keep(it).then_some(()))?;
+        Some((waited, held))
     }
 
-    /// Whether luneta heard of the menu numbered `menu` from a key of it, which
-    /// the menu still waits on: an answer to one luneta no longer waits on goes
-    /// nowhere.
-    fn waits_on_it(&self, menu: u64, keep: impl Fn(&Menu) -> bool) -> bool {
+    /// As `take_waited` does, with what `see` sees of the menu it takes.
+    fn take_seen<T>(
+        &mut self,
+        menu: u64,
+        see: impl Fn(&Menu) -> Option<T>,
+    ) -> Option<(Menu, Held, T)> {
         let open = self.menu.as_ref().filter(|it| it.number() == menu);
-        let working = self.working.get(&menu);
-        open.or(working).is_some_and(keep)
+        if let Some(seen) = open.and_then(&see) {
+            return self.menu.take().map(|it| (it, Held::Open, seen));
+        }
+        let seen = self.working.get(&menu).and_then(see)?;
+        self.working.remove(&menu).map(|it| (it, Held::Kept, seen))
+    }
+
+    /// Where the sidebar holds the menu numbered `menu`, while it waits on
+    /// what a key of it asked for, as `keep` says: an answer to one luneta no
+    /// longer waits on goes nowhere.
+    fn holds(&self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<Held> {
+        let open = self.menu.as_ref().filter(|it| it.number() == menu).map(|it| (it, Held::Open));
+        let (it, held) = open.or_else(|| Some((self.working.get(&menu)?, Held::Kept)))?;
+        keep(it).then_some(held)
     }
 
     /// A look for the session zellij's client is in, as `here` says, if it
@@ -3726,14 +3779,15 @@ impl Sidebar {
     /// Keeps the menu a key left open, if any, does what the key left the
     /// sidebar to do, and asks luneta for what that takes.
     fn menu_did(&mut self, did: Did) -> Asked {
-        self.menu_did_after(true, did)
+        self.menu_did_after(Held::Open, did)
     }
 
-    /// As `menu_did` does, for a key of the menu numbered `menu` that `open`
-    /// says is still open, or else was closed while what its key started went
-    /// on: what it opened opens where it would have, but it takes luneta's
-    /// client nowhere, as you went somewhere else as it ran.
-    fn menu_did_after(&mut self, open: bool, did: Did) -> Asked {
+    /// As `menu_did` does, for a key of a menu `held` says is still open, or
+    /// else was closed while what its key started went on: what it opened
+    /// opens where it would have, but it takes luneta's client nowhere, as you
+    /// went somewhere else as it ran. One closed stays kept while luneta waits
+    /// on an answer for it, and the notes say what it would have shown else.
+    fn menu_did_after(&mut self, held: Held, did: Did) -> Asked {
         let (menu, wants) = match did {
             Did::Stays(menu, wants) => (menu, wants),
             Did::Closed(done) => {
@@ -3751,7 +3805,7 @@ impl Sidebar {
                         },
                         None => Asked::Start { on, starts },
                     },
-                    Done::Go(on, place) if open => Asked::Go { on, place },
+                    Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
                     // You went to work elsewhere as it ran: the notes say
                     // where it is, and it takes you nowhere from where you
                     // are, which would cut what you type.
@@ -3769,12 +3823,25 @@ impl Sidebar {
             },
         };
         let (number, on) = (menu.number(), menu.target().machine().clone());
-        if open {
-            self.menu = Some(menu);
-        } else if menu.waits() {
-            // It goes on waiting, as `waits` says, with nothing of it shown.
-            self.working.insert(number, menu);
+        match held {
+            Held::Open => self.menu = Some(menu),
+            Held::Kept => {
+                self.working.insert(number, menu);
+            },
         }
+        let asked = self.menu_wants(held, number, on, wants);
+        if held == Held::Kept
+            && asked.menu() != Some(number)
+            && let Some(said) = self.working.remove(&number).as_ref().and_then(Menu::left)
+        {
+            self.say(said);
+        }
+        asked
+    }
+
+    /// What luneta is asked for what the menu numbered `number`, of `on`,
+    /// wants, held as `held` says.
+    fn menu_wants(&mut self, held: Held, number: u64, on: Machine, wants: Wants) -> Asked {
         match wants {
             Wants::Nothing => Asked::Nothing,
             Wants::Keep(harness) => {
@@ -3802,7 +3869,7 @@ impl Sidebar {
                 let here = self.going().is_none() && self.on == on;
                 if here && self.here() == Some(session.as_str()) {
                     Asked::Open { menu: number, on, open: opened }
-                } else if open {
+                } else if held == Held::Open {
                     Asked::OpenThere { menu: number, on, place, open: opened }
                 } else {
                     // The tab opens there only once luneta's zellij is, which
@@ -3832,7 +3899,7 @@ impl Sidebar {
             // A session luneta makes is one it takes zellij's client to, which
             // a menu the keys left is not to do from what you went on to: the
             // notes say what to press to have it, as the worktree is made.
-            Wants::Make { session, cwd, tab_cwd, name, command } if open => {
+            Wants::Make { session, cwd, tab_cwd, name, command } if held == Held::Open => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
             Wants::Make { session, tab_cwd, .. } => {
@@ -3867,13 +3934,13 @@ impl Sidebar {
     /// `d m` of the menu numbered `menu` heard what it would delete, as `plan`
     /// says, or why it did not: the menu goes on, while it waits on it.
     pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, Menu::sweeping) else {
+        let Some((waiting, held)) = self.take_waited(menu, Menu::sweeping) else {
             return Asked::Nothing;
         };
         if let Ok(plan) = &plan {
             log_unasked(plan);
         }
-        self.menu_did_after(open, waiting.swept(plan))
+        self.menu_did_after(held, waiting.swept(plan))
     }
 
     /// `d m` of the menu numbered `menu` heard what came of what it was told to
@@ -3887,8 +3954,8 @@ impl Sidebar {
                 log_unasked(&plan);
                 // A menu that closed while it waited is no longer what you are
                 // on: the notes say nothing went, and why.
-                if let Some((waiting, true)) = waiting {
-                    return self.menu_did_after(true, waiting.changed(plan));
+                if let Some((waiting, Held::Open)) = waiting {
+                    return self.menu_did_after(Held::Open, waiting.changed(plan));
                 }
                 self.say("menu: nothing deleted: what would go changed".to_owned());
             },
@@ -3906,33 +3973,33 @@ impl Sidebar {
     /// request, an issue or a file, goes, as `found` says, or why it found
     /// nothing: the menu goes on, while it waits on it.
     pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, Menu::pulling) else {
+        let Some((waiting, held)) = self.take_waited(menu, Menu::pulling) else {
             return Asked::Nothing;
         };
         if let Some(off_branch) = waiting.off_branch(&found) {
             self.say(off_branch);
         }
-        self.menu_did_after(open, waiting.pulled(found))
+        self.menu_did_after(held, waiting.pulled(found))
     }
 
     /// luneta kept what the pane of the menu numbered `menu` printed, as
     /// `printed` says, or why it kept nothing: the menu goes on, while it
     /// waits on it.
     pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, Menu::reading) else {
+        let Some((waiting, held)) = self.take_waited(menu, Menu::reading) else {
             return Asked::Nothing;
         };
-        self.menu_did_after(open, waiting.printed(printed))
+        self.menu_did_after(held, waiting.printed(printed))
     }
 
     /// luneta kept the logs of the checks that failed on the pull request of
     /// the menu numbered `menu`, as `checks` says, or why it kept none: the
     /// menu goes on, while it waits on them.
     pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, Menu::fetching) else {
+        let Some((waiting, held)) = self.take_waited(menu, Menu::fetching) else {
             return Asked::Nothing;
         };
-        self.menu_did_after(open, waiting.checked(checks))
+        self.menu_did_after(held, waiting.checked(checks))
     }
 
     /// Every pane of `on` the daemon says a directory of, in the order of the
@@ -4186,10 +4253,7 @@ impl Sidebar {
     /// went on to. A session zellij made for it is the one the daemon lists by
     /// its name, as it does by the time zellij opens a tab of it.
     pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, |it| it.opening().is_some()) else {
-            return Asked::Nothing;
-        };
-        let Some(opening) = waiting.opening() else {
+        let Some((waiting, held, opening)) = self.take_seen(menu, Menu::opening) else {
             return Asked::Nothing;
         };
         let on = waiting.target().machine().clone();
@@ -4206,12 +4270,12 @@ impl Sidebar {
         };
         let place = match opening {
             Opening::In(session) | Opening::Turned(session) => {
-                Place::Pane(PanePlace { session: session.clone(), pane })
+                Place::Pane(PanePlace { session, pane })
             },
             Opening::Made(made) => {
                 let sessions = self.seen(&on).map(|seen| oldest_first(seen.sessions).0);
                 let mut named =
-                    sessions.into_iter().flatten().filter(|(listed, _)| listed.name == *made);
+                    sessions.into_iter().flatten().filter(|(listed, _)| listed.name == made);
                 let (Some((session, _)), None) = (named.next(), named.next()) else {
                     self.say(format!(
                         "menu: zellij opened pane {pane} in {made}, which luneta cannot tell"
@@ -4221,7 +4285,7 @@ impl Sidebar {
                 Place::Pane(PanePlace { session, pane })
             },
         };
-        if open {
+        if held == Held::Open {
             return Asked::Go { on, place };
         }
         let said = Self::opened_said(&place);
@@ -4242,11 +4306,7 @@ impl Sidebar {
         match came {
             Ok(IntoPanes::Done) => self.opened(menu, Ok(pane)),
             Ok(IntoPanes::Partly { moved, of, why }) => {
-                // A menu closed while it waited is no longer what you are on,
-                // and hears nothing of what came of it.
-                let waited = self.take_waited(menu, |it| it.opening().is_some());
-                if let Some((_, true)) = waited {
-                    self.menu = None;
+                if self.take_waited(menu, |it| it.opening().is_some()).is_some() {
                     self.say(format!("menu: turned {moved} of {of} panes: {why}"));
                 }
                 Asked::Nothing
@@ -4255,21 +4315,22 @@ impl Sidebar {
         }
     }
 
-    /// Whether the menu numbered `menu` still waits for zellij to open what a
-    /// key asked for, or to turn it: one the keys left behind still does,
-    /// which opens it where it would have, and takes luneta's client nowhere.
-    pub fn waits_on(&self, menu: u64) -> bool {
-        self.waits_on_it(menu, |it| it.opening().is_some())
+    /// Where the sidebar holds the menu numbered `menu`, while it still waits
+    /// for zellij to open what a key asked for, or to turn it: one the keys
+    /// left behind still does, which opens it where it would have, and takes
+    /// luneta's client nowhere.
+    pub fn waits_on(&self, menu: u64) -> Option<Held> {
+        self.holds(menu, |it| it.opening().is_some())
     }
 
     /// zellij said which tabs the tab of the pane of the menu numbered `menu`
     /// can turn into, or why it could not: the menu goes on, while it waits
     /// on it.
     pub fn tabs(&mut self, menu: u64, tabs: Result<Vec<OtherTab>, String>) -> Asked {
-        let Some((waiting, open)) = self.take_waited(menu, Menu::listing) else {
+        let Some((waiting, held)) = self.take_waited(menu, Menu::listing) else {
             return Asked::Nothing;
         };
-        self.menu_did_after(open, waiting.tabs(tabs))
+        self.menu_did_after(held, waiting.tabs(tabs))
     }
 
     /// zellij said what closing the pane of the menu numbered `menu` closes,
@@ -8924,9 +8985,9 @@ mod tests {
         let turned = Asked::Turn { menu: 1, on: on.clone(), place: older, turn };
         type_in(&mut sidebar, "t");
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), turned);
-        assert!(sidebar.waits_on(1));
+        assert_eq!(sidebar.waits_on(1), Some(Held::Open));
         assert_eq!(sidebar.opened(1, Ok(1)), go_here(pane_of("older", 10, 1)));
-        assert!(!sidebar.waits_on(1));
+        assert_eq!(sidebar.waits_on(1), None);
         assert_eq!(sidebar.opened(1, Ok(1)), Asked::Nothing);
 
         sidebar.step(2);
@@ -8957,7 +9018,7 @@ mod tests {
             sidebar.key(&char('p'), moment(160_000));
             let other = OtherTab { pane: 5, name: "Tab #2".to_owned() };
             sidebar.tabs(1, Ok(vec![other]));
-            assert!(sidebar.waits_on(1));
+            assert_eq!(sidebar.waits_on(1), Some(Held::Open));
             sidebar
         };
         let mut sidebar = waiting();
@@ -8975,7 +9036,8 @@ mod tests {
         let mut sidebar = waiting();
         sidebar.close_menu();
         assert_eq!(sidebar.turned_into_panes(1, 1, Ok(partly)), Asked::Nothing);
-        assert_eq!(sidebar.notice, None);
+        assert!(sidebar.working.is_empty());
+        assert_eq!(sidebar.notice.as_deref(), Some(said));
     }
 
     /// A pull request's link pasted with the sidebar's keys opens the menu
@@ -9145,10 +9207,10 @@ mod tests {
         });
         // The keys go elsewhere as zellij opens it.
         sidebar.focus(Keys::Zellij);
-        assert!(sidebar.waits_on(number));
+        assert_eq!(sidebar.waits_on(number), Some(Held::Kept));
         assert_eq!(sidebar.opened(number, Ok(7)), Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("menu: opened older:7"));
-        assert!(!sidebar.waits_on(number));
+        assert_eq!(sidebar.waits_on(number), None);
     }
 
     /// `Esc` closes the menu a key of which waits, as it does one whose keys
@@ -9432,6 +9494,87 @@ mod tests {
         assert_eq!(sidebar.opened(number, Ok(4)), Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("menu: opened s:4"));
         assert!(sidebar.working.is_empty());
+    }
+
+    /// A menu the keys left goes on only while luneta waits on an answer for
+    /// it: where what its key wants next is not asked, as a session luneta
+    /// would make, a tab of a session luneta's zellij is not in, or the tabs
+    /// to pick from, the sidebar keeps nothing of it, no spinner turns for it,
+    /// and the notes say why.
+    #[test]
+    fn a_kept_menu_whose_next_ask_is_not_made_keeps_nothing() {
+        let page = "https://github.com/lorenzolfm/luneta/pull/5";
+        let left = |at| {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.paste(page);
+            let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+            let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            sidebar.focus(Keys::Zellij);
+            let work = Readied::Link(Link::parse(page).unwrap());
+            let worktree = "/w/luneta/feat".to_owned();
+            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+            let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
+            assert_eq!(asked, Asked::Nothing);
+            assert!(sidebar.working.is_empty());
+            assert!(!sidebar.turning());
+            sidebar.notice
+        };
+        let made = left(At::Clone { cwd: "/w/n".to_owned(), name: session_name("luneta") });
+        let said = "menu: the worktree of /w/luneta/feat is made: no session is made for it, as \
+                    luneta's zellij is where you went; open luneta and try again";
+        assert_eq!(made.as_deref(), Some(said));
+        let there = left(At::Session((listed("newer", 20), 1)));
+        assert_eq!(there, Some(Sidebar::busy_said(&session_name("newer"))));
+
+        let tab = |pane, name: &str| OtherTab { pane, name: name.to_owned() };
+        let listing = || {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            type_in(&mut sidebar, "t");
+            sidebar.key(&char('p'), moment(160_000));
+            sidebar
+        };
+        let mut sidebar = listing();
+        sidebar.focus(Keys::Zellij);
+        assert_eq!(sidebar.working.len(), 1);
+        assert_eq!(sidebar.tabs(1, Ok(vec![tab(5, "Tab #2"), tab(6, "Tab #3")])), Asked::Nothing);
+        assert!(sidebar.working.is_empty());
+        let said = "menu: not turned: older has 2 other tabs to pick from; t p asks again";
+        assert_eq!(sidebar.notice.as_deref(), Some(said));
+        let mut sidebar = listing();
+        assert_eq!(sidebar.tabs(1, Ok(vec![tab(5, "Tab #2"), tab(6, "Tab #3")])), Asked::Nothing);
+        sidebar.focus(Keys::Zellij);
+        assert!(sidebar.working.is_empty());
+    }
+
+    /// `t` on a pasted issue whose worktree moved off its branch starts no
+    /// agent, which the menu says while it is open: once the keys left it,
+    /// the notes say so.
+    #[test]
+    fn a_kept_menu_that_starts_no_agent_on_a_worktree_moved_off_says_so() {
+        let page = "https://github.com/lorenzolfm/luneta/issues/5";
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.paste(page);
+        let number = sidebar.menu.as_ref().map_or(0, Menu::number);
+        let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
+            panic!("no job for the key");
+        };
+        sidebar.focus(Keys::Zellij);
+        let at = At::Session((listed("older", 10), 1));
+        let branch = Some("dev-docs".to_owned());
+        let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+        let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off: true, work };
+        let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
+        assert_eq!(asked, Asked::Nothing);
+        assert!(sidebar.working.is_empty());
+        let notice = sidebar.notice.as_deref().unwrap_or_default();
+        assert!(notice.starts_with("menu: /w/luneta/issue-5 is "), "{notice}");
+        let tail = "so no agent starts there; w opens it once #5 is pasted again";
+        assert!(notice.ends_with(tail), "{notice}");
     }
 
     /// The menu floats over zellij for the pane luneta's zellij is on,
@@ -10863,13 +11006,21 @@ mod tests {
         sidebar.key(&char('d'), now);
         let number = sidebar.menu.as_ref().expect("the menu").number();
         sidebar.key(&char('m'), now);
-        sidebar.prunes(number, Ok(plan));
+        sidebar.prunes(number, Ok(plan.clone()));
         sidebar.key(&char('y'), now);
         let came = prunes::Came::Stays("it has a pane".to_owned());
         let stays = prunes::Outcome { worktree: goes.worktree, came };
         assert_eq!(sidebar.pruned(number, Ok(prunes::Pruned::Went(vec![stays]))), Asked::Nothing);
         assert!(sidebar.menu.is_none());
         let note = "menu: deleted 0 of 1 worktrees; one stays: it has a pane";
+        assert_eq!(sidebar.notice.as_deref(), Some(note));
+        sidebar.key(&char('d'), now);
+        let number = sidebar.menu.as_ref().expect("the menu").number();
+        sidebar.key(&char('m'), now);
+        sidebar.focus(Keys::Zellij);
+        assert_eq!(sidebar.prunes(number, Ok(plan)), Asked::Nothing);
+        assert!(sidebar.working.is_empty());
+        let note = "menu: nothing deleted: the menu closed before you said yes; d m asks again";
         assert_eq!(sidebar.notice.as_deref(), Some(note));
     }
 

@@ -1360,13 +1360,17 @@ impl App {
             },
             // A menu closed since is no longer what you are on, and takes
             // luneta's client nowhere.
-            Event::NoClient { menu, owed, on, place } => {
-                if self.sidebar.waits_on(menu) {
+            Event::NoClient { menu, owed, on, place } => match self.sidebar.waits_on(menu) {
+                Some(sidebar::Held::Open) => {
                     let after = After::IntoTab(owed, place.clone());
                     if !self.go(&on, &Place::Pane(place), Some(after)) {
                         self.sidebar.close_menu();
                     }
-                }
+                },
+                Some(sidebar::Held::Kept) => {
+                    owed.pay(Err(lunetad::opens::no_client(place.session.name())));
+                },
+                None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Pulled { menu, found } => {
