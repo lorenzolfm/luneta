@@ -644,12 +644,17 @@ impl Daemon for Host {
         &self,
         request: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
-        let ListSkillsRequest { on, dir } = request.into_inner();
+        let ListSkillsRequest { on, dir, harness } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.list_skills(ListSkillsRequest { on: None, dir: dir.into() }).await;
+            let asked = ListSkillsRequest { on: None, dir: dir.into(), harness };
+            return daemon.list_skills(asked).await;
         }
-        let found = task::spawn_blocking(move || skills::found_in(dir.as_str())).await;
+        let harness = match harness {
+            None => api::Harness::ClaudeCode,
+            Some(said) => api::Harness::try_from(said).unwrap_or(api::Harness::Unspecified),
+        };
+        let found = task::spawn_blocking(move || skills::found_in(dir.as_str(), harness)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
         let skill = |skills::Skill { name, description, runs }| Skill {

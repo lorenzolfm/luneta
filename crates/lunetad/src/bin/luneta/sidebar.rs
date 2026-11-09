@@ -327,13 +327,15 @@ pub struct PanePlace {
 }
 
 /// The agent in the pane luneta's zellij is on, that you can name a skill to:
-/// where it is, and the directory its skills are found for.
+/// where it is, the directory its skills are found for, and the harness it
+/// runs in, which finds them and spells them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HereAgent {
     pub on: Machine,
     pub session: SessionName,
     pub pane: u32,
     pub dir: String,
+    pub harness: agents::Harness,
 }
 
 /// What a row stands for, by which the highlight keeps to it as rows come and
@@ -1039,9 +1041,9 @@ pub enum Asked {
     /// row of `on`, goes among its panes `worked`, or else on the first of
     /// `others` that has what it is of, and have its worktree made there.
     Pull { menu: u64, on: Machine, work: Work, wanted: Wanted, worked: Vec<Worked>, others: Others },
-    /// Find the skills that `cwd`, on `on`, can run, for the menu numbered
-    /// `menu`.
-    Find { menu: u64, on: Machine, cwd: String },
+    /// Find the skills that `cwd`, on `on`, can run in `agent`, for the menu
+    /// numbered `menu`.
+    Find { menu: u64, on: Machine, cwd: String, agent: agents::Harness },
     /// Keep what the shell in the pane `pane` of `session`, on `on`, printed
     /// after the line `command` was last run on, there, for the menu
     /// numbered `menu`.
@@ -1996,21 +1998,23 @@ impl Sidebar {
         }
     }
 
-    /// The Claude Code agent started at a prompt in the pane luneta's zellij
-    /// is on, if one is there, as luneta last followed its client. A `claude
-    /// -p` that a shell started is no agent to talk to: the shell has the keys.
+    /// The agent started at a prompt in the pane luneta's zellij is on, of a
+    /// harness luneta knows, if one is there, as luneta last followed its
+    /// client. A `claude -p` that a shell started is no agent to talk to: the
+    /// shell has the keys.
     pub fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
         let seen = self.seen(&self.on)?;
         let seated = seated(seen.agents, seen.sessions);
         let agent = seated.get(&(place.session.name().as_str(), place.pane))?;
         let pane = self.pane_of(&self.on, &place.session, place.pane)?;
-        let here = agent.runs_in() == Harness::ClaudeCode && agent.at_a_prompt();
-        here.then(|| HereAgent {
+        let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
+        Some(HereAgent {
             on: self.on.clone(),
             session: place.session.name().clone(),
             pane: place.pane,
             dir: agent_dir(agent, pane).to_owned(),
+            harness,
         })
     }
 
@@ -3366,6 +3370,15 @@ impl Sidebar {
         self.menu_did(did)
     }
 
+    /// Keeps `harness` for the agents the menu starts, for every luneta, or
+    /// says why it is this luneta's alone.
+    fn keep_agent(&mut self, harness: agents::Harness) {
+        if let Err(why) = self.agent.keep(harness) {
+            let name = agents::name(harness);
+            self.say(format!("agent: {name} is for this luneta alone: {why}"));
+        }
+    }
+
     /// The harness the menu for `target` starts agents in: that of the agent
     /// in its pane, where one runs, or else the one you picked last.
     fn agent_for(&self, target: &Target) -> agents::Harness {
@@ -3617,13 +3630,14 @@ impl Sidebar {
         match wants {
             Wants::Nothing => Asked::Nothing,
             Wants::Keep(harness) => {
-                if let Err(why) = self.agent.keep(harness) {
-                    let name = agents::name(harness);
-                    self.say(format!("agent: {name} is for this luneta alone: {why}"));
-                }
+                self.keep_agent(harness);
                 Asked::Nothing
             },
-            Wants::Skills(cwd) => Asked::Find { menu: number, on, cwd },
+            Wants::Skills { cwd, agent } => Asked::Find { menu: number, on, cwd, agent },
+            Wants::Refind { cwd, agent } => {
+                self.keep_agent(agent);
+                Asked::Find { menu: number, on, cwd, agent }
+            },
             Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
                 let open = Open::Pane { session: session.name, beside, cwd, command };
                 Asked::Open { menu: number, on, open }
@@ -4096,9 +4110,9 @@ impl Sidebar {
 
     /// The finder found `skills` for the menu numbered `menu`, or says why it
     /// found none, for its search box.
-    pub fn found(&mut self, menu: u64, skills: Result<Vec<Skill>, String>) {
+    pub fn found(&mut self, menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String>) {
         if let Some(open) = self.menu.as_mut().filter(|it| it.number() == menu) {
-            open.found(skills);
+            open.found(agent, skills);
         }
     }
 
@@ -8497,7 +8511,8 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&char('m'), moment(160_000));
         let cwd = "/w/luneta/main".to_owned();
-        let find = Asked::Find { menu: 1, on: Machine::Local, cwd: cwd.clone() };
+        let agent = agents::Harness::ClaudeCode;
+        let find = Asked::Find { menu: 1, on: Machine::Local, cwd: cwd.clone(), agent };
         assert_eq!(sidebar.key(&char('/'), moment(160_000)), find);
         let name = |name: &str| Name::new(name.to_owned()).expect("a name");
         let skill = |named: &str| Skill {
@@ -8505,7 +8520,7 @@ mod tests {
             description: String::new(),
             runs: crate::skills::Runs::ForAnyone,
         };
-        sidebar.found(1, Ok(vec![skill("code-review"), skill("tigerstyle")]));
+        sidebar.found(1, agent, Ok(vec![skill("code-review"), skill("tigerstyle")]));
         let clicked = clicks(&mut sidebar, 15);
         let skills: Vec<(&str, Option<Hit>)> =
             clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
@@ -9040,12 +9055,10 @@ mod tests {
         assert!(sidebar.menu.is_none());
     }
 
-    /// What goes wrong with what the menu over zellij does is said over
-    /// zellij, where you look, and the sidebar collapsed has no room for:
-    /// What you say can name a skill only to a Claude Code agent started at a
-    /// prompt in the pane luneta's zellij is on, of that agent's directory as
-    /// zellij says it: not to a shell, nor to one where a shell ran `claude
-    /// -p`, nor to a pi agent, as the skills the finder finds are Claude Code's.
+    /// What you say can name a skill only to an agent started at a prompt in
+    /// the pane luneta's zellij is on, of that agent's directory as zellij
+    /// says it, and of its harness, which finds its skills: not to a shell,
+    /// nor to one where a shell ran `claude -p`.
     #[test]
     fn the_agent_here_is_the_one_in_the_pane_luneta_s_zellij_is_on() {
         let on_pane = |id: u32| {
@@ -9072,13 +9085,19 @@ mod tests {
             sidebar.here_agent()
         };
         let session = SessionName::running("s").expect("a name");
-        let here = HereAgent { on: Machine::Local, session, pane: 1, dir: "/w/a".to_owned() };
+        let (dir, harness) = ("/w/a".to_owned(), agents::Harness::ClaudeCode);
+        let here = HereAgent { on: Machine::Local, session, pane: 1, dir, harness };
         assert_eq!(on_pane(1), Some(here));
         assert_eq!(on_pane(2), None);
         assert_eq!(on_pane(3), None);
-        assert_eq!(on_pane(4), None);
+        let session = SessionName::running("s").expect("a name");
+        let (dir, harness) = ("/w/d".to_owned(), agents::Harness::Pi);
+        let here = HereAgent { on: Machine::Local, session, pane: 4, dir, harness };
+        assert_eq!(on_pane(4), Some(here));
     }
 
+    /// What goes wrong with what the menu over zellij does is said over
+    /// zellij, where you look, and the sidebar collapsed has no room for:
     /// luneta takes it once, and it stays out of the notes, but for what
     /// luneta did not take as the box gave up the keys. The menu at the bottom
     /// says it in the notes. What went wrong before goes from the notes as the

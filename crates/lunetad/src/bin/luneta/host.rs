@@ -157,9 +157,9 @@ pub enum Event {
     /// A pane of a session no client is in stays, for the menu numbered `menu`
     /// owed it, until a client there makes room for its tab.
     NoClient { menu: u64, owed: Due<u32>, on: Machine, place: PanePlace },
-    /// The skills the directory of the menu numbered `menu` can run, or why
-    /// the finder found none.
-    Skills { menu: u64, skills: Result<Vec<Skill>, String> },
+    /// The skills the directory of the menu numbered `menu` can run in
+    /// `agent`, or why the finder found none.
+    Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
     /// Where the key of the menu numbered `menu`, for a pull request, an
     /// issue or a file, goes, and on which machine, with the worktree made;
     /// or why luneta found nothing.
@@ -1364,7 +1364,7 @@ impl App {
                     }
                 }
             },
-            Event::Skills { menu, skills } => self.sidebar.found(menu, skills),
+            Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Pulled { menu, found } => {
                 let asked = self.sidebar.pulled(menu, found);
                 self.follow(asked);
@@ -2251,8 +2251,9 @@ impl App {
                     self.deleting.push(deleting);
                 }
             },
-            Asked::Find { menu, on, cwd } => {
-                skills::find(&on, &cwd, &self.events, move |skills| Event::Skills { menu, skills });
+            Asked::Find { menu, on, cwd, agent } => {
+                let said = move |skills| Event::Skills { menu, agent, skills };
+                skills::find(&on, &cwd, agent, &self.events, said);
             },
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
@@ -2394,8 +2395,8 @@ impl App {
     }
 
     /// The skills that the dictation numbered `number`, into `under`, can name,
-    /// which the finder is asked for: those of the directory of the Claude
-    /// Code agent in the pane zellij is on. None elsewhere: in a shell, "slash"
+    /// which the finder is asked for: those of the directory of the agent in
+    /// the pane zellij is on, in its harness. None elsewhere: in a shell, "slash"
     /// is more likely part of a path, and the ask box's agent runs in safe
     /// mode, where none of your skills are.
     fn nameable(&self, number: u64, under: &Where) -> Skills {
@@ -2403,7 +2404,7 @@ impl App {
             return Skills::Found(Vec::new());
         };
         let said = move |skills| Event::Nameable { number, skills };
-        skills::find(&agent.on, &agent.dir, &self.events, said);
+        skills::find(&agent.on, &agent.dir, agent.harness, &self.events, said);
         Skills::Finding
     }
 
@@ -2477,7 +2478,8 @@ impl App {
                 let dictated = if here { dictated } else { dictated.moved() };
                 let Dictated { written, sends, .. } = dictated;
                 let mode = self.client.hosted.mode();
-                for paste in pastes(&written, mode) {
+                let harness = agent.map_or(agents::Harness::ClaudeCode, |agent| agent.harness);
+                for paste in pastes(&written, harness, mode) {
                     self.client.hosted.send(paste);
                 }
                 let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -3416,14 +3418,15 @@ fn whole<W: io::Write>(
 }
 
 /// The bytes that write what was dictated in the pane zellij is on, paste by
-/// paste: a slash command, then what it is given, each with a space after it
-/// for what you say next. Neither is typed, as zellij takes what is typed for
-/// keys, and outside its normal mode acts on them: an `x` in its tab mode closes
-/// the tab. Nor are they one paste, as Claude Code folds a long one to
-/// `[Pasted text #1]`, and takes a prompt that is only that for words, whatever
-/// the paste starts with.
-fn pastes(written: &named::Written, mode: TermMode) -> Vec<Vec<u8>> {
-    let command = written.command.iter().map(|command| format!("/{command} "));
+/// paste: a slash command, as `harness` spells it, then what it is given,
+/// each with a space after it for what you say next. Neither is typed, as
+/// zellij takes what is typed for keys, and outside its normal mode acts on
+/// them: an `x` in its tab mode closes the tab. Nor are they one paste, as
+/// Claude Code folds a long one to `[Pasted text #1]`, and takes a prompt that
+/// is only that for words, whatever the paste starts with.
+fn pastes(written: &named::Written, harness: agents::Harness, mode: TermMode) -> Vec<Vec<u8>> {
+    let spelled = |command: &skills::Name| agents::spelled(harness, command.as_str());
+    let command = written.command.iter().map(|command| format!("{} ", spelled(command)));
     let text = (!written.text.is_empty()).then(|| format!("{} ", written.text));
     command.chain(text).map(|paste| keys::paste(&paste, mode)).collect()
 }
@@ -3546,14 +3549,22 @@ mod tests {
     }
 
     /// Pasted, what you dictate reaches the pane in any mode of zellij's, which
-    /// acts on keys: typed, `/handoff` would open a pane in its pane mode.
+    /// acts on keys: typed, `/handoff` would open a pane in its pane mode. A pi
+    /// agent's command is spelled as pi runs a skill.
     #[test]
     fn what_is_dictated_is_pasted_and_a_command_on_its_own() {
-        let pasted = |command: Option<&str>, text: &str| {
+        let written = |command: Option<&str>, text: &str| {
             let command = command.map(|name| skills::Name::new(name.to_owned()).expect("a name"));
-            let written = named::Written { command, text: text.to_owned(), only_first: Vec::new() };
-            pastes(&written, TermMode::BRACKETED_PASTE)
+            named::Written { command, text: text.to_owned(), only_first: Vec::new() }
         };
+        let pasted = |command: Option<&str>, text: &str| {
+            let claude = agents::Harness::ClaudeCode;
+            pastes(&written(command, text), claude, TermMode::BRACKETED_PASTE)
+        };
+        let pi = agents::Harness::Pi;
+        let pi = pastes(&written(Some("handoff"), "now"), pi, TermMode::BRACKETED_PASTE);
+        let (command, text) = (b"\x1b[200~/skill:handoff \x1b[201~", b"\x1b[200~now \x1b[201~");
+        assert_eq!(pi, [command.to_vec(), text.to_vec()]);
         assert_eq!(
             pasted(Some("handoff"), "the next session fixes CI"),
             [

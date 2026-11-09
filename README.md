@@ -275,9 +275,9 @@ back to the keys, and so does `Backspace` once there is nothing to take back.
 The list shows eight skills at most, and scrolls under the cursor. It keeps
 the height of the skills found as you type, so the menu keeps its size.
 
-`Tab` picks the other harness there too. The skills are the ones Claude Code
-finds for that directory, as slash commands, whichever harness the agent starts
-in, where it finds them:
+`Tab` picks the other harness there too, and the list is made again for it,
+keeping what you typed. The skills are the ones the harness the border names
+finds for that directory, where it finds them. Claude Code's, as slash commands:
 
 - yours, in `~/.claude`, or in `CLAUDE_CONFIG_DIR`
 - the project's, in the `.claude` of the directory and of each one above it,
@@ -291,6 +291,22 @@ frontmatter says `user-invocable: false` is left out. The skills built into
 Claude Code, and the ones it brings from claude.ai, are not where luneta looks,
 and the list leaves them out. It is made again each time `/` opens it, which
 takes a moment, mostly `claude plugin list`'s.
+
+pi's, which it runs as `/skill:<name>`, where pi 1.5 finds them, nearest first:
+
+- the project's, in the `.pi/skills` of the directory, and in the
+  `.agents/skills` of it and of each one above it, up to the top of its
+  repository; pi loads these once you trust the project, which it asks as it
+  starts
+- yours, in `skills` of `~/.pi/agent`, or of `PI_CODING_AGENT_DIR`, and in
+  `~/.agents/skills`
+
+A folder with a `SKILL.md` is a skill, and holds no other; a `.md` at the top of
+a `skills` of pi's, or below the top of an `.agents/skills`, is one too. A skill
+goes by the name its frontmatter gives it, or else by its folder's, and one that
+doesn't say what it does is left out, as pi leaves it out. The skills your pi
+settings or pi's packages name are not where luneta looks, and neither are
+pi's ignore files.
 
 The New group, under `n`, opens where the pane works: `n p` your shell in a
 pane of its own beside that pane, `n t` a tab of its session, and `n s` a
@@ -1499,9 +1515,10 @@ that what it writes goes where you opened it. A terminal
 tells luneta that a key was let go only with the kitty keyboard protocol, as
 Ghostty and kitty speak it: in one that does not, `Alt r` taps.
 
-Into a pane with a Claude Code agent in it, a skill you name is written as its
-slash command, and the box shows it as it will be written, so you can `Esc` it
-if it's the wrong one:
+Into a pane with an agent in it, a skill you name is written as its slash
+command, and the box shows it as it will be written, so you can `Esc` it if it's
+the wrong one. A pi agent gets pi's spelling, `/skill:tigerstyle`, and the
+skills pi finds:
 
 | you say | it writes |
 |---|---|
@@ -1515,7 +1532,7 @@ this off" is no `/handoff`. The model may write "skill" as "skills", "scale" or
 "queue", which are words too, so those count only after "use", "using", "run",
 "apply" or "with": "use the handoff scale" is `/handoff`, and "clear the code
 review queue" stays words. The names are those the [menu's `/`](#menu) finds
-for the directory of the agent's pane, on its machine. A name is matched
+for the directory of the agent's pane, on its machine, in its harness. A name is matched
 loosely, as the model mishears them: spaces and hyphens don't count, and "make
 legal statements unrepresentable" is `/make-illegal-states-unrepresentable`. A
 name as short as `teach` must be said as it is, and where two skills are about
