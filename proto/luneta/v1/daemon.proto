@@ -1263,6 +1263,19 @@ message Checkout {
   // The directory that holds the repository. Absent from a daemon older than
   // this field.
   optional string repository = 5;
+  // How many lines changed on the branch, against the branch its repository
+  // takes as its default, work tree changes included. Zero, and absent, on
+  // that branch itself and where the repository says none, and absent from a
+  // daemon older than this field. The branch is asked of git alone: no remote
+  // is reached, so what says the default here can be behind what the
+  // repository has.
+  optional Changed changed = 6;
+}
+
+/// How many lines changed on a branch.
+message Changed {
+  uint32 added = 1;
+  uint32 deleted = 2;
 }
 
 message Branch {

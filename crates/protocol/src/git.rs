@@ -45,8 +45,23 @@ pub enum WorkTree {
     NoCheckout { repository: Said },
     /// A repository's work tree: the directory that holds the repository,
     /// which only a daemon older than the field does not say, what is checked
-    /// out there, and what changed.
-    Checkout { repository: Option<Said>, head: Head, changes: Changes, stashes: u32 },
+    /// out there, what changed, and how many lines changed on the branch,
+    /// which only a daemon newer than the field says.
+    Checkout {
+        repository: Option<Said>,
+        head: Head,
+        changes: Changes,
+        stashes: u32,
+        changed: Option<Changed>,
+    },
+}
+
+/// How many lines changed on a branch, against the branch its repository
+/// takes as its default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changed {
+    pub added: u32,
+    pub deleted: u32,
 }
 
 /// What is checked out in a work tree.
@@ -85,12 +100,14 @@ impl WorkTree {
                     repository: repository.as_str().to_owned(),
                 })
             },
-            WorkTree::Checkout { repository, head, changes, stashes } => {
+            WorkTree::Checkout { repository, head, changes, stashes, changed } => {
                 v1::work_tree::Stands::Checkout(v1::Checkout {
                     head: Some(head.to_api()),
                     changes: Some(changes.to_api()),
                     stashes: *stashes,
                     repository: repository.as_ref().map(|it| it.as_str().to_owned()),
+                    changed: changed
+                        .map(|Changed { added, deleted }| v1::Changed { added, deleted }),
                 })
             },
         };
@@ -119,6 +136,9 @@ impl WorkTree {
             head: Head::of_api(checkout.head.as_ref()?)?,
             changes: Changes::of_api(checkout.changes.as_ref()?),
             stashes: checkout.stashes,
+            changed: checkout
+                .changed
+                .map(|v1::Changed { added, deleted }| Changed { added, deleted }),
         })
     }
 
@@ -146,7 +166,13 @@ impl WorkTree {
             }
         }
         let head = head.ok_or("no line that says what is checked out")?;
-        Ok(WorkTree::Checkout { repository: Some(repository), head, changes, stashes })
+        Ok(WorkTree::Checkout {
+            repository: Some(repository),
+            head,
+            changes,
+            stashes,
+            changed: None,
+        })
     }
 }
 
@@ -325,6 +351,7 @@ mod tests {
             head: Head::Detached,
             changes: Changes::default(),
             stashes: 0,
+            changed: None,
         });
         for tree in trees {
             assert_eq!(WorkTree::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
@@ -336,6 +363,7 @@ mod tests {
                 changes,
                 stashes: 0,
                 repository: None,
+                changed: None,
             }))
         };
         let branch = |name: &str| {
@@ -352,6 +380,7 @@ mod tests {
                 changes: Some(v1::Changes::default()),
                 stashes: 0,
                 repository: Some(String::new()),
+                changed: None,
             })),
             Some(v1::work_tree::Stands::NoCheckout(v1::work_tree::NoCheckout {
                 repository: String::new(),

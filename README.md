@@ -908,7 +908,15 @@ under the age, how its work tree stands, in the glyphs
 | `⇡` `⇣` `⇕` | commits ahead of the upstream, behind it, or both |
 
 A pane outside a repository, or on a detached `HEAD`, has no branch, and its
-row stays one line. After the branch is the number of its pull request on
+row stays one line. After the branch is how many lines changed on it, against
+the branch its repository takes as its default, as `issue-299 +120 -34`, the
+added in green and the deleted in red, of every line git's diff of the two
+counts, work tree changes included, as a diff of the pull request would show
+them. None changed, or the default branch itself, shows nothing, and a branch
+no default is found for shows none either. lunetad asks git in the directory
+once for a branch of a repository, however many panes are on it, as a pane
+comes to the branch and then every five seconds, and nothing reaches a remote
+for it. After that is the number of its pull request on
 GitHub, as `fold #126`, in the colour `gh` lists it in: green while it is
 open, grey while it is a draft, and magenta once it is merged, which says the
 worktree may be able to go: [`d m`](#delete-merged-worktrees) checks that it can,
