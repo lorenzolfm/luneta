@@ -912,10 +912,14 @@ row stays one line. After the branch is how many lines changed on it, against
 the branch its repository takes as its default, as `issue-299 +120 -34`, the
 added in green and the deleted in red, of every line git's diff of the two
 counts, work tree changes included, as a diff of the pull request would show
-them. None changed, or the default branch itself, shows nothing, and a branch
-no default is found for shows none either. lunetad asks git once for each
-directory panes work in, however many panes are in it, as a pane comes to it
-and then every five seconds, and nothing reaches a remote for it. After that
+them. The default is the branch the `HEAD` of `upstream`, `github` or `origin`
+names, in the order `gh` takes one to look for pull requests in, or else
+`main` or `master`. None changed, or the default branch itself, shows nothing,
+and a branch no default is found for shows none either. lunetad asks git once
+for each directory panes work in, however many panes are in it, as a pane
+comes to it and then every five seconds. Nothing reaches a remote for it, and
+nothing writes the index: a partial clone that lacks what the count needs
+shows none. After that
 is the number of its pull request on
 GitHub, as `fold #126`, in the colour `gh` lists it in: green while it is
 open, grey while it is a draft, and magenta once it is merged, which says the

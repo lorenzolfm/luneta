@@ -526,14 +526,10 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
-    // `main` is one commit past `origin/main` with a merge gone wrong in
-    // the work tree, so its lines changed count what that commit and the
-    // work tree hold, of the merge-base of the two; the untracked file is
-    // in none of it, as a diff of the pull request would not show it.
     let main = Branch {
         name: "main".to_owned(),
         upstream: Some(Upstream { ahead: 1, behind: 0 }),
-        changed: Some(api::Changed { added: 8, deleted: 5 }),
+        changed: None,
     };
     let checkout = |dir: &str, head, changes, stashes| {
         let repository = Some(fs::canonicalize(dir).unwrap().display().to_string());
