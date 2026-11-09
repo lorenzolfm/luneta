@@ -59,7 +59,6 @@ fn with_pi() -> (Host, Daemon) {
     eventually("the extension is there", || extension(&host).is_file().then_some(()));
     (host, daemon)
 }
-
 /// A process of pi's, in the pane `work:3`, in the mode `mode`, as pi names it.
 struct Pi {
     process: Running,
@@ -155,6 +154,27 @@ fn the_extension_goes_where_pi_finds_it_once_pi_has_run() {
     });
     let there: Vec<_> = fs::read_dir(extension(&host).parent().unwrap()).unwrap().collect();
     assert_eq!(there.len(), 1, "it leaves only itself: {there:?}");
+}
+
+/// A launcher of pi's that keeps a folder of its own, as numes does with its
+/// `PI_CODING_AGENT_DIR`, has the extension of its own too: an agent started
+/// there reads none of the one in pi's own folder, and would tell a folder no
+/// daemon reads.
+#[test]
+fn a_launcher_s_folder_of_pi_s_gets_the_extension_of_its_own() {
+    let host = Host::new();
+    fs::create_dir_all(host.numes_pi_folder()).unwrap();
+    let _daemon = start(host.vars()).unwrap();
+    let numes = host.numes_pi_folder().join("extensions/luneta.ts");
+    eventually("the extension is in numes's folder", || numes.is_file().then_some(()));
+    let told = fs::read_to_string(&numes).unwrap();
+    assert_eq!(
+        told.lines().find(|line| line.contains("const FOLDER")),
+        Some(format!("const FOLDER = {:?};", host.runtime().join("luneta")).as_str()),
+        "it tells the daemon's folder"
+    );
+    // pi's own folder stays where it was: none, where pi has not run.
+    assert!(!host.pi_folder().exists());
 }
 
 /// Where pi starts, the variables that name luneta's folder can say another:

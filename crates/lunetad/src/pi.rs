@@ -61,6 +61,35 @@ pub fn folder() -> Option<PathBuf> {
         .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
 }
 
+/// Every folder pi finds extensions in on this machine, the first the one pi
+/// runs in here, each of another the one a launcher of pi's makes its own.
+/// A wrapper that sets `PI_CODING_AGENT_DIR` of its own, as numes does for the
+/// models it serves, keeps its sessions, and finds its extensions, in a folder
+/// of its own: an agent started there reads none of what is in the one pi
+/// would take, so the extension goes in each.
+#[must_use]
+pub fn folders() -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if let Some(pi) = folder() {
+        found.push(pi);
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|home: &OsString| !home.is_empty())
+        .map(PathBuf::from)
+    {
+        let own = home.join(".pi/agent");
+        if !found.contains(&own) {
+            found.push(own);
+        }
+        // numes runs pi with `PI_CODING_AGENT_DIR` of its own, under the home.
+        let numes = home.join(".local/share/numes/apps/pi");
+        if !found.contains(&numes) {
+            found.push(numes);
+        }
+    }
+    found
+}
+
 /// A file of the extension, as much of it as the adapter reads. A file without
 /// the first four does not read as one, as the extension always writes them.
 #[derive(Deserialize)]
@@ -92,8 +121,8 @@ pub struct AgentFiles {
     /// The daemon's folder, which the extension is told of.
     luneta: PathBuf,
     dir: PathBuf,
-    /// pi's folder, which the extension is kept in, if there is one to find.
-    pi: Option<PathBuf>,
+    /// Each folder pi finds extensions in, which the extension is kept in.
+    pi: Vec<PathBuf>,
     /// What each process says of itself, by its pid and when it started.
     processes: HashMap<(u32, String), Process>,
     /// What went wrong in reading the folder, or in putting the extension.
@@ -101,10 +130,10 @@ pub struct AgentFiles {
 }
 
 impl AgentFiles {
-    /// The files in `luneta`, the daemon's folder, and the extension for pi's
-    /// folder `pi`, if there is one to find.
+    /// The files in `luneta`, the daemon's folder, and the extension for each
+    /// of pi's folders `pi`, where one is there to find.
     #[must_use]
-    pub fn new(luneta: &Path, pi: Option<PathBuf>) -> Self {
+    pub fn new(luneta: &Path, pi: Vec<PathBuf>) -> Self {
         let dir = luneta.join(FOLDER);
         // Made ahead of any agent, to be watched from the start: a folder that
         // is not there yet is read on the sweep alone.
@@ -131,12 +160,17 @@ impl AgentFiles {
     /// extension where pi finds it, where it is not this daemon's: pi can come
     /// to the machine long after the daemon started, and a daemon in another
     /// folder can take the extension and go, after which each pi that starts
-    /// would tell a folder no daemon reads.
+    /// would tell a folder no daemon reads. Each folder of a launcher's gets it
+    /// too, or an agent started there would tell a folder no daemon reads.
     pub fn scan(&mut self) -> Vec<Agent> {
-        if let Some(pi) = self.pi.as_ref().filter(|pi| pi.is_dir())
-            && let Err(error) = install(pi, &self.luneta)
-        {
-            self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
+        let folders = self.pi.clone();
+        for pi in &folders {
+            if !pi.is_dir() {
+                continue;
+            }
+            if let Err(error) = install(pi, &self.luneta) {
+                self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
+            }
         }
         let paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,

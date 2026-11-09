@@ -70,6 +70,11 @@ impl Host {
         self.home.path().join(".pi/agent")
     }
 
+    /// pi's folder of numes's, which the launcher of pi's makes as its own.
+    pub fn numes_pi_folder(&self) -> PathBuf {
+        self.home.path().join(".local/share/numes/apps/pi")
+    }
+
     /// The folder zellij 0.45 keeps its sessions' sockets in.
     pub fn contract(&self) -> PathBuf {
         self.zellij.path().join("contract_version_1")

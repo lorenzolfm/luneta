@@ -356,7 +356,7 @@ fn follow(
         },
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
-    let mut files = pi::AgentFiles::new(folder, pi::folder());
+    let mut files = pi::AgentFiles::new(folder, pi::folders());
     let dir = files.dir().to_owned();
     let read = move || files.scan();
     let tell = {

@@ -112,13 +112,14 @@ Agent support, today:
 
 pi keeps no file for each agent, so lunetad keeps an extension where pi finds it,
 `extensions/luneta.ts` in `~/.pi/agent`, or in `PI_CODING_AGENT_DIR`, on any
-machine where pi has run, and writes over an older luneta's, or that of a lunetad
-in another folder, as it finds one. A pi that already runs takes it with
-`/reload`. The extension keeps a file for the agent in the folder of the lunetad
-that last put it there, wherever pi starts, as in a `nix develop` that moves
-`TMPDIR`. While a second lunetad runs in another folder, as one started in such a
-shell does on macOS, a pi that starts can tell either, and takes the one left
-with `/reload`.
+machine where pi has run, and in the folder of its own a launcher of pi's keeps,
+like numes's, on any where one has run. It writes over an older luneta's, or
+that of a lunetad in another folder, as it finds one. A pi that already runs
+takes it with `/reload`. The extension keeps a file for the agent in the folder
+of the lunetad that last put it there, wherever pi starts, as in a `nix develop`
+that moves `TMPDIR`. While a second lunetad runs in another folder, as one
+started in such a shell does on macOS, a pi that starts can tell either, and
+takes the one left with `/reload`.
 What goes by an agent and its status goes by that: its row and mark, the picker,
 the dots, `d d`, `luneta go`, the notifications, and all of it on [another
 machine](#other-machines).
