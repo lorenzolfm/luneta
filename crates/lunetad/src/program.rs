@@ -78,7 +78,7 @@ pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
 /// Runs `command` as `run` does, with `stdin` on its stdin, in place of nothing.
 pub fn run_reading(command: &mut Command, limit: Duration, stdin: Stdio) -> io::Result<Ran> {
     let kills = Kills::Program;
-    let Ok(ran) = running::<Infallible>(command, limit, None, kills, stdin, SAID_MAX)?;
+    let Ok((ran, _)) = running::<Infallible>(command, limit, None, kills, stdin, FIRST)?;
     Ok(ran)
 }
 
@@ -99,7 +99,17 @@ pub fn saying(words: &str) -> io::Result<Stdio> {
 /// it said more, as one that hands over a file does, whatever its size.
 pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Result<Ran> {
     let kills = Kills::Program;
-    let Ok(ran) = running::<Infallible>(command, limit, None, kills, Stdio::null(), most)?;
+    let keeps = Keeps::First { most, over: io::ErrorKind::FileTooLarge };
+    let Ok((ran, _)) = running::<Infallible>(command, limit, None, kills, Stdio::null(), keeps)?;
+    Ok(ran)
+}
+
+/// Runs `command` as `run` does, where it may say any amount on its stdout,
+/// of which the last lines that fit in `most` bytes are kept, and how many
+/// lines it said before them.
+pub fn run_tail(command: &mut Command, limit: Duration, most: u64) -> io::Result<(Ran, u64)> {
+    let (kills, keeps) = (Kills::Program, Keeps::Last { most });
+    let Ok(ran) = running::<Infallible>(command, limit, None, kills, Stdio::null(), keeps)?;
     Ok(ran)
 }
 
@@ -112,7 +122,8 @@ pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Resul
 /// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     let kills = Kills::Group;
-    let Ok(ran) = running::<Infallible>(alone(command), limit, None, kills, Stdio::null(), SAID_MAX)?;
+    let (command, stdin) = (alone(command), Stdio::null());
+    let Ok((ran, _)) = running::<Infallible>(command, limit, None, kills, stdin, FIRST)?;
     Ok(ran)
 }
 
@@ -139,7 +150,8 @@ pub fn run_while_reading(
     stdin: Stdio,
 ) -> io::Result<Option<Ran>> {
     let wanted = || if wanted() { Ok(()) } else { Err(()) };
-    running::<()>(command, limit, Some(&wanted), Kills::Program, stdin, SAID_MAX).map(Result::ok)
+    let ran = running::<()>(command, limit, Some(&wanted), Kills::Program, stdin, FIRST);
+    ran.map(|ran| ran.ok().map(|(ran, _)| ran))
 }
 
 /// What of a program is killed, as it is stuck or no longer wanted.
@@ -152,22 +164,38 @@ enum Kills {
     Group,
 }
 
+/// What of a program's stdout is read: up to `most` bytes, where more is an
+/// error of `over`, or the last of its lines that fit in `most` bytes.
+#[derive(Clone, Copy)]
+enum Keeps {
+    First { most: u64, over: io::ErrorKind },
+    Last { most: u64 },
+}
+
+/// What was read of a pipe, as `Keeps` says: its bytes, and how many lines
+/// went before them.
+type Said = (Vec<u8>, u64);
+
+/// What `run` reads of a program's stdout.
+const FIRST: Keeps = Keeps::First { most: SAID_MAX, over: io::ErrorKind::FileTooLarge };
+
 /// Runs `command`, as `run_while` does, where it is `wanted` only for a
 /// while, which says what that comes to once it is not, or else as `run`
-/// does, with `stdin` on its stdin, and kills of it what `kills` says. It may
-/// say up to `most` bytes on its stdout.
+/// does, with `stdin` on its stdin, and kills of it what `kills` says. It
+/// reads of its stdout what `keeps` says, and says how many lines went
+/// before what it kept.
 fn running<N>(
     command: &mut Command,
     limit: Duration,
     wanted: Option<&dyn Fn() -> Result<(), N>>,
     kills: Kills,
     stdin: Stdio,
-    most: u64,
-) -> io::Result<Result<Ran, N>> {
+    keeps: Keeps,
+) -> io::Result<Result<(Ran, u64), N>> {
     let deadline = Instant::now() + limit;
     let mut child =
         command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let heard = hear(&mut child, deadline, wanted, most);
+    let heard = hear(&mut child, deadline, wanted, keeps);
     // Whatever was heard of it, or why nothing could be, what is left of it
     // is killed, and it is waited for last, so that no kill names a pid let
     // go. One that could not be killed is let go unwaited for, rather than
@@ -177,16 +205,19 @@ fn running<N>(
     }
     let status = child.wait()?;
     Ok(match heard? {
-        Heard::Ended { stdout, stderr } => Ok(Ran::Ended { status, stdout, stderr }),
-        Heard::Stuck => Ok(Ran::Stuck),
+        Heard::Ended { stdout: (stdout, before), stderr } => {
+            Ok((Ran::Ended { status, stdout, stderr }, before))
+        },
+        Heard::Stuck => Ok((Ran::Stuck, 0)),
         Heard::Unwanted(not) => Err(not),
     })
 }
 
 /// What was heard of a program, before it is waited for.
 enum Heard<N> {
-    /// It ended, and said all it had to say in its time.
-    Ended { stdout: Vec<u8>, stderr: Vec<u8> },
+    /// It ended, and said all it had to say in its time: of its stdout, what
+    /// was kept, and how many lines went before it.
+    Ended { stdout: Said, stderr: Vec<u8> },
     /// It, or what it started that holds its stdout open, went past its
     /// deadline.
     Stuck,
@@ -195,18 +226,18 @@ enum Heard<N> {
 }
 
 /// What is heard of `child` until `deadline`, for as long as it is `wanted`,
-/// up to `most` bytes of its stdout.
+/// of its stdout what `keeps` says.
 fn hear<N>(
     child: &mut Child,
     deadline: Instant,
     wanted: Option<&dyn Fn() -> Result<(), N>>,
-    most: u64,
+    keeps: Keeps,
 ) -> io::Result<Heard<N>> {
     let stdout = child.stdout.take().expect("its stdout is piped");
-    let stdout = read(stdout, most, io::ErrorKind::FileTooLarge)?;
+    let stdout = read(stdout, keeps)?;
     // What a program says of its failures is no answer that is too large.
     let stderr = child.stderr.take().expect("its stderr is piped");
-    let stderr = read(stderr, SAID_MAX, io::ErrorKind::Other)?;
+    let stderr = read(stderr, Keeps::First { most: SAID_MAX, over: io::ErrorKind::Other })?;
     let ended = ends(child)?;
     let left = || deadline.saturating_duration_since(Instant::now());
     loop {
@@ -232,7 +263,7 @@ fn hear<N>(
         // What it started holds its stdout open still.
         return Ok(Heard::Stuck);
     };
-    Ok(Heard::Ended { stdout: stdout?, stderr: stderr? })
+    Ok(Heard::Ended { stdout: stdout?, stderr: stderr?.0 })
 }
 
 /// Kills of `child` what `kills` says. One that ended, and is not waited for
@@ -306,21 +337,25 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
 }
 
 /// What comes out of `pipe` until it closes, read in a thread of its own and
-/// handed over in one piece, or why it could not all be read: an error of
-/// `over` where it is more than `most` bytes.
+/// handed over in one piece, as `keeps` says, with how many lines went
+/// before it, or why it could not all be read: an error of `over` where it
+/// is more than the `most` bytes of `Keeps::First`.
 fn read(
     mut pipe: impl Read + Send + 'static,
-    most: u64,
-    over: io::ErrorKind,
-) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
+    keeps: Keeps,
+) -> io::Result<Receiver<io::Result<Said>>> {
     in_thread(move || {
+        let (most, over) = match keeps {
+            Keeps::First { most, over } => (most, over),
+            Keeps::Last { most } => return last_lines(&mut pipe, most),
+        };
         let mut all = Vec::new();
         let read = (&mut pipe).take(most).read_to_end(&mut all);
         // What it says past the most is read and let go, so that it is not
         // kept waiting.
         let past = read.and_then(|_| io::copy(&mut pipe, &mut io::sink()));
         match past {
-            Ok(0) => Ok(all),
+            Ok(0) => Ok((all, 0)),
             Ok(_) => {
                 let more = format!("it said more than {most} bytes");
                 Err(io::Error::new(over, more))
@@ -328,6 +363,39 @@ fn read(
             Err(error) => Err(error),
         }
     })
+}
+
+/// The last of the lines out of `pipe` until it closes that fit in `most`
+/// bytes, and how many went before them. What it says is let go of as it
+/// comes, so that no more than twice as much is held at once.
+fn last_lines(pipe: &mut impl Read, most: u64) -> io::Result<Said> {
+    let most = usize::try_from(most).unwrap_or(usize::MAX);
+    let (mut kept, mut before) = (Vec::new(), 0);
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => kept.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+            Err(error) => return Err(error),
+        }
+        if kept.len() > most.saturating_mul(2) {
+            before += let_go(&mut kept, most);
+        }
+    }
+    if kept.len() > most {
+        before += let_go(&mut kept, most);
+    }
+    Ok((kept, before))
+}
+
+/// Lets go of the lines of `kept` before the last that fit in `most` bytes,
+/// and says how many it let go of.
+fn let_go(kept: &mut Vec<u8>, most: usize) -> u64 {
+    let cut = kept.len().saturating_sub(most);
+    let start = kept[cut..].iter().position(|&byte| byte == b'\n');
+    let start = start.map_or(kept.len(), |at| cut + at + 1);
+    kept.drain(..start).fold(0, |lines, byte| lines + u64::from(byte == b'\n'))
 }
 
 /// What `work` comes to, worked out in a thread of its own and handed over
@@ -354,8 +422,8 @@ mod tests {
     use rustix::process::{self, Pid, Signal};
 
     use super::{
-        Ran, SAID_MAX, alone, run, run_alone, run_reading, run_up_to, run_while, run_while_reading,
-        saying,
+        Ran, SAID_MAX, alone, run, run_alone, run_reading, run_tail, run_up_to, run_while,
+        run_while_reading, saying,
     };
 
     /// A program reads what it is told to the end, however much more of it
@@ -442,6 +510,27 @@ mod tests {
             panic!("it said more than the most, and was read");
         };
         assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge, "{error}");
+    }
+
+    /// A program asked for its last lines has those that fit kept whole, and
+    /// the lines before them counted, however much it said; one that said
+    /// less has all of it kept.
+    #[test]
+    fn a_program_asked_for_its_last_lines_keeps_them() {
+        let tail = |count: &str, most| {
+            let mut says = Command::new("seq");
+            says.arg(count);
+            let Ok((Ran::Ended { stdout, .. }, before)) =
+                run_tail(&mut says, Duration::from_secs(10), most)
+            else {
+                panic!("seq {count} was not heard");
+            };
+            (String::from_utf8(stdout).unwrap(), before)
+        };
+        let (kept, before) = tail("200000", 100);
+        let last: Vec<String> = (199987..=200000).map(|line| format!("{line}\n")).collect();
+        assert_eq!((kept, before), (last.concat(), 199986));
+        assert_eq!(tail("3", 100), ("1\n2\n3\n".to_owned(), 0));
     }
 
     /// A program is heard from as it ends, about as soon as std's own `output`

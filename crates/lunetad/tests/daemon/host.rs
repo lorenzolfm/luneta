@@ -719,16 +719,25 @@ if [ "$1 $2 $4" = "pr view --repo" ]; then
     echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
     exit 1
 fi
-if [ "$1 $2 $4 $5" = "pr view --json state,headRefOid,statusCheckRollup" ]; then
+if [ "$1 $2 $4 $5" = "pr view --json state,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
     echo "$*" >> "$pulls/checked"
     [ -f "$pulls/checks-${3##*/}" ] && exec cat "$pulls/checks-${3##*/}"
     echo "GraphQL: Could not resolve to a PullRequest with the number of ${3##*/}." >&2
     exit 1
 fi
-if [ "$1 $2 $3 $5 $6" = "run view --job --log-failed -R" ]; then
+if [ "$1 $2" = "api --hostname" ] && case "$*" in */actions/jobs/*/logs) true;; *) false;; esac; then
     echo "$*" >> "$pulls/checked"
-    [ -f "$pulls/log-$4" ] && exec cat "$pulls/log-$4"
-    echo "failed to get run log: HTTP 404: Not Found" >&2
+    if [ "$4" = --allow-escape-sequences ]; then
+        if [ -f "$pulls/old" ]; then
+            echo "unknown flag: --allow-escape-sequences" >&2
+            exit 1
+        fi
+        shift
+    fi
+    job=${4#*/actions/jobs/}
+    job=${job%/logs}
+    [ -f "$pulls/log-$job" ] && exec cat "$pulls/log-$job"
+    echo "gh: Not Found (HTTP 404)" >&2
     exit 1
 fi
 if [ "$1" = api ]; then
@@ -833,9 +842,14 @@ exec cat "$said"
         fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
     }
 
-    /// Has gh say `log` of the failed steps of the job numbered `job`.
+    /// Has gh say `log` of the job numbered `job`.
     pub fn log(&self, job: u64, log: &str) {
         fs::write(self.pulls.join(format!("log-{job}")), log).unwrap();
+    }
+
+    /// Has gh be one older than 2.97, which knows no `--allow-escape-sequences`.
+    pub fn old(&self) {
+        fs::write(self.pulls.join("old"), "").unwrap();
     }
 
     /// What gh has been asked of checks and their logs, in the order it was

@@ -217,8 +217,9 @@ while lunetad runs, or else as it next starts.
 The Claude group's `c` starts an agent beside a pane on the checks that failed
 on its branch's pull request, to fix them. luneta asks `gh` how the checks of
 the pull request's head stand now, and fetches the log of each job of GitHub
-Actions that failed, with `gh run view --job <id> --log-failed`, as many as 8
-side by side. It keeps the last 2000 lines of each, with no colours, in a file
+Actions that failed, with `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`,
+which has it as soon as the job ends, while others of its run go on, as many as
+8 side by side. It keeps the last 2000 lines of each, with no colours, in a file
 of its own in the folder `checks` of luneta's, which the agent is let read with
 no question asked, and the menu says `⠋ Asking gh about the checks of #126…`
 meanwhile:
@@ -226,12 +227,13 @@ meanwhile:
 ```text
 Fix the checks that failed on pull request #126,
 https://github.com/owner/repo/pull/126, at its head
-3f2c9e1d0b8a4c5e6f708192a3b4c5d6e7f80912. `ci / test` failed: its failed steps'
-log is in /run/user/1000/luneta/checks/1793317274015320011-4127-0.log. One other
-check has yet to end.
+3f2c9e1d0b8a4c5e6f708192a3b4c5d6e7f80912. `ci / test` failed: its log is in
+/run/user/1000/luneta/checks/1793317274015320011-4127-0.log. One other check has
+yet to end.
 ```
 
-A check of another service, a job whose log `gh` could not fetch, and those past
+A check of another service, a job that ran in a repository other than the pull
+request's or its head's, a job whose log `gh` could not fetch, and those past
 the 8th, are named with why they have no log, and the page of each where GitHub
 gives one. The key
 takes a pane whose branch has a pull request open, or a draft: on another, or

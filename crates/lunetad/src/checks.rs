@@ -8,7 +8,8 @@
 //!
 //! GitHub lists a pull request's checks as runs of checks, as GitHub Actions
 //! makes one of each job, and statuses, as other services set them. gh fetches
-//! the log of a job of GitHub Actions alone, of the steps that failed.
+//! the log of a job of GitHub Actions alone, once the job has ended, while
+//! others of its run go on.
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -26,7 +27,7 @@ use crate::{folder, git, keeps, program};
 pub(crate) const FOLDER: &str = "checks";
 
 /// How long gh has to say: it asks GitHub, across the network, and a log
-/// comes down whole before gh says the failed steps of it.
+/// comes down whole.
 const LIMIT: Duration = Duration::from_secs(30);
 
 /// How long `kept_failing` takes at the most: the logs come down side by
@@ -45,6 +46,10 @@ const LOGS_MAX: usize = 8;
 /// what fetched it panicked, as the log says.
 const NO_JOB: &str = "it is no job of GitHub Actions, whose log gh fetches";
 const PANICKED: &str = "what fetched its log panicked";
+
+/// What gh 2.97 and later are told to write a log as it is, with the styles
+/// in it, which an older one does not know, and writes so anyway.
+const AS_IT_IS: &str = "--allow-escape-sequences";
 
 /// A check as gh writes it in `statusCheckRollup`: a run of a check, or a
 /// status, or what GitHub has added since, which counts for nothing.
@@ -149,12 +154,22 @@ pub(crate) fn rolled_up(rollup: Option<serde_json::Value>) -> Option<Checks> {
     checks_of(rollup).as_deref().map(counted)
 }
 
-/// A job of GitHub Actions, by the repository it ran in, as gh's `-R` takes
-/// it, and its number there.
+/// A job of GitHub Actions, by the host and the `<owner>/<repo>` of the
+/// repository it ran in, and its number there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Job {
+    host: String,
     repository: String,
     id: u64,
+}
+
+impl Job {
+    /// Whether it ran in `repository`, as `<host>/<owner>/<repo>`, which
+    /// GitHub names with no heed to case.
+    fn ran_in(&self, repository: &str) -> bool {
+        let ran = format!("{}/{}", self.host, self.repository);
+        ran.eq_ignore_ascii_case(repository)
+    }
 }
 
 /// The job a check's page is of, where it is a job's of GitHub Actions:
@@ -172,14 +187,16 @@ fn job_of(link: &str) -> Option<Job> {
         return None;
     }
     let id = job.parse().ok().filter(|_| number(job))?;
-    Some(Job { repository: format!("{host}/{owner}/{name}"), id })
+    Some(Job { host: (*host).to_owned(), repository: format!("{owner}/{name}"), id })
 }
 
 /// A pull request's page, `https://<host>/<owner>/<repo>/pull/<n>`, as gh
-/// takes it, and the number it says.
+/// takes it, the repository it says, as `<host>/<owner>/<repo>`, and the
+/// number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullPage {
     url: String,
+    repository: String,
     number: NonZeroU32,
 }
 
@@ -190,16 +207,17 @@ impl PullPage {
         let parts: Vec<&str> = path.split('/').collect();
         let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
         let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-        let number = match parts.as_slice() {
+        let pull = match parts.as_slice() {
             [host, owner, name, "pull", pull]
                 if [host, owner, name].into_iter().all(named) && digits(pull) =>
             {
-                pull.parse().ok()
+                pull.parse().ok().map(|number| (format!("{host}/{owner}/{name}"), number))
             },
             _ => None,
         };
-        let number = number.ok_or_else(|| format!("{url} is no page of a pull request"))?;
-        Ok(PullPage { url: url.to_owned(), number })
+        let (repository, number) =
+            pull.ok_or_else(|| format!("{url} is no page of a pull request"))?;
+        Ok(PullPage { url: url.to_owned(), repository, number })
     }
 
     #[must_use]
@@ -216,7 +234,7 @@ impl PullPage {
 /// What a check that failed holds of its log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Log {
-    /// Its failed steps' log, its last lines, in a file of its own.
+    /// Its job's log, its last lines, in a file of its own.
     Kept(Kept),
     /// Why none was kept, in words.
     Unkept(String),
@@ -240,25 +258,41 @@ pub struct Failing {
     pub passed: u32,
 }
 
-/// The pull request, as `gh pr view --json state,headRefOid,statusCheckRollup`
-/// writes it.
+/// What `kept_failing` asks gh of the pull request.
+const VIEWED: &str = "state,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup";
+
+/// The pull request, as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
     state: String,
     head_ref_oid: String,
     #[serde(default)]
+    head_repository: Option<Named>,
+    #[serde(default)]
+    head_repository_owner: Option<Owner>,
+    #[serde(default)]
     status_check_rollup: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+struct Named {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct Owner {
+    login: String,
+}
+
 /// Asks gh how the pull request of `page` stands now, and the checks of its
-/// head, and keeps the log of each that failed, of those of GitHub Actions,
-/// in luneta's runtime folder, or says why it found none: of one no longer
-/// open, nor a draft, none.
+/// head, and keeps the log of each that failed, of those of GitHub Actions
+/// that ran in its repository or its head's, in luneta's runtime folder, or
+/// says why it found none: of one no longer open, nor a draft, none.
 pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     let url = page.url();
     let mut gh = Command::new("gh");
-    git::local(gh.args(["pr", "view", url, "--json", "state,headRefOid,statusCheckRollup"]));
+    git::local(gh.args(["pr", "view", url, "--json", VIEWED]));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view {url} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("gh pr view {url}: {why}"))?;
@@ -269,38 +303,63 @@ pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     }
     let checks = checks_of(viewed.status_check_rollup)
         .ok_or_else(|| format!("gh pr view {url} said checks that do not read"))?;
+    let host = page.repository.split('/').next().unwrap_or_default();
+    let head = match (viewed.head_repository_owner, viewed.head_repository) {
+        (Some(Owner { login }), Some(Named { name })) => Some(format!("{host}/{login}/{name}")),
+        _ => None,
+    };
+    let repositories: Vec<&str> =
+        [page.repository.as_str()].into_iter().chain(head.as_deref()).collect();
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
-    Ok(keep(&runtime, viewed.head_ref_oid, &checks, fetch, SystemTime::now()))
+    Ok(keep(&runtime, viewed.head_ref_oid, &checks, &repositories, fetch, SystemTime::now()))
 }
 
-/// What gh says of the failed steps of `job`: the log, or why it gave none.
-fn fetch(job: &Job) -> Result<Vec<u8>, String> {
-    let mut gh = Command::new("gh");
-    let id = job.id.to_string();
-    gh.args(["run", "view", "--job", &id, "--log-failed", "-R", &job.repository]);
-    let asked = format!("gh run view --job {id} --log-failed -R {}", job.repository);
-    let ran = program::run(git::local(&mut gh), LIMIT)
-        .map_err(|error| format!("{asked} could not be run: {error}"))?;
-    ran.answer().map_err(|why| format!("{asked}: {why}"))
+/// What gh says of the log of `job`: its last lines, and how many lines went
+/// before them, or why it gave none. gh asks for the job's log alone, which
+/// GitHub has once the job ended, whatever the others of its run do.
+fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
+    let logs = format!("repos/{}/actions/jobs/{}/logs", job.repository, job.id);
+    let asked = format!("gh api --hostname {} {logs}", job.host);
+    let ask = |flags: &[&str]| {
+        let mut gh = Command::new("gh");
+        gh.args(["api", "--hostname", &job.host]).args(flags).arg(&logs);
+        program::run_tail(git::local(&mut gh), LIMIT, program::SAID_MAX)
+            .map_err(|error| format!("{asked} could not be run: {error}"))
+    };
+    let unknown = format!("unknown flag: {AS_IT_IS}");
+    let (ran, before) = match ask(&[AS_IT_IS])? {
+        (program::Ran::Ended { stderr, .. }, _)
+            if String::from_utf8_lossy(&stderr).contains(&unknown) =>
+        {
+            ask(&[])?
+        },
+        ran => ran,
+    };
+    let log = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
+    Ok((log, before))
 }
 
 /// What becomes of the log of a check that failed: its job's fetched, or
-/// none, as it is no job's, or one past the first `LOGS_MAX` jobs.
+/// none, as it is no job's, or one that ran in another repository than
+/// those it is let fetch from, or one past the first `LOGS_MAX` jobs.
 enum Plan {
     Fetch(Job),
     NoJob,
+    Elsewhere(Job),
     Past,
 }
 
 /// The checks of `head` that failed, of `checks`, each with its log as
 /// `fetch` gets it, kept in a file of its own in the folder `FOLDER` of
-/// luneta's folder `runtime`, for the first `LOGS_MAX` of their jobs: fetched
-/// side by side, so that the ask takes as long as the slowest.
+/// luneta's folder `runtime`, for the first `LOGS_MAX` of their jobs that
+/// ran in one of `repositories`: fetched side by side, so that the ask takes
+/// as long as the slowest.
 fn keep(
     runtime: &Path,
     head: String,
     checks: &[Check],
-    fetch: impl Fn(&Job) -> Result<Vec<u8>, String> + Sync,
+    repositories: &[&str],
+    fetch: impl Fn(&Job) -> Result<(Vec<u8>, u64), String> + Sync,
     now: SystemTime,
 ) -> Failing {
     let Checks { pending, passed, .. } = counted(checks);
@@ -309,6 +368,9 @@ fn keep(
     let mut jobs = 0;
     let plans = failed.iter().map(|check| match check.link.as_deref().and_then(job_of) {
         None => Plan::NoJob,
+        Some(job) if !repositories.iter().any(|repository| job.ran_in(repository)) => {
+            Plan::Elsewhere(job)
+        },
         Some(_) if jobs >= LOGS_MAX => Plan::Past,
         Some(job) => {
             jobs += 1;
@@ -318,10 +380,14 @@ fn keep(
     let plans: Vec<Plan> = plans.collect();
     let log = |plan: Plan| match plan {
         Plan::NoJob => Log::Unkept(NO_JOB.to_owned()),
+        Plan::Elsewhere(Job { host, repository, .. }) => Log::Unkept(format!(
+            "its job ran in {host}/{repository}, which is neither the pull request's repository \
+             nor its head's"
+        )),
         Plan::Past => Log::Unkept(format!("luneta fetches no more than {LOGS_MAX} logs")),
-        Plan::Fetch(job) => match fetch(&job).and_then(|log| write(runtime, &log, now)) {
-            Ok(kept) => Log::Kept(kept),
-            Err(why) => Log::Unkept(why),
+        Plan::Fetch(job) => {
+            let kept = fetch(&job).and_then(|(log, before)| write(runtime, &log, before, now));
+            kept.map_or_else(Log::Unkept, Log::Kept)
         },
     };
     let logs: Vec<Log> = thread::scope(|scope| {
@@ -339,8 +405,9 @@ fn keep(
 }
 
 /// Writes the last `TAIL` lines of `log`, with no styles, in a file of its
-/// own, as `keeps::Draft` keeps it, or says why it kept none.
-fn write(runtime: &Path, log: &[u8], now: SystemTime) -> Result<Kept, String> {
+/// own, as `keeps::Draft` keeps it, or says why it kept none: of a log that
+/// had `before` lines before it, those are left out too.
+fn write(runtime: &Path, log: &[u8], before: u64, now: SystemTime) -> Result<Kept, String> {
     let log = String::from_utf8_lossy(log);
     let lines: Vec<String> = log.lines().map(plain).collect();
     let first = lines.iter().position(|line| !line.trim().is_empty());
@@ -349,8 +416,11 @@ fn write(runtime: &Path, log: &[u8], now: SystemTime) -> Result<Kept, String> {
         return Err("gh fetched a log with nothing in it".to_owned());
     };
     let lines = &lines[first..=last];
-    let left_out = lines.len().saturating_sub(TAIL);
-    let lines = &lines[left_out..];
+    let cut = lines.len().saturating_sub(TAIL);
+    let lines = &lines[cut..];
+    let before = usize::try_from(before).unwrap_or(usize::MAX);
+    let blank = if before == 0 { 0 } else { first };
+    let left_out = before.saturating_add(blank).saturating_add(cut);
     let mut draft = keeps::Draft::new(runtime, FOLDER, "log", now)?;
     let mut text = lines.join("\n");
     text.push('\n');
@@ -442,12 +512,18 @@ mod tests {
     /// number; any other page names no job.
     #[test]
     fn a_job_s_page_says_where_it_ran() {
-        let job = |repository: &str, id| Some(Job { repository: repository.to_owned(), id });
+        let job = |host: &str, repository: &str, id| {
+            Some(Job { host: host.to_owned(), repository: repository.to_owned(), id })
+        };
         let page = "https://github.com/owner/repo/actions/runs/42/job/128712805531";
-        assert_eq!(job_of(page), job("github.com/owner/repo", 128712805531));
-        assert_eq!(job_of(&format!("{page}?pr=328")), job("github.com/owner/repo", 128712805531));
+        assert_eq!(job_of(page), job("github.com", "owner/repo", 128712805531));
+        let asked = job_of(&format!("{page}?pr=328"));
+        assert_eq!(asked, job("github.com", "owner/repo", 128712805531));
         let enterprise = "https://git.example.com/team/repo/actions/runs/1/job/2";
-        assert_eq!(job_of(enterprise), job("git.example.com/team/repo", 2));
+        assert_eq!(job_of(enterprise), job("git.example.com", "team/repo", 2));
+        let ran = job_of(page).unwrap();
+        assert!(ran.ran_in("github.com/owner/repo") && ran.ran_in("github.com/Owner/Repo"));
+        assert!(!ran.ran_in("github.com/owner/other") && !ran.ran_in("git.example.com/owner/repo"));
         for page in [
             "http://github.com/owner/repo/actions/runs/42/job/1",
             "https://github.com/owner/repo/actions/runs/42",
@@ -469,6 +545,7 @@ mod tests {
         let url = "https://github.com/owner/repo/pull/328";
         let page = PullPage::parse(url).unwrap();
         assert_eq!((page.url(), page.number().get()), (url, 328));
+        assert_eq!(page.repository, "github.com/owner/repo");
         for url in [
             "http://github.com/owner/repo/pull/328",
             "https://github.com/owner/repo/issues/328",
@@ -496,9 +573,10 @@ mod tests {
     }
 
     /// Each check that failed is listed, in gh's order: one of GitHub Actions
-    /// with its log, its last lines, in a file of its own; any other, and one
-    /// whose log gh did not give, with why. Past `LOGS_MAX` jobs, none is
-    /// fetched, and a check of no job counts as none of them.
+    /// with its log, its last lines, in a file of its own; any other, one that
+    /// ran in a repository other than those asked of, and one whose log gh did
+    /// not give, with why. Past `LOGS_MAX` jobs, none is fetched, and a check
+    /// of no job counts as none of them.
     #[test]
     fn each_check_that_failed_keeps_its_log() {
         let root = tempfile::tempdir().unwrap();
@@ -511,22 +589,27 @@ mod tests {
             run("mac", "COMPLETED", "FAILURE", 3),
             run("arm", "IN_PROGRESS", "", 4),
             run("empty", "COMPLETED", "FAILURE", 5),
+            run("fork", "COMPLETED", "FAILURE", 6).replace("owner/repo", "fork/repo"),
+            run("other", "COMPLETED", "FAILURE", 7).replace("owner/repo", "other/repo"),
         ])))
         .unwrap();
+        let repositories = ["github.com/owner/repo", "github.com/fork/repo"];
         let log = b"\n\ntest\tRun\t\xef\xbb\xbfgo\ntest\tRun\t\x1b[31mfailed\x1b[0m\n";
         let fetch = |job: &Job| {
-            assert_eq!(job.repository, "github.com/owner/repo");
-            match job.id {
-                2 => Ok(log.to_vec()),
-                3 => Err("gh: job 3 is still in progress".to_owned()),
-                5 => Ok(b"\n  \n".to_vec()),
-                _ => panic!("fetched job {}", job.id),
+            assert_eq!(job.host, "github.com");
+            match (job.repository.as_str(), job.id) {
+                ("owner/repo", 2) => Ok((log.to_vec(), 0)),
+                ("owner/repo", 3) => Err("gh: HTTP 404: Not Found".to_owned()),
+                ("owner/repo", 5) => Ok((b"\n  \n".to_vec(), 0)),
+                ("fork/repo", 6) => Ok((b"\nfailed\n".to_vec(), 40)),
+                _ => panic!("fetched job {job:?}"),
             }
         };
-        let failing = keep(&runtime, "abc".to_owned(), &checks, fetch, now);
+        let failing = keep(&runtime, "abc".to_owned(), &checks, &repositories, fetch, now);
         assert_eq!((failing.head.as_str(), failing.pending, failing.passed), ("abc", 1, 1));
         let names: Vec<&str> = failing.failed.iter().map(|failed| failed.name.as_str()).collect();
-        assert_eq!(names, ["ci / test", "ci/bad", "ci / mac", "ci / empty"]);
+        let all = ["ci / test", "ci/bad", "ci / mac", "ci / empty", "ci / fork", "ci / other"];
+        assert_eq!(names, all);
         let Log::Kept(Kept { file, lines: 2, left_out: 0 }) = &failing.failed[0].log else {
             panic!("{:?}", failing.failed[0].log);
         };
@@ -540,17 +623,23 @@ mod tests {
             Log::Kept(kept) => panic!("{kept:?}"),
         };
         assert_eq!(unkept(1), NO_JOB);
-        assert_eq!(unkept(2), "gh: job 3 is still in progress");
+        assert_eq!(unkept(2), "gh: HTTP 404: Not Found");
         assert_eq!(unkept(3), "gh fetched a log with nothing in it");
+        let Log::Kept(Kept { lines: 1, left_out: 41, .. }) = &failing.failed[4].log else {
+            panic!("{:?}", failing.failed[4].log);
+        };
+        let elsewhere = "its job ran in github.com/other/repo, which is neither the pull request's \
+                         repository nor its head's";
+        assert_eq!(unkept(5), elsewhere);
 
         let many: Vec<String> =
             (1..=LOGS_MAX as u64 + 1).map(|job| run("m", "COMPLETED", "FAILURE", job)).collect();
         let fetch = |job: &Job| {
             assert!(job.id <= LOGS_MAX as u64, "fetched job {}", job.id);
-            Ok(b"failed\n".to_vec())
+            Ok((b"failed\n".to_vec(), 0))
         };
         let many = checks_of(Some(rollup(&many))).unwrap();
-        let failing = keep(&runtime, "abc".to_owned(), &many, fetch, now);
+        let failing = keep(&runtime, "abc".to_owned(), &many, &repositories, fetch, now);
         assert_eq!(failing.failed.len(), LOGS_MAX + 1);
         assert!(failing.failed[..LOGS_MAX].iter().all(|failed| matches!(failed.log, Log::Kept(_))));
         let last = &failing.failed[LOGS_MAX].log;
@@ -561,25 +650,30 @@ mod tests {
         first.push(run("test", "COMPLETED", "FAILURE", 2));
         let fetch = |job: &Job| {
             assert_eq!(job.id, 2, "fetched job {}", job.id);
-            Ok(b"failed\n".to_vec())
+            Ok((b"failed\n".to_vec(), 0))
         };
         let first = checks_of(Some(rollup(&first))).unwrap();
-        let failing = keep(&runtime, "abc".to_owned(), &first, fetch, now);
+        let failing = keep(&runtime, "abc".to_owned(), &first, &repositories, fetch, now);
         let no_job = Log::Unkept(NO_JOB.to_owned());
         assert!(failing.failed[..LOGS_MAX].iter().all(|failed| failed.log == no_job));
         assert!(matches!(failing.failed[LOGS_MAX].log, Log::Kept(_)));
     }
 
-    /// A long log keeps its last `TAIL` lines, and says how many it left out.
+    /// A long log keeps its last `TAIL` lines, and says how many it left out,
+    /// with those gh said before what was read of it, blank ones too.
     #[test]
     fn a_long_log_keeps_its_last_lines() {
         let root = tempfile::tempdir().unwrap();
         let runtime = root.path().join("luneta");
         let log: Vec<String> = (1..=TAIL + 5).map(|line| format!("line {line}")).collect();
         let log = log.join("\n");
-        let kept = write(&runtime, log.as_bytes(), SystemTime::now()).unwrap();
+        let kept = write(&runtime, log.as_bytes(), 0, SystemTime::now()).unwrap();
         assert_eq!((kept.lines, kept.left_out), (TAIL, 5));
         let text = fs::read_to_string(&kept.file).unwrap();
         assert!(text.starts_with("line 6\n") && text.ends_with(&format!("line {}\n", TAIL + 5)));
+        let kept = write(&runtime, b"\n\nlast\n", 0, SystemTime::now()).unwrap();
+        assert_eq!((kept.lines, kept.left_out), (1, 0));
+        let kept = write(&runtime, b"\n\nlast\n", 7, SystemTime::now()).unwrap();
+        assert_eq!((kept.lines, kept.left_out), (1, 9));
     }
 }

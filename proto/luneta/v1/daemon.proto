@@ -51,7 +51,7 @@ service Daemon {
   // shell waits at. A file goes a day on.
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
   // Keeps the log of each check of a pull request that failed on its head, as
-  // gh fetches the failed steps' log of a job of GitHub Actions, in a file for
+  // gh fetches the log of a job of GitHub Actions, in a file for
   // the daemon's user alone, for an agent there to read, as luneta's menu does
   // for `c c`. A file goes a day on. It answers once, as `Prunes` does, since
   // gh can take longer than an answer has; a question that hangs up does not
@@ -390,10 +390,11 @@ message KeepChecksResponse {
     // What it holds of the log: one of these, always. A client that finds
     // none has a newer daemon's.
     oneof log {
-      // The failed steps' log, its last lines, kept in a file.
+      // The job's log, its last lines, kept in a file.
       KeepPrintedResponse.File kept = 3;
       // Why none was kept, in words: a check of no job of GitHub Actions,
-      // or one gh could not fetch the log of.
+      // one that ran in another repository, or one gh could not fetch the
+      // log of.
       string unkept = 4;
     }
   }

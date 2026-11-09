@@ -25,14 +25,11 @@ pub fn prompt(page: &PullPage, failing: &Failing) -> String {
     let mut said = vec![format!("{asks} {head}.")];
     said.extend(failed.iter().map(|Failed { name, link, log }| match log {
         Log::Kept(Kept { file, left_out: 0, .. }) => {
-            format!("`{name}` failed: its failed steps' log is in {file}.")
+            format!("`{name}` failed: its log is in {file}.")
         },
         Log::Kept(Kept { file, lines, left_out }) => {
             let of = lines + left_out;
-            format!(
-                "`{name}` failed: the last {lines} of the {of} lines of its failed steps' log are \
-                 in {file}."
-            )
+            format!("`{name}` failed: the last {lines} of the {of} lines of its log are in {file}.")
         },
         Log::Unkept(why) => match link {
             Some(link) => format!("`{name}` failed, with no log: {why}. Its page is {link}."),
@@ -111,10 +108,10 @@ mod tests {
             prompt(&page, &failing),
             "Fix the checks that failed on pull request #328, \
              https://github.com/owner/repo/pull/328, at its head abc123. `ci / clippy` failed: \
-             its failed steps' log is in /run/checks/1.log. `ci / mac` failed: the last 2000 of \
-             the 2007 lines of its failed steps' log are in /run/checks/2.log. `ext` failed, \
-             with no log: no job. Its page is https://ci.example.com/1. `gone` failed, with no \
-             log: no job. 2 other checks have yet to end."
+             its log is in /run/checks/1.log. `ci / mac` failed: the last 2000 of the 2007 \
+             lines of its log are in /run/checks/2.log. `ext` failed, with no log: no job. Its \
+             page is https://ci.example.com/1. `gone` failed, with no log: no job. 2 other \
+             checks have yet to end."
         );
         assert_eq!(files(&failing), ["/run/checks/1.log", "/run/checks/2.log"]);
 

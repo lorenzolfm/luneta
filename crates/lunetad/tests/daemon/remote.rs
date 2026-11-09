@@ -765,7 +765,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         invalid(daemon.keep_printed(untyped).await.unwrap_err());
 
         // The logs of a pull request's checks that failed are kept there, as
-        // gh there fetches them, and none of one merged since.
+        // gh there fetches them, older or not, and none of one merged since.
         let checks = |url: &str| KeepChecksRequest { on: on("far"), url: url.to_owned() };
         let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
         let kept = kept.unwrap().into_inner().message().await.unwrap().unwrap();
@@ -778,10 +778,11 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!((name.as_str(), link.as_str()), ("ci / test", job));
         assert!(Path::new(&path).starts_with(far.runtime.path().canonicalize().unwrap()), "{path}");
         assert_eq!(fs::read_to_string(path).unwrap(), "test\tRun\terror[E0308]\n");
-        let asked = [
-            "pr view https://github.com/o/n/pull/328 --json state,headRefOid,statusCheckRollup",
-            "run view --job 7 --log-failed -R github.com/o/n",
-        ];
+        let viewed = "pr view https://github.com/o/n/pull/328 --json \
+                      state,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup";
+        let logs = "repos/o/n/actions/jobs/7/logs";
+        let fetched = format!("api --hostname github.com --allow-escape-sequences {logs}");
+        let asked = [viewed, fetched.as_str()];
         assert_eq!(far.gh.checked(), asked);
         assert_eq!(here.gh.checked(), [] as [String; 0]);
         invalid(daemon.keep_checks(checks("https://github.com/o/n/issues/328")).await.unwrap_err());
@@ -792,8 +793,22 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let merged = merged.unwrap().into_inner().message().await.unwrap_err();
         assert_eq!(merged.code(), Code::FailedPrecondition, "{merged:?}");
         assert_eq!(merged.message(), "https://github.com/o/n/pull/329 is merged now");
-        let fetched = far.gh.checked().into_iter().filter(|asked| asked.starts_with("run view"));
-        assert_eq!(fetched.count(), 1);
+        let fetching = || {
+            let checked = far.gh.checked().into_iter();
+            checked.filter(|asked| asked.starts_with("api")).collect::<Vec<_>>()
+        };
+        assert_eq!(fetching(), std::slice::from_ref(&fetched));
+        far.gh.old();
+        let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
+        let kept = kept.unwrap().into_inner().message().await.unwrap().unwrap();
+        let [Failed { log: Some(failed::Log::Kept(File { path, .. })), .. }] =
+            kept.failed.as_slice()
+        else {
+            panic!("kept {kept:?}");
+        };
+        assert_eq!(fs::read_to_string(path).unwrap(), "test\tRun\terror[E0308]\n");
+        let again = format!("api --hostname github.com {logs}");
+        assert_eq!(fetching(), [fetched.clone(), fetched, again]);
 
         // A screen there is dumped there: of the terminal asked, or else of
         // the one a client coming to the session would be on, as zellij there
