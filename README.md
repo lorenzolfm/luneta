@@ -913,10 +913,10 @@ the branch its repository takes as its default, as `issue-299 +120 -34`, the
 added in green and the deleted in red, of every line git's diff of the two
 counts, work tree changes included, as a diff of the pull request would show
 them. None changed, or the default branch itself, shows nothing, and a branch
-no default is found for shows none either. lunetad asks git in the directory
-once for a branch of a repository, however many panes are on it, as a pane
-comes to the branch and then every five seconds, and nothing reaches a remote
-for it. After that is the number of its pull request on
+no default is found for shows none either. lunetad asks git once for each
+directory panes work in, however many panes are in it, as a pane comes to it
+and then every five seconds, and nothing reaches a remote for it. After that
+is the number of its pull request on
 GitHub, as `fold #126`, in the colour `gh` lists it in: green while it is
 open, grey while it is a draft, and magenta once it is merged, which says the
 worktree may be able to go: [`d m`](#delete-merged-worktrees) checks that it can,

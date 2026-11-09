@@ -526,25 +526,27 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
-    let main = Branch { name: "main".to_owned(), upstream: Some(Upstream { ahead: 1, behind: 0 }) };
-    let checkout = |dir: &str, head, changes, stashes, changed| {
+    // `main` is one commit past `origin/main` with a merge gone wrong in
+    // the work tree, so its lines changed count what that commit and the
+    // work tree hold, of the merge-base of the two; the untracked file is
+    // in none of it, as a diff of the pull request would not show it.
+    let main = Branch {
+        name: "main".to_owned(),
+        upstream: Some(Upstream { ahead: 1, behind: 0 }),
+        changed: Some(api::Changed { added: 8, deleted: 5 }),
+    };
+    let checkout = |dir: &str, head, changes, stashes| {
         let repository = Some(fs::canonicalize(dir).unwrap().display().to_string());
         Some(Stands::Checkout(Checkout {
             head: Some(head),
             changes: Some(changes),
             stashes,
             repository,
-            changed,
         }))
     };
-    // `main` is one commit past `origin/main` with a merge gone wrong in
-    // the work tree, so its lines changed count what that commit and the
-    // work tree hold, of the merge-base of the two; the untracked file is
-    // in none of it, as a diff of the pull request would not show it.
-    let changed = Some(api::Changed { added: 8, deleted: 5 });
-    assert_eq!(stands(&tree), checkout(&tree, Head::Branch(main), every, 1, changed));
+    assert_eq!(stands(&tree), checkout(&tree, Head::Branch(main), every, 1));
     let none = Changes::default();
-    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(()), none, 0, None));
+    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(()), none, 0));
     assert_eq!(stands(&plain), Some(Stands::Outside(())));
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
@@ -607,7 +609,8 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     let changed = |dir: &str| {
         host.host().work_trees.iter().find(|tree| tree.dir == dir).and_then(|tree| {
             match tree.stands.as_ref()? {
-                Stands::Checkout(Checkout { changed: Some(changed), .. }) => {
+                Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. }) => {
+                    let changed = branch.changed.as_ref()?;
                     Some((changed.added, changed.deleted))
                 },
                 _ => None,

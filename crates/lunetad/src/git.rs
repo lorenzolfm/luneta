@@ -110,8 +110,10 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree,
     match (said, placed) {
         (Ok(stdout), _) => WorkTree::parse(&String::from_utf8_lossy(&stdout), repository)
             .map(|mut tree| {
-                if let WorkTree::Checkout { changed, head: Head::Branch { .. }, .. } = &mut tree {
-                    *changed = counted(dir);
+                if let WorkTree::Checkout { head: Head::Branch { name, changed, .. }, .. } =
+                    &mut tree
+                {
+                    *changed = counted(dir, name.as_str());
                 }
                 tree
             })
@@ -123,7 +125,7 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree,
     }
 }
 
-/// How many lines changed on the branch checked out in `dir`, as `changed`
+/// How many lines changed on `branch`, checked out in `dir`, as `changed`
 /// counts them, with git's failure to say none of them said: the row shows
 /// nothing rather than a wrong count, and git says of the work tree what it
 /// said of it before. A work tree git rests from, its branch keeps no count
@@ -131,9 +133,9 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree,
 /// counts a default as: what the row shows of the lines a branch changed is
 /// one git sweep behind the most, as the row already is of what gh said of
 /// the branch's pull request.
-fn counted(dir: &str) -> Option<Changed> {
-    changed(dir)
-        .map_err(|why| log::say(&format!("git diff in {dir}: {why}")))
+fn counted(dir: &str, branch: &str) -> Option<Changed> {
+    changed(dir, branch)
+        .map_err(|why| log::say(&format!("git in {dir} did not count {branch}'s lines: {why}")))
         .ok()
         .flatten()
 }
@@ -240,133 +242,72 @@ pub fn branch(dir: &str) -> Option<String> {
     Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
 }
 
-/// How many lines changed on the branch checked out in `dir`, against the
+/// How many lines changed on `branch`, checked out in `dir`, against the
 /// branch its repository takes as its default: every line git's diff of the
 /// two counts, work tree changes included, as a diff of the pull request
 /// would show them. None on the default branch itself, where the repository
-/// says none, where none is checked out, or where git does not say. Why git
-/// could not be asked, where it could not.
+/// says none, where the two share no history, or where `branch` has no
+/// commit. Why git did not say, where it did not.
 ///
-/// The default is asked of git alone: `refs/remotes/origin/HEAD` where the
-/// repository has it, and otherwise `main` where the repository has that and
-/// `master` where it has that, as a branch a pane works on is asked about
-/// only where a clone it was made in says the default. Nothing reaches a
+/// The default is asked of git alone: the branch `refs/remotes/origin/HEAD`
+/// names where the repository has it, and otherwise `main` and then
+/// `master`, of `origin` and then of the repository's own. Nothing reaches a
 /// remote, so what says the default here can be behind what the repository
 /// has.
-pub fn changed(dir: &str) -> Result<Option<Changed>, String> {
-    let git = || {
+pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
+    let git = |args: &[&str]| {
         let mut git = Command::new("git");
-        local(git.args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "safe.bareRepository=explicit",
-            "-C",
-            dir,
-        ]));
-        git
+        local(git.args(["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit"]))
+            .args(["-C", dir])
+            .args(args);
+        program::run(&mut git, LIMIT).map_err(|error| format!("git could not be run: {error}"))
     };
-    let found = |default: String| -> Option<String> {
-        let asked = format!("refs/remotes/origin/{default}");
-        let mut merge = git();
-        merge.args(["merge-base", "HEAD", &asked]);
-        if matches!(
-            program::run(&mut merge, LIMIT),
-            Ok(Ran::Ended { status, .. }) if status.success()
-        ) {
-            return Some(asked);
-        }
-        // A repository no remote has been named `origin` in, as one a test
-        // makes, keeps its branches of its own.
-        let asked = format!("refs/heads/{default}");
-        let mut merge = git();
-        merge.args(["merge-base", "HEAD", &asked]);
-        matches!(program::run(&mut merge, LIMIT), Ok(Ran::Ended { status, .. }) if status.success())
-            .then_some(asked)
-    };
-    let Some(base) = defaults(dir).into_iter().find_map(found) else {
+    let tip = format!("refs/heads/{branch}");
+    let named = [
+        tip.as_str(),
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+        "refs/remotes/origin/master",
+        "refs/heads/master",
+    ];
+    let mut listing = vec!["for-each-ref", "--format=%(refname) %(objectname)"];
+    listing.extend(named);
+    let listed = git(&listing)?.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+    let listed = String::from_utf8_lossy(&listed);
+    let listed: HashMap<&str, &str> =
+        listed.lines().filter_map(|line| line.split_once(' ')).collect();
+    let Some(&tip) = listed.get(tip.as_str()) else {
         return Ok(None);
     };
-    // The branch checked out on the default itself counts none: the default
-    // is its merge-base, and its diff of that is what the work tree changed
-    // of the branch alone, which is none on a branch that stands as the
-    // default does, and work tree changes on one that does not, which the
-    // glyph after the numbers says as well. The default is an ancestor of
-    // every branch made from it, so what says the branch is the default is
-    // the other way around: the branch is an ancestor of the default, or
-    // the two are one.
-    let mut on_default = git();
-    on_default.args(["merge-base", "--is-ancestor", "HEAD", &base]);
-    let on_default = matches!(
-        program::run(&mut on_default, LIMIT),
-        Ok(Ran::Ended { status, .. }) if status.success()
-    );
-    // The diff is of the merge-base of the branch and the default —
-    // `--merge-base` — and not of the default itself, so that what the
-    // default has that the branch does not, as it moved on after the branch
-    // was made, counts as none of the branch's changes. Work tree changes
-    // are in it, as a diff of the pull request would show them, and on the
-    // default they are left out: the branch counts none.
-    let asked = if on_default { "HEAD".to_owned() } else { base };
-    let mut diff = git();
-    diff.args(["diff", "--merge-base", "--numstat", "--no-textconv", &asked]);
-    let said = program::run(&mut diff, LIMIT)
-        .map_err(|error| format!("git diff in {dir} could not be run: {error}"))?;
-    let said = said.answer().map_err(|why| format!("git diff in {dir}: {why}"))?;
-    let said = String::from_utf8_lossy(&said);
-    let mut changed = Changed::default();
-    let mut said_something = false;
-    for line in said.lines() {
-        // A binary diff says `-\t-`, and a path with a tab in it makes a
-        // line of more fields: neither says how many lines changed, so what
-        // it says counts as none, and the rest of what changed still does.
+    let Some(base) = named[1..].iter().find_map(|name| listed.get(name).copied()) else {
+        return Ok(None);
+    };
+    let fork = match git(&["merge-base", tip, base])? {
+        Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
+        ran => ran.answer().map_err(|why| format!("git merge-base said {why}"))?,
+    };
+    let fork = one_line(fork).ok_or("git merge-base named no commit")?;
+    if fork == tip {
+        return Ok(None);
+    }
+    let said = git(&["diff", "--numstat", "--no-textconv", &fork])?
+        .answer()
+        .map_err(|why| format!("git diff said {why}"))?;
+    let (mut added, mut deleted) = (0u32, 0u32);
+    for line in String::from_utf8_lossy(&said).lines() {
         let mut fields = line.split('\t');
-        let Some(added) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
+        let Some(more) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
             continue;
         };
-        let Some(deleted) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
+        let Some(fewer) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
             continue;
         };
-        said_something = true;
-        changed.added = changed
-            .added
-            .checked_add(added)
-            .ok_or("git diff in {dir} said more lines than there is room to count")?;
-        changed.deleted = changed
-            .deleted
-            .checked_add(deleted)
-            .ok_or("git diff in {dir} said more lines than there is room to count")?;
+        let room = "git diff said more lines than there is room to count";
+        added = added.checked_add(more).ok_or(room)?;
+        deleted = deleted.checked_add(fewer).ok_or(room)?;
     }
-    if !said_something {
-        return Ok(None);
-    }
-    Ok((!on_default && (changed.added > 0 || changed.deleted > 0)).then_some(changed))
-}
-
-/// The branches the repository of `dir` may take as its default, nearest
-/// first: the one its `origin` names, then `main`, then `master`. `origin` is
-/// asked about by name, as the repository it names is where the default says
-/// one: a clone of a fork keeps its `origin` the fork's and finds the branch
-/// the fork takes as its default, and so does the pull request of a branch
-/// made there.
-fn defaults(dir: &str) -> Vec<String> {
-    let mut git = Command::new("git");
-    local(git.args(["-c", "safe.bareRepository=explicit", "-C", dir]));
-    let said = program::run(
-        git.args(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]),
-        LIMIT,
-    );
-    let said = said.ok().and_then(|ran| ran.answer().ok());
-    let named = said
-        .as_deref()
-        .and_then(|said| String::from_utf8(said.to_vec()).ok())
-        .as_deref()
-        .and_then(|said| said.strip_prefix("refs/remotes/origin/\n"))
-        .map(str::to_owned);
-    named
-        .into_iter()
-        .chain(["main".to_owned(), "master".to_owned()])
-        .collect()
+    Ok(Changed::new(added, deleted))
 }
 
 pub enum NamedHead {
@@ -1086,12 +1027,14 @@ pub fn follow(
 mod tests {
     use std::fs::{self, File};
 
-    use super::{Common, changed, stamp};
+    use super::{Changed, Common, changed, stamp};
 
     /// How many lines changed on a branch against the default, as `changed`
     /// counts them: what a commit changed and what the work tree holds too,
     /// none of what the default has that the branch does not, and none on
-    /// the default itself.
+    /// the default itself. The default `origin/HEAD` names comes before
+    /// `main`, and a branch that shares no history with it, or has no commit,
+    /// counts none.
     #[test]
     fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -1127,13 +1070,28 @@ mod tests {
         // What changed on `issue-299`: `b` became `B`, and `c` an empty
         // line — one added and one deleted of each — and `new` one more
         // added.
-        let what = changed(dir.path().to_str().unwrap());
-        assert_eq!(what, Ok(Some(super::Changed { added: 3, deleted: 2 })));
+        let at = dir.path().to_str().unwrap();
+        assert_eq!(changed(at, "issue-299"), Ok(Changed::new(3, 2)));
 
         assert!(git(&["switch", "-q", "main"]));
         // The default itself counts none, whatever the work tree holds: the
         // glyph after where the numbers would be says that instead.
-        assert_eq!(changed(dir.path().to_str().unwrap()), Ok(None));
+        assert_eq!(changed(at, "main"), Ok(None));
+
+        assert!(git(&["rm", "-q", "-f", "new"]));
+        assert!(git(&["switch", "-q", "-c", "trunk"]));
+        commit("trunk", "t\n");
+        assert!(git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]));
+        assert!(git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]));
+        assert!(git(&["switch", "-q", "-c", "fold"]));
+        commit("fold", "f\n");
+        assert_eq!(changed(at, "fold"), Ok(Changed::new(1, 0)));
+        assert_eq!(changed(at, "trunk"), Ok(None));
+
+        assert!(git(&["switch", "-q", "--orphan", "lone"]));
+        commit("lone", "l\n");
+        assert_eq!(changed(at, "lone"), Ok(None));
+        assert_eq!(changed(at, "unborn"), Ok(None));
     }
 
     /// git tells no repository from one it refuses by its words alone, as it

@@ -662,9 +662,8 @@ struct Checkout {
     /// How its work tree stands, as starship shows it.
     status: String,
     /// How many lines changed on the branch, against the branch its
-    /// repository takes as its default. None on that branch itself, where
-    /// the repository says none, or where its daemon is older than the
-    /// count.
+    /// repository takes as its default. None where nothing changed, on that
+    /// branch itself, or where its daemon is older than the count.
     changed: Option<Changed>,
     /// Its pull request, if it has one to show.
     pull_request: Option<Numbered>,
@@ -672,26 +671,21 @@ struct Checkout {
 
 /// How many lines changed on a branch, as its branch's line shows them:
 /// `+120 -34`, the added in green and the deleted in red, as diffs are
-/// coloured. Nothing where either is zero, as the branch is at rest.
-fn changed_shown(changed: Changed) -> Option<(Vec<Span<'static>>, usize)> {
+/// coloured, and either left out where it is none.
+fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
+    let (added, deleted) = (changed.added(), changed.deleted());
     let mut spans = Vec::new();
-    if changed.added > 0 {
-        spans.push(Span::styled(
-            format!("+{}", changed.added),
-            Style::new().fg(gruvbox::GREEN),
-        ));
+    if added > 0 {
+        spans.push(Span::styled(format!("+{added}"), Style::new().fg(gruvbox::GREEN)));
     }
-    if changed.deleted > 0 {
-        if changed.added > 0 {
+    if deleted > 0 {
+        if added > 0 {
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(
-            format!("-{}", changed.deleted),
-            Style::new().fg(gruvbox::RED),
-        ));
+        spans.push(Span::styled(format!("-{deleted}"), Style::new().fg(gruvbox::RED)));
     }
-    let width: usize = spans.iter().map(Span::width).sum();
-    (!spans.is_empty()).then_some((spans, width))
+    let width = spans.iter().map(Span::width).sum();
+    (spans, width)
 }
 
 /// A pull request, as its branch's line shows it: its number, in the colour
@@ -5352,18 +5346,14 @@ fn repository_of(tree: &WorkTree) -> Option<String> {
     }
 }
 
-/// The branch checked out in a work tree, how the tree stands, and its
-/// `pull_request`, or none for a detached `HEAD` or a directory in no
-/// repository.
 /// The branch checked out in a work tree, how the tree stands, how many lines
 /// changed on the branch, and its `pull_request`, or none for a detached
 /// `HEAD` or a directory in no repository.
 fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout {
-        head: Head::Branch { name, upstream },
+        head: Head::Branch { name, upstream, changed },
         changes,
         stashes,
-        changed,
         ..
     } = tree
     else {
@@ -5742,13 +5732,6 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, then the number of its pull request, with the mark
-/// of its checks, and how its work tree stands. The branch is cut to leave
-/// the other two whole. The mark of the pane luneta's zellij is on, `here`,
-/// runs down it too, and the `gutter` after it. And the columns the number is
-/// on, as the line has it, for a click to go by, and the room the branch had,
-/// for a sweep over it.
-/// The line under a pane's row, `width` wide: the branch checked out where it
 /// works, under its label, then how many lines changed on the branch, then
 /// the number of its pull request, with the mark of its checks, and how its
 /// work tree stands. The branch is cut to leave the other three whole. The
@@ -5762,7 +5745,7 @@ fn checkout_line(
     width: usize,
 ) -> (Line<'static>, Option<Range<usize>>, usize) {
     let status = &checkout.status;
-    let changed = checkout.changed.and_then(changed_shown);
+    let changed = checkout.changed.map(changed_shown);
     let number = checkout
         .pull_request
         .as_ref()
@@ -6161,9 +6144,9 @@ mod tests {
         ];
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let name = Said::new("main".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0, changed: None };
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.heard(host);
@@ -6517,8 +6500,8 @@ mod tests {
             Vec::new(),
         );
         let changes = Some(api::Changes::default());
-        let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None }));
-        let checkout = api::Checkout { head, changes, stashes: 0, repository: None, changed: None };
+        let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None, changed: None }));
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/c".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
@@ -7700,9 +7683,9 @@ mod tests {
         ];
         for (dir, branch, modified, number, state) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
-            let head = Head::Branch { name, upstream: None };
+            let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes { modified, ..Changes::default() };
-            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0, changed: None };
+            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let pull_request = PullRequest { number, state, url: None, checks: None };
@@ -7758,13 +7741,13 @@ mod tests {
         ];
         for (dir, branch, changed, number) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
-            let head = Head::Branch { name, upstream: None };
+            let changed = changed.and_then(|(added, deleted)| Changed::new(added, deleted));
+            let head = Head::Branch { name, upstream: None, changed };
             let tree = WorkTree::Checkout {
                 repository: None,
                 head,
                 changes: Changes::default(),
                 stashes: 0,
-                changed: changed.map(|(added, deleted)| Changed { added, deleted }),
             };
             host.work_trees.push(tree.to_api(dir));
             if number > 0 {
@@ -7831,9 +7814,9 @@ mod tests {
         let mut host = host(vec![session("s", 10, panes.collect())], Vec::new());
         for (dir, branch, number, state, checks) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
-            let head = Head::Branch { name, upstream: None };
+            let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes::default();
-            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0, changed: None };
+            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
@@ -8004,9 +7987,9 @@ mod tests {
         let panes = vec![notes, deep, branched, unsaid];
         let mut host = host(vec![session("s", 10, panes)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0, changed: None };
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/c"));
         let found = |typed: &str| {
             let mut sidebar = fresh();
@@ -8214,9 +8197,9 @@ mod tests {
         pull: Option<(u32, State, Option<&str>)>,
     ) {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0, changed: None };
+        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         work_trees.push(tree.to_api(dir));
         if let Some((number, state, url)) = pull {
             let number = NonZeroU32::new(number).expect("a pull request's number");
@@ -9124,9 +9107,10 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(api::Branch {
             name: "feat/menu".to_owned(),
             upstream: None,
+            changed: None,
         }));
         let changes = Some(api::Changes::default());
-        let checkout = api::Checkout { head, changes, stashes: 0, repository: None, changed: None };
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
@@ -9293,9 +9277,10 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(api::Branch {
             name: "feat/brief".to_owned(),
             upstream: None,
+            changed: None,
         }));
         let changes = Some(api::Changes::default());
-        let checkout = api::Checkout { head, changes, stashes: 0, repository: None, changed: None };
+        let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/luneta/main".to_owned(),
             stands: Some(api::work_tree::Stands::Checkout(checkout)),
@@ -10485,9 +10470,9 @@ mod tests {
             panic!("nixos is reached");
         };
         let name = Said::new("fix".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let repository = Said::new("/w".to_owned());
-        let tree = WorkTree::Checkout { repository, head, changes: Changes::default(), stashes: 0, changed: None };
+        let tree = WorkTree::Checkout { repository, head, changes: Changes::default(), stashes: 0 };
         there.work_trees.push(tree.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.heard(host);
