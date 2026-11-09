@@ -65,6 +65,7 @@ use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{Ask, Heard, Keyed};
 use crate::away;
+use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
@@ -204,6 +205,9 @@ pub enum Event {
     /// The order of the sidebar's rows was kept: by another luneta, or by
     /// this one.
     Order,
+    /// The harness for the agents the menu starts was kept: by another
+    /// luneta, or by this one.
+    Agent,
     /// What a notification says, read for it.
     Alerted(alerts::Read),
     /// You clicked the notification of this agent.
@@ -952,7 +956,9 @@ fn run_in(
         (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
     let news_watched = news::watch(&news, events.clone());
     let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
-    let mut sidebar = Sidebar::new(folds, news, order, machines::local_name());
+    let (agent, agent_unread) = Kept::shared();
+    let agent_watched = agent.file().map(|file| agents::watch(file, events.clone())).transpose();
+    let mut sidebar = Sidebar::new(folds, news, order, agent, machines::local_name());
     if let Some(why) = unkept {
         sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
     }
@@ -974,6 +980,16 @@ fn run_in(
         Err(error) => {
             sidebar.notify(format!("rows moved elsewhere show from luneta's next start: {error}"));
         },
+    }
+    match agent_watched {
+        Ok(watcher) => watching.extend(watcher),
+        Err(error) => {
+            let why = format!("a harness picked elsewhere holds from luneta's next start: {error}");
+            sidebar.notify(why);
+        },
+    }
+    if let Some(why) = agent_unread {
+        sidebar.notify(format!("the menu starts agents in claude: {why}"));
     }
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
@@ -1428,6 +1444,7 @@ impl App {
             Event::StopAloud => self.aloud.press(aloud::Button::Stop),
             Event::News => self.sidebar.reread(),
             Event::Order => self.sidebar.reorder(),
+            Event::Agent => self.sidebar.reagent(),
         }
         if relists {
             self.relist();
