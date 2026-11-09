@@ -11,7 +11,11 @@
 //! is on, and a brief or the ask box the menu asks for shows in a box there
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
-//! them again. `Ctrl j` opens the picker in a box there too, on the
+//! them again. What a key of the menu started goes on as the menu closes, as it
+//! does as the keys leave it at the bottom of the sidebar: the sidebar keeps
+//! it, says in its notes what it waits on, and opens what it opens then, where
+//! it would have, without taking zellij's client from where you went.
+//! `Ctrl j` opens the picker in a box there too, on the
 //! sessions, `Ctrl b` on the agents and `Ctrl d` on the directories. `Alt r`
 //! dictates, held or tapped, into the pane zellij is on or the ask box, in a
 //! box along the bottom of zellij that has the keys and the mouse until what

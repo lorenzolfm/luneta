@@ -39,12 +39,19 @@
 //! it, and `t` starts an agent there on tackling it. Each acts on the row's
 //! machine, or else on the first other machine that has the repository.
 //!
+//! What a key started is the sidebar's from the moment you press it, not the
+//! menu's: the menu closing, as the keys leave it for zellij, or as `Esc`
+//! closes it, does not end it. The sidebar keeps it, says in its notes what it
+//! waits on, and opens the tab and starts the agent once it has, where they
+//! would have been, without taking zellij's client from where you went.
+//!
 //! At the top of the sidebar, a key the sidebar has no use of its own for
 //! opens the menu on the group it opens, and `m` opens it on its first group,
 //! where every key is the menu's. While the sidebar has the focus and no menu
 //! is open, the legend at its bottom lists the keys it takes there.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -833,7 +840,7 @@ fn bare(key: &KeyEvent) -> bool {
 }
 
 /// Whether `key` closes the menu, whatever group is open.
-fn closes(key: &KeyEvent) -> bool {
+pub fn closes(key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('c') => key.modifiers == KeyModifiers::CONTROL,
         KeyCode::Esc => bare(key),
@@ -1547,6 +1554,76 @@ impl Menu {
         matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
 
+    /// Whether the menu waits on what a key of it started: the work itself,
+    /// as `wt add` makes a worktree, the agent that starts once luneta kept
+    /// what a pane printed or the checks that failed, or zellij opening or
+    /// turning what the key asked for. The sidebar keeps such a menu going
+    /// once the keys leave it, so that what the key started does not end with
+    /// the menu: the tab opens and the agent starts where they would have, and
+    /// the notes say where, while luneta's client goes nowhere.
+    pub fn waits(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Sweeping { .. }
+                | Stage::Pruning { .. }
+                | Stage::Reading { .. }
+                | Stage::Fetching { .. }
+                | Stage::Opening { .. }
+                | Stage::Listing { .. }
+                | Stage::Picking { .. }
+                | Stage::Turning { .. }
+                | Stage::Pull { step: Step::Waiting(_), .. }
+        )
+    }
+
+    /// What the menu waits on, in words, for the notes while the keys are
+    /// elsewhere: none for what it shows itself while it is open.
+    pub fn doing(&self) -> Option<String> {
+        match &self.stage {
+            Stage::Sweeping { .. } => Some(sweeping(self.target.repository_name())),
+            Stage::Pruning { count, .. } => Some(pruning(*count)),
+            Stage::Reading { ended, .. } => Some(reading(ended)),
+            Stage::Fetching { page, .. } => Some(fetching(page.number())),
+            Stage::Pull { work, step: Step::Waiting(wait), .. } => Some(wait.doing(work)),
+            Stage::Choosing(_)
+            | Stage::Planning { .. }
+            | Stage::Asking { .. }
+            | Stage::Swept { .. }
+            | Stage::Opening { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
+            | Stage::Turning { .. }
+            | Stage::Pull { step: Step::Choosing { .. }, .. }
+            | Stage::Ssh { .. } => None,
+        }
+    }
+
+    /// What the menu is for, while it is for what was pasted and a key of it
+    /// may still make the worktree, or is making it: pasting the same link
+    /// again makes nothing of its own meanwhile, which would be a second
+    /// worktree of one.
+    pub fn making(&self) -> Option<&Work> {
+        match &self.stage {
+            Stage::Pull {
+                work, step: Step::Choosing { .. } | Step::Waiting(Wait::Pulling(_)), ..
+            } => Some(work),
+            Stage::Pull { step: Step::Waiting(Wait::Opening(_) | Wait::Making(_)), .. }
+            | Stage::Choosing(_)
+            | Stage::Planning { .. }
+            | Stage::Asking { .. }
+            | Stage::Sweeping { .. }
+            | Stage::Swept { .. }
+            | Stage::Pruning { .. }
+            | Stage::Opening { .. }
+            | Stage::Listing { .. }
+            | Stage::Picking { .. }
+            | Stage::Turning { .. }
+            | Stage::Reading { .. }
+            | Stage::Fetching { .. }
+            | Stage::Ssh { .. } => None,
+        }
+    }
+
     /// Types `text`, pasted, on one line, in the box for a machine's
     /// destination, and says whether that is open to type it in.
     pub fn paste(&mut self, text: &str) -> bool {
@@ -2217,17 +2294,17 @@ impl Menu {
             ),
             Stage::Sweeping { keys, .. } => {
                 let repository = self.target.repository_name();
-                let doing = format!("Asking gh about the worktrees of {repository}…");
+                let doing = sweeping(repository);
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Fetching { keys, page, .. } => {
-                let doing = format!("Asking gh about the checks of #{}…", page.number());
+                let doing = fetching(page.number());
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
             },
             Stage::Pruning { keys, count, .. } => {
-                let doing = format!("Deleting {}…", merged_worktrees(*count));
+                let doing = pruning(*count);
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 let repository = self.target.repository_name().to_owned();
                 (title(keys), repository, body, keyed(width, &[(Hint::Esc, "Close")]))
@@ -2395,6 +2472,26 @@ pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     }
     let lines = lines.into_iter().flat_map(|line| sidebar::wrapped(&line, width, style));
     lines.collect()
+}
+
+/// What luneta asks gh about the worktrees of `repository`, `d m`.
+fn sweeping(repository: &str) -> String {
+    format!("Asking gh about the worktrees of {repository}…")
+}
+
+/// What `d m` does with `count` merged worktrees.
+fn pruning(count: usize) -> String {
+    format!("Deleting {}…", merged_worktrees(count))
+}
+
+/// What luneta keeps of what a pane printed, for an agent on it.
+fn reading(ended: &Ended) -> String {
+    format!("Reading what `{}` printed…", ended.command.as_str())
+}
+
+/// What luneta asks gh about the checks of the pull request `number`.
+fn fetching(number: NonZeroU32) -> String {
+    format!("Asking gh about the checks of #{number}…")
 }
 
 /// What luneta waits on, `doing`, wrapped as `wrap` wraps it, after the
