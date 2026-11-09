@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::agents::{self, Harness};
+use crate::agents::Harness;
 use crate::away::{self, Away};
 use crate::brief::{self, Asking};
 use crate::due::Due;
@@ -211,7 +211,7 @@ impl Ask {
             Works::There { on, cwd } => (Some(on.clone()), cwd.as_ref().map(PathBuf::from)),
         };
         let resumed = self.session.clone();
-        let (highlighted, agents) = (self.highlighted.clone(), agents::to_api(agents));
+        let highlighted = self.highlighted.clone();
         let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents);
         self.talk.push(Said::You(words));
         let asked = match asked {

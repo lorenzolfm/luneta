@@ -27,10 +27,10 @@ use serde_json::Value;
 
 use crate::api::ask_request::{self, UserPane};
 use crate::api::ask_response::{self, Ran};
-use crate::api::{AskRequest, AskResponse, Harness, On};
+use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::zellij::SessionName;
-use crate::{claude, git, program};
+use crate::{claude, git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
 /// runs a few commands in a row, without slips.
@@ -325,8 +325,7 @@ pub struct Asked {
 
 impl Asked {
     /// The turn of `words`, as `Asked` has it, or why not: `cwd` is by no
-    /// absolute path, the words are only white space, or `agents` is a
-    /// harness this build does not know.
+    /// absolute path, or the words are only white space.
     pub fn new(
         cwd: Option<PathBuf>,
         words: &str,
@@ -343,17 +342,14 @@ impl Asked {
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
         }
-        if agents == Harness::Unspecified {
-            return Err("agents: a harness this lunetad does not know".to_owned());
-        }
-        let words = words.to_owned();
-        Ok(Asked { cwd, words, resumed, highlighted, user, turn, agents })
+        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
 
     /// The turn a question asks for, and the machine it is for, or why the
     /// question is invalid: as `new` says, or it resumes a session by no id
     /// of one, or names your pane in a session by a name zellij does not
-    /// take, or its turn is of the key of the turn before it.
+    /// take, or its turn is of the key of the turn before it, or its agents
+    /// are to start in a harness this lunetad does not know.
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
         let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before, agents } =
             request;
@@ -373,10 +369,7 @@ impl Asked {
             },
         };
         let turn = Turn::new(turn, before)?;
-        let agents = match agents {
-            None => Harness::ClaudeCode,
-            Some(said) => Harness::try_from(said).unwrap_or(Harness::Unspecified),
-        };
+        let agents = Harness::said(agents).map_err(|why| format!("agents: {why}"))?;
         let cwd = cwd.map(PathBuf::from);
         let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents)?;
         Ok((on, asked))
@@ -403,7 +396,7 @@ impl Asked {
             user,
             turn: self.turn.key,
             before: self.turn.before,
-            agents: Some(self.agents.into()),
+            agents: Some(self.agents.to_api().into()),
         }
     }
 
@@ -471,9 +464,7 @@ fn system(highlighted: &str) -> String {
 fn told(user: &User, agents: Harness, words: &str) -> String {
     let agents = match agents {
         Harness::Pi => "[luneta: start an agent in pi, unless the user names Claude Code.]",
-        Harness::ClaudeCode | Harness::Unspecified => {
-            "[luneta: start an agent in Claude Code, unless the user names pi.]"
-        },
+        Harness::ClaudeCode => "[luneta: start an agent in Claude Code, unless the user names pi.]",
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),

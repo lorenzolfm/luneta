@@ -746,7 +746,9 @@ message AskRequest {
   // The harness the user picked last for the agents luneta's menu starts,
   // which the agent starts one in unless the user names another. Absent from
   // a luneta older than this field, whose menu starts Claude Code's alone: so
-  // absent is Claude Code, as `Agent.harness` is.
+  // absent is Claude Code, as `Agent.harness` is. A daemon older than the
+  // field, on the machine the turn is for, starts Claude Code's, whatever it
+  // says.
   optional Harness agents = 10;
 
   message UserPane {

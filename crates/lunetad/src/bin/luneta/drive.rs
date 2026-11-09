@@ -53,6 +53,7 @@ use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
 
+use crate::agents::{self, Harness};
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
@@ -295,14 +296,16 @@ fn runs(command: &[String]) -> Result<(), String> {
     const ONLY: &str = "in luneta's ask box, a pane runs your shell, `claude [--name <name>] \
                         [<prompt>]` or `pi [--name <name>] [<prompt>]`, and nothing else";
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
+    let unknown = || format!("{ONLY}: it does not run {}", words.join(" "));
     let (agent, name, prompt) = match words[..] {
         [] => return Ok(()),
-        [agent @ ("claude" | "pi")] => (agent, None, None),
-        [agent @ ("claude" | "pi"), "--name", name] => (agent, Some(name), None),
-        [agent @ ("claude" | "pi"), "--name", name, prompt] => (agent, Some(name), Some(prompt)),
-        [agent @ ("claude" | "pi"), prompt] => (agent, None, Some(prompt)),
-        _ => return Err(format!("{ONLY}: it does not run {}", words.join(" "))),
+        [agent] => (agent, None, None),
+        [agent, "--name", name] => (agent, Some(name), None),
+        [agent, "--name", name, prompt] => (agent, Some(name), Some(prompt)),
+        [agent, prompt] => (agent, None, Some(prompt)),
+        _ => return Err(unknown()),
     };
+    let harness = agents::named(agent).ok_or_else(unknown)?;
     if name.into_iter().chain(prompt).any(|word| word.starts_with('-')) {
         let why = "takes no option but --name, nor a word with a - first";
         return Err(format!("{ONLY}: {agent} {why}"));
@@ -311,8 +314,14 @@ fn runs(command: &[String]) -> Result<(), String> {
         let why = "takes no prompt with a ! first, a line for your shell";
         return Err(format!("{ONLY}: {agent} {why}"));
     }
-    if agent == "pi" && prompt.is_some_and(|prompt| prompt.starts_with('@')) {
-        return Err(format!("{ONLY}: pi takes no prompt with an @ first, a file it reads"));
+    let read = match harness {
+        Harness::ClaudeCode => None,
+        Harness::Pi => Some(('@', "takes no prompt with an @ first, a file it reads")),
+    };
+    if let Some((first, why)) = read
+        && prompt.is_some_and(|prompt| prompt.starts_with(first))
+    {
+        return Err(format!("{ONLY}: {agent} {why}"));
     }
     Ok(())
 }

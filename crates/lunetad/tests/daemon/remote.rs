@@ -1218,7 +1218,7 @@ fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> As
     let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
     let turn = Turn::new(255, (!first).then_some(10)).unwrap();
     let row = "The row highlighted is session work.".to_owned();
-    let (cwd, pi) = (cwd.map(Path::to_owned), api::Harness::Pi);
+    let (cwd, pi) = (cwd.map(Path::to_owned), lunetad::Harness::Pi);
     let asked = Asked::new(cwd, words, resumed, row, user, turn, pi).unwrap();
     asked.asked(Some(On { destination: on.to_owned() }))
 }
