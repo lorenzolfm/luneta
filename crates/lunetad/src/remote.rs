@@ -945,25 +945,25 @@ mod tests {
         let _entered = runtime.enter();
         let bridges = Arc::new(Bridges::default());
         let destination: Destination = "nixos".parse().unwrap();
-        let mut bridged = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
-        let woke = |bridged: &mut Bridged, within: Duration| {
-            let waits = tokio::time::timeout(within, bridged.waits(Duration::from_secs(60)));
+        let mut watch = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
+        let woke = |watch: &mut Bridged, within: Duration| {
+            let waits = tokio::time::timeout(within, watch.waits(Duration::from_secs(60)));
             runtime.block_on(waits).is_ok()
         };
 
         assert!(bridges.to(&destination).is_none());
         assert!(bridges.to(&destination).is_none());
-        assert!(woke(&mut bridged, Duration::from_secs(10)));
-        assert!(!woke(&mut bridged, Duration::from_millis(100)));
+        assert!(woke(&mut watch, Duration::from_secs(10)));
+        assert!(!woke(&mut watch, Duration::from_millis(100)));
 
         assert!(bridges.to(&destination).is_none());
-        bridged.awake();
-        assert!(!woke(&mut bridged, Duration::from_millis(100)));
+        watch.awake();
+        assert!(!woke(&mut watch, Duration::from_millis(100)));
 
         let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
-        bridged.agree(&answered(), Some(&daemon));
+        watch.agree(&answered(), Some(&daemon));
         assert!(bridges.to(&destination).is_some());
-        assert!(!woke(&mut bridged, Duration::from_millis(100)));
+        assert!(!woke(&mut watch, Duration::from_millis(100)));
     }
 
     /// Each ssh to a machine shares one socket, another machine's another,
