@@ -1598,15 +1598,15 @@ impl Menu {
     }
 
     /// What the menu is for, while it is for what was pasted and a key of it
-    /// may still make the worktree, or is making it: pasting the same link
-    /// again makes nothing of its own meanwhile, which would be a second
-    /// worktree of one.
+    /// is making the worktree: pasting the same link again makes nothing of
+    /// its own meanwhile, which would be a second worktree of one.
     pub fn making(&self) -> Option<&Work> {
         match &self.stage {
+            Stage::Pull { work, step: Step::Waiting(Wait::Pulling(_)), .. } => Some(work),
             Stage::Pull {
-                work, step: Step::Choosing { .. } | Step::Waiting(Wait::Pulling(_)), ..
-            } => Some(work),
-            Stage::Pull { step: Step::Waiting(Wait::Opening(_) | Wait::Making(_)), .. }
+                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening(_) | Wait::Making(_)),
+                ..
+            }
             | Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }

@@ -1876,6 +1876,12 @@ impl Sidebar {
         self.keep_working(menu);
     }
 
+    /// Closes the menu numbered `menu`, and keeps nothing of it: luneta did not
+    /// do what it asked, and said why.
+    pub fn drop_menu(&mut self, menu: u64) {
+        self.menu.take_if(|open| open.number() == menu);
+    }
+
     /// Whether what a key of a menu started still goes on, after the keys left
     /// it: a spinner among the notes turns while it does.
     fn working_on(&self) -> bool {
@@ -3645,6 +3651,7 @@ impl Sidebar {
         self.menus += 1;
         let target = self.target_at(&self.on, place);
         let agent = self.agent_for(&target);
+        self.close_menu();
         self.menu = Some(Menu::new(self.menus, target, agent));
         Ok(())
     }
@@ -3691,6 +3698,7 @@ impl Sidebar {
             }
             return;
         };
+        self.close_menu();
         self.menus += 1;
         self.menu = Some(Menu::pull(self.menus, target, work, self.agent.harness()));
     }
@@ -3791,7 +3799,9 @@ impl Sidebar {
         let (menu, wants) = match did {
             Did::Stays(menu, wants) => (menu, wants),
             Did::Closed(done) => {
-                self.menu = None;
+                if held == Held::Open {
+                    self.menu = None;
+                }
                 return match done {
                     Done::Nothing => Asked::Nothing,
                     Done::Wrong(reason) => {
@@ -9264,6 +9274,100 @@ mod tests {
         // Another link makes its own.
         sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6");
         assert!(sidebar.menu.is_some());
+    }
+
+    /// The same link pasted again while its menu only chooses opens it again,
+    /// as nothing is on its way yet.
+    #[test]
+    fn a_link_pasted_again_before_a_key_opens_its_menu_again() {
+        let page = "https://github.com/lorenzolfm/luneta/pull/5";
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.paste(page);
+        sidebar.paste(page);
+        assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(2));
+        assert_eq!(sidebar.notice, None);
+        assert!(sidebar.working.is_empty());
+    }
+
+    /// A menu that waits, in whose place another opens, as a link pasted or
+    /// `Alt a` opens one, goes on, as it does when the keys leave it.
+    #[test]
+    fn a_menu_that_waits_goes_on_when_another_takes_its_place() {
+        let waiting = || {
+            let mut sidebar = two_sessions();
+            sidebar.focus(Keys::Sidebar);
+            sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+            let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
+                panic!("no job for the key");
+            };
+            sidebar
+        };
+        let mut sidebar = waiting();
+        sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6");
+        assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(2));
+        assert!(sidebar.working.contains_key(&1));
+
+        let mut sidebar = waiting();
+        let went = sidebar.went(&pane_of("older", 10, 1)).unwrap();
+        let clients = vec![Client { id: 1, pane: Some(1) }];
+        sidebar.looked(Looked { number: went.number, went: went.went, clients, before: None });
+        assert_eq!(sidebar.float_menu(), Ok(()));
+        assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(2));
+        assert!(sidebar.working.contains_key(&1));
+    }
+
+    /// An answer that ends a menu the keys left ends only that one: the menu
+    /// open meanwhile stays, and a key of it that waits gets its answer.
+    #[test]
+    fn a_kept_menu_s_last_answer_leaves_the_open_menu_alone() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5");
+        let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
+            panic!("no job for the key");
+        };
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000));
+        let page = "https://github.com/lorenzolfm/luneta/issues/6";
+        sidebar.paste(page);
+        let Asked::Pull { .. } = sidebar.key(&char('w'), moment(162_000)) else {
+            panic!("no job for the key");
+        };
+        assert_eq!(sidebar.pulled(1, Err("gh failed".to_owned())), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("menu: lorenzolfm/luneta#5: gh failed"));
+        assert!(sidebar.working.is_empty());
+        assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(2));
+        let work = Readied::Link(Link::parse(page).unwrap());
+        let at = At::Session((listed("older", 10), 1));
+        let worktree = "/w/luneta/issue-6".to_owned();
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+        let asked = sidebar.pulled(2, Ok(Found { on: Machine::Local, ready }));
+        assert!(matches!(asked, Asked::Open { menu: 2, .. }), "{asked:?}");
+    }
+
+    /// A menu luneta could not take its client on for, which said why, keeps
+    /// nothing: the answer owed to it goes nowhere, and why stays in the notes.
+    #[test]
+    fn a_menu_luneta_did_not_go_for_keeps_nothing() {
+        let page = "https://github.com/lorenzolfm/luneta/pull/5";
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        sidebar.paste(page);
+        let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
+            panic!("no job for the key");
+        };
+        let work = Readied::Link(Link::parse(page).unwrap());
+        let at = At::Session((listed("newer", 20), 1));
+        let worktree = "/w/luneta/feat".to_owned();
+        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+        let asked = sidebar.pulled(1, Ok(Found { on: Machine::Local, ready }));
+        assert!(matches!(asked, Asked::OpenThere { menu: 1, .. }), "{asked:?}");
+        sidebar.notify("zellij has yet to come to its session".to_owned());
+        sidebar.drop_menu(1);
+        assert!(sidebar.menu.is_none());
+        assert!(sidebar.working.is_empty());
+        assert_eq!(sidebar.opened(1, Err(crate::due::UNANSWERED.to_owned())), Asked::Nothing);
+        assert_eq!(sidebar.notice.as_deref(), Some("zellij has yet to come to its session"));
     }
 
     /// A `.md` file's path pasted opens the menu for the file, whether or not

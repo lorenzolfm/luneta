@@ -1364,7 +1364,7 @@ impl App {
                 Some(sidebar::Held::Open) => {
                     let after = After::IntoTab(owed, place.clone());
                     if !self.go(&on, &Place::Pane(place), Some(after)) {
-                        self.sidebar.close_menu();
+                        self.sidebar.drop_menu(menu);
                     }
                 },
                 Some(sidebar::Held::Kept) => {
@@ -2199,7 +2199,7 @@ impl App {
             Asked::OpenThere { menu, on, place, open } => {
                 let owed = zellij::owed(menu, &self.events);
                 if !self.go(&on, &place, Some(After::Open(owed, open))) {
-                    self.sidebar.close_menu();
+                    self.sidebar.drop_menu(menu);
                 }
             },
             Asked::Carry { on, carry, landing, follows } => {
@@ -2244,7 +2244,7 @@ impl App {
                 };
                 let owed = zellij::owed(menu, &self.events);
                 if !self.make(unused, Some(cwd.as_str()), Some((owed, tab))) {
-                    self.sidebar.close_menu();
+                    self.sidebar.drop_menu(menu);
                 }
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
