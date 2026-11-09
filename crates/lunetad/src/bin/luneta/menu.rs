@@ -6,10 +6,13 @@
 //! Its keys are luneta's own. `/` searches every skill the directory of the
 //! row's pane can run, for an agent to start on the one you pick, beside that
 //! pane. `a` opens the ask box, for an agent to do what you say in words, as
-//! the menu would. `c` opens the Claude group, a key for each of a few skills, which
+//! the menu would. `c` opens the Skills group, a key for each of a few skills, which
 //! starts an agent on it there, `f` and `e`, which start one on what the
 //! command a shell ran last printed, to fix what went wrong or explain it, and
-//! `c`, which starts one on the checks that failed on its pull request.
+//! `c`, which starts one on the checks that failed on its pull request. Each
+//! starts in the harness the rule over the group names, the one that runs in
+//! the pane, or else the one you picked last, and `Tab` picks the other: in
+//! the search too, and in the menu for a link.
 //! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in, or
 //! on a machine's header in the home of its user there, or a machine for
@@ -22,7 +25,7 @@
 //! you say yes, and on another machine's header forgets the machine. `b` opens the
 //! Brief group, which briefs you on every session, the row's session, or the agent in its pane, or on a machine's
 //! header, the machine's sessions. luneta has no
-//! configuration to read keys for skills from, and the Claude group's are its
+//! configuration to read keys for skills from, and the Skills group's are its
 //! own. The menu lists only the keys that work on its kind of row: a session's
 //! row and a machine's header have no pane, and none of the keys that need one,
 //! and this machine's header nothing to delete.
@@ -57,6 +60,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::agents::{self, Harness};
 use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
@@ -80,25 +84,22 @@ const SEARCH_DOES: &str = "Search skills";
 const ASK: char = 'a';
 const ASK_DOES: &str = "Ask";
 
-/// The key of the Claude group, its name, and its keys, each with the skill
+/// The key of the Skills group, its name, and its keys, each with the skill
 /// it starts an agent on: the skills the author runs most. luneta has no
 /// configuration to read yours from.
 const SKILLS: char = 'c';
-const SKILLS_NAME: &str = "Claude";
-const SKILL_KEYS: [(char, &str); 3] = [
-    ('t', REVIEW),
-    ('m', "/make-illegal-states-unrepresentable"),
-    ('s', "/tigerstyle"),
-];
+const SKILLS_NAME: &str = "Skills";
+const SKILL_KEYS: [(char, &str); 3] =
+    [('t', REVIEW), ('m', "make-illegal-states-unrepresentable"), ('s', "tigerstyle")];
 
-/// The key of the Claude group that starts an agent on the checks that failed
+/// The key of the Skills group that starts an agent on the checks that failed
 /// on the head of the pane's pull request, and what the menu says it does.
 const CHECKS: char = 'c';
 const CHECKS_DOES: &str = "fix the failing checks";
 
-/// The skill an agent reviews a pull request with: the Claude group's `t`,
+/// The skill an agent reviews a pull request with: the Skills group's `t`,
 /// and the `r` of the menu for a pull request, which gives it the link.
-const REVIEW: &str = "/thermo-nuclear-review";
+const REVIEW: &str = "thermo-nuclear-review";
 
 /// What the `t` of the menu for an issue tells an agent, before the link: in
 /// words, as you would, with no skill.
@@ -142,6 +143,9 @@ pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
 
+/// What the line that picks the other harness names its key, `Tab`.
+const SWITCH: &str = "tab";
+
 /// What follows a group's name: it opens, as a folded session does.
 const GROUP: &str = "▸";
 
@@ -155,9 +159,6 @@ const SEARCH_ROWS: usize = 8;
 /// its borders: as many as what it shows takes, the search box the most, and
 /// what is longer wraps or is cut.
 const FLOATING: (usize, usize) = (24, 62);
-
-/// What a key that starts an agent starts.
-const CLAUDE: &str = "claude";
 
 /// The key that waits for what to yank at the top of the sidebar, what the
 /// legend names it, the key that then yanks a pull request's link, and what
@@ -282,7 +283,7 @@ impl Top {
     }
 }
 
-/// No command takes the key of the ask box, or of luneta's Claude, New, Turn,
+/// No command takes the key of the ask box, or of luneta's Skills, New, Turn,
 /// Delete or Brief group, which would be out of reach at the top of the
 /// sidebar, and gone from the legend; nor a key the sidebar moves, folds or
 /// opens the menu with, which `Top::of` finds first. Nor does the sidebar
@@ -374,7 +375,7 @@ impl TurnKey {
     }
 }
 
-/// A key of the Claude group that starts an agent on what the command a
+/// A key of the Skills group that starts an agent on what the command a
 /// shell ran last printed, beside its pane: to fix what went wrong, or to
 /// explain it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,7 +385,7 @@ enum Last {
 }
 
 impl Last {
-    /// Each, in the order the Claude group shows them, after its skills.
+    /// Each, in the order the Skills group shows them, after its skills.
     const ALL: [Last; 2] = [Last::Fix, Last::Explain];
 
     const fn key(self) -> char {
@@ -411,7 +412,7 @@ impl Last {
     }
 }
 
-/// No key of the Claude group's skills is one of `Last`'s, or `CHECKS`, nor
+/// No key of the Skills group's skills is one of `Last`'s, or `CHECKS`, nor
 /// one of `Last`'s `CHECKS`, which would hide it.
 const _: () = {
     let mut at = 0;
@@ -419,11 +420,11 @@ const _: () = {
         let mut skill = 0;
         while skill < SKILL_KEYS.len() {
             let alike = SKILL_KEYS[skill].0 == Last::ALL[at].key();
-            assert!(!alike, "two keys alike in the Claude group");
-            assert!(SKILL_KEYS[skill].0 != CHECKS, "two keys alike in the Claude group");
+            assert!(!alike, "two keys alike in the Skills group");
+            assert!(SKILL_KEYS[skill].0 != CHECKS, "two keys alike in the Skills group");
             skill += 1;
         }
-        assert!(Last::ALL[at].key() != CHECKS, "two keys alike in the Claude group");
+        assert!(Last::ALL[at].key() != CHECKS, "two keys alike in the Skills group");
         at += 1;
     }
 };
@@ -474,11 +475,11 @@ impl Pull {
     }
 
     /// What a menu whose agent `asks` says the key does.
-    const fn does(self, asks: Asks) -> &'static str {
+    fn does(self, asks: Asks) -> String {
         match (self, asks) {
-            (Pull::Worktree, _) => "worktree",
-            (Pull::Agent, Asks::Review) => REVIEW,
-            (Pull::Agent, Asks::Tackle) => "tackle",
+            (Pull::Worktree, _) => "worktree".to_owned(),
+            (Pull::Agent, Asks::Review) => format!("/{REVIEW}"),
+            (Pull::Agent, Asks::Tackle) => "tackle".to_owned(),
         }
     }
 
@@ -503,12 +504,12 @@ enum Entry {
     /// A key that opens a group, the name the menu shows for it, and the keys
     /// in it.
     Group { key: char, name: &'static str, entries: Vec<Entry> },
-    /// A key of the Claude group: starts an agent on the prompt, a skill.
-    Start { key: char, prompt: &'static str },
-    /// A key of the Claude group: starts an agent on what the command the
+    /// A key of the Skills group: starts an agent on the skill so named.
+    Start { key: char, skill: &'static str },
+    /// A key of the Skills group: starts an agent on what the command the
     /// pane's shell ran last printed.
     Last(Last),
-    /// The key of the Claude group that starts an agent on the checks that
+    /// The key of the Skills group that starts an agent on the checks that
     /// failed on the pane's pull request.
     Checks,
     /// A key of the New group: opens a pane, a tab or a session.
@@ -609,8 +610,10 @@ enum Pressed {
     Moved,
     /// Asks for the search box over the skills.
     Search,
-    /// Starts an agent on the prompt.
+    /// Starts an agent on the skill so named.
     Start(String),
+    /// Picks this harness for the agents the menu starts.
+    Switched(Harness),
     /// Starts an agent on what the pane's shell printed last.
     Last(Last),
     /// Starts an agent on the checks that failed on the pane's pull request.
@@ -637,13 +640,14 @@ enum Pressed {
     Nothing,
 }
 
-/// The menu's entries, the groups opened so far, and the search box over the
-/// skills while it is open.
+/// The menu's entries, the groups opened so far, the search box over the
+/// skills while it is open, and the harness its keys start agents in.
 struct Keys {
     root: Vec<Entry>,
     /// Each group opened, by where it stands in the one before.
     open: Vec<usize>,
     search: Option<Search>,
+    agent: Harness,
 }
 
 impl Keys {
@@ -651,11 +655,11 @@ impl Keys {
     /// kind of row, as `Entry::on` says. A pane's row has them all; a
     /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; another
     /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group; and
-    /// this one's the same but `d d`.
-    fn new(target: &Target) -> Self {
+    /// this one's the same but `d d`. They start agents in `agent`.
+    fn new(target: &Target, agent: Harness) -> Self {
         let every = Keys::every(target.removes()).into_iter();
         let root = every.filter_map(|entry| entry.on(target)).collect();
-        Keys { root, open: Vec::new(), search: None }
+        Keys { root, open: Vec::new(), search: None, agent }
     }
 
     /// The menu's keys, on whatever row: `/`, which opens the search over
@@ -672,7 +676,7 @@ impl Keys {
     /// `b z`, `b s` and `b h` brief you on every session, its session and
     /// what the menu is for, or on a machine's header, its sessions.
     fn every(removes: Option<Removes>) -> Vec<Entry> {
-        let start = |(key, prompt)| Entry::Start { key, prompt };
+        let start = |(key, skill)| Entry::Start { key, skill };
         vec![
             Entry::Search,
             Entry::Ask,
@@ -730,7 +734,7 @@ impl Keys {
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
         root.extend(Keys::every(None).into_iter().filter(shown));
-        Keys { root, open: Vec::new(), search: None }
+        Keys { root, open: Vec::new(), search: None, agent: Harness::ClaudeCode }
     }
 
     /// The groups opened, each its name and its entries.
@@ -751,12 +755,23 @@ impl Keys {
         self.trail().last().map_or(self.root.as_slice(), |(_, entries)| entries)
     }
 
+    /// Whether what is open starts agents, and names their harness: the
+    /// Skills group, or the search box over the skills.
+    fn starts(&self) -> bool {
+        self.search.is_some() || self.trail().last().is_some_and(|(name, _)| *name == SKILLS_NAME)
+    }
+
     /// What `key` does: a key the group open shows opens its group, opens or
     /// closes what it opens or closes, or asks for the search box,
     /// `Backspace` goes back a group, and out of the menu from the first, and
     /// `Esc` closes it. While the search box is open, it takes the keys
-    /// instead.
+    /// instead. Where what is open starts agents, `Tab` picks the other
+    /// harness for them.
     fn key(&mut self, key: &KeyEvent) -> Pressed {
+        if key.code == KeyCode::Tab && bare(key) && self.starts() {
+            self.agent = agents::other(self.agent);
+            return Pressed::Switched(self.agent);
+        }
         if let Some(search) = &mut self.search {
             let (pressed, open) = searched(search, key);
             if !open {
@@ -786,7 +801,7 @@ impl Keys {
             return Pressed::Nothing;
         };
         match &entries[at] {
-            Entry::Start { prompt, .. } => return Pressed::Start((*prompt).to_owned()),
+            Entry::Start { skill, .. } => return Pressed::Start((*skill).to_owned()),
             Entry::Last(last) => return Pressed::Last(*last),
             Entry::Checks => return Pressed::Checks,
             Entry::New(new) => return Pressed::New(*new),
@@ -850,7 +865,7 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
             (Pressed::Moved, true)
         },
         KeyCode::Enter => match search.chosen() {
-            Some(skill) => (Pressed::Start(format!("/{}", skill.name)), true),
+            Some(skill) => (Pressed::Start(skill.name.to_string()), true),
             None => (Pressed::Nothing, true),
         },
         KeyCode::Char(c) => {
@@ -1187,75 +1202,6 @@ impl PaneRow {
     }
 }
 
-/// Claude Code on `prompt`, as a command line. A prompt that runs a skill
-/// names the agent for the skill and the branch it works on, as `/rename`
-/// would, so that the sidebar and the picker say what it is doing from the
-/// start.
-fn claude(prompt: &str, branch: Option<&str>) -> Vec<String> {
-    let mut command = vec![CLAUDE.to_owned()];
-    if let Some(skill) = skill(prompt) {
-        command.push("--name".to_owned());
-        command.push(match branch {
-            Some(branch) => format!("{skill}: {branch}"),
-            None => skill.to_owned(),
-        });
-    }
-    command.push(prompt.to_owned());
-    command
-}
-
-/// Claude Code on `prompt`, let read `files`, with no question asked: luneta
-/// keeps what a shell printed, and the logs of checks, outside the directory
-/// the agent works in, where Claude Code asks first. It asks for a file no
-/// rule can name.
-fn claude_reading(prompt: String, files: &[&str]) -> Vec<String> {
-    let mut command = vec![CLAUDE.to_owned()];
-    let rules: Vec<String> = files.iter().filter_map(|file| read_rule(file)).collect();
-    if !rules.is_empty() {
-        command.push("--allowedTools".to_owned());
-        command.extend(rules);
-        // The flag takes every word after it as another tool, up to this.
-        command.push("--".to_owned());
-    }
-    command.push(prompt);
-    command
-}
-
-/// The rule that lets Claude Code read the file by the path `file` from the
-/// root, and no other, but for one whose name differs by its case alone, which
-/// a rule takes no account of; or none where no rule can name it alone. A rule
-/// names a path from the root with another `/` before it, as a glob: `\` makes
-/// `*`, `[` or `]` itself, and it takes four to make a `\`, as Claude Code reads
-/// the rule, and then the glob. Nothing makes a `?` itself. `--allowedTools`
-/// cuts its word at a space or a comma outside parentheses, which any `)`
-/// leaves it outside of, and a line is another glob.
-fn read_rule(file: &str) -> Option<String> {
-    let mut rule = String::from("Read(/");
-    let mut inside = true;
-    for c in file.chars() {
-        match c {
-            '?' => return None,
-            ' ' | ',' if !inside => return None,
-            c if c.is_control() => return None,
-            '(' => inside = true,
-            ')' => inside = false,
-            '*' | '[' | ']' => rule.push('\\'),
-            '\\' => rule.push_str(r"\\\"),
-            _ => {},
-        }
-        rule.push(c);
-    }
-    rule.push(')');
-    Some(rule)
-}
-
-/// The skill a prompt runs, as `/tigerstyle` or `/plugin:skill`: the command
-/// it starts with.
-fn skill(prompt: &str) -> Option<&str> {
-    let command = prompt.strip_prefix('/')?.split(char::is_whitespace).next()?;
-    (!command.is_empty()).then_some(command)
-}
-
 /// What a key of the New group opens in the menu's session, or an agent a
 /// skill starts. A new session is none of them: luneta goes to that itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1279,6 +1225,9 @@ pub enum Did {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wants {
     Nothing,
+    /// The harness picked for the agents the menu starts kept, for every
+    /// luneta.
+    Keep(Harness),
     /// The skills that `cwd` can run, for the search box.
     Skills(String),
     /// What the delete key deletes planned, for `planned`: for a pane, once
@@ -1414,9 +1363,10 @@ enum Stage {
     /// the head of the pull request of `page`, for an agent on them beside
     /// the pane. Keys do nothing but close the menu.
     Fetching { keys: Keys, beside: Beside, page: PullPage },
-    /// The menu for `work`, which a paste opened, at `step`. Once luneta has
-    /// found where its keys go, its target is there.
-    Pull { work: Work, step: Step },
+    /// The menu for `work`, which a paste opened, at `step`, whose agent
+    /// starts in `agent`. Once luneta has found where its keys go, its target
+    /// is there.
+    Pull { work: Work, agent: Harness, step: Step },
     /// The box `n m` opens, with what is typed in it for ssh to reach a
     /// machine by, and why that is no destination, once `Enter` found it is
     /// not, until the next key.
@@ -1473,10 +1423,10 @@ impl Wait {
 impl Menu {
     /// The menu numbered `number` for `target`, on the group `key` opens, or
     /// on the first with no key, and what a key that does more than open a
-    /// group leaves the sidebar to do. None, and no menu, for a key the menu
-    /// has not.
-    pub fn open(number: u64, target: Target, key: Option<char>) -> Option<Did> {
-        let keys = Keys::new(&target);
+    /// group leaves the sidebar to do, its keys starting agents in `agent`.
+    /// None, and no menu, for a key the menu has not.
+    pub fn open(number: u64, target: Target, key: Option<char>, agent: Harness) -> Option<Did> {
+        let keys = Keys::new(&target, agent);
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
@@ -1487,16 +1437,18 @@ impl Menu {
         })
     }
 
-    /// The menu numbered `number` for `target`, on its first group.
-    pub fn new(number: u64, target: Target) -> Menu {
-        let keys = Keys::new(&target);
+    /// The menu numbered `number` for `target`, on its first group, its keys
+    /// starting agents in `agent`.
+    pub fn new(number: u64, target: Target, agent: Harness) -> Menu {
+        let keys = Keys::new(&target, agent);
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
     /// The menu numbered `number` for `work`, pasted with the menu for
-    /// `target` open, or the row highlighted.
-    pub fn pull(number: u64, target: Target, work: Work) -> Menu {
-        Menu { number, target, stage: Stage::Pull { work, step: Step::Choosing { wrong: None } } }
+    /// `target` open, or the row highlighted, whose agent starts in `agent`.
+    pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
+        let step = Step::Choosing { wrong: None };
+        Menu { number, target, stage: Stage::Pull { work, agent, step } }
     }
 
     pub fn number(&self) -> u64 {
@@ -1616,6 +1568,7 @@ impl Menu {
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
+                (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
                 (Pressed::Moved | Pressed::Nothing, _)
                 | (
                     Pressed::Search
@@ -1636,9 +1589,10 @@ impl Menu {
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
-                (Pressed::Start(prompt), Target::Pane(_, row)) => match row.beside() {
+                (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
-                        let command = claude(&prompt, row.branch.as_deref());
+                        let branch = row.branch.as_deref();
+                        let command = agents::on_skill(keys.agent, &skill, None, branch);
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
@@ -1759,15 +1713,21 @@ impl Menu {
             {
                 Did::Closed(Done::Nothing)
             },
-            Stage::Pull { work, step: step @ Step::Choosing { .. } } => {
+            Stage::Pull { work, agent, step: step @ Step::Choosing { .. } }
+                if key.code == KeyCode::Tab && bare(key) =>
+            {
+                let agent = agents::other(agent);
+                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
+            },
+            Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
                 let asks = Asks::of(&work);
                 match Pull::pressed(key, asks) {
                     Some(pull) => {
                         let wants = Wants::Pull(work.clone(), pull.wanted(asks));
                         let step = Step::Waiting(Wait::Pulling(pull));
-                        stays(Stage::Pull { work, step }, wants)
+                        stays(Stage::Pull { work, agent, step }, wants)
                     },
-                    None => stays(Stage::Pull { work, step }, Wants::Nothing),
+                    None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
                 }
             },
             stage @ (Stage::Planning { .. }
@@ -1896,7 +1856,7 @@ impl Menu {
     /// that, and waits for zellij to open it.
     pub fn pulled(self, found: Result<Found, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
+        let Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let Found { on, ready: Ready { at, worktree, branch, moved_off, work: readied } } =
@@ -1907,19 +1867,19 @@ impl Menu {
         let off = work.off_branch(branch.as_deref()).filter(|_| moved_off);
         if let (Pull::Agent, Some(off)) = (pull, off) {
             let wrong = Some(format!("{worktree} is {off}, so no agent starts there; w opens it"));
-            let stage = Stage::Pull { work, step: Step::Choosing { wrong } };
+            let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         }
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                claude(&format!("{REVIEW} {}", link.url()), branch.as_deref())
+                agents::on_skill(agent, REVIEW, Some(&link.url()), branch.as_deref())
             },
             (Pull::Agent, Readied::Link(link)) => {
-                claude(&format!("{TACKLE} {}", link.url()), branch.as_deref())
+                agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
             },
             (Pull::Agent, Readied::File { real }) => {
-                claude_reading(format!("{TACKLE} {real}"), &[real.as_str()])
+                agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
@@ -1935,7 +1895,7 @@ impl Menu {
             };
             let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
-            let stage = Stage::Pull { work: work.clone(), step };
+            let stage = Stage::Pull { work: work.clone(), agent, step };
             let cwd = worktree.clone();
             Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
@@ -1953,7 +1913,7 @@ impl Menu {
             (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), worktree, work.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
-                let stage = Stage::Pull { work, step: Step::Waiting(Wait::Making(name)) };
+                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
                 // The session is the machine's, as zellij makes it, and the
                 // menu is for that, until it has a pane of it.
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
@@ -1962,7 +1922,8 @@ impl Menu {
     }
 
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
-        let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(Pull::Worktree)) } = &self.stage
+        let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(Pull::Worktree)), .. } =
+            &self.stage
         else {
             return None;
         };
@@ -2007,7 +1968,8 @@ impl Menu {
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
-        let opens = Opens::Pane { beside: pane, command: claude_reading(prompt, &files) };
+        let command = agents::on_words(keys.agent, prompt, &files);
+        let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -2040,7 +2002,7 @@ impl Menu {
             )));
         }
         let prompt = checks::prompt(&page, &failing);
-        let command = claude_reading(prompt, &checks::files(&failing));
+        let command = agents::on_words(keys.agent, prompt, &checks::files(&failing));
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
@@ -2151,7 +2113,7 @@ impl Menu {
         let right = self.target.cwd().map_or_default(sidebar::short_cwd);
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
-            Stage::Pull { work, step } => {
+            Stage::Pull { work, agent, step } => {
                 let body = match step {
                     Step::Choosing { wrong } => {
                         let asks = Asks::of(work);
@@ -2159,6 +2121,8 @@ impl Menu {
                         spots = entry_spots(&entries, width).map(Choice::Key);
                         let mut body: Vec<_> =
                             entries.iter().map(|entry| entry_line(entry, inner)).collect();
+                        spots.add(body.len(), 0..width, Choice::Key(KeyEvent::from(KeyCode::Tab)));
+                        body.push(switch_line(*agent, inner));
                         if let Some(wrong) = wrong {
                             body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED)));
                         }
@@ -2188,25 +2152,40 @@ impl Menu {
             | Stage::Turning { keys, .. }
             | Stage::Reading { keys, .. } => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
+                let switch = (Hint::Tab, agents::name(agents::other(keys.agent)));
                 if let Some(search) = &keys.search {
-                    let moves =
-                        [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
+                    let moves = [
+                        (Hint::Moves, "Move"),
+                        (Hint::Enter, "Start"),
+                        switch,
+                        (Hint::Esc, "Back"),
+                    ];
                     let (body, skills) = search_lines(search, width, body_room);
                     if choosing {
                         spots = skills;
                     }
-                    (SEARCH_TITLE.to_owned(), right, body, keyed(width, &moves))
+                    let title = in_agent(SEARCH_TITLE, keys.agent);
+                    (title, right, body, keyed(width, &moves))
                 } else {
                     let back: &[(Hint, &str)] = if keys.open.is_empty() {
                         &[(Hint::Esc, "Close")]
                     } else {
                         &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
                     };
+                    let entries = keys.entries();
+                    let mut body: Vec<_> =
+                        entries.iter().map(|entry| entry_line(entry, inner)).collect();
                     if choosing {
-                        spots = entry_spots(keys.entries(), width).map(Choice::Key);
+                        spots = entry_spots(entries, width).map(Choice::Key);
                     }
-                    let body = keys.entries().iter().map(|entry| entry_line(entry, inner));
-                    (title(keys), right, body.collect(), keyed(width, back))
+                    if keys.starts() {
+                        if choosing {
+                            let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
+                            spots.add(body.len(), 0..width, tab);
+                        }
+                        body.push(switch_line(keys.agent, inner));
+                    }
+                    (title(keys), right, body, keyed(width, back))
                 }
             },
             Stage::Asking { keys, asks, .. } => (
@@ -2504,10 +2483,20 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
     lines
 }
 
-/// What the rule over the menu names: the groups opened.
+/// What the rule over the menu names: the groups opened, and the harness
+/// their keys start agents in, where they do.
 fn title(keys: &Keys) -> String {
     let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
-    if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
+    match (names.is_empty(), keys.starts()) {
+        (true, _) => TITLE.to_owned(),
+        (false, false) => names.join(" › "),
+        (false, true) => in_agent(&names.join(" › "), keys.agent),
+    }
+}
+
+/// `title`, and the harness after it that what it names starts agents in.
+fn in_agent(title: &str, agent: Harness) -> String {
+    format!("{title} · {}", agents::name(agent))
 }
 
 /// The legend at the bottom of the sidebar, `width` wide, in `room` lines at
@@ -2597,7 +2586,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(GROUP, Style::new().fg(TAG)));
         },
-        Entry::Start { prompt, .. } => spans.push(does(prompt)),
+        Entry::Start { skill, .. } => spans.push(does(&format!("/{skill}"))),
         Entry::Last(last) => spans.push(does(last.does())),
         Entry::Checks => spans.push(does(CHECKS_DOES)),
         Entry::New(new) => spans.push(does(new.does())),
@@ -2609,11 +2598,24 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Brief(scope) => spans.push(does(scope.does())),
         Entry::Command(command) => spans.push(does(command.does())),
         Entry::YankPull => spans.push(does(YANK_PULL_DOES)),
-        Entry::Pull(pull, asks) => spans.push(does(pull.does(*asks))),
+        Entry::Pull(pull, asks) => spans.push(does(&pull.does(*asks))),
         Entry::Search => spans.push(does(SEARCH_DOES)),
         Entry::Ask => spans.push(does(ASK_DOES)),
     }
     Line::from(spans)
+}
+
+/// The line under the keys that start agents, `inner` wide past the space it
+/// starts with: `Tab`, and the harness it picks in the place of `agent`.
+fn switch_line(agent: Harness, inner: usize) -> Line<'static> {
+    let does = format!("use {}", agents::name(agents::other(agent)));
+    let room = inner.saturating_sub(SWITCH.width() + GAP);
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(SWITCH, Style::new().fg(ACCENT)),
+        Span::raw(" ".repeat(GAP)),
+        Span::styled(sidebar::cut(&does, room), Style::new().fg(NAME)),
+    ])
 }
 
 /// A key a line of keys names, as `<ESC>`, `<y>` or `<Ctrl r>`, or what
@@ -2808,6 +2810,8 @@ mod tests {
     use crate::spots::Hit;
     use crate::zellij::Closes;
 
+    const CLAUDE: Harness = Harness::ClaudeCode;
+
     fn listed() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
     }
@@ -2847,7 +2851,7 @@ mod tests {
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
-        Menu::open(1, target, key).expect("a key of the menu")
+        Menu::open(1, target, key, CLAUDE).expect("a key of the menu")
     }
 
     /// The menu a key left open, and what it wants asked for.
@@ -3014,7 +3018,7 @@ mod tests {
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
                 " a  Ask",
-                " c  Claude ▸",
+                " c  Skills ▸",
                 " n  New ▸",
                 " t  Turn ▸",
                 " d  Delete ▸",
@@ -3027,7 +3031,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
         // A key the menu has not opens none.
-        assert!(Menu::open(1, pane_row(), Some('x')).is_none());
+        assert!(Menu::open(1, pane_row(), Some('x'), CLAUDE).is_none());
     }
 
     #[test]
@@ -3043,7 +3047,7 @@ mod tests {
                 " o  Open PR",
                 " y  Yank ▸",
                 " a  Ask",
-                " c  Claude ▸",
+                " c  Skills ▸",
                 " n  New ▸",
                 " t  Turn ▸",
                 " d  Delete ▸",
@@ -3066,32 +3070,61 @@ mod tests {
         assert_eq!(Top::of('b'), None);
     }
 
-    /// `c` opens the Claude group, and a key in it starts an agent on its
+    /// `c` opens the Skills group, and a key in it starts an agent on its
     /// skill beside the row's pane, in its directory, named for the skill
-    /// and the branch, as the search's `Enter` does.
+    /// and the branch, as the search's `Enter` does: in the harness the rule
+    /// names, which `Tab` switches, and wants kept for the next menu. Where
+    /// the rule has no room for where the pane works too, it names the
+    /// harness.
     #[test]
-    fn a_key_of_the_claude_group_starts_an_agent_on_its_skill() {
+    fn a_key_of_the_skills_group_starts_an_agent_on_its_skill_in_the_harness_named() {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
             text(&menu.lines(31, 10, 0).0),
             [
-                "─ Claude ──────── luneta/main ─",
+                "─ Skills · claude ─────────────",
                 " t  /thermo-nuclear-review",
                 " m  /make-illegal-states-unrep…",
                 " s  /tigerstyle",
                 " f  fix the last command",
                 " e  explain the last command",
                 " c  fix the failing checks",
+                " tab  use pi",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
+        let wide = format!("─ Skills · claude {} luneta/main ─", "─".repeat(16));
+        assert_eq!(text(&menu.lines(48, 10, 0).0)[0], wide);
         let (menu, wants) = stays(menu.key(&char('t')));
         let named = "thermo-nuclear-review: feat/menu";
         let command = ["claude", "--name", named, "/thermo-nuclear-review"].map(str::to_owned);
-        let opens = Opens::Pane { beside: 4, command: command.to_vec() };
-        assert_eq!(wants, beside_row(opens));
+        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
         assert!(menu.opening().is_some());
+
+        let (menu, _) = stays(opened(pane_row(), Some('c')));
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        assert_eq!(wants, Wants::Keep(Harness::Pi));
+        let lines = text(&menu.lines(31, 10, 0).0);
+        assert_eq!([lines[0].as_str(), lines[7].as_str()], [
+            "─ Skills · pi ─── luneta/main ─",
+            " tab  use claude",
+        ]);
+        let (menu, wants) = stays(menu.key(&char('t')));
+        let command = ["pi", "--name", named, "/skill:thermo-nuclear-review"].map(str::to_owned);
+        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
+        assert!(menu.opening().is_some());
+    }
+
+    /// `Tab` switches the harness only where the menu starts agents: its
+    /// first group starts none.
+    #[test]
+    fn tab_does_nothing_where_the_menu_starts_no_agent() {
+        let (menu, _) = stays(opened(pane_row(), None));
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        assert_eq!(wants, Wants::Nothing);
+        let (_, wants) = stays(menu.key(&char('c')));
+        assert_eq!(wants, Wants::Nothing);
     }
 
     /// The command a row's shell ran last: `cargo test`, which failed.
@@ -3156,6 +3189,14 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
+
+        // pi reads it with no rule, as it asks nothing before a read.
+        let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), Harness::Pi).unwrap());
+        let (menu, _) = stays(menu.key(&char('e')));
+        let kept = Kept { file: "/run/luneta/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
+        let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
+        let opens = Opens::Pane { beside: 4, command: vec!["pi".to_owned(), prompt.to_owned()] };
+        assert_eq!(wants, beside_row(opens));
 
         // Nothing printed leaves the agent no file to read.
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -3315,7 +3356,7 @@ mod tests {
     #[test]
     fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
         for row in [pane_row(), session_row()] {
-            let did = Menu::open(1, row.clone(), Some('a')).expect("the menu has `a`");
+            let did = Menu::open(1, row.clone(), Some('a'), CLAUDE).expect("the menu has `a`");
             assert_eq!(closed(did), Done::Ask(row.clone()));
             let (menu, _) = stays(opened(row.clone(), None));
             assert_eq!(closed(menu.key(&char('a'))), Done::Ask(row));
@@ -3672,7 +3713,7 @@ mod tests {
             ]
         );
         assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
-        assert!(Menu::open(1, local_header(), Some(DELETE)).is_none());
+        assert!(Menu::open(1, local_header(), Some(DELETE), CLAUDE).is_none());
 
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         for (header, machine) in [(local_header(), Machine::Local), (remote_header(), vps())] {
@@ -3741,7 +3782,8 @@ mod tests {
         let new = || ("─ New ─────────────────────────".to_owned(), Wants::Nothing);
         for target in [session_row(), local_header(), remote_header()] {
             for group in [SEARCH, SKILLS, TURN] {
-                assert!(Menu::open(1, target.clone(), Some(group)).is_none(), "{group}");
+                let menu = Menu::open(1, target.clone(), Some(group), CLAUDE);
+                assert!(menu.is_none(), "{group}");
                 assert_eq!(press(&target, None, group), first(), "{group}");
             }
             for key in ['p', 't'] {
@@ -3763,19 +3805,6 @@ mod tests {
         assert_eq!(closed(menu.key(&char('s'))), Done::Wrong(why));
     }
 
-    #[test]
-    fn a_skill_names_the_agent_for_it_and_its_branch() {
-        assert_eq!(
-            claude("/tigerstyle", Some("feat/menu")),
-            ["claude", "--name", "tigerstyle: feat/menu", "/tigerstyle"]
-        );
-        assert_eq!(
-            claude("/code-review since main", None),
-            ["claude", "--name", "code-review", "/code-review since main"]
-        );
-        assert_eq!(claude("fix the fold", None), ["claude", "fix the fold"]);
-    }
-
     fn skills(names: &[&str]) -> Vec<Skill> {
         let skill = |name: &&str| Skill {
             name: Name::new((*name).to_owned()).expect("a name"),
@@ -3792,7 +3821,7 @@ mod tests {
         assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
-            ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
+            ["─ Skills · claude ─────────────", " _", " finding skills…"]
         );
         menu.found(Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
@@ -3802,12 +3831,12 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
-            "─ Skills ──────── luneta/main ─".to_owned(),
+            "─ Skills · claude ─────────────".to_owned(),
             " ti_".to_owned(),
             " /tigerstyle  tigerstyle it".to_owned(),
         ]);
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = claude("/tigerstyle", Some("feat/menu"));
+        let command = agents::on_skill(CLAUDE, "tigerstyle", None, Some("feat/menu"));
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
@@ -3836,7 +3865,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
-        let command = claude("/code-review", Some("feat/menu"));
+        let command = agents::on_skill(CLAUDE, "code-review", None, Some("feat/menu"));
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
@@ -4006,14 +4035,14 @@ mod tests {
     /// take, and as tall as its lines.
     #[test]
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
-        let menu = Menu::new(1, pane_row());
+        let menu = Menu::new(1, pane_row(), CLAUDE);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(floated(drawing(&menu), 50, 11), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
             boxed(" a  Ask"),
-            boxed(" c  Claude ▸"),
+            boxed(" c  Skills ▸"),
             boxed(" n  New ▸"),
             boxed(" t  Turn ▸"),
             boxed(" d  Delete ▸"),
@@ -4024,8 +4053,8 @@ mod tests {
 
         let (menu, _) = stays(menu.key(&char('c')));
         let zellij = "z".repeat(7);
-        let rule = format!("─ Claude {} luneta/main ─", "─".repeat(18));
-        assert_eq!(floated(drawing(&menu), 50, 10)[1..], [
+        let rule = format!("─ Skills · claude {} luneta/main ─", "─".repeat(9));
+        assert_eq!(floated(drawing(&menu), 50, 11)[1..], [
             format!("{zellij}┌{rule}┐"),
             format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
             format!("{zellij}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
@@ -4033,11 +4062,12 @@ mod tests {
             format!("{zellij}│{:<41}│", " f  fix the last command"),
             format!("{zellij}│{:<41}│", " e  explain the last command"),
             format!("{zellij}│{:<41}│", " c  fix the failing checks"),
+            format!("{zellij}│{:<41}│", " tab  use pi"),
             format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
         // Narrower than the keys take, the box is as wide as zellij's side.
-        let narrow = floated(drawing(&menu), 30, 10);
+        let narrow = floated(drawing(&menu), 30, 11);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
@@ -4075,8 +4105,8 @@ mod tests {
     /// names, with the words after it. The rule over them is none.
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
-        let menu = Menu::new(1, pane_row());
-        assert_eq!(clicked(&menu, "Claude ▸"), Some(pressed(KeyCode::Char('c'))));
+        let menu = Menu::new(1, pane_row(), CLAUDE);
+        assert_eq!(clicked(&menu, "Skills ▸"), Some(pressed(KeyCode::Char('c'))));
         assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
         assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
         assert_eq!(clicked(&menu, "Close"), Some(pressed(KeyCode::Esc)));
@@ -4131,7 +4161,7 @@ mod tests {
     /// The menu for the pull request, pasted on `row`, its key `key` pressed,
     /// waiting for luneta to find where it goes.
     fn pulling_on(row: Target, key: char) -> Menu {
-        let (menu, wants) = stays(Menu::pull(1, row, link()).key(&char(key)));
+        let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
         let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
         assert_eq!(wants, Wants::Pull(link(), wanted));
         assert!(menu.pulling());
@@ -4155,20 +4185,22 @@ mod tests {
     /// close the menu.
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
-        let menu = Menu::pull(1, pane_row(), link());
+        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
                 " r  /thermo-nuclear-review",
+                " tab  use pi",
                 " <ESC> - Close",
             ]
         );
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
-        let (syncing, wants) = stays(Menu::pull(1, pane_row(), link()).key(&char('r')));
+        let syncing = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let (syncing, wants) = stays(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
         assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
         let (menu, wants) = stays(menu.key(&char('w')));
@@ -4231,6 +4263,39 @@ mod tests {
         assert_eq!((&row.session, row.pane), (&other, 9));
     }
 
+    /// `Tab` in the menu for a pull request picks the other harness, and
+    /// wants it kept, and its line then offers the first back; `r` then
+    /// starts the review in that one, by its spelling of the skill. A click
+    /// on that line is a `Tab`. Once a key waits, `Tab` does nothing.
+    #[test]
+    fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
+        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let tab = KeyEvent::from(KeyCode::Tab);
+        assert_eq!(menu.lines(31, 9, 0).1.at(Position::new(5, 3)), Some(&Choice::Key(tab)));
+        let (menu, wants) = stays(menu.key(&tab));
+        assert_eq!(wants, Wants::Keep(Harness::Pi));
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[3], " tab  use claude");
+        let (menu, _) = stays(menu.key(&char('r')));
+        let (menu, wants) = stays(menu.key(&tab));
+        assert_eq!(wants, Wants::Nothing);
+        let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
+        let worktree = "/w/cdk/feat-x".to_owned();
+        let work = Readied::Link(pull_request());
+        let at = At::Session((other.clone(), 7));
+        let branch = Some("feat/x".to_owned());
+        let ready = Ready { at, worktree: worktree.clone(), branch, moved_off: false, work };
+        let (_, wants) = stays(menu.pulled(Ok(here(ready))));
+        let review = [
+            "pi",
+            "--name",
+            "thermo-nuclear-review: feat/x",
+            "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
+        ];
+        let command = review.map(str::to_owned).to_vec();
+        let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
+        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd: worktree, opens });
+    }
+
     /// A paste of an issue's link opens the menu for the issue, named for it,
     /// with `t` where the menu for a pull request has `r`. `t` opens a tab in
     /// the worktree of the issue's branch, named for it, with an agent told in
@@ -4239,10 +4304,16 @@ mod tests {
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let menu = Menu::pull(1, pane_row(), issue.clone());
+        let menu = Menu::pull(1, pane_row(), issue.clone(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
-            ["─ #2736 ──────── cashubtc/cdk ─", " w  worktree", " t  tackle", " <ESC> - Close"]
+            [
+                "─ #2736 ──────── cashubtc/cdk ─",
+                " w  worktree",
+                " t  tackle",
+                " tab  use pi",
+                " <ESC> - Close",
+            ]
         );
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
@@ -4269,7 +4340,7 @@ mod tests {
     fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone()).key(&char('t')));
+        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
             at: At::Clone { cwd: "/w/cdk".to_owned(), name },
@@ -4285,6 +4356,7 @@ mod tests {
             "─ #2736 ──────── cashubtc/cdk ─",
             " w  worktree",
             " t  tackle",
+            " tab  use pi",
             " /w/cdk/issue-2736 is on",
             " dev-docs, not issue-2736, so",
             " no agent starts there; w",
@@ -4316,13 +4388,14 @@ mod tests {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
             Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
         };
-        let menu = Menu::pull(1, pane_row(), file());
+        let menu = Menu::pull(1, pane_row(), file(), CLAUDE);
         assert_eq!(
             text(&menu.lines(38, 9, 0).0),
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
                 " w  worktree",
                 " t  tackle",
+                " tab  use pi",
                 " <ESC> - Close",
             ]
         );
@@ -4355,7 +4428,9 @@ mod tests {
         let cwd = worktree.to_owned();
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
-        let pressed = |key: char| stays(Menu::pull(1, pane_row(), file()).key(&char(key))).0;
+        let pressed = |key: char| {
+            stays(Menu::pull(1, pane_row(), file(), CLAUDE).key(&char(key))).0
+        };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
@@ -4366,42 +4441,6 @@ mod tests {
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
             Done::Wrong("menu: docs/plans/sync-rework.md: no such file".to_owned())
         );
-    }
-
-    /// The agent is let read the file by a rule that names it alone, as a glob
-    /// would name others, whatever the path holds, and told of it as it is. A
-    /// path no rule can name gets none, and Claude Code asks first.
-    #[test]
-    fn an_agent_is_let_read_the_file_by_a_rule_that_names_it_alone() {
-        for (file, rule) in [
-            ("/w/plan.md", "Read(//w/plan.md)"),
-            ("/w/My Plan (v2).md", "Read(//w/My Plan (v2).md)"),
-            ("/w/a, b.md", "Read(//w/a, b.md)"),
-            ("/w/b{a,c}.md", "Read(//w/b{a,c}.md)"),
-            ("/w/[draft] a*.md", r"Read(//w/\[draft\] a\*.md)"),
-            (r"/w/back\slash.md", r"Read(//w/back\\\\slash.md)"),
-        ] {
-            let prompt = format!("Tackle {file}");
-            let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
-            assert_eq!(
-                claude_reading(prompt.clone(), &[file]),
-                command.map(str::to_owned).to_vec(),
-                "{file}"
-            );
-        }
-        for file in [
-            "/w/what?.md",
-            "/w/Plan (v2) final.md",
-            "/w/Plan (v2), final.md",
-            "/w/two\nlines.md",
-        ] {
-            let prompt = format!("Tackle {file}");
-            assert_eq!(
-                claude_reading(prompt.clone(), &[file]),
-                ["claude".to_owned(), prompt],
-                "{file:?}"
-            );
-        }
     }
 
     /// Where no session works in the repository, luneta makes one in its

@@ -74,6 +74,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
@@ -1127,6 +1128,8 @@ pub struct Sidebar {
     news: News,
     /// The order the rows go in, as you moved them.
     order: Order,
+    /// The harness you picked last for the agents the menu starts.
+    agent: Kept,
     /// The pane luneta's zellij is on, as the rows were last built.
     here_key: Option<Key>,
     /// When what finished last in each pane did, as the rows were last built.
@@ -1474,10 +1477,18 @@ enum Highlight {
 
 impl Sidebar {
     /// The sidebar, with the sessions `folds` has folded, what `news` has of
-    /// what you saw and marked, and the rows in `order`, on a machine that
-    /// goes by `this`.
-    pub fn new(folds: Folds, news: News, order: Order, this: String) -> Self {
-        Sidebar { this, folds, news, order, ..Sidebar::default() }
+    /// what you saw and marked, the rows in `order`, and the harness `agent`
+    /// keeps for the agents the menu starts, on a machine that goes by `this`.
+    pub fn new(folds: Folds, news: News, order: Order, agent: Kept, this: String) -> Self {
+        Sidebar { this, folds, news, order, agent, ..Sidebar::default() }
+    }
+
+    /// Takes up the harness for the agents the menu starts as it is kept
+    /// now, as another luneta picked it.
+    pub fn reagent(&mut self) {
+        if let Err(why) = self.agent.reload() {
+            log::say(&format!("agent: {why}"));
+        }
     }
 
     /// Takes up the folds as they are kept now, as another luneta left them.
@@ -3348,10 +3359,29 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menus += 1;
-        let Some(did) = Menu::open(self.menus, target, key) else {
+        let agent = self.agent_for(&target);
+        let Some(did) = Menu::open(self.menus, target, key, agent) else {
             return Asked::Nothing;
         };
         self.menu_did(did)
+    }
+
+    /// The harness the menu for `target` starts agents in: that of the agent
+    /// in its pane, where one runs, or else the one you picked last.
+    fn agent_for(&self, target: &Target) -> agents::Harness {
+        self.harness_in(target).unwrap_or_else(|| self.agent.harness())
+    }
+
+    /// The harness of the agent in the pane of `target`, where one runs that
+    /// luneta knows the harness of.
+    fn harness_in(&self, target: &Target) -> Option<agents::Harness> {
+        let Target::Pane(machine, row) = target else {
+            return None;
+        };
+        let seen = self.seen(machine)?;
+        let shown = self.pane_of(machine, &row.session, row.pane)?;
+        let seats = seated(seen.agents, seen.sessions);
+        seats.get(&(row.session.name.as_str(), shown.id)).and_then(|agent| agents::of(agent))
     }
 
     /// What the menu is for, as it opens on the highlighted row.
@@ -3430,7 +3460,9 @@ impl Sidebar {
         self.notice = None;
         let place = Place::Pane(self.here_place().inspect_err(|why| log::say(why))?);
         self.menus += 1;
-        self.menu = Some(Menu::new(self.menus, self.target_at(&self.on, place)));
+        let target = self.target_at(&self.on, place);
+        let agent = self.agent_for(&target);
+        self.menu = Some(Menu::new(self.menus, target, agent));
         Ok(())
     }
 
@@ -3467,7 +3499,7 @@ impl Sidebar {
             return;
         };
         self.menus += 1;
-        self.menu = Some(Menu::pull(self.menus, target, work));
+        self.menu = Some(Menu::pull(self.menus, target, work, self.agent.harness()));
     }
 
     /// The menu, while it floats over zellij.
@@ -3584,6 +3616,13 @@ impl Sidebar {
         self.menu = Some(menu);
         match wants {
             Wants::Nothing => Asked::Nothing,
+            Wants::Keep(harness) => {
+                if let Err(why) = self.agent.keep(harness) {
+                    let name = agents::name(harness);
+                    self.say(format!("agent: {name} is for this luneta alone: {why}"));
+                }
+                Asked::Nothing
+            },
             Wants::Skills(cwd) => Asked::Find { menu: number, on, cwd },
             Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
                 let open = Open::Pane { session: session.name, beside, cwd, command };
@@ -6138,7 +6177,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("order");
         let order = Order::within(file.clone());
-        let mut sidebar = Sidebar::new(Folds::default(), News::default(), order, "mac".to_owned());
+        let (folds, news, agent) = (Folds::default(), News::default(), Kept::default());
+        let mut sidebar = Sidebar::new(folds, news, order, agent, "mac".to_owned());
         sidebar.heard(host(vec![session("a", 1, Vec::new())], Vec::new()));
         sidebar.lost("lunetad does not answer".to_owned());
         std::fs::write(&file, r#"{"sessions": []}"#).unwrap();
@@ -6154,7 +6194,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("order");
         let order = Order::within(file.clone());
-        let mut sidebar = Sidebar::new(Folds::default(), News::default(), order, "mac".to_owned());
+        let (folds, news, agent) = (Folds::default(), News::default(), Kept::default());
+        let mut sidebar = Sidebar::new(folds, news, order, agent, "mac".to_owned());
         let listing = |named: &[(&str, i64)]| {
             let sessions = named.iter().map(|(name, at)| session(name, *at, Vec::new()));
             host(sessions.collect(), Vec::new())
@@ -8410,7 +8451,7 @@ mod tests {
             (" o  Open PR", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
-            (" c  Claude ▸", Some(on_legend('c'))),
+            (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
             (" t  Turn ▸", Some(on_legend('t'))),
             (" d  Delete ▸", Some(on_legend('d'))),
@@ -8481,6 +8522,52 @@ mod tests {
         let open = Open::Pane { session: session_name("older"), beside: 1, cwd, command };
         let open = Asked::Open { menu: 1, on: Machine::Local, open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
+    }
+
+    /// A key of the menu starts an agent in the harness of the one in the
+    /// row's pane, and on a pane with none, in the one picked last, which
+    /// `Tab` picks, for this menu and every next one, and keeps for the
+    /// next luneta.
+    #[test]
+    fn the_menu_starts_agents_in_the_pane_s_harness_or_else_the_one_picked_last() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("agent");
+        let mut sidebar = two_sessions();
+        sidebar.agent = Kept::within(file.clone()).0;
+        if let Some(host) = &mut sidebar.host {
+            host.agents[0].harness = Some(Harness::Pi.into());
+        }
+        sidebar.focus(Keys::Sidebar);
+        let started = |menu, session: &str, beside, cwd: &str, harness, spelled| {
+            let command = [harness, "--name", "tigerstyle", spelled].map(str::to_owned).to_vec();
+            let (session, cwd) = (session_name(session), cwd.to_owned());
+            let open = Open::Pane { session, beside, cwd, command };
+            Asked::Open { menu, on: Machine::Local, open }
+        };
+        type_in(&mut sidebar, "c");
+        let pi = started(1, "older", 1, "/w/luneta/main", "pi", "/skill:tigerstyle");
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
+
+        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.step(2);
+        type_in(&mut sidebar, "c");
+        let claude = started(2, "newer", 1, "/w/b", "claude", "/tigerstyle");
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), claude);
+
+        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "c");
+        let tab = KeyEvent::from(KeyCode::Tab);
+        assert_eq!(sidebar.key(&tab, moment(160_000)), Asked::Nothing);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "pi\n");
+        let pi = started(3, "newer", 1, "/w/b", "pi", "/skill:tigerstyle");
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
+        sidebar.focus(Keys::Zellij);
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "c");
+        let pi = started(4, "newer", 1, "/w/b", "pi", "/skill:tigerstyle");
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
     }
 
     /// A key of the menu opens it at the bottom, for the highlighted row, and
@@ -8612,11 +8699,12 @@ mod tests {
         sidebar.paste("ls -la");
         assert!(sidebar.menu.is_none());
         sidebar.paste("https://github.com/lorenzolfm/luneta/pull/5\n");
-        let lines = screen(&mut sidebar, true, 32, 16);
+        let lines = screen(&mut sidebar, true, 32, 17);
         assert_eq!(lines[12..], [
             "─ #5 ────── lorenzolfm/luneta ─",
             " w  worktree",
             " r  /thermo-nuclear-review",
+            " tab  use pi",
             " <ESC> - Close",
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
@@ -8680,11 +8768,12 @@ mod tests {
         let Some(Target::Pane(on, row)) = sidebar.target() else { panic!("not a pane's row") };
         let cwd = row.cwd.clone();
         sidebar.paste("  docs/plans/sync-rework.md\n");
-        let lines = screen(&mut sidebar, true, 39, 16);
+        let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(lines[12..], [
             "─ sync-rework ─ plans/sync-rework.md ─",
             " w  worktree",
             " t  tackle",
+            " tab  use pi",
             " <ESC> - Close",
         ]);
         let Asked::Pull { on: asked_on, work, .. } = sidebar.key(&char('t'), moment(160_000))
@@ -11101,8 +11190,8 @@ mod tests {
         // A luneta that takes up the order only as it moves a session.
         let deaf = || {
             let order = Order::within(file.clone());
-            let mut sidebar =
-                Sidebar::new(Folds::default(), News::default(), order, "mac".to_owned());
+            let (folds, news, agent) = (Folds::default(), News::default(), Kept::default());
+            let mut sidebar = Sidebar::new(folds, news, order, agent, "mac".to_owned());
             sidebar.heard(searched().host.unwrap());
             sidebar.focus(Keys::Sidebar);
             sidebar

@@ -3,6 +3,7 @@
 //! has zellij open, move and close what the sidebar's menu does, for the
 //! agent of its ask box among others.
 
+mod agents;
 mod alerts;
 mod aloud;
 mod answers;

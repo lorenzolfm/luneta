@@ -151,22 +151,24 @@ turn a pane into a tab and a tab into panes, or delete what you are done with. T
 and what each does, as which-key does in neovim.
 
 ```text
-╭─ Claude ─────────────── luneta/sidebar ─╮
+╭─ Skills · claude ────── luneta/sidebar ─╮
 │ t  /thermo-nuclear-review               │
 │ m  /make-illegal-states-unrepresentable │
 │ s  /tigerstyle                          │
 │ f  fix the last command                 │
 │ e  explain the last command             │
 │ c  fix the failing checks               │
+│ tab  use pi                             │
 │                                         │
 │ <BS> - Back, <ESC> - Close              │
 ╰─────────────────────────────────────────╯
 ```
 
 `Alt a` opens the menu floating at the bottom right of zellij's side, for the
-pane zellij is on. `c` opens its Claude group, and `t` starts Claude Code on
+pane zellij is on. `c` opens its Skills group, and `t` starts an agent on
 `/thermo-nuclear-review` in a pane of its own, beside that pane in its tab, and
-in the directory it works in, which the border over the keys names. For
+in the directory it works in, which the border over the keys names where it
+has room. For
 `/thermo-nuclear-review` that is the point: it reviews the branch checked out
 there. In a pane that is no terminal, the menu has no pane to start an agent
 beside, and says so in place of its keys. So it does for a pane whose directory
@@ -174,23 +176,30 @@ zellij has yet to say: an agent starts where its pane works, or not at all.
 [luneta's sidebar](#luneta-in-your-terminal) has the menu too, for the row it
 highlights.
 
+The agent starts in the harness the border names, Claude Code (`claude`) or
+pi: the harness of the agent in that pane, where one runs, or else the one you
+picked last, in any luneta on the machine. `Tab` picks the other, for this menu
+and the next, and luneta keeps it in `luneta/agent` of `$XDG_STATE_HOME`, or of
+`~/.local/state`. Each harness is told in its own words: Claude Code runs a
+skill as `/tigerstyle`, and pi as `/skill:tigerstyle`.
+
 An agent started on a skill goes by the skill and the branch, as
 `thermo-nuclear-review: feat/sidebar`, as though you had named it with
 `/rename`, so the sidebar and the picker say what it is doing from the start.
 
 What a key starts on is the first message of the session, as
-`claude "/tigerstyle"` would take it: a skill, a skill and its arguments, as
+`claude "/tigerstyle"` or `pi "/skill:tigerstyle"` would take it: a skill, a skill and its arguments, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
 the menu from the first; `Esc` closes it.
 
-The Claude group's `f` and `e` start an agent beside a shell on the command it
+The Skills group's `f` and `e` start an agent beside a shell on the command it
 ran last, to fix what went wrong, or to explain it: on its command line and its
 exit status, which [the shell's hook](#hook-the-shell) says, and on what it
 printed, from the line it was run on to the prompt the shell waits at, and
 nothing before. luneta has zellij dump the pane, its scrollback with it, and
 keeps what the command printed in a file of its own, its last 2000 lines at
 most, in the folder `printed` of luneta's, which the agent is let read with no
-question asked:
+question asked, as pi reads any file:
 
 ```text
 Fix this. In my shell, `cargo test` ended with exit status 101. What it printed
@@ -214,7 +223,7 @@ before the one the shell waits on end the file, as luneta cannot tell them from
 what the command printed. A file goes once it is a day old, within the hour
 while lunetad runs, or else as it next starts.
 
-The Claude group's `c` starts an agent beside a pane on the checks that failed
+The Skills group's `c` starts an agent beside a pane on the checks that failed
 on its branch's pull request, to fix them. luneta asks `gh` how the checks of
 the pull request's head stand now, and fetches the log of each job of GitHub
 Actions that failed, with `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`,
@@ -240,7 +249,7 @@ takes a pane whose branch has a pull request open, or a draft: on another, or
 where no check failed, the menu says why it starts none. A file goes as the
 files of `f` and `e` do.
 
-The Claude group's other keys are for a few skills, built in. For any other,
+The Skills group's other keys are for a few skills, built in. For any other,
 `/` at the top of the menu searches every skill the pane's directory can run:
 what you type narrows the list, fuzzily, by a skill's name and by what it says
 it does, the skills whose names match first, and `Enter` starts an agent on the
@@ -248,7 +257,7 @@ one highlighted, beside the pane, as a key does. `↓` and `↑` move; `Esc` goe
 back to the keys, and so does `Backspace` once there is nothing to take back.
 
 ```text
-╭─ Skills ─────────────────────────────────────── luneta/main ─╮
+╭─ Skills · claude ────────────────────────────── luneta/main ─╮
 │ _                                                            │
 │ /code-review  Review the changes since a fixed point, on tw… │
 │ /diagnosing-bugs  Diagnosis loop for hard bugs and performa… │
@@ -259,15 +268,16 @@ back to the keys, and so does `Backspace` once there is nothing to take back.
 │ /thermo-nuclear-review  Review a branch as hard as it can b… │
 │ /tigerstyle  Apply TigerStyle when writing or reviewing cod… │
 │                                                              │
-│ <↓↑> - Move, <ENTER> - Start, <ESC> - Back                   │
+│ <↓↑> - Move, <ENTER> - Start, <TAB> - pi, <ESC> - Back       │
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
 The list shows eight skills at most, and scrolls under the cursor. It keeps
 the height of the skills found as you type, so the menu keeps its size.
 
-The skills are the ones Claude Code finds for that directory, as slash
-commands, where it finds them:
+`Tab` picks the other harness there too. The skills are the ones Claude Code
+finds for that directory, as slash commands, whichever harness the agent starts
+in, where it finds them:
 
 - yours, in `~/.claude`, or in `CLAUDE_CONFIG_DIR`
 - the project's, in the `.claude` of the directory and of each one above it,
@@ -603,7 +613,7 @@ too.
 
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
-your groups from yet. In their place, its Claude group has keys for a few
+your groups from yet. In their place, its Skills group has keys for a few
 skills, built in. It lists only the keys that work on the row: on a session's
 row, `a`, `n m`, `d d`, `d s` and the Brief group, on another machine's header,
 `a`, `n s`, `n m`, `d d` and the Brief group, and on this machine's the same but
@@ -628,7 +638,7 @@ has the keys and no menu is open, its bottom lists what you can press there:
  o  Open PR
  y  Yank ▸
  a  Ask
- c  Claude ▸
+ c  Skills ▸
  n  New ▸
  t  Turn ▸
  d  Delete ▸
@@ -652,13 +662,13 @@ machine's header, `n s` makes the session in your home on that machine. Each
 takes zellij there, and gives it the keys. A tab of another session opens once
 zellij is there: zellij makes a tab as big as a client of its session, and
 most have none attached.
-`c t` starts Claude Code on `/thermo-nuclear-review` in a pane of its own
+`c t` starts an agent on `/thermo-nuclear-review` in a pane of its own
 beside the highlighted pane, in its tab and in the directory it works in, named
 for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,
 and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
 first group, where `/` searches the skills the pane's directory can run, and
-`Enter` starts Claude Code on the one highlighted, beside the pane, as `c`'s
-keys do, and so does a click on a skill. The wheel over them moves the
+`Enter` starts an agent on the one highlighted, beside the pane, as `c`'s
+keys do, in the harness the border names, and so does a click on a skill. The wheel over them moves the
 highlight.
 
 `t t` turns the highlighted pane into a tab of its own, in its session, and the
@@ -715,8 +725,9 @@ own code, which luneta is built with, and opens a tab there, named `#123`, in
 the session that works in its repository: the one zellij is in, or else
 another, or else a session luneta makes in a clone of it that zoxide knows,
 named as the picker's directories name it. `r` does the
-same and starts Claude Code in the tab on `/thermo-nuclear-review` and the
-link, named for the skill and the branch. Where a pane has the pull request's
+same and starts an agent in the tab on `/thermo-nuclear-review` and the
+link, named for the skill and the branch, in the harness you picked last, which
+`Tab` there switches, as in the Skills group. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
 beside it. A repository is the pull request's where any of its remotes is the
 pull request's repository on GitHub, by GitHub's name or, by ssh, another your
@@ -768,7 +779,7 @@ request. Where neither the clone nor origin has the branch yet, luneta fetches
 the default branch of the issue's repository and makes it from that, with no
 upstream: in a fork's clone, from the repository it forks, not from the fork.
 A branch origin has, as one you pushed from another machine, wt checks out. `t`
-does the same and starts Claude Code in the tab, told to `Tackle` the link.
+does the same and starts an agent in the tab, told to `Tackle` the link.
 Pasted again, the link finds the worktree the first paste made: `w` takes
 zellij to a pane that works in it, and `t` starts the agent beside it. That
 worktree may have moved on, as one does when an issue goes out as several pull
@@ -787,10 +798,10 @@ root, from `~/`, or else from where the highlighted row works. `w` makes a
 worktree of a branch named for the file, and opens a tab there, so
 `docs/plans/sync-rework.md` makes the branch `md-sync-rework` and the tab
 `sync-rework`: in lower case, with a `-` for what a branch's name can't hold. The
-`md-` keeps `main.md` off `main`. `t` does the same and starts Claude Code in the
+`md-` keeps `main.md` off `main`. `t` does the same and starts an agent in the
 tab, told to `Tackle` the file by its real path, and let read it there, as the
 worktree may not have it; for a path no rule of Claude Code's can name alone, as
-one with a `?`, it asks first. The worktree is made in the repository the file is
+one with a `?`, Claude Code asks first. The worktree is made in the repository the file is
 in, or, for a file in none, the one the highlighted row works in; a file in none,
 on a row that works in no directory, makes nothing, and the menu says why. So does
 a file in a repository git refuses to read, as one of a newer format or another
@@ -1135,7 +1146,7 @@ zellij was last in a session, and the notes say what ssh said; `luneta.log`
 says why luneta passed over each machine it did.
 
 The menu on another machine's pane opens what it opens here, there: `n p`,
-`n t` and the agents of the Claude group open in zellij on that machine, `c f`
+`n t` and the agents of the Skills group open in zellij on that machine, `c f`
 and `c e` keep what the pane printed in a file there, for the agent there to
 read, `c c` has `gh` there fetch the logs of the checks and keeps them there, `/` finds the skills of the pane's directory there, and `n s` makes a
 session there, named as that machine names one, and on its header in your

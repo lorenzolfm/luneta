@@ -53,6 +53,7 @@ mod watch;
 mod zellij;
 pub mod zoxide;
 
+pub use agent::Harness;
 pub use claude::{folder as claude_folder, one_answer};
 pub use client::{connect, listening, stream, through, Unbridged, BRIDGED, REACH};
 pub use daemon::{serve, Claim};
