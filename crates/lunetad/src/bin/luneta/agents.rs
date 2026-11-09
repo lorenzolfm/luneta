@@ -14,18 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use lunetad::api;
+pub use lunetad::Harness;
 
 use notify::RecommendedWatcher;
 
 use crate::host::Event;
 use crate::state;
-
-/// A harness an agent can start in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Harness {
-    ClaudeCode,
-    Pi,
-}
 
 /// The name of the file the harness is kept in.
 const FILE: &str = "agent";
@@ -36,6 +30,16 @@ pub const fn name(harness: Harness) -> &'static str {
     match harness {
         Harness::ClaudeCode => "claude",
         Harness::Pi => "pi",
+    }
+}
+
+/// The harness that runs the program `program`, by the name `name` gives it,
+/// if luneta knows it.
+pub fn named(program: &str) -> Option<Harness> {
+    match program {
+        "claude" => Some(Harness::ClaudeCode),
+        "pi" => Some(Harness::Pi),
+        _ => None,
     }
 }
 
@@ -186,14 +190,13 @@ impl Kept {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(format!("{}: {error}", file.display())),
         };
-        let named = text.trim();
-        let known = [Harness::ClaudeCode, Harness::Pi].into_iter().find(|h| name(*h) == named);
-        match known {
+        let program = text.trim();
+        match named(program) {
             Some(harness) => {
                 self.harness = harness;
                 Ok(())
             },
-            None => Err(format!("{}: {named:?} is no harness luneta knows", file.display())),
+            None => Err(format!("{}: {program:?} is no harness luneta knows", file.display())),
         }
     }
 
@@ -287,6 +290,15 @@ mod tests {
                 "{file:?}"
             );
         }
+    }
+
+    /// A harness is known by the name of the program it runs, and by no other.
+    #[test]
+    fn a_harness_is_known_by_its_program_s_name() {
+        for harness in [Harness::ClaudeCode, Harness::Pi] {
+            assert_eq!(named(name(harness)), Some(harness));
+        }
+        assert_eq!(named("codex"), None);
     }
 
     /// The harness picked in one luneta is the next one's, and one that
