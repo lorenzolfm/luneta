@@ -1355,8 +1355,9 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
 }
 
 /// A `claude` for `host` that writes issues: it writes where it ran and the
-/// options it ran with in `host`'s home, `wrote` there, and what it was told
-/// in `told` there, and answers with a title, a body and a label. On words
+/// options it ran with in `host`'s home, `wrote` there, what it was told in
+/// `told` there, and the file of settings it was handed in `settings` there,
+/// and answers with a title, a body and a label. On words
 /// that say `please-fail`, it fails as one with no login does.
 fn claude_that_writes_issues(host: &Host) {
     let home = host.home.path().display();
@@ -1366,6 +1367,8 @@ printf '%s' "$words" > "{home}/told"
 {{ echo "cwd=$(pwd -P)"; echo "pane=${{ZELLIJ-unset}}"
 for arg; do case "$arg" in --*) echo "$arg";; esac; done
 }} > "{home}/wrote"
+handed=
+for arg; do [ "$handed" = --settings ] && cp "$arg" "{home}/settings"; handed=$arg; done
 case "$words" in
     *please-fail*)
         echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
@@ -1381,9 +1384,11 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","st
 /// the directory it names there, told the words, and the labels and your last
 /// issues as gh there lists them, and filed there, by gh there in the same
 /// directory, with the title, body and label `claude` wrote: the daemon
-/// answers with its number, title and page. Where `claude` or gh fail, it
-/// says why: gh files nothing after a `claude` that failed, and `claude`
-/// writes nothing where gh cannot list. Each gh is told the repository on
+/// answers with its number, title and page. `claude` may read nothing git
+/// ignores there, nor the git directory. Where `claude` or gh fail, it says
+/// why: gh files nothing after a `claude` that failed, and `claude` writes
+/// nothing where gh cannot list. A gh that failed short of GitHub's answer
+/// may have filed one. Each gh is told the repository on
 /// GitHub asked for. A gh that files and does not say the issue's page may
 /// have filed one, which the daemon says apart. One for a directory by no
 /// absolute path, of no words, or for no repository on GitHub is invalid,
@@ -1408,6 +1413,8 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     git_said(&dir, &["remote", "add", "origin", "git@github.com:me/n.git"]);
     git_said(&dir, &["remote", "add", "lab", "git@gitlab.com:o/n.git"]);
     git_said(&dir, &["remote", "add", "upstream", "https://github.com/o/n"]);
+    fs::write(dir.join(".gitignore"), ".env\n").unwrap();
+    fs::write(dir.join(".env"), "TOKEN=secret\n").unwrap();
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1442,16 +1449,24 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         assert_eq!(wrote[..2], [cwd.as_str(), "pane=unset"]);
         let told = fs::read_to_string(far.home.path().join("told")).unwrap();
         assert!(told.starts_with("a red button\n\n[luneta: the repository's labels"), "{told}");
-        assert!(told.contains(r#"[{"name":"bug","#), "{told}");
+        assert!(told.contains(r#"[{"name":"bug"}]"#), "{told}");
         assert!(told.contains(r#"[{"title":"An older one","#), "{told}");
         let mine = "--author @me --state all --limit 5 --json title,body,labels";
         let listed = [
-            format!("{there} label list --limit 100 --json name,description --repo github.com/o/n"),
+            format!("{there} label list --limit 100 --json name --repo github.com/o/n"),
             format!("{there} issue list {mine} --repo github.com/o/n"),
         ];
         assert_eq!(far.gh.listed(), listed);
-        for option in ["--json-schema", "--no-session-persistence", "--safe-mode"] {
+        let options = ["--json-schema", "--no-session-persistence", "--safe-mode", "--settings"];
+        for option in options {
             assert!(wrote.contains(&option), "{option} in {wrote:?}");
+        }
+        let settings = fs::read_to_string(far.home.path().join("settings")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let denied = settings["permissions"]["deny"].as_array().unwrap();
+        for rule in [format!("Read(/{there}/.env)"), format!("Read(/{there}/**/.git/**)")] {
+            let rule = serde_json::Value::from(rule);
+            assert!(denied.contains(&rule), "{rule} in {denied:?}");
         }
         let asked =
             "issue create --title A red button --body-file - --repo github.com/o/n --label bug";
@@ -1464,6 +1479,12 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         let refused = refused.unwrap().into_inner().message().await.unwrap_err();
         assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
         assert_eq!(refused.message(), "gh: could not add label: 'bug' not found");
+        far.gh.refuse_issues("HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+        let lost = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let lost = lost.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(lost.code(), Code::Aborted, "{lost:?}");
+        assert_eq!(lost.message(), "gh: HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+        far.gh.refuse_issues("could not add label: 'bug' not found");
 
         far.gh.say_on_create("Created it\n");
         let unread = daemon.file_issue(file(on("far"), &dir, "a red button")).await;

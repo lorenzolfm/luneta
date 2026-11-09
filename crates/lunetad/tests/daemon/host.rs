@@ -715,7 +715,7 @@ if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; 
         cat "$pulls/lists-fail" >&2
         exit 1
     fi
-    [ "$1" = label ] && echo '[{"name":"bug","description":"Something isn'"'"'t working"}]'
+    [ "$1" = label ] && echo '[{"name":"bug"}]'
     [ "$1" = issue ] && echo '[{"title":"An older one","body":"It was older.","labels":[]}]'
     exit 0
 fi

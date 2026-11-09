@@ -1654,8 +1654,9 @@ message FileIssueRequest {
   // What the user said the issue is to be: with nothing but white space, it
   // is invalid.
   string words = 3;
-  // The repository on GitHub it is filed in, as `owner/name`, which
-  // `IssueRepositories` said: by anything else, it is invalid.
+  // The repository on GitHub it is filed in, as `owner/name`, as
+  // `IssueRepositories` says them: one spelled otherwise is invalid. The
+  // daemon files it in whichever is named, one of the remotes or not.
   string repository = 4;
 }
 

@@ -1478,35 +1478,41 @@ hold `Alt r` and [dictate](#dictate) it. `Tab` goes back to the list.
 └─────────────────────────────────────────────────────────┘
 ```
 
-`Enter` closes the box, and the keys go back to where they were. While the
-issue is written and filed, the sidebar's notes say `⠋ Filing an issue in
+`Enter` closes the box, and the keys go back to where they were. While the issue
+is written and filed, the sidebar's notes say `⠋ Filing an issue in
 lorenzolfm/luneta…`, the spinner turning, one line for each issue on its way.
 Once it is filed, they say its number and title, and its link is on your
 clipboard, as `y p` puts a pull request's there, until the next key in the
 sidebar. Where it was not filed, they say why, and the next `i` in that
 repository opens the box with your words in it, to send again, until you send
-them, oldest first where more than one was not filed. Where `gh` ran out of
-time as it filed, or the answer from another machine was lost, it may have been
-filed: the notes say so, and you have your words again, but look on GitHub
-before you send them. `Esc` closes the box and sends nothing, and keeps the
-words it opened with as you left them; `Ctrl u` and then `Esc` drops them.
+them, oldest first where more than one was not filed. Where `gh` ran out of time
+as it filed, failed short of GitHub's answer, or the answer from another machine
+was lost, it may have been filed: the notes say so, and you have your words
+again, but look on GitHub before you send them. `Esc` closes the box and sends
+nothing, and keeps the words it opened with as you left them; `Ctrl u` and then
+`Esc` drops them.
 
-luneta has `gh` list the labels of the repository on GitHub it goes to, and the
-last five issues you filed there, telling each `gh` that repository, and hands
-them, with what you said, to `claude -p --model sonnet`, on your Claude Code
-login, in safe mode and in Claude Code's `dontAsk` permission mode. It writes
-the issue as yours are written: a title, a body, and one of the repository's
-labels, or none. It may read the repository's files, to name the code your
-words point at, and runs no command: luneta has `gh issue create` file what it
-wrote, with your `gh` login. It reads no issue but yours, as anyone can file
-one in a public repository, or comment on one, and what that says would come
-into what it is told. It asks you nothing, as you are not waiting on it: it
-writes what it has, and you edit the issue after. It keeps no Claude session. A
-repository with no remote on github.com has nowhere to file it, which the box
-says, and where `gh` can't list, nothing is written. On another machine's row,
-all of it runs on that machine, with its `claude` and `gh` logins, as the [ask
-box](#on-another-machines-row)'s agent does. Writing has five minutes, and each
-`gh` one more.
+luneta has `gh` list the names of the labels of the repository on GitHub it goes
+to, and the last five issues you filed there, telling each `gh` that repository,
+and hands them, with what you said, to `claude -p --model sonnet`, on your
+Claude Code login, in safe mode and in Claude Code's `dontAsk` permission mode.
+It writes the issue as yours are written: a title, a body, and one of the
+repository's labels, or none. It may read the repository's files, to name the
+code your words point at, and runs no command: luneta has `gh issue create` file
+what it wrote, with your `gh` login. It reads no issue but yours, nor what a
+label says it is for, as anyone can file one in a public repository, or comment
+on one, and its maintainers write its labels, and what that says would come into
+what it is told. As what it writes is filed before you read it, it may read
+nothing git ignores in the pane's directory, where `.env` files and the like are
+kept, nor a git directory, whose config may have a token in a remote's url, and
+where git can't say what it ignores, as in the clone `wt clone` makes, it reads
+none of the files: those it reads could tell it to put a secret in the issue. It asks you nothing,
+as you are not waiting on it: it writes what it has, and you edit the issue
+after. It keeps no Claude session. A repository with no remote on github.com has
+nowhere to file it, which the box says, and where `gh` can't list, nothing is
+written. On another machine's row, all of it runs on that machine, with its
+`claude` and `gh` logins, as the [ask box](#on-another-machines-row)'s agent
+does. Writing has five minutes, and each `gh` one more.
 
 ### Delete merged worktrees
 

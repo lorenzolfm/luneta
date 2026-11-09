@@ -1,6 +1,6 @@
 //! An issue of a repository on GitHub, written from what you said and filed
-//! there: luneta's `i`. gh lists the repository's labels and the last issues
-//! you filed there, and what you typed, or dictated, goes to `claude -p` with
+//! there: luneta's `i`. gh lists the names of the repository's labels and
+//! the last issues you filed there, and what you typed, or dictated, goes to `claude -p` with
 //! them, which writes the issue as yours are written, reading the code where
 //! the words name some, and answers with a title, a body and a label, as
 //! `schema` has them. It files nothing itself: gh files what it wrote, with
@@ -10,9 +10,14 @@
 //! so that the agent reads this machine's repository, and gh files it with
 //! this machine's login.
 //!
-//! The agent reads no issue but yours, and runs no command: anyone can file
-//! an issue in a public repository, or comment on one, and what it says
-//! would come into what the agent is told.
+//! The agent reads no issue but yours, nor what a label says it is for, and
+//! runs no command: anyone can file an issue in a public repository, or
+//! comment on one, and its maintainers write its labels, and what they say
+//! would come into what the agent is told. What it writes is filed before you
+//! read it, so it may not read what git ignores in the directory, where `.env`
+//! files and the like are kept, nor a git directory, whose config may have a
+//! token in a remote's url: anyone who pushes to the repository writes the
+//! files it reads, and those could tell it to put a secret in the issue.
 //!
 //! The agent asks nothing back: the box is gone as it writes. It writes the
 //! issue with what you said, and you edit the issue after.
@@ -23,20 +28,23 @@
 //! second, as it takes `upstream` before `origin`.
 
 use std::fmt;
-use std::io;
+use std::fs;
+use std::io::{self, Write as _};
 use std::num::NonZeroU32;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tempfile::NamedTempFile;
 use tonic::{Code, Status};
 
 use crate::api::{FileIssueRequest, FileIssueResponse, IssueRepository, On};
 use crate::directory::Directory;
 use crate::links::{self, Remotes};
 use crate::program::{self, Ran};
-use crate::{asks, claude, git};
+use crate::{asks, claude, git, log};
 
 /// The model the agent writes on: the ask box's, which reads a repository's
 /// issues and writes one as they are written.
@@ -50,9 +58,16 @@ pub const WRITING: Duration = Duration::from_mins(5);
 /// across the network.
 pub const GH: Duration = Duration::from_mins(1);
 
+/// How long git has to list what it ignores in the directory: it walks what
+/// it does not track there, as `git status` does.
+const GIT: Duration = Duration::from_secs(30);
+
 /// How long an issue takes at the most: gh lists the labels and the issues,
-/// the agent writes, and gh files it.
-pub const AT_MOST: Duration = WRITING.saturating_add(GH.saturating_mul(3));
+/// git what it ignores, the agent writes, and gh files it.
+pub const AT_MOST: Duration = WRITING.saturating_add(GH.saturating_mul(3)).saturating_add(GIT);
+
+/// How gh ends where it is not logged in, before it asks GitHub anything.
+const GH_UNAUTHENTICATED: i32 = 4;
 
 /// How many of your last issues the agent is shown, to write as they are.
 const SHOWN: &str = "5";
@@ -134,8 +149,9 @@ pub struct Filed {
 pub enum Unfiled {
     /// None was, as this says: gh or claude refused, or was never asked.
     Refused(String),
-    /// One may have been, as this says: gh ran out of time as it filed, or
-    /// said what luneta does not read, or the answer was lost on its way.
+    /// One may have been, as this says: gh ran out of time as it filed,
+    /// failed short of GitHub's answer, or said what luneta does not read, or
+    /// the answer was lost on its way.
     InDoubt(String),
 }
 
@@ -287,14 +303,15 @@ impl Filing {
     /// list, as in a repository of no GitHub remote, nor can it file, and the
     /// agent writes nothing.
     pub fn file(&self) -> Result<Filed, Unfiled> {
-        let listing = ["label", "list", "--limit", "100", "--json", "name,description"];
+        let listing = ["label", "list", "--limit", "100", "--json", "name"];
         let listed = self.listed(&listing).map_err(Unfiled::Refused)?;
         let labels = names(&listed).map_err(Unfiled::Refused)?;
         let mine = ["issue", "list", "--author", "@me", "--state", "all", "--limit", SHOWN];
         let issues = self.listed(&[&mine[..], &["--json", "title,body,labels"]].concat());
         let issues = issues.map_err(Unfiled::Refused)?;
+        let unread = unread(&self.dir);
         let told = told(&self.words, &listed, &issues);
-        let written = self.write(&told, &labels).map_err(Unfiled::Refused)?;
+        let written = self.write(&told, &labels, &unread).map_err(Unfiled::Refused)?;
         self.create(&written)
     }
 
@@ -318,10 +335,12 @@ impl Filing {
         gh
     }
 
-    /// Has the agent write it, `told` on its stdin, with one of `labels`:
-    /// what it wrote, or why it wrote nothing.
-    fn write(&self, told: &str, labels: &[String]) -> Result<Written, String> {
-        let mut claude = self.claude(labels);
+    /// Has the agent write it, `told` on its stdin, with one of `labels`,
+    /// reading none of `unread`: what it wrote, or why it wrote nothing.
+    fn write(&self, told: &str, labels: &[String], unread: &[String]) -> Result<Written, String> {
+        let settings = settings(unread)
+            .map_err(|error| format!("the settings of claude could not be written: {error}"))?;
+        let mut claude = self.claude(labels, settings.path());
         let stdin =
             program::saying(told).map_err(|error| format!("claude could not be told: {error}"))?;
         let ran = program::run_reading(&mut claude, WRITING, stdin)
@@ -344,12 +363,14 @@ impl Filing {
     /// `claude`, for it, to take one of `labels`. It runs on `MODEL`, in safe
     /// mode, so that none of your hooks, `CLAUDE.md` or MCP servers come into
     /// it, with `TOOLS` its tools, and the permission rules of your own
-    /// settings alone: not those of the repository, which anyone who pushes
-    /// to it could write. It keeps no session, and has no zellij in its
-    /// environment, so that the daemon places it in no pane.
-    fn claude(&self, labels: &[String]) -> Command {
+    /// settings, and those of the file `settings`, which `settings` writes:
+    /// not those of the repository, which anyone who pushes to it could
+    /// write. It keeps no session, and has no zellij in its environment, so
+    /// that the daemon places it in no pane.
+    fn claude(&self, labels: &[String], settings: &Path) -> Command {
         let mut claude = Command::new("claude");
         claude.args(["-p", "--model", MODEL, "--safe-mode", "--setting-sources", "user"]);
+        claude.arg("--settings").arg(settings);
         claude.args(["--permission-mode", "dontAsk", "--tools", TOOLS]);
         claude.args(["--no-session-persistence", "--output-format", "json"]);
         claude.arg("--json-schema").arg(schema(labels));
@@ -363,9 +384,9 @@ impl Filing {
     }
 
     /// Has gh file what the agent wrote, in the repository: the issue filed,
-    /// or why gh filed none. A gh that could not start, or that said why it
-    /// failed, filed none; one that ran out of time, or did not say what
-    /// luneta reads, may have.
+    /// or why gh filed none. A gh that could not start filed none, nor one
+    /// that failed as `filed_none` says; one that failed otherwise, ran out
+    /// of time, or did not say what luneta reads, may have.
     fn create(&self, written: &Written) -> Result<Filed, Unfiled> {
         let mut gh = self.gh(&["issue", "create", "--title", &written.title, "--body-file", "-"]);
         if let Some(label) = &written.label {
@@ -382,7 +403,16 @@ impl Filing {
         })?;
         let said = match ran {
             Ran::Stuck => return Err(Unfiled::InDoubt("gh: it did not answer in time".to_owned())),
-            ended @ Ran::Ended { .. } => answered(ended).map_err(Unfiled::Refused)?,
+            Ran::Ended { status, stdout, .. } if status.success() => stdout,
+            Ran::Ended { status, stderr, .. } => {
+                let why = refused(&stderr, status);
+                let said = format!("gh: {why}");
+                return Err(if filed_none(&why, status) {
+                    Unfiled::Refused(said)
+                } else {
+                    Unfiled::InDoubt(said)
+                });
+            },
         };
         let said = String::from_utf8_lossy(&said);
         let url = said.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or_default();
@@ -494,7 +524,7 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The names of the labels gh `listed`, as `gh label list --json` says
+/// The names of the labels gh `listed`, as `gh label list --json name` says
 /// them: or why that says none luneta reads.
 fn names(listed: &str) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
@@ -506,8 +536,8 @@ fn names(listed: &str) -> Result<Vec<String>, String> {
     Ok(labels.into_iter().map(|label| label.name).collect())
 }
 
-/// What the agent is told: `words`, what you said, and then the repository's
-/// `labels` and your last `issues` there, as gh lists them.
+/// What the agent is told: `words`, what you said, and then the names of the
+/// repository's `labels` and your last `issues` there, as gh lists them.
 fn told(words: &str, labels: &str, issues: &str) -> String {
     format!(
         "{words}\n\n[luneta: the repository's labels, as gh label list says them:]\n{labels}\n\n\
@@ -539,6 +569,105 @@ fn number_of(url: &str) -> Option<NonZeroU32> {
     let (_name, _owner, host) = (parts.next()?, parts.next()?, parts.next()?);
     (!host.is_empty()).then_some(())?;
     number.parse().ok()
+}
+
+/// Whether gh, which failed with `status` and said `why`, as `refused` has
+/// it, filed nothing: it files with one question to GitHub, and asks before
+/// it whether the repository takes issues and what its labels are. It stops
+/// short of filing where it is not logged in, the repository has its issues
+/// off, or a label is none of the repository's, and GitHub's answer says why
+/// it took none: one with errors in it, or of a status of the 400s. Any other
+/// failure, as a connection lost or a status of the 500s, may have come after
+/// GitHub took the issue in.
+fn filed_none(why: &str, status: ExitStatus) -> bool {
+    status.code() == Some(GH_UNAUTHENTICATED)
+        || why.starts_with("GraphQL: ")
+        || why.starts_with("HTTP 4")
+        || why.starts_with("could not add label: ")
+        || why.ends_with(" repository has disabled issues")
+}
+
+/// What the agent may not read in `dir`, as Claude Code's rules for its
+/// `Read`, which hold for `Grep` and `Glob` too: each path git ignores there,
+/// by its absolute path, a directory git ignores with all that is in it, and
+/// the git directories in there. Each by `dir` as it is spelled and as its
+/// links lead, as Claude Code takes a path where its links lead. All of `dir`
+/// where git ignores a path that is no UTF-8, which no rule spells, or where
+/// git did not say what it ignores, as in the clone `wt clone` makes, which
+/// is no work tree and holds the worktrees: the agent then writes the issue
+/// without the code.
+fn unread(dir: &Directory) -> Vec<String> {
+    let said = ignored(dir).unwrap_or_else(|why| {
+        log::say(&format!("issue: git did not say what it ignores in {dir}: {why}"));
+        b"./\0".to_vec()
+    });
+    let real = fs::canonicalize(dir.as_str()).ok();
+    let real = real.as_deref().and_then(Path::to_str).filter(|real| *real != dir.as_str());
+    let bases = [Some(dir.as_str()), real];
+    bases.into_iter().flatten().flat_map(|base| rules(base, &said)).collect()
+}
+
+/// What git ignores in `dir`, as `git ls-files -z --directory` lists it: or
+/// why it did not say.
+fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
+    let mut git = Command::new("git");
+    git.args(["-c", "core.fsmonitor=false", "-C", dir.as_str(), "ls-files", "-z"]);
+    git.args(["--others", "--ignored", "--exclude-standard", "--directory"]);
+    git::local(&mut git);
+    match program::run(&mut git, GIT).map_err(|error| unrun("git", &git, &error))? {
+        Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
+        Ran::Ended { status, stderr, .. } => Err(refused(&stderr, status)),
+        Ran::Stuck => Err(format!("it was still listing after {}s", GIT.as_secs())),
+    }
+}
+
+/// The rules for `Read` of what git `ignored` in `base`, as `git ls-files -z
+/// --directory` lists it there, as `unread` has them for `base`.
+fn rules(base: &str, ignored: &[u8]) -> Vec<String> {
+    let base = base.trim_end_matches('/');
+    let mut paths = Vec::new();
+    for listed in ignored.split(|byte| *byte == 0).filter(|listed| !listed.is_empty()) {
+        let Ok(listed) = std::str::from_utf8(listed) else {
+            return vec![denied(&format!("{base}/"))];
+        };
+        paths.push(listed.strip_prefix("./").unwrap_or(listed));
+    }
+    let mut rules: Vec<String> =
+        paths.iter().map(|path| denied(&format!("{base}/{path}"))).collect();
+    rules.push(format!("Read(/{}/**/.git/**)", escaped(base)));
+    rules
+}
+
+/// The rule for `Read` of the absolute `path`, a directory with all that is
+/// in it where it ends in `/`, as Claude Code spells one, after `//`, and its
+/// characters that would match others escaped.
+fn denied(path: &str) -> String {
+    let all = if path.ends_with('/') { "**" } else { "" };
+    format!("Read(/{}{all})", escaped(path))
+}
+
+/// `path` with the characters that would match others in a rule, or end it,
+/// escaped, as gitignore does.
+fn escaped(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']' | '(' | ')') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// A file of Claude Code's settings, of none but the rules `unread` says,
+/// which deny the agent `Read`, for as long as it is kept: its own, as it
+/// lists what you keep out of git.
+fn settings(unread: &[String]) -> io::Result<NamedTempFile> {
+    let mut file = tempfile::Builder::new().prefix("luneta-issue-").suffix(".json").tempfile()?;
+    let settings = json!({"permissions": {"deny": unread}});
+    file.write_all(settings.to_string().as_bytes())?;
+    file.flush()?;
+    Ok(file)
 }
 
 /// Why gh filed nothing, as it ended with `status` and said `stderr`: its
@@ -585,21 +714,24 @@ mod tests {
     }
 
     /// The agent runs in the row's directory, on the ask box's model, in safe
-    /// mode, with the permission rules of your settings alone, the tools that
-    /// read and no Bash, keeps no session, and answers as `schema` has it,
-    /// with one of the repository's labels or none. It has no zellij in its
-    /// environment, nor what tells git where a repository is.
+    /// mode, with the permission rules of your settings and luneta's file of
+    /// them alone, the tools that read and no Bash, keeps no session, and
+    /// answers as `schema` has it, with one of the repository's labels or
+    /// none. It has no zellij in its environment, nor what tells git where a
+    /// repository is.
     #[test]
     fn the_agent_writes_in_the_row_s_directory_and_runs_nothing() {
         let labels = ["bug".to_owned(), "enhancement".to_owned()];
-        let claude = filing().claude(&labels);
+        let claude = filing().claude(&labels, Path::new("/tmp/luneta-issue-1.json"));
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/luneta/main")));
         let model = ["-p", "--model", "sonnet", "--safe-mode", "--setting-sources", "user"];
+        let settings = ["--settings", "/tmp/luneta-issue-1.json"];
         let permissions = ["--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob"];
         let output = ["--no-session-persistence", "--output-format", "json"];
         let asked = schema(&labels);
         let schema = ["--json-schema", &asked, "--append-system-prompt", SYSTEM];
-        assert_eq!(args(&claude), [&model[..], &permissions, &output, &schema].concat());
+        let expected = [&model[..], &settings, &permissions, &output, &schema].concat();
+        assert_eq!(args(&claude), expected);
         let removed = |name: &str| {
             claude.get_envs().any(|(key, value)| key.to_str() == Some(name) && value.is_none())
         };
@@ -617,7 +749,7 @@ mod tests {
     /// The labels the agent may take are those gh lists, by their names.
     #[test]
     fn the_labels_are_those_gh_lists() {
-        let listed = r#"[{"name":"bug","description":"It breaks"},{"name":"ui","description":""}]"#;
+        let listed = r#"[{"name":"bug"},{"name":"ui"}]"#;
         assert_eq!(names(listed), Ok(vec!["bug".to_owned(), "ui".to_owned()]));
         assert_eq!(names("[]"), Ok(Vec::new()));
         assert!(names("no labels").unwrap_err().starts_with("gh listed labels luneta"));
@@ -760,6 +892,70 @@ mod tests {
         ] {
             assert_eq!(number(url), None, "{url}");
         }
+    }
+
+    /// The agent may read nothing git ignores in the directory, by its path
+    /// there, a directory with all in it, nor a git directory in it: each
+    /// with the characters that match others escaped. Where all the
+    /// directory is ignored, it reads none of it, and so where git ignores a
+    /// path that is no UTF-8, or does not say what it ignores, as in no work
+    /// tree.
+    #[test]
+    fn the_agent_may_read_nothing_git_ignores_nor_a_git_directory() {
+        let ignored = b".env\0target/\0a*b(1).secret\0";
+        assert_eq!(rules("/w/n/", ignored), [
+            "Read(//w/n/.env)",
+            "Read(//w/n/target/**)",
+            r"Read(//w/n/a\*b\(1\).secret)",
+            "Read(//w/n/**/.git/**)",
+        ]);
+        assert_eq!(rules("/w/[n]", b""), [r"Read(//w/\[n\]/**/.git/**)"]);
+        assert_eq!(rules("/w/n", b"./\0.env\0"), [
+            "Read(//w/n/**)",
+            "Read(//w/n/.env)",
+            "Read(//w/n/**/.git/**)",
+        ]);
+        assert_eq!(rules("/w/n", b".env\0\xff.env\0"), ["Read(//w/n/**)"]);
+        let bare = tempfile::tempdir().unwrap();
+        let real = bare.path().canonicalize().unwrap().display().to_string();
+        let mut git = Command::new("git");
+        git::local(git.args(["init", "--quiet", "--bare"]).arg(&real));
+        assert!(git.status().unwrap().success());
+        let all = denied(&format!("{real}/"));
+        assert!(unread(&Directory::parse(real).unwrap()).contains(&all), "{all}");
+        let file = settings(&["Read(//w/n/.env)".to_owned()]).unwrap();
+        let written: Value = serde_json::from_slice(&fs::read(file.path()).unwrap()).unwrap();
+        assert_eq!(written, json!({"permissions": {"deny": ["Read(//w/n/.env)"]}}));
+    }
+
+    /// gh filed nothing where it is not logged in, where it stopped before it
+    /// filed, or where GitHub said why it took none; and may have filed one
+    /// where it failed in any other way, as GitHub's answer was lost or was
+    /// of a status of the 500s.
+    #[test]
+    fn gh_filed_none_where_it_stopped_short_or_github_said_why() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let failed = ExitStatus::from_raw(1 << 8);
+        let unauthenticated = ExitStatus::from_raw(4 << 8);
+        for why in [
+            "could not add label: 'bugs' not found",
+            "the 'o/n' repository has disabled issues",
+            "GraphQL: was submitted too quickly (createIssue)",
+            "HTTP 403: Resource not accessible by integration (https://api.github.com/graphql)",
+        ] {
+            assert!(filed_none(why, failed), "{why}");
+        }
+        let login = "To get started with GitHub CLI, please run:  gh auth login";
+        assert!(filed_none(login, unauthenticated));
+        for why in [
+            r#"Post "https://api.github.com/graphql": read: connection reset by peer"#,
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+            "exit status: 1",
+        ] {
+            assert!(!filed_none(why, failed), "{why}");
+        }
+        let killed = ExitStatus::from_raw(9);
+        assert!(!filed_none(&killed.to_string(), killed));
     }
 
     /// Why gh filed nothing is the first line it said of it, past the one
