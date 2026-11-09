@@ -215,6 +215,11 @@ service Daemon {
   // there is none: `FAILED_PRECONDITION` where none was filed, and `ABORTED`
   // where one may have been. A question that hangs up does not stop it.
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
+  // The repositories on GitHub an issue of the repository a directory is in
+  // can be filed in, as its remotes name them, in the order gh takes them:
+  // for luneta's `i` to have you pick one, where it has more than one. git
+  // says, and gh is not asked.
+  rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -1649,6 +1654,9 @@ message FileIssueRequest {
   // What the user said the issue is to be: with nothing but white space, it
   // is invalid.
   string words = 3;
+  // The repository on GitHub it is filed in, as `owner/name`, which
+  // `IssueRepositories` said: by anything else, it is invalid.
+  string repository = 4;
 }
 
 message FileIssueResponse {
@@ -1656,4 +1664,25 @@ message FileIssueResponse {
   // number, and its title.
   string url = 1;
   string title = 2;
+}
+
+message IssueRepositoriesRequest {
+  On on = 1;
+  // A directory of the repository, by its absolute path: one by another path is
+  // invalid.
+  string dir = 2;
+}
+
+message IssueRepositoriesResponse {
+  // In the order gh takes them: the one `gh repo set-default` set, then
+  // `upstream`, `github` and `origin`, then the rest. None where no remote is
+  // on GitHub.
+  repeated IssueRepository repositories = 1;
+}
+
+message IssueRepository {
+  // The first remote that names it.
+  string remote = 1;
+  // As `owner/name`, on github.com.
+  string repository = 2;
 }

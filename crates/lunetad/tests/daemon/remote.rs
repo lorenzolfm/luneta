@@ -26,7 +26,7 @@ use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
     self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
-    FileIssueRequest,
+    FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
     DumpScreenRequest, GoRequest, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
     KillRequest,
     ListClientsRequest,
@@ -1383,10 +1383,13 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","st
 /// directory, with the title, body and label `claude` wrote: the daemon
 /// answers with its number, title and page. Where `claude` or gh fail, it
 /// says why: gh files nothing after a `claude` that failed, and `claude`
-/// writes nothing where gh cannot list. A gh that files and does not say the
-/// issue's page may have filed one, which the daemon says apart. One for a directory by no absolute
-/// path, or of no words, is invalid, and one for a machine this daemon does
-/// not reach runs nothing.
+/// writes nothing where gh cannot list. Each gh is told the repository on
+/// GitHub asked for. A gh that files and does not say the issue's page may
+/// have filed one, which the daemon says apart. One for a directory by no
+/// absolute path, of no words, or for no repository on GitHub is invalid,
+/// and one for a machine this daemon does not reach runs nothing. The
+/// remotes on GitHub of the repository there are listed there, gh's first,
+/// and none of those elsewhere.
 #[test]
 fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     let here = Host::new();
@@ -1401,6 +1404,10 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     let dir = far.home.path().join("w");
     fs::create_dir(&dir).unwrap();
     let there = dir.canonicalize().unwrap().display().to_string();
+    git_said(&dir, &["init", "--quiet"]);
+    git_said(&dir, &["remote", "add", "origin", "git@github.com:me/n.git"]);
+    git_said(&dir, &["remote", "add", "lab", "git@gitlab.com:o/n.git"]);
+    git_said(&dir, &["remote", "add", "upstream", "https://github.com/o/n"]);
 
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1411,7 +1418,19 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
             on,
             dir: dir.display().to_string(),
             words: words.to_owned(),
+            repository: "o/n".to_owned(),
         };
+        let listed = IssueRepositoriesRequest { on: on("far"), dir: dir.display().to_string() };
+        let listed = daemon.issue_repositories(listed).await.unwrap().into_inner();
+        let remote = |remote: &str, repository: &str| IssueRepository {
+            remote: remote.to_owned(),
+            repository: repository.to_owned(),
+        };
+        assert_eq!(listed.repositories, [remote("upstream", "o/n"), remote("origin", "me/n")]);
+        let relative = IssueRepositoriesRequest { on: on("far"), dir: "w".to_owned() };
+        let relative = daemon.issue_repositories(relative).await.unwrap_err();
+        assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
+
         let filed = daemon.file_issue(file(on("far"), &dir, " a red button ")).await;
         let filed = filed.unwrap().into_inner().message().await.unwrap().unwrap();
         let filed = Filed::of(filed).unwrap();
@@ -1425,15 +1444,17 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         assert!(told.starts_with("a red button\n\n[luneta: the repository's labels"), "{told}");
         assert!(told.contains(r#"[{"name":"bug","#), "{told}");
         assert!(told.contains(r#"[{"title":"An older one","#), "{told}");
+        let mine = "--author @me --state all --limit 5 --json title,body,labels";
         let listed = [
-            format!("{there} label list --limit 100 --json name,description"),
-            format!("{there} issue list --author @me --state all --limit 5 --json title,body,labels"),
+            format!("{there} label list --limit 100 --json name,description --repo github.com/o/n"),
+            format!("{there} issue list {mine} --repo github.com/o/n"),
         ];
         assert_eq!(far.gh.listed(), listed);
         for option in ["--json-schema", "--no-session-persistence", "--safe-mode"] {
             assert!(wrote.contains(&option), "{option} in {wrote:?}");
         }
-        let asked = "issue create --title A red button --body-file - --label bug";
+        let asked =
+            "issue create --title A red button --body-file - --repo github.com/o/n --label bug";
         let created = [there.as_str(), asked, "It is red.", "Too red."].map(str::to_owned);
         assert_eq!(far.gh.created(), Some(created.to_vec()));
         assert_eq!(here.gh.created(), None);
@@ -1470,6 +1491,8 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
             |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
         invalid(daemon.file_issue(file(on("far"), Path::new("w"), "x")).await.unwrap_err());
         invalid(daemon.file_issue(file(on("far"), &dir, " ")).await.unwrap_err());
+        let unnamed = FileIssueRequest { repository: String::new(), ..file(on("far"), &dir, "x") };
+        invalid(daemon.file_issue(unnamed).await.unwrap_err());
         let nowhere = daemon.file_issue(file(on("nowhere"), &dir, "x")).await.unwrap_err();
         assert_eq!(nowhere.code(), Code::FailedPrecondition, "{nowhere:?}");
         assert_eq!(nowhere.message(), "lunetad does not reach nowhere now");

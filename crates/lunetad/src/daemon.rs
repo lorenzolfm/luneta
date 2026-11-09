@@ -66,7 +66,7 @@ use crate::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
     DumpScreenResponse, FileIssueRequest, FileIssueResponse, GoRequest, InfoResponse,
-    KeepChecksRequest, KeepChecksResponse,
+    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
@@ -83,7 +83,7 @@ use crate::directory::Directory;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
-use crate::issues::{Filing, Unfiled};
+use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
@@ -1149,6 +1149,23 @@ impl Daemon for Host {
         }
         let answer = late(move || Ok(filing.file().map_err(Unfiled::status)?.answer()));
         Ok(Response::new(Box::pin(answer)))
+    }
+
+    async fn issue_repositories(
+        &self,
+        request: Request<IssueRepositoriesRequest>,
+    ) -> Result<Response<IssueRepositoriesResponse>, Status> {
+        let IssueRepositoriesRequest { on, dir } = request.into_inner();
+        let dir = directory("dir", dir)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let request = IssueRepositoriesRequest { on: None, dir: dir.to_string() };
+            return daemon.issue_repositories(request).await;
+        }
+        let listed = task::spawn_blocking(move || issues::remotes(&dir)).await;
+        let listed = listed.map_err(|error| unfinished(&error))?;
+        let remotes = listed.map_err(Status::failed_precondition)?;
+        let repositories = remotes.into_iter().map(Remote::answer).collect();
+        Ok(Response::new(IssueRepositoriesResponse { repositories }))
     }
 
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;

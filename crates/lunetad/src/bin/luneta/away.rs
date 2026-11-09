@@ -16,7 +16,8 @@ use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
     closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
-    DumpScreenRequest, GoRequest, KeepChecksRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    DumpScreenRequest, GoRequest, IssueRepositoriesRequest, KeepChecksRequest, KeepPrintedRequest,
+    KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, OtherTabsRequest,
     RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
@@ -27,7 +28,7 @@ use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
-use lunetad::issues::{self, Filed, Filing, Unfiled};
+use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -458,6 +459,16 @@ impl Away {
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
+    }
+
+    /// The remotes on GitHub of the repository `dir` is in there, as
+    /// `lunetad::issues::remotes` lists them there, or why it did not.
+    pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
+        let request = IssueRepositoriesRequest { on: Some(self.on()), dir: dir.to_string() };
+        let listed =
+            self.ask(|mut daemon| async move { daemon.issue_repositories(request).await })?;
+        let remotes = listed.repositories.into_iter().map(Remote::of);
+        remotes.collect::<Result<_, _>>().map_err(|why| format!("{}: {why}", self.on))
     }
 
     /// Has the daemon there write and file `filing`, as `lunetad::issues`

@@ -53,7 +53,7 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTit
 use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
-use lunetad::issues::{Filed, Unfiled};
+use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::carries::Moved;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
@@ -185,12 +185,16 @@ pub enum Event {
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
     Heard { number: u64, heard: Heard },
+    /// The remotes on GitHub git listed for the issue box numbered `number`,
+    /// or why it did not.
+    Remotes { number: u64, remotes: Result<Vec<Remote>, String> },
     /// What came of the issue the issue box numbered `number` sent to
-    /// `repository`, of `words`, what you said: the issue gh filed, or why
-    /// there is none.
+    /// `repository`, to be filed in `to` on GitHub, of `words`, what you
+    /// said: the issue gh filed, or why there is none.
     Filed {
         number: u64,
         repository: issue::Repository,
+        to: OnGitHub,
         words: String,
         filed: Result<Filed, Unfiled>,
     },
@@ -1430,14 +1434,22 @@ impl App {
                     ask.heard(heard);
                 }
             },
-            Event::Filed { number, repository, words, filed } => {
-                self.sidebar.filed(number, &repository.name, &filed);
+            Event::Remotes { number, remotes } => {
+                if let Some(Over::Issue(issue) | Over::Dictation(_, Where::Issue(issue))) =
+                    &mut self.focus.over
+                    && issue.number() == number
+                {
+                    issue.listed(remotes);
+                }
+            },
+            Event::Filed { number, repository, to, words, filed } => {
+                self.sidebar.filed(number, &to.to_string(), &filed);
                 match filed {
                     Ok(filed) => {
                         clip(terminal, ClipboardType::Clipboard, filed.url())?;
                         self.copied = Some(filed.url().to_owned());
                     },
-                    Err(_) => self.unfiled.keep(number, repository, words),
+                    Err(_) => self.unfiled.keep(number, repository, to, words),
                 }
             },
             Event::Picker { number, heard } => {
@@ -1511,8 +1523,11 @@ impl App {
         let over = match &self.focus.over {
             Some(Over::Brief(briefing)) => briefing.turning(),
             Some(Over::Ask(ask)) => ask.turning(),
-            Some(Over::Dictation(dictation, _)) => dictation.turning(),
-            Some(Over::Menu | Over::Issue(_) | Over::Picker(_) | Over::Note(_)) | None => false,
+            Some(Over::Dictation(dictation, under)) => {
+                dictation.turning() || matches!(under, Where::Issue(issue) if issue.turning())
+            },
+            Some(Over::Issue(issue)) => issue.turning(),
+            Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
         };
         over || self.sidebar.turning()
     }
@@ -2323,7 +2338,7 @@ impl App {
             },
             Asked::Issue(repository) => {
                 self.issues += 1;
-                let issue = Issue::new(self.issues, repository, &self.unfiled);
+                let issue = Issue::open(self.issues, repository, &self.unfiled, &self.events);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Issue(issue)) });
             },
             // lunetad reads the file again as it changes, and its next answer
@@ -2426,8 +2441,8 @@ impl App {
         let Some(Over::Issue(issue)) = open else {
             return;
         };
-        if let Some((number, repository)) = issue.send(&self.events, &mut self.unfiled) {
-            self.sidebar.filing(number, &repository);
+        if let Some((number, to)) = issue.send(&self.events, &mut self.unfiled) {
+            self.sidebar.filing(number, &to.to_string());
         }
         self.give_from(had, Focus::on(self.focus.side));
     }
@@ -2584,8 +2599,9 @@ impl App {
                 if let Some(dictated) = &dictated {
                     issue.dictated(&dictated.written.to_string());
                 }
+                let sends = dictated.is_some_and(|dictated| dictated.sends) && issue.ready();
                 self.give_from(had, Focus { side, over: Some(Over::Issue(issue)) });
-                if dictated.is_some_and(|dictated| dictated.sends) {
+                if sends {
                     self.file_issue();
                 }
             },

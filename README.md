@@ -1449,48 +1449,64 @@ minutes wherever it runs.
 ### File an issue
 
 `i` on a pane's row in a repository, in the sidebar's [menu](#menu) or the one
-over zellij, opens the issue box, where you say what the issue is: type it, or
-hold `Alt r` and [dictate](#dictate) it.
+over zellij, opens the issue box. It goes to a repository on GitHub that one
+of the remotes names. Where they name two or more, as a fork's clone's do, the
+box first lists them, the one `gh` would take first, for you to pick with the
+arrows, or `j` and `k`, and `Enter`, or by its number:
 
 ```text
-┌─ File issue ─────────────────────────────── luneta ─┐
-│ sonnet writes it as this repository does, and gh    │
-│ files it.                                           │
-│                                                     │
-│ › the ask box should say which model it runs on_    │
-│                                                     │
-│ <ENTER> File  <Alt r> Dictate  <ESC> Close          │
-└─────────────────────────────────────────────────────┘
+┌─ File issue ──────────────────────────── cdk ─┐
+│ Which repository on GitHub is it for?         │
+│ 1 cashubtc/cdk  upstream                      │
+│ 2 lorenzolfm/cdk  origin                      │
+│                                               │
+│ <↓↑> - Move, <ENTER> - Pick, <ESC> - Close    │
+└───────────────────────────────────────────────┘
+```
+
+Then, or at once where there is one, you say what the issue is: type it, or
+hold `Alt r` and [dictate](#dictate) it. `Tab` goes back to the list.
+
+```text
+┌─ File issue ──────────────────────── lorenzolfm/luneta ─┐
+│ sonnet writes it as lorenzolfm/luneta does, and gh      │
+│ files it there.                                         │
+│                                                         │
+│ › the ask box should say which model it runs on_        │
+│                                                         │
+│ <ENTER> File  <Alt r> Dictate  <ESC> Close              │
+└─────────────────────────────────────────────────────────┘
 ```
 
 `Enter` closes the box, and the keys go back to where they were. While the
 issue is written and filed, the sidebar's notes say `⠋ Filing an issue in
-luneta…`, the spinner turning, one line for each issue on its way. Once it is
-filed, they say its number and title, and its link is on your clipboard, as `y
-p` puts a pull request's there, until the next key in the sidebar. Where it
-was not filed, they say why, and the next `i` in that repository opens the box
-with your words in it, to send again, until you send them, oldest first where
-more than one was not filed. Where `gh` ran out of time as it filed, or the
-answer from another machine was lost, it may have been filed: the notes say
-so, and you have your words again, but look on GitHub before you send them.
-`Esc` closes the box and sends nothing, and keeps the words it opened with as
-you left them; `Ctrl u` and then `Esc` drops them.
+lorenzolfm/luneta…`, the spinner turning, one line for each issue on its way.
+Once it is filed, they say its number and title, and its link is on your
+clipboard, as `y p` puts a pull request's there, until the next key in the
+sidebar. Where it was not filed, they say why, and the next `i` in that
+repository opens the box with your words in it, to send again, until you send
+them, oldest first where more than one was not filed. Where `gh` ran out of
+time as it filed, or the answer from another machine was lost, it may have been
+filed: the notes say so, and you have your words again, but look on GitHub
+before you send them. `Esc` closes the box and sends nothing, and keeps the
+words it opened with as you left them; `Ctrl u` and then `Esc` drops them.
 
-luneta has `gh` list the repository's labels and the last five issues you
-filed there, in the pane's directory, and hands them, with what you said, to
-`claude -p --model sonnet`, on your Claude Code login, in safe mode and in
-Claude Code's `dontAsk` permission mode. It writes the issue as yours are
-written: a title, a body, and one of the repository's labels, or none. It may
-read the repository's files, to name the code your words point at, and runs
-no command: luneta has `gh issue create` file what it wrote, with your `gh`
-login. It reads no issue but yours, as anyone can file one in a public
-repository, or comment on one, and what that says would come into what it is
-told. It asks you nothing, as you are not waiting on it: it writes what it
-has, and you edit the issue after. It keeps no Claude session. Where `gh`
-can't list, as in a repository with no GitHub remote, nothing is written. On
-another machine's row, all of it runs on that machine, with its `claude` and
-`gh` logins, as the [ask box](#on-another-machines-row)'s agent does. Writing
-has five minutes, and each `gh` one more.
+luneta has `gh` list the labels of the repository on GitHub it goes to, and the
+last five issues you filed there, telling each `gh` that repository, and hands
+them, with what you said, to `claude -p --model sonnet`, on your Claude Code
+login, in safe mode and in Claude Code's `dontAsk` permission mode. It writes
+the issue as yours are written: a title, a body, and one of the repository's
+labels, or none. It may read the repository's files, to name the code your
+words point at, and runs no command: luneta has `gh issue create` file what it
+wrote, with your `gh` login. It reads no issue but yours, as anyone can file
+one in a public repository, or comment on one, and what that says would come
+into what it is told. It asks you nothing, as you are not waiting on it: it
+writes what it has, and you edit the issue after. It keeps no Claude session. A
+repository with no remote on github.com has nowhere to file it, which the box
+says, and where `gh` can't list, nothing is written. On another machine's row,
+all of it runs on that machine, with its `claude` and `gh` logins, as the [ask
+box](#on-another-machines-row)'s agent does. Writing has five minutes, and each
+`gh` one more.
 
 ### Delete merged worktrees
 

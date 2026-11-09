@@ -231,6 +231,20 @@ pub(crate) fn remote_is_of(url: &str, repository: (&str, &str, &str)) -> bool {
     url_is_of(url, repository, ssh_host)
 }
 
+/// The owner and the name of the repository on GitHub a remote's `url`
+/// names: on GitHub by its host, or by ssh, by another that ssh's config
+/// gives it, as `ssh_host` says, as `url_is_of` takes a remote to be of one.
+/// None for a remote anywhere else.
+pub(crate) fn github_repository_of(
+    url: &str,
+    ssh_host: impl FnOnce(&str) -> Option<String>,
+) -> Option<(&str, &str)> {
+    let Spelled { host, ssh, owner, name } = spelled(url)?;
+    let github = |host: &str| host.eq_ignore_ascii_case(GITHUB);
+    let there = github(host) || (ssh && ssh_host(host).is_some_and(|host| github(&host)));
+    there.then_some((owner, name))
+}
+
 fn url_is_of(
     url: &str,
     (on, owner, name): (&str, &str, &str),
@@ -528,7 +542,7 @@ fn spelled(url: &str) -> Option<Spelled<'_>> {
 /// name, as its `Host` and `HostName` do: as `ssh -G` says, which reads the
 /// config and connects nowhere. None for what names no host, as what starts
 /// with `-`, which ssh would take for an option.
-fn ssh_host(host: &str) -> Option<String> {
+pub(crate) fn ssh_host(host: &str) -> Option<String> {
     let spelled = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_');
     if host.is_empty() || host.starts_with('-') || !host.chars().all(spelled) {
         return None;
@@ -1754,6 +1768,20 @@ mod tests {
             "https://github-work/cashubtc/cdk",
         ] {
             assert!(!link().of(url, ssh_host), "{url}");
+        }
+    }
+
+    /// A remote names a repository on GitHub by ssh or https, by GitHub's
+    /// name, or by ssh by another that ssh's config gives it; one anywhere
+    /// else names none.
+    #[test]
+    fn a_remote_names_a_repository_on_github_by_its_host() {
+        let of = |url| github_repository_of(url, ssh_host);
+        assert_eq!(of("git@github.com:cashubtc/cdk.git"), Some(("cashubtc", "cdk")));
+        assert_eq!(of("https://GitHub.com/lorenzolfm/cdk/"), Some(("lorenzolfm", "cdk")));
+        assert_eq!(of("git@github-work:cashubtc/cdk.git"), Some(("cashubtc", "cdk")));
+        for url in ["git@gitlab.com:cashubtc/cdk.git", "https://github-work/o/n", "/srv/git/cdk"] {
+            assert_eq!(of(url), None, "{url}");
         }
     }
 

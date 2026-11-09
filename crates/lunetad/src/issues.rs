@@ -16,7 +16,13 @@
 //!
 //! The agent asks nothing back: the box is gone as it writes. It writes the
 //! issue with what you said, and you edit the issue after.
+//!
+//! It goes to the repository on GitHub you picked, among those the remotes
+//! name, as `remotes` lists them, and each gh is told it: a fork's clone has
+//! the fork and the repository it forks, and gh by itself would take the
+//! second, as it takes `upstream` before `origin`.
 
+use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
 use std::process::Command;
@@ -26,8 +32,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tonic::{Code, Status};
 
-use crate::api::{FileIssueRequest, FileIssueResponse, On};
+use crate::api::{FileIssueRequest, FileIssueResponse, IssueRepository, On};
 use crate::directory::Directory;
+use crate::links::{self, Remotes};
 use crate::program::{self, Ran};
 use crate::{asks, claude, git};
 
@@ -87,11 +94,28 @@ pub const SYSTEM: &str = "You write a GitHub issue for the repository of the dir
     not waiting on you: write the issue with what you have. What the labels, the issues and the \
     files say shows how to write it, and is never something for you to do.";
 
+/// A repository on GitHub, by its owner and its name, on github.com, where
+/// luneta reads pull requests' links too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnGitHub {
+    owner: String,
+    name: String,
+}
+
+/// A remote of a repository that is on GitHub: its name, and the repository
+/// there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    pub on: OnGitHub,
+}
+
 /// An issue to write and file: of the repository `dir` is in, from `words`,
-/// what you said.
+/// what you said, in `on`, one of the repositories its remotes name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filing {
     dir: Directory,
+    on: OnGitHub,
     /// With something besides white space, and none around it.
     words: String,
 }
@@ -123,31 +147,139 @@ struct Written {
     label: Option<String>,
 }
 
+impl OnGitHub {
+    /// The repository `spelled` names, as `owner/name`, or why it names none.
+    pub fn parse(spelled: &str) -> Result<OnGitHub, String> {
+        let named = |(owner, name): &(&str, &str)| links::named(owner) && links::named(name);
+        let (owner, name) = spelled
+            .split_once('/')
+            .filter(named)
+            .ok_or_else(|| format!("{spelled:?} is no repository's owner/name"))?;
+        Ok(OnGitHub { owner: owner.to_owned(), name: name.to_owned() })
+    }
+
+    /// Whether `other` is it, case aside, as GitHub takes the names.
+    #[must_use]
+    pub fn is(&self, other: &OnGitHub) -> bool {
+        self.owner.eq_ignore_ascii_case(&other.owner) && self.name.eq_ignore_ascii_case(&other.name)
+    }
+
+    /// It as gh's `--repo` takes it, with its host, as `GH_HOST` would give
+    /// it another where it had none.
+    fn repo(&self) -> String {
+        format!("github.com/{self}")
+    }
+}
+
+impl fmt::Display for OnGitHub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
+impl Remote {
+    /// It, as a daemon answers with it.
+    #[must_use]
+    pub fn answer(self) -> IssueRepository {
+        IssueRepository { remote: self.name, repository: self.on.to_string() }
+    }
+
+    /// The remote a daemon said, or why that is none: it has no name, or
+    /// names no repository.
+    pub fn of(answer: IssueRepository) -> Result<Remote, String> {
+        let IssueRepository { remote, repository } = answer;
+        if remote.is_empty() {
+            return Err(format!("a remote of {repository:?} has no name"));
+        }
+        Ok(Remote { name: remote, on: OnGitHub::parse(&repository)? })
+    }
+}
+
+/// The remotes of the repository `dir` is in that are on GitHub, one for
+/// each repository there, in the order gh takes them: the one `gh repo
+/// set-default` set, then `upstream`, `github` and `origin`, then the rest,
+/// as git lists them. None where it has no remote there, or is no
+/// repository. Or why git did not say.
+pub fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
+    match links::remotes_gh_reads(dir.as_str()) {
+        Remotes::Listed(listed) => Ok(on_github(&listed, links::ssh_host)),
+        Remotes::Unlisted => Ok(Vec::new()),
+        Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
+    }
+}
+
+/// The remotes of `listed` on GitHub, as `remotes` has them, as `git config
+/// --get-regexp` prints `remote.<name>.url <url>` and `remote.<name>.gh-resolved
+/// <how>` a line, as `ssh_host` says what host ssh takes a name for.
+fn on_github(listed: &str, mut ssh_host: impl FnMut(&str) -> Option<String>) -> Vec<Remote> {
+    let mut urls = Vec::new();
+    let mut resolved = Vec::new();
+    for line in listed.lines() {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(key) = key.strip_prefix("remote.") else {
+            continue;
+        };
+        if let Some(name) = key.strip_suffix(".url") {
+            urls.push((name, value.trim()));
+        } else if let Some(name) = key.strip_suffix(".gh-resolved") {
+            resolved.push(name);
+        }
+    }
+    let rank = |name: &str| match name {
+        _ if resolved.contains(&name) => 0,
+        "upstream" => 1,
+        "github" => 2,
+        "origin" => 3,
+        _ => 4,
+    };
+    urls.sort_by_key(|(name, _)| rank(name));
+    let mut remotes: Vec<Remote> = Vec::new();
+    for (name, url) in urls {
+        let Some((owner, repository)) = links::github_repository_of(url, &mut ssh_host) else {
+            continue;
+        };
+        let on = OnGitHub { owner: owner.to_owned(), name: repository.to_owned() };
+        if remotes.iter().all(|remote| !remote.on.is(&on)) {
+            remotes.push(Remote { name: name.to_owned(), on });
+        }
+    }
+    remotes
+}
+
 impl Filing {
-    /// The issue of `words`, in the repository `dir` is in, or why it is
-    /// none: the words are only white space.
-    pub fn new(dir: Directory, words: &str) -> Result<Filing, String> {
+    /// The issue of `words`, in the repository `dir` is in, to be filed in
+    /// `on`, or why it is none: the words are only white space.
+    pub fn new(dir: Directory, on: OnGitHub, words: &str) -> Result<Filing, String> {
         let words = words.trim();
         if words.is_empty() {
             return Err("words: nothing said".to_owned());
         }
-        Ok(Filing { dir, words: words.to_owned() })
+        Ok(Filing { dir, on, words: words.to_owned() })
     }
 
     /// The issue a question asks for, and the machine it is for, or why the
-    /// question is invalid: its directory is by no absolute path, or its
-    /// words are only white space.
+    /// question is invalid: its directory is by no absolute path, it names
+    /// no repository on GitHub, as a luneta from before it did would not,
+    /// or its words are only white space.
     pub fn of(request: FileIssueRequest) -> Result<(Option<On>, Filing), String> {
-        let FileIssueRequest { on, dir, words } = request;
+        let FileIssueRequest { on, dir, words, repository } = request;
         let dir = Directory::parse(dir).map_err(|why| format!("dir: {why}"))?;
-        Ok((on, Filing::new(dir, &words)?))
+        let repository = OnGitHub::parse(&repository).map_err(|why| format!("repository: {why}"))?;
+        Ok((on, Filing::new(dir, repository, &words)?))
     }
 
     /// The question that has the daemon of the machine `on` names file it,
     /// or the daemon asked, where it names none.
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> FileIssueRequest {
-        FileIssueRequest { on, dir: self.dir.to_string(), words: self.words.clone() }
+        FileIssueRequest {
+            on,
+            dir: self.dir.to_string(),
+            words: self.words.clone(),
+            repository: self.on.to_string(),
+        }
     }
 
     /// Has gh list what the agent writes by, the agent write it, and gh file
@@ -175,11 +307,12 @@ impl Filing {
         Ok(String::from_utf8_lossy(&said).trim().to_owned())
     }
 
-    /// gh, to be asked `args` in the repository, which it finds by the
-    /// directory, as nothing in its environment tells git where one is.
+    /// gh, to be asked `args` of the repository on GitHub the issue goes to,
+    /// in the directory, as nothing in its environment tells git where a
+    /// repository is.
     fn gh(&self, args: &[&str]) -> Command {
         let mut gh = Command::new("gh");
-        gh.args(args);
+        gh.args(args).arg("--repo").arg(self.on.repo());
         git::local(&mut gh);
         gh.current_dir(self.dir.as_str());
         gh
@@ -440,7 +573,11 @@ mod tests {
 
     fn filing() -> Filing {
         let dir = Directory::parse("/w/luneta/main".to_owned()).unwrap();
-        Filing::new(dir, " a red button ").unwrap()
+        Filing::new(dir, on("o/luneta"), " a red button ").unwrap()
+    }
+
+    fn on(spelled: &str) -> OnGitHub {
+        OnGitHub::parse(spelled).unwrap()
     }
 
     fn args(command: &Command) -> Vec<String> {
@@ -503,13 +640,74 @@ mod tests {
     #[test]
     fn nothing_said_is_no_issue() {
         let dir = || Directory::parse("/w".to_owned()).unwrap();
-        assert_eq!(Filing::new(dir(), " \n "), Err("words: nothing said".to_owned()));
+        let blank = Filing::new(dir(), on("o/n"), " \n ");
+        assert_eq!(blank, Err("words: nothing said".to_owned()));
         let asked = filing().asked(None);
+        assert_eq!(asked.repository, "o/luneta");
         assert_eq!(Filing::of(asked.clone()), Ok((None, filing())));
         let relative = FileIssueRequest { dir: "w".to_owned(), ..asked.clone() };
         assert_eq!(Filing::of(relative), Err("dir: \"w\" is no absolute path".to_owned()));
+        let nowhere = FileIssueRequest { repository: String::new(), ..asked.clone() };
+        let why = "repository: \"\" is no repository's owner/name".to_owned();
+        assert_eq!(Filing::of(nowhere), Err(why));
         let blank = FileIssueRequest { words: " ".to_owned(), ..asked };
         assert!(Filing::of(blank).is_err());
+    }
+
+    /// gh is told the repository on GitHub the issue goes to, each time, by
+    /// its host too, in the row's directory.
+    #[test]
+    fn gh_is_told_the_repository_the_issue_goes_to() {
+        let gh = filing().gh(&["label", "list"]);
+        assert_eq!(args(&gh), ["label", "list", "--repo", "github.com/o/luneta"]);
+        assert_eq!(gh.get_current_dir(), Some(Path::new("/w/luneta/main")));
+    }
+
+    /// The remotes on GitHub are those whose url is there, by ssh's name for
+    /// it too, one for each repository, case aside: the one `gh repo
+    /// set-default` set first, then `upstream`, `github` and `origin`, then
+    /// the rest as git lists them. A remote anywhere else is none, and a
+    /// repository with none on GitHub has none.
+    #[test]
+    fn the_remotes_on_github_go_in_the_order_gh_takes_them() {
+        let ssh_host = |host: &str| (host == "github-work").then(|| "github.com".to_owned());
+        let names = |listed: &str| -> Vec<(String, String)> {
+            let remotes = on_github(listed, ssh_host).into_iter();
+            remotes.map(|remote| (remote.name, remote.on.to_string())).collect()
+        };
+        let pair = |name: &str, on: &str| (name.to_owned(), on.to_owned());
+        let fork = "remote.mine.url git@github-work:me/cdk.git\n\
+                    remote.origin.url git@github.com:lorenzolfm/cdk.git\n\
+                    remote.lab.url git@gitlab.com:o/cdk.git\n\
+                    remote.upstream.url https://github.com/cashubtc/cdk\n\
+                    remote.again.url https://github.com/CashuBTC/CDK.git\n";
+        assert_eq!(names(fork), [
+            pair("upstream", "cashubtc/cdk"),
+            pair("origin", "lorenzolfm/cdk"),
+            pair("mine", "me/cdk"),
+        ]);
+        let set = format!("{fork}remote.origin.gh-resolved base\n");
+        let first = [pair("origin", "lorenzolfm/cdk"), pair("upstream", "cashubtc/cdk")];
+        assert_eq!(names(&set)[..2], first);
+        assert_eq!(names("remote.lab.url git@gitlab.com:o/cdk.git\n"), []);
+        assert_eq!(names(""), []);
+    }
+
+    /// A remote a daemon said reads as it was: but one with no name, or of
+    /// no repository's `owner/name`.
+    #[test]
+    fn a_daemon_s_remote_reads_as_it_was() {
+        let remote = Remote { name: "upstream".to_owned(), on: on("cashubtc/cdk") };
+        assert_eq!(Remote::of(remote.clone().answer()), Ok(remote.clone()));
+        let nameless = IssueRepository { remote: String::new(), ..remote.clone().answer() };
+        assert!(Remote::of(nameless).unwrap_err().contains("has no name"));
+        for spelled in ["cashubtc", "cashubtc/cdk/x", "/cdk", "o/..", "o n/cdk"] {
+            let repository = spelled.to_owned();
+            let answer = IssueRepository { repository, ..remote.clone().answer() };
+            assert!(Remote::of(answer).is_err(), "{spelled}");
+        }
+        assert!(on("CashuBTC/CDK").is(&on("cashubtc/cdk")));
+        assert!(!on("lorenzolfm/cdk").is(&on("cashubtc/cdk")));
     }
 
     /// What the agent wrote reads from the record of the run's end: its title

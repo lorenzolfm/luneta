@@ -18,7 +18,7 @@ use lunetad::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest,
     ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
-    FileIssueRequest, FileIssueResponse,
+    FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
     InfoResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
     KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
@@ -670,6 +670,13 @@ impl Daemon for StandIn {
         _: Request<FileIssueRequest>,
     ) -> Result<Response<Self::FileIssueStream>, Status> {
         Err(Status::unimplemented("a stand-in asks gh nothing"))
+    }
+
+    async fn issue_repositories(
+        &self,
+        _: Request<IssueRepositoriesRequest>,
+    ) -> Result<Response<IssueRepositoriesResponse>, Status> {
+        Err(Status::unimplemented("a stand-in reads no remotes"))
     }
 
     async fn list_clients(
