@@ -744,7 +744,8 @@ message AskRequest {
   fixed64 turn = 8;
   optional fixed64 before = 9;
   // The harness the user picked last for the agents luneta's menu starts,
-  // which the agent starts one in unless the user names another. Absent from
+  // which the agent starts one in. A pane the agent opens runs pi only where
+  // this is pi, as pi asks nothing before it runs a command. Absent from
   // a luneta older than this field, whose menu starts Claude Code's alone: so
   // absent is Claude Code, as `Agent.harness` is. A daemon older than the
   // field, on the machine the turn is for, starts Claude Code's, whatever it

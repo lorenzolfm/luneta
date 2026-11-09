@@ -779,12 +779,14 @@ fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
 /// The ask box's agent runs what it may without anyone asking you, and a
 /// pane runs what it is given: so a pane it opens, or a tab, runs your shell
 /// or Claude Code, as `claude [--name <name>] [<prompt>]`, which asks you or
-/// looks at what it does, in your permission mode. Any other command, an
-/// option of claude's but `--name`, and a prompt that is a line for your
-/// shell, are refused before zellij is asked anything. Out of the box, a
+/// looks at what it does, in your permission mode, or pi, as `pi [--name
+/// <name>] [<prompt>]`, which asks nothing, only in a turn whose agents start
+/// in pi. Any other command, an option of theirs but `--name`, a prompt that
+/// is a line for your shell, and for pi, one that is a file or a command of
+/// its own, are refused before zellij is asked anything. Out of the box, a
 /// pane runs what it is given.
 #[test]
-fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
+fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_claude_or_pi() {
     let host = Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
     let tab = (0, "Tab #1");
@@ -793,9 +795,11 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
     let cwd = tempfile::tempdir().unwrap();
     let cwd = cwd.path().to_str().unwrap();
     let in_the_box = [("LUNETA_PANE", "work:2"), ("LUNETA_TURN", "00000000000000aa")];
+    let in_a_pi_box = [&in_the_box[..], &[("LUNETA_AGENTS", "pi")]].concat();
     let open = |what: &str, command: &[&str]| {
         let args = [&["open", what, "--cwd", cwd, "--"][..], command].concat();
-        asked(&host, &in_the_box, &args)
+        let pi = command.first() == Some(&"pi");
+        asked(&host, if pi { &in_a_pi_box } else { &in_the_box }, &args)
     };
     // The fake zellij opens nothing, and notes what it was asked.
     let last_opened = || host.lists.opened().last().cloned().unwrap_or_default();
@@ -825,6 +829,8 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
         ("pane", &["pi", "-p"], "pi takes no option but --name"),
         ("pane", &["pi", "!rm -rf ~"], "no prompt with a ! first"),
         ("pane", &["pi", "@/etc/shadow"], "pi takes no prompt with an @ first"),
+        ("pane", &["pi", "update"], "pi takes no prompt that is a command of its own"),
+        ("tab", &["pi", "config"], "pi takes no prompt that is a command of its own"),
         ("pane", &["codex", "tackle it"], "it does not run codex"),
     ] {
         let refusal = open(what, command);
@@ -833,6 +839,18 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
         let only = "in luneta's ask box, a pane runs your shell, `claude";
         assert!(why.contains(only), "{command:?}: {why}");
         assert!(why.contains(refused), "{command:?}: {why}");
+    }
+    for (agents, refused) in [
+        (None, "pi runs only once you pick pi with Tab"),
+        (Some("claude"), "LUNETA_AGENTS is \"claude\""),
+    ] {
+        let agents_var = agents.map(|agents| ("LUNETA_AGENTS", agents));
+        let vars = [&in_the_box[..], agents_var.as_slice()].concat();
+        let args = ["open", "pane", "--cwd", cwd, "--", "pi", "tackle it"];
+        let refusal = asked(&host, &vars, &args);
+        let why = String::from_utf8_lossy(&refusal.stderr);
+        assert_eq!(refusal.status.code(), Some(1), "{agents:?}: {why}");
+        assert!(why.contains(refused), "{agents:?}: {why}");
     }
     assert_eq!(host.lists.opened(), opened);
 

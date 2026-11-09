@@ -194,9 +194,9 @@ impl Ask {
     }
 
     /// Hands what you typed to the agent, on a thread of its own, for you
-    /// where `user` says, its agents to start in `agents` unless you name
-    /// another harness, and takes it from what you are typing. What the turn
-    /// hears comes back on `events`, and how it ended, as `Due` does.
+    /// where `user` says, its agents to start in `agents`, and takes it from
+    /// what you are typing. What the turn hears comes back on `events`, and
+    /// how it ended, as `Due` does.
     pub fn send(&mut self, user: User, agents: Harness, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;

@@ -1343,8 +1343,8 @@ What you type goes to `claude -p --model sonnet`, on your Claude Code login,
 with luneta's skill, in the directory of the highlighted row's pane, or the one
 luneta started in on a session's row, whichever harness that row's agent runs
 in. The agent is told which row is highlighted, and with each thing you send, which pane you are in, and
-which harness to start an agent in unless you name the other: the one you
-picked last with `Tab` in the [menu](#menu). The pane is the one
+which harness to start an agent in: the one you picked last with `Tab` in the
+[menu](#menu). The pane is the one
 luneta's zellij is on, which the commands take for the pane they run in, as
 `LUNETA_PANE` names it. The box shows each command the agent runs, with a red
 `✗` for one Claude Code denied it, which ran nothing, and what it says. Once a
@@ -1370,13 +1370,15 @@ Those of the directory it runs in don't come into it, as a repository can
 bring its own. Claude Code denies it anything else, any command
 run inside another, as with `$(…)`, and any that reads a variable or sets one,
 so the turn's keys stay out of its reach. A pane or a tab it opens runs your
-shell, Claude Code as `claude [--name <name>] [<prompt>]`, or pi as `pi [--name
-<name>] [<prompt>]`: in the box, `luneta open` refuses any other command, any
-option but `--name`, a prompt that starts with `!`, which is a line for your
-shell, and for pi one that starts with `@`, which pi reads as a file, as a pane
-runs what it is given without asking you. An agent it starts so runs on the
-prompt the box's agent wrote: Claude Code in your own permission mode, and pi,
-which asks nothing before it runs a command, with no check at all. The `luneta` it runs
+shell, Claude Code as `claude [--name <name>] [<prompt>]`, or, once you have
+picked pi with `Tab` in the menu, pi as `pi [--name <name>] [<prompt>]`: in the
+box, `luneta open` refuses any other command, any option but `--name`, a prompt
+that starts with `!`, which is a line for your shell, and for pi one that starts
+with `@`, which pi reads as a file, or that is one of pi's own commands, such as
+`update`, as a pane runs what it is given without asking you. An agent it starts
+so runs on the prompt the box's agent wrote: Claude Code in your own permission
+mode, and pi, which asks nothing before it runs a command, with no check at all,
+which is why the box starts pi only where you picked it. The `luneta` it runs
 is the sidebar's own. Each turn writes a Claude session in that directory, as
 any `claude -p` does, so `claude --resume` lists it there.
 

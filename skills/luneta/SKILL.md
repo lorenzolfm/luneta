@@ -121,8 +121,10 @@ A tab in no repository opens in the user's session: leave `--session` out.
 Run a coding agent as the pane's command, in a harness luneta knows: Claude
 Code (`claude`) or pi (`pi`). Start the one the user names. Otherwise, in
 luneta's ask box, the one its line names, which the user picked last in
-luneta's menu; anywhere else, the one you run in. Name it for what it does, so
-the sidebar shows it from the start:
+luneta's menu; anywhere else, the one you run in. In the box, luneta opens pi
+only where the line names pi: where it names Claude Code and the user asks for
+pi, tell them to pick pi with `Tab` in luneta's menu. Name it for what it does,
+so the sidebar shows it from the start:
 
 ```sh
 luneta open tab --session app --cwd ~/code/app --name issue-42 -- claude --name "issue-42" "let's tackle this one: https://github.com/o/app/issues/42"

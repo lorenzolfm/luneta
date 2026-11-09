@@ -63,6 +63,14 @@ pub const AWAY_VAR: &str = "LUNETA_AWAY";
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
 
+/// What says, in the variables of the agent of luneta's ask box, that a pane
+/// it opens may run pi, as you picked pi last in luneta's menu: pi asks
+/// nothing before it runs a command, so the box opens none where you did not.
+pub const AGENTS_VAR: &str = "LUNETA_AGENTS";
+
+/// What `AGENTS_VAR` is, where it is set.
+const AGENTS_PI: &str = "pi";
+
 /// The commands the agent may run, as Claude Code's rules name them: the
 /// verbs of luneta's its skill has, and the commands its skill reads what
 /// your words point at with, and makes worktrees with. In `dontAsk` mode,
@@ -101,9 +109,9 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
     sessions, agents, open, go, turn, close and prune, zoxide query, gh issue view and list, gh pr view \
     and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
-    pane you open runs the user's shell, Claude Code as claude [--name <name>] [<prompt>], or \
-    pi as pi [--name <name>] [<prompt>], with no other option of theirs: luneta refuses any \
-    other command. You cannot wait for \
+    pane you open runs the user's shell, Claude Code as claude [--name <name>] [<prompt>], or, \
+    where the turn's line says pi, pi as pi [--name <name>] [<prompt>], with no other option \
+    of theirs: luneta refuses any other command. You cannot wait for \
     the user in the middle of a turn: to ask them anything, as the skill has you ask before \
     a close, or which of two things they meant, end your turn with the question. Their \
     answer comes as the next message. So a close or a prune takes --yes only in the turn after \
@@ -259,6 +267,18 @@ pub fn turn_in(
     Ok(Some((turn, User::read(asked, away)?)))
 }
 
+/// The harness the turn's agents start in, as the box names it in `said`, of
+/// `AGENTS_VAR`: Claude Code where it is not set. Or why it does not read.
+pub fn agents_in(said: Option<&str>) -> Result<Harness, String> {
+    match said {
+        None => Ok(Harness::ClaudeCode),
+        Some(AGENTS_PI) => Ok(Harness::Pi),
+        Some(said) => {
+            Err(format!("{AGENTS_VAR} is {said:?}, and luneta's ask box sets it to {AGENTS_PI}"))
+        },
+    }
+}
+
 /// A step of a turn of the agent, as `claude` says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -308,8 +328,8 @@ impl Step {
 /// A turn asked of the agent: `words`, what you typed, for an agent that
 /// works in `cwd`, on the Claude session `resumed` if one went before, told
 /// of the row `highlighted` as the box opened, for you where `user` says, in
-/// `turn`, starting the agents it starts in `agents` unless you name another
-/// harness.
+/// `turn`, starting the agents it starts in `agents`, and in pi only where
+/// that is pi.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
     /// By its absolute path: none for the home of the user it runs as.
@@ -439,6 +459,10 @@ impl Asked {
         git::local(&mut claude);
         self.user.name_in(&mut claude);
         self.turn.name_in(&mut claude);
+        match self.agents {
+            Harness::Pi => claude.env(AGENTS_VAR, AGENTS_PI),
+            Harness::ClaudeCode => claude.env_remove(AGENTS_VAR),
+        };
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
             claude.env("PATH", path);
         }
@@ -460,11 +484,13 @@ fn system(highlighted: &str) -> String {
 
 /// The message of a turn: `words`, what you typed, after a line that says
 /// where you are as you send it, as `user` has it, and one that says the
-/// harness an agent it starts runs in, `agents`, unless you name another.
+/// harness an agent it starts runs in, `agents`: pi unless you name Claude
+/// Code, or Claude Code alone, as the box opens pi only where you picked it.
 fn told(user: &User, agents: Harness, words: &str) -> String {
     let agents = match agents {
         Harness::Pi => "[luneta: start an agent in pi, unless the user names Claude Code.]",
-        Harness::ClaudeCode => "[luneta: start an agent in Claude Code, unless the user names pi.]",
+        Harness::ClaudeCode => "[luneta: start an agent in Claude Code. luneta opens pi only once \
+                                the user picks it with Tab in luneta's menu.]",
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
@@ -720,7 +746,8 @@ mod tests {
         assert_eq!(said[14], system);
         assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
         let told_first = told(&first.user, first.agents, &first.words);
-        let line = "[luneta: start an agent in Claude Code, unless the user names pi.]";
+        let line = "[luneta: start an agent in Claude Code. luneta opens pi only once the user \
+                    picks it with Tab in luneta's menu.]";
         let you = "[luneta: the user is in pane luneta:2.]";
         assert_eq!(told_first, format!("{you}\n{line}\n\nclose it"));
         let pi = told(&first.user, Harness::Pi, "go");
@@ -778,6 +805,24 @@ mod tests {
             }
         }
         assert_eq!(turn_in(None, None, None, None), Ok(None));
+    }
+
+    /// luneta's commands read in the variables of the agent the harness its
+    /// agents start in, as the box named it: Claude Code where it names
+    /// none, and nothing the box would not name.
+    #[test]
+    fn the_agent_s_commands_read_the_harness_of_the_turn() {
+        for agents in [Harness::ClaudeCode, Harness::Pi] {
+            let you = User::Untold;
+            let asked = Asked::new(None, "yes", None, String::new(), you, turn(), agents);
+            let claude = asked.unwrap().claude();
+            let set = claude.get_envs().find(|(key, _)| key.to_str() == Some(AGENTS_VAR));
+            let said = set.and_then(|(_, value)| value).and_then(|value| value.to_str());
+            assert_eq!(agents_in(said), Ok(agents));
+        }
+        for forged in ["", "claude", "Pi", "pi "] {
+            assert!(agents_in(Some(forged)).is_err(), "{forged:?}");
+        }
     }
 
     /// A command reads no turn of the box's but one its variables name in
