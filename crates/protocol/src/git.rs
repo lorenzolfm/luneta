@@ -49,12 +49,47 @@ pub enum WorkTree {
     Checkout { repository: Option<Said>, head: Head, changes: Changes, stashes: u32 },
 }
 
+/// How many lines changed on a branch, against the branch its repository
+/// takes as its default: some, of the one or the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Changed {
+    added: u32,
+    deleted: u32,
+}
+
+impl Changed {
+    /// `added` and `deleted`, unless both are none.
+    #[must_use]
+    pub fn new(added: u32, deleted: u32) -> Option<Self> {
+        (added > 0 || deleted > 0).then_some(Changed { added, deleted })
+    }
+
+    #[must_use]
+    pub fn added(self) -> u32 {
+        self.added
+    }
+
+    #[must_use]
+    pub fn deleted(self) -> u32 {
+        self.deleted
+    }
+
+    fn of_api(changed: v1::Changed) -> Option<Self> {
+        Changed::new(changed.added, changed.deleted)
+    }
+
+    fn to_api(self) -> v1::Changed {
+        v1::Changed { added: self.added, deleted: self.deleted }
+    }
+}
+
 /// What is checked out in a work tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Head {
     Detached,
-    /// A branch, and how far it is from its upstream, if it has one.
-    Branch { name: Said, upstream: Option<Upstream> },
+    /// A branch, how far it is from its upstream, if it has one, and how many
+    /// lines changed on it, which only a daemon newer than the field says.
+    Branch { name: Said, upstream: Option<Upstream>, changed: Option<Changed> },
 }
 
 /// How far a branch is ahead of its upstream, and behind it.
@@ -156,7 +191,7 @@ impl Head {
         if named == DETACHED {
             return Some(Head::Detached);
         }
-        Some(Head::Branch { name: Said::new(named.to_owned())?, upstream: None })
+        Some(Head::Branch { name: Said::new(named.to_owned())?, upstream: None, changed: None })
     }
 
     /// None for a branch with no name.
@@ -166,6 +201,7 @@ impl Head {
             v1::checkout::Head::Branch(branch) => Some(Head::Branch {
                 name: Said::new(branch.name.clone())?,
                 upstream: branch.upstream.map(Upstream::of_api),
+                changed: branch.changed.and_then(Changed::of_api),
             }),
         }
     }
@@ -173,9 +209,10 @@ impl Head {
     fn to_api(&self) -> v1::checkout::Head {
         match self {
             Head::Detached => v1::checkout::Head::Detached(()),
-            Head::Branch { name, upstream } => v1::checkout::Head::Branch(v1::Branch {
+            Head::Branch { name, upstream, changed } => v1::checkout::Head::Branch(v1::Branch {
                 name: name.as_str().to_owned(),
                 upstream: upstream.map(Upstream::to_api),
+                changed: changed.map(Changed::to_api),
             }),
         }
     }
@@ -260,7 +297,7 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Changes, Head, Said, WorkTree};
+    use super::{v1, Changed, Changes, Head, Said, WorkTree};
 
     fn repo() -> Said {
         Said::new("/w/repo".to_owned()).unwrap()
@@ -292,7 +329,7 @@ mod tests {
             assert!(WorkTree::parse(status, repo()).is_err(), "{status:?}");
         }
         let tree = WorkTree::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
-        let WorkTree::Checkout { head: Head::Branch { name, upstream: None }, changes, .. } = tree
+        let WorkTree::Checkout { head: Head::Branch { name, upstream: None, .. }, changes, .. } = tree
         else {
             panic!("main, with no upstream: {tree:?}");
         };
@@ -326,6 +363,15 @@ mod tests {
             changes: Changes::default(),
             stashes: 0,
         });
+        let name = Said::new("fold".to_owned()).unwrap();
+        let changed = Changed::new(120, 34);
+        let head = Head::Branch { name, upstream: None, changed };
+        trees.push(WorkTree::Checkout {
+            repository: None,
+            head,
+            changes: Changes::default(),
+            stashes: 0,
+        });
         for tree in trees {
             assert_eq!(WorkTree::of_api(&tree.to_api("/w/repo")).as_ref(), Some(&tree));
         }
@@ -339,9 +385,17 @@ mod tests {
             }))
         };
         let branch = |name: &str| {
-            let branch = v1::Branch { name: name.to_owned(), upstream: None };
+            let branch = v1::Branch { name: name.to_owned(), upstream: None, changed: None };
             Some(v1::checkout::Head::Branch(branch))
         };
+        let none = v1::Changed { added: 0, deleted: 0 };
+        let head = v1::Branch { name: "fold".to_owned(), upstream: None, changed: Some(none) };
+        let stands = checkout(Some(v1::checkout::Head::Branch(head)), Some(v1::Changes::default()));
+        let tree = WorkTree::of_api(&v1::WorkTree { dir: "/w/repo".to_owned(), stands });
+        let Some(WorkTree::Checkout { head: Head::Branch { changed, .. }, .. }) = tree else {
+            panic!("fold: {tree:?}");
+        };
+        assert_eq!(changed, None);
         let unread = [
             None,
             checkout(None, Some(v1::Changes::default())),

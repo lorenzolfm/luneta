@@ -47,7 +47,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
-use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
+use luneta_protocol::git::{Changed, Changes, Head, Upstream, WorkTree};
 use luneta_protocol::github::{PullRequest, State, Verdict};
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
@@ -661,8 +661,31 @@ struct Checkout {
     branch: String,
     /// How its work tree stands, as starship shows it.
     status: String,
+    /// How many lines changed on the branch, against the branch its
+    /// repository takes as its default. None where nothing changed, on that
+    /// branch itself, or where its daemon is older than the count.
+    changed: Option<Changed>,
     /// Its pull request, if it has one to show.
     pull_request: Option<Numbered>,
+}
+
+/// How many lines changed on a branch, as its branch's line shows them:
+/// `+120 -34`, the added in green and the deleted in red, as diffs are
+/// coloured, and either left out where it is none.
+fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
+    let (added, deleted) = (changed.added(), changed.deleted());
+    let mut spans = Vec::new();
+    if added > 0 {
+        spans.push(Span::styled(format!("+{added}"), Style::new().fg(gruvbox::GREEN)));
+    }
+    if deleted > 0 {
+        if added > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(format!("-{deleted}"), Style::new().fg(gruvbox::RED)));
+    }
+    let width = spans.iter().map(Span::width).sum();
+    (spans, width)
 }
 
 /// A pull request, as its branch's line shows it: its number, in the colour
@@ -5323,17 +5346,23 @@ fn repository_of(tree: &WorkTree) -> Option<String> {
     }
 }
 
-/// The branch checked out in a work tree, how the tree stands, and its
-/// `pull_request`, or none for a detached `HEAD` or a directory in no
-/// repository.
+/// The branch checked out in a work tree, how the tree stands, how many lines
+/// changed on the branch, and its `pull_request`, or none for a detached
+/// `HEAD` or a directory in no repository.
 fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
-    let WorkTree::Checkout { head: Head::Branch { name, upstream }, changes, stashes, .. } = tree
+    let WorkTree::Checkout {
+        head: Head::Branch { name, upstream, changed },
+        changes,
+        stashes,
+        ..
+    } = tree
     else {
         return None;
     };
     Some(Checkout {
         branch: name.as_str().to_owned(),
         status: glyphs(changes, *stashes, *upstream),
+        changed: *changed,
         pull_request: pull_request.and_then(numbered),
     })
 }
@@ -5703,12 +5732,12 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, then the number of its pull request, with the mark
-/// of its checks, and how its work tree stands. The branch is cut to leave
-/// the other two whole. The mark of the pane luneta's zellij is on, `here`,
-/// runs down it too, and the `gutter` after it. And the columns the number is
-/// on, as the line has it, for a click to go by, and the room the branch had,
-/// for a sweep over it.
+/// works, under its label, then how many lines changed on the branch, then
+/// the number of its pull request, with the mark of its checks, and how its
+/// work tree stands. The branch is cut to leave the other three whole. The
+/// mark of the pane luneta's zellij is on, `here`, runs down it too, and the
+/// `gutter` after it. And the columns the number is on, as the line has it,
+/// for a click to go by, and the room the branch had, for a sweep over it.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
@@ -5716,12 +5745,18 @@ fn checkout_line(
     width: usize,
 ) -> (Line<'static>, Option<Range<usize>>, usize) {
     let status = &checkout.status;
-    let number = checkout.pull_request.as_ref().map(|numbered| {
-        Span::styled(numbered.shown(), Style::new().fg(numbered.colour))
-    });
+    let changed = checkout.changed.map(changed_shown);
+    let number = checkout
+        .pull_request
+        .as_ref()
+        .map(|numbered| Span::styled(numbered.shown(), Style::new().fg(numbered.colour)));
     let checks = checkout.pull_request.as_ref().and_then(|numbered| numbered.checks);
     let mark = checks.map(verdict_mark);
-    let held = number.as_ref().map_or(0, |number| number.content.width() + 1)
+    // What comes after the branch, and the spaces between its parts: the
+    // lines changed, the number with the mark of its checks, and how the
+    // work tree stands.
+    let held = changed.as_ref().map_or(0, |(_, wide)| wide + 1)
+        + number.as_ref().map_or(0, |number| number.content.width() + 1)
         + mark.as_ref().map_or(0, Span::width);
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = width.saturating_sub(LABEL + held + reserve + 1);
@@ -5734,6 +5769,10 @@ fn checkout_line(
         Span::styled(branch, Style::new().fg(gruvbox::GREY)),
     ];
     let mut columns = None;
+    if let Some((shown, _)) = changed {
+        spans.push(Span::raw(" "));
+        spans.extend(shown);
+    }
     if let Some(number) = number {
         spans.push(Span::raw(" "));
         let start: usize = spans.iter().map(Span::width).sum();
@@ -6105,7 +6144,7 @@ mod tests {
         ];
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
         let name = Said::new("main".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
         let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/b"));
@@ -6461,7 +6500,7 @@ mod tests {
             Vec::new(),
         );
         let changes = Some(api::Changes::default());
-        let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None }));
+        let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None, changed: None }));
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
         host.work_trees = vec![api::WorkTree {
             dir: "/w/c".to_owned(),
@@ -7644,7 +7683,7 @@ mod tests {
         ];
         for (dir, branch, modified, number, state) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
-            let head = Head::Branch { name, upstream: None };
+            let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes { modified, ..Changes::default() };
             let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
@@ -7677,6 +7716,82 @@ mod tests {
         assert_eq!(colour(10), Some(gruvbox::GREY));
     }
 
+    /// The lines changed on a branch sit between its name and the number of
+    /// its pull request: the added in green, the deleted in red, as diffs are
+    /// coloured. None where the branch is the repository's default, or its
+    /// daemon is too old to say, or where nothing changed, so the line stays
+    /// as it is for a pane at rest. A branch too long gives way to them, as
+    /// it does to the number and to how the work tree stands.
+    #[test]
+    fn a_branch_shows_the_lines_changed_on_it() {
+        let panes = ["/w/a", "/w/b", "/w/c", "/w/d", "/w/e", "/w/f"];
+        let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
+        let mut host = host(vec![session("s", 10, panes)], Vec::new());
+        // (dir, branch, how many lines changed as its daemon counts them,
+        // its pull request's number, or none where it has none)
+        let checkouts = [
+            ("/w/a", "issue-299", Some((120, 34)), 328),
+            ("/w/b", "fix", Some((7, 0)), 12),
+            ("/w/c", "tidy", Some((0, 5)), 13),
+            // The repository's default branch, which its daemon counts none
+            // on.
+            ("/w/d", "main", None, 14),
+            ("/w/e", "handoff-eng-11259-and-more", Some((9, 8)), 4321),
+            ("/w/f", "gone", None, 0),
+        ];
+        for (dir, branch, changed, number) in checkouts {
+            let name = Said::new(branch.to_owned()).expect("a branch's name");
+            let changed = changed.and_then(|(added, deleted)| Changed::new(added, deleted));
+            let head = Head::Branch { name, upstream: None, changed };
+            let tree = WorkTree::Checkout {
+                repository: None,
+                head,
+                changes: Changes::default(),
+                stashes: 0,
+            };
+            host.work_trees.push(tree.to_api(dir));
+            if number > 0 {
+                let number = NonZeroU32::new(number).expect("a pull request's number");
+                let pull_request = PullRequest { number, state: State::Open, url: None, checks: None };
+                host.pull_requests.push(pull_request.to_api(dir));
+            }
+        }
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+
+        let buffer = drawn(&mut sidebar, false, 34, 17);
+        let line = |y: u16| {
+            let line: String = (0..33).map(|x| buffer[(x, y)].symbol()).collect();
+            line.trim_end().to_owned()
+        };
+        let branches: Vec<String> = (0..6).map(|pane| line(6 + pane * 2)).collect();
+        assert_eq!(
+            branches,
+            [
+                "       issue-299 +120 -34 #328",
+                "       fix +7 #12",
+                "       tidy -5 #13",
+                "       main #14",
+                "       handoff-eng-… +9 -8 #4321",
+                "       gone",
+            ]
+        );
+        let colour = |y: u16, from: u16, mark: &str| {
+            let x = (from..34).find(|x| buffer[(*x, y)].symbol() == mark).expect("the mark");
+            buffer[(x, y)].fg
+        };
+        let first = 6;
+        // `fix` has only added lines and `tidy` only deleted ones, so each
+        // mark says its own count's colour. A branch's name can hold a `-`
+        // of its own, as `handoff-eng…` does, so the marks are found from the
+        // start of the line on, and each after the `+` before it.
+        let added = (0..34).find(|x| buffer[(*x, first)].symbol() == "+").expect("the mark");
+        assert_eq!(buffer[(added, first)].fg, gruvbox::GREEN);
+        assert_eq!(colour(first, added, "-"), gruvbox::RED);
+        assert_eq!(colour(first + 2, 0, "+"), gruvbox::GREEN);
+        assert_eq!(colour(first + 4, 0, "-"), gruvbox::RED);
+    }
+
     /// An open pull request, or a draft, has a mark after its number for
     /// what its checks come to, in its colour: one failed, one has yet to end,
     /// or each passed. One with no checks, or whose daemon is too old to say
@@ -7699,7 +7814,7 @@ mod tests {
         let mut host = host(vec![session("s", 10, panes.collect())], Vec::new());
         for (dir, branch, number, state, checks) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
-            let head = Head::Branch { name, upstream: None };
+            let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes::default();
             let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
@@ -7872,7 +7987,7 @@ mod tests {
         let panes = vec![notes, deep, branched, unsaid];
         let mut host = host(vec![session("s", 10, panes)], vec![seated]);
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
         let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         host.work_trees.push(tree.to_api("/w/c"));
@@ -8082,7 +8197,7 @@ mod tests {
         pull: Option<(u32, State, Option<&str>)>,
     ) {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
         let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
         work_trees.push(tree.to_api(dir));
@@ -8992,6 +9107,7 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(api::Branch {
             name: "feat/menu".to_owned(),
             upstream: None,
+            changed: None,
         }));
         let changes = Some(api::Changes::default());
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
@@ -9161,6 +9277,7 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(api::Branch {
             name: "feat/brief".to_owned(),
             upstream: None,
+            changed: None,
         }));
         let changes = Some(api::Changes::default());
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
@@ -10353,7 +10470,7 @@ mod tests {
             panic!("nixos is reached");
         };
         let name = Said::new("fix".to_owned()).expect("a branch's name");
-        let head = Head::Branch { name, upstream: None };
+        let head = Head::Branch { name, upstream: None, changed: None };
         let repository = Said::new("/w".to_owned());
         let tree = WorkTree::Checkout { repository, head, changes: Changes::default(), stashes: 0 };
         there.work_trees.push(tree.to_api("/w/b"));

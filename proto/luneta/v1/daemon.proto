@@ -1269,6 +1269,17 @@ message Branch {
   string name = 1;
   // How far it is from its upstream. Absent when it has none.
   Upstream upstream = 2;
+  // How many lines changed on it, against the branch its repository takes as
+  // its default, work tree changes included. Absent on that branch itself,
+  // where nothing changed, where no default is found, and from a daemon older
+  // than this field. Never zero in both.
+  Changed changed = 3;
+}
+
+// How many lines changed on a branch.
+message Changed {
+  uint32 added = 1;
+  uint32 deleted = 2;
 }
 
 message Changes {

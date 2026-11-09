@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use luneta_protocol::git::{self, WorkTree};
+use luneta_protocol::git::{self, Changed, Head, WorkTree};
 use luneta_protocol::said::Said;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -85,10 +85,11 @@ pub fn local(command: &mut Command) -> &mut Command {
 
 /// What git says of the work tree in `dir`: how it stands, that `dir` is in a
 /// repository and in none of its work trees, as git `placed` it, or that it is
-/// in no repository. When git did not say, as it did not answer in time, or
+/// in no repository, and why git did not count the lines its branch changed,
+/// where it did not. When git did not say, as it did not answer in time, or
 /// would not read the repository or the work tree, what is to be said of it
 /// instead.
-fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree, String> {
+fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Stood {
     let [program, args @ ..] = git::command(dir);
     let mut git = Command::new(program);
     local(git.args(args));
@@ -104,16 +105,42 @@ fn status(dir: &str, placed: &Placed, common: Option<&Path>) -> Result<WorkTree,
         None => holder_of(dir)?,
     };
     let Some(repository) = repository else {
-        return Ok(WorkTree::Outside);
+        return Ok((WorkTree::Outside, None));
     };
     match (said, placed) {
         (Ok(stdout), _) => WorkTree::parse(&String::from_utf8_lossy(&stdout), repository)
+            .map(|mut tree| {
+                let uncounted = match &mut tree {
+                    WorkTree::Checkout { head: Head::Branch { name, changed, .. }, .. } => {
+                        counted(dir, name.as_str(), changed)
+                    },
+                    _ => None,
+                };
+                (tree, uncounted)
+            })
             .map_err(|why| format!("git status in {dir} said {why}")),
-        (Err(_), Placed::Outside(_)) => Ok(WorkTree::NoCheckout { repository }),
+        (Err(_), Placed::Outside(_)) => Ok((WorkTree::NoCheckout { repository }, None)),
         (Err(why), Placed::In(_) | Placed::Unsaid) => {
             Err(format!("git status in {dir} said {why}"))
         },
     }
+}
+
+/// How a work tree stands, and why git did not count the lines its branch
+/// changed, where it did not; or why git did not say how it stands.
+type Stood = Result<(WorkTree, Option<String>), String>;
+
+/// Sets `count` to how many lines changed on `branch`, checked out in
+/// `dir`, as `changed` counts them, or to none where git failed to say, and
+/// says why then: the row shows nothing rather than a wrong count, and git
+/// says of the work tree what it said of it before.
+fn counted(dir: &str, branch: &str, count: &mut Option<Changed>) -> Option<String> {
+    let (changed, why) = match changed(dir, branch) {
+        Ok(changed) => (changed, None),
+        Err(why) => (None, Some(format!("git in {dir} did not count {branch}'s lines: {why}"))),
+    };
+    *count = changed;
+    why
 }
 
 /// The directory that holds the repository `dir` is in, or None where it is in
@@ -216,6 +243,95 @@ pub fn branch(dir: &str) -> Option<String> {
     let said = program::run(&mut git, LIMIT).ok()?.answer().ok()?;
     let head = String::from_utf8(said).ok()?;
     Some(head.strip_suffix('\n')?.strip_prefix("refs/heads/")?.to_owned())
+}
+
+/// How many lines changed on `branch`, checked out in `dir`, against the
+/// branch its repository takes as its default: every line git's diff of the
+/// two counts, work tree changes included, as a diff of the pull request
+/// would show them. None on the default branch itself, where the repository
+/// says none, where the two share no history, or where `branch` has no
+/// commit. Why git did not say, where it did not.
+///
+/// The default is asked of git alone: the branch the `HEAD` of `upstream`,
+/// `github` or `origin` names where the repository has one, in the order gh
+/// takes the repository it asks for pull requests, and otherwise `main` and
+/// then `master`, of those remotes and then of the repository's own. Nothing
+/// reaches a remote, so what says the default here can be behind what the
+/// repository has, and a partial clone's missing contents are not fetched.
+pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
+    let git = |args: &[&str]| {
+        let mut git = Command::new("git");
+        local(git.args(["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit"]))
+            .args(["-C", dir])
+            .args(args)
+            .env("GIT_NO_LAZY_FETCH", "1");
+        program::run(&mut git, LIMIT).map_err(|error| format!("git could not be run: {error}"))
+    };
+    let tip = format!("refs/heads/{branch}");
+    let mut named = vec![tip.clone()];
+    named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/HEAD")));
+    for name in ["main", "master"] {
+        named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/{name}")));
+        named.push(format!("refs/heads/{name}"));
+    }
+    let mut listing = vec!["for-each-ref", "--format=%(refname) %(objectname) %(symref)"];
+    listing.extend(named.iter().map(String::as_str));
+    let listed = git(&listing)?.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+    let listed = String::from_utf8_lossy(&listed);
+    let listed: HashMap<&str, (&str, &str)> = listed
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            Some((fields.next()?, (fields.next()?, fields.next().unwrap_or(""))))
+        })
+        .collect();
+    let Some(&(tip, _)) = listed.get(tip.as_str()) else {
+        return Ok(None);
+    };
+    let Some((base, default)) = named[1..].iter().find_map(|name| {
+        let &(base, symref) = listed.get(name.as_str())?;
+        Some((base, default_name(if symref.is_empty() { name } else { symref })))
+    }) else {
+        return Ok(None);
+    };
+    if default == Some(branch) {
+        return Ok(None);
+    }
+    let fork = match git(&["merge-base", tip, base])? {
+        Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
+        ran => ran.answer().map_err(|why| format!("git merge-base said {why}"))?,
+    };
+    let fork = one_line(fork).ok_or("git merge-base named no commit")?;
+    let said = git(&["diff-index", "-M", "--numstat", "--no-textconv", &fork])?
+        .answer()
+        .map_err(|why| format!("git diff-index said {why}"))?;
+    let (mut added, mut deleted) = (0u32, 0u32);
+    for line in String::from_utf8_lossy(&said).lines() {
+        let mut fields = line.split('\t');
+        let Some(more) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(fewer) = fields.next().and_then(|count| count.parse::<u32>().ok()) else {
+            continue;
+        };
+        let room = "git diff-index said more lines than there is room to count";
+        added = added.checked_add(more).ok_or(room)?;
+        deleted = deleted.checked_add(fewer).ok_or(room)?;
+    }
+    Ok(Changed::new(added, deleted))
+}
+
+/// The remotes whose `HEAD` says a repository's default branch, in the order
+/// gh takes one as the repository it asks for pull requests.
+const DEFAULT_REMOTES: [&str; 3] = ["upstream", "github", "origin"];
+
+/// The name of the branch `target` is, a ref of the default branch: `main`
+/// of `refs/heads/main`, or of `refs/remotes/origin/main`.
+fn default_name(target: &str) -> Option<&str> {
+    target.strip_prefix("refs/heads/").or_else(|| {
+        let remote = target.strip_prefix("refs/remotes/")?;
+        DEFAULT_REMOTES.iter().find_map(|name| remote.strip_prefix(name)?.strip_prefix('/'))
+    })
 }
 
 pub enum NamedHead {
@@ -807,15 +923,15 @@ impl Asked {
 /// whole by the time its folder is watched. Where git does not answer,
 /// nothing of `dir` is read here, and where git placed it before stands.
 /// Where git placed `dir`, with the work tree in `trees` where it is in one;
-/// what git said; and whether git placed `dir` elsewhere since, which has it
-/// due again.
+/// what git said, as `status` says it; and whether git placed `dir`
+/// elsewhere since, which has it due again.
 fn ask(
     dir: &str,
     before: Option<Placed>,
     trees: &mut HashMap<PathBuf, Tree>,
     wake: &SyncSender<()>,
     troubles: &mut Troubles,
-) -> (Placed, Result<WorkTree, String>, bool) {
+) -> (Placed, Stood, bool) {
     let (placed, anew, common) = match place(dir) {
         Ok(Some(place)) => {
             let (top, common) = (place.top.clone(), place.common.clone());
@@ -890,15 +1006,18 @@ pub fn follow(
                 let before = asked.remove(&dir).map(|was| was.placed);
                 let (placed, said, moved) = ask(&dir, before, &mut trees, &wake, &mut troubles);
                 let (took, ended) = (started.elapsed(), Instant::now());
-                let trouble = said.as_ref().err().cloned();
+                let trouble = match &said {
+                    Ok((_, uncounted)) => uncounted.clone(),
+                    Err(why) => Some(why.clone()),
+                };
+                if let Some(trouble) = &trouble {
+                    troubles.say(trouble.clone());
+                }
                 asked.insert(dir.clone(), Asked { ended, took, changed: moved, placed, trouble });
-                match said {
-                    Ok(tree) => {
-                        if core.send(core::Command::WorkTree { dir, tree }).is_err() {
-                            return;
-                        }
-                    },
-                    Err(trouble) => troubles.say(trouble),
+                if let Ok((tree, _)) = said
+                    && core.send(core::Command::WorkTree { dir, tree }).is_err()
+                {
+                    return;
                 }
                 // Not let settle, as it is below: with a work tree that
                 // changes all along, git would ask about one directory each
@@ -934,8 +1053,127 @@ pub fn follow(
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
 
-    use super::{stamp, Common};
+    use super::{Changed, Common, changed, stamp};
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        let mut git = std::process::Command::new("git");
+        for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
+            git.env_remove(repository);
+        }
+        git.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(["-c", "maintenance.auto=false"])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// How many lines changed on a branch against the default, as `changed`
+    /// counts them: what a commit changed and what the work tree holds too,
+    /// on a branch with no commit of its own as well, none of what the
+    /// default has that the branch does not, and none on the default itself.
+    /// The index stays as git left it. The default the `HEAD` of `upstream`
+    /// names comes before `origin`'s, which comes before `main`, and a branch
+    /// that shares no history with it, or has no commit, counts none.
+    #[test]
+    fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| git(dir.path(), args);
+        let commit = |file: &str, text: &str| {
+            fs::write(dir.path().join(file), text).unwrap();
+            assert!(git(&["add", file]));
+            assert!(git(&["commit", "-q", "-m", file]));
+        };
+        assert!(git(&["init", "-q", "-b", "main"]));
+        commit("base", "a\nb\nc\n");
+        commit("same", "s\n");
+        assert!(git(&["switch", "-q", "-c", "issue-299"]));
+        commit("base", "a\nB\n\n");
+        // A change nothing committed holds: `git add -N` has the work tree
+        // counted for it, as a diff of the pull request would show it.
+        fs::write(dir.path().join("new"), "d\n").unwrap();
+        assert!(git(&["add", "-N", "new"]));
+        // What changed on `issue-299`: `b` became `B`, and `c` an empty
+        // line — one added and one deleted of each — and `new` one more
+        // added.
+        let at = dir.path().to_str().unwrap();
+        let later = SystemTime::now() + Duration::from_secs(60);
+        let same = File::options().write(true).open(dir.path().join("same")).unwrap();
+        same.set_modified(later).unwrap();
+        let index = dir.path().join(".git").join("index");
+        let before = stamp(&index);
+        assert_eq!(changed(at, "issue-299"), Ok(Changed::new(3, 2)));
+        assert_eq!(stamp(&index), before);
+
+        assert!(git(&["switch", "-q", "main"]));
+        // The default itself counts none, whatever the work tree holds: the
+        // glyph after where the numbers would be says that instead.
+        assert_eq!(changed(at, "main"), Ok(None));
+        assert!(git(&["switch", "-q", "-c", "fresh"]));
+        assert_eq!(changed(at, "fresh"), Ok(Changed::new(1, 0)));
+        assert!(git(&["switch", "-q", "main"]));
+
+        assert!(git(&["rm", "-q", "-f", "new"]));
+        assert!(git(&["switch", "-q", "-c", "trunk"]));
+        commit("trunk", "t\n");
+        assert!(git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]));
+        assert!(git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]));
+        assert!(git(&["switch", "-q", "-c", "fold"]));
+        commit("fold", "f\n");
+        assert_eq!(changed(at, "fold"), Ok(Changed::new(1, 0)));
+        assert_eq!(changed(at, "trunk"), Ok(None));
+        assert!(git(&["update-ref", "refs/remotes/upstream/next", "HEAD"]));
+        assert!(git(&["symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/next"]));
+        assert!(git(&["switch", "-q", "-c", "next"]));
+        assert_eq!(changed(at, "next"), Ok(None));
+        commit("next", "n\n");
+        assert_eq!(changed(at, "next"), Ok(None));
+        assert!(git(&["switch", "-q", "-c", "onto-next"]));
+        commit("onto-next", "o\n");
+        assert_eq!(changed(at, "onto-next"), Ok(Changed::new(2, 0)));
+
+        assert!(git(&["switch", "-q", "--orphan", "lone"]));
+        commit("lone", "l\n");
+        assert_eq!(changed(at, "lone"), Ok(None));
+        assert_eq!(changed(at, "unborn"), Ok(None));
+    }
+
+    /// A partial clone that lacks what the default's side of the count holds
+    /// fetches none of it from the remote to count: git says it could not.
+    #[test]
+    fn git_fetches_nothing_to_count_the_lines_changed_in_a_partial_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, clone) = (dir.path().join("origin"), dir.path().join("clone"));
+        fs::create_dir(&origin).unwrap();
+        let lines = |from: u32, to: u32| (from..=to).map(|line| line.to_string() + "\n").collect();
+        let commit = |text: String| {
+            fs::write(origin.join("lines"), text).unwrap();
+            assert!(git(&origin, &["add", "lines"]));
+            assert!(git(&origin, &["commit", "-q", "-m", "lines"]));
+        };
+        assert!(git(&origin, &["init", "-q", "-b", "main"]));
+        assert!(git(&origin, &["config", "uploadpack.allowFilter", "true"]));
+        commit(lines(1, 100));
+        commit(lines(1, 50));
+        assert!(git(&origin, &["switch", "-q", "-c", "fold"]));
+        commit(lines(1, 70));
+        assert!(git(&origin, &["switch", "-q", "main"]));
+        let url = format!("file://{}", origin.display());
+        let cloned = ["clone", "-q", "--filter=blob:none", "--no-checkout", &url, "clone"];
+        assert!(git(dir.path(), &cloned));
+        assert!(git(&clone, &["checkout", "-q", "-b", "fold", "origin/fold"]));
+
+        let at = clone.to_str().unwrap();
+        let said = changed(at, "fold");
+        assert!(said.as_ref().is_err_and(|why| why.starts_with("git diff-index said")), "{said:?}");
+    }
 
     /// git tells no repository from one it refuses by its words alone, as it
     /// ends with one status for all of them: as it says them near a mount

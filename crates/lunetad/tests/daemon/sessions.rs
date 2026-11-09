@@ -526,7 +526,11 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
-    let main = Branch { name: "main".to_owned(), upstream: Some(Upstream { ahead: 1, behind: 0 }) };
+    let main = Branch {
+        name: "main".to_owned(),
+        upstream: Some(Upstream { ahead: 1, behind: 0 }),
+        changed: None,
+    };
     let checkout = |dir: &str, head, changes, stashes| {
         let repository = Some(fs::canonicalize(dir).unwrap().display().to_string());
         Some(Stands::Checkout(Checkout {
@@ -546,6 +550,85 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
         let trees = host.host().work_trees;
         trees.iter().all(|tree| tree.dir != plain).then_some(())
     });
+}
+
+/// The daemon counts the lines changed on a branch against the branch its
+/// repository takes as its default, work tree changes included, as a diff of
+/// the pull request would show them: `origin/HEAD` says the default, where
+/// the repository has it. The default branch itself counts none, nor does a
+/// branch with nothing changed on it.
+#[test]
+fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
+    fn at(dir: &str) -> &Path {
+        Path::new(dir)
+    }
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let dirs = dirs.path().canonicalize().unwrap();
+    let (origin, work, other) =
+        (dirs.join("origin.git"), dirs.join("work"), dirs.join("other"));
+    for dir in [&work, &other, &origin] {
+        fs::create_dir(dir).unwrap();
+    }
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    assert!(git(&work, &["clone", "-q", "--origin", "origin", &origin.display().to_string(), "."]));
+    commit(&work, "README", "start\n");
+    // The clone knows the default only once it has heard of the branch it
+    // names: `clone` of an empty repository sets none.
+    assert!(git(&work, &["push", "-q", "origin", "main"]));
+    assert!(git(&work, &["remote", "set-head", "origin", "main"]));
+    let base = ["a\n", "b\n", "c\n"].concat();
+    commit(&work, "base", &base);
+    assert!(git(&work, &["push", "-q", "origin", "main"]));
+    assert!(git(&work, &["switch", "-q", "-c", "issue-299"]));
+    commit(&work, "base", "a\nB\n\n");
+    // A change nothing committed holds: `git add -N` has the work tree
+    // counted for it, as a diff of the pull request would show it.
+    fs::write(work.join("new"), "d\n").unwrap();
+    assert!(git(&work, &["add", "-N", "new"]));
+    assert!(git(
+        &other,
+        &["clone", "-q", "--origin", "origin", &origin.display().to_string(), "."],
+    ));
+    assert!(git(&other, &["remote", "set-head", "origin", "main"]));
+
+    let spelled = |dir: &PathBuf| dir.display().to_string();
+    let (work, other) = (spelled(&work), spelled(&other));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    host.zellij.list("work", &json!([in_dir(1, &work), in_dir(2, &other)]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+
+    // The lines changed on `issue-299`: `b` became `B` and `c` an empty
+    // line — one added and one deleted of each — and `new` one more added;
+    // none on `main`, which is the repository's default.
+    let changed = |dir: &str| {
+        host.host().work_trees.iter().find(|tree| tree.dir == dir).and_then(|tree| {
+            match tree.stands.as_ref()? {
+                Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. }) => {
+                    let changed = branch.changed.as_ref()?;
+                    Some((changed.added, changed.deleted))
+                },
+                _ => None,
+            }
+        })
+    };
+    eventually("git counts the lines changed on issue-299", || {
+        (changed(&work) == Some((3, 2))).then_some(())
+    });
+    let said = daemon.said_after(Duration::from_secs(1)).to_vec();
+    assert!(!said.iter().any(|line| line.contains("git ")), "git said: {said:?}");
+    eventually("git counts none on main", || changed(&other).is_none().then_some(()));
+
+    // A branch made from the default counts what it changed, and one back
+    // on the default counts none.
+    assert!(git(at(&other), &["switch", "-q", "-c", "fold"]));
+    commit(at(&other), "new", "d\n");
+    eventually("git counts the lines changed on fold", || {
+        (changed(&other) == Some((1, 0))).then_some(())
+    });
+    assert!(git(at(&other), &["switch", "-q", "main"]));
+    eventually("git counts none on main", || changed(&other).is_none().then_some(()));
 }
 
 #[test]
