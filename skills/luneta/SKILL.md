@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start Claude Code agents on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, and delete the worktrees of merged pull requests. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, or clean up merged worktrees, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, and delete the worktrees of merged pull requests. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, or clean up merged worktrees, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -118,18 +118,25 @@ A tab in no repository opens in the user's session: leave `--session` out.
 
 ## Start an agent
 
-Run Claude Code as the pane's command, naming it for what it does, so the
-sidebar shows it from the start:
+Run a coding agent as the pane's command, in a harness luneta knows: Claude
+Code (`claude`) or pi (`pi`). Start the one the user names. Otherwise, in
+luneta's ask box, the one its line names, which the user picked last in
+luneta's menu; anywhere else, the one you run in. In the box, luneta opens pi
+only where the line names pi: where it names Claude Code and the user asks for
+pi, tell them to pick pi with `Tab` in luneta's menu. Name it for what it does,
+so the sidebar shows it from the start:
 
 ```sh
 luneta open tab --session app --cwd ~/code/app --name issue-42 -- claude --name "issue-42" "let's tackle this one: https://github.com/o/app/issues/42"
 luneta open pane --beside luneta:11 -- claude --name "thermo-nuclear-review: fix-auth" "/thermo-nuclear-review"
+luneta open pane --beside luneta:11 -- pi --name "thermo-nuclear-review: fix-auth" "/skill:thermo-nuclear-review"
 ```
 
-- A skill runs as the prompt: `/skill-name args`. Name it `<skill>: <branch>`.
+- A skill runs as the prompt: `/skill-name args` in Claude Code, and
+  `/skill:skill-name args` in pi. Name it `<skill>: <branch>`.
 - Put the prompt in one argument. Quote it for the shell, not for zellij.
 - The `<session>:<pane>` that `open` prints is where the agent runs.
-  `luneta agents` lists it once Claude Code has started.
+  `luneta agents` lists it once it has started.
 
 ### Several at once, one per issue
 
@@ -144,7 +151,8 @@ own, or they edit the same files:
    otherwise tell the user.
 3. Open a tab per worktree in the session
    [Which session a tab opens in](#which-session-a-tab-opens-in) picks, named for
-   the branch, with `claude --name <branch> "<prompt>"` in it.
+   the branch, with `claude --name <branch> "<prompt>"` in it, or `pi` in
+   place of `claude`.
 4. Report the tabs you opened (`<session>:<pane>` and the issue each has).
    Don't `go` anywhere unless asked, or that session has nobody in it and the
    user is waiting on you.

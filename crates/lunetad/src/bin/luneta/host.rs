@@ -2357,7 +2357,7 @@ impl App {
             self.client.nudge_in(seat.to_string());
         }
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
-            ask.send(user, &self.events);
+            ask.send(user, self.sidebar.agent(), &self.events);
         }
     }
 

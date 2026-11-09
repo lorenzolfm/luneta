@@ -1227,8 +1227,9 @@ a machine whose clipboard is not the one you sit at.
 are talking to can do it for you when you ask in words: "make me a session to
 work on floresta", "tackle these four issues in parallel", "run
 `/thermo-nuclear-review` on that PR", "close every session but this one". The
-skill in [`skills/luneta`](skills/luneta/SKILL.md) tells Claude Code, or any
-agent that reads skills, how it goes about it: what it reads to work out what
+skill in [`skills/luneta`](skills/luneta/SKILL.md) tells Claude Code, pi, or
+any agent that reads skills, how it goes about it: which harness an agent it
+starts runs in (the one you name, or else the one it runs in itself), what it reads to work out what
 your words point at, a worktree for each agent it starts side by side, which
 session its tabs open in, and asking you before it closes anything. A tab of
 work in a repository opens where a pasted link's does: in the session you name,
@@ -1341,7 +1342,9 @@ zellij, and you tell the agent there:
 What you type goes to `claude -p --model sonnet`, on your Claude Code login,
 with luneta's skill, in the directory of the highlighted row's pane, or the one
 luneta started in on a session's row, whichever harness that row's agent runs
-in. The agent is told which row is highlighted, and with each thing you send, which pane you are in: the one
+in. The agent is told which row is highlighted, and with each thing you send, which pane you are in, and
+which harness to start an agent in: the one you picked last with `Tab` in the
+[menu](#menu). The pane is the one
 luneta's zellij is on, which the commands take for the pane they run in, as
 `LUNETA_PANE` names it. The box shows each command the agent runs, with a red
 `✗` for one Claude Code denied it, which ran nothing, and what it says. Once a
@@ -1367,10 +1370,15 @@ Those of the directory it runs in don't come into it, as a repository can
 bring its own. Claude Code denies it anything else, any command
 run inside another, as with `$(…)`, and any that reads a variable or sets one,
 so the turn's keys stay out of its reach. A pane or a tab it opens runs your
-shell, or Claude Code as `claude [--name <name>] [<prompt>]`: in the box, `luneta
-open` refuses any other command, and any option of `claude`'s but `--name`, as a
-pane runs what it is given without asking you. An agent it starts so runs on the
-prompt the box's agent wrote, in your own permission mode. The `luneta` it runs
+shell, Claude Code as `claude [--name <name>] [<prompt>]`, or, once you have
+picked pi with `Tab` in the menu, pi as `pi [--name <name>] [<prompt>]`: in the
+box, `luneta open` refuses any other command, any option but `--name`, a prompt
+that starts with `!`, which is a line for your shell, and for pi one that starts
+with `@`, which pi reads as a file, or that is one of pi's own commands, such as
+`update`, as a pane runs what it is given without asking you. An agent it starts
+so runs on the prompt the box's agent wrote: Claude Code in your own permission
+mode, and pi, which asks nothing before it runs a command, with no check at all,
+which is why the box starts pi only where you picked it. The `luneta` it runs
 is the sidebar's own. Each turn writes a Claude session in that directory, as
 any `claude -p` does, so `claude --resume` lists it there.
 

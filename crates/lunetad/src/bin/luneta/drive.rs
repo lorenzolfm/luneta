@@ -15,7 +15,8 @@
 //! luneta's zellij is on another machine, by none, as none here is yours:
 //! there a close takes none of yours along, and `go` moves none of your
 //! clients. Claude Code runs what that agent runs without asking you, so a
-//! pane it opens runs your shell or Claude Code, and no other command.
+//! pane it opens runs your shell, Claude Code, or pi where you picked pi for
+//! the agents the menu starts, and no other command.
 //!
 //! A turn moves nobody, as an open does, and what you type goes on reaching your
 //! pane, as `turns` says. Where another client is on a pane that moves, or the
@@ -46,13 +47,14 @@ use std::time::SystemTime;
 
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
-use lunetad::asks::{Turn, User};
+use lunetad::asks::{self, Turn, User, AGENTS_VAR};
 use lunetad::cli::PaneId;
 use lunetad::clients::Client;
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
 
+use crate::agents::{self, Harness};
 use crate::close::{self, Act, Doing, Plan, Untold};
 use crate::commands;
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
@@ -220,7 +222,7 @@ pub enum Opening {
         #[arg(long)]
         cwd: Option<PathBuf>,
         /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude [--name <name>] [<prompt>]`.
+        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -238,7 +240,7 @@ pub enum Opening {
         #[arg(long)]
         name: Option<String>,
         /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude [--name <name>] [<prompt>]`.
+        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -277,35 +279,69 @@ fn seat_here(folder: &Path) -> Result<Option<Pane>, String> {
 }
 
 /// Whether a pane this opens may run `command`, as `runs` says: in luneta's
-/// ask box, only Claude Code. Or why not.
+/// ask box, only Claude Code, or pi where the turn's agents start in pi. Or
+/// why not.
 fn may_run(command: &[String]) -> Result<(), String> {
     match turn_here()? {
         None => Ok(()),
-        Some(_) => runs(command),
+        Some(_) => runs(command, asks::agents_in(zellij::var(AGENTS_VAR)?.as_deref())?),
     }
 }
 
-/// Whether `command` is your shell, as an empty one is, or Claude Code on a
-/// name and a prompt, `claude [--name <name>] [<prompt>]`, none of which it
-/// takes for an option, nor the prompt for a line of your shell. A pane runs
-/// what it is given without asking you, and Claude Code, in your permission
-/// mode, asks you or looks at what it does. Or why not.
-fn runs(command: &[String]) -> Result<(), String> {
-    const ONLY: &str = "in luneta's ask box, a pane runs your shell or `claude [--name <name>] \
-                        [<prompt>]`, and nothing else";
+/// What pi takes for a command of its own, and not for a prompt, as the
+/// first word it is given: `pi update` updates pi.
+const PI_COMMANDS: [&str; 8] =
+    ["install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"];
+
+/// Whether `command` is your shell, as an empty one is, or Claude Code or pi
+/// on a name and a prompt, `claude [--name <name>] [<prompt>]` or `pi [--name
+/// <name>] [<prompt>]`, none of which it takes for an option, nor the prompt
+/// for a line of your shell, nor, for pi, for a file to read or a command of
+/// its own. A pane runs what it is given without asking you, and Claude Code,
+/// in your permission mode, asks you or looks at what it does. pi asks
+/// nothing, so it runs only where the turn's `agents` start in pi, as you
+/// picked in the menu. Or why not.
+fn runs(command: &[String], agents: Harness) -> Result<(), String> {
+    const ONLY: &str = "in luneta's ask box, a pane runs your shell, `claude [--name <name>] \
+                        [<prompt>]` or `pi [--name <name>] [<prompt>]`, and nothing else";
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
-    let (name, prompt) = match words[..] {
-        [] | ["claude"] => (None, None),
-        ["claude", "--name", name] => (Some(name), None),
-        ["claude", "--name", name, prompt] => (Some(name), Some(prompt)),
-        ["claude", prompt] => (None, Some(prompt)),
-        _ => return Err(format!("{ONLY}: it does not run {}", words.join(" "))),
+    let unknown = || format!("{ONLY}: it does not run {}", words.join(" "));
+    let (agent, name, prompt) = match words[..] {
+        [] => return Ok(()),
+        [agent] => (agent, None, None),
+        [agent, "--name", name] => (agent, Some(name), None),
+        [agent, "--name", name, prompt] => (agent, Some(name), Some(prompt)),
+        [agent, prompt] => (agent, None, Some(prompt)),
+        _ => return Err(unknown()),
     };
+    let harness = agents::named(agent).ok_or_else(unknown)?;
+    if harness == Harness::Pi && agents != Harness::Pi {
+        let why = "runs only once you pick pi with Tab in luneta's menu";
+        return Err(format!("{ONLY}: {agent} {why}"));
+    }
     if name.into_iter().chain(prompt).any(|word| word.starts_with('-')) {
-        return Err(format!("{ONLY}: claude takes no option but --name, nor a word with a - first"));
+        let why = "takes no option but --name, nor a word with a - first";
+        return Err(format!("{ONLY}: {agent} {why}"));
     }
     if prompt.is_some_and(|prompt| prompt.starts_with('!')) {
-        return Err(format!("{ONLY}: claude takes no prompt with a ! first, a line for your shell"));
+        let why = "takes no prompt with a ! first, a line for your shell";
+        return Err(format!("{ONLY}: {agent} {why}"));
+    }
+    let read = match harness {
+        Harness::ClaudeCode => None,
+        Harness::Pi => Some(('@', "takes no prompt with an @ first, a file it reads")),
+    };
+    if let Some((first, why)) = read
+        && prompt.is_some_and(|prompt| prompt.starts_with(first))
+    {
+        return Err(format!("{ONLY}: {agent} {why}"));
+    }
+    if harness == Harness::Pi
+        && name.is_none()
+        && prompt.is_some_and(|prompt| PI_COMMANDS.contains(&prompt))
+    {
+        let why = "takes no prompt that is a command of its own";
+        return Err(format!("{ONLY}: {agent} {why}"));
     }
     Ok(())
 }

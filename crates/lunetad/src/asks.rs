@@ -30,7 +30,7 @@ use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
 use crate::zellij::SessionName;
-use crate::{claude, git, program};
+use crate::{claude, git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
 /// runs a few commands in a row, without slips.
@@ -62,6 +62,14 @@ pub const AWAY_VAR: &str = "LUNETA_AWAY";
 /// that reads a variable or sets one, in its `dontAsk` mode.
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
+
+/// What says, in the variables of the agent of luneta's ask box, that a pane
+/// it opens may run pi, as you picked pi last in luneta's menu: pi asks
+/// nothing before it runs a command, so the box opens none where you did not.
+pub const AGENTS_VAR: &str = "LUNETA_AGENTS";
+
+/// What `AGENTS_VAR` is, where it is set.
+const AGENTS_PI: &str = "pi";
 
 /// The commands the agent may run, as Claude Code's rules name them: the
 /// verbs of luneta's its skill has, and the commands its skill reads what
@@ -101,8 +109,9 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     nothing around it: no $(…), no pipes, no && and no ;. Only these run: luneta here, \
     sessions, agents, open, go, turn, close and prune, zoxide query, gh issue view and list, gh pr view \
     and list, luneta worktree, and git worktree add and list. Claude Code denies any other. A \
-    pane you open runs the user's shell, or Claude Code as claude [--name <name>] [<prompt>], \
-    with no other option of claude's: luneta refuses any other command. You cannot wait for \
+    pane you open runs the user's shell, Claude Code as claude [--name <name>] [<prompt>], or, \
+    where the turn's line says pi, pi as pi [--name <name>] [<prompt>], with no other option \
+    of theirs: luneta refuses any other command. You cannot wait for \
     the user in the middle of a turn: to ask them anything, as the skill has you ask before \
     a close, or which of two things they meant, end your turn with the question. Their \
     answer comes as the next message. So a close or a prune takes --yes only in the turn after \
@@ -258,6 +267,18 @@ pub fn turn_in(
     Ok(Some((turn, User::read(asked, away)?)))
 }
 
+/// The harness the turn's agents start in, as the box names it in `said`, of
+/// `AGENTS_VAR`: Claude Code where it is not set. Or why it does not read.
+pub fn agents_in(said: Option<&str>) -> Result<Harness, String> {
+    match said {
+        None => Ok(Harness::ClaudeCode),
+        Some(AGENTS_PI) => Ok(Harness::Pi),
+        Some(said) => {
+            Err(format!("{AGENTS_VAR} is {said:?}, and luneta's ask box sets it to {AGENTS_PI}"))
+        },
+    }
+}
+
 /// A step of a turn of the agent, as `claude` says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -307,7 +328,8 @@ impl Step {
 /// A turn asked of the agent: `words`, what you typed, for an agent that
 /// works in `cwd`, on the Claude session `resumed` if one went before, told
 /// of the row `highlighted` as the box opened, for you where `user` says, in
-/// `turn`.
+/// `turn`, starting the agents it starts in `agents`, and in pi only where
+/// that is pi.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
     /// By its absolute path: none for the home of the user it runs as.
@@ -318,6 +340,7 @@ pub struct Asked {
     highlighted: String,
     user: User,
     turn: Turn,
+    agents: Harness,
 }
 
 impl Asked {
@@ -330,6 +353,7 @@ impl Asked {
         highlighted: String,
         user: User,
         turn: Turn,
+        agents: Harness,
     ) -> Result<Asked, String> {
         if let Some(cwd) = cwd.as_ref().filter(|cwd| !cwd.is_absolute()) {
             return Err(format!("cwd: {} is no absolute path", cwd.display()));
@@ -338,15 +362,17 @@ impl Asked {
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
         }
-        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn })
+        Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
 
     /// The turn a question asks for, and the machine it is for, or why the
     /// question is invalid: as `new` says, or it resumes a session by no id
     /// of one, or names your pane in a session by a name zellij does not
-    /// take, or its turn is of the key of the turn before it.
+    /// take, or its turn is of the key of the turn before it, or its agents
+    /// are to start in a harness this lunetad does not know.
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
-        let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before } = request;
+        let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before, agents } =
+            request;
         let resumed = match resumed {
             None => None,
             Some(resumed) => Some(
@@ -363,7 +389,9 @@ impl Asked {
             },
         };
         let turn = Turn::new(turn, before)?;
-        let asked = Asked::new(cwd.map(PathBuf::from), &words, resumed, highlighted, user, turn)?;
+        let agents = Harness::said(agents).map_err(|why| format!("agents: {why}"))?;
+        let cwd = cwd.map(PathBuf::from);
+        let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents)?;
         Ok((on, asked))
     }
 
@@ -388,6 +416,7 @@ impl Asked {
             user,
             turn: self.turn.key,
             before: self.turn.before,
+            agents: Some(self.agents.to_api().into()),
         }
     }
 
@@ -399,7 +428,7 @@ impl Asked {
         wanted: &dyn Fn() -> bool,
         hear: &dyn Fn(Step),
     ) -> Option<Result<(), String>> {
-        talk(self.claude(), &told(&self.user, &self.words), wanted, hear)
+        talk(self.claude(), &told(&self.user, self.agents, &self.words), wanted, hear)
     }
 
     /// `claude`, for it. It runs on the model the box has, in safe mode, so
@@ -430,6 +459,10 @@ impl Asked {
         git::local(&mut claude);
         self.user.name_in(&mut claude);
         self.turn.name_in(&mut claude);
+        match self.agents {
+            Harness::Pi => claude.env(AGENTS_VAR, AGENTS_PI),
+            Harness::ClaudeCode => claude.env_remove(AGENTS_VAR),
+        };
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
             claude.env("PATH", path);
         }
@@ -450,8 +483,15 @@ fn system(highlighted: &str) -> String {
 }
 
 /// The message of a turn: `words`, what you typed, after a line that says
-/// where you are as you send it, as `user` has it.
-fn told(user: &User, words: &str) -> String {
+/// where you are as you send it, as `user` has it, and one that says the
+/// harness an agent it starts runs in, `agents`: pi unless you name Claude
+/// Code, or Claude Code alone, as the box opens pi only where you picked it.
+fn told(user: &User, agents: Harness, words: &str) -> String {
+    let agents = match agents {
+        Harness::Pi => "[luneta: start an agent in pi, unless the user names Claude Code.]",
+        Harness::ClaudeCode => "[luneta: start an agent in Claude Code. luneta opens pi only once \
+                                the user picks it with Tab in luneta's menu.]",
+    };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
         User::Away => "[luneta: the user is on another machine just now, where luneta's zellij \
@@ -466,7 +506,7 @@ fn told(user: &User, words: &str) -> String {
                          where you need them.]"
             .to_owned(),
     };
-    format!("{user}\n\n{words}")
+    format!("{user}\n{agents}\n\n{words}")
 }
 
 /// The `PATH` with the directory of `exe` first, where it is a `luneta`, or
@@ -653,6 +693,8 @@ mod tests {
 
     use super::*;
 
+    const CLAUDE: Harness = Harness::ClaudeCode;
+
     fn turn() -> Turn {
         Turn { key: 255, before: Some(10) }
     }
@@ -689,7 +731,8 @@ mod tests {
         };
         let highlighted = "The row highlighted is pane luneta:4.".to_owned();
         let cwd = Some(PathBuf::from("/w/luneta"));
-        let first = Asked::new(cwd, " close it ", None, highlighted, pane("luneta", 2), turn());
+        let you = pane("luneta", 2);
+        let first = Asked::new(cwd, " close it ", None, highlighted, you, turn(), CLAUDE);
         let first = first.unwrap();
         let claude = first.claude();
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/luneta")));
@@ -702,8 +745,14 @@ mod tests {
         let system = format!("{SYSTEM}\n\nThe row highlighted is pane luneta:4.\n\n{SKILL}");
         assert_eq!(said[14], system);
         assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
-        let told_first = told(&first.user, &first.words);
-        assert_eq!(told_first, "[luneta: the user is in pane luneta:2.]\n\nclose it");
+        let told_first = told(&first.user, first.agents, &first.words);
+        let line = "[luneta: start an agent in Claude Code. luneta opens pi only once the user \
+                    picks it with Tab in luneta's menu.]";
+        let you = "[luneta: the user is in pane luneta:2.]";
+        assert_eq!(told_first, format!("{you}\n{line}\n\nclose it"));
+        let pi = told(&first.user, Harness::Pi, "go");
+        let line = "[luneta: start an agent in pi, unless the user names Claude Code.]";
+        assert_eq!(pi, format!("{you}\n{line}\n\ngo"));
         for name in claude::PANE_VARS.into_iter().chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
@@ -712,23 +761,23 @@ mod tests {
         assert_eq!(var(&claude, BEFORE_VAR), Some(Some("000000000000000a".to_owned())));
 
         let resumed = Some(session("7c22"));
-        let next = Asked::new(None, "yes", resumed, String::new(), User::Away, turn());
+        let next = Asked::new(None, "yes", resumed, String::new(), User::Away, turn(), CLAUDE);
         let claude = next.unwrap().claude();
         assert_eq!(claude.get_current_dir(), env::var_os("HOME").as_deref().map(Path::new));
         assert_eq!(args(&claude)[15..17], ["--resume", "7c22"]);
         assert_eq!(var(&claude, ASKED_VAR), Some(None));
         assert_eq!(var(&claude, AWAY_VAR), Some(Some("1".to_owned())));
-        let away = told(&User::Away, "yes");
+        let away = told(&User::Away, Harness::ClaudeCode, "yes");
         assert!(away.starts_with("[luneta: the user is on another machine just now"), "{away}");
         assert!(away.ends_with("]\n\nyes"), "{away}");
 
         let first = Turn { key: 10, before: None };
-        let untold = Asked::new(None, "yes", None, String::new(), User::Untold, first);
+        let untold = Asked::new(None, "yes", None, String::new(), User::Untold, first, CLAUDE);
         let claude = untold.unwrap().claude();
         assert_eq!([var(&claude, ASKED_VAR), var(&claude, AWAY_VAR)], [Some(None), Some(None)]);
         assert_eq!(var(&claude, TURN_VAR), Some(Some("000000000000000a".to_owned())));
         assert_eq!(var(&claude, BEFORE_VAR), Some(None));
-        let untold = told(&User::Untold, "yes");
+        let untold = told(&User::Untold, Harness::ClaudeCode, "yes");
         let says = "[luneta: it cannot tell which pane the user is in";
         assert!(untold.starts_with(says), "{untold}");
         assert!(untold.ends_with("]\n\nyes"), "{untold}");
@@ -746,7 +795,8 @@ mod tests {
         let first = Turn::new(10, None).unwrap();
         for user in [pane("a:b", 4), User::Away, User::Untold] {
             for turn in [first, turn()] {
-                let asked = Asked::new(None, "yes", None, String::new(), user.clone(), turn);
+                let you = user.clone();
+                let asked = Asked::new(None, "yes", None, String::new(), you, turn, CLAUDE);
                 let claude = asked.unwrap().claude();
                 let [key, before, pane, away] =
                     [TURN_VAR, BEFORE_VAR, ASKED_VAR, AWAY_VAR].map(|name| var(&claude, name));
@@ -755,6 +805,24 @@ mod tests {
             }
         }
         assert_eq!(turn_in(None, None, None, None), Ok(None));
+    }
+
+    /// luneta's commands read in the variables of the agent the harness its
+    /// agents start in, as the box named it: Claude Code where it names
+    /// none, and nothing the box would not name.
+    #[test]
+    fn the_agent_s_commands_read_the_harness_of_the_turn() {
+        for agents in [Harness::ClaudeCode, Harness::Pi] {
+            let you = User::Untold;
+            let asked = Asked::new(None, "yes", None, String::new(), you, turn(), agents);
+            let claude = asked.unwrap().claude();
+            let set = claude.get_envs().find(|(key, _)| key.to_str() == Some(AGENTS_VAR));
+            let said = set.and_then(|(_, value)| value).and_then(|value| value.to_str());
+            assert_eq!(agents_in(said), Ok(agents));
+        }
+        for forged in ["", "claude", "Pi", "pi "] {
+            assert!(agents_in(Some(forged)).is_err(), "{forged:?}");
+        }
     }
 
     /// A command reads no turn of the box's but one its variables name in
@@ -815,13 +883,14 @@ mod tests {
         for user in [pane("luneta", 2), User::Away, User::Untold] {
             for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
                 let row = "row".to_owned();
-                let asked = Asked::new(cwd, "close it", resumed, row, user.clone(), turn());
+                let asked = Asked::new(cwd, "close it", resumed, row, user.clone(), turn(), CLAUDE);
                 let asked = asked.unwrap();
                 assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked)));
             }
         }
         let request = || {
-            let asked = Asked::new(None, "close it", None, "row".to_owned(), User::Untold, turn());
+            let row = "row".to_owned();
+            let asked = Asked::new(None, "close it", None, row, User::Untold, turn(), CLAUDE);
             asked.unwrap().asked(None)
         };
         let invalid = [
@@ -834,6 +903,7 @@ mod tests {
                 ..request()
             },
             AskRequest { turn: 7, before: Some(7), ..request() },
+            AskRequest { agents: Some(99), ..request() },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");

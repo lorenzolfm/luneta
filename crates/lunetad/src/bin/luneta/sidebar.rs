@@ -3370,6 +3370,11 @@ impl Sidebar {
         self.menu_did(did)
     }
 
+    /// The harness you picked last for the agents the menu starts.
+    pub fn agent(&self) -> agents::Harness {
+        self.agent.harness()
+    }
+
     /// Keeps `harness` for the agents the menu starts, for every luneta, or
     /// says why it is this luneta's alone.
     fn keep_agent(&mut self, harness: agents::Harness) {

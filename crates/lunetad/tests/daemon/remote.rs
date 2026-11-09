@@ -1213,12 +1213,13 @@ async fn turn(
 
 /// A turn of the ask box asked of `on`, with `words`, in `cwd`, for the user
 /// where `user` says, the first of its talk or else one that goes on with
-/// the session `7c22`.
+/// the session `7c22`, starting agents in pi.
 fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> AskRequest {
     let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
     let turn = Turn::new(255, (!first).then_some(10)).unwrap();
     let row = "The row highlighted is session work.".to_owned();
-    let asked = Asked::new(cwd.map(Path::to_owned), words, resumed, row, user, turn).unwrap();
+    let (cwd, pi) = (cwd.map(Path::to_owned), lunetad::Harness::Pi);
+    let asked = Asked::new(cwd, words, resumed, row, user, turn, pi).unwrap();
     asked.asked(Some(On { destination: on.to_owned() }))
 }
 
@@ -1268,7 +1269,8 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
             "resumed=none".to_owned(),
             "model=--model sonnet".to_owned(),
         ]);
-        assert_eq!(words, "[luneta: the user is in pane work:2.]\n\nwhere am I");
+        let pi = "[luneta: start an agent in pi, unless the user names Claude Code.]";
+        assert_eq!(words, format!("[luneta: the user is in pane work:2.]\n{pi}\n\nwhere am I"));
 
         let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", User::Away, false)).await;
         assert_eq!(steps, [session.clone(), ran.clone(), said]);
