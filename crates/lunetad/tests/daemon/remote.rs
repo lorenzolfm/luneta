@@ -128,17 +128,13 @@ exec "$to/$destination"
 
     /// Has ssh reach the host whose variables are `vars` as `destination`.
     pub fn reaches(&self, destination: &str, vars: Vars) {
-        let bridge = vars.command(LUNETA);
-        let (mut unset, mut set) = (String::new(), String::new());
-        for (name, value) in bridge.get_envs() {
-            let name = name.to_str().unwrap();
-            match value {
-                None => write!(unset, " -u {name}").unwrap(),
-                Some(value) => write!(set, " {name}={}", quoted(value.to_str().unwrap())).unwrap(),
-            }
-        }
-        let text = format!("exec env{unset}{set} {} bridge\n", quoted(LUNETA));
-        script(&self.to.join(destination), &text);
+        script(&self.to.join(destination), &bridge(&vars));
+    }
+
+    /// Has ssh reach `destination` as `reaches` does, `secs` after it is run,
+    /// as over a slow link.
+    fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
+        script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridge(&vars)));
     }
 
     /// Has ssh wait on `destination` for good, saying nothing, as it does on
@@ -230,6 +226,20 @@ impl Drop for StalledAnswers {
         // It ended, with the bridge the daemon gave up on.
         let _ = kill_process(self.0, Signal::CONT);
     }
+}
+
+/// What runs `luneta bridge` as the host whose variables are `vars`.
+fn bridge(vars: &Vars) -> String {
+    let bridge = vars.command(LUNETA);
+    let (mut unset, mut set) = (String::new(), String::new());
+    for (name, value) in bridge.get_envs() {
+        let name = name.to_str().unwrap();
+        match value {
+            None => write!(unset, " -u {name}").unwrap(),
+            Some(value) => write!(set, " {name}={}", quoted(value.to_str().unwrap())).unwrap(),
+        }
+    }
+    format!("exec env{unset}{set} {} bridge\n", quoted(LUNETA))
 }
 
 /// `text` as the shell reads it as one word, whatever is in it.
@@ -421,6 +431,37 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
     drop(far_daemon);
     let _later = far.serve("later");
     reached(&here, "far", |far| names(far) == ["later"]);
+    let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
+}
+
+/// A question for a machine whose daemon makes way for a newer one, while
+/// ssh to it runs again, is handed on to the newer one, as the machine's
+/// host stands meanwhile, rather than refused.
+#[test]
+fn a_question_while_a_machine_is_reached_again_is_handed_on() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    ssh.reaches("far", far.vars());
+    let far_daemon = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+
+    ssh.reaches_slowly("far", far.vars(), 2);
+    let runs = ssh.runs("far");
+    drop(far_daemon);
+    eventually("ssh runs to far again", || (ssh.runs("far") > runs).then_some(()));
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let checked = runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = Some(On { destination: "far".to_owned() });
+        let check = CheckNameRequest { on, name: "fresh".to_owned() };
+        tokio::time::timeout(Duration::from_secs(10), daemon.check_name(check)).await
+    });
+    assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
+    assert_eq!(ssh.runs("far"), runs + 1);
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
 }
 

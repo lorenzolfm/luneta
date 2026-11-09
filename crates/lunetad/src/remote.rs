@@ -165,8 +165,8 @@ impl Reached {
 }
 
 /// The machines this one watches, each with its daemon, through the bridge
-/// it watches it on, while the last question there was answered: for a
-/// client's question of one, which this one hands on.
+/// it watches it on, from its answer until the core is told the machine is
+/// unreached: for a client's question of one, which this one hands on.
 #[derive(Default)]
 pub struct Bridges(Mutex<HashMap<Destination, Bridge>>);
 
@@ -174,7 +174,7 @@ pub struct Bridges(Mutex<HashMap<Destination, Bridge>>);
 struct Bridge {
     /// The watch's number, as `Bridged` has it.
     watch: u64,
-    /// The machine's daemon, while the watch reaches it.
+    /// The machine's daemon, while the core has its host, as `Seen` says.
     daemon: Option<DaemonClient<Channel>>,
     /// Has the watch run ssh now, where it waits to run it again: room for
     /// one, as one is all it takes, and those that find it full go unsent.
@@ -196,7 +196,7 @@ impl Bridges {
 }
 
 /// `destination`'s watch in `bridges`, from its start until it stops, and
-/// its daemon there, from the watch's first answer to the last it had.
+/// its daemon there, as `Bridged::agree` says.
 struct Bridged {
     bridges: Arc<Bridges>,
     destination: Destination,
@@ -225,15 +225,15 @@ impl Bridged {
         bridges.get_mut(&self.destination).filter(|bridge| bridge.watch == self.watch)
     }
 
-    fn reached(&self, daemon: &DaemonClient<Channel>) {
+    /// Has the bridges agree with what the watch has `seen`: questions go
+    /// to the machine's `daemon` while the core has its host, and to none
+    /// once the core is told the machine is unreached.
+    fn agree(&self, seen: &Seen, daemon: Option<&DaemonClient<Channel>>) {
         if let Some(bridge) = self.own(&mut locked(&self.bridges.0)) {
-            bridge.daemon = Some(daemon.clone());
-        }
-    }
-
-    fn lost(&self) {
-        if let Some(bridge) = self.own(&mut locked(&self.bridges.0)) {
-            bridge.daemon = None;
+            bridge.daemon = match seen {
+                Seen::Answered { .. } | Seen::Broke { .. } => daemon.cloned(),
+                Seen::Reaching { .. } | Seen::Unreached { .. } => None,
+            };
         }
     }
 
@@ -600,8 +600,8 @@ fn watch(
 /// is unreached, and again as that changes, and when it is reached after. It
 /// asks only while `standing` says that this daemon runs for reasons of its
 /// own, which each question says, and which only then keeps that one running
-/// too. The machine's daemon is in the bridges while its last question was
-/// answered.
+/// too. The machine's daemon is in the bridges from its answer until the
+/// core is told the machine is unreached.
 async fn watched(
     mut bridged: Bridged,
     core: SyncSender<Command>,
@@ -610,11 +610,7 @@ async fn watched(
 ) {
     let destination = bridged.destination.clone();
     let mut daemon = None;
-    // The host as last told, as its daemon versions it.
-    let mut after = None;
-    let mut word = SystemTime::now();
-    let mut failures: u32 = 0;
-    let mut logged: Option<(String, Stopped)> = None;
+    let mut seen = Seen::Reaching { since: SystemTime::now() };
     let said = Arc::default();
     loop {
         // A question on a connection that broke makes one afresh, with an
@@ -627,44 +623,37 @@ async fn watched(
             return;
         }
         bridged.awake();
-        let question = standing.borrow().question(after);
+        let question = standing.borrow().question(seen.after());
         let asked = asked(&destination, &mut daemon, question, &said, &folder).await;
         let (version, host) = match asked {
             Ok(answered) => answered,
-            Err((why, stopped)) => {
-                bridged.lost();
-                failures = failures.saturating_add(1);
-                if failures > 1 || after.is_none() {
-                    // Asked afresh once reached again: the host as last told
-                    // is no longer what the core has.
-                    after = None;
-                    let why_now = Some((why.clone(), stopped));
-                    if logged != why_now {
+            Err(why) => {
+                let logged = matches!(&seen, Seen::Unreached { why: logged, .. } if *logged == why);
+                seen = seen.failed(why);
+                bridged.agree(&seen, daemon.as_ref());
+                if let Seen::Unreached { since, why: (why, stopped), .. } = &seen {
+                    if !logged {
                         log::say(&format!("{destination}: unreached: {why}"));
-                        logged = why_now;
                     }
-                    let unreached = Reached::Unreached { since: word, why, stopped };
-                    if !told(&core, &destination, unreached) {
+                    let (since, why, stopped) = (*since, why.clone(), *stopped);
+                    if !told(&core, &destination, Reached::Unreached { since, why, stopped }) {
                         return;
                     }
                 }
-                bridged.waits(again(failures)).await;
+                bridged.waits(again(seen.failures())).await;
                 continue;
             },
         };
-        if let Some(daemon) = &daemon {
-            bridged.reached(daemon);
-        }
-        failures = 0;
-        if logged.take().is_some() {
-            let unreached_for = word.elapsed().unwrap_or_default().as_secs();
+        if let Seen::Unreached { since, .. } = &seen {
+            let unreached_for = since.elapsed().unwrap_or_default().as_secs();
             log::say(&format!("{destination}: reached, after {unreached_for}s unreached"));
         }
-        word = SystemTime::now();
-        if after == Some(version) {
+        let told_already = seen.after() == Some(version);
+        seen = Seen::Answered { after: version, at: SystemTime::now() };
+        bridged.agree(&seen, daemon.as_ref());
+        if told_already {
             continue;
         }
-        after = Some(version);
         // Each field by name, and no `..`: a field the host gains does not
         // build here until it is said whether a machine's host has it too,
         // which one that changes with each daemon must not.
@@ -693,6 +682,50 @@ async fn watched(
         };
         if !told(&core, &destination, Reached::Host(host)) {
             return;
+        }
+    }
+}
+
+/// What a watch has of the machine it watches, as it tells the core.
+enum Seen {
+    /// Nothing yet, since the watch began: the first ssh to it runs.
+    Reaching { since: SystemTime },
+    /// The host its daemon answered `at`, as the version `after`.
+    Answered { after: api::Version, at: SystemTime },
+    /// The host as `Answered`, though the connection to it broke since, and
+    /// is made afresh at once: the host stands meanwhile, as where the
+    /// machine's daemon makes way for a newer one.
+    Broke { after: api::Version, at: SystemTime },
+    /// Nothing, since `since`, after as many `failures` in a row, for `why`.
+    Unreached { since: SystemTime, failures: u32, why: (String, Stopped) },
+}
+
+impl Seen {
+    /// The version of the host the core has, to ask after.
+    fn after(&self) -> Option<api::Version> {
+        match self {
+            Seen::Answered { after, .. } | Seen::Broke { after, .. } => Some(*after),
+            Seen::Reaching { .. } | Seen::Unreached { .. } => None,
+        }
+    }
+
+    /// How many questions in a row failed.
+    fn failures(&self) -> u32 {
+        match self {
+            Seen::Reaching { .. } | Seen::Answered { .. } => 0,
+            Seen::Broke { .. } => 1,
+            Seen::Unreached { failures, .. } => *failures,
+        }
+    }
+
+    /// What it has once a question fails for `why`.
+    fn failed(self, why: (String, Stopped)) -> Seen {
+        let failures = self.failures().saturating_add(1);
+        match self {
+            Seen::Answered { after, at } => Seen::Broke { after, at },
+            Seen::Reaching { since }
+            | Seen::Broke { at: since, .. }
+            | Seen::Unreached { since, .. } => Seen::Unreached { since, failures, why },
         }
     }
 }
@@ -831,6 +864,17 @@ mod tests {
 
     use super::*;
 
+    /// What a watch has once its machine's daemon answered.
+    fn answered() -> Seen {
+        Seen::Answered { after: api::Version { pid: 1, seq: 1 }, at: SystemTime::now() }
+    }
+
+    /// What a watch has once it told the core its machine is unreached.
+    fn lost() -> Seen {
+        let why = ("ssh: Connection refused".to_owned(), Stopped::Ended(Some(255)));
+        Seen::Unreached { since: SystemTime::now(), failures: 2, why }
+    }
+
     /// The machines `text` names, as the file, and how much of it does not
     /// read.
     fn named_in(text: &str) -> (Vec<String>, u32) {
@@ -880,9 +924,9 @@ mod tests {
         let of_watch = |watch| Bridged::new(Arc::clone(&bridges), destination.clone(), watch);
         let ending = of_watch(1);
         let later = of_watch(2);
-        later.reached(&daemon);
-        ending.reached(&daemon);
-        ending.lost();
+        later.agree(&answered(), Some(&daemon));
+        ending.agree(&answered(), Some(&daemon));
+        ending.agree(&lost(), None);
         drop(ending);
         let watch = locked(&bridges.0).get(&destination).map(|bridge| bridge.watch);
         assert_eq!(watch, Some(2));
@@ -917,7 +961,7 @@ mod tests {
         assert!(!woke(&mut bridged, Duration::from_millis(100)));
 
         let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
-        bridged.reached(&daemon);
+        bridged.agree(&answered(), Some(&daemon));
         assert!(bridges.to(&destination).is_some());
         assert!(!woke(&mut bridged, Duration::from_millis(100)));
     }
