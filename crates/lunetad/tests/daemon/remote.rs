@@ -1374,7 +1374,7 @@ case "$words" in
         echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
         exit 1 ;;
 esac
-echo '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","structured_output":{{"title":"A red button","body":"It is red.\nToo red.","label":"bug"}}}}'
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","structured_output":{{"title":"A red button","body":"It is red.\nToo red.","label":"bug"}}}}'
 "#
     );
     script(&host.zellij.bin().join("claude"), &text);
