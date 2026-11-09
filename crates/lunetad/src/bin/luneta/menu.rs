@@ -10,9 +10,10 @@
 //! starts an agent on it there, `f` and `e`, which start one on what the
 //! command a shell ran last printed, to fix what went wrong or explain it, and
 //! `c`, which starts one on the checks that failed on its pull request. Each
-//! starts in the harness the rule over the group names, the one that runs in
-//! the pane, or else the one you picked last, and `Tab` picks the other: in
-//! the search too, and in the menu for a link.
+//! starts in the harness the line under the keys names, by its icon and its
+//! name: the one that runs in the pane, which the line says, or else the one
+//! you picked last, and `Tab` picks the next: in the search too, and in the
+//! menu for a link.
 //! `n` opens the New group: your shell beside the
 //! pane, a tab of its session, or a session, in the directory it works in, or
 //! on a machine's header in the home of its user there, or a machine for
@@ -67,11 +68,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::agents::{self, Harness};
+use crate::agents::{self, Harness, Picked};
 use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::icons;
 use crate::issue::Repository;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
@@ -156,8 +158,13 @@ pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
 
-/// What the line that picks the other harness names its key, `Tab`.
-const SWITCH: &str = "tab";
+/// What the line under the keys that start agents says `Tab` does, in as
+/// many words as it has room for.
+const NEXT_DOES: [&str; 2] = ["another agent", "another"];
+
+/// What the line under the keys that start agents says after the name of the
+/// harness, where the agent in the pane picked it.
+const PANE_S: &str = ", the pane's";
 
 /// What follows a group's name: it opens, as a folded session does.
 const GROUP: &str = "▸";
@@ -668,7 +675,7 @@ struct Keys {
     /// Each group opened, by where it stands in the one before.
     open: Vec<usize>,
     search: Option<Search>,
-    agent: Harness,
+    agent: Picked,
 }
 
 impl Keys {
@@ -678,7 +685,7 @@ impl Keys {
     /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; another
     /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group; and
     /// this one's the same but `d d`. They start agents in `agent`.
-    fn new(target: &Target, agent: Harness) -> Self {
+    fn new(target: &Target, agent: Picked) -> Self {
         let every = Keys::every(target.removes()).into_iter();
         let root = every.filter_map(|entry| entry.on(target)).collect();
         Keys { root, open: Vec::new(), search: None, agent }
@@ -758,7 +765,7 @@ impl Keys {
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
         root.extend(Keys::every(None).into_iter().filter(shown));
-        Keys { root, open: Vec::new(), search: None, agent: Harness::ClaudeCode }
+        Keys { root, open: Vec::new(), search: None, agent: Picked::ByYou(Harness::ClaudeCode) }
     }
 
     /// The groups opened, each its name and its entries.
@@ -789,12 +796,12 @@ impl Keys {
     /// closes what it opens or closes, or asks for the search box,
     /// `Backspace` goes back a group, and out of the menu from the first, and
     /// `Esc` closes it. While the search box is open, it takes the keys
-    /// instead. Where what is open starts agents, `Tab` picks the other
+    /// instead. Where what is open starts agents, `Tab` picks the next
     /// harness for them.
     fn key(&mut self, key: &KeyEvent) -> Pressed {
         if key.code == KeyCode::Tab && bare(key) && self.starts() {
-            self.agent = agents::other(self.agent);
-            return Pressed::Switched(self.agent);
+            self.agent = self.agent.next();
+            return Pressed::Switched(self.agent.harness());
         }
         if let Some(search) = &mut self.search {
             let (pressed, open) = searched(search, key);
@@ -1410,7 +1417,7 @@ enum Stage {
     /// The menu for `work`, which a paste opened, at `step`, whose agent
     /// starts in `agent`. Once luneta has found where its keys go, its target
     /// is there.
-    Pull { work: Work, agent: Harness, step: Step },
+    Pull { work: Work, agent: Picked, step: Step },
     /// The box `n m` opens, with what is typed in it for ssh to reach a
     /// machine by, and why that is no destination, once `Enter` found it is
     /// not, until the next key.
@@ -1469,7 +1476,7 @@ impl Menu {
     /// on the first with no key, and what a key that does more than open a
     /// group leaves the sidebar to do, its keys starting agents in `agent`.
     /// None, and no menu, for a key the menu has not.
-    pub fn open(number: u64, target: Target, key: Option<char>, agent: Harness) -> Option<Did> {
+    pub fn open(number: u64, target: Target, key: Option<char>, agent: Picked) -> Option<Did> {
         let keys = Keys::new(&target, agent);
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
@@ -1483,14 +1490,14 @@ impl Menu {
 
     /// The menu numbered `number` for `target`, on its first group, its keys
     /// starting agents in `agent`.
-    pub fn new(number: u64, target: Target, agent: Harness) -> Menu {
+    pub fn new(number: u64, target: Target, agent: Picked) -> Menu {
         let keys = Keys::new(&target, agent);
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
     /// The menu numbered `number` for `work`, pasted with the menu for
     /// `target` open, or the row highlighted, whose agent starts in `agent`.
-    pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
+    pub fn pull(number: u64, target: Target, work: Work, agent: Picked) -> Menu {
         let step = Step::Choosing { wrong: None };
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
     }
@@ -1740,7 +1747,7 @@ impl Menu {
                 (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { cwd, .. }) => {
                         keys.search = Some(Search::new());
-                        let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent };
+                        let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent.harness() };
                         stays(Stage::Choosing(keys), wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
@@ -1748,7 +1755,7 @@ impl Menu {
                 (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
                         let branch = row.branch.as_deref();
-                        let command = agents::on_skill(keys.agent, &skill, None, branch);
+                        let command = agents::on_skill(keys.agent.harness(), &skill, None, branch);
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
@@ -1876,8 +1883,8 @@ impl Menu {
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } }
                 if key.code == KeyCode::Tab && bare(key) =>
             {
-                let agent = agents::other(agent);
-                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
+                let agent = agent.next();
+                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent.harness()))
             },
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
                 let asks = Asks::of(&work);
@@ -2033,13 +2040,13 @@ impl Menu {
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                agents::on_skill(agent, REVIEW, Some(&link.url()), branch.as_deref())
+                agents::on_skill(agent.harness(), REVIEW, Some(&link.url()), branch.as_deref())
             },
             (Pull::Agent, Readied::Link(link)) => {
-                agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
+                agents::on_words(agent.harness(), format!("{TACKLE} {}", link.url()), &[])
             },
             (Pull::Agent, Readied::File { real }) => {
-                agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
+                agents::on_words(agent.harness(), format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
@@ -2128,7 +2135,7 @@ impl Menu {
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
-        let command = agents::on_words(keys.agent, prompt, &files);
+        let command = agents::on_words(keys.agent.harness(), prompt, &files);
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
@@ -2162,7 +2169,7 @@ impl Menu {
             )));
         }
         let prompt = checks::prompt(&page, &failing);
-        let command = agents::on_words(keys.agent, prompt, &checks::files(&failing));
+        let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
@@ -2174,7 +2181,7 @@ impl Menu {
     /// the menu starts agents in that harness: `Tab` asked for another's.
     pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
         if let Stage::Choosing(keys) = &mut self.stage
-            && keys.agent == agent
+            && keys.agent.harness() == agent
             && let Some(search) = &mut keys.search
         {
             search.fill(skills);
@@ -2285,7 +2292,7 @@ impl Menu {
                         let mut body: Vec<_> =
                             entries.iter().map(|entry| entry_line(entry, inner)).collect();
                         spots.add(body.len(), 0..width, Choice::Key(KeyEvent::from(KeyCode::Tab)));
-                        body.push(switch_line(*agent, inner));
+                        body.push(agent_line(*agent, inner));
                         if let Some(wrong) = wrong {
                             body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED)));
                         }
@@ -2315,20 +2322,25 @@ impl Menu {
             | Stage::Turning { keys, .. }
             | Stage::Reading { keys, .. } => {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
-                let switch = (Hint::Tab, agents::name(agents::other(keys.agent)));
+                let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
                 if let Some(search) = &keys.search {
-                    let moves = [
-                        (Hint::Moves, "Move"),
-                        (Hint::Enter, "Start"),
-                        switch,
-                        (Hint::Esc, "Back"),
-                    ];
-                    let (body, skills) = search_lines(search, width, body_room);
+                    let moves =
+                        [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
+                    // The line that names the agent goes under the skills,
+                    // where it leaves room for the term and one of them.
+                    let listing = body_room.checked_sub(1).filter(|room| *room > 1);
+                    let (mut body, skills) =
+                        search_lines(search, width, listing.unwrap_or(body_room));
                     if choosing {
                         spots = skills;
                     }
-                    let title = in_agent(SEARCH_TITLE, keys.agent);
-                    (title, right, body, keyed(width, &moves))
+                    if listing.is_some() {
+                        if choosing {
+                            spots.add(body.len(), 0..width, tab);
+                        }
+                        body.push(agent_line(keys.agent, inner));
+                    }
+                    (SEARCH_TITLE.to_owned(), right, body, keyed(width, &moves))
                 } else {
                     let back: &[(Hint, &str)] = if keys.open.is_empty() {
                         &[(Hint::Esc, "Close")]
@@ -2343,10 +2355,9 @@ impl Menu {
                     }
                     if keys.starts() {
                         if choosing {
-                            let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
                             spots.add(body.len(), 0..width, tab);
                         }
-                        body.push(switch_line(keys.agent, inner));
+                        body.push(agent_line(keys.agent, inner));
                     }
                     (title(keys), right, body, keyed(width, back))
                 }
@@ -2666,20 +2677,10 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
     lines
 }
 
-/// What the rule over the menu names: the groups opened, and the harness
-/// their keys start agents in, where they do.
+/// What the rule over the menu names: the groups opened.
 fn title(keys: &Keys) -> String {
     let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
-    match (names.is_empty(), keys.starts()) {
-        (true, _) => TITLE.to_owned(),
-        (false, false) => names.join(" › "),
-        (false, true) => in_agent(&names.join(" › "), keys.agent),
-    }
-}
-
-/// `title`, and the harness after it that what it names starts agents in.
-fn in_agent(title: &str, agent: Harness) -> String {
-    format!("{title} · {}", agents::name(agent))
+    if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
 }
 
 /// The legend at the bottom of the sidebar, `width` wide, in `room` lines at
@@ -2790,16 +2791,45 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
 }
 
 /// The line under the keys that start agents, `inner` wide past the space it
-/// starts with: `Tab`, and the harness it picks in the place of `agent`.
-fn switch_line(agent: Harness, inner: usize) -> Line<'static> {
-    let does = format!("use {}", agents::name(agents::other(agent)));
-    let room = inner.saturating_sub(SWITCH.width() + GAP);
-    Line::from(vec![
+/// starts with: the icon and the name of the harness of `agent`, and that the
+/// agent in the pane picked it, where it did; and after them `<TAB>`, which
+/// picks the next, and what it does. Where the line has no room for all of
+/// it, what `Tab` does goes in fewer words, then in none, and then the
+/// pane's part goes.
+fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
+    let name = agents::name(agent.harness());
+    let icon = icons::of(name).map_or_else(|| " ".repeat(icons::WIDTH), str::to_owned);
+    let pane = match agent {
+        Picked::ByPane(_) => PANE_S,
+        Picked::ByYou(_) => "",
+    };
+    let key = Hint::Tab.label();
+    let named = icons::WIDTH + 1 + name.width();
+    let wide = |pane: &str, does: &str| {
+        let does = if does.is_empty() { 0 } else { 1 + does.width() };
+        named + pane.width() + GAP + key.width() + does
+    };
+    let tries = [(pane, NEXT_DOES[0]), (pane, NEXT_DOES[1]), (pane, ""), ("", "")];
+    let fits = |(pane, does): &(&str, &str)| wide(pane, does) <= inner;
+    let (pane, does) = tries.into_iter().find(fits).unwrap_or(("", ""));
+    let room = inner.saturating_sub(icons::WIDTH + 1);
+    let name = sidebar::cut(name, room);
+    let mut spans = vec![
         Span::raw(" "),
-        Span::styled(SWITCH, Style::new().fg(ACCENT)),
-        Span::raw(" ".repeat(GAP)),
-        Span::styled(sidebar::cut(&does, room), Style::new().fg(NAME)),
-    ])
+        Span::raw(icon),
+        Span::raw(" "),
+        Span::raw(name),
+        Span::styled(pane, Style::new().fg(NAME)),
+    ];
+    if wide(pane, does) <= inner {
+        spans.push(Span::raw(" ".repeat(GAP)));
+        spans.push(Span::styled(key, Style::new().fg(ACCENT)));
+        if !does.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(does, Style::new().fg(NAME)));
+        }
+    }
+    Line::from(spans)
 }
 
 /// A key a line of keys names, as `<ESC>`, `<y>` or `<Ctrl r>`, or what
@@ -2995,6 +3025,7 @@ mod tests {
     use crate::zellij::Closes;
 
     const CLAUDE: Harness = Harness::ClaudeCode;
+    const PICKED: Picked = Picked::ByYou(CLAUDE);
 
     fn listed() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
@@ -3035,7 +3066,7 @@ mod tests {
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
-        Menu::open(1, target, key, CLAUDE).expect("a key of the menu")
+        Menu::open(1, target, key, PICKED).expect("a key of the menu")
     }
 
     /// The menu a key left open, and what it wants asked for.
@@ -3216,7 +3247,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
         // A key the menu has not opens none.
-        assert!(Menu::open(1, pane_row(), Some('x'), CLAUDE).is_none());
+        assert!(Menu::open(1, pane_row(), Some('x'), PICKED).is_none());
     }
 
     #[test]
@@ -3258,10 +3289,9 @@ mod tests {
 
     /// `c` opens the Skills group, and a key in it starts an agent on its
     /// skill beside the row's pane, in its directory, named for the skill
-    /// and the branch, as the search's `Enter` does: in the harness the rule
-    /// names, which `Tab` switches, and wants kept for the next menu. Where
-    /// the rule has no room for where the pane works too, it names the
-    /// harness.
+    /// and the branch, as the search's `Enter` does: in the harness the line
+    /// under the keys names, by its icon and its name, which `Tab` switches,
+    /// and wants kept for the next menu. The rule names the group alone.
     #[test]
     fn a_key_of_the_skills_group_starts_an_agent_on_its_skill_in_the_harness_named() {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
@@ -3269,19 +3299,17 @@ mod tests {
         assert_eq!(
             text(&menu.lines(31, 10, 0).0),
             [
-                "─ Skills · claude ─────────────",
+                "─ Skills ──────── luneta/main ─",
                 " t  /thermo-nuclear-review",
                 " m  /make-illegal-states-unrep…",
                 " s  /tigerstyle",
                 " f  fix the last command",
                 " e  explain the last command",
                 " c  fix the failing checks",
-                " tab  use pi",
+                " \u{ec82} claude  <TAB> another agent",
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let wide = format!("─ Skills · claude {} luneta/main ─", "─".repeat(16));
-        assert_eq!(text(&menu.lines(48, 10, 0).0)[0], wide);
         let (menu, wants) = stays(menu.key(&char('t')));
         let named = "thermo-nuclear-review: feat/menu";
         let command = ["claude", "--name", named, "/thermo-nuclear-review"].map(str::to_owned);
@@ -3293,13 +3321,31 @@ mod tests {
         assert_eq!(wants, Wants::Keep(Harness::Pi));
         let lines = text(&menu.lines(31, 10, 0).0);
         assert_eq!([lines[0].as_str(), lines[7].as_str()], [
-            "─ Skills · pi ─── luneta/main ─",
-            " tab  use claude",
+            "─ Skills ──────── luneta/main ─",
+            " \u{f03ff} pi  <TAB> another agent",
         ]);
         let (menu, wants) = stays(menu.key(&char('t')));
         let command = ["pi", "--name", named, "/skill:thermo-nuclear-review"].map(str::to_owned);
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
         assert!(menu.opening().is_some());
+    }
+
+    /// On a pane an agent runs in, the line under the keys says that agent
+    /// picked the harness, until `Tab` picks the next. Where the line has
+    /// less room, what `Tab` does goes in fewer words, then in none, and then
+    /// the pane's part goes.
+    #[test]
+    fn the_agent_line_says_where_the_pane_s_agent_picked_the_harness() {
+        let pi = Picked::ByPane(Harness::Pi);
+        let (menu, _) = stays(Menu::open(1, pane_row(), Some('c'), pi).unwrap());
+        let line = |menu: &Menu, width| text(&menu.lines(width, 10, 0).0)[7].clone();
+        assert_eq!(line(&menu, 38), " \u{f03ff} pi, the pane's  <TAB> another agent");
+        assert_eq!(line(&menu, 37), " \u{f03ff} pi, the pane's  <TAB> another");
+        assert_eq!(line(&menu, 31), " \u{f03ff} pi, the pane's  <TAB>");
+        assert_eq!(line(&menu, 23), " \u{f03ff} pi  <TAB>");
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        assert_eq!(wants, Wants::Keep(CLAUDE));
+        assert_eq!(line(&menu, 31), " \u{ec82} claude  <TAB> another agent");
     }
 
     /// `Tab` switches the harness only where the menu starts agents: its
@@ -3377,7 +3423,8 @@ mod tests {
         assert!(menu.opening().is_some());
 
         // pi reads it with no rule, as it asks nothing before a read.
-        let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), Harness::Pi).unwrap());
+        let pi = Picked::ByPane(Harness::Pi);
+        let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
         let (menu, _) = stays(menu.key(&char('e')));
         let kept = Kept { file: "/run/luneta/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
         let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
@@ -3543,7 +3590,7 @@ mod tests {
     #[test]
     fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
         for row in [pane_row(), session_row()] {
-            let did = Menu::open(1, row.clone(), Some('a'), CLAUDE).expect("the menu has `a`");
+            let did = Menu::open(1, row.clone(), Some('a'), PICKED).expect("the menu has `a`");
             assert_eq!(closed(did), Done::Ask(row.clone()));
             let (menu, _) = stays(opened(row.clone(), None));
             assert_eq!(closed(menu.key(&char('a'))), Done::Ask(row));
@@ -3562,7 +3609,7 @@ mod tests {
             let row = Target::Pane(on.clone(), row());
             let (home, name) = ("/w/luneta".to_owned(), "luneta".to_owned());
             let repository = Repository { on, dir: main_dir(), home, name };
-            let did = Menu::open(1, row.clone(), Some('i'), CLAUDE).expect("the menu has `i`");
+            let did = Menu::open(1, row.clone(), Some('i'), PICKED).expect("the menu has `i`");
             assert_eq!(closed(did), Done::Issue(repository.clone()));
             let (menu, _) = stays(opened(row, None));
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
@@ -3570,7 +3617,7 @@ mod tests {
         let unrepositoried = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
         let nowhere = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
         for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
-            assert!(Menu::open(1, row.clone(), Some('i'), CLAUDE).is_none(), "{row:?}");
+            assert!(Menu::open(1, row.clone(), Some('i'), PICKED).is_none(), "{row:?}");
             let (menu, _) = stays(opened(row.clone(), None));
             let lines = text(&menu.lines(31, 12, 0).0);
             assert!(!lines.contains(&" i  File issue".to_owned()), "{lines:?}");
@@ -3927,7 +3974,7 @@ mod tests {
             ]
         );
         assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
-        assert!(Menu::open(1, local_header(), Some(DELETE), CLAUDE).is_none());
+        assert!(Menu::open(1, local_header(), Some(DELETE), PICKED).is_none());
 
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         for (header, machine) in [(local_header(), Machine::Local), (remote_header(), vps())] {
@@ -3996,7 +4043,7 @@ mod tests {
         let new = || ("─ New ─────────────────────────".to_owned(), Wants::Nothing);
         for target in [session_row(), local_header(), remote_header()] {
             for group in [SEARCH, SKILLS, TURN] {
-                let menu = Menu::open(1, target.clone(), Some(group), CLAUDE);
+                let menu = Menu::open(1, target.clone(), Some(group), PICKED);
                 assert!(menu.is_none(), "{group}");
                 assert_eq!(press(&target, None, group), first(), "{group}");
             }
@@ -4035,17 +4082,19 @@ mod tests {
         assert_eq!(wants, Wants::Skills { cwd: "/w/luneta/main".to_owned(), agent: CLAUDE });
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
-            ["─ Skills · claude ─────────────", " _", " finding skills…"]
+            ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
         );
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
         // has the focus, which it has while the search is open.
         let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [Some(LIT), None]);
+        // Under the skills, the line that names the agent, as in the groups.
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{ec82} claude  <TAB> another agent");
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
-            "─ Skills · claude ─────────────".to_owned(),
+            "─ Skills ──────── luneta/main ─".to_owned(),
             " ti_".to_owned(),
             " /tigerstyle  tigerstyle it".to_owned(),
         ]);
@@ -4059,7 +4108,7 @@ mod tests {
     /// `Tab` in the search box picks the other harness and has the finder
     /// asked for its skills, keeping what is typed. What the finder says
     /// for the harness the box left goes nowhere. `Enter` starts the one
-    /// picked in the harness the rule names.
+    /// picked in the harness the line under the skills names.
     #[test]
     fn tab_in_the_search_finds_the_skills_of_the_other_harness() {
         let (mut menu, _) = stays(opened(pane_row(), Some('/')));
@@ -4069,7 +4118,7 @@ mod tests {
         let cwd = "/w/luneta/main".to_owned();
         assert_eq!(wants, Wants::Refind { cwd, agent: Harness::Pi });
         assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
-            "─ Skills · pi ─── luneta/main ─",
+            "─ Skills ──────── luneta/main ─",
             " t_",
             " finding skills…",
         ]);
@@ -4077,6 +4126,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " finding skills…");
         menu.found(Harness::Pi, Ok(skills(&["tdd", "code-review"])));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(Harness::Pi, "tdd", None, Some("feat/menu"));
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command }));
@@ -4275,7 +4325,7 @@ mod tests {
     /// take, and as tall as its lines.
     #[test]
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
-        let menu = Menu::new(1, pane_row(), CLAUDE);
+        let menu = Menu::new(1, pane_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(floated(drawing(&menu), 50, 12), [
             "z".repeat(50),
@@ -4294,7 +4344,7 @@ mod tests {
 
         let (menu, _) = stays(menu.key(&char('c')));
         let zellij = "z".repeat(7);
-        let rule = format!("─ Skills · claude {} luneta/main ─", "─".repeat(9));
+        let rule = format!("─ Skills {} luneta/main ─", "─".repeat(18));
         assert_eq!(floated(drawing(&menu), 50, 11)[1..], [
             format!("{zellij}┌{rule}┐"),
             format!("{zellij}│{:<41}│", " t  /thermo-nuclear-review"),
@@ -4303,7 +4353,7 @@ mod tests {
             format!("{zellij}│{:<41}│", " f  fix the last command"),
             format!("{zellij}│{:<41}│", " e  explain the last command"),
             format!("{zellij}│{:<41}│", " c  fix the failing checks"),
-            format!("{zellij}│{:<41}│", " tab  use pi"),
+            format!("{zellij}│{:<41}│", " \u{ec82} claude  <TAB> another agent"),
             format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
@@ -4346,7 +4396,7 @@ mod tests {
     /// names, with the words after it. The rule over them is none.
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
-        let menu = Menu::new(1, pane_row(), CLAUDE);
+        let menu = Menu::new(1, pane_row(), PICKED);
         assert_eq!(clicked(&menu, "Skills ▸"), Some(pressed(KeyCode::Char('c'))));
         assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
         assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
@@ -4402,7 +4452,7 @@ mod tests {
     /// The menu for the pull request, pasted on `row`, its key `key` pressed,
     /// waiting for luneta to find where it goes.
     fn pulling_on(row: Target, key: char) -> Menu {
-        let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
+        let (menu, wants) = stays(Menu::pull(1, row, link(), PICKED).key(&char(key)));
         let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
         assert_eq!(wants, Wants::Pull(link(), wanted));
         assert!(menu.pulling());
@@ -4426,21 +4476,21 @@ mod tests {
     /// close the menu.
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
-        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let menu = Menu::pull(1, pane_row(), link(), PICKED);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
                 " r  /thermo-nuclear-review",
-                " tab  use pi",
+                " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
         );
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
-        let syncing = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let syncing = Menu::pull(1, pane_row(), link(), PICKED);
         let (syncing, wants) = stays(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
         assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
@@ -4504,18 +4554,18 @@ mod tests {
         assert_eq!((&row.session, row.pane), (&other, 9));
     }
 
-    /// `Tab` in the menu for a pull request picks the other harness, and
-    /// wants it kept, and its line then offers the first back; `r` then
+    /// `Tab` in the menu for a pull request picks the next harness, and
+    /// wants it kept, and its line then names that one; `r` then
     /// starts the review in that one, by its spelling of the skill. A click
     /// on that line is a `Tab`. Once a key waits, `Tab` does nothing.
     #[test]
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
-        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let menu = Menu::pull(1, pane_row(), link(), PICKED);
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(menu.lines(31, 9, 0).1.at(Position::new(5, 3)), Some(&Choice::Key(tab)));
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[3], " tab  use claude");
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[3], " \u{f03ff} pi  <TAB> another agent");
         let (menu, _) = stays(menu.key(&char('r')));
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Nothing);
@@ -4545,14 +4595,14 @@ mod tests {
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let menu = Menu::pull(1, pane_row(), issue.clone(), CLAUDE);
+        let menu = Menu::pull(1, pane_row(), issue.clone(), PICKED);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " w  worktree",
                 " t  tackle",
-                " tab  use pi",
+                " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
         );
@@ -4581,7 +4631,7 @@ mod tests {
     fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
+        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), PICKED).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
             at: At::Clone { cwd: "/w/cdk".to_owned(), name },
@@ -4597,7 +4647,7 @@ mod tests {
             "─ #2736 ──────── cashubtc/cdk ─",
             " w  worktree",
             " t  tackle",
-            " tab  use pi",
+            " \u{ec82} claude  <TAB> another agent",
             " /w/cdk/issue-2736 is on",
             " dev-docs, not issue-2736, so",
             " no agent starts there; w",
@@ -4629,14 +4679,14 @@ mod tests {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
             Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
         };
-        let menu = Menu::pull(1, pane_row(), file(), CLAUDE);
+        let menu = Menu::pull(1, pane_row(), file(), PICKED);
         assert_eq!(
             text(&menu.lines(38, 9, 0).0),
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
                 " w  worktree",
                 " t  tackle",
-                " tab  use pi",
+                " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
             ]
         );
@@ -4670,7 +4720,7 @@ mod tests {
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         let pressed = |key: char| {
-            stays(Menu::pull(1, pane_row(), file(), CLAUDE).key(&char(key))).0
+            stays(Menu::pull(1, pane_row(), file(), PICKED).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };

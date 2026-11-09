@@ -154,14 +154,14 @@ turn a pane into a tab and a tab into panes, or delete what you are done with. T
 and what each does, as which-key does in neovim.
 
 ```text
-╭─ Skills · claude ────── luneta/sidebar ─╮
+╭─ Skills ─────────────── luneta/sidebar ─╮
 │ t  /thermo-nuclear-review               │
 │ m  /make-illegal-states-unrepresentable │
 │ s  /tigerstyle                          │
 │ f  fix the last command                 │
 │ e  explain the last command             │
 │ c  fix the failing checks               │
-│ tab  use pi                             │
+│ claude  <TAB> another agent             │
 │                                         │
 │ <BS> - Back, <ESC> - Close              │
 ╰─────────────────────────────────────────╯
@@ -179,11 +179,14 @@ zellij has yet to say: an agent starts where its pane works, or not at all.
 [luneta's sidebar](#luneta-in-your-terminal) has the menu too, for the row it
 highlights.
 
-The agent starts in the harness the border names, Claude Code (`claude`) or
-pi: the harness of the agent in that pane, where one runs, or else the one you
-picked last, in any luneta on the machine. `Tab` picks the other, for this menu
-and the next, and luneta keeps it in `luneta/agent` of `$XDG_STATE_HOME`, or of
-`~/.local/state`. Each harness is told in its own words: Claude Code runs a
+The agent starts in the harness the line under the keys names, by its icon
+and its name, Claude Code (`claude`) or pi: the harness of the agent in that
+pane, where one runs, as the line says by `pi, the pane's`, or else the one you
+picked last, in any luneta on the machine. `Tab`, or a click on the line, goes
+round to the next harness luneta knows, for this menu and the ones after it,
+and luneta keeps it in `luneta/agent` of `$XDG_STATE_HOME`, or of
+`~/.local/state`. The icon is left out of the menus drawn on this page, as the
+sidebar's are. Each harness is told in its own words: Claude Code runs a
 skill as `/tigerstyle`, and pi as `/skill:tigerstyle`.
 
 An agent started on a skill goes by the skill and the branch, as
@@ -260,7 +263,7 @@ one highlighted, beside the pane, as a key does. `↓` and `↑` move; `Esc` goe
 back to the keys, and so does `Backspace` once there is nothing to take back.
 
 ```text
-╭─ Skills · claude ────────────────────────────── luneta/main ─╮
+╭─ Skills ─────────────────────────────────────── luneta/main ─╮
 │ _                                                            │
 │ /code-review  Review the changes since a fixed point, on tw… │
 │ /diagnosing-bugs  Diagnosis loop for hard bugs and performa… │
@@ -270,17 +273,18 @@ back to the keys, and so does `Backspace` once there is nothing to take back.
 │ /research  Research a question against primary sources.      │
 │ /thermo-nuclear-review  Review a branch as hard as it can b… │
 │ /tigerstyle  Apply TigerStyle when writing or reviewing cod… │
+│ claude  <TAB> another agent                                  │
 │                                                              │
-│ <↓↑> - Move, <ENTER> - Start, <TAB> - pi, <ESC> - Back       │
+│ <↓↑> - Move, <ENTER> - Start, <ESC> - Back                   │
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
 The list shows eight skills at most, and scrolls under the cursor. It keeps
 the height of the skills found as you type, so the menu keeps its size.
 
-`Tab` picks the other harness there too, and the list is made again for it,
-keeping what you typed. The skills are the ones the harness the border names
-finds for that directory, where it finds them. Claude Code's, as slash commands:
+`Tab` picks the next harness there too, and the list is made again for it,
+keeping what you typed. The skills are the ones the harness the line under
+them names finds for that directory, where it finds them. Claude Code's, as slash commands:
 
 - yours, in `~/.claude`, or in `CLAUDE_CONFIG_DIR`
 - the project's, in the `.claude` of the directory and of each one above it,
@@ -691,7 +695,7 @@ for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,
 and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
 first group, where `/` searches the skills the pane's directory can run, and
 `Enter` starts an agent on the one highlighted, beside the pane, as `c`'s
-keys do, in the harness the border names, and so does a click on a skill. The wheel over them moves the
+keys do, in the harness the line under the skills names, and so does a click on a skill. The wheel over them moves the
 highlight.
 
 `t t` turns the highlighted pane into a tab of its own, in its session, and the
@@ -754,7 +758,8 @@ another, or else a session luneta makes in a clone of it that zoxide knows,
 named as the picker's directories name it. `r` does the
 same and starts an agent in the tab on `/thermo-nuclear-review` and the
 link, named for the skill and the branch, in the harness you picked last, which
-`Tab` there switches, as in the Skills group. Where a pane has the pull request's
+the line under the keys names, and `Tab` there picks the next, as in the
+Skills group. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
 beside it. A repository is the pull request's where any of its remotes is the
 pull request's repository on GitHub, by GitHub's name or, by ssh, another your
