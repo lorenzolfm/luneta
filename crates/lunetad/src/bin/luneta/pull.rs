@@ -200,6 +200,18 @@ pub fn follow(dir: &str) -> ExitCode {
     }
 }
 
+/// Fetches the upstream branch of the branch checked out in `dir`, as
+/// `links::fetched_upstream` does. Or prints why it did not, as `make` does.
+pub fn fetch_upstream(dir: &str) -> ExitCode {
+    match links::fetched_upstream(dir) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("{}{why}", links::WHY);
+            ExitCode::FAILURE
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

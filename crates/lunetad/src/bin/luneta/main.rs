@@ -116,6 +116,15 @@ enum Command {
         #[arg(value_name = "DIR")]
         dir: String,
     },
+    /// Fetch the upstream branch of the branch checked out in a worktree, as
+    /// `wt follow` fetches it, and move no branch. lunetad has it fetched so,
+    /// for the count of how far behind it a branch is. Why it did not comes
+    /// last on stderr, after `luneta: `.
+    #[command(hide = true)]
+    FetchUpstream {
+        #[arg(value_name = "DIR")]
+        dir: String,
+    },
     /// Tell the luneta listening on a socket that its notification of a
     /// group was clicked, as a click on one runs on macOS.
     #[command(hide = true)]
@@ -144,6 +153,7 @@ fn main() -> ExitCode {
         // It asks no lunetad, and so needs no folder to find one in.
         Command::Worktree { repo, of } => return pull::make(&repo, &of),
         Command::Follow { dir } => return pull::follow(&dir),
+        Command::FetchUpstream { dir } => return pull::fetch_upstream(&dir),
         Command::Clicked { socket, group } => {
             return match peers::tell(&socket, &group) {
                 Ok(()) => ExitCode::SUCCESS,

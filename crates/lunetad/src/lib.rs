@@ -20,6 +20,7 @@ mod daemon;
 mod directory;
 pub mod ended;
 pub mod eza;
+mod fetches;
 pub mod folder;
 mod git;
 mod github;

@@ -21,6 +21,7 @@
 //! directory at a time, and one git has said nothing of yet first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -81,6 +82,20 @@ pub fn local(command: &mut Command) -> &mut Command {
         command.env_remove(repository);
     }
     command
+}
+
+/// Has git, run by `command` or by a program it runs, take each of `pairs` as
+/// config, over what any config file says, after what the environment gives
+/// git already.
+pub fn configured<'a>(command: &'a mut Command, pairs: &[(&str, &str)]) -> &'a mut Command {
+    let count = env::var("GIT_CONFIG_COUNT").ok();
+    let mut next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
+    for (key, value) in pairs {
+        command.env(format!("GIT_CONFIG_KEY_{next}"), key);
+        command.env(format!("GIT_CONFIG_VALUE_{next}"), value);
+        next = next.saturating_add(1);
+    }
+    command.env("GIT_CONFIG_COUNT", next.to_string())
 }
 
 /// What git says of the work tree in `dir`: how it stands, that `dir` is in a

@@ -1161,6 +1161,65 @@ fn git_runs_no_command_a_repository_names() {
     assert!(ran.exists(), "git runs no command the repository names here");
 }
 
+/// How far behind its upstream a branch a pane works on is, is of what the
+/// remote has, with no one fetching it but the daemon, which moves no branch
+/// and runs no hook the repository names. A remote that is gone is said once
+/// in the log.
+#[test]
+fn the_behind_count_is_of_what_the_remote_has() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, tree, elsewhere, ran) =
+        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    let (lost, lone) = (path("lost.git"), path("lone"));
+    fs::create_dir(&origin).unwrap();
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    commit(&elsewhere, "README", "start\n");
+    assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
+    assert!(git(dirs.path(), &["clone", "-q", "--bare", &spelled(&origin), "lost.git"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&lost), "lone"]));
+    fs::remove_dir_all(&lost).unwrap();
+    for file in ["one", "two", "three"] {
+        commit(&elsewhere, file, "new\n");
+    }
+    assert!(git(&elsewhere, &["push", "-q"]));
+    let hook = tree.join(".git/hooks/reference-transaction");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+    fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
+    let here = fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap();
+
+    let (cwd, alone) = (spelled(&tree), spelled(&lone));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    host.zellij.list("work", &json!([in_dir(1, &cwd), in_dir(2, &alone)]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let upstream = |it: Checkout| match it.head {
+        Some(Head::Branch(branch)) => branch.upstream.map(|it| (it.ahead, it.behind)),
+        _ => None,
+    };
+    eventually("the branch is three behind", || {
+        checkout(&host, &cwd).and_then(upstream).filter(|it| *it == (0, 3))
+    });
+    assert_eq!(fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap(), here);
+    assert!(!ran.exists(), "the fetch ran the hook the repository names");
+    // As it would have, let move a ref.
+    assert!(git(&tree, &["update-ref", "refs/heads/moved", "HEAD"]));
+    assert!(ran.exists(), "git runs no hook the repository names here");
+
+    let log = host.home.path().join(".local/state/luneta/luneta.log");
+    let failed = format!("git did not fetch the upstream of main in {alone}");
+    eventually("the log says the fetch failed", || {
+        fs::read_to_string(&log).ok().filter(|log| log.contains(&failed))
+    });
+    thread::sleep(Duration::from_secs(1));
+    let said = fs::read_to_string(&log).unwrap();
+    assert_eq!(said.matches(&failed).count(), 1, "{said}");
+}
+
 /// gh is asked for the pull request of the branch checked out where each pane
 /// works: once for a branch of a repository, however many of its directories
 /// panes work in, and at once as a pane comes to a branch. What gh found of a

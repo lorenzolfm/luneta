@@ -1498,7 +1498,7 @@ fn worktree_said(ran: Ran) -> Result<String, Unready> {
 /// The `luneta` that makes the worktree: the one this runs as, or else the
 /// one beside it, as beside `lunetad`, as old or as new as it is; or why
 /// there is none.
-fn luneta() -> Result<PathBuf, String> {
+pub(crate) fn luneta() -> Result<PathBuf, String> {
     let this = env::current_exe()
         .map_err(|error| format!("luneta cannot tell where it is: {error}"))?;
     if this.file_name().is_some_and(|name| name == "luneta") {
@@ -1533,6 +1533,13 @@ pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
 pub fn followed(dir: &str) -> Result<(), String> {
     git_reads(dir)?;
     wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
+}
+
+/// Fetches the upstream branch of the branch checked out in `dir`, by wt's own
+/// code, as `wt follow` fetches it, and moves no branch; or why it did not.
+pub fn fetched_upstream(dir: &str) -> Result<(), String> {
+    git_reads(dir)?;
+    wt::cmd::follow::fetch_upstream(Path::new(dir)).map_err(|error| format!("{error:#}"))
 }
 
 /// Why wt's git would not read the repository `dir` is in, where a variable
@@ -1571,7 +1578,7 @@ fn directory(path: &str) -> Option<String> {
 /// Why `luneta worktree` made no worktree, as it says on stderr after what wt
 /// and git say there as they go: the lines from its last that starts with
 /// `WHY`, on one, as what wt says can take more than one.
-fn failure(stderr: &str) -> Option<String> {
+pub(crate) fn failure(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let why = lines.iter().rposition(|line| line.starts_with(WHY))?;
     lines[why..].join(", ").strip_prefix(WHY).map(str::to_owned)
@@ -2388,7 +2395,8 @@ mod tests {
             let bare = bare.to_str().unwrap();
             assert!(git(scratch.path(), &["init", "-q", "--bare", bare]).is_some());
             let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
-            let wt = Repo::discover(Some(Path::new(bare))).unwrap().container().join("issue-7");
+            let found = Repo::discover(Some(Path::new(bare))).unwrap();
+            let wt = found.container().unwrap().join("issue-7");
             assert_eq!(wt_makes(&common, "issue-7"), wt.to_str().unwrap());
         }
     }

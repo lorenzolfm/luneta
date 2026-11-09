@@ -964,6 +964,16 @@ under the age, how its work tree stands, in the glyphs
 | `?` | an untracked file |
 | `⇡` `⇣` `⇕` | commits ahead of the upstream, behind it, or both |
 
+The count behind is of what the remote has: lunetad fetches the upstream of
+each branch a pane works on, as a pane comes to it and every five minutes
+after, as `wt follow` fetches it. The fetch moves no branch, and moves the
+remote-tracking ref only where no commit is lost, so a rewrite still moves on
+`r`. Nothing in `core.hooksPath` or `core.fsmonitor` runs for it, nor
+maintenance or a submodule's fetch, and it asks for no password: a remote that
+wants one, is gone, or takes more than a minute fails, and lunetad's log says so
+once while it keeps failing. A branch whose upstream is not a remote-tracking
+ref, as a fork's `refs/pull/N/head`, shows no count and is not fetched.
+
 A pane outside a repository, or on a detached `HEAD`, has no branch, and its
 row stays one line. After the branch is how many lines changed on it, against
 the branch its repository takes as its default, as `issue-299 +120 -34`, the
