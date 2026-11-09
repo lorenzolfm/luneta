@@ -9,7 +9,7 @@ resolver = "2"
 
 # One version for the daemon and the protocol, which ship together.
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 license = "MIT"
 
 [profile.release]

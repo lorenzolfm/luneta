@@ -1849,6 +1849,9 @@ On NixOS, add the flake to your inputs, and its package to your system's:
 environment.systemPackages = [ luneta.packages.${pkgs.stdenv.hostPlatform.system}.lunetad ];
 ```
 
+The input follows `main`. To stay on a release, name its tag in the URL, as
+`github:lorenzolfm/luneta/v0.3.0`.
+
 Then type `luneta` in a terminal. It needs nothing in zellij's config.
 
 ### Hook the shell
@@ -2005,7 +2008,7 @@ is of one release until the next. A cargo build has no stamp, and nor has the
 flake's build of a tree with changes not yet committed, so either keeps the
 daemon an install of its release started, and an install stops one either
 started. `luneta info` says the stamp after the release, as
-`0.2.2+1793301121`, and so do `luneta --version` and `lunetad --version` of
+`0.3.0+1793301121`, and so do `luneta --version` and `lunetad --version` of
 their own.
 One that reads zellij's sessions in another folder than their zellij keeps
 them in, as one started with another `ZELLIJ_SOCKET_DIR` does, they neither
