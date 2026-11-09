@@ -60,6 +60,7 @@ use lunetad::api::{
     Agent, Client, Front, Harness, Host, Pane, Saying, Session, Shell, Status, UnreadFile,
 };
 use lunetad::asks::User;
+use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::carries::{self, Carry, Lands, Moved, Planned, Whole};
 use lunetad::prunes;
@@ -83,6 +84,7 @@ use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
 use crate::icons;
+use crate::issue::Repository;
 use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
@@ -1079,6 +1081,8 @@ pub enum Asked {
     Brief(Brief),
     /// Open the ask box, for this row.
     Ask(Target),
+    /// Open the issue box, for this repository.
+    Issue(Repository),
     /// Add the machine ssh reaches by this destination to luneta's hosts
     /// file, for lunetad to watch.
     Ssh(Destination),
@@ -1115,6 +1119,7 @@ impl Asked {
             | Asked::Start { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
+            | Asked::Issue(_)
             | Asked::Ssh(_)
             | Asked::Forget(_) => None,
         }
@@ -1269,6 +1274,14 @@ pub struct Sidebar {
     /// wherever the keys went. Two can run at once, as two links pasted one
     /// after the other. The notes say what each waits on until it is done.
     working: BTreeMap<u64, Menu>,
+    /// The issues the issue box sent, while they are written and filed, each
+    /// by the number of its box, with the name of its repository: the notes
+    /// say each, after a spinner that turns, until gh has filed it, or why
+    /// not.
+    filing: BTreeMap<u64, String>,
+    /// What the last issue filed is, by its number and its title, as its link
+    /// is on the clipboard, for the notes to say until the next key.
+    filed: Option<String>,
     /// How many menus the sidebar has opened. A menu takes the next number
     /// as it opens, which what zellij answers for it carries.
     menus: u64,
@@ -2364,6 +2377,34 @@ impl Sidebar {
         }
     }
 
+    /// Says in the notes that the issue of the box numbered `number` is being
+    /// written and filed in `repository`, until `filed` says what came of it.
+    pub fn filing(&mut self, number: u64, repository: &str) {
+        self.filing.insert(number, repository.to_owned());
+    }
+
+    /// Says in the notes what came of the issue of the box numbered `number`,
+    /// in `repository`: its number and title, as gh filed it, until the next
+    /// key; or why gh filed none, or may have, which says your words are in
+    /// the issue box again.
+    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+        self.filing.remove(&number);
+        match filed {
+            Ok(filed) => {
+                log::say(&format!("issue: filed {}", filed.url()));
+                let (number, title) = (filed.number(), filed.title());
+                self.filed = Some(format!("filed #{number} in {repository}: {title}; link copied"));
+            },
+            Err(Unfiled::Refused(why)) => {
+                self.notify(format!("issue in {repository}: {why}; i has your words again"));
+            },
+            Err(Unfiled::InDoubt(why)) => {
+                let doubt = format!("issue in {repository} may be filed: {why}");
+                self.notify(format!("{doubt}; i has your words, look first"));
+            },
+        }
+    }
+
     /// Says in the notes that an image is on its way to the machine `to`, or
     /// no longer says so, with none. The sidebar collapsed says so by its rule.
     pub fn image_going(&mut self, to: Option<Destination>) {
@@ -2390,10 +2431,11 @@ impl Sidebar {
     /// Whether a spinner turns: the rule along the top has one while an agent
     /// on the rows is at work, and so does the sidebar collapsed; and the
     /// menu has one while what a key of it waits on is at work, as the notes
-    /// do while what a key started after the keys left it goes on.
+    /// do while what a key started after the keys left it goes on, and while
+    /// an issue is filed.
     pub fn turning(&self) -> bool {
         let menus = self.menu.as_ref().is_some_and(Menu::turning);
-        self.counts.busy > 0 || menus || self.working_on()
+        self.counts.busy > 0 || menus || self.working_on() || !self.filing.is_empty()
     }
 
     /// Makes the rows again from what the daemon said last.
@@ -2899,6 +2941,7 @@ impl Sidebar {
         }
         self.notice = None;
         self.copied = None;
+        self.filed = None;
         self.arriving = None;
         let pending = std::mem::take(&mut self.pending);
         // `Esc` and `Ctrl c` close a menu, and what a key of it started goes on
@@ -3828,6 +3871,7 @@ impl Sidebar {
                     Done::Act(on, act) => self.delete(on, act),
                     Done::Brief(briefed) => self.brief(briefed),
                     Done::Ask(target) => Asked::Ask(target),
+                    Done::Issue(repository) => Asked::Issue(repository),
                     Done::Ssh(destination) => Asked::Ssh(destination),
                     Done::Forget(destination) => Asked::Forget(destination),
                 };
@@ -5120,6 +5164,13 @@ impl Sidebar {
         }
         if let Some((number, _)) = &self.copied {
             notes.say(&format!("copied #{number}"), width, Style::new().fg(NAME));
+        }
+        if let Some(filed) = &self.filed {
+            notes.say(filed, width, Style::new().fg(NAME));
+        }
+        for repository in self.filing.values() {
+            let filing = format!("Filing an issue in {repository}…");
+            notes.lines.extend(menu::waiting(&filing, width, Style::new().fg(NAME), frame));
         }
         if let Some(to) = &self.image_going {
             let going = format!("image on its way to {to}");
@@ -6752,10 +6803,10 @@ mod tests {
         assert_eq!(lit, [6, 7]);
         // The legend leaves the rows four lines, which scroll a line for
         // the pane to show whole, and stay so once the focus goes.
-        let (_, lit) = seen(&mut sidebar, true, 32, 20);
+        let (_, lit) = seen(&mut sidebar, true, 32, 21);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
-        let (lines, lit) = seen(&mut sidebar, true, 32, 20);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 21);
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         assert_eq!((lines[5].as_str(), lit.as_slice()), (nvim, &[4][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
@@ -6813,7 +6864,7 @@ mod tests {
         }
         assert_eq!(cursor(&sidebar), second);
         // Tall enough for the legend to leave newer's row on screen.
-        let area = Rect::new(0, 0, 32, 21);
+        let area = Rect::new(0, 0, 32, 22);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
@@ -7002,7 +7053,7 @@ mod tests {
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         // Two lines, between the title and the rule along the top and the
         // legend at the bottom.
-        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 18)[3..5].to_vec();
+        let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 19)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
             [" ▾ older ────────────────── ●1", "   ● \u{ec82} fold                 1m"]
@@ -7088,7 +7139,7 @@ mod tests {
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
-        let area = Rect::new(0, 0, 32, 18);
+        let area = Rect::new(0, 0, 32, 19);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert!(lines[5].starts_with("─ luneta ─"), "{lines:?}");
         assert_eq!(click(&mut sidebar, 10, 5, area), Asked::Take);
@@ -7770,7 +7821,7 @@ mod tests {
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let row = |sidebar: &mut Sidebar, now| {
             sidebar.ticked(now, steady(now), true);
-            seen_at(sidebar, true, 32, 19, now).0[4].clone()
+            seen_at(sidebar, true, 32, 20, now).0[4].clone()
         };
         let (new, seen) =
             ("  •✓ \u{ec82} fold                 1m", "   ✓ \u{ec82} fold                 1m");
@@ -8163,7 +8214,7 @@ mod tests {
     /// session's name: those under this machine's header down to the blank
     /// above the legend.
     fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
-        let lines = screen(sidebar, true, 32, 27);
+        let lines = screen(sidebar, true, 32, 28);
         let rows = lines[sessions_from(&lines)..].iter().take_while(|line| !line.is_empty());
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
@@ -8178,7 +8229,7 @@ mod tests {
     /// The last line of the sidebar, focused: the keys the search takes, or
     /// else the last of the legend.
     fn bottom(sidebar: &mut Sidebar) -> String {
-        screen(sidebar, true, 32, 17)[16].clone()
+        screen(sidebar, true, 32, 18)[17].clone()
     }
 
     /// The search at the bottom of the sidebar, focused: its rule, what is
@@ -8475,6 +8526,59 @@ mod tests {
     fn number_spot(drawn: &Drawn, y: u16) -> Vec<u16> {
         let hits = |x: &u16| matches!(drawn.at(Position::new(*x, y)), Some(Hit::Number(_)));
         (0..64).filter(hits).collect()
+    }
+
+    /// An issue the issue box sent shows among the notes as it is filed,
+    /// after a spinner that turns, and what came of it once gh says: its
+    /// number and title, in no colour of what went wrong, until the next
+    /// key, whatever the time; or why none was filed, which says the box has
+    /// your words again, and why one may have been, which says to look before
+    /// you send them. Two filed at once show each.
+    #[test]
+    fn an_issue_shows_in_the_notes_as_it_is_filed_and_then_what_came_of_it() {
+        let mut sidebar = two_sessions();
+        let notes = |sidebar: &mut Sidebar, at| {
+            let (lines, _) = seen_at(sidebar, false, 32, 16, at);
+            let first = lines.iter().rposition(String::is_empty).map_or(0, |at| at + 1);
+            lines[first..].to_vec()
+        };
+        assert!(!sidebar.turning());
+        sidebar.filing(1, "luneta");
+        sidebar.filing(2, "zed");
+        assert!(sidebar.turning());
+        let now = moment(160_000);
+        assert_eq!(notes(&mut sidebar, now), [
+            " ⠋ Filing an issue in luneta…",
+            " ⠋ Filing an issue in zed…",
+        ]);
+        let url = "https://github.com/o/luneta/issues/355".to_owned();
+        let filed = Filed::page(url, "A red button").unwrap();
+        sidebar.filed(1, "luneta", &Ok(filed));
+        sidebar.filed(2, "zed", &Err(Unfiled::Refused("gh: no GitHub remote".to_owned())));
+        assert!(!sidebar.turning());
+        let later = moment(3_600_000);
+        let buffer = drawn_at(&mut sidebar, false, 32, 16, later);
+        let lines = notes(&mut sidebar, later);
+        assert_eq!(lines, [
+            " issue in zed: gh: no GitHub r",
+            " emote; i has your words again",
+            " filed #355 in luneta: A red b",
+            " utton; link copied",
+        ]);
+        let note = u16::try_from(16 - 2).unwrap();
+        assert_eq!(buffer[(1, note)].fg, NAME);
+        sidebar.focus(Keys::Sidebar);
+        sidebar.key(&char('j'), later);
+        assert_eq!((sidebar.filed.as_ref(), sidebar.notice.as_ref()), (None, None));
+        sidebar.filing(3, "luneta");
+        let stuck = Unfiled::InDoubt("gh: it did not answer in time".to_owned());
+        sidebar.filed(3, "luneta", &Err(stuck));
+        assert_eq!(notes(&mut sidebar, later), [
+            " issue in luneta may be filed:",
+            "  gh: it did not answer in tim",
+            " e; i has your words, look fir",
+            " st",
+        ]);
     }
 
     /// `y` waits for what to yank, which the bottom of the sidebar lists, and
@@ -8815,9 +8919,9 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         let clicked = clicks(&mut sidebar, 0);
-        assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
+        assert!(clicked[..6].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
         let legend: Vec<(&str, Option<Hit>)> =
-            clicked[7..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+            clicked[6..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let rule = format!("─ luneta {}", "─".repeat(22));
         assert_eq!(legend, [
             (rule.as_str(), None),
@@ -8828,6 +8932,7 @@ mod tests {
             (" o  Open PR", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
+            (" i  File issue", Some(on_legend('i'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
             (" t  Turn ▸", Some(on_legend('t'))),
@@ -10360,7 +10465,7 @@ mod tests {
     /// The rows the sidebar draws under this machine's header, focused, with
     /// no rule after a session's name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
-        let (lines, lit) = seen(sidebar, true, 32, 27);
+        let (lines, lit) = seen(sidebar, true, 32, 28);
         let from = sessions_from(&lines);
         let rows = lines[from..].iter().take_while(|line| !line.is_empty());
         let rows = rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect();
@@ -10425,7 +10530,7 @@ mod tests {
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
-        let area = Rect::new(0, 0, 32, 27);
+        let area = Rect::new(0, 0, 32, 28);
         let (before, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let mut act = |kind, column, row| sidebar.mouse(mouse(kind, column, row), area);
@@ -10834,8 +10939,8 @@ mod tests {
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
         // Four lines of rows, between the rule and the legend.
-        let area = Rect::new(0, 0, 32, 20);
-        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 20)[HEADER].clone();
+        let area = Rect::new(0, 0, 32, 21);
+        let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 21)[HEADER].clone();
         assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
@@ -11643,7 +11748,7 @@ mod tests {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         assert_eq!(sidebar.cursor, Some(Spot::Machine(vps.clone())));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let area = Rect::new(0, 0, 32, 26);
+        let area = Rect::new(0, 0, 32, 27);
         for folded in [false, true] {
             sidebar.folds.set(Fold::Machine(&vps), folded);
             type_in(&mut sidebar, "hl ");
@@ -11743,20 +11848,20 @@ mod tests {
     fn another_machine_s_session_dragged_lands_among_its_own() {
         let mut sidebar = fresh();
         sidebar.heard(two_each());
-        let area = Rect::new(0, 0, 32, 26);
+        let area = Rect::new(0, 0, 32, 27);
         screen(&mut sidebar, true, area.width, area.height);
         let left = MouseButton::Left;
         // dev's row, under nixos's main, up over mac's.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
-        let (lines, lit) = seen(&mut sidebar, true, 32, 26);
+        let (lines, lit) = seen(&mut sidebar, true, 32, 27);
         assert_eq!((lines[9].as_str(), lit), (" ▾ dev ───────────────────────", vec![9, 10]));
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
         assert_eq!(names_listed(&sidebar), ["main", "work", "dev", "main"]);
         // dev, now nixos's first, down past every machine.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 16), area);
-        assert_eq!(seen(&mut sidebar, true, 32, 26).1, [11, 12]);
+        assert_eq!(seen(&mut sidebar, true, 32, 27).1, [11, 12]);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 16), area);
         assert_eq!(names_listed(&sidebar), ["main", "work", "main", "dev"]);
         let rows = rows_shown(&mut sidebar);

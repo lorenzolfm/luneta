@@ -16,7 +16,8 @@ use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
     closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
-    DumpScreenRequest, GoRequest, KeepChecksRequest, KeepPrintedRequest, KillRequest, ListClientsRequest,
+    DumpScreenRequest, GoRequest, IssueRepositoriesRequest, KeepChecksRequest, KeepPrintedRequest,
+    KillRequest, ListClientsRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
     ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, OtherTabsRequest,
     RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
@@ -27,6 +28,7 @@ use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
+use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -459,6 +461,31 @@ impl Away {
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
     }
 
+    /// The remotes on GitHub of the repository `dir` is in there, as
+    /// `lunetad::issues::remotes` lists them there, or why it did not.
+    pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
+        let request = IssueRepositoriesRequest { on: Some(self.on()), dir: dir.to_string() };
+        let listed =
+            self.ask(|mut daemon| async move { daemon.issue_repositories(request).await })?;
+        let remotes = listed.repositories.into_iter().map(Remote::of);
+        remotes.collect::<Result<_, _>>().map_err(|why| format!("{}: {why}", self.on))
+    }
+
+    /// Has the daemon there write and file `filing`, as `lunetad::issues`
+    /// does there, and says the issue filed, or why there is none, as
+    /// `Unfiled::of` reads it. A question that hangs up does not stop it, so
+    /// one luneta heard no answer to may have filed one, and so may one
+    /// whose answer luneta does not read.
+    pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
+        let request = filing.asked(Some(self.on()));
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_or_code(issues::AT_MOST, async move {
+            timeout(patience, daemon.file_issue(request)).await
+        });
+        let answer = answer.map_err(|(why, code)| Unfiled::of(why, code))?;
+        Filed::of(answer).map_err(|why| Unfiled::InDoubt(format!("{}: {why}", self.on)))
+    }
+
     /// What deleting the merged worktrees of the repository `dir` is in there
     /// deletes, as `prunes::plan` says there; or why it did not say.
     pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
@@ -506,19 +533,34 @@ impl Away {
         late: Duration,
         asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
     ) -> Result<T, String> {
+        self.answer_or_code(late, asking).map_err(|(why, _)| why)
+    }
+
+    /// As `answer_of`, with the code of the status the daemon said why with,
+    /// or none, where no answer came.
+    fn answer_or_code<T>(
+        &mut self,
+        late: Duration,
+        asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
+    ) -> Result<T, (String, Option<Code>)> {
         let on = &self.on;
         let secs = self.patience.as_secs_f32();
         self.runtime.block_on(async {
+            let said = |status: &Status| (on.said(status), Some(status.code()));
             let mut answer = match asking.await {
                 Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(on.said(&status)),
-                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+                Ok(Err(status)) => return Err(said(&status)),
+                Err(_) => return Err((format!("{on}: lunetad did not answer in {secs}s"), None)),
             };
             match timeout(late, answer.message()).await {
-                Ok(Ok(Some(said))) => Ok(said),
-                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
-                Ok(Err(status)) => Err(on.said(&status)),
-                Err(_) => Err(format!("{on}: lunetad said nothing for {}s", late.as_secs())),
+                Ok(Ok(Some(answer))) => Ok(answer),
+                Ok(Ok(None)) => {
+                    Err((format!("{on}: lunetad's answer ended with nothing in it"), None))
+                },
+                Ok(Err(status)) => Err(said(&status)),
+                Err(_) => {
+                    Err((format!("{on}: lunetad said nothing for {}s", late.as_secs()), None))
+                },
             }
         })
     }

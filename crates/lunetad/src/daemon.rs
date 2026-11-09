@@ -65,7 +65,8 @@ use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, InfoResponse, KeepChecksRequest, KeepChecksResponse,
+    DumpScreenResponse, FileIssueRequest, FileIssueResponse, GoRequest, InfoResponse,
+    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
@@ -82,6 +83,7 @@ use crate::directory::Directory;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
+use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
@@ -1130,6 +1132,40 @@ impl Daemon for Host {
             Ok(PruneResponse::from(&pruned))
         });
         Ok(Response::new(Box::pin(answer)))
+    }
+
+    type FileIssueStream =
+        Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
+
+    async fn file_issue(
+        &self,
+        request: Request<FileIssueRequest>,
+    ) -> Result<Response<Self::FileIssueStream>, Status> {
+        let (on, filing) = Filing::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        let unreached = |status: Status| Unfiled::Refused(status.message().to_owned()).status();
+        if let Some(mut daemon) = self.bridged(on).map_err(unreached)? {
+            let answer = daemon.file_issue(filing.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let answer = late(move || Ok(filing.file().map_err(Unfiled::status)?.answer()));
+        Ok(Response::new(Box::pin(answer)))
+    }
+
+    async fn issue_repositories(
+        &self,
+        request: Request<IssueRepositoriesRequest>,
+    ) -> Result<Response<IssueRepositoriesResponse>, Status> {
+        let IssueRepositoriesRequest { on, dir } = request.into_inner();
+        let dir = directory("dir", dir)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let request = IssueRepositoriesRequest { on: None, dir: dir.to_string() };
+            return daemon.issue_repositories(request).await;
+        }
+        let listed = task::spawn_blocking(move || issues::remotes(&dir)).await;
+        let listed = listed.map_err(|error| unfinished(&error))?;
+        let remotes = listed.map_err(Status::failed_precondition)?;
+        let repositories = remotes.into_iter().map(Remote::answer).collect();
+        Ok(Response::new(IssueRepositoriesResponse { repositories }))
     }
 
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;

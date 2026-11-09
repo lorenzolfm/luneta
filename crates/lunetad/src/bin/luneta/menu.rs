@@ -72,6 +72,7 @@ use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::issue::Repository;
 use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
@@ -90,6 +91,11 @@ const SEARCH_DOES: &str = "Search skills";
 /// says it does.
 const ASK: char = 'a';
 const ASK_DOES: &str = "Ask";
+
+/// The key that opens the issue box, at the top of the menu, and what the
+/// menu says it does.
+const ISSUE: char = 'i';
+const ISSUE_DOES: &str = "File issue";
 
 /// The key of the Skills group, its name, and its keys, each with the skill
 /// it starts an agent on: the skills the author runs most. luneta has no
@@ -290,16 +296,17 @@ impl Top {
     }
 }
 
-/// No command takes the key of the ask box, or of luneta's Skills, New, Turn,
-/// Delete or Brief group, which would be out of reach at the top of the
-/// sidebar, and gone from the legend; nor a key the sidebar moves, folds or
-/// opens the menu with, which `Top::of` finds first. Nor does the sidebar
-/// move with the ask box's.
+/// No command takes the key of the ask box or the issue box, or of luneta's
+/// Skills, New, Turn, Delete or Brief group, which would be out of reach at
+/// the top of the sidebar, and gone from the legend; nor a key the sidebar
+/// moves, folds or opens the menu with, which `Top::of` finds first. Nor does
+/// the sidebar move with the ask box's or the issue box's.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
         let key = Command::ALL[at].key();
         let group = key == ASK
+            || key == ISSUE
             || key == SKILLS
             || key == NEW
             || key == TURN
@@ -310,6 +317,7 @@ const _: () = {
         at += 1;
     }
     assert!(Top::moves(ASK).is_none(), "the ask box on a key the sidebar moves with");
+    assert!(Top::moves(ISSUE).is_none(), "the issue box on a key the sidebar moves with");
 };
 
 /// What a key of the New group opens, for the pane the menu is for, in the
@@ -551,6 +559,8 @@ enum Entry {
     Search,
     /// The key that opens the ask box.
     Ask,
+    /// The key that opens the issue box, on a pane's row in a repository.
+    Issue,
 }
 
 impl Entry {
@@ -574,6 +584,7 @@ impl Entry {
             | Entry::New(New::Pane | New::Tab)
             | Entry::Turn(_) => pane.then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
+            Entry::Issue => target.repository().is_some().then_some(self),
             Entry::New(New::Machine)
             | Entry::Ask
             | Entry::Brief(_)
@@ -605,6 +616,7 @@ impl Entry {
             Entry::Pull(pull, asks) => pull.key(*asks),
             Entry::Search => SEARCH,
             Entry::Ask => ASK,
+            Entry::Issue => ISSUE,
         }
     }
 }
@@ -641,6 +653,8 @@ enum Pressed {
     Brief(brief::Scope),
     /// Opens the ask box.
     Ask,
+    /// Opens the issue box.
+    Issue,
     /// Closes the menu.
     Close,
     /// Nothing: the group open has no such key.
@@ -659,7 +673,8 @@ struct Keys {
 
 impl Keys {
     /// The keys of the menu for `target`: those of `every` that work on its
-    /// kind of row, as `Entry::on` says. A pane's row has them all; a
+    /// kind of row, as `Entry::on` says. A pane's row has them all, but `i`
+    /// and `d m` where it works in no repository; a
     /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; another
     /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group; and
     /// this one's the same but `d d`. They start agents in `agent`.
@@ -670,7 +685,8 @@ impl Keys {
     }
 
     /// The menu's keys, on whatever row: `/`, which opens the search over
-    /// the skills, `a`, which opens the ask box, and the Claude, New, Turn,
+    /// the skills, `a`, which opens the ask box, `i`, which opens the issue
+    /// box, and the Claude, New, Turn,
     /// Delete and Brief groups: `c t`, `c m` and `c s` start an
     /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
     /// last, `c c` one on the checks that failed on its pull request, `n p`,
@@ -687,6 +703,7 @@ impl Keys {
         vec![
             Entry::Search,
             Entry::Ask,
+            Entry::Issue,
             Entry::Group {
                 key: SKILLS,
                 name: SKILLS_NAME,
@@ -821,6 +838,7 @@ impl Keys {
             Entry::Brief(scope) => return Pressed::Brief(*scope),
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
+            Entry::Issue => return Pressed::Issue,
             // The legend only shows, and runs nothing, as do the menu for a
             // pull request and the list of tabs, which take their keys themselves.
             Entry::Command(_) | Entry::YankPull | Entry::Pull(..) | Entry::Tab { .. } => {
@@ -1070,6 +1088,19 @@ impl Target {
         }
     }
 
+    /// The repository an issue the issue box files goes to: the one its
+    /// pane works in, where git has said, by the directory the pane works in,
+    /// on its machine. None on a session's row, or a machine's header, which
+    /// work in no repository.
+    fn repository(&self) -> Option<Repository> {
+        let Target::Pane(on, PaneRow { cwd: Some(cwd), repository: Some(home), .. }) = self else {
+            return None;
+        };
+        let dir = Directory::parse(cwd.clone()).ok()?;
+        let (home, name) = (home.clone(), self.repository_name().to_owned());
+        Some(Repository { on: on.clone(), dir, home, name })
+    }
+
     /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
@@ -1297,6 +1328,8 @@ pub enum Done {
     Brief(Briefed),
     /// Open the ask box, for the row the menu was for.
     Ask(Target),
+    /// Open the issue box, for the repository of the row the menu was for.
+    Issue(Repository),
     /// Have lunetad watch the machine ssh reaches by this destination.
     Ssh(Destination),
     /// Have lunetad stop watching this machine.
@@ -1791,6 +1824,10 @@ impl Menu {
                 (Pressed::Forget(destination), _) => Did::Closed(Done::Forget(destination)),
                 (Pressed::Brief(scope), _) => Did::Closed(Done::Brief(target.brief(scope))),
                 (Pressed::Ask, _) => Did::Closed(Done::Ask(target.clone())),
+                (Pressed::Issue, _) => match target.repository() {
+                    Some(repository) => Did::Closed(Done::Issue(repository)),
+                    None => Did::Closed(Done::Nothing),
+                },
             },
             Stage::Ssh { keys, mut typed, .. } => match ssh_key(key, &mut typed) {
                 Typed::Close => Did::Closed(Done::Nothing),
@@ -2747,6 +2784,7 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
         Entry::Pull(pull, asks) => spans.push(does(&pull.does(*asks))),
         Entry::Search => spans.push(does(SEARCH_DOES)),
         Entry::Ask => spans.push(does(ASK_DOES)),
+        Entry::Issue => spans.push(does(ISSUE_DOES)),
     }
     Line::from(spans)
 }
@@ -3159,11 +3197,12 @@ mod tests {
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(pane_row(), None));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 10, 0).0),
             [
                 "─ luneta ──────── luneta/main ─",
                 " /  Search skills",
                 " a  Ask",
+                " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
                 " t  Turn ▸",
@@ -3183,7 +3222,7 @@ mod tests {
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
-            text(&legend(31, 13).0),
+            text(&legend(31, 14).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
@@ -3193,6 +3232,7 @@ mod tests {
                 " o  Open PR",
                 " y  Yank ▸",
                 " a  Ask",
+                " i  File issue",
                 " c  Skills ▸",
                 " n  New ▸",
                 " t  Turn ▸",
@@ -3507,6 +3547,33 @@ mod tests {
             assert_eq!(closed(did), Done::Ask(row.clone()));
             let (menu, _) = stays(opened(row.clone(), None));
             assert_eq!(closed(menu.key(&char('a'))), Done::Ask(row));
+        }
+    }
+
+    /// `i` closes the menu for the sidebar to open the issue box, for the
+    /// repository the pane of the row works in, by the pane's directory, on
+    /// its machine: at the top of the sidebar, and in the menu's first group.
+    /// A session's row, a machine's header and a pane in no repository, or
+    /// in a directory the daemon has not said, have no `i`.
+    #[test]
+    fn i_opens_the_issue_box_for_the_repository_of_the_row() {
+        let vps = Machine::Remote("vps".parse().unwrap());
+        for on in [Machine::Local, vps] {
+            let row = Target::Pane(on.clone(), row());
+            let (home, name) = ("/w/luneta".to_owned(), "luneta".to_owned());
+            let repository = Repository { on, dir: main_dir(), home, name };
+            let did = Menu::open(1, row.clone(), Some('i'), CLAUDE).expect("the menu has `i`");
+            assert_eq!(closed(did), Done::Issue(repository.clone()));
+            let (menu, _) = stays(opened(row, None));
+            assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
+        }
+        let unrepositoried = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
+        let nowhere = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
+            assert!(Menu::open(1, row.clone(), Some('i'), CLAUDE).is_none(), "{row:?}");
+            let (menu, _) = stays(opened(row.clone(), None));
+            let lines = text(&menu.lines(31, 12, 0).0);
+            assert!(!lines.contains(&" i  File issue".to_owned()), "{lines:?}");
         }
     }
 
@@ -4210,11 +4277,12 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
         let menu = Menu::new(1, pane_row(), CLAUDE);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(drawing(&menu), 50, 11), [
+        assert_eq!(floated(drawing(&menu), 50, 12), [
             "z".repeat(50),
             format!("{}┌─ luneta ─ luneta/main ─┐", "z".repeat(24)),
             boxed(" /  Search skills"),
             boxed(" a  Ask"),
+            boxed(" i  File issue"),
             boxed(" c  Skills ▸"),
             boxed(" n  New ▸"),
             boxed(" t  Turn ▸"),

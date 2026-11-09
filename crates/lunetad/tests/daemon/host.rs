@@ -709,6 +709,27 @@ impl FakeGh {
         let gh = FakeGh { pulls: bin.join("pulls") };
         fs::create_dir(&gh.pulls).unwrap();
         let text = r#"pulls="${0%/*}/pulls"
+if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; then
+    echo "$(pwd -P) $*" >> "$pulls/listed"
+    if [ -f "$pulls/lists-fail" ]; then
+        cat "$pulls/lists-fail" >&2
+        exit 1
+    fi
+    [ "$1" = label ] && echo '[{"name":"bug"}]'
+    [ "$1" = issue ] && echo '[{"title":"An older one","body":"It was older.","labels":[]}]'
+    exit 0
+fi
+if [ "$1 $2" = "issue create" ]; then
+    { echo "$(pwd -P)"; echo "$*"; cat; } > "$pulls/created"
+    [ -f "$pulls/create-says" ] && exec cat "$pulls/create-says"
+    if [ -f "$pulls/create-fails" ]; then
+        printf '\nCreating issue in o/n\n\n' >&2
+        cat "$pulls/create-fails" >&2
+        exit 1
+    fi
+    echo "https://github.com/o/n/issues/360"
+    exit 0
+fi
 if [ "$1 $2" = "issue view" ]; then
     echo "$*" >> "$pulls/issues"
     [ -f "$pulls/issue-$3" ] && exec cat "$pulls/issue-$3"
@@ -873,6 +894,43 @@ exec cat "$said"
     /// Has gh be one older than 2.97, which knows no `--allow-escape-sequences`.
     pub fn old(&self) {
         fs::write(self.pulls.join("old"), "").unwrap();
+    }
+
+    /// Has gh fail to list labels and issues from now on, and say `why` as it
+    /// does.
+    pub fn refuse_lists(&self, why: &str) {
+        fs::write(self.pulls.join("lists-fail"), format!("{why}\n")).unwrap();
+    }
+
+    /// Where gh has listed labels and issues, and what it was asked, a line
+    /// each, in the order it was asked.
+    pub fn listed(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("listed")) {
+            Ok(listed) => listed.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh listed does not read: {error}"),
+        }
+    }
+
+    /// Has `gh issue create` fail from now on, and say `why` as it does.
+    pub fn refuse_issues(&self, why: &str) {
+        fs::write(self.pulls.join("create-fails"), format!("{why}\n")).unwrap();
+    }
+
+    /// Has `gh issue create` file the issue from now on, and say `said` of it
+    /// in place of its page.
+    pub fn say_on_create(&self, said: &str) {
+        fs::write(self.pulls.join("create-says"), said).unwrap();
+    }
+
+    /// Where gh last filed an issue, what it was asked, and the body it read
+    /// on its stdin, a line each and then the body's: none if it filed none.
+    pub fn created(&self) -> Option<Vec<String>> {
+        match fs::read_to_string(self.pulls.join("created")) {
+            Ok(created) => Some(created.lines().map(str::to_owned).collect()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("what gh filed does not read: {error}"),
+        }
     }
 
     /// What gh has been asked of checks and their logs, in the order it was

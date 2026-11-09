@@ -31,6 +31,7 @@ mod hush;
 mod icons;
 mod images;
 mod input;
+mod issue;
 mod keys;
 mod ledger;
 mod live;

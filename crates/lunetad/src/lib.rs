@@ -24,6 +24,7 @@ pub mod folder;
 mod git;
 mod github;
 pub mod images;
+pub mod issues;
 mod keeps;
 pub mod links;
 pub mod log;

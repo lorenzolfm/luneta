@@ -26,6 +26,7 @@ use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::{
     self, AskRequest, CheckNameRequest, Client, CloseRequest, ClosesRequest, DeleteExitedRequest,
+    FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
     DumpScreenRequest, GoRequest, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
     KillRequest,
     ListClientsRequest,
@@ -36,6 +37,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{Asked, Step, Turn, User};
 use lunetad::images::{self, Png};
+use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
 use lunetad::{Directory, SessionName};
@@ -1349,6 +1351,173 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
         ended.unwrap();
         assert_eq!(steps.len(), 3, "{steps:?}");
         assert!(started.elapsed() >= Duration::from_secs(6), "{:?}", started.elapsed());
+    });
+}
+
+/// A `claude` for `host` that writes issues: it writes where it ran and the
+/// options it ran with in `host`'s home, `wrote` there, what it was told in
+/// `told` there, and the file of settings it was handed in `settings` there,
+/// and answers with a title, a body and a label. On words
+/// that say `please-fail`, it fails as one with no login does.
+fn claude_that_writes_issues(host: &Host) {
+    let home = host.home.path().display();
+    let text = format!(
+        r#"words=$(cat)
+printf '%s' "$words" > "{home}/told"
+{{ echo "cwd=$(pwd -P)"; echo "pane=${{ZELLIJ-unset}}"
+for arg; do case "$arg" in --*) echo "$arg";; esac; done
+}} > "{home}/wrote"
+handed=
+for arg; do [ "$handed" = --settings ] && cp "$arg" "{home}/settings"; handed=$arg; done
+case "$words" in
+    *please-fail*)
+        echo '{{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}}'
+        exit 1 ;;
+esac
+printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","structured_output":{{"title":"A red button","body":"It is red.\nToo red.","label":"bug"}}}}'
+"#
+    );
+    script(&host.zellij.bin().join("claude"), &text);
+}
+
+/// An issue asked of another machine is written there, by `claude` there in
+/// the directory it names there, told the words, and the labels and your last
+/// issues as gh there lists them, and filed there, by gh there in the same
+/// directory, with the title, body and label `claude` wrote: the daemon
+/// answers with its number, title and page. `claude` may read nothing git
+/// ignores there, nor the git directory. Where `claude` or gh fail, it says
+/// why: gh files nothing after a `claude` that failed, and `claude` writes
+/// nothing where gh cannot list. A gh that failed short of GitHub's answer
+/// may have filed one. Each gh is told the repository on
+/// GitHub asked for. A gh that files and does not say the issue's page may
+/// have filed one, which the daemon says apart. One for a directory by no
+/// absolute path, of no words, or for no repository on GitHub is invalid,
+/// and one for a machine this daemon does not reach runs nothing. The
+/// remotes on GitHub of the repository there are listed there, gh's first,
+/// and none of those elsewhere.
+#[test]
+fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    claude_that_writes_issues(&far);
+    let _work = far.serve("work");
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |far| !far.sessions.is_empty());
+    let dir = far.home.path().join("w");
+    fs::create_dir(&dir).unwrap();
+    let there = dir.canonicalize().unwrap().display().to_string();
+    git_said(&dir, &["init", "--quiet"]);
+    git_said(&dir, &["remote", "add", "origin", "git@github.com:me/n.git"]);
+    git_said(&dir, &["remote", "add", "lab", "git@gitlab.com:o/n.git"]);
+    git_said(&dir, &["remote", "add", "upstream", "https://github.com/o/n"]);
+    fs::write(dir.join(".gitignore"), ".env\n").unwrap();
+    fs::write(dir.join(".env"), "TOKEN=secret\n").unwrap();
+
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = |destination: &str| Some(On { destination: destination.to_owned() });
+        let file = |on, dir: &Path, words: &str| FileIssueRequest {
+            on,
+            dir: dir.display().to_string(),
+            words: words.to_owned(),
+            repository: "o/n".to_owned(),
+        };
+        let listed = IssueRepositoriesRequest { on: on("far"), dir: dir.display().to_string() };
+        let listed = daemon.issue_repositories(listed).await.unwrap().into_inner();
+        let remote = |remote: &str, repository: &str| IssueRepository {
+            remote: remote.to_owned(),
+            repository: repository.to_owned(),
+        };
+        assert_eq!(listed.repositories, [remote("upstream", "o/n"), remote("origin", "me/n")]);
+        let relative = IssueRepositoriesRequest { on: on("far"), dir: "w".to_owned() };
+        let relative = daemon.issue_repositories(relative).await.unwrap_err();
+        assert_eq!(relative.code(), Code::InvalidArgument, "{relative:?}");
+
+        let filed = daemon.file_issue(file(on("far"), &dir, " a red button ")).await;
+        let filed = filed.unwrap().into_inner().message().await.unwrap().unwrap();
+        let filed = Filed::of(filed).unwrap();
+        assert_eq!((filed.number().get(), filed.title()), (360, "A red button"));
+        assert_eq!(filed.url(), "https://github.com/o/n/issues/360");
+        let wrote = fs::read_to_string(far.home.path().join("wrote")).unwrap();
+        let wrote: Vec<&str> = wrote.lines().collect();
+        let cwd = format!("cwd={there}");
+        assert_eq!(wrote[..2], [cwd.as_str(), "pane=unset"]);
+        let told = fs::read_to_string(far.home.path().join("told")).unwrap();
+        assert!(told.starts_with("a red button\n\n[luneta: the repository's labels"), "{told}");
+        assert!(told.contains(r#"[{"name":"bug"}]"#), "{told}");
+        assert!(told.contains(r#"[{"title":"An older one","#), "{told}");
+        let mine = "--author @me --state all --limit 5 --json title,body,labels";
+        let listed = [
+            format!("{there} label list --limit 100 --json name --repo github.com/o/n"),
+            format!("{there} issue list {mine} --repo github.com/o/n"),
+        ];
+        assert_eq!(far.gh.listed(), listed);
+        let options = ["--json-schema", "--no-session-persistence", "--safe-mode", "--settings"];
+        for option in options {
+            assert!(wrote.contains(&option), "{option} in {wrote:?}");
+        }
+        let settings = fs::read_to_string(far.home.path().join("settings")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let denied = settings["permissions"]["deny"].as_array().unwrap();
+        for rule in [format!("Read(/{there}/.env)"), format!("Read(/{there}/**/.git/**)")] {
+            let rule = serde_json::Value::from(rule);
+            assert!(denied.contains(&rule), "{rule} in {denied:?}");
+        }
+        let asked =
+            "issue create --title A red button --body-file - --repo github.com/o/n --label bug";
+        let created = [there.as_str(), asked, "It is red.", "Too red."].map(str::to_owned);
+        assert_eq!(far.gh.created(), Some(created.to_vec()));
+        assert_eq!(here.gh.created(), None);
+
+        far.gh.refuse_issues("could not add label: 'bug' not found");
+        let refused = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let refused = refused.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+        assert_eq!(refused.message(), "gh: could not add label: 'bug' not found");
+        far.gh.refuse_issues("HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+        let lost = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let lost = lost.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(lost.code(), Code::Aborted, "{lost:?}");
+        assert_eq!(lost.message(), "gh: HTTP 502: Bad Gateway (https://api.github.com/graphql)");
+        far.gh.refuse_issues("could not add label: 'bug' not found");
+
+        far.gh.say_on_create("Created it\n");
+        let unread = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let unread = unread.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(unread.code(), Code::Aborted, "{unread:?}");
+        assert_eq!(unread.message(), r#"gh said "Created it", no issue's page"#);
+        fs::remove_file(far.zellij.bin().join("pulls/create-says")).unwrap();
+
+        fs::remove_file(far.zellij.bin().join("pulls/created")).unwrap();
+        let unwritten = daemon.file_issue(file(on("far"), &dir, "please-fail")).await;
+        let unwritten = unwritten.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(unwritten.code(), Code::FailedPrecondition, "{unwritten:?}");
+        assert_eq!(unwritten.message(), "claude failed: Not logged in");
+        assert_eq!(far.gh.created(), None);
+
+        fs::remove_file(far.home.path().join("wrote")).unwrap();
+        far.gh.refuse_lists("none of the git remotes here point to a known GitHub host");
+        let unlisted = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let unlisted = unlisted.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(unlisted.code(), Code::FailedPrecondition, "{unlisted:?}");
+        assert!(unlisted.message().starts_with("gh: none of the git remotes"), "{unlisted:?}");
+        assert!(!far.home.path().join("wrote").exists());
+
+        let invalid =
+            |status: Status| assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+        invalid(daemon.file_issue(file(on("far"), Path::new("w"), "x")).await.unwrap_err());
+        invalid(daemon.file_issue(file(on("far"), &dir, " ")).await.unwrap_err());
+        let unnamed = FileIssueRequest { repository: String::new(), ..file(on("far"), &dir, "x") };
+        invalid(daemon.file_issue(unnamed).await.unwrap_err());
+        let nowhere = daemon.file_issue(file(on("nowhere"), &dir, "x")).await.unwrap_err();
+        assert_eq!(nowhere.code(), Code::FailedPrecondition, "{nowhere:?}");
+        assert_eq!(nowhere.message(), "lunetad does not reach nowhere now");
+        assert_eq!(here.gh.created(), None);
     });
 }
 
