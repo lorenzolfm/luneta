@@ -642,7 +642,9 @@ sidebar if it had them. A click on an entry presses its key, and on
 key does. What it opens takes zellij there, with the keys. What goes
 wrong it says where it floated, in a box any key or a click closes, and so it
 says why it does not open: zellij is on a plugin's pane, or luneta cannot yet
-tell which pane zellij is on. `Alt a` there tries again. While the sidebar
+tell which pane zellij is on. `Alt a` there tries again. A key that waits for
+something, as a pasted link's does, goes on after the menu closes, wherever the
+keys went: the pasted link's section below says how. While the sidebar
 has the keys and no menu is open, its bottom lists what you can press there:
 
 ```text
@@ -762,6 +764,17 @@ names the directory. So does any machine that may have made the worktree, as one
 whose answer is cut short, so that no other makes a second. With none, it names
 the machines it asked, and why it could not ask any it did not. A paste while
 zellij has the keys stays zellij's.
+
+What a key started is the sidebar's once you press it, not the menu's: `Esc`, or
+the keys leaving the menu for zellij, closes the menu and lets it finish. The
+worktree is made or moved, the tab opened and the agent started where they would
+have been, and the notes say what it waits on meanwhile, as `⠋ Syncing #123…`, and
+where it opened once it is done, as `menu: opened cdk:7`. A tab that opens after
+you have gone to work elsewhere does not take zellij's client from what you are
+typing: it says where it is, and you go when you want to. Two links pasted one
+after the other each go on their own. Pasting a link again while its worktree is
+on its way makes nothing of its own, and the notes say it is on its way, so that
+one link never makes two worktrees.
 
 `r` reviews the pull request as GitHub has it, so a second review after a push or
 a force-push does not read the commits the first one did. Before the agent starts,

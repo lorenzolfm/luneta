@@ -11,7 +11,11 @@
 //! is on, and a brief or the ask box the menu asks for shows in a box there
 //! too, as does what went wrong with what the menu did there: each has the
 //! keys and the mouse until it closes, when the side that had them before has
-//! them again. `Ctrl j` opens the picker in a box there too, on the
+//! them again. What a key of the menu started goes on as the menu closes, as it
+//! does as the keys leave it at the bottom of the sidebar: the sidebar keeps
+//! it, says in its notes what it waits on, and opens what it opens then, where
+//! it would have, without taking zellij's client from where you went.
+//! `Ctrl j` opens the picker in a box there too, on the
 //! sessions, `Ctrl b` on the agents and `Ctrl d` on the directories. `Alt r`
 //! dictates, held or tapped, into the pane zellij is on or the ask box, in a
 //! box along the bottom of zellij that has the keys and the mouse until what
@@ -1356,13 +1360,17 @@ impl App {
             },
             // A menu closed since is no longer what you are on, and takes
             // luneta's client nowhere.
-            Event::NoClient { menu, owed, on, place } => {
-                if self.sidebar.waits_on(menu) {
+            Event::NoClient { menu, owed, on, place } => match self.sidebar.waits_on(menu) {
+                Some(sidebar::Held::Open) => {
                     let after = After::IntoTab(owed, place.clone());
                     if !self.go(&on, &Place::Pane(place), Some(after)) {
-                        self.sidebar.close_menu();
+                        self.sidebar.drop_menu(menu);
                     }
-                }
+                },
+                Some(sidebar::Held::Kept) => {
+                    owed.pay(Err(lunetad::opens::no_client(place.session.name())));
+                },
+                None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Pulled { menu, found } => {
@@ -2191,7 +2199,7 @@ impl App {
             Asked::OpenThere { menu, on, place, open } => {
                 let owed = zellij::owed(menu, &self.events);
                 if !self.go(&on, &place, Some(After::Open(owed, open))) {
-                    self.sidebar.close_menu();
+                    self.sidebar.drop_menu(menu);
                 }
             },
             Asked::Carry { on, carry, landing, follows } => {
@@ -2236,7 +2244,7 @@ impl App {
                 };
                 let owed = zellij::owed(menu, &self.events);
                 if !self.make(unused, Some(cwd.as_str()), Some((owed, tab))) {
-                    self.sidebar.close_menu();
+                    self.sidebar.drop_menu(menu);
                 }
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
