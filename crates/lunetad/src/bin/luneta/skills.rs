@@ -9,26 +9,27 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 pub use lunetad::skills::{Name, Runs, Skill};
 
+use crate::agents::Harness;
 use crate::away::{self, Away};
 use crate::host::Event;
 use crate::machines::Machine;
 
-/// Asks the finder for the skills `cwd`, on `on`, can run, on a thread of
-/// its own, and hands back what it found, or why it found nothing, as the
-/// event `said` makes of it.
+/// Asks the finder for the skills `cwd`, on `on`, can run in `harness`, on
+/// a thread of its own, and hands back what it found, or why it found
+/// nothing, as the event `said` makes of it.
 pub fn find(
     on: &Machine,
     cwd: &str,
+    harness: Harness,
     events: &Sender<Event>,
     said: impl FnOnce(Result<Vec<Skill>, String>) -> Event + Send + 'static,
 ) {
     let (on, cwd, events) = (on.clone(), cwd.to_owned(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
-            Machine::Local => lunetad::skills::found_in(&cwd),
-            Machine::Remote(destination) => {
-                Away::reach(destination, away::ANSWER).and_then(|mut away| away.skills(&cwd))
-            },
+            Machine::Local => lunetad::skills::found_in(&cwd, harness),
+            Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
+                .and_then(|mut away| away.skills(&cwd, harness)),
         };
         // luneta is on its way out.
         let _ = events.send(said(skills));
@@ -104,6 +105,13 @@ impl Search {
     /// The skill the cursor is on.
     pub fn chosen(&self) -> Option<&Skill> {
         self.found().nth(self.selected).map(|(skill, _)| skill)
+    }
+
+    /// Waits on the finder again, for the skills of another harness, keeping
+    /// what is typed.
+    pub fn refind(&mut self) {
+        self.skills = Skills::Finding;
+        self.narrow();
     }
 
     /// Takes what the finder said, while the box waits for it, and says

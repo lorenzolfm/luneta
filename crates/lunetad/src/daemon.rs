@@ -97,7 +97,7 @@ use crate::checks::{Failing, Log};
 use crate::{
     carries, checks, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
     names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics,
-    turns, watch, zellij, zoxide,
+    turns, watch, zellij, zoxide, Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -644,12 +644,15 @@ impl Daemon for Host {
         &self,
         request: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
-        let ListSkillsRequest { on, dir } = request.into_inner();
+        let ListSkillsRequest { on, dir, harness } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.list_skills(ListSkillsRequest { on: None, dir: dir.into() }).await;
+            let asked = ListSkillsRequest { on: None, dir: dir.into(), harness };
+            return daemon.list_skills(asked).await;
         }
-        let found = task::spawn_blocking(move || skills::found_in(dir.as_str())).await;
+        let harness = Harness::said(harness)
+            .map_err(|why| Status::invalid_argument(format!("harness: {why}")))?;
+        let found = task::spawn_blocking(move || skills::found_in(dir.as_str(), harness)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
         let skill = |skills::Skill { name, description, runs }| Skill {

@@ -305,6 +305,11 @@ message OpenResponse {
 message ListSkillsRequest {
   On on = 1;
   string dir = 2;
+  // The harness whose skills are asked for, where it finds them. Absent from a
+  // luneta older than this field, which asks for Claude Code's: so absent is
+  // Claude Code, as `Agent.harness` is. A daemon older than the field finds
+  // Claude Code's, whatever it says.
+  optional Harness harness = 3;
 }
 
 message ListSkillsResponse {

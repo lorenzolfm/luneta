@@ -792,6 +792,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let skill = dir.path().join(".claude/skills/near");
     fs::create_dir_all(&skill).unwrap();
     fs::write(skill.join("SKILL.md"), "---\ndescription: Near.\n---\n").unwrap();
+    let pi_skill = dir.path().join(".agents/skills/near-pi");
+    fs::create_dir_all(&pi_skill).unwrap();
+    fs::write(pi_skill.join("SKILL.md"), "---\ndescription: Near pi.\n---\n").unwrap();
     let _far = start(far.vars()).unwrap();
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
@@ -871,12 +874,17 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(here.zellij.opened(), [] as [String; 0]);
 
         let skills = dir.path().to_str().unwrap().to_owned();
-        let skills = ListSkillsRequest { on: on("far"), dir: skills };
+        let skills = ListSkillsRequest { on: on("far"), dir: skills, harness: None };
         let found = daemon.list_skills(skills).await.unwrap();
         let near =
             Skill { name: "near".to_owned(), description: "Near.".to_owned(), only_you: false };
         assert_eq!(found.into_inner().skills, [near]);
-        let nowhere = ListSkillsRequest { on: on("far"), dir: String::new() };
+        let (dir_of, pi) = (dir.path().to_str().unwrap().to_owned(), Some(api::Harness::Pi.into()));
+        let skills = ListSkillsRequest { on: on("far"), dir: dir_of, harness: pi };
+        let found = daemon.list_skills(skills).await.unwrap();
+        let (name, description) = ("near-pi".to_owned(), "Near pi.".to_owned());
+        assert_eq!(found.into_inner().skills, [Skill { name, description, only_you: false }]);
+        let nowhere = ListSkillsRequest { on: on("far"), dir: String::new(), harness: None };
         invalid(daemon.list_skills(nowhere).await.unwrap_err());
 
         let typed = "cargo test".to_owned();

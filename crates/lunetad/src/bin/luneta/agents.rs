@@ -51,6 +51,15 @@ pub const fn other(harness: Harness) -> Harness {
     }
 }
 
+/// How `harness` runs the skill named `skill`: Claude Code by `/<name>`, and
+/// pi by `/skill:<name>`.
+pub fn spelled(harness: Harness, skill: &str) -> String {
+    match harness {
+        Harness::ClaudeCode => format!("/{skill}"),
+        Harness::Pi => format!("/skill:{skill}"),
+    }
+}
+
 /// The harness an agent runs in, as its daemon says, if luneta knows it.
 pub fn of(agent: &api::Agent) -> Option<Harness> {
     match agent.runs_in() {
@@ -75,10 +84,7 @@ pub fn on_skill(
         Some(branch) => format!("{skill}: {branch}"),
         None => skill.to_owned(),
     };
-    let spelled = match harness {
-        Harness::ClaudeCode => format!("/{skill}"),
-        Harness::Pi => format!("/skill:{skill}"),
-    };
+    let spelled = spelled(harness, skill);
     let prompt = match given {
         Some(given) => format!("{spelled} {given}"),
         None => spelled,

@@ -1,6 +1,7 @@
-//! The skills a pane's directory can run, for the menu's search: each a
-//! `SKILL.md`, a command or a workflow, where Claude Code finds them for that
-//! directory.
+//! The skills a pane's directory can run, for the menu's search, in a
+//! harness: for Claude Code, each a `SKILL.md`, a command or a workflow, where
+//! it finds them for that directory, and for pi, each a `SKILL.md` or a `.md`
+//! where pi finds them.
 //!
 //! Claude Code names the skills it would run only as it starts a session:
 //! `claude -p` with `--output-format stream-json` says them in the `init` it
@@ -9,14 +10,20 @@
 //! alone: not what each does, which the search goes by too. So the finder
 //! looks where Claude Code looks, and asks `claude plugin list`, which takes a
 //! moment and starts no session, which plugins are on in that directory.
+//! pi names its skills only in a session too, and has no plugins: the finder
+//! looks where pi looks, which takes no program.
 
 use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::program;
+use crate::{program, Harness};
 
 /// Prints what `claude plugin list --json` says of the plugins in the
 /// directory `$1`, then for each skill, command and workflow found for it:
@@ -133,9 +140,23 @@ impl std::fmt::Display for Name {
     }
 }
 
-/// The skills `cwd` can run, as the finder finds them on this machine, or
-/// why it found none.
-pub fn found_in(cwd: &str) -> Result<Vec<Skill>, String> {
+/// The skills `cwd` can run in `harness`, as the finder finds them on this
+/// machine, or why it found none.
+pub fn found_in(cwd: &str, harness: Harness) -> Result<Vec<Skill>, String> {
+    match harness {
+        Harness::ClaudeCode => claude_found_in(cwd),
+        Harness::Pi => {
+            let set = |name: &str| env::var_os(name).map(PathBuf::from);
+            let home = set("HOME");
+            let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
+            Ok(pi_found(Path::new(cwd), home.as_deref(), agent.as_deref()))
+        },
+    }
+}
+
+/// The skills `cwd` can run in Claude Code, as `FIND` finds them, or why it
+/// found none.
+fn claude_found_in(cwd: &str) -> Result<Vec<Skill>, String> {
     let mut finder = Command::new("sh");
     finder.args(["-c", FIND, "sh", cwd]);
     program::run(&mut finder, LIMIT)
@@ -165,20 +186,20 @@ fn found(stdout: &[u8]) -> Vec<Skill> {
             plugin.keeps(text);
         }
     }
+    let found = files.into_iter().filter_map(|(at, path, text)| match (at, plugins.get(at)) {
+        ("", _) => own(path, text),
+        (_, Some(plugin)) => plugin.name(path).map(|name| (name, Front::read(text))),
+        (_, None) => None,
+    });
+    listed(found.filter(|(_, front)| front.invocable))
+}
+
+/// The skills `found`, by name, in the order found: a skill found twice is
+/// the first found. One named what no slash command runs is left out.
+fn listed(found: impl Iterator<Item = (String, Front)>) -> Vec<Skill> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
-    for (at, path, text) in files {
-        let found = match (at, plugins.get(at)) {
-            ("", _) => own(path, text),
-            (_, Some(plugin)) => plugin.name(path).map(|name| (name, Front::read(text))),
-            (_, None) => None,
-        };
-        let Some((name, front)) = found else {
-            continue;
-        };
-        if !front.invocable {
-            continue;
-        }
+    for (name, front) in found {
         let Some(name) = Name::new(name) else {
             continue;
         };
@@ -193,6 +214,114 @@ fn found(stdout: &[u8]) -> Vec<Skill> {
     skills
 }
 
+/// pi's own folder in your home, where `PI_CODING_AGENT_DIR` does not name
+/// another, which holds your skills in `skills`.
+const PI_AGENT: &str = ".pi/agent";
+
+/// How many folders deep the finder looks for pi's skills under where pi
+/// keeps them, as `FIND` looks in a plugin.
+const PI_DEPTH: usize = 6;
+
+/// The most bytes of a file the finder reads for its frontmatter.
+const FRONT_BYTES: u64 = 64 * 1024;
+
+/// Where pi finds skills: in a folder of its own, as `.pi/skills`, where a
+/// `.md` at the top is a skill too, or in an Agent Skills folder, as
+/// `.agents/skills`, where one below the top is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    Pi,
+    Agents,
+}
+
+/// The skills `cwd` can run in pi, where pi 1.5 finds them, nearest first: in
+/// `.pi/skills` of the directory, in `.agents/skills` of it and of each one
+/// above it up to its repository's top, or up to `/` outside of one, in
+/// `skills` of `agent`, pi's own folder of yours, and in `.agents/skills` of
+/// `home`. A folder with a `SKILL.md` is a skill, named for the folder, and
+/// holds no other. A skill goes by the name its frontmatter gives it, or else
+/// by its folder's, and one that says nothing of what it does is none. pi
+/// loads the directory's own only once you trust it, which it asks as it
+/// starts. The skills your settings or pi's packages name are not where the
+/// finder looks, nor does it leave out what an ignore file does.
+fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill> {
+    let ours = home.map(|home| home.join(".agents").join("skills"));
+    let mut places = vec![(cwd.join(".pi").join("skills"), Kept::Pi)];
+    let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
+    for dir in cwd.ancestors() {
+        let skills = dir.join(".agents").join("skills");
+        if Some(&skills) != ours.as_ref() {
+            places.push((skills, Kept::Agents));
+        }
+        if Some(dir) == top {
+            break;
+        }
+    }
+    places.extend(agent.map(|agent| (agent.join("skills"), Kept::Pi)));
+    places.extend(ours.map(|ours| (ours, Kept::Agents)));
+    let mut files = Vec::new();
+    for (root, kept) in &places {
+        skill_files(root, root, *kept, 0, &mut files);
+    }
+    let found = files.into_iter().filter_map(|file| {
+        let mut front = Front::read(&frontmatter(&file)?);
+        if front.description.trim().is_empty() {
+            return None;
+        }
+        let folder = file.parent()?.file_name()?.to_str()?;
+        let name = front.name.take().filter(|name| !name.is_empty());
+        Some((name.unwrap_or_else(|| folder.to_owned()), front))
+    });
+    listed(found)
+}
+
+/// Adds the skills in `dir`, of `root`, `depth` folders under it, to `files`,
+/// as pi finds them: its `SKILL.md` alone where it has one, or else a `.md`
+/// where `kept` takes one at that depth, and the skills of each folder in it
+/// but those whose names start with a `.` and `node_modules`. A link is what
+/// it links to. In order of their names, as a folder lists them in no order.
+fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Vec<PathBuf>) {
+    let Ok(listed) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(String, PathBuf)> = listed
+        .filter_map(Result::ok)
+        .filter_map(|entry| Some((entry.file_name().into_string().ok()?, entry.path())))
+        .collect();
+    entries.sort();
+    let skill = dir.join("SKILL.md");
+    if skill.is_file() {
+        files.push(skill);
+        return;
+    }
+    let top = dir == root;
+    for (name, path) in entries {
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let md = (kept == Kept::Pi) == top;
+        if md && path.extension().is_some_and(|extension| extension == "md") && path.is_file() {
+            files.push(path);
+        } else if depth < PI_DEPTH && path.is_dir() {
+            skill_files(&path, root, kept, depth + 1, files);
+        }
+    }
+}
+
+/// The frontmatter `file` starts with, as `FIND` prints one: up to its 64th
+/// line. None for a file with none, or that cannot be read.
+fn frontmatter(file: &Path) -> Option<String> {
+    let mut text = String::new();
+    File::open(file).ok()?.take(FRONT_BYTES).read_to_string(&mut text).ok()?;
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let front: Vec<&str> =
+        lines.take(64).take_while(|line| line.trim_end() != "---").collect();
+    Some(front.join("\n"))
+}
+
 /// A skill, a command or a workflow of yours, or of a directory's, by its
 /// path in its `.claude`, and what it says of itself in `text`: its name, and
 /// what the menu reads of it. A skill is named for its directory, as
@@ -204,7 +333,8 @@ fn own(path: &str, text: &str) -> Option<(String, Front)> {
     if let Some(file) = workflow.filter(|file| one_name(file)) {
         let name = meta(text, "name").unwrap_or_else(|| file.to_owned());
         let description = meta(text, "description").unwrap_or_default();
-        return Some((name, Front { description, invocable: true, runs: Runs::ForAnyone }));
+        let front = Front { name: None, description, invocable: true, runs: Runs::ForAnyone };
+        return Some((name, front));
     }
     let skill = path.strip_prefix("skills/").and_then(|path| path.strip_suffix("/SKILL.md"));
     let name = skill.filter(|name| one_name(name)).or_else(|| command(path))?;
@@ -301,6 +431,8 @@ fn bare(path: &str) -> &str {
 
 /// What the menu reads of a frontmatter.
 struct Front {
+    /// The name it gives, which pi goes by, and Claude Code does not.
+    name: Option<String>,
     description: String,
     /// False for a skill that says `user-invocable: false`: Claude Code runs
     /// it, but no slash command does.
@@ -313,8 +445,12 @@ impl Front {
     /// value on its line, quoted or not, and the lines indented under it, as
     /// a block scalar or a plain one runs on, joined by spaces.
     fn read(front: &str) -> Self {
-        let mut read =
-            Front { description: String::new(), invocable: true, runs: Runs::ForAnyone };
+        let mut read = Front {
+            name: None,
+            description: String::new(),
+            invocable: true,
+            runs: Runs::ForAnyone,
+        };
         let mut lines = front.lines().peekable();
         while let Some(line) = lines.next() {
             let Some((key, value)) = line.split_once(':') else {
@@ -331,6 +467,7 @@ impl Front {
                 parts.extend(Some(next.trim()).filter(|part| !part.is_empty()));
             }
             match key {
+                "name" => read.name = Some(unquote(&parts.join(" "))),
                 "description" => read.description = unquote(&parts.join(" ")),
                 "user-invocable" => read.invocable = unquote(&parts.join(" ")) != "false",
                 "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
@@ -575,6 +712,77 @@ mod tests {
     /// The finder runs on a directory of skills of its own: yours are left
     /// out by a `CLAUDE_CONFIG_DIR` with none, and the plugins by a `PATH`
     /// with no `claude` on it.
+    /// Writes `text` to `file` in `root`, and the folders it is in.
+    fn put(root: &Path, file: &str, text: &str) {
+        let path = root.join(file);
+        let made = path.parent().map_or(Ok(()), std::fs::create_dir_all);
+        assert!(made.and_then(|()| std::fs::write(&path, text)).is_ok(), "{file}");
+    }
+
+    fn only_you(name: &str, description: &str) -> Skill {
+        Skill { runs: Runs::OnlyForYou, ..skill(name, description) }
+    }
+
+    /// pi's skills are where pi finds them: the directory's own `.pi/skills`,
+    /// `.agents/skills` of it and of each one above it up to its repository's
+    /// top, yours in pi's folder and in `~/.agents/skills`, the nearest of a
+    /// name first. A folder with a `SKILL.md` holds no other skill; a `.md` is
+    /// a skill at the top of pi's folders and below the top of the Agent
+    /// Skills ones, named for the folder it is in, as pi names it. A skill
+    /// goes by the name its frontmatter gives first, and one that says
+    /// nothing of what it does is none, nor is what is in a folder
+    /// whose name starts with a `.`, or in `node_modules`.
+    #[test]
+    fn the_finder_finds_what_pi_runs_where_pi_finds_it() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let (home, agent) = (root.join("home"), root.join("home/.pi/agent"));
+        let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
+        put(root, "outside/.agents/skills/far/SKILL.md", &front("Above the repository."));
+        put(root, "outside/repo/.git/HEAD", "");
+        put(root, "outside/repo/.agents/skills/top/SKILL.md", &front("At the top."));
+        put(root, "outside/repo/.agents/skills/group/nested.md", &front("Below the top."));
+        put(root, "outside/repo/.agents/skills/flat.md", &front("At the top of Agent Skills."));
+        put(root, "outside/repo/inner/.pi/skills/near/SKILL.md", &front("Near."));
+        put(root, "outside/repo/inner/.pi/skills/near/more/SKILL.md", &front("Held by near."));
+        put(root, "outside/repo/inner/.pi/skills/loose.md", &front("At the top of pi's."));
+        put(root, "outside/repo/inner/.agents/skills/near/SKILL.md", &front("Farther."));
+        let named = "---\nname: renamed\ndescription: Named.\n---\n";
+        put(root, "home/.pi/agent/skills/named/SKILL.md", named);
+        let mine = "---\ndescription: Mine.\ndisable-model-invocation: true\n---\n";
+        put(root, "home/.pi/agent/skills/mine/SKILL.md", mine);
+        put(root, "home/.pi/agent/skills/mute/SKILL.md", "---\nname: mute\n---\n");
+        put(root, "home/.pi/agent/skills/bare/SKILL.md", "No frontmatter.\n");
+        put(root, "home/.pi/agent/skills/.hidden/SKILL.md", &front("Hidden."));
+        put(root, "home/.pi/agent/skills/node_modules/dep/SKILL.md", &front("A dependency."));
+        put(root, "home/.agents/skills/shared/SKILL.md", &front("Shared."));
+        let cwd = root.join("outside/repo/inner");
+        assert_eq!(pi_found(&cwd, Some(&home), Some(&agent)), [
+            skill("group", "Below the top."),
+            only_you("mine", "Mine."),
+            skill("near", "Near."),
+            skill("renamed", "Named."),
+            skill("shared", "Shared."),
+            skill("skills", "At the top of pi's."),
+            skill("top", "At the top."),
+        ]);
+    }
+
+    /// Outside of a repository, the finder looks up to `/`; without a home,
+    /// only where the directory is.
+    #[test]
+    fn outside_a_repository_pi_s_skills_are_found_up_to_the_root() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        put(root, "a/.agents/skills/up/SKILL.md", "---\ndescription: Up.\n---\n");
+        let found = pi_found(&root.join("a/b/c"), None, None);
+        assert!(found.contains(&skill("up", "Up.")), "{found:?}");
+    }
+
     #[test]
     fn the_finder_finds_the_skills_of_a_directory_and_those_above_it() {
         let Ok(scratch) = tempfile::tempdir() else {

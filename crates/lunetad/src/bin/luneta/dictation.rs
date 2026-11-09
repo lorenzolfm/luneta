@@ -22,10 +22,11 @@
 //! it presses again as the key is held is the key repeating, which does
 //! nothing.
 //!
-//! Into a pane with a Claude Code agent in it, a skill you name is written as
-//! its slash command, as `named` has it, and the box shows it so as you say
-//! it. The finder says which skills there are while you talk: what you said
-//! waits on it only if it has a mark in it, a word that can name a skill.
+//! Into a pane with an agent in it, a skill you name is written as its slash
+//! command, as `named` has it, and the box shows it so as you say it: in the
+//! harness's spelling once written, `/skill:<name>` for pi's. The finder says
+//! which skills there are while you talk: what you said waits on it only if it
+//! has a mark in it, a word that can name a skill.
 //! `Enter` sends what the box showed as it went down: a command it did not show
 //! then is written, and waits for you. Unlike words, a command is not written
 //! where that agent has since gone from the pane: what you said is, as you said

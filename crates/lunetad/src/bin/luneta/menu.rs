@@ -1228,8 +1228,12 @@ pub enum Wants {
     /// The harness picked for the agents the menu starts kept, for every
     /// luneta.
     Keep(Harness),
-    /// The skills that `cwd` can run, for the search box.
-    Skills(String),
+    /// The skills that `cwd` can run in `agent`, for the search box.
+    Skills { cwd: String, agent: Harness },
+    /// The harness picked for the agents the menu starts kept, as `Keep`
+    /// does, and the skills `cwd` can run in it, for the search box, which
+    /// waits on them again.
+    Refind { cwd: String, agent: Harness },
     /// What the delete key deletes planned, for `planned`: for a pane, once
     /// zellij has said what closing it closes: of `session`.
     Plan { session: Listed, scope: Scope },
@@ -1568,6 +1572,16 @@ impl Menu {
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
+                (Pressed::Switched(agent), Target::Pane(_, row))
+                    if let Some(search) = &mut keys.search =>
+                {
+                    search.refind();
+                    let wants = match row.beside() {
+                        Ok(Beside { cwd, .. }) => Wants::Refind { cwd: cwd.into(), agent },
+                        Err(_) => Wants::Keep(agent),
+                    };
+                    stays(Stage::Choosing(keys), wants)
+                },
                 (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
                 (Pressed::Moved | Pressed::Nothing, _)
                 | (
@@ -1585,7 +1599,8 @@ impl Menu {
                 (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { cwd, .. }) => {
                         keys.search = Some(Search::new());
-                        stays(Stage::Choosing(keys), Wants::Skills(cwd.into()))
+                        let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent };
+                        stays(Stage::Choosing(keys), wants)
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -2010,8 +2025,11 @@ impl Menu {
     }
 
     /// Fills the search box with what the finder said, while it is open.
-    pub fn found(&mut self, skills: Result<Vec<crate::skills::Skill>, String>) {
+    /// What the finder found for `agent` is for the search box only while
+    /// the menu starts agents in that harness: `Tab` asked for another's.
+    pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
         if let Stage::Choosing(keys) = &mut self.stage
+            && keys.agent == agent
             && let Some(search) = &mut keys.search
         {
             search.fill(skills);
@@ -3818,12 +3836,12 @@ mod tests {
     fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
         let (menu, _) = stays(opened(pane_row(), None));
         let (mut menu, wants) = stays(menu.key(&char('/')));
-        assert_eq!(wants, Wants::Skills("/w/luneta/main".to_owned()));
+        assert_eq!(wants, Wants::Skills { cwd: "/w/luneta/main".to_owned(), agent: CLAUDE });
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
             ["─ Skills · claude ─────────────", " _", " finding skills…"]
         );
-        menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         // The one the cursor is on is lit, as the sidebar's row is while it
         // has the focus, which it has while the search is open.
         let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
@@ -3842,13 +3860,39 @@ mod tests {
         assert!(menu.opening().is_some());
     }
 
+    /// `Tab` in the search box picks the other harness and has the finder
+    /// asked for its skills, keeping what is typed. What the finder says
+    /// for the harness the box left goes nowhere. `Enter` starts the one
+    /// picked in the harness the rule names.
+    #[test]
+    fn tab_in_the_search_finds_the_skills_of_the_other_harness() {
+        let (mut menu, _) = stays(opened(pane_row(), Some('/')));
+        menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
+        let (menu, _) = stays(menu.key(&char('t')));
+        let (mut menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        let cwd = "/w/luneta/main".to_owned();
+        assert_eq!(wants, Wants::Refind { cwd, agent: Harness::Pi });
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
+            "─ Skills · pi ─── luneta/main ─",
+            " t_",
+            " finding skills…",
+        ]);
+        menu.found(CLAUDE, Ok(skills(&["tigerstyle"])));
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " finding skills…");
+        menu.found(Harness::Pi, Ok(skills(&["tdd", "code-review"])));
+        assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
+        let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+        let command = agents::on_skill(Harness::Pi, "tdd", None, Some("feat/menu"));
+        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command }));
+    }
+
     /// Each skill the search box shows is a spot on its line that picks it:
     /// a click starts an agent on it, as `Enter` does with the cursor on it.
     /// The wheel over them moves the cursor. What is typed is no spot.
     #[test]
     fn a_click_on_a_skill_starts_an_agent_on_it_as_enter_does() {
         let (mut menu, _) = stays(opened(pane_row(), Some('/')));
-        menu.found(Ok(skills(&["code-review", "tigerstyle"])));
+        menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
         // The rule, what is typed, then the skills.
         let (_, spots) = menu.lines(31, 6, 0);
