@@ -760,12 +760,12 @@ impl Keys {
     /// for those a command has, or the sidebar moves with, which `m` reaches.
     /// It shows the Delete group's key and not what it deletes, which is the
     /// row's.
-    fn legend() -> Self {
+    fn legend() -> Vec<Entry> {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
         let shown = |entry: &Entry| Top::of(entry.key()).is_none();
         root.extend(Keys::every(None).into_iter().filter(shown));
-        Keys { root, open: Vec::new(), search: None, agent: Picked::ByYou(Harness::ClaudeCode) }
+        root
     }
 
     /// The groups opened, each its name and its entries.
@@ -1417,7 +1417,7 @@ enum Stage {
     /// The menu for `work`, which a paste opened, at `step`, whose agent
     /// starts in `agent`. Once luneta has found where its keys go, its target
     /// is there.
-    Pull { work: Work, agent: Picked, step: Step },
+    Pull { work: Work, agent: Harness, step: Step },
     /// The box `n m` opens, with what is typed in it for ssh to reach a
     /// machine by, and why that is no destination, once `Enter` found it is
     /// not, until the next key.
@@ -1497,7 +1497,7 @@ impl Menu {
 
     /// The menu numbered `number` for `work`, pasted with the menu for
     /// `target` open, or the row highlighted, whose agent starts in `agent`.
-    pub fn pull(number: u64, target: Target, work: Work, agent: Picked) -> Menu {
+    pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
         let step = Step::Choosing { wrong: None };
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
     }
@@ -1883,8 +1883,8 @@ impl Menu {
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } }
                 if key.code == KeyCode::Tab && bare(key) =>
             {
-                let agent = agent.next();
-                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent.harness()))
+                let agent = agents::next(agent);
+                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
             },
             Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
                 let asks = Asks::of(&work);
@@ -2040,13 +2040,13 @@ impl Menu {
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                agents::on_skill(agent.harness(), REVIEW, Some(&link.url()), branch.as_deref())
+                agents::on_skill(agent, REVIEW, Some(&link.url()), branch.as_deref())
             },
             (Pull::Agent, Readied::Link(link)) => {
-                agents::on_words(agent.harness(), format!("{TACKLE} {}", link.url()), &[])
+                agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
             },
             (Pull::Agent, Readied::File { real }) => {
-                agents::on_words(agent.harness(), format!("{TACKLE} {real}"), &[real.as_str()])
+                agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
@@ -2292,7 +2292,7 @@ impl Menu {
                         let mut body: Vec<_> =
                             entries.iter().map(|entry| entry_line(entry, inner)).collect();
                         spots.add(body.len(), 0..width, Choice::Key(KeyEvent::from(KeyCode::Tab)));
-                        body.push(agent_line(*agent, inner));
+                        body.push(agent_line(Picked::ByYou(*agent), inner));
                         if let Some(wrong) = wrong {
                             body.extend(wrap(wrong, width, Style::new().fg(gruvbox::RED)));
                         }
@@ -2688,7 +2688,7 @@ fn title(keys: &Keys) -> String {
 /// leaves them to the menu, and the sidebar's command, each with what it
 /// does. Each is a spot that presses its key, by its line among them.
 pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    listed(TITLE, &Keys::legend().root, width, room)
+    listed(TITLE, &Keys::legend(), width, room)
 }
 
 /// What the bottom of the sidebar lists in the legend's place while `y` waits
@@ -2794,40 +2794,36 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
 /// starts with: the icon and the name of the harness of `agent`, and that the
 /// agent in the pane picked it, where it did; and after them `<TAB>`, which
 /// picks the next, and what it does. Where the line has no room for all of
-/// it, what `Tab` does goes in fewer words, then in none, and then the
-/// pane's part goes.
+/// it, what `Tab` does goes in fewer words, then in none, then the pane's
+/// part goes, and then `<TAB>`, for the name alone, cut to fit.
 fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
     let name = agents::name(agent.harness());
-    let icon = icons::of(name).map_or_else(|| " ".repeat(icons::WIDTH), str::to_owned);
     let pane = match agent {
-        Picked::ByPane(_) => PANE_S,
-        Picked::ByYou(_) => "",
+        Picked::ByPane(_) => Some(PANE_S),
+        Picked::ByYou(_) => None,
     };
     let key = Hint::Tab.label();
-    let named = icons::WIDTH + 1 + name.width();
-    let wide = |pane: &str, does: &str| {
-        let does = if does.is_empty() { 0 } else { 1 + does.width() };
-        named + pane.width() + GAP + key.width() + does
+    let wide = |(pane, does): &(Option<&str>, Option<&str>)| {
+        let pane = pane.map_or(0, UnicodeWidthStr::width);
+        let does = does.map_or(0, |does| 1 + does.width());
+        icons::WIDTH + 1 + name.width() + pane + GAP + key.width() + does
     };
-    let tries = [(pane, NEXT_DOES[0]), (pane, NEXT_DOES[1]), (pane, ""), ("", "")];
-    let fits = |(pane, does): &(&str, &str)| wide(pane, does) <= inner;
-    let (pane, does) = tries.into_iter().find(fits).unwrap_or(("", ""));
-    let room = inner.saturating_sub(icons::WIDTH + 1);
-    let name = sidebar::cut(name, room);
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::raw(icon),
-        Span::raw(" "),
-        Span::raw(name),
-        Span::styled(pane, Style::new().fg(NAME)),
-    ];
-    if wide(pane, does) <= inner {
-        spans.push(Span::raw(" ".repeat(GAP)));
-        spans.push(Span::styled(key, Style::new().fg(ACCENT)));
-        if !does.is_empty() {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(does, Style::new().fg(NAME)));
-        }
+    let does = NEXT_DOES.map(Some);
+    let tries = [(pane, does[0]), (pane, does[1]), (pane, None), (None, None)];
+    let icon = icons::harness(agent.harness());
+    let mut spans = vec![Span::raw(" "), Span::raw(icon), Span::raw(" ")];
+    match tries.into_iter().find(|tried| wide(tried) <= inner) {
+        Some((pane, does)) => {
+            spans.push(Span::raw(name));
+            spans.extend(pane.map(|pane| Span::styled(pane, Style::new().fg(NAME))));
+            spans.push(Span::raw(" ".repeat(GAP)));
+            spans.push(Span::styled(key, Style::new().fg(ACCENT)));
+            if let Some(does) = does {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(does, Style::new().fg(NAME)));
+            }
+        },
+        None => spans.push(Span::raw(sidebar::cut(name, inner.saturating_sub(icons::WIDTH + 1)))),
     }
     Line::from(spans)
 }
@@ -3332,8 +3328,8 @@ mod tests {
 
     /// On a pane an agent runs in, the line under the keys says that agent
     /// picked the harness, until `Tab` picks the next. Where the line has
-    /// less room, what `Tab` does goes in fewer words, then in none, and then
-    /// the pane's part goes.
+    /// less room, what `Tab` does goes in fewer words, then in none, then the
+    /// pane's part goes, and then `<TAB>`.
     #[test]
     fn the_agent_line_says_where_the_pane_s_agent_picked_the_harness() {
         let pi = Picked::ByPane(Harness::Pi);
@@ -3343,6 +3339,7 @@ mod tests {
         assert_eq!(line(&menu, 37), " \u{f03ff} pi, the pane's  <TAB> another");
         assert_eq!(line(&menu, 31), " \u{f03ff} pi, the pane's  <TAB>");
         assert_eq!(line(&menu, 23), " \u{f03ff} pi  <TAB>");
+        assert_eq!(line(&menu, 11), " \u{f03ff} pi");
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(CLAUDE));
         assert_eq!(line(&menu, 31), " \u{ec82} claude  <TAB> another agent");
@@ -4452,7 +4449,7 @@ mod tests {
     /// The menu for the pull request, pasted on `row`, its key `key` pressed,
     /// waiting for luneta to find where it goes.
     fn pulling_on(row: Target, key: char) -> Menu {
-        let (menu, wants) = stays(Menu::pull(1, row, link(), PICKED).key(&char(key)));
+        let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
         let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
         assert_eq!(wants, Wants::Pull(link(), wanted));
         assert!(menu.pulling());
@@ -4476,7 +4473,7 @@ mod tests {
     /// close the menu.
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
-        let menu = Menu::pull(1, pane_row(), link(), PICKED);
+        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
@@ -4490,7 +4487,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
-        let syncing = Menu::pull(1, pane_row(), link(), PICKED);
+        let syncing = Menu::pull(1, pane_row(), link(), CLAUDE);
         let (syncing, wants) = stays(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
         assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
@@ -4560,7 +4557,7 @@ mod tests {
     /// on that line is a `Tab`. Once a key waits, `Tab` does nothing.
     #[test]
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
-        let menu = Menu::pull(1, pane_row(), link(), PICKED);
+        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(menu.lines(31, 9, 0).1.at(Position::new(5, 3)), Some(&Choice::Key(tab)));
         let (menu, wants) = stays(menu.key(&tab));
@@ -4595,7 +4592,7 @@ mod tests {
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let menu = Menu::pull(1, pane_row(), issue.clone(), PICKED);
+        let menu = Menu::pull(1, pane_row(), issue.clone(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
@@ -4631,7 +4628,7 @@ mod tests {
     fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), PICKED).key(&char('t')));
+        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
             at: At::Clone { cwd: "/w/cdk".to_owned(), name },
@@ -4679,7 +4676,7 @@ mod tests {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
             Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
         };
-        let menu = Menu::pull(1, pane_row(), file(), PICKED);
+        let menu = Menu::pull(1, pane_row(), file(), CLAUDE);
         assert_eq!(
             text(&menu.lines(38, 9, 0).0),
             [
@@ -4720,7 +4717,7 @@ mod tests {
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         let pressed = |key: char| {
-            stays(Menu::pull(1, pane_row(), file(), PICKED).key(&char(key))).0
+            stays(Menu::pull(1, pane_row(), file(), CLAUDE).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };

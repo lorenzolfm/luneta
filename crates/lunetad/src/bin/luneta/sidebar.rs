@@ -3747,8 +3747,7 @@ impl Sidebar {
         };
         self.close_menu();
         self.menus += 1;
-        let agent = agents::Picked::ByYou(self.agent.harness());
-        self.menu = Some(Menu::pull(self.menus, target, work, agent));
+        self.menu = Some(Menu::pull(self.menus, target, work, self.agent.harness()));
     }
 
     /// The menu, while it floats over zellij.
