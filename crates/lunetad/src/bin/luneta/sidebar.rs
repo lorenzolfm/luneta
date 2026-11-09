@@ -1685,13 +1685,19 @@ impl Sidebar {
     }
 
     /// zellij did not take luneta's zellij to the session it was sent to on
-    /// the go that `look` was to find it there. A look at the one it is in
-    /// still.
+    /// the go that `look` was to find it there: it is in the one it left
+    /// still, until zellij titles the terminal, which it may never do where
+    /// the client came to a tab that had that title. A look at the one it is
+    /// in still.
     pub fn stayed(&mut self, look: u64) -> Option<Look> {
         if !self.sent_on(look) {
             return None;
         }
-        self.sent = None;
+        let from = match self.sent.take() {
+            Some(Sent::Going { from, .. }) => from,
+            _ => None,
+        };
+        self.sent = from.map(|Leaving { session, .. }| Sent::Landed { session });
         let look = self.arrived();
         self.rebuild();
         look
@@ -6794,6 +6800,20 @@ mod tests {
         let look = sidebar.went(&newer).unwrap();
         let stayed = sidebar.stayed(look.number).map(|look| look.session);
         assert_eq!(stayed, Some("older".to_owned()));
+        assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
+    }
+
+    /// A client that comes back to a tab after its connection dropped gets no
+    /// title, as zellij sent the one before it that title already. A go that
+    /// zellij does not take leaves it in the session it came to all the same.
+    #[test]
+    fn a_go_zellij_does_not_take_leaves_an_untitled_client_where_it_came() {
+        let mut sidebar = two_sessions();
+        sidebar.title = None;
+        let came = sidebar.rejoining(&session_name("older"));
+        sidebar.unfound(came.number);
+        let look = sidebar.went(&pane_of("newer", 20, 1)).unwrap();
+        sidebar.stayed(look.number);
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
