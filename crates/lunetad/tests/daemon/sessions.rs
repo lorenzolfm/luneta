@@ -1268,7 +1268,8 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
 }
 
 /// gh is asked again soon about a branch whose pull request has checks yet
-/// to end, as they are what change. Where it fails, what it said before
+/// to end, as they are what change: in 15s, and in twice that once it said
+/// nothing new of them, as it fails. Where it fails, what it said before
 /// stands, as stale, until it answers again. The daemon says how the checks
 /// changed, and how long it was since gh had said them, failing in between.
 #[test]
@@ -1294,7 +1295,7 @@ fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
         pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.checks, it.stale))
     };
     let soon = |what: &str, wanted| {
-        let deadline = Instant::now() + Duration::from_secs(25);
+        let deadline = Instant::now() + Duration::from_secs(40);
         while shown() != Some(wanted) {
             assert!(Instant::now() < deadline, "never came to be: {what}");
             thread::sleep(Duration::from_millis(50));

@@ -445,8 +445,10 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// How long gh rests from a branch before it is asked about it again.
 #[derive(Clone, Copy, Debug)]
 pub struct Rests {
-    /// From one whose pull request has checks yet to end: they are what
-    /// change, and soon.
+    /// From one whose pull request has checks yet to end, as they last
+    /// changed: they are what change, and soon. Twice as long each time they
+    /// come to nothing new, up to `settled`, as a job can wait for hours for
+    /// a runner, or for someone to let it run.
     pub pending: Duration,
     /// From any other.
     pub settled: Duration,
@@ -463,6 +465,8 @@ struct Said {
 struct Asked {
     /// When it is to be asked about again.
     next: Instant,
+    /// How long it rests from it until then.
+    rest: Duration,
     /// What it said the last time it answered, if it has.
     said: Option<Said>,
     /// How many times it failed to answer since.
@@ -519,37 +523,46 @@ struct Answered {
 /// Where gh stands with a branch once it said `said` of it, from where it
 /// stood with it before, if it had been asked about it: what it found last
 /// stands, as stale, where it failed. One whose checks are pending is asked
-/// about again the soonest.
+/// about again the soonest, once they changed, and twice as late each time
+/// gh says nothing new of them, as they stay as they were or it fails.
 fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> Asked {
     let now = Instant::now();
-    let (before, failed) = was.map_or((None, 0), |was| (was.said, was.failed));
+    let (before, failed, rested) = match was {
+        Some(was) => (was.said, was.failed, Some(was.rest)),
+        None => (None, 0, None),
+    };
     let of = |found: Option<Pulled>| found.map(|found| found.pull_request);
     let fresh = |found: Option<PullRequest>, trouble| {
         let change = |was| checks_changed(was, found.as_ref(), failed, now);
         if let Some(change) = before.as_ref().and_then(change) {
             log::say(&change);
         }
-        (Some(Said { at: now, found }), trouble, 0)
+        let new = before.as_ref().is_none_or(|was| was.found != found);
+        (Some(Said { at: now, found }), trouble, 0, new)
     };
-    let (said, trouble, failed) = match said {
+    let (said, trouble, failed, new) = match said {
         Ok(Answer::Stayed(found)) => fresh(of(found), None),
         // The core wakes the thread once git sees the checkout.
-        Ok(Answer::Moved) => (before, None, failed),
+        Ok(Answer::Moved) => (before, None, failed, false),
         Ok(Answer::Partly { own, why }) => {
             let own = of(own);
             let was = before.as_ref().and_then(|was| was.found.clone());
             if standing(was, own.clone()) == own {
                 fresh(own, Some(why))
             } else {
-                (before, Some(why), failed.saturating_add(1))
+                (before, Some(why), failed.saturating_add(1), false)
             }
         },
-        Err(why) => (before, Some(why), failed.saturating_add(1)),
+        Err(why) => (before, Some(why), failed.saturating_add(1), false),
     };
     let found = said.as_ref().and_then(|said| said.found.as_ref());
     let pending = found.is_some_and(|found| found.verdict() == Some(Verdict::Pending));
-    let rest = if pending { rests.pending } else { rests.settled };
-    Asked { next: now + rest, said, failed, trouble }
+    let rest = match rested {
+        _ if !pending => rests.settled,
+        Some(rested) if !new => rested.saturating_mul(2).max(rests.pending).min(rests.settled),
+        _ => rests.pending,
+    };
+    Asked { next: now + rest, rest, said, failed, trouble }
 }
 
 /// What to say where the checks of a pull request come to otherwise than
@@ -607,22 +620,29 @@ pub fn follow(
         let forks = Arc::new(Forks::default());
         let (answer, answers) = mpsc::channel();
         let mut troubles = Troubles::default();
+        // The branch in each directory as the core said it last, and the
+        // directories each branch is checked out in, as git said them then.
+        let mut seen = None;
+        let mut on = BTreeMap::new();
         loop {
             let Some(branches) = core::ask(&core, core::Command::Branches) else {
                 return;
             };
-            // The directories each branch is checked out in. git says the
-            // repository of each afresh: a directory a pane stays in can be
-            // cloned over, with a branch of the same name checked out.
-            let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
-            for (dir, branch) in branches {
-                if let git::Common::Of(repository) = git::common(&dir) {
-                    on.entry((repository, branch)).or_default().push(dir);
-                }
-            }
             while let Ok(Answered { branch, said }) = answers.try_recv() {
                 let was = asked.remove(&branch).and_then(Ask::into_asked);
                 asked.insert(branch, Ask::Resting(answered(was, said, rests)));
+            }
+            let now = Instant::now();
+            let due = |asked: &HashMap<Branch, Ask>, branch: &Branch| {
+                asked.get(branch).is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
+            };
+            // git says the repository of each directory afresh: one a pane
+            // stays in can be cloned over, with a branch of the same name
+            // checked out. It does so as a branch is due, or the core says
+            // another, and not for an answer alone, as each is.
+            if seen.as_ref() != Some(&branches) || on.keys().any(|branch| due(&asked, branch)) {
+                on = located(&branches);
+                seen = Some(branches);
             }
             let asking = |ask: &Ask| matches!(ask, Ask::Asking(_));
             asked.retain(|branch, ask| on.contains_key(branch) || asking(ask));
@@ -631,11 +651,7 @@ pub fn follow(
             if !tell(&core, &on, &asked) {
                 return;
             }
-            let now = Instant::now();
-            let due = |branch: &&Branch| {
-                asked.get(*branch).is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
-            };
-            let mut due: Vec<&Branch> = on.keys().filter(due).collect();
+            let mut due: Vec<&Branch> = on.keys().filter(|branch| due(&asked, branch)).collect();
             // Never asked about before all others, then the one due longest.
             due.sort_by_key(|branch| asked.get(*branch).and_then(Ask::next));
             let free = |asked: &HashMap<Branch, Ask>| {
@@ -684,6 +700,18 @@ pub fn follow(
     Ok(())
 }
 
+/// The directories each branch is checked out in, by the repository git
+/// says each directory is of, of `branches`, the branch in each directory.
+fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>> {
+    let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
+    for (dir, branch) in branches {
+        if let git::Common::Of(repository) = git::common(dir) {
+            on.entry((repository, branch.clone())).or_default().push(dir.clone());
+        }
+    }
+    on
+}
+
 /// Tells the core the pull request gh found last for the branch in each
 /// directory `on` has it checked out in. False once the core has stopped.
 fn tell(
@@ -725,11 +753,20 @@ mod tests {
         }
     }
 
+    fn pulled(pull_request: PullRequest) -> Pulled {
+        Pulled {
+            pull_request,
+            head_name: "fix".to_owned(),
+            head: "abc".to_owned(),
+            author: None,
+            head_repository: None,
+        }
+    }
+
     /// Where gh fails to say all of a branch, what it said of it before
     /// stands as stale, and counts as a failure: unless what it said of the
-    /// fork's stands, which is fresh. A branch whose checks are pending is
-    /// asked about again sooner, stale or not, and one that moved off its
-    /// branch stays as stale as it was.
+    /// fork's stands, which is fresh. One that moved off its branch stays as
+    /// stale as it was.
     #[test]
     fn what_gh_failed_to_say_again_stands_as_stale() {
         let rests = Rests { pending: Duration::from_secs(1), settled: Duration::from_hours(1) };
@@ -738,16 +775,10 @@ mod tests {
         let at = Instant::now();
         let was = |found: &PullRequest| Asked {
             next: at,
+            rest: rests.pending,
             said: Some(Said { at, found: Some(found.clone()) }),
             failed: 1,
             trouble: None,
-        };
-        let pulled = |pull_request| Pulled {
-            pull_request,
-            head_name: "fix".to_owned(),
-            head: "abc".to_owned(),
-            author: None,
-            head_repository: None,
         };
         let partly = |own| Ok(Answer::Partly { own, why: "the parent did not say".to_owned() });
         let said = |asked: &Asked| asked.said.as_ref().map(|said| said.at);
@@ -756,18 +787,49 @@ mod tests {
         let stale = PullRequest { stale: true, ..parent_s.clone() };
         assert_eq!((asked.found(), said(&asked), asked.failed), (Some(stale), Some(at), 2));
         assert_eq!(asked.trouble.as_deref(), Some("the parent did not say"));
-        assert!(asked.next < Instant::now() + Duration::from_secs(2));
 
         let closed = pull("owner/repo", 4, State::Closed, None);
         let fork_s = pull("owner/repo", 4, State::Open, pending);
         let asked = answered(Some(was(&fork_s)), partly(Some(pulled(closed.clone()))), rests);
         assert_eq!((asked.found(), asked.failed), (Some(closed), 0));
         assert!(said(&asked).is_some_and(|now| now > at));
-        assert!(asked.next > Instant::now() + Duration::from_mins(59));
+        assert_eq!(asked.rest, rests.settled);
 
         let asked = answered(Some(was(&fork_s)), Ok(Answer::Moved), rests);
         let stale = PullRequest { stale: true, ..fork_s };
         assert_eq!((asked.found(), asked.trouble, asked.failed), (Some(stale), None, 1));
+    }
+
+    /// gh rests the shortest from checks yet to end, once they changed, and
+    /// twice as long each time it says nothing new of them, as they stay as
+    /// they were or it fails to say them, up to as long as from any other.
+    #[test]
+    fn checks_that_stay_pending_are_asked_about_less_and_less_often() {
+        let rests = Rests { pending: Duration::from_secs(15), settled: Duration::from_mins(2) };
+        let checks = |pending, passed| Some(Checks { pending, failed: 0, passed });
+        let stayed = |checks| {
+            let pull_request = pull("owner/repo", 7, State::Open, checks);
+            Ok(Answer::Stayed(Some(pulled(pull_request))))
+        };
+        let failed = || Err("gh failed".to_owned());
+        let mut asked = answered(None, stayed(checks(2, 0)), rests);
+        let mut rested = vec![asked.rest];
+        let said = [
+            stayed(checks(2, 0)),
+            failed(),
+            stayed(checks(2, 0)),
+            stayed(checks(2, 0)),
+            stayed(checks(1, 1)),
+            failed(),
+            stayed(checks(0, 2)),
+        ];
+        for said in said {
+            asked = answered(Some(asked), said, rests);
+            rested.push(asked.rest);
+        }
+        let secs = Duration::from_secs;
+        let rests = [15, 30, 60, 120, 120, 15, 30, 120].map(secs);
+        assert_eq!(rested, rests);
     }
 
     /// What the daemon says as a pull request's checks come to otherwise:

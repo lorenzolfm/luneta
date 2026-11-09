@@ -125,7 +125,9 @@ const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 /// from those whose checks have ended, to ask sooner of those that have not.
 const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(2);
 
-/// How long gh rests from a branch whose pull request has checks yet to end.
+/// How long gh rests from a branch whose pull request has checks yet to end,
+/// once they changed: twice as long each time they come to nothing new, up to
+/// `PULL_REQUEST_SWEEP`.
 const PENDING_CHECKS_SWEEP: Duration = Duration::from_secs(15);
 
 /// How often the daemon looks for the files luneta keeps that are past their

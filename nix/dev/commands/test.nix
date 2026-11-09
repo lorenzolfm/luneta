@@ -7,7 +7,7 @@
 {
   name = "test";
   usage = "[args...]";
-  help = "the tests on nextest, then the doctests; -P quick leaves out the two that wait 30s";
+  help = "the tests on nextest, then the doctests; -P quick leaves out the two that wait 30s and more";
   tools = testKit;
   text = ''
     ${compileEnv}
