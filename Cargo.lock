@@ -3658,7 +3658,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wt"
 version = "0.3.0"
-source = "git+https://github.com/lorenzolfm/wt?rev=fc6bcd45f5708200d806f678d6a5a17071043944#fc6bcd45f5708200d806f678d6a5a17071043944"
+source = "git+https://github.com/lorenzolfm/wt?rev=0ad5e2f0adfe334e9633e2a5fb4ce72c0b640c4b#0ad5e2f0adfe334e9633e2a5fb4ce72c0b640c4b"
 dependencies = [
  "anyhow",
  "clap",

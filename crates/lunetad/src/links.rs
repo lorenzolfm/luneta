@@ -2360,7 +2360,8 @@ mod tests {
             let bare = bare.to_str().unwrap();
             assert!(git(scratch.path(), &["init", "-q", "--bare", bare]).is_some());
             let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
-            let wt = Repo::discover(Some(Path::new(bare))).unwrap().container().join("issue-7");
+            let repo = Repo::discover(Some(Path::new(bare))).unwrap();
+            let wt = repo.container().unwrap().join("issue-7");
             assert_eq!(wt_makes(&common, "issue-7"), wt.to_str().unwrap());
         }
     }
