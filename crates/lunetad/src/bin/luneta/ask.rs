@@ -33,6 +33,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
+use crate::agents::{self, Harness};
 use crate::away::{self, Away};
 use crate::brief::{self, Asking};
 use crate::due::Due;
@@ -193,9 +194,10 @@ impl Ask {
     }
 
     /// Hands what you typed to the agent, on a thread of its own, for you
-    /// where `user` says, and takes it from what you are typing. What the
-    /// turn hears comes back on `events`, and how it ended, as `Due` does.
-    pub fn send(&mut self, user: User, events: &Sender<Event>) {
+    /// where `user` says, its agents to start in `agents` unless you name
+    /// another harness, and takes it from what you are typing. What the turn
+    /// hears comes back on `events`, and how it ended, as `Due` does.
+    pub fn send(&mut self, user: User, agents: Harness, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
         }
@@ -209,7 +211,8 @@ impl Ask {
             Works::There { on, cwd } => (Some(on.clone()), cwd.as_ref().map(PathBuf::from)),
         };
         let resumed = self.session.clone();
-        let asked = Asked::new(cwd, &words, resumed, self.highlighted.clone(), user, turn);
+        let (highlighted, agents) = (self.highlighted.clone(), agents::to_api(agents));
+        let asked = Asked::new(cwd, &words, resumed, highlighted, user, turn, agents);
         self.talk.push(Said::You(words));
         let asked = match asked {
             Ok(asked) => asked,
@@ -624,7 +627,7 @@ mod tests {
         ask.works = Works::There { on: "nixos".parse().unwrap(), cwd: Some("w".to_owned()) };
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
-        ask.send(User::Untold, &events);
+        ask.send(User::Untold, Harness::ClaudeCode, &events);
         let wrong = "ask: cwd: w is no absolute path".to_owned();
         assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
         assert!(!ask.turning());

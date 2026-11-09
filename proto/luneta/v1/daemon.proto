@@ -743,6 +743,11 @@ message AskRequest {
   // close the agent runs takes a yes only to a plan said in the turn before.
   fixed64 turn = 8;
   optional fixed64 before = 9;
+  // The harness the user picked last for the agents luneta's menu starts,
+  // which the agent starts one in unless the user names another. Absent from
+  // a luneta older than this field, whose menu starts Claude Code's alone: so
+  // absent is Claude Code, as `Agent.harness` is.
+  optional Harness agents = 10;
 
   message UserPane {
     string session = 1;

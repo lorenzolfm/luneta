@@ -804,6 +804,8 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
         ("pane", &["claude", "--name", "issue-42", "tackle it"]),
         ("pane", &["claude", "/thermo-nuclear-review"]),
         ("tab", &["claude"]),
+        ("pane", &["pi", "--name", "issue-42", "tackle it"]),
+        ("tab", &["pi", "/skill:tigerstyle"]),
     ] {
         open(what, command);
         let asked = last_opened();
@@ -819,11 +821,17 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_or_claude() {
         ("tab", &["claude", "--dangerously-skip-permissions"], "no option but --name"),
         ("pane", &["claude", "--name", "-x"], "no option but --name"),
         ("pane", &["claude", "!rm -rf ~"], "no prompt with a ! first"),
+        ("pane", &["pi", "--tools", "bash"], "it does not run"),
+        ("pane", &["pi", "-p"], "pi takes no option but --name"),
+        ("pane", &["pi", "!rm -rf ~"], "no prompt with a ! first"),
+        ("pane", &["pi", "@/etc/shadow"], "pi takes no prompt with an @ first"),
+        ("pane", &["codex", "tackle it"], "it does not run codex"),
     ] {
         let refusal = open(what, command);
         let why = String::from_utf8_lossy(&refusal.stderr);
         assert_eq!(refusal.status.code(), Some(1), "{command:?}: {why}");
-        assert!(why.contains("in luneta's ask box, a pane runs your shell or"), "{command:?}: {why}");
+        let only = "in luneta's ask box, a pane runs your shell, `claude";
+        assert!(why.contains(only), "{command:?}: {why}");
         assert!(why.contains(refused), "{command:?}: {why}");
     }
     assert_eq!(host.lists.opened(), opened);

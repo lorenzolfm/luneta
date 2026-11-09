@@ -15,7 +15,7 @@
 //! luneta's zellij is on another machine, by none, as none here is yours:
 //! there a close takes none of yours along, and `go` moves none of your
 //! clients. Claude Code runs what that agent runs without asking you, so a
-//! pane it opens runs your shell or Claude Code, and no other command.
+//! pane it opens runs your shell, Claude Code or pi, and no other command.
 //!
 //! A turn moves nobody, as an open does, and what you type goes on reaching your
 //! pane, as `turns` says. Where another client is on a pane that moves, or the
@@ -220,7 +220,7 @@ pub enum Opening {
         #[arg(long)]
         cwd: Option<PathBuf>,
         /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude [--name <name>] [<prompt>]`.
+        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -238,7 +238,7 @@ pub enum Opening {
         #[arg(long)]
         name: Option<String>,
         /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude [--name <name>] [<prompt>]`.
+        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -277,7 +277,7 @@ fn seat_here(folder: &Path) -> Result<Option<Pane>, String> {
 }
 
 /// Whether a pane this opens may run `command`, as `runs` says: in luneta's
-/// ask box, only Claude Code. Or why not.
+/// ask box, only Claude Code or pi. Or why not.
 fn may_run(command: &[String]) -> Result<(), String> {
     match turn_here()? {
         None => Ok(()),
@@ -285,27 +285,34 @@ fn may_run(command: &[String]) -> Result<(), String> {
     }
 }
 
-/// Whether `command` is your shell, as an empty one is, or Claude Code on a
-/// name and a prompt, `claude [--name <name>] [<prompt>]`, none of which it
-/// takes for an option, nor the prompt for a line of your shell. A pane runs
-/// what it is given without asking you, and Claude Code, in your permission
-/// mode, asks you or looks at what it does. Or why not.
+/// Whether `command` is your shell, as an empty one is, or Claude Code or pi
+/// on a name and a prompt, `claude [--name <name>] [<prompt>]` or `pi [--name
+/// <name>] [<prompt>]`, none of which it takes for an option, nor the prompt
+/// for a line of your shell, nor, for pi, for a file to read. A pane runs what
+/// it is given without asking you, and Claude Code, in your permission mode,
+/// asks you or looks at what it does. pi asks nothing. Or why not.
 fn runs(command: &[String]) -> Result<(), String> {
-    const ONLY: &str = "in luneta's ask box, a pane runs your shell or `claude [--name <name>] \
-                        [<prompt>]`, and nothing else";
+    const ONLY: &str = "in luneta's ask box, a pane runs your shell, `claude [--name <name>] \
+                        [<prompt>]` or `pi [--name <name>] [<prompt>]`, and nothing else";
     let words: Vec<&str> = command.iter().map(String::as_str).collect();
-    let (name, prompt) = match words[..] {
-        [] | ["claude"] => (None, None),
-        ["claude", "--name", name] => (Some(name), None),
-        ["claude", "--name", name, prompt] => (Some(name), Some(prompt)),
-        ["claude", prompt] => (None, Some(prompt)),
+    let (agent, name, prompt) = match words[..] {
+        [] => return Ok(()),
+        [agent @ ("claude" | "pi")] => (agent, None, None),
+        [agent @ ("claude" | "pi"), "--name", name] => (agent, Some(name), None),
+        [agent @ ("claude" | "pi"), "--name", name, prompt] => (agent, Some(name), Some(prompt)),
+        [agent @ ("claude" | "pi"), prompt] => (agent, None, Some(prompt)),
         _ => return Err(format!("{ONLY}: it does not run {}", words.join(" "))),
     };
     if name.into_iter().chain(prompt).any(|word| word.starts_with('-')) {
-        return Err(format!("{ONLY}: claude takes no option but --name, nor a word with a - first"));
+        let why = "takes no option but --name, nor a word with a - first";
+        return Err(format!("{ONLY}: {agent} {why}"));
     }
     if prompt.is_some_and(|prompt| prompt.starts_with('!')) {
-        return Err(format!("{ONLY}: claude takes no prompt with a ! first, a line for your shell"));
+        let why = "takes no prompt with a ! first, a line for your shell";
+        return Err(format!("{ONLY}: {agent} {why}"));
+    }
+    if agent == "pi" && prompt.is_some_and(|prompt| prompt.starts_with('@')) {
+        return Err(format!("{ONLY}: pi takes no prompt with an @ first, a file it reads"));
     }
     Ok(())
 }
