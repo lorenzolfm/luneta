@@ -27,6 +27,7 @@ use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
+use lunetad::issues::{self, Filed, Filing};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -457,6 +458,18 @@ impl Away {
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
+    }
+
+    /// Has the daemon there write and file `filing`, as `lunetad::issues`
+    /// does there, and says the issue filed, or why there is none. A question
+    /// that hangs up does not stop it.
+    pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, String> {
+        let request = filing.asked(Some(self.on()));
+        let (patience, mut daemon) = (self.patience, self.daemon.clone());
+        let answer = self.answer_of(issues::AT_MOST, async move {
+            timeout(patience, daemon.file_issue(request)).await
+        })?;
+        Filed::of(answer)
     }
 
     /// What deleting the merged worktrees of the repository `dir` is in there

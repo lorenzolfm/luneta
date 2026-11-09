@@ -65,7 +65,8 @@ use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, InfoResponse, KeepChecksRequest, KeepChecksResponse,
+    DumpScreenResponse, FileIssueRequest, FileIssueResponse, GoRequest, InfoResponse,
+    KeepChecksRequest, KeepChecksResponse,
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
@@ -82,6 +83,7 @@ use crate::directory::Directory;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
+use crate::issues::Filing;
 use crate::links::{Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
@@ -1128,6 +1130,25 @@ impl Daemon for Host {
             let pruned = prunes::deleted_as_agreed(&dir, &agreed, occupied, here.as_deref())
                 .map_err(Status::failed_precondition)?;
             Ok(PruneResponse::from(&pruned))
+        });
+        Ok(Response::new(Box::pin(answer)))
+    }
+
+    type FileIssueStream =
+        Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
+
+    async fn file_issue(
+        &self,
+        request: Request<FileIssueRequest>,
+    ) -> Result<Response<Self::FileIssueStream>, Status> {
+        let (on, filing) = Filing::of(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let answer = daemon.file_issue(filing.asked(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let answer = late(move || {
+            let filed = filing.file().map_err(Status::failed_precondition)?;
+            Ok(filed.answer())
         });
         Ok(Response::new(Box::pin(answer)))
     }

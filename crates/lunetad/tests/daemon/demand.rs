@@ -18,6 +18,7 @@ use lunetad::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest,
     ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
+    FileIssueRequest, FileIssueResponse,
     InfoResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
     KeepPrintedRequest, KeepPrintedResponse,
     KillRequest, ListAgentsResponse, ListClientsRequest, ListClientsResponse, ListContentsRequest,
@@ -659,6 +660,15 @@ impl Daemon for StandIn {
         &self,
         _: Request<KeepChecksRequest>,
     ) -> Result<Response<Self::KeepChecksStream>, Status> {
+        Err(Status::unimplemented("a stand-in asks gh nothing"))
+    }
+
+    type FileIssueStream = tokio_stream::Empty<Result<FileIssueResponse, Status>>;
+
+    async fn file_issue(
+        &self,
+        _: Request<FileIssueRequest>,
+    ) -> Result<Response<Self::FileIssueStream>, Status> {
         Err(Status::unimplemented("a stand-in asks gh nothing"))
     }
 

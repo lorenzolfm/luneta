@@ -53,6 +53,7 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTit
 use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
+use lunetad::issues::Filed;
 use lunetad::carries::Moved;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
@@ -83,6 +84,7 @@ use crate::folds::{self, Folds};
 use crate::hosted::{Hosted, Said, Size};
 use crate::images::{self, Went};
 use crate::input;
+use crate::issue::{self, Issue};
 use crate::keys;
 use crate::machines::{self, Added, Machine};
 use crate::menu::{self, Choice};
@@ -183,6 +185,9 @@ pub enum Event {
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
     Heard { number: u64, heard: Heard },
+    /// What came of the issue the issue box numbered `number` sent, of
+    /// `words`, what you said: the issue gh filed, or why there is none.
+    Filed { number: u64, words: String, filed: Result<Filed, String> },
     /// What zellij answered the picker numbered `number`.
     Picker { number: u64, heard: picker::Heard },
     /// What the speech model said of the dictation numbered `number`.
@@ -347,6 +352,9 @@ enum Over {
     /// The ask box, from when the menu asks for it until it closes, which
     /// gives up the turn its agent is at.
     Ask(Ask),
+    /// The issue box, from when the menu asks for it until it closes, which
+    /// sends its issue to be filed, or does not.
+    Issue(Issue),
     /// The picker, from `SESSIONS`, `AGENTS` or `DIRS` until it closes, or
     /// takes zellij somewhere.
     Picker(Box<Picker>),
@@ -365,11 +373,12 @@ struct Fetch {
 
 /// Where what you dictate is written: in the pane zellij is on, which had this
 /// agent in it as the box opened, if it had one, or on the line of the ask box,
-/// which waits under the dictation's.
+/// or of the issue box, which waits under the dictation's.
 #[derive(Debug)]
 enum Where {
     Zellij(Option<HereAgent>),
     Ask(Ask),
+    Issue(Issue),
 }
 
 /// Where the last button to go down went down: what a button does after one that
@@ -721,6 +730,12 @@ struct App {
     /// How many ask boxes luneta has opened, which are numbered as briefs
     /// are.
     asks: u64,
+    /// How many issue boxes luneta has opened, which are numbered as briefs
+    /// are.
+    issues: u64,
+    /// What you said of the last issue that was not filed, which the next
+    /// issue box opens with, until one is sent.
+    unfiled: Option<String>,
     /// How many pickers luneta has opened, which are numbered as briefs are.
     pickers: u64,
     /// How many dictations luneta has opened, which are numbered as briefs
@@ -1051,6 +1066,8 @@ fn run_in(
         turned: None,
         briefs: 0,
         asks: 0,
+        issues: 0,
+        unfiled: None,
         pickers: 0,
         dictations: 0,
         image: images::Going::default(),
@@ -1407,6 +1424,16 @@ impl App {
                     ask.heard(heard);
                 }
             },
+            Event::Filed { number, words, filed } => {
+                self.sidebar.filed(number, &filed);
+                match filed {
+                    Ok(Filed { url, .. }) => {
+                        clip(terminal, ClipboardType::Clipboard, &url)?;
+                        self.copied = Some(url);
+                    },
+                    Err(_) => self.unfiled = Some(words),
+                }
+            },
             Event::Picker { number, heard } => {
                 if let Some(Over::Picker(picker)) = &mut self.focus.over
                     && picker.number() == number
@@ -1479,7 +1506,7 @@ impl App {
             Some(Over::Brief(briefing)) => briefing.turning(),
             Some(Over::Ask(ask)) => ask.turning(),
             Some(Over::Dictation(dictation, _)) => dictation.turning(),
-            Some(Over::Menu | Over::Picker(_) | Over::Note(_)) | None => false,
+            Some(Over::Menu | Over::Issue(_) | Over::Picker(_) | Over::Note(_)) | None => false,
         };
         over || self.sidebar.turning()
     }
@@ -1665,6 +1692,7 @@ impl App {
             // box does nothing with a paste, as with any key but its own.
             Input::Paste(text) => match &mut self.focus.over {
                 Some(Over::Ask(ask)) => ask.paste(&text),
+                Some(Over::Issue(issue)) => issue.paste(&text),
                 Some(Over::Picker(picker)) => picker.paste(&text),
                 Some(Over::Menu) => self.sidebar.paste(&text),
                 Some(Over::Brief(_) | Over::Note(_) | Over::Dictation(..)) => {},
@@ -1726,6 +1754,15 @@ impl App {
                     Keyed::Nothing => {},
                     Keyed::Send => self.converse(),
                     Keyed::Close => self.give(Focus::on(self.focus.side)),
+                }
+                return;
+            },
+            // So does the issue box.
+            Some(Over::Issue(issue)) => {
+                match issue.key(key) {
+                    issue::Keyed::Nothing => {},
+                    issue::Keyed::File => self.file_issue(),
+                    issue::Keyed::Close => self.give(Focus::on(self.focus.side)),
                 }
                 return;
             },
@@ -1979,7 +2016,7 @@ impl App {
         // would end the talk. So does the dictation box: a click would move
         // what it writes into, or open another box under it.
         match &self.focus.over {
-            Some(Over::Ask(_) | Over::Picker(_) | Over::Dictation(..)) => return,
+            Some(Over::Ask(_) | Over::Issue(_) | Over::Picker(_) | Over::Dictation(..)) => return,
             Some(Over::Brief(briefing)) => {
                 if down && briefing.clicked() {
                     self.let_go();
@@ -2278,6 +2315,12 @@ impl App {
                 let ask = Ask::new(self.asks, &target, &self.dir);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Ask(ask)) });
             },
+            Asked::Issue(repository) => {
+                self.issues += 1;
+                let typed = self.unfiled.clone().unwrap_or_default();
+                let issue = Issue::new(self.issues, repository, typed);
+                self.give(Focus { side: self.focus.side, over: Some(Over::Issue(issue)) });
+            },
             // lunetad reads the file again as it changes, and its next answer
             // has the machine, or has it no more.
             Asked::Ssh(destination) => match machines::add(&destination) {
@@ -2369,6 +2412,22 @@ impl App {
         }
     }
 
+    /// Sends what you typed in the issue box to be written and filed, and
+    /// closes the box: the keys go back to where they were, and the notes say
+    /// how the filing goes.
+    fn file_issue(&mut self) {
+        let had = self.focus.zellij_told();
+        let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
+        let Some(Over::Issue(issue)) = open else {
+            return;
+        };
+        if let Some((number, repository)) = issue.send(&self.events) {
+            self.unfiled = None;
+            self.sidebar.filing(number, &repository);
+        }
+        self.give_from(had, Focus::on(self.focus.side));
+    }
+
     /// Opens the dictation box, for what you say to be written where the keys
     /// are, if that is somewhere it can be: in the pane zellij is on, while
     /// zellij has them under no box, or in the ask box, but while its agent
@@ -2380,6 +2439,7 @@ impl App {
         let under = match self.focus.over.take() {
             None if zellij => Where::Zellij(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
+            Some(Over::Issue(issue)) => Where::Issue(issue),
             other => {
                 self.focus.over = other;
                 return false;
@@ -2503,6 +2563,15 @@ impl App {
                 self.give_from(had, Focus { side, over: Some(Over::Ask(ask)) });
                 if dictated.is_some_and(|dictated| dictated.sends) {
                     self.converse();
+                }
+            },
+            Where::Issue(mut issue) => {
+                if let Some(dictated) = &dictated {
+                    issue.dictated(&dictated.written.to_string());
+                }
+                self.give_from(had, Focus { side, over: Some(Over::Issue(issue)) });
+                if dictated.is_some_and(|dictated| dictated.sends) {
+                    self.file_issue();
                 }
             },
         }
@@ -2907,6 +2976,7 @@ impl App {
                 Some(
                     Over::Brief(_)
                     | Over::Ask(_)
+                    | Over::Issue(_)
                     | Over::Note(_)
                     | Over::Picker(_)
                     | Over::Dictation(..),
@@ -2918,6 +2988,7 @@ impl App {
                 | Some(
                     Over::Brief(_)
                     | Over::Ask(_)
+                    | Over::Issue(_)
                     | Over::Note(_)
                     | Over::Picker(_)
                     | Over::Dictation(..),
@@ -2948,6 +3019,7 @@ impl App {
             Some(
                 Over::Brief(_)
                 | Over::Ask(_)
+                | Over::Issue(_)
                 | Over::Note(_)
                 | Over::Picker(_)
                 | Over::Dictation(..),
@@ -3352,10 +3424,16 @@ impl App {
                     ask.draw(buffer, zellij, now);
                     Drawn::Nothing
                 },
+                Some(Over::Issue(issue)) => {
+                    issue.draw(buffer, zellij, now);
+                    Drawn::Nothing
+                },
                 Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
                 Some(Over::Dictation(dictation, under)) => {
-                    if let Where::Ask(ask) = under {
-                        ask.draw(buffer, zellij, now);
+                    match under {
+                        Where::Ask(ask) => ask.draw(buffer, zellij, now),
+                        Where::Issue(issue) => issue.draw(buffer, zellij, now),
+                        Where::Zellij(_) => {},
                     }
                     dictation.draw(buffer, zellij, (now, Instant::now()));
                     Drawn::Nothing

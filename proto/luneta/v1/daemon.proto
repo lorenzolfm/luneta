@@ -206,6 +206,14 @@ service Daemon {
   // stays, and git may refuse one: the others go. It answers once, as `Prunes`
   // does, and a question that hangs up does not stop it.
   rpc Prune(PruneRequest) returns (stream PruneResponse);
+  // Has Claude Code write an issue of the repository a directory is in, from
+  // what the user said, as `claude -p` reads how its issues are written there,
+  // and has gh file it there, with the daemon's user's login: luneta's `i`.
+  // It answers once, as late as that takes, up to five minutes for the writing
+  // and a minute for gh: a stream too, as the start of every answer is cut five
+  // seconds after the question. The stream ends after the answer, or with why
+  // there is none, and a question that hangs up does not stop it.
+  rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
 }
 
 // The machine a question is for: this daemon's own where it is absent, and
@@ -1630,4 +1638,21 @@ message PruneResponse {
       string stays = 4;
     }
   }
+}
+
+message FileIssueRequest {
+  On on = 1;
+  // A directory of the repository, by its absolute path: one by another path is
+  // invalid.
+  string dir = 2;
+  // What the user said the issue is to be: with nothing but white space, it
+  // is invalid.
+  string words = 3;
+}
+
+message FileIssueResponse {
+  // The issue filed, by its number, its title, and its page, as gh said it.
+  uint32 number = 1;
+  string title = 2;
+  string url = 3;
 }

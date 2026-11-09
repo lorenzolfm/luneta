@@ -37,6 +37,9 @@ picker over it with sessions, agents and directories tabs.
 * [Tell an agent](#tell-an-agent) what you want in words: a session to work on
   something, an agent on each of four issues, every session closed. Tell the
   agent you're talking to, or [luneta's sidebar](#from-lunetas-sidebar)
+* [File an issue](#file-an-issue) from one key: say what it is, and an agent
+  writes it in the repository's style and files it as you go on, its link on
+  your clipboard
 * [Dictate](#dictate) to an agent, or to the ask box, by a speech model that
   runs on your machine: hold `Alt r` and talk
 * Have what you selected [read aloud](#read-aloud), and an agent on any of your
@@ -507,8 +510,8 @@ zellij sees them, whichever of the two has the keys:
   closes it again.
 - `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl b` on the
   agents, and `Ctrl d` on the directories.
-- `Alt r` [dictates](#dictate) into the pane zellij is on, or the ask box:
-  hold it and talk.
+- `Alt r` [dictates](#dictate) into the pane zellij is on, the ask box or the
+  issue box: hold it and talk.
 - `Alt u` [reads aloud](#read-aloud) what you selected, and pauses what plays
   and has it go on. `Alt Shift u` stops it.
 
@@ -633,7 +636,8 @@ your groups from yet. In their place, its Skills group has keys for a few
 skills, built in. It lists only the keys that work on the row: on a session's
 row, `a`, `n m`, `d d`, `d s` and the Brief group, on another machine's header,
 `a`, `n s`, `n m`, `d d` and the Brief group, and on this machine's the same but
-`d d`. A key it does not list does nothing. `Alt a` opens the same menu
+`d d`; and on a pane's row, `i` and `d m` only where the pane works in a
+repository. A key it does not list does nothing. `Alt a` opens the same menu
 floating at the bottom right of zellij's side, for the pane zellij is on,
 wherever the keys are and folded or not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
 click off its box closes it, and gives the keys back to zellij, or to the
@@ -656,6 +660,7 @@ has the keys and no menu is open, its bottom lists what you can press there:
  o  Open PR
  y  Yank ▸
  a  Ask
+ i  File issue
  c  Skills ▸
  n  New ▸
  t  Turn ▸
@@ -735,6 +740,10 @@ and closing the brief gives the keys back where the menu took them from.
 `a` opens the [ask box](#from-lunetas-sidebar), where you tell an agent in
 words what you want done, as the menu would do it. From the menu over zellij,
 closing it gives the keys back where the menu took them from, as a brief does.
+
+`i` opens the [issue box](#file-an-issue), for an issue of the repository the
+highlighted row's pane works in: `Enter` closes it, and the issue is filed as
+you go on.
 
 A pull request's link, pasted while the sidebar has the keys or in the menu
 over zellij, opens the menu for that pull request instead. `w` makes a
@@ -1200,8 +1209,9 @@ in there is deleted once zellij is in the newest other session of that
 machine's; with none, it is deleted with zellij in it, and luneta goes on as it
 does when a session there ends. While luneta's zellij is on another machine,
 the menu over zellij is for its pane there. The Brief group briefs you on its
-agents as on this machine's, and [the ask box](#on-another-machines-row) runs
-its agent there. A pull request's or an issue's link pasted on its row is that
+agents as on this machine's, [the ask box](#on-another-machines-row) runs
+its agent there, and [the issue box](#file-an-issue) has the issue written and
+filed there. A pull request's or an issue's link pasted on its row is that
 machine's to act on first, and another's only where it has none of the
 repository: lunetad there finds where its keys go among that
 machine's panes and the clones its zoxide knows, asks its `gh`, and has its
@@ -1436,6 +1446,47 @@ row of this machine's while luneta's zellij is on another. `Esc` gives up the
 turn there too, and lunetad there kills `claude`. A turn takes up to ten
 minutes wherever it runs.
 
+### File an issue
+
+`i` on a pane's row in a repository, in the sidebar's [menu](#menu) or the one
+over zellij, opens the issue box, where you say what the issue is: type it, or
+hold `Alt r` and [dictate](#dictate) it.
+
+```text
+┌─ File issue ─────────────────────────────── luneta ─┐
+│ sonnet writes it as this repository does, and gh    │
+│ files it.                                           │
+│                                                     │
+│ › the ask box should say which model it runs on_    │
+│                                                     │
+│ <ENTER> File  <Alt r> Dictate  <ESC> Close          │
+└─────────────────────────────────────────────────────┘
+```
+
+`Enter` closes the box, and the keys go back to where they were. While the
+issue is written and filed, the sidebar's notes say `⠋ Filing an issue in
+luneta…`, the spinner turning, one line for each issue on its way. Once it is
+filed, they say its number and title, and its link is on your clipboard, as `y
+p` puts a pull request's there, until the next key in the sidebar. Where it
+was not filed, they say why, and the next `i` opens the box with your words in
+it, to send again. `Esc` closes the box and sends nothing.
+
+luneta has `gh` list the repository's labels and the last five issues you
+filed there, in the pane's directory, and hands them, with what you said, to
+`claude -p --model sonnet`, on your Claude Code login, in safe mode and in
+Claude Code's `dontAsk` permission mode. It writes the issue as yours are
+written: a title, a body, and one of the repository's labels, or none. It may
+read the repository's files, to name the code your words point at, and runs
+no command: luneta has `gh issue create` file what it wrote, with your `gh`
+login. It reads no issue but yours, as anyone can file one in a public
+repository, or comment on one, and what that says would come into what it is
+told. It asks you nothing, as you are not waiting on it: it writes what it
+has, and you edit the issue after. It keeps no Claude session. Where `gh`
+can't list, as in a repository with no GitHub remote, nothing is written. On
+another machine's row, all of it runs on that machine, with its `claude` and
+`gh` logins, as the [ask box](#on-another-machines-row)'s agent does. Writing
+has five minutes, and each `gh` one more.
+
 ### Delete merged worktrees
 
 A merged pull request leaves its worktree and its branch behind. `d m`, on a
@@ -1524,9 +1575,9 @@ each ask counts against GitHub's hourly limit.
 ### Dictate
 
 `Alt r` writes what you say where you would type it: in the pane zellij is on,
-as a paste is, so on an agent's prompt or a shell's line, or on the
-[ask box](#from-lunetas-sidebar)'s line. Hold it and talk, and let it go: what
-you said is written. A tap of it, let go at once, keeps the microphone on until
+as a paste is, so on an agent's prompt or a shell's line, or on the line of the
+[ask box](#from-lunetas-sidebar) or the [issue box](#file-an-issue). Hold it
+and talk, and let it go: what you said is written. A tap of it, let go at once, keeps the microphone on until
 you press it again, to talk with your hands free, and there `Enter` writes what
 you said and sends it, as `Enter` would. `Esc` gives it up. Short of `Enter`,
 nothing is sent: what is written waits for you to read it, fix it and send it,
@@ -1733,13 +1784,13 @@ that was up, without a sound.
 | | | needed for |
 |---|---|---|
 | **zellij 0.45.0** | | everything |
-| [`claude`](https://claude.com/claude-code) | optional | the menu, the brief and the ask box |
+| [`claude`](https://claude.com/claude-code) | optional | the menu, the brief, the ask box and the issue box |
 | `git` | optional | the branch in the name of an agent the menu starts |
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's or issue's repository that no session works in |
 | [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request, an issue or a `.md` file you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
-| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), with the mark of its checks, the logs `c c` hands an agent, and the issue of a link you paste there |
+| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), with the mark of its checks, the logs `c c` hands an agent, the issue of a link you paste there, and the issues `i` files |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
