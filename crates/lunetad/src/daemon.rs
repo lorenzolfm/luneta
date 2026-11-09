@@ -1326,7 +1326,8 @@ fn unfinished(error: &task::JoinError) -> Status {
 impl Host {
     /// The daemon of the machine `on` names, where it names one, which the
     /// question is handed on to; none for this machine; or why not, as one
-    /// this daemon does not reach now.
+    /// this daemon does not reach now, which it then runs ssh to again at
+    /// once, for the next question to find.
     fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
         let Some(api::On { destination }) = on else {
             return Ok(None);

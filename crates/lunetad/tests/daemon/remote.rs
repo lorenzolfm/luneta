@@ -59,8 +59,9 @@ use crate::worktree::{cloned_as_wt, git};
 /// then, with 255. Nor does it run anything on a terminal, which would mangle
 /// what the daemons say, or where it could ask for a password, which no one
 /// would answer: without `-T` and `BatchMode=yes`, it ends so too. It notes
-/// each time it is run to a destination, for `runs`, and the pid of each
-/// bridge it runs, for `bridges`. Run with `-t`, as luneta runs a client of a
+/// each time it is run to a destination, for `runs`, each time it could not
+/// resolve one, for `unresolved`, and the pid of each bridge it runs, for
+/// `bridges`. Run with `-t`, as luneta runs a client of a
 /// session there, it runs nothing: it notes the command, for `clients`, and
 /// ends well, as a client that detached does, or as one zellij there dropped
 /// does, as many as a test had it `drops_clients`, or as ssh does that failed,
@@ -110,6 +111,7 @@ destination="$1"
 shift
 echo run >> "$to/$destination.runs"
 if [ ! -x "$to/$destination" ]; then
+    echo unresolved >> "$to/$destination.unresolved"
     echo "ssh: Could not resolve hostname $destination: Name or service not known" >&2
     exit 255
 fi
@@ -165,6 +167,11 @@ exec "$to/$destination"
         clients.unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
+    /// Has ssh to `destination` end with `code`, before it reaches lunetad.
+    fn ends_with(&self, destination: &str, code: u8) {
+        script(&self.to.join(destination), &format!("exit {code}\n"));
+    }
+
     /// Has ssh reach `destination` no more, as one that cannot resolve it.
     fn unreaches(&self, destination: &str) {
         fs::remove_file(self.to.join(destination)).unwrap();
@@ -174,6 +181,12 @@ exec "$to/$destination"
     fn runs(&self, destination: &str) -> usize {
         let runs = fs::read_to_string(self.to.join(format!("{destination}.runs")));
         runs.unwrap_or_default().lines().count()
+    }
+
+    /// How many times ssh to `destination` could not resolve it.
+    fn unresolved(&self, destination: &str) -> usize {
+        let unresolved = fs::read_to_string(self.to.join(format!("{destination}.unresolved")));
+        unresolved.unwrap_or_default().lines().count()
     }
 
     /// The pids of the bridges ssh has run to `destination`, in turn.
@@ -551,6 +564,81 @@ fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     let unresolved = "nowhere: ssh: Could not resolve hostname nowhere";
     let lines = said.iter().filter(|line| line.contains(unresolved)).count();
     assert_eq!(lines, 1, "{said:?}");
+}
+
+/// What `host`'s daemon answers a client that asks to go to a session on
+/// `destination`, which it refuses, as it does not reach it.
+fn refused_go(host: &Host, destination: &str) -> Status {
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = Some(On { destination: destination.to_owned() });
+        let go = GoRequest { on, at: "work".to_owned(), to: "play".to_owned(), pane: None };
+        daemon.go(go).await.unwrap_err()
+    })
+}
+
+/// A question for a machine the daemon does not reach is refused, and has
+/// ssh run to it again at once, where the daemon would else wait longer
+/// each time ssh failed: 8 seconds after the fifth. The machine is reached
+/// in moments, for the next question to find.
+#[test]
+fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    eventually("ssh fails to far five times", || {
+        here.host();
+        (ssh.unresolved("far") >= 5).then_some(())
+    });
+
+    ssh.reaches("far", far.vars());
+    let asked = Instant::now();
+    let refused = refused_go(&here, "far");
+    assert_eq!(refused.code(), Code::Unavailable, "{refused:?}");
+    reached(&here, "far", |_| true);
+    let took = asked.elapsed();
+    assert!(took < Duration::from_secs(5), "reached {took:?} after it was asked for");
+    assert_eq!(ssh.runs("far"), 6);
+}
+
+/// The log says why a machine is unreached once, while each ssh to it fails
+/// alike, and again as why changes, and how long it was unreached once it is
+/// reached.
+#[test]
+fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
+    let here = Host::new();
+    let far = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let mut daemon = start(here.vars()).unwrap();
+    eventually("ssh fails to far twice", || {
+        here.host();
+        (ssh.runs("far") >= 2).then_some(())
+    });
+    ssh.ends_with("far", 7);
+    let runs = ssh.runs("far");
+    eventually("ssh fails to far twice more", || {
+        here.host();
+        (ssh.runs("far") >= runs + 2).then_some(())
+    });
+    ssh.reaches("far", far.vars());
+    refused_go(&here, "far");
+    reached(&here, "far", |_| true);
+
+    let said = daemon.said_after(Duration::from_secs(1));
+    let unreached: Vec<&String> =
+        said.iter().filter(|line| line.contains("far: unreached: ")).collect();
+    assert_eq!(unreached.len(), 2, "{said:?}");
+    assert!(unreached[0].ends_with("(exit status: 255)"), "{said:?}");
+    assert!(unreached[1].ends_with("(exit status: 7)"), "{said:?}");
+    let reached = said.iter().filter(|line| line.contains("far: reached, after ")).count();
+    assert_eq!(reached, 1, "{said:?}");
 }
 
 /// `luneta ssh` adds a machine to the hosts file, after the machines it
