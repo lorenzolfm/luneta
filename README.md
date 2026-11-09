@@ -1468,8 +1468,13 @@ issue is written and filed, the sidebar's notes say `⠋ Filing an issue in
 luneta…`, the spinner turning, one line for each issue on its way. Once it is
 filed, they say its number and title, and its link is on your clipboard, as `y
 p` puts a pull request's there, until the next key in the sidebar. Where it
-was not filed, they say why, and the next `i` opens the box with your words in
-it, to send again. `Esc` closes the box and sends nothing.
+was not filed, they say why, and the next `i` in that repository opens the box
+with your words in it, to send again, until you send them, oldest first where
+more than one was not filed. Where `gh` ran out of time as it filed, or the
+answer from another machine was lost, it may have been filed: the notes say
+so, and you have your words again, but look on GitHub before you send them.
+`Esc` closes the box and sends nothing, and keeps the words it opened with as
+you left them; `Ctrl u` and then `Esc` drops them.
 
 luneta has `gh` list the repository's labels and the last five issues you
 filed there, in the pane's directory, and hands them, with what you said, to

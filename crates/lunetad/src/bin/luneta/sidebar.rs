@@ -60,7 +60,7 @@ use lunetad::api::{
     Agent, Client, Front, Harness, Host, Pane, Saying, Session, Shell, Status, UnreadFile,
 };
 use lunetad::asks::User;
-use lunetad::issues::Filed;
+use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::carries::{self, Carry, Lands, Moved, Planned, Whole};
 use lunetad::prunes;
@@ -2383,18 +2383,24 @@ impl Sidebar {
         self.filing.insert(number, repository.to_owned());
     }
 
-    /// Says in the notes what came of the issue of the box numbered `number`:
-    /// its number and title, as gh filed it, until the next key; or why gh
-    /// filed none, which says your words are in the issue box again.
-    pub fn filed(&mut self, number: u64, filed: &Result<Filed, String>) {
-        let repository = self.filing.remove(&number).unwrap_or_default();
+    /// Says in the notes what came of the issue of the box numbered `number`,
+    /// in `repository`: its number and title, as gh filed it, until the next
+    /// key; or why gh filed none, or may have, which says your words are in
+    /// the issue box again.
+    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+        self.filing.remove(&number);
         match filed {
-            Ok(Filed { number, title, url }) => {
-                log::say(&format!("issue: filed {url}"));
+            Ok(filed) => {
+                log::say(&format!("issue: filed {}", filed.url()));
+                let (number, title) = (filed.number(), filed.title());
                 self.filed = Some(format!("filed #{number} in {repository}: {title}; link copied"));
             },
-            Err(why) => {
+            Err(Unfiled::Refused(why)) => {
                 self.notify(format!("issue in {repository}: {why}; i has your words again"));
+            },
+            Err(Unfiled::InDoubt(why)) => {
+                let doubt = format!("issue in {repository} may be filed: {why}");
+                self.notify(format!("{doubt}; i has your words, look first"));
             },
         }
     }
@@ -8526,7 +8532,8 @@ mod tests {
     /// after a spinner that turns, and what came of it once gh says: its
     /// number and title, in no colour of what went wrong, until the next
     /// key, whatever the time; or why none was filed, which says the box has
-    /// your words again. Two filed at once show each.
+    /// your words again, and why one may have been, which says to look before
+    /// you send them. Two filed at once show each.
     #[test]
     fn an_issue_shows_in_the_notes_as_it_is_filed_and_then_what_came_of_it() {
         let mut sidebar = two_sessions();
@@ -8544,11 +8551,10 @@ mod tests {
             " ⠋ Filing an issue in luneta…",
             " ⠋ Filing an issue in zed…",
         ]);
-        let number = NonZeroU32::new(355).unwrap();
         let url = "https://github.com/o/luneta/issues/355".to_owned();
-        let filed = Filed { number, title: "A red button".to_owned(), url };
-        sidebar.filed(1, &Ok(filed));
-        sidebar.filed(2, &Err("gh: no GitHub remote".to_owned()));
+        let filed = Filed::page(url, "A red button").unwrap();
+        sidebar.filed(1, "luneta", &Ok(filed));
+        sidebar.filed(2, "zed", &Err(Unfiled::Refused("gh: no GitHub remote".to_owned())));
         assert!(!sidebar.turning());
         let later = moment(3_600_000);
         let buffer = drawn_at(&mut sidebar, false, 32, 16, later);
@@ -8564,6 +8570,15 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&char('j'), later);
         assert_eq!((sidebar.filed.as_ref(), sidebar.notice.as_ref()), (None, None));
+        sidebar.filing(3, "luneta");
+        let stuck = Unfiled::InDoubt("gh: it did not answer in time".to_owned());
+        sidebar.filed(3, "luneta", &Err(stuck));
+        assert_eq!(notes(&mut sidebar, later), [
+            " issue in luneta may be filed:",
+            "  gh: it did not answer in tim",
+            " e; i has your words, look fir",
+            " st",
+        ]);
     }
 
     /// `y` waits for what to yank, which the bottom of the sidebar lists, and

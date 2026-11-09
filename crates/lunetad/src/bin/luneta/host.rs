@@ -53,7 +53,7 @@ use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTit
 use crossterm::{execute, queue};
 use lunetad::api::Host;
 use lunetad::asks::User;
-use lunetad::issues::Filed;
+use lunetad::issues::{Filed, Unfiled};
 use lunetad::carries::Moved;
 use lunetad::log::{self, Process};
 use lunetad::prunes;
@@ -185,9 +185,15 @@ pub enum Event {
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
     Heard { number: u64, heard: Heard },
-    /// What came of the issue the issue box numbered `number` sent, of
-    /// `words`, what you said: the issue gh filed, or why there is none.
-    Filed { number: u64, words: String, filed: Result<Filed, String> },
+    /// What came of the issue the issue box numbered `number` sent to
+    /// `repository`, of `words`, what you said: the issue gh filed, or why
+    /// there is none.
+    Filed {
+        number: u64,
+        repository: issue::Repository,
+        words: String,
+        filed: Result<Filed, Unfiled>,
+    },
     /// What zellij answered the picker numbered `number`.
     Picker { number: u64, heard: picker::Heard },
     /// What the speech model said of the dictation numbered `number`.
@@ -733,9 +739,9 @@ struct App {
     /// How many issue boxes luneta has opened, which are numbered as briefs
     /// are.
     issues: u64,
-    /// What you said of the last issue that was not filed, which the next
-    /// issue box opens with, until one is sent.
-    unfiled: Option<String>,
+    /// What you said of each issue that was not filed, which the next issue
+    /// box for its repository opens with, until it is sent.
+    unfiled: issue::Kept,
     /// How many pickers luneta has opened, which are numbered as briefs are.
     pickers: u64,
     /// How many dictations luneta has opened, which are numbered as briefs
@@ -1067,7 +1073,7 @@ fn run_in(
         briefs: 0,
         asks: 0,
         issues: 0,
-        unfiled: None,
+        unfiled: issue::Kept::default(),
         pickers: 0,
         dictations: 0,
         image: images::Going::default(),
@@ -1424,14 +1430,14 @@ impl App {
                     ask.heard(heard);
                 }
             },
-            Event::Filed { number, words, filed } => {
-                self.sidebar.filed(number, &filed);
+            Event::Filed { number, repository, words, filed } => {
+                self.sidebar.filed(number, &repository.name, &filed);
                 match filed {
-                    Ok(Filed { url, .. }) => {
-                        clip(terminal, ClipboardType::Clipboard, &url)?;
-                        self.copied = Some(url);
+                    Ok(filed) => {
+                        clip(terminal, ClipboardType::Clipboard, filed.url())?;
+                        self.copied = Some(filed.url().to_owned());
                     },
-                    Err(_) => self.unfiled = Some(words),
+                    Err(_) => self.unfiled.keep(number, repository, words),
                 }
             },
             Event::Picker { number, heard } => {
@@ -1762,7 +1768,7 @@ impl App {
                 match issue.key(key) {
                     issue::Keyed::Nothing => {},
                     issue::Keyed::File => self.file_issue(),
-                    issue::Keyed::Close => self.give(Focus::on(self.focus.side)),
+                    issue::Keyed::Close => self.close_issue(),
                 }
                 return;
             },
@@ -2317,8 +2323,7 @@ impl App {
             },
             Asked::Issue(repository) => {
                 self.issues += 1;
-                let typed = self.unfiled.clone().unwrap_or_default();
-                let issue = Issue::new(self.issues, repository, typed);
+                let issue = Issue::new(self.issues, repository, &self.unfiled);
                 self.give(Focus { side: self.focus.side, over: Some(Over::Issue(issue)) });
             },
             // lunetad reads the file again as it changes, and its next answer
@@ -2421,9 +2426,19 @@ impl App {
         let Some(Over::Issue(issue)) = open else {
             return;
         };
-        if let Some((number, repository)) = issue.send(&self.events) {
-            self.unfiled = None;
+        if let Some((number, repository)) = issue.send(&self.events, &mut self.unfiled) {
             self.sidebar.filing(number, &repository);
+        }
+        self.give_from(had, Focus::on(self.focus.side));
+    }
+
+    /// Closes the issue box with nothing sent, and keeps the words it opened
+    /// with as you left them.
+    fn close_issue(&mut self) {
+        let had = self.focus.zellij_told();
+        let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
+        if let Some(Over::Issue(issue)) = open {
+            issue.close(&mut self.unfiled);
         }
         self.give_from(had, Focus::on(self.focus.side));
     }

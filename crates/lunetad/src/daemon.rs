@@ -83,7 +83,7 @@ use crate::directory::Directory;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
-use crate::issues::Filing;
+use crate::issues::{Filing, Unfiled};
 use crate::links::{Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
@@ -1142,14 +1142,12 @@ impl Daemon for Host {
         request: Request<FileIssueRequest>,
     ) -> Result<Response<Self::FileIssueStream>, Status> {
         let (on, filing) = Filing::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
+        let unreached = |status: Status| Unfiled::Refused(status.message().to_owned()).status();
+        if let Some(mut daemon) = self.bridged(on).map_err(unreached)? {
             let answer = daemon.file_issue(filing.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let answer = late(move || {
-            let filed = filing.file().map_err(Status::failed_precondition)?;
-            Ok(filed.answer())
-        });
+        let answer = late(move || Ok(filing.file().map_err(Unfiled::status)?.answer()));
         Ok(Response::new(Box::pin(answer)))
     }
 

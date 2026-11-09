@@ -721,6 +721,7 @@ if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; 
 fi
 if [ "$1 $2" = "issue create" ]; then
     { echo "$(pwd -P)"; echo "$*"; cat; } > "$pulls/created"
+    [ -f "$pulls/create-says" ] && exec cat "$pulls/create-says"
     if [ -f "$pulls/create-fails" ]; then
         printf '\nCreating issue in o/n\n\n' >&2
         cat "$pulls/create-fails" >&2
@@ -914,6 +915,12 @@ exec cat "$said"
     /// Has `gh issue create` fail from now on, and say `why` as it does.
     pub fn refuse_issues(&self, why: &str) {
         fs::write(self.pulls.join("create-fails"), format!("{why}\n")).unwrap();
+    }
+
+    /// Has `gh issue create` file the issue from now on, and say `said` of it
+    /// in place of its page.
+    pub fn say_on_create(&self, said: &str) {
+        fs::write(self.pulls.join("create-says"), said).unwrap();
     }
 
     /// Where gh last filed an issue, what it was asked, and the body it read

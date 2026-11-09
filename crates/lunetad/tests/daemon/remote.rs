@@ -1383,7 +1383,8 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"{{}}","st
 /// directory, with the title, body and label `claude` wrote: the daemon
 /// answers with its number, title and page. Where `claude` or gh fail, it
 /// says why: gh files nothing after a `claude` that failed, and `claude`
-/// writes nothing where gh cannot list. One for a directory by no absolute
+/// writes nothing where gh cannot list. A gh that files and does not say the
+/// issue's page may have filed one, which the daemon says apart. One for a directory by no absolute
 /// path, or of no words, is invalid, and one for a machine this daemon does
 /// not reach runs nothing.
 #[test]
@@ -1414,8 +1415,8 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         let filed = daemon.file_issue(file(on("far"), &dir, " a red button ")).await;
         let filed = filed.unwrap().into_inner().message().await.unwrap().unwrap();
         let filed = Filed::of(filed).unwrap();
-        assert_eq!((filed.number.get(), filed.title.as_str()), (360, "A red button"));
-        assert_eq!(filed.url, "https://github.com/o/n/issues/360");
+        assert_eq!((filed.number().get(), filed.title()), (360, "A red button"));
+        assert_eq!(filed.url(), "https://github.com/o/n/issues/360");
         let wrote = fs::read_to_string(far.home.path().join("wrote")).unwrap();
         let wrote: Vec<&str> = wrote.lines().collect();
         let cwd = format!("cwd={there}");
@@ -1443,6 +1444,13 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
         assert_eq!(refused.message(), "gh: could not add label: 'bug' not found");
 
+        far.gh.say_on_create("Created it\n");
+        let unread = daemon.file_issue(file(on("far"), &dir, "a red button")).await;
+        let unread = unread.unwrap().into_inner().message().await.unwrap_err();
+        assert_eq!(unread.code(), Code::Aborted, "{unread:?}");
+        assert_eq!(unread.message(), r#"gh said "Created it", no issue's page"#);
+        fs::remove_file(far.zellij.bin().join("pulls/create-says")).unwrap();
+
         fs::remove_file(far.zellij.bin().join("pulls/created")).unwrap();
         let unwritten = daemon.file_issue(file(on("far"), &dir, "please-fail")).await;
         let unwritten = unwritten.unwrap().into_inner().message().await.unwrap_err();
@@ -1463,7 +1471,8 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         invalid(daemon.file_issue(file(on("far"), Path::new("w"), "x")).await.unwrap_err());
         invalid(daemon.file_issue(file(on("far"), &dir, " ")).await.unwrap_err());
         let nowhere = daemon.file_issue(file(on("nowhere"), &dir, "x")).await.unwrap_err();
-        assert_eq!(nowhere.code(), Code::Unavailable, "{nowhere:?}");
+        assert_eq!(nowhere.code(), Code::FailedPrecondition, "{nowhere:?}");
+        assert_eq!(nowhere.message(), "lunetad does not reach nowhere now");
         assert_eq!(here.gh.created(), None);
     });
 }

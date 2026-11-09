@@ -27,7 +27,7 @@ use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
-use lunetad::issues::{self, Filed, Filing};
+use lunetad::issues::{self, Filed, Filing, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
 use lunetad::opens::{Open, Opened};
 use lunetad::printed::{Kept, Printed};
@@ -461,15 +461,18 @@ impl Away {
     }
 
     /// Has the daemon there write and file `filing`, as `lunetad::issues`
-    /// does there, and says the issue filed, or why there is none. A question
-    /// that hangs up does not stop it.
-    pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, String> {
+    /// does there, and says the issue filed, or why there is none, as
+    /// `Unfiled::of` reads it. A question that hangs up does not stop it, so
+    /// one luneta heard no answer to may have filed one, and so may one
+    /// whose answer luneta does not read.
+    pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
         let request = filing.asked(Some(self.on()));
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(issues::AT_MOST, async move {
+        let answer = self.answer_or_code(issues::AT_MOST, async move {
             timeout(patience, daemon.file_issue(request)).await
-        })?;
-        Filed::of(answer)
+        });
+        let answer = answer.map_err(|(why, code)| Unfiled::of(why, code))?;
+        Filed::of(answer).map_err(|why| Unfiled::InDoubt(format!("{}: {why}", self.on)))
     }
 
     /// What deleting the merged worktrees of the repository `dir` is in there
@@ -519,19 +522,34 @@ impl Away {
         late: Duration,
         asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
     ) -> Result<T, String> {
+        self.answer_or_code(late, asking).map_err(|(why, _)| why)
+    }
+
+    /// As `answer_of`, with the code of the status the daemon said why with,
+    /// or none, where no answer came.
+    fn answer_or_code<T>(
+        &mut self,
+        late: Duration,
+        asking: impl Future<Output = Result<Result<Response<Streaming<T>>, Status>, Elapsed>>,
+    ) -> Result<T, (String, Option<Code>)> {
         let on = &self.on;
         let secs = self.patience.as_secs_f32();
         self.runtime.block_on(async {
+            let said = |status: &Status| (on.said(status), Some(status.code()));
             let mut answer = match asking.await {
                 Ok(Ok(answer)) => answer.into_inner(),
-                Ok(Err(status)) => return Err(on.said(&status)),
-                Err(_) => return Err(format!("{on}: lunetad did not answer in {secs}s")),
+                Ok(Err(status)) => return Err(said(&status)),
+                Err(_) => return Err((format!("{on}: lunetad did not answer in {secs}s"), None)),
             };
             match timeout(late, answer.message()).await {
-                Ok(Ok(Some(said))) => Ok(said),
-                Ok(Ok(None)) => Err(format!("{on}: lunetad's answer ended with nothing in it")),
-                Ok(Err(status)) => Err(on.said(&status)),
-                Err(_) => Err(format!("{on}: lunetad said nothing for {}s", late.as_secs())),
+                Ok(Ok(Some(answer))) => Ok(answer),
+                Ok(Ok(None)) => {
+                    Err((format!("{on}: lunetad's answer ended with nothing in it"), None))
+                },
+                Ok(Err(status)) => Err(said(&status)),
+                Err(_) => {
+                    Err((format!("{on}: lunetad said nothing for {}s", late.as_secs()), None))
+                },
             }
         })
     }

@@ -9,14 +9,16 @@
 //! keys go back to where they were: the issue is written and filed as you go
 //! on, which the notes say, and then its number and its title, as its link
 //! goes on the clipboard. Where it could not be filed, the notes say why,
-//! and the next box opens with your words in it, to send again.
+//! and the next box for that repository opens with your words in it, to send
+//! again: those of each issue not filed, oldest first, until it is sent.
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lunetad::issues::{self, Filed, Filing};
+use lunetad::issues::{self, Filed, Filing, Unfiled};
 use lunetad::Directory;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -35,12 +37,43 @@ use crate::sidebar::ACCENT;
 const TITLE: &str = "File issue";
 
 /// The repository an issue goes to: the one the highlighted row's pane
-/// works in, by the directory it works in, on its machine, and by its name.
+/// works in, by the directory it works in, on its machine, by the directory
+/// git said holds it, and by its name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
     pub on: Machine,
     pub dir: Directory,
+    pub home: String,
     pub name: String,
+}
+
+impl Repository {
+    /// Whether `other` is it, from whichever of its worktrees.
+    fn is(&self, other: &Repository) -> bool {
+        self.on == other.on && self.home == other.home
+    }
+}
+
+/// What you said of each issue that was not filed, by the number of the box
+/// it was sent from, and so oldest first, with its repository: an issue box
+/// for that repository opens with the oldest, until it is sent.
+#[derive(Debug, Default)]
+pub struct Kept(BTreeMap<u64, (Repository, String)>);
+
+impl Kept {
+    /// Keeps `words`, of the issue the box numbered `number` sent to
+    /// `repository`, which was not filed.
+    pub fn keep(&mut self, number: u64, repository: Repository, words: String) {
+        self.0.insert(number, (repository, words));
+    }
+
+    /// The oldest words kept for `repository`, by the number they are kept
+    /// by.
+    fn oldest(&self, repository: &Repository) -> Option<(u64, String)> {
+        let mut kept = self.0.iter();
+        let (number, (_, words)) = kept.find(|(_, (of, _))| of.is(repository))?;
+        Some((*number, words.clone()))
+    }
 }
 
 /// What a key does to the box, for luneta to do.
@@ -62,13 +95,33 @@ pub struct Issue {
     repository: Repository,
     /// What you are typing, for the issue.
     typed: String,
+    /// The number the words it opened with are kept by, where it opened with
+    /// some.
+    kept: Option<u64>,
 }
 
 impl Issue {
-    /// The box numbered `number`, for an issue of `repository`, with `typed`
-    /// in it: the words of an issue that was not filed, or none.
-    pub fn new(number: u64, repository: Repository, typed: String) -> Self {
-        Issue { number, repository, typed }
+    /// The box numbered `number`, for an issue of `repository`, with the
+    /// oldest words `kept` for it in it, or none.
+    pub fn new(number: u64, repository: Repository, kept: &Kept) -> Self {
+        let (kept, typed) = kept.oldest(&repository).unzip();
+        Issue { number, repository, typed: typed.unwrap_or_default(), kept }
+    }
+
+    /// Closes it, with nothing sent: the words it opened with stay `kept`,
+    /// as you left them, but where you took all of them back.
+    pub fn close(self, kept: &mut Kept) {
+        let Some(number) = self.kept else {
+            return;
+        };
+        let typed = self.typed.trim();
+        match kept.0.get_mut(&number) {
+            Some((_, words)) if !typed.is_empty() => typed.clone_into(words),
+            Some(_) => {
+                kept.0.remove(&number);
+            },
+            None => {},
+        }
     }
 
     /// What `key` does: `Esc` and `Ctrl c` close the box. A character types,
@@ -107,23 +160,33 @@ impl Issue {
     }
 
     /// Sends what you typed to be written and filed, on a thread of its own,
-    /// as the box closes. What came of it comes back on `events`, as `Due`
-    /// does, with the words, which the next box opens with where it was not
-    /// filed. The repository's name, for the notes, and the box's number,
-    /// which what comes of it carries; or, where you typed nothing, none.
-    pub fn send(self, events: &Sender<Event>) -> Option<(u64, String)> {
-        let Issue { number, repository: Repository { on, dir, name }, typed } = self;
-        let words = typed.trim().to_owned();
-        let filing = Filing::new(dir, &words).ok()?;
-        let due = Due::new(events, move |filed: Result<Result<Filed, String>, String>| {
-            Event::Filed { number, words, filed: filed.and_then(|filed| filed) }
+    /// as the box closes, and the words it opened with are `kept` no more.
+    /// What came of it comes back on `events`, as `Due` does, with the words
+    /// and the repository, to be kept for it where none was filed. An answer
+    /// that never came may have filed one. The box's number, which what comes
+    /// of it carries, and the repository's name, for the notes; or, where you
+    /// typed nothing, none, as the box closes.
+    pub fn send(self, events: &Sender<Event>, kept: &mut Kept) -> Option<(u64, String)> {
+        let words = self.typed.trim().to_owned();
+        let Ok(filing) = Filing::new(self.repository.dir.clone(), &words) else {
+            self.close(kept);
+            return None;
+        };
+        if let Some(number) = self.kept {
+            kept.0.remove(&number);
+        }
+        let Issue { number, repository, .. } = self;
+        let (on, name) = (repository.on.clone(), repository.name.clone());
+        let due = Due::new(events, move |filed: Result<Result<Filed, Unfiled>, String>| {
+            let filed = filed.unwrap_or_else(|why| Err(Unfiled::InDoubt(why)));
+            Event::Filed { number, repository, words, filed }
         });
         thread::spawn(move || {
             let filed = match &on {
                 Machine::Local => filing.file(),
                 Machine::Remote(on) => match Away::reach(on, away::ANSWER) {
                     Ok(mut away) => away.file_issue(&filing),
-                    Err(why) => Err(format!("{on}: {why}")),
+                    Err(why) => Err(Unfiled::Refused(format!("{on}: {why}"))),
                 },
             };
             due.pay(Ok(filed));
@@ -174,8 +237,13 @@ mod tests {
     use crate::gruvbox;
 
     fn repository(on: Machine) -> Repository {
-        let dir = Directory::parse("/w/luneta/main".to_owned()).unwrap();
-        Repository { on, dir, name: "luneta".to_owned() }
+        in_worktree(on, "main")
+    }
+
+    /// The repository of `repository` by its worktree named `worktree`.
+    fn in_worktree(on: Machine, worktree: &str) -> Repository {
+        let dir = Directory::parse(format!("/w/luneta/{worktree}")).unwrap();
+        Repository { on, dir, home: "/w/luneta".to_owned(), name: "luneta".to_owned() }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -209,7 +277,7 @@ mod tests {
     /// repository, and its machine where that is another.
     #[test]
     fn the_box_takes_what_you_type_and_files_it_on_enter() {
-        let mut issue = Issue::new(1, repository(Machine::Local), String::new());
+        let mut issue = Issue::new(1, repository(Machine::Local), &Kept::default());
         assert_eq!(issue.key(&key(KeyCode::Enter)), Keyed::Nothing);
         typed(&mut issue, "a red button x");
         assert_eq!(issue.key(&key(KeyCode::Backspace)), Keyed::Nothing);
@@ -238,7 +306,9 @@ mod tests {
         assert_eq!(issue.key(&interrupt), Keyed::Close);
 
         let far = Machine::Remote("nixos".parse().unwrap());
-        let there = Issue::new(2, repository(far), "kept words".to_owned());
+        let mut kept = Kept::default();
+        kept.keep(1, repository(far.clone()), "kept words".to_owned());
+        let there = Issue::new(2, repository(far), &kept);
         let lines = shown(&there, 50, 9);
         assert_eq!(lines[0], "┌─ File issue ───────────────── luneta on nixos ─┐");
         assert_eq!(lines[4], "│ › kept words_                                  │");
@@ -248,8 +318,54 @@ mod tests {
     #[test]
     fn nothing_typed_sends_nothing() {
         let (events, heard) = mpsc::channel();
-        let issue = Issue::new(1, repository(Machine::Local), "  ".to_owned());
-        assert_eq!(issue.send(&events), None);
+        let issue = Issue::new(1, repository(Machine::Local), &Kept::default());
+        assert_eq!(issue.send(&events, &mut Kept::default()), None);
         assert!(heard.try_recv().is_err());
+    }
+
+    fn typed_in(issue: &Issue) -> &str {
+        &issue.typed
+    }
+
+    /// The words of each issue not filed are kept for its repository, from
+    /// whichever of its worktrees, oldest first: a box for another repository,
+    /// or one on another machine, opens with none of them. Each stays until
+    /// the box it opened in sends it, as you left it there, but where you
+    /// took all of it back; a box opened while they were on their way sends
+    /// none of them.
+    #[test]
+    fn the_words_of_an_issue_not_filed_stay_with_its_repository_until_sent() {
+        let (events, _heard) = mpsc::channel();
+        let here = repository(Machine::Local);
+        let elsewhere = Repository { home: "/w/zed".to_owned(), ..repository(Machine::Local) };
+        let far = repository(Machine::Remote("vps".parse().unwrap()));
+        let mut kept = Kept::default();
+        let open = |number, repository: &Repository, kept: &Kept| {
+            Issue::new(number, repository.clone(), kept)
+        };
+
+        let blank = open(3, &here, &kept);
+        kept.keep(1, here.clone(), "first".to_owned());
+        kept.keep(2, here.clone(), "second".to_owned());
+        assert_eq!(blank.send(&events, &mut kept), None);
+        for other in [&elsewhere, &far] {
+            assert_eq!(typed_in(&open(4, other, &kept)), "");
+        }
+        let mut edited = open(5, &in_worktree(Machine::Local, "feat"), &kept);
+        assert_eq!(typed_in(&edited), "first");
+        typed(&mut edited, " again");
+        edited.close(&mut kept);
+        let mut early = open(6, &here, &Kept::default());
+        typed(&mut early, "sent while they were kept");
+        assert!(early.send(&events, &mut kept).is_some());
+        assert_eq!(typed_in(&open(7, &here, &kept)), "first again");
+
+        assert!(open(8, &here, &kept).send(&events, &mut kept).is_some());
+        let mut cleared = open(9, &here, &kept);
+        assert_eq!(typed_in(&cleared), "second");
+        let line_back = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(cleared.key(&line_back), Keyed::Nothing);
+        cleared.close(&mut kept);
+        assert_eq!(typed_in(&open(10, &here, &kept)), "");
     }
 }

@@ -212,7 +212,8 @@ service Daemon {
   // It answers once, as late as that takes, up to five minutes for the writing
   // and a minute for gh: a stream too, as the start of every answer is cut five
   // seconds after the question. The stream ends after the answer, or with why
-  // there is none, and a question that hangs up does not stop it.
+  // there is none: `FAILED_PRECONDITION` where none was filed, and `ABORTED`
+  // where one may have been. A question that hangs up does not stop it.
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
 }
 
@@ -1651,8 +1652,8 @@ message FileIssueRequest {
 }
 
 message FileIssueResponse {
-  // The issue filed, by its number, its title, and its page, as gh said it.
-  uint32 number = 1;
+  // The issue filed, by its page, as gh said it, whose last part is its
+  // number, and its title.
+  string url = 1;
   string title = 2;
-  string url = 3;
 }

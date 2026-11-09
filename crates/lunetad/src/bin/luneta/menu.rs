@@ -1093,11 +1093,12 @@ impl Target {
     /// on its machine. None on a session's row, or a machine's header, which
     /// work in no repository.
     fn repository(&self) -> Option<Repository> {
-        let Target::Pane(on, PaneRow { cwd: Some(cwd), repository: Some(_), .. }) = self else {
+        let Target::Pane(on, PaneRow { cwd: Some(cwd), repository: Some(home), .. }) = self else {
             return None;
         };
         let dir = Directory::parse(cwd.clone()).ok()?;
-        Some(Repository { on: on.clone(), dir, name: self.repository_name().to_owned() })
+        let (home, name) = (home.clone(), self.repository_name().to_owned());
+        Some(Repository { on: on.clone(), dir, home, name })
     }
 
     /// The branch checked out where its pane works.
@@ -3559,7 +3560,8 @@ mod tests {
         let vps = Machine::Remote("vps".parse().unwrap());
         for on in [Machine::Local, vps] {
             let row = Target::Pane(on.clone(), row());
-            let repository = Repository { on, dir: main_dir(), name: "luneta".to_owned() };
+            let (home, name) = ("/w/luneta".to_owned(), "luneta".to_owned());
+            let repository = Repository { on, dir: main_dir(), home, name };
             let did = Menu::open(1, row.clone(), Some('i'), CLAUDE).expect("the menu has `i`");
             assert_eq!(closed(did), Done::Issue(repository.clone()));
             let (menu, _) = stays(opened(row, None));
