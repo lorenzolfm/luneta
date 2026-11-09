@@ -1236,6 +1236,91 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
 }
 
+/// A branch gh does not answer for holds up no other: gh is asked about the
+/// others as it hangs, and what it finds of them shows at once.
+#[test]
+fn a_branch_gh_hangs_on_holds_up_no_other() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let (stuck, other) = (dirs.path().join("a"), dirs.path().join("b"));
+    for (dir, branch) in [(&stuck, "stuck"), (&other, "main")] {
+        fs::create_dir(dir).unwrap();
+        assert!(git(dir, &["init", "-q", "-b", branch]));
+        commit(dir, "README", "start\n");
+    }
+    host.gh.hang("stuck");
+    let page = "https://github.com/owner/repo/pull/7";
+    host.gh.open("main", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page }));
+    let (stuck, other) = (stuck.display().to_string(), other.display().to_string());
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    host.zellij.list("work", &json!([in_dir(1, &stuck), in_dir(2, &other)]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+
+    eventually("gh is asked about stuck", || {
+        host.gh.asked().iter().any(|branch| branch == "stuck").then_some(())
+    });
+    eventually("main's pull request shows as gh hangs on stuck", || {
+        let pull_requests = host.host().pull_requests;
+        pull_requests.iter().any(|it| it.dir == other && it.number == 7).then_some(())
+    });
+    host.gh.answer("stuck");
+}
+
+/// gh is asked again soon about a branch whose pull request has checks yet
+/// to end, as they are what change. Where it fails, what it said before
+/// stands, as stale, until it answers again. The daemon says how the checks
+/// changed, and how long it was since gh had said them, failing in between.
+#[test]
+fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
+    let host = Host::new();
+    let tree = tempfile::tempdir().unwrap();
+    assert!(git(tree.path(), &["init", "-q", "-b", "main"]));
+    commit(tree.path(), "README", "start\n");
+    let page = "https://github.com/owner/repo/pull/7";
+    let checked = |state: &str| {
+        let rollup = json!([{ "__typename": "StatusContext", "context": "ci", "state": state }]);
+        let mut pull = json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page });
+        pull["statusCheckRollup"] = rollup;
+        pull
+    };
+    host.gh.open("main", &checked("PENDING"));
+    let cwd = tree.path().display().to_string();
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let mut daemon = start(host.vars()).unwrap();
+    let shown = || {
+        let pull_requests = host.host().pull_requests;
+        pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.checks, it.stale))
+    };
+    let soon = |what: &str, wanted| {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while shown() != Some(wanted) {
+            assert!(Instant::now() < deadline, "never came to be: {what}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let pending = Some(api::Checks { pending: 1, failed: 0, passed: 0 });
+    eventually("main's checks show pending", || (shown() == Some((pending, false))).then_some(()));
+
+    host.gh.fail("main");
+    soon("they stand stale as gh fails", (pending, true));
+
+    host.gh.open("main", &checked("SUCCESS"));
+    host.gh.mend("main");
+    let passed = Some(api::Checks { pending: 0, failed: 0, passed: 1 });
+    soon("they pass as gh answers again", (passed, false));
+
+    let said = daemon.said_after(Duration::from_secs(1));
+    let failed = format!("gh pr view in {cwd}: HTTP 401: Requires authentication");
+    assert!(said.iter().any(|line| line.contains(&failed)), "{said:?}");
+    let changed = format!("the checks of {page} went from pending to passing, ");
+    let once = "failing once in between";
+    let changed = |line: &&String| line.contains(&changed) && line.ends_with(once);
+    assert_eq!(said.iter().filter(changed).count(), 1, "{said:?}");
+    assert_eq!(host.gh.asked(), ["main"; 3]);
+}
+
 const PARENT: &str = "github.com/upstream/repo";
 
 fn forked_tree(dir: &Path) {
