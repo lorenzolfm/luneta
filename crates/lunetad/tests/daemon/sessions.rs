@@ -1083,7 +1083,8 @@ fn git_runs_no_command_a_repository_names() {
 /// panes work in, and at once as a pane comes to a branch. What gh found of a
 /// branch is no longer a directory's once another is checked out there, and
 /// a branch with no pull request has none, which is no trouble to the daemon.
-/// Each comes with its page, which says the repository its number counts in.
+/// Each comes with its page, which says the repository its number counts in,
+/// and how the checks of its head stand, as gh says them with it.
 #[test]
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
@@ -1096,7 +1097,15 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
         commit(dir, "README", "start\n");
     }
     let page = |number| format!("https://github.com/owner/repo/pull/{number}");
-    let main = json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page(7) });
+    let run = |conclusion: &str| json!({
+        "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": conclusion,
+    });
+    let rollup = json!([run("FAILURE"), run("SUCCESS"), { "__typename": "StatusContext",
+        "context": "ci", "state": "PENDING" }]);
+    let main = json!({
+        "number": 7, "state": "OPEN", "isDraft": false, "url": page(7),
+        "statusCheckRollup": rollup,
+    });
     host.gh.open("main", &main);
     host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }));
     let spelled = |dir: &Path| dir.display().to_string();
@@ -1118,6 +1127,9 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let wanted = [top.clone(), src.clone(), beside.clone()].map(|dir| (dir, open.clone()));
     assert_eq!(all, BTreeMap::from(wanted));
     assert_eq!(host.gh.asked(), ["main", "main"]);
+    let checks = host.host().pull_requests.into_iter().map(|it| it.checks).collect::<Vec<_>>();
+    let failing = Some(api::Checks { pending: 1, failed: 1, passed: 1 });
+    assert_eq!(checks, vec![failing; 3]);
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
     let draft = (8, PullRequestState::Draft, page(8));

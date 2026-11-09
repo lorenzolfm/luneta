@@ -719,6 +719,27 @@ if [ "$1 $2 $4" = "pr view --repo" ]; then
     echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2
     exit 1
 fi
+if [ "$1 $2 $4 $5" = "pr view --json state,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
+    echo "$*" >> "$pulls/checked"
+    [ -f "$pulls/checks-${3##*/}" ] && exec cat "$pulls/checks-${3##*/}"
+    echo "GraphQL: Could not resolve to a PullRequest with the number of ${3##*/}." >&2
+    exit 1
+fi
+if [ "$1 $2" = "api --hostname" ] && case "$*" in */actions/jobs/*/logs) true;; *) false;; esac; then
+    echo "$*" >> "$pulls/checked"
+    if [ "$4" = --allow-escape-sequences ]; then
+        if [ -f "$pulls/old" ]; then
+            echo "unknown flag: --allow-escape-sequences" >&2
+            exit 1
+        fi
+        shift
+    fi
+    job=${4#*/actions/jobs/}
+    job=${job%/logs}
+    [ -f "$pulls/log-$job" ] && exec cat "$pulls/log-$job"
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+fi
 if [ "$1" = api ]; then
     [ -f "$pulls/api" ] && exec cat "$pulls/api"
     echo "gh: Not Found (HTTP 404)" >&2
@@ -736,7 +757,7 @@ if [ "$1 $2 $3" = "pr list --base" ]; then
     echo '[]'
     exit 0
 fi
-if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner" ]; then
+if [ "$*" != "pr view --json number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi
@@ -803,6 +824,38 @@ exec cat "$said"
 
     pub fn viewed(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("viewed")) {
+            Ok(asked) => asked.lines().map(str::to_owned).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("what gh was asked does not read: {error}"),
+        }
+    }
+
+    /// Has gh say `rollup` of the checks of the pull request numbered
+    /// `number`, in `state`, at `head`, as `gh pr view <page> --json
+    /// state,headRefOid,statusCheckRollup` writes it, of whichever repository.
+    pub fn checks(&self, number: u32, state: &str, head: &str, rollup: &serde_json::Value) {
+        let said = serde_json::json!({
+            "state": state,
+            "headRefOid": head,
+            "statusCheckRollup": rollup,
+        });
+        fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
+    }
+
+    /// Has gh say `log` of the job numbered `job`.
+    pub fn log(&self, job: u64, log: &str) {
+        fs::write(self.pulls.join(format!("log-{job}")), log).unwrap();
+    }
+
+    /// Has gh be one older than 2.97, which knows no `--allow-escape-sequences`.
+    pub fn old(&self) {
+        fs::write(self.pulls.join("old"), "").unwrap();
+    }
+
+    /// What gh has been asked of checks and their logs, in the order it was
+    /// asked.
+    pub fn checked(&self) -> Vec<String> {
+        match fs::read_to_string(self.pulls.join("checked")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("what gh was asked does not read: {error}"),

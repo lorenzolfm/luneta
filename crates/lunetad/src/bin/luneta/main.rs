@@ -11,6 +11,7 @@ mod away;
 mod bridge;
 mod brief;
 mod browser;
+mod checks;
 mod clipboard;
 mod close;
 mod commands;

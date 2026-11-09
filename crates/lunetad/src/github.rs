@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use luneta_protocol::github::{PullRequest, State};
 use serde::Deserialize;
 
+use crate::checks;
 use crate::core;
 use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
@@ -41,9 +42,12 @@ pub struct Found {
     pub pull_request: PullRequest,
 }
 
-/// What gh is asked of a pull request: `--json` takes them so.
-const VIEWED: &str =
-    "number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner";
+/// What gh is asked of a pull request: `--json` takes them so, the checks of
+/// its head with them, which cost no other ask.
+const VIEWED: &str = concat!(
+    "number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,",
+    "statusCheckRollup",
+);
 
 /// A pull request as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
@@ -60,6 +64,9 @@ struct Viewed {
     author: Option<Owner>,
     head_repository: Option<HeadRepository>,
     head_repository_owner: Option<Owner>,
+    /// The checks of its head, as `checks` reads them.
+    #[serde(default)]
+    status_check_rollup: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -130,7 +137,12 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         _ => None,
     };
     Ok(Pulled {
-        pull_request: PullRequest { number: viewed.number, state, url: Some(viewed.url) },
+        pull_request: PullRequest {
+            number: viewed.number,
+            state,
+            url: Some(viewed.url),
+            checks: checks::rolled_up(viewed.status_check_rollup),
+        },
         head_name: viewed.head_ref_name,
         head: viewed.head_ref_oid,
         author: viewed.author.map(|author| author.login).filter(|login| !login.is_empty()),
@@ -520,7 +532,7 @@ fn tell(
 mod tests {
     use std::num::NonZeroU32;
 
-    use luneta_protocol::github::{PullRequest, State};
+    use luneta_protocol::github::{Checks, PullRequest, State};
 
     use super::{fork_of, parse, standing, Pulled, RepositoryName};
 
@@ -530,6 +542,7 @@ mod tests {
             number: NonZeroU32::new(number).unwrap(),
             state,
             url: Some(format!("https://github.com/{repository}/pull/{number}")),
+            checks: None,
         };
         let fork_s = |state| pull("owner/repo", 5, state);
         let parent_s = || pull("upstream/repo", 5, State::Open);
@@ -622,7 +635,12 @@ mod tests {
         let open = format!(r#""isDraft":false,"number":126,"state":"OPEN",{head}"#);
         assert_eq!(
             read(&format!(r#"{{{open},"url":"{url}"}}"#)),
-            Ok(PullRequest { number, state: State::Open, url: Some(url.to_owned()) })
+            Ok(PullRequest {
+                number,
+                state: State::Open,
+                url: Some(url.to_owned()),
+                checks: Some(Checks::default()),
+            })
         );
         let page = format!(r#"{head},"url":"https://github.com/owner/repo/pull/1""#);
         let viewed = |fields: &str| format!("{{{fields},{page}}}");

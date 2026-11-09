@@ -53,6 +53,7 @@ use crate::api::closes_response::{self, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
 use crate::api::daemon_server::{Daemon, DaemonServer};
 use crate::api::keep_image_request::{Image, Part};
+use crate::api::keep_checks_response::{self, Failed as FailedCheck};
 use crate::api::keep_printed_response::{self, File as PrintedFile, Top};
 use crate::api::list_dirs_response::Dir;
 use crate::api::list_exited_response::Exited;
@@ -64,8 +65,8 @@ use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
     self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
-    DumpScreenResponse, GoRequest, InfoResponse, KeepImageRequest, KeepImageResponse,
-    KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
+    DumpScreenResponse, GoRequest, InfoResponse, KeepChecksRequest, KeepChecksResponse,
+    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
     NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest,
@@ -92,8 +93,9 @@ use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
 use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
+use crate::checks::{Failing, Log};
 use crate::{
-    carries, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
+    carries, checks, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
     names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics,
     turns, watch, zellij, zoxide,
 };
@@ -305,6 +307,7 @@ async fn sweep_keeps(folder: PathBuf) {
             let now = SystemTime::now();
             keeps::sweep_kind(&folder, images::FOLDER, now);
             keeps::sweep_kind(&folder, printed::FOLDER, now);
+            keeps::sweep_kind(&folder, checks::FOLDER, now);
         });
         // One that panicked has said so in the log, and what it left stays for
         // the next.
@@ -683,6 +686,27 @@ impl Daemon for Host {
             Printed::Top(kept) => keep_printed_response::Printed::Top(Top { file: kept.map(file) }),
         };
         Ok(Response::new(KeepPrintedResponse { printed: Some(printed) }))
+    }
+
+    type KeepChecksStream =
+        Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
+
+    async fn keep_checks(
+        &self,
+        request: Request<KeepChecksRequest>,
+    ) -> Result<Response<Self::KeepChecksStream>, Status> {
+        let KeepChecksRequest { on, url } = request.into_inner();
+        let page = checks::PullPage::parse(&url)
+            .map_err(|why| Status::invalid_argument(format!("url: {why}")))?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let answer = daemon.keep_checks(KeepChecksRequest { on: None, url }).await?;
+            return Ok(Response::new(Box::pin(answer.into_inner())));
+        }
+        let answer = late(move || {
+            let kept = checks::kept_failing(&page).map_err(Status::failed_precondition)?;
+            Ok(kept_checks(kept))
+        });
+        Ok(Response::new(Box::pin(answer)))
     }
 
     async fn name_session(
@@ -1155,6 +1179,24 @@ fn kept_image(
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }
+}
+
+/// The logs of the checks that failed, as `KeepChecks` answers with them.
+fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecksResponse {
+    let file = |KeptFile { file, lines, left_out }| PrintedFile {
+        path: file,
+        lines: lines as u64,
+        left_out: left_out as u64,
+    };
+    let failed = failed.into_iter().map(|checks::Failed { name, link, log }| FailedCheck {
+        name,
+        link: link.unwrap_or_default(),
+        log: Some(match log {
+            Log::Kept(kept) => keep_checks_response::failed::Log::Kept(file(kept)),
+            Log::Unkept(why) => keep_checks_response::failed::Log::Unkept(why),
+        }),
+    });
+    KeepChecksResponse { head, failed: failed.collect(), pending, passed }
 }
 
 /// What `job` answers, from a thread of its own, as a stream of that answer

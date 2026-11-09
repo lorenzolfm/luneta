@@ -48,7 +48,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
 use luneta_protocol::git::{Changes, Head, Upstream, WorkTree};
-use luneta_protocol::github::{PullRequest, State};
+use luneta_protocol::github::{PullRequest, State, Verdict};
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
 use luneta_protocol::{tab, unread};
@@ -77,6 +77,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::alerts::{self, Reach};
 use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
+use crate::checks;
 use crate::close::{self, Act, Deletes, Plan, Scope, Seat, Subject, Untold};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
@@ -662,11 +663,13 @@ struct Checkout {
 }
 
 /// A pull request, as its branch's line shows it: its number, in the colour
-/// of its state.
+/// of its state, and after it a mark for what its checks come to, while it is
+/// open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Numbered {
     number: Number,
     colour: Color,
+    checks: Option<Verdict>,
 }
 
 /// A pull request's number on its branch's line: its link says it where it has
@@ -1042,6 +1045,9 @@ pub enum Asked {
     /// after the line `command` was last run on, there, for the menu
     /// numbered `menu`.
     Printed { menu: u64, on: Machine, session: SessionName, pane: u32, ended: menu::Ended },
+    /// Keep the log of each check that failed on the head of the pull request
+    /// of `page`, on `on`, for the menu numbered `menu`.
+    Checks { menu: u64, on: Machine, page: checks::PullPage },
     /// Have the model write this brief, and show it.
     Brief(Brief),
     /// Open the ask box, for this row.
@@ -3357,8 +3363,8 @@ impl Sidebar {
 
     /// What the menu is for, as it opens on `place`, of `machine`: for a
     /// pane, the directory it works in, or its agent, as its row says it,
-    /// the branch checked out there, and what its shell said it ran last. A
-    /// session has none of them, having no pane.
+    /// the branch checked out there, its pull request, and what its shell
+    /// said it ran last. A session has none of them, having no pane.
     fn target_at(&self, machine: &Machine, place: Place) -> Target {
         let (session, pane) = match place {
             Place::Session(session) => return Target::Session(machine.clone(), session),
@@ -3379,8 +3385,13 @@ impl Sidebar {
         let checkout = tree.as_ref().and_then(|tree| checkout(tree, None));
         let branch = checkout.map(|checkout| checkout.branch);
         let repository = tree.as_ref().and_then(repository_of);
+        let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
+        let pull_request =
+            cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
+        let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, pane);
-        Target::Pane(machine.clone(), PaneRow { session, pane, cwd, branch, repository, ran })
+        let row = PaneRow { session, pane, cwd, branch, repository, pull_request, ran };
+        Target::Pane(machine.clone(), row)
     }
 
     /// What the shell in the pane `pane` of `session`, of `machine`, said it
@@ -3604,6 +3615,7 @@ impl Sidebar {
             Wants::Printed { session, pane, ended } => {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
+            Wants::Checks { page } => Asked::Checks { menu: number, on, page },
             Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
@@ -3685,6 +3697,16 @@ impl Sidebar {
             return Asked::Nothing;
         };
         self.menu_did(waiting.printed(printed))
+    }
+
+    /// luneta kept the logs of the checks that failed on the pull request of
+    /// the menu numbered `menu`, as `checks` says, or why it kept none: the
+    /// menu goes on, while it waits on them.
+    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
+        let Some(waiting) = self.menu.take_if(|it| it.number() == menu && it.fetching()) else {
+            return Asked::Nothing;
+        };
+        self.menu_did(waiting.checked(checks))
     }
 
     /// Every pane of `on` the daemon says a directory of, in the order of the
@@ -5256,7 +5278,8 @@ fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Check
 /// which gh lists it in: green while it is open, grey while it is a draft, and
 /// purple once it is merged. A closed one is none. What its daemon says of its
 /// page is taken only as this pull request's link: another machine's says it,
-/// and the clipboard and the browser take what they are handed.
+/// and the clipboard and the browser take what they are handed. One open, or
+/// a draft, has what its checks come to, where its daemon says them.
 fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
@@ -5264,11 +5287,24 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Merged => gruvbox::PURPLE,
         State::Closed => return None,
     };
+    let checks = pull_request.verdict();
     let number = pull_request.number;
     let link = pull_request.url.as_deref().and_then(Link::parse);
     let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
     let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
-    Some(Numbered { number, colour })
+    Some(Numbered { number, colour, checks })
+}
+
+/// The mark after a pull request's number for what its checks come to, as
+/// GitHub marks them, in its colour: one failed, one has yet to end, or each
+/// passed.
+fn verdict_mark(verdict: Verdict) -> Span<'static> {
+    let (mark, colour) = match verdict {
+        Verdict::Failing => ("✗", gruvbox::RED),
+        Verdict::Pending => ("●", gruvbox::YELLOW),
+        Verdict::Passing => ("✓", gruvbox::GREEN),
+    };
+    Span::styled(mark, Style::new().fg(colour))
 }
 
 /// The glyph of each kind of change there is, then the one for where the
@@ -5603,11 +5639,12 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
 }
 
 /// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, then the number of its pull request, and how its
-/// work tree stands. The branch is cut to leave the other two whole. The mark
-/// of the pane luneta's zellij is on, `here`, runs down it too, and the
-/// `gutter` after it. And the columns the number is on, as the line has it, for
-/// a click to go by, and the room the branch had, for a sweep over it.
+/// works, under its label, then the number of its pull request, with the mark
+/// of its checks, and how its work tree stands. The branch is cut to leave
+/// the other two whole. The mark of the pane luneta's zellij is on, `here`,
+/// runs down it too, and the `gutter` after it. And the columns the number is
+/// on, as the line has it, for a click to go by, and the room the branch had,
+/// for a sweep over it.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
@@ -5618,7 +5655,10 @@ fn checkout_line(
     let number = checkout.pull_request.as_ref().map(|numbered| {
         Span::styled(numbered.shown(), Style::new().fg(numbered.colour))
     });
-    let held = number.as_ref().map_or(0, |number| number.content.width() + 1);
+    let checks = checkout.pull_request.as_ref().and_then(|numbered| numbered.checks);
+    let mark = checks.map(verdict_mark);
+    let held = number.as_ref().map_or(0, |number| number.content.width() + 1)
+        + mark.as_ref().map_or(0, Span::width);
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = width.saturating_sub(LABEL + held + reserve + 1);
     let branch = cut(&checkout.branch, room);
@@ -5635,6 +5675,7 @@ fn checkout_line(
         let start: usize = spans.iter().map(Span::width).sum();
         columns = Some(start..start + number.width());
         spans.push(number);
+        spans.extend(mark);
     }
     spans.push(Span::raw(" ".repeat(gap)));
     spans.push(Span::raw(status.clone()));
@@ -7528,7 +7569,8 @@ mod tests {
             let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
-            host.pull_requests.push(PullRequest { number, state, url: None }.to_api(dir));
+            let pull_request = PullRequest { number, state, url: None, checks: None };
+            host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
         sidebar.heard(host);
@@ -7553,6 +7595,65 @@ mod tests {
         assert_eq!(colour(6), Some(gruvbox::GREEN));
         assert_eq!(colour(8), Some(gruvbox::PURPLE));
         assert_eq!(colour(10), Some(gruvbox::GREY));
+    }
+
+    /// An open pull request, or a draft, has a mark after its number for
+    /// what its checks come to, in its colour: one failed, one has yet to end,
+    /// or each passed. One with no checks, or whose daemon is too old to say
+    /// them, has none, and so does a merged one, whatever its checks did. A
+    /// branch too long gives way to the mark too.
+    #[test]
+    fn an_open_pull_request_shows_what_its_checks_come_to() {
+        use luneta_protocol::github::Checks;
+
+        let checks = |pending, failed, passed| Some(Checks { pending, failed, passed });
+        let checkouts = [
+            ("/w/a", "main", 126, State::Open, checks(1, 1, 3)),
+            ("/w/b", "fold", 7, State::Draft, checks(2, 0, 3)),
+            ("/w/c", "handoff-eng-11259-and-more", 4321, State::Open, checks(0, 0, 3)),
+            ("/w/d", "none", 8, State::Open, checks(0, 0, 0)),
+            ("/w/e", "old", 9, State::Open, None),
+            ("/w/f", "gone", 10, State::Merged, checks(0, 1, 0)),
+        ];
+        let panes = checkouts.iter().zip(1..).map(|((cwd, ..), id)| pane(id, id, cwd, "fish"));
+        let mut host = host(vec![session("s", 10, panes.collect())], Vec::new());
+        for (dir, branch, number, state, checks) in checkouts {
+            let name = Said::new(branch.to_owned()).expect("a branch's name");
+            let head = Head::Branch { name, upstream: None };
+            let changes = Changes::default();
+            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
+            host.work_trees.push(tree.to_api(dir));
+            let number = NonZeroU32::new(number).expect("a pull request's number");
+            let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
+            host.pull_requests.push(PullRequest { number, state, url, checks }.to_api(dir));
+        }
+        let mut sidebar = fresh();
+        sidebar.heard(host);
+
+        let buffer = drawn(&mut sidebar, false, 32, 17);
+        let line = |y: u16| {
+            let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
+            line.trim_end().to_owned()
+        };
+        let branches: Vec<String> = [6, 8, 10, 12, 14, 16].into_iter().map(line).collect();
+        assert_eq!(
+            branches,
+            [
+                "       main #126✗",
+                "       fold #7●",
+                "       handoff-eng-112… #4321✓",
+                "       none #8",
+                "       old #9",
+                "       gone #10",
+            ]
+        );
+        let mark = |y: u16, mark: &str| {
+            let x = (0..32).find(|x| buffer[(*x, y)].symbol() == mark).expect("the mark");
+            buffer[(x, y)].fg
+        };
+        assert_eq!(mark(6, "✗"), gruvbox::RED);
+        assert_eq!(mark(8, "●"), gruvbox::YELLOW);
+        assert_eq!(mark(10, "✓"), gruvbox::GREEN);
     }
 
     #[test]
@@ -7908,7 +8009,7 @@ mod tests {
         if let Some((number, state, url)) = pull {
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = url.map(str::to_owned);
-            pull_requests.push(PullRequest { number, state, url }.to_api(dir));
+            pull_requests.push(PullRequest { number, state, url, checks: None }.to_api(dir));
         }
     }
 
@@ -8484,7 +8585,8 @@ mod tests {
         if let Some(host) = &mut sidebar.host {
             let number = NonZeroU32::new(5).unwrap();
             let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
-            host.pull_requests.push(PullRequest { number, state: State::Open, url }.to_api("/w/b"));
+            let pull_request = PullRequest { number, state: State::Open, url, checks: None };
+            host.pull_requests.push(pull_request.to_api("/w/b"));
         }
         sidebar.focus(Keys::Sidebar);
         sidebar.paste("ls -la");
@@ -8801,6 +8903,7 @@ mod tests {
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             repository: None,
+            pull_request: None,
             ran: Ran::Unhooked,
         })));
 
@@ -10201,7 +10304,7 @@ mod tests {
         let on = Machine::Remote(nixos());
         let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
         let (branch, repository, ran) = (None, None, Ran::Unhooked);
-        let row = PaneRow { session, pane: 1, cwd, branch, repository, ran };
+        let row = PaneRow { session, pane: 1, cwd, branch, repository, pull_request: None, ran };
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();

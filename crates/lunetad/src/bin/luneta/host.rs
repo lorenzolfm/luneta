@@ -67,6 +67,7 @@ use crate::ask::{Ask, Heard, Keyed};
 use crate::away;
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
+use crate::checks;
 use crate::close::Act;
 use crate::desktop::{self, Desktop, Reader};
 use crate::dictation::{self, Dictated, Dictation};
@@ -169,6 +170,10 @@ pub enum Event {
     /// What the pane of the menu numbered `menu` printed after its last
     /// command's line, as luneta kept it, or why it kept nothing.
     Printed { menu: u64, printed: Result<Printed, String> },
+    /// The checks that failed on the head of the pull request of the menu
+    /// numbered `menu`, with their logs as luneta kept them, or why it found
+    /// none.
+    Checks { menu: u64, checks: Result<checks::Failing, String> },
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
@@ -1352,6 +1357,10 @@ impl App {
                 let asked = self.sidebar.printed(menu, printed);
                 self.follow(asked);
             },
+            Event::Checks { menu, checks } => {
+                let asked = self.sidebar.checks(menu, checks);
+                self.follow(asked);
+            },
             Event::Prunes { menu, plan } => {
                 let asked = self.sidebar.prunes(menu, plan);
                 self.follow(asked);
@@ -2231,6 +2240,7 @@ impl App {
             Asked::Printed { menu, on, session, pane, ended } => {
                 printed::read(menu, &on, &session, pane, ended, &self.events);
             },
+            Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
                 let folder = self.claude_folder.clone();

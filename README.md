@@ -157,6 +157,7 @@ and what each does, as which-key does in neovim.
 │ s  /tigerstyle                          │
 │ f  fix the last command                 │
 │ e  explain the last command             │
+│ c  fix the failing checks               │
 │                                         │
 │ <BS> - Back, <ESC> - Close              │
 ╰─────────────────────────────────────────╯
@@ -212,6 +213,32 @@ file starts after it, too late. Of a prompt of more than one line, the lines
 before the one the shell waits on end the file, as luneta cannot tell them from
 what the command printed. A file goes once it is a day old, within the hour
 while lunetad runs, or else as it next starts.
+
+The Claude group's `c` starts an agent beside a pane on the checks that failed
+on its branch's pull request, to fix them. luneta asks `gh` how the checks of
+the pull request's head stand now, and fetches the log of each job of GitHub
+Actions that failed, with `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`,
+which has it as soon as the job ends, while others of its run go on, as many as
+8 side by side. It keeps the last 2000 lines of each, with no colours, in a file
+of its own in the folder `checks` of luneta's, which the agent is let read with
+no question asked, and the menu says `⠋ Asking gh about the checks of #126…`
+meanwhile:
+
+```text
+Fix the checks that failed on pull request #126,
+https://github.com/owner/repo/pull/126, at its head
+3f2c9e1d0b8a4c5e6f708192a3b4c5d6e7f80912. `ci / test` failed: its log is in
+/run/user/1000/luneta/checks/1793317274015320011-4127-0.log. One other check has
+yet to end.
+```
+
+A check of another service, a job that ran in a repository other than the pull
+request's or its head's, a job whose log `gh` could not fetch, and those past
+the 8th, are named with why they have no log, and the page of each where GitHub
+gives one. The key
+takes a pane whose branch has a pull request open, or a draft: on another, or
+where no check failed, the menu says why it starts none. A file goes as the
+files of `f` and `e` do.
 
 The Claude group's other keys are for a few skills, built in. For any other,
 `/` at the top of the menu searches every skill the pane's directory can run:
@@ -871,6 +898,14 @@ its own, is asked about again in that repository where `gh` finds none for it,
 or only a closed one, which takes one more ask. From there, the fork's default
 branch shows only one still open.
 
+After the number of one open, or a draft, a mark says what the checks of its
+head come to, as GitHub's checks and the statuses other services set say them:
+a red `✗` once one failed, whatever the others do, a yellow `●` while one has
+yet to end and none failed, and a green `✓` once each ended and none failed, as
+`fold #126✓`. A head with no check has no mark. `gh` says them with the pull
+request, in the same ask, so they show within a minute too, and
+[`c c`](#menu) starts an agent on those that failed.
+
 To take a pull request's link from there, without asking its agent, a click on
 the number copies it, wherever the keys are, and does nothing else: a note says
 so for a few seconds, as `copied #126`, and the number is lit under the pointer,
@@ -1102,7 +1137,7 @@ says why luneta passed over each machine it did.
 The menu on another machine's pane opens what it opens here, there: `n p`,
 `n t` and the agents of the Claude group open in zellij on that machine, `c f`
 and `c e` keep what the pane printed in a file there, for the agent there to
-read, `/` finds the skills of the pane's directory there, and `n s` makes a
+read, `c c` has `gh` there fetch the logs of the checks and keeps them there, `/` finds the skills of the pane's directory there, and `n s` makes a
 session there, named as that machine names one, and on its header in your
 home there, which lunetad there knows; luneta's zellij goes to what opened, as
 `Enter` would. While lunetad does not reach the machine, `n s` on its header
@@ -1643,7 +1678,7 @@ that was up, without a sound.
 | [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request, an issue or a `.md` file you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
-| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), and the issue of a link you paste there |
+| [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), with the mark of its checks, the logs `c c` hands an agent, and the issue of a link you paste there |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
