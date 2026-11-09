@@ -9,7 +9,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 pub use lunetad::skills::{Name, Runs, Skill};
 
-use crate::agents::{self, Harness};
+use crate::agents::Harness;
 use crate::away::{self, Away};
 use crate::host::Event;
 use crate::machines::Machine;
@@ -27,7 +27,7 @@ pub fn find(
     let (on, cwd, events) = (on.clone(), cwd.to_owned(), events.clone());
     thread::spawn(move || {
         let skills = match &on {
-            Machine::Local => lunetad::skills::found_in(&cwd, agents::to_api(harness)),
+            Machine::Local => lunetad::skills::found_in(&cwd, harness),
             Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
                 .and_then(|mut away| away.skills(&cwd, harness)),
         };

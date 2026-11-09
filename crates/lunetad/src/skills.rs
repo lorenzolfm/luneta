@@ -23,8 +23,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::api::Harness;
-use crate::program;
+use crate::{program, Harness};
 
 /// Prints what `claude plugin list --json` says of the plugins in the
 /// directory `$1`, then for each skill, command and workflow found for it:
@@ -152,7 +151,6 @@ pub fn found_in(cwd: &str, harness: Harness) -> Result<Vec<Skill>, String> {
             let agent = set("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
             Ok(pi_found(Path::new(cwd), home.as_deref(), agent.as_deref()))
         },
-        Harness::Unspecified => Err("skills: of a harness this lunetad does not know".to_owned()),
     }
 }
 

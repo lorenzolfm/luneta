@@ -51,14 +51,6 @@ pub const fn other(harness: Harness) -> Harness {
     }
 }
 
-/// `harness`, as the daemon's API names it.
-pub const fn to_api(harness: Harness) -> api::Harness {
-    match harness {
-        Harness::ClaudeCode => api::Harness::ClaudeCode,
-        Harness::Pi => api::Harness::Pi,
-    }
-}
-
 /// How `harness` runs the skill named `skill`: Claude Code by `/<name>`, and
 /// pi by `/skill:<name>`.
 pub fn spelled(harness: Harness, skill: &str) -> String {

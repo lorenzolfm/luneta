@@ -52,6 +52,19 @@ pub enum Harness {
 }
 
 impl Harness {
+    /// The harness a request names by `said`: Claude Code where it names none,
+    /// as a luneta older than the field asks for. Or why not, for one this
+    /// lunetad does not know.
+    pub fn said(said: Option<i32>) -> Result<Harness, String> {
+        match said.map(api::Harness::try_from) {
+            None | Some(Ok(api::Harness::ClaudeCode)) => Ok(Harness::ClaudeCode),
+            Some(Ok(api::Harness::Pi)) => Ok(Harness::Pi),
+            Some(Ok(api::Harness::Unspecified) | Err(_)) => {
+                Err("a harness this lunetad does not know".to_owned())
+            },
+        }
+    }
+
     #[must_use]
     pub fn to_api(self) -> api::Harness {
         match self {
@@ -334,6 +347,25 @@ impl Unread {
                 }),
                 pane: named.pane,
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request that names no harness asks for Claude Code's, as an older
+    /// luneta's does, and one that names a harness only a newer luneta knows,
+    /// or none by name, is refused.
+    #[test]
+    fn a_request_names_a_harness_this_lunetad_knows() {
+        assert_eq!(Harness::said(None), Ok(Harness::ClaudeCode));
+        for harness in [Harness::ClaudeCode, Harness::Pi] {
+            assert_eq!(Harness::said(Some(harness.to_api().into())), Ok(harness));
+        }
+        for unknown in [api::Harness::Unspecified.into(), 99] {
+            assert!(Harness::said(Some(unknown)).is_err(), "{unknown}");
         }
     }
 }

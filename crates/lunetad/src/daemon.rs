@@ -97,7 +97,7 @@ use crate::checks::{Failing, Log};
 use crate::{
     carries, checks, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
     names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics,
-    turns, watch, zellij, zoxide,
+    turns, watch, zellij, zoxide, Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -650,10 +650,8 @@ impl Daemon for Host {
             let asked = ListSkillsRequest { on: None, dir: dir.into(), harness };
             return daemon.list_skills(asked).await;
         }
-        let harness = match harness {
-            None => api::Harness::ClaudeCode,
-            Some(said) => api::Harness::try_from(said).unwrap_or(api::Harness::Unspecified),
-        };
+        let harness = Harness::said(harness)
+            .map_err(|why| Status::invalid_argument(format!("harness: {why}")))?;
         let found = task::spawn_blocking(move || skills::found_in(dir.as_str(), harness)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;

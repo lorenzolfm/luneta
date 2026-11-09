@@ -43,7 +43,7 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Channel;
 use tonic::{Code, Response, Status, Streaming};
 
-use crate::agents::{self, Harness};
+use crate::agents::Harness;
 use crate::daemon;
 use crate::zellij::Starts;
 
@@ -201,7 +201,7 @@ impl Away {
     /// `lunetad::skills::found_in` finds them, or why it found none. One of a
     /// name no prompt runs, as a newer daemon's could be, is left out.
     pub fn skills(&mut self, dir: &str, harness: Harness) -> Result<Vec<Skill>, String> {
-        let harness = Some(agents::to_api(harness).into());
+        let harness = Some(harness.to_api().into());
         let request = ListSkillsRequest { on: Some(self.on()), dir: dir.to_owned(), harness };
         let listed = self.ask(|mut daemon| async move { daemon.list_skills(request).await })?;
         let skill = |skill: lunetad::api::list_skills_response::Skill| {
