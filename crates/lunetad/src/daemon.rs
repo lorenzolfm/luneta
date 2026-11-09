@@ -121,8 +121,14 @@ const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 
 /// How long gh rests from a branch before it is asked about its pull request
 /// again. gh asks GitHub, and each ask counts against the hourly limit that
-/// GitHub puts on the user, and that each gh of theirs shares.
-const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(1);
+/// GitHub puts on the user, and that each gh of theirs shares: it rests longer
+/// from those whose checks have ended, to ask sooner of those that have not.
+const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(2);
+
+/// How long gh rests from a branch whose pull request has checks yet to end,
+/// once they changed: twice as long each time they come to nothing new, up to
+/// `PULL_REQUEST_SWEEP`.
+const PENDING_CHECKS_SWEEP: Duration = Duration::from_secs(15);
 
 /// How often the daemon looks for the files luneta keeps that are past their
 /// day, as nothing else takes away the last of a kind, which holds what a
@@ -228,7 +234,8 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
-    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github: wake_github };
+    let github = wake_github.clone();
+    let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
     let core = core::start(wakes)?;
     let (end, ending) = oneshot::channel();
     // Read once, so that the folders the daemon says it reads are the ones it
@@ -240,7 +247,8 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     follow(&core, &claim.folder, folders, watchers.clone(), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
-    github::follow(core.clone(), github_woken, PULL_REQUEST_SWEEP)?;
+    let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
+    github::follow(core.clone(), wake_github, github_woken, rests)?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();

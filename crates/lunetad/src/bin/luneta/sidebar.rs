@@ -690,12 +690,13 @@ fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
 
 /// A pull request, as its branch's line shows it: its number, in the colour
 /// of its state, and after it a mark for what its checks come to, while it is
-/// open.
+/// open, grey where gh failed since it said them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Numbered {
     number: Number,
     colour: Color,
     checks: Option<Verdict>,
+    stale: bool,
 }
 
 /// A pull request's number on its branch's line: its link says it where it has
@@ -5618,18 +5619,19 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let link = pull_request.url.as_deref().and_then(Link::parse);
     let link = link.filter(|link| link.kind() == Kind::Pull && link.number() == number);
     let number = link.map_or(Number::Unlinked(number), |link| Number::Linked(Box::new(link)));
-    Some(Numbered { number, colour, checks })
+    Some(Numbered { number, colour, checks, stale: pull_request.stale })
 }
 
 /// The mark after a pull request's number for what its checks come to, as
 /// GitHub marks them, in its colour: one failed, one has yet to end, or each
-/// passed.
-fn verdict_mark(verdict: Verdict) -> Span<'static> {
+/// passed. A stale one is grey, as they may have come to more since.
+fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     let (mark, colour) = match verdict {
         Verdict::Failing => ("✗", gruvbox::RED),
         Verdict::Pending => ("●", gruvbox::YELLOW),
         Verdict::Passing => ("✓", gruvbox::GREEN),
     };
+    let colour = if stale { gruvbox::GREY } else { colour };
     Span::styled(mark, Style::new().fg(colour))
 }
 
@@ -5983,8 +5985,8 @@ fn checkout_line(
         .pull_request
         .as_ref()
         .map(|numbered| Span::styled(numbered.shown(), Style::new().fg(numbered.colour)));
-    let checks = checkout.pull_request.as_ref().and_then(|numbered| numbered.checks);
-    let mark = checks.map(verdict_mark);
+    let numbered = checkout.pull_request.as_ref();
+    let mark = numbered.and_then(|it| Some(verdict_mark(it.checks?, it.stale)));
     // What comes after the branch, and the spaces between its parts: the
     // lines changed, the number with the mark of its checks, and how the
     // work tree stands.
@@ -7921,7 +7923,7 @@ mod tests {
             let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
             host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
-            let pull_request = PullRequest { number, state, url: None, checks: None };
+            let pull_request = PullRequest { number, state, url: None, checks: None, stale: false };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -7985,7 +7987,8 @@ mod tests {
             host.work_trees.push(tree.to_api(dir));
             if number > 0 {
                 let number = NonZeroU32::new(number).expect("a pull request's number");
-                let pull_request = PullRequest { number, state: State::Open, url: None, checks: None };
+                let (state, url) = (State::Open, None);
+                let pull_request = PullRequest { number, state, url, checks: None, stale: false };
                 host.pull_requests.push(pull_request.to_api(dir));
             }
         }
@@ -8029,7 +8032,8 @@ mod tests {
     /// what its checks come to, in its colour: one failed, one has yet to end,
     /// or each passed. One with no checks, or whose daemon is too old to say
     /// them, has none, and so does a merged one, whatever its checks did. A
-    /// branch too long gives way to the mark too.
+    /// branch too long gives way to the mark too. Where gh failed since it
+    /// said them, the mark is grey.
     #[test]
     fn an_open_pull_request_shows_what_its_checks_come_to() {
         use luneta_protocol::github::Checks;
@@ -8042,6 +8046,7 @@ mod tests {
             ("/w/d", "none", 8, State::Open, checks(0, 0, 0)),
             ("/w/e", "old", 9, State::Open, None),
             ("/w/f", "gone", 10, State::Merged, checks(0, 1, 0)),
+            ("/w/g", "late", 11, State::Open, checks(1, 0, 2)),
         ];
         let panes = checkouts.iter().zip(1..).map(|((cwd, ..), id)| pane(id, id, cwd, "fish"));
         let mut host = host(vec![session("s", 10, panes.collect())], Vec::new());
@@ -8053,17 +8058,19 @@ mod tests {
             host.work_trees.push(tree.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
-            host.pull_requests.push(PullRequest { number, state, url, checks }.to_api(dir));
+            let stale = dir == "/w/g";
+            let pull_request = PullRequest { number, state, url, checks, stale };
+            host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
         sidebar.heard(host);
 
-        let buffer = drawn(&mut sidebar, false, 32, 17);
+        let buffer = drawn(&mut sidebar, false, 32, 19);
         let line = |y: u16| {
             let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             line.trim_end().to_owned()
         };
-        let branches: Vec<String> = [6, 8, 10, 12, 14, 16].into_iter().map(line).collect();
+        let branches: Vec<String> = [6, 8, 10, 12, 14, 16, 18].into_iter().map(line).collect();
         assert_eq!(
             branches,
             [
@@ -8073,6 +8080,7 @@ mod tests {
                 "       none #8",
                 "       old #9",
                 "       gone #10",
+                "       late #11●",
             ]
         );
         let mark = |y: u16, mark: &str| {
@@ -8082,6 +8090,7 @@ mod tests {
         assert_eq!(mark(6, "✗"), gruvbox::RED);
         assert_eq!(mark(8, "●"), gruvbox::YELLOW);
         assert_eq!(mark(10, "✓"), gruvbox::GREEN);
+        assert_eq!(mark(18, "●"), gruvbox::GREY);
     }
 
     #[test]
@@ -8437,7 +8446,8 @@ mod tests {
         if let Some((number, state, url)) = pull {
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = url.map(str::to_owned);
-            pull_requests.push(PullRequest { number, state, url, checks: None }.to_api(dir));
+            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
+            pull_requests.push(pull_request.to_api(dir));
         }
     }
 
@@ -9061,7 +9071,8 @@ mod tests {
         if let Some(host) = &mut sidebar.host {
             let number = NonZeroU32::new(5).unwrap();
             let url = Some("https://github.com/lorenzolfm/luneta/pull/5".to_owned());
-            let pull_request = PullRequest { number, state: State::Open, url, checks: None };
+            let state = State::Open;
+            let pull_request = PullRequest { number, state, url, checks: None, stale: false };
             host.pull_requests.push(pull_request.to_api("/w/b"));
         }
         sidebar.focus(Keys::Sidebar);

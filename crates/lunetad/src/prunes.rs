@@ -1119,7 +1119,13 @@ mod tests {
     fn pulled(author: Option<&str>, head: &str) -> Pulled {
         let number = NonZeroU32::new(1).unwrap();
         Pulled {
-            pull_request: PullRequest { number, state: State::Merged, url: None, checks: None },
+            pull_request: PullRequest {
+                number,
+                state: State::Merged,
+                url: None,
+                checks: None,
+                stale: false,
+            },
             head_name: "origin-branch".to_owned(),
             head: head.to_owned(),
             author: author.map(str::to_owned),

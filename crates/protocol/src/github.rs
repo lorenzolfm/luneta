@@ -17,6 +17,9 @@ pub struct PullRequest {
     pub state: State,
     pub url: Option<String>,
     pub checks: Option<Checks>,
+    /// Whether gh failed the last time it was asked about the branch, so that
+    /// all this is what it said before.
+    pub stale: bool,
 }
 
 /// How many checks of a pull request's head have yet to end, ended and
@@ -94,6 +97,7 @@ impl PullRequest {
                 failed,
                 passed,
             }),
+            stale: self.stale,
         }
     }
 
@@ -116,7 +120,7 @@ impl PullRequest {
             failed,
             passed,
         });
-        Some(PullRequest { number, state, url, checks })
+        Some(PullRequest { number, state, url, checks, stale: pull_request.stale })
     }
 }
 
@@ -136,8 +140,9 @@ mod tests {
         let checks = Some(Checks { pending: 1, failed: 2, passed: 3 });
         for state in [State::Open, State::Draft, State::Merged, State::Closed] {
             let none = Some(Checks::default());
-            for (url, checks) in [(url.clone(), checks), (None, None), (None, none)] {
-                let pull_request = PullRequest { number, state, url, checks };
+            let said = [(url.clone(), checks, false), (None, None, false), (None, none, true)];
+            for (url, checks, stale) in said {
+                let pull_request = PullRequest { number, state, url, checks, stale };
                 let api = pull_request.to_api("/w/repo");
                 assert_eq!(PullRequest::of_api(&api), Some(pull_request));
             }
@@ -148,7 +153,8 @@ mod tests {
         for (number, state) in [(0, open), (126, unspecified), (126, 99)] {
             let dir = "/w/repo".to_owned();
             let url = String::new();
-            let pull_request = v1::PullRequest { dir, number, state, url, checks: None };
+            let (checks, stale) = (None, false);
+            let pull_request = v1::PullRequest { dir, number, state, url, checks, stale };
             assert_eq!(PullRequest::of_api(&pull_request), None, "{pull_request:?}");
         }
     }
@@ -171,7 +177,9 @@ mod tests {
     fn only_an_open_pull_request_says_its_checks() {
         let number = NonZeroU32::new(126).unwrap();
         let failed = Some(Checks { pending: 0, failed: 1, passed: 0 });
-        let verdict = |state, checks| PullRequest { number, state, url: None, checks }.verdict();
+        let verdict = |state, checks| {
+            PullRequest { number, state, url: None, checks, stale: false }.verdict()
+        };
         assert_eq!(verdict(State::Open, failed), Some(Verdict::Failing));
         assert_eq!(verdict(State::Draft, failed), Some(Verdict::Failing));
         assert_eq!(verdict(State::Merged, failed), None);

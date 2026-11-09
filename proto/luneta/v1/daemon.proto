@@ -1322,6 +1322,10 @@ message PullRequest {
   // daemon older than this field, or where gh wrote them in a way the daemon
   // does not read.
   Checks checks = 5;
+  // Whether gh failed the last time the daemon asked it about the branch:
+  // all of this is what gh said before, and may have changed since. False
+  // from a daemon older than this field, which did not say.
+  bool stale = 6;
 }
 
 // How many checks of a pull request's head have yet to end, ended and

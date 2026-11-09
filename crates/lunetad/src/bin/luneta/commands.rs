@@ -578,8 +578,9 @@ fn stands(tree: &WorkTree) -> Option<String> {
 }
 
 /// A pull request, in words: its number and its state, and while it is open,
-/// what its checks come to, where it has any. None for one that does not
-/// read, as a newer daemon's could send.
+/// what its checks come to, where it has any, and that gh failed since it
+/// said all that, where it did. None for one that does not read, as a newer
+/// daemon's could send.
 fn pulled(pull_request: &PullRequest) -> Option<String> {
     let pull_request = github::PullRequest::of_api(pull_request)?;
     let state = match pull_request.state {
@@ -594,7 +595,8 @@ fn pulled(pull_request: &PullRequest) -> Option<String> {
         Some(Verdict::Passing) => ", checks passing",
         None => "",
     };
-    Some(format!("#{} {state}{checks}", pull_request.number))
+    let old = if pull_request.stale { ", as gh said before it failed" } else { "" };
+    Some(format!("#{} {state}{checks}{old}", pull_request.number))
 }
 
 /// Writes out the host once it is no longer as `after` saw it.

@@ -3368,6 +3368,7 @@ mod tests {
             state,
             url: url.map(str::to_owned),
             checks: None,
+            stale: false,
         });
         Target::Pane(Machine::Local, PaneRow { pull_request, ..row() })
     }

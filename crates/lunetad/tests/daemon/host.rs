@@ -696,7 +696,9 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
 /// upstream is `refs/pull/<number>/head` that it has none for, it says it can
 /// resolve no such number, as gh does. Its `pr list --base` says what a test
 /// wrote with `based_on` or `merged_into`, or none, and notes what it was asked.
-/// It knows no other command.
+/// Of a branch a test had it `hang` on, it answers nothing until it has it
+/// `answer`, and of one it had it `fail` on, it fails as one logged out does,
+/// until it has it `mend`. It knows no other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
@@ -767,6 +769,11 @@ if [ -f "$pulls/switch" ]; then
 fi
 branch=$(git symbolic-ref --short HEAD) || exit 1
 echo "${GH_REPO:+$GH_REPO }$branch" >> "$pulls/asked"
+while [ -f "$pulls/$branch.hung" ]; do sleep 0.05; done
+if [ -f "$pulls/$branch.fails" ]; then
+    echo "HTTP 401: Requires authentication (https://api.github.com/graphql)" >&2
+    exit 1
+fi
 said="$pulls/${GH_REPO:+$GH_REPO/}$branch.json"
 if [ ! -f "$said" ]; then
     merge=$(git config "branch.$branch.merge")
@@ -791,6 +798,22 @@ exec cat "$said"
     /// is asked, where git has yet to see it.
     pub fn switch(&self, branch: &str) {
         fs::write(self.pulls.join("switch"), branch).unwrap();
+    }
+
+    pub fn hang(&self, branch: &str) {
+        fs::write(self.pulls.join(format!("{branch}.hung")), "").unwrap();
+    }
+
+    pub fn answer(&self, branch: &str) {
+        fs::remove_file(self.pulls.join(format!("{branch}.hung"))).unwrap();
+    }
+
+    pub fn fail(&self, branch: &str) {
+        fs::write(self.pulls.join(format!("{branch}.fails")), "").unwrap();
+    }
+
+    pub fn mend(&self, branch: &str) {
+        fs::remove_file(self.pulls.join(format!("{branch}.fails"))).unwrap();
     }
 
     /// The branches gh has been asked about, in the order it was asked.

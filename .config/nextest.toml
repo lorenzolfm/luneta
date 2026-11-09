@@ -2,7 +2,10 @@
 fail-fast = false
 
 [profile.quick]
-default-filter = "not test(=demand::the_waits_of_half_a_minute_hold_side_by_side)"
+default-filter = """
+not test(=demand::the_waits_of_half_a_minute_hold_side_by_side)
+and not test(=sessions::pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails)
+"""
 
 [profile.ci]
 retries = 0

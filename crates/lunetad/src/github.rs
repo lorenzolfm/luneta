@@ -12,23 +12,30 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
 use std::num::NonZeroU32;
+use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use luneta_protocol::github::{PullRequest, State};
+use luneta_protocol::github::{PullRequest, State, Verdict};
 use serde::Deserialize;
 
 use crate::checks;
 use crate::core;
 use crate::git::{self, NamedHead};
 use crate::links::{self, Remotes};
+use crate::log;
 use crate::program;
 use crate::watch::Troubles;
 
 /// How long gh has to say: it asks GitHub, across the network.
 const LIMIT: Duration = Duration::from_secs(30);
+
+/// How many branches gh is asked about at once, so that one it does not
+/// answer for in time holds up none of the others.
+const ASKS_AT_ONCE: usize = 4;
 
 /// How gh starts what it says of a branch with no pull request, which is no
 /// failure to the daemon: gh fails the same way at anything else.
@@ -142,6 +149,7 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
             state,
             url: Some(viewed.url),
             checks: checks::rolled_up(viewed.status_check_rollup),
+            stale: false,
         },
         head_name: viewed.head_ref_name,
         head: viewed.head_ref_oid,
@@ -241,13 +249,15 @@ fn find(dir: &str, base: Option<&str>) -> Result<Option<Pulled>, String> {
     }
 }
 
-fn fork(dir: &str, repository: &str, forks: &mut Forks) -> Result<Option<Fork>, String> {
+fn fork(dir: &str, repository: &str, forks: &Forks) -> Result<Option<Fork>, String> {
     let remotes = match links::remotes_gh_reads(dir) {
         Remotes::Listed(listed) => listed,
         Remotes::Unlisted => return Ok(None),
         Remotes::Unsaid(why) => return Err(format!("git did not say the remotes of {dir}: {why}")),
     };
-    if let Some(known) = forks.get(repository)
+    let lineage = forks.of(repository);
+    let mut lineage = locked(&lineage);
+    if let Some(known) = lineage.as_ref()
         && known.remotes == remotes
     {
         return Ok(known.fork.clone());
@@ -259,7 +269,7 @@ fn fork(dir: &str, repository: &str, forks: &mut Forks) -> Result<Option<Fork>, 
     let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
     let fork = fork_of(&said)
         .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
-    forks.insert(repository.to_owned(), Lineage { remotes, fork: fork.clone() });
+    *lineage = Some(Lineage { remotes, fork: fork.clone() });
     Ok(fork)
 }
 
@@ -267,7 +277,7 @@ fn in_parent(
     dir: &str,
     repository: &str,
     branch: &str,
-    forks: &mut Forks,
+    forks: &Forks,
 ) -> Result<Option<Pulled>, String> {
     let Some(head) = git::named_head(dir, branch)? else {
         return Ok(None);
@@ -290,11 +300,7 @@ fn in_parent(
 /// where it pushes the branch. It reads what is checked out as it starts,
 /// where git can have last looked a sweep before, so what is checked out is
 /// read again once gh has answered.
-fn view(
-    dir: &str,
-    (repository, branch): &Branch,
-    forks: &mut Forks,
-) -> Result<Answer, String> {
+fn view(dir: &str, (repository, branch): &Branch, forks: &Forks) -> Result<Answer, String> {
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.pull_request.state != State::Closed);
     let beyond = if settled { Ok(None) } else { in_parent(dir, repository, branch, forks) };
@@ -333,7 +339,7 @@ impl Asker {
         branch: &str,
     ) -> Result<Option<Pulled>, String> {
         let asked = (repository.to_owned(), branch.to_owned());
-        match view(dir, &asked, &mut self.forks)? {
+        match view(dir, &asked, &self.forks)? {
             Answer::Stayed(found) => Ok(found),
             Answer::Partly { why, .. } => Err(why),
             Answer::Moved => Err(format!("{dir} moved off {branch} as gh answered")),
@@ -346,7 +352,7 @@ impl Asker {
         repository: &str,
         branch: &str,
     ) -> Result<Option<u32>, String> {
-        let found = in_parent(dir, repository, branch, &mut self.forks)?;
+        let found = in_parent(dir, repository, branch, &self.forks)?;
         let open = |found: &Pulled| matches!(found.pull_request.state, State::Open | State::Draft);
         Ok(found.filter(open).map(|found| found.pull_request.number.get()))
     }
@@ -416,92 +422,276 @@ struct Lineage {
     fork: Option<Fork>,
 }
 
-type Forks = HashMap<String, Lineage>;
+/// What gh said each repository is a fork of, by its common directory, with
+/// the remotes it said it for. An ask holds a repository's lock as gh is asked
+/// about it, so that asks of one repository at once ask gh once.
+#[derive(Default)]
+struct Forks(Mutex<HashMap<String, Arc<Mutex<Option<Lineage>>>>>);
+
+impl Forks {
+    fn of(&self, repository: &str) -> Arc<Mutex<Option<Lineage>>> {
+        Arc::clone(locked(&self.0).entry(repository.to_owned()).or_default())
+    }
+
+    fn retain(&self, keep: impl Fn(&str) -> bool) {
+        locked(&self.0).retain(|repository, _| keep(repository));
+    }
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long gh rests from a branch before it is asked about it again.
+#[derive(Clone, Copy, Debug)]
+pub struct Rests {
+    /// From one whose pull request has checks yet to end, as they last
+    /// changed: they are what change, and soon. Twice as long each time they
+    /// come to nothing new, up to `settled`, as a job can wait for hours for
+    /// a runner, or for someone to let it run.
+    pub pending: Duration,
+    /// From any other.
+    pub settled: Duration,
+}
+
+/// What gh said of a branch the last time it answered: when, and the pull
+/// request it found, if it found one.
+struct Said {
+    at: Instant,
+    found: Option<PullRequest>,
+}
 
 /// Where gh stands with a branch it has been asked about.
 struct Asked {
     /// When it is to be asked about again.
     next: Instant,
-    /// The pull request it found last, if it found one.
-    found: Option<PullRequest>,
+    /// How long it rests from it until then.
+    rest: Duration,
+    /// What it said the last time it answered, if it has.
+    said: Option<Said>,
+    /// How many times it failed to answer since.
+    failed: u32,
     /// What went wrong the last time it was asked about, if anything did.
     trouble: Option<String>,
 }
 
+impl Asked {
+    /// The pull request gh found last, stale where it failed since.
+    fn found(&self) -> Option<PullRequest> {
+        let found = self.said.as_ref()?.found.clone()?;
+        Some(PullRequest { stale: self.failed > 0, ..found })
+    }
+}
+
+/// Where gh is with a branch: resting from it, or asking about it, from
+/// where it stood with it before, if it had been asked about it.
+enum Ask {
+    Resting(Asked),
+    Asking(Option<Asked>),
+}
+
+impl Ask {
+    fn asked(&self) -> Option<&Asked> {
+        match self {
+            Ask::Resting(asked) => Some(asked),
+            Ask::Asking(was) => was.as_ref(),
+        }
+    }
+
+    fn into_asked(self) -> Option<Asked> {
+        match self {
+            Ask::Resting(asked) => Some(asked),
+            Ask::Asking(was) => was,
+        }
+    }
+
+    /// When it is to be asked about again: none while it is.
+    fn next(&self) -> Option<Instant> {
+        match self {
+            Ask::Resting(asked) => Some(asked.next),
+            Ask::Asking(_) => None,
+        }
+    }
+}
+
+/// What gh said of a branch, from the thread that asked it.
+struct Answered {
+    branch: Branch,
+    said: Result<Answer, String>,
+}
+
+/// Where gh stands with a branch once it said `said` of it, from where it
+/// stood with it before, if it had been asked about it: what it found last
+/// stands, as stale, where it failed. One whose checks are pending is asked
+/// about again the soonest, once they changed, and twice as late each time
+/// gh says nothing new of them, as they stay as they were or it fails.
+fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> Asked {
+    let now = Instant::now();
+    let (before, failed, rested) = match was {
+        Some(was) => (was.said, was.failed, Some(was.rest)),
+        None => (None, 0, None),
+    };
+    let of = |found: Option<Pulled>| found.map(|found| found.pull_request);
+    let fresh = |found: Option<PullRequest>, trouble| {
+        let change = |was| checks_changed(was, found.as_ref(), failed, now);
+        if let Some(change) = before.as_ref().and_then(change) {
+            log::say(&change);
+        }
+        let new = before.as_ref().is_none_or(|was| was.found != found);
+        (Some(Said { at: now, found }), trouble, 0, new)
+    };
+    let (said, trouble, failed, new) = match said {
+        Ok(Answer::Stayed(found)) => fresh(of(found), None),
+        // The core wakes the thread once git sees the checkout.
+        Ok(Answer::Moved) => (before, None, failed, false),
+        Ok(Answer::Partly { own, why }) => {
+            let own = of(own);
+            let was = before.as_ref().and_then(|was| was.found.clone());
+            if standing(was, own.clone()) == own {
+                fresh(own, Some(why))
+            } else {
+                (before, Some(why), failed.saturating_add(1), false)
+            }
+        },
+        Err(why) => (before, Some(why), failed.saturating_add(1), false),
+    };
+    let found = said.as_ref().and_then(|said| said.found.as_ref());
+    let pending = found.is_some_and(|found| found.verdict() == Some(Verdict::Pending));
+    let rest = match rested {
+        _ if !pending => rests.settled,
+        Some(rested) if !new => rested.saturating_mul(2).max(rests.pending).min(rests.settled),
+        _ => rests.pending,
+    };
+    Asked { next: now + rest, rest, said, failed, trouble }
+}
+
+/// What to say where the checks of a pull request come to otherwise than
+/// they did the last time gh said them, `was`: with how long it had been, and
+/// how many times gh failed to say them in between, which tells a slow sweep
+/// from a failed one.
+fn checks_changed(
+    was: &Said,
+    now: Option<&PullRequest>,
+    failed: u32,
+    at: Instant,
+) -> Option<String> {
+    let (said, was, now) = (was.at, was.found.as_ref()?, now?);
+    if (was.number, &was.url) != (now.number, &now.url) {
+        return None;
+    }
+    let verdict = |pull_request: &PullRequest| pull_request.checks.and_then(|it| it.verdict());
+    let (before, after) = (verdict(was), verdict(now));
+    if before == after {
+        return None;
+    }
+    let word = |verdict| match verdict {
+        Some(Verdict::Failing) => "failing",
+        Some(Verdict::Pending) => "pending",
+        Some(Verdict::Passing) => "passing",
+        None => "no checks",
+    };
+    let named = now.url.clone().unwrap_or_else(|| format!("#{}", now.number));
+    let said = at.duration_since(said).as_secs();
+    let failed = match failed {
+        0 => String::new(),
+        1 => ", failing once in between".to_owned(),
+        failed => format!(", failing {failed} times in between"),
+    };
+    let (before, after) = (word(before), word(after));
+    let said = format!(", {said}s after gh last said them");
+    Some(format!("the checks of {named} went from {before} to {after}{said}{failed}"))
+}
+
 /// Asks gh for the pull request of the branch checked out in each directory
-/// a pane works in, in a thread of its own, and tells the core: about each
-/// branch once gh has rested from it for a `sweep`, and about one it has said
-/// nothing of yet as soon as it is `woken`, before those left. What gh said
-/// of a branch it could not answer for stands until it can. The thread ends
-/// once the core has.
+/// a pane works in, a few at a time, each in a thread of its own, and tells
+/// the core: about each branch once gh has rested from it, by `rests`, and
+/// about one it has said nothing of yet as soon as it is `woken`, before
+/// those left. What gh said of a branch it could not answer for stands, as
+/// stale, until it can. A thread that asked wakes it with `wake` once it has
+/// an answer. It ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
+    wake: SyncSender<()>,
     woken: Receiver<()>,
-    sweep: Duration,
+    rests: Rests,
 ) -> io::Result<()> {
     thread::Builder::new().name("gh".to_owned()).spawn(move || {
-        let mut asked: HashMap<Branch, Asked> = HashMap::new();
-        let mut forks = Forks::new();
+        let mut asked: HashMap<Branch, Ask> = HashMap::new();
+        let forks = Arc::new(Forks::default());
+        let (answer, answers) = mpsc::channel();
         let mut troubles = Troubles::default();
-        'sweep: loop {
+        // The branch in each directory as the core said it last, and the
+        // directories each branch is checked out in, as git said them then.
+        let mut seen = None;
+        let mut on = BTreeMap::new();
+        loop {
             let Some(branches) = core::ask(&core, core::Command::Branches) else {
                 return;
             };
-            // The directories each branch is checked out in. git says the
-            // repository of each afresh: a directory a pane stays in can be
-            // cloned over, with a branch of the same name checked out.
-            let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
-            for (dir, branch) in branches {
-                if let git::Common::Of(repository) = git::common(&dir) {
-                    on.entry((repository, branch)).or_default().push(dir);
-                }
+            while let Ok(Answered { branch, said }) = answers.try_recv() {
+                let was = asked.remove(&branch).and_then(Ask::into_asked);
+                asked.insert(branch, Ask::Resting(answered(was, said, rests)));
             }
-            asked.retain(|branch, _| on.contains_key(branch));
-            forks.retain(|repository, _| on.keys().any(|(of, _)| of == repository));
+            let now = Instant::now();
+            let due = |asked: &HashMap<Branch, Ask>, branch: &Branch| {
+                asked.get(branch).is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
+            };
+            // git says the repository of each directory afresh: one a pane
+            // stays in can be cloned over, with a branch of the same name
+            // checked out. It does so as a branch is due, or the core says
+            // another, and not for an answer alone, as each is.
+            if seen.as_ref() != Some(&branches) || on.keys().any(|branch| due(&asked, branch)) {
+                on = located(&branches);
+                seen = Some(branches);
+            }
+            let asking = |ask: &Ask| matches!(ask, Ask::Asking(_));
+            asked.retain(|branch, ask| on.contains_key(branch) || asking(ask));
+            forks.retain(|repository| on.keys().any(|(of, _)| of == repository));
             // A directory that came to a branch gh has said of already.
             if !tell(&core, &on, &asked) {
                 return;
             }
-            let now = Instant::now();
-            let due = |branch: &&Branch| asked.get(*branch).is_none_or(|was| was.next <= now);
-            let mut due: Vec<&Branch> = on.keys().filter(due).collect();
+            let mut due: Vec<&Branch> = on.keys().filter(|branch| due(&asked, branch)).collect();
             // Never asked about before all others, then the one due longest.
-            due.sort_by_key(|branch| asked.get(*branch).map(|was| was.next));
-            for branch in due {
-                let said = view(&on[branch][0], branch, &mut forks);
-                let next = Instant::now() + sweep;
-                let was = asked.remove(branch).and_then(|was| was.found);
-                let of = |found: Option<Pulled>| found.map(|found| found.pull_request);
-                let (found, trouble) = match said {
-                    Ok(Answer::Stayed(found)) => (of(found), None),
-                    // The core wakes the thread once git sees the checkout.
-                    Ok(Answer::Moved) => (was, None),
-                    Ok(Answer::Partly { own, why }) => {
-                        troubles.say(why.clone());
-                        (standing(was, of(own)), Some(why))
-                    },
-                    Err(trouble) => {
-                        troubles.say(trouble.clone());
-                        (was, Some(trouble))
+            due.sort_by_key(|branch| asked.get(*branch).and_then(Ask::next));
+            let free = |asked: &HashMap<Branch, Ask>| {
+                ASKS_AT_ONCE.saturating_sub(asked.values().filter(|ask| asking(ask)).count())
+            };
+            for branch in due.into_iter().take(free(&asked)) {
+                let dir = on[branch][0].clone();
+                let (of, forks) = (branch.clone(), Arc::clone(&forks));
+                let (answer, wake) = (answer.clone(), wake.clone());
+                let asks = thread::Builder::new().name("gh ask".to_owned()).spawn(move || {
+                    let said = panic::catch_unwind(AssertUnwindSafe(|| view(&dir, &of, &forks)))
+                        .unwrap_or_else(|_| Err(format!("gh's ask about {} panicked", of.1)));
+                    if answer.send(Answered { branch: of, said }).is_ok() {
+                        let _ = wake.try_send(());
+                    }
+                });
+                let was = asked.remove(branch).and_then(Ask::into_asked);
+                let ask = match asks {
+                    Ok(_) => Ask::Asking(was),
+                    Err(error) => {
+                        let why = format!("gh could not be asked about {}: {error}", branch.1);
+                        Ask::Resting(answered(was, Err(why), rests))
                     },
                 };
-                asked.insert(branch.clone(), Asked { next, found, trouble });
-                if !tell(&core, &on, &asked) {
-                    return;
-                }
-                if woken.try_recv().is_ok() {
-                    continue 'sweep;
-                }
+                asked.insert(branch.clone(), ask);
             }
             // What went wrong with one that gh rests from has not gone right
             // since, and is not said again.
-            for trouble in asked.values().filter_map(|was| was.trouble.clone()) {
+            for trouble in asked.values().filter_map(|ask| ask.asked()?.trouble.clone()) {
                 troubles.say(trouble);
             }
             troubles.done();
             let now = Instant::now();
-            let next = asked.values().map(|was| was.next.saturating_duration_since(now));
-            match woken.recv_timeout(next.min().unwrap_or(sweep)) {
+            let next = if free(&asked) > 0 {
+                let next = asked.values().filter_map(Ask::next);
+                next.map(|next| next.saturating_duration_since(now)).min()
+            } else {
+                None
+            };
+            match woken.recv_timeout(next.unwrap_or(rests.settled)) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => {},
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -510,16 +700,29 @@ pub fn follow(
     Ok(())
 }
 
+/// The directories each branch is checked out in, by the repository git
+/// says each directory is of, of `branches`, the branch in each directory.
+fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>> {
+    let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
+    for (dir, branch) in branches {
+        if let git::Common::Of(repository) = git::common(dir) {
+            on.entry((repository, branch.clone())).or_default().push(dir.clone());
+        }
+    }
+    on
+}
+
 /// Tells the core the pull request gh found last for the branch in each
 /// directory `on` has it checked out in. False once the core has stopped.
 fn tell(
     core: &SyncSender<core::Command>,
     on: &BTreeMap<Branch, Vec<String>>,
-    asked: &HashMap<Branch, Asked>,
+    asked: &HashMap<Branch, Ask>,
 ) -> bool {
     let mut found = BTreeMap::new();
     for (branch, dirs) in on {
-        let Some(pull_request) = asked.get(branch).and_then(|was| was.found.clone()) else {
+        let Some(pull_request) = asked.get(branch).and_then(Ask::asked).and_then(Asked::found)
+        else {
             continue;
         };
         let of = Found { branch: branch.1.clone(), pull_request };
@@ -531,19 +734,136 @@ fn tell(
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::time::{Duration, Instant};
 
     use luneta_protocol::github::{Checks, PullRequest, State};
 
-    use super::{fork_of, parse, standing, Pulled, RepositoryName};
+    use super::{
+        answered, checks_changed, fork_of, parse, standing, Answer, Asked, Pulled, RepositoryName,
+        Rests, Said,
+    };
 
-    #[test]
-    fn a_parent_that_does_not_say_leaves_its_own_and_takes_news_of_the_fork_s() {
-        let pull = |repository: &str, number: u32, state: State| PullRequest {
+    fn pull(repository: &str, number: u32, state: State, checks: Option<Checks>) -> PullRequest {
+        PullRequest {
             number: NonZeroU32::new(number).unwrap(),
             state,
             url: Some(format!("https://github.com/{repository}/pull/{number}")),
-            checks: None,
+            checks,
+            stale: false,
+        }
+    }
+
+    fn pulled(pull_request: PullRequest) -> Pulled {
+        Pulled {
+            pull_request,
+            head_name: "fix".to_owned(),
+            head: "abc".to_owned(),
+            author: None,
+            head_repository: None,
+        }
+    }
+
+    /// Where gh fails to say all of a branch, what it said of it before
+    /// stands as stale, and counts as a failure: unless what it said of the
+    /// fork's stands, which is fresh. One that moved off its branch stays as
+    /// stale as it was.
+    #[test]
+    fn what_gh_failed_to_say_again_stands_as_stale() {
+        let rests = Rests { pending: Duration::from_secs(1), settled: Duration::from_hours(1) };
+        let pending = Some(Checks { pending: 1, failed: 0, passed: 0 });
+        let parent_s = pull("upstream/repo", 5, State::Open, pending);
+        let at = Instant::now();
+        let was = |found: &PullRequest| Asked {
+            next: at,
+            rest: rests.pending,
+            said: Some(Said { at, found: Some(found.clone()) }),
+            failed: 1,
+            trouble: None,
         };
+        let partly = |own| Ok(Answer::Partly { own, why: "the parent did not say".to_owned() });
+        let said = |asked: &Asked| asked.said.as_ref().map(|said| said.at);
+
+        let asked = answered(Some(was(&parent_s)), partly(None), rests);
+        let stale = PullRequest { stale: true, ..parent_s.clone() };
+        assert_eq!((asked.found(), said(&asked), asked.failed), (Some(stale), Some(at), 2));
+        assert_eq!(asked.trouble.as_deref(), Some("the parent did not say"));
+
+        let closed = pull("owner/repo", 4, State::Closed, None);
+        let fork_s = pull("owner/repo", 4, State::Open, pending);
+        let asked = answered(Some(was(&fork_s)), partly(Some(pulled(closed.clone()))), rests);
+        assert_eq!((asked.found(), asked.failed), (Some(closed), 0));
+        assert!(said(&asked).is_some_and(|now| now > at));
+        assert_eq!(asked.rest, rests.settled);
+
+        let asked = answered(Some(was(&fork_s)), Ok(Answer::Moved), rests);
+        let stale = PullRequest { stale: true, ..fork_s };
+        assert_eq!((asked.found(), asked.trouble, asked.failed), (Some(stale), None, 1));
+    }
+
+    /// gh rests the shortest from checks yet to end, once they changed, and
+    /// twice as long each time it says nothing new of them, as they stay as
+    /// they were or it fails to say them, up to as long as from any other.
+    #[test]
+    fn checks_that_stay_pending_are_asked_about_less_and_less_often() {
+        let rests = Rests { pending: Duration::from_secs(15), settled: Duration::from_mins(2) };
+        let checks = |pending, passed| Some(Checks { pending, failed: 0, passed });
+        let stayed = |checks| {
+            let pull_request = pull("owner/repo", 7, State::Open, checks);
+            Ok(Answer::Stayed(Some(pulled(pull_request))))
+        };
+        let failed = || Err("gh failed".to_owned());
+        let mut asked = answered(None, stayed(checks(2, 0)), rests);
+        let mut rested = vec![asked.rest];
+        let said = [
+            stayed(checks(2, 0)),
+            failed(),
+            stayed(checks(2, 0)),
+            stayed(checks(2, 0)),
+            stayed(checks(1, 1)),
+            failed(),
+            stayed(checks(0, 2)),
+        ];
+        for said in said {
+            asked = answered(Some(asked), said, rests);
+            rested.push(asked.rest);
+        }
+        let secs = Duration::from_secs;
+        let rests = [15, 30, 60, 120, 120, 15, 30, 120].map(secs);
+        assert_eq!(rested, rests);
+    }
+
+    /// What the daemon says as a pull request's checks come to otherwise:
+    /// nothing where they come to the same, or it is another pull request, or
+    /// gh found none before.
+    #[test]
+    fn a_change_in_the_checks_says_how_long_gh_took_to_see_it() {
+        let checks = |pending, failed, passed| Some(Checks { pending, failed, passed });
+        let open = |checks| pull("owner/repo", 7, State::Open, checks);
+        let at = Instant::now();
+        let said = |found| Said { at: at.checked_sub(Duration::from_secs(62)).unwrap(), found };
+        let changed = |was: &PullRequest, now: &PullRequest, failed| {
+            checks_changed(&said(Some(was.clone())), Some(now), failed, at)
+        };
+        let of = "the checks of https://github.com/owner/repo/pull/7 went from";
+        assert_eq!(
+            changed(&open(checks(1, 0, 2)), &open(checks(0, 0, 3)), 0),
+            Some(format!("{of} pending to passing, 62s after gh last said them"))
+        );
+        assert_eq!(
+            changed(&open(checks(0, 0, 0)), &open(checks(0, 1, 0)), 3),
+            Some(format!(
+                "{of} no checks to failing, 62s after gh last said them, failing 3 times in between"
+            ))
+        );
+        assert_eq!(changed(&open(checks(2, 0, 1)), &open(checks(1, 0, 2)), 0), None);
+        let other = pull("owner/repo", 8, State::Open, checks(0, 0, 3));
+        assert_eq!(changed(&open(checks(1, 0, 0)), &other, 0), None);
+        assert_eq!(checks_changed(&said(None), Some(&other), 0, at), None);
+    }
+
+    #[test]
+    fn a_parent_that_does_not_say_leaves_its_own_and_takes_news_of_the_fork_s() {
+        let pull = |repository: &str, number, state| pull(repository, number, state, None);
         let fork_s = |state| pull("owner/repo", 5, state);
         let parent_s = || pull("upstream/repo", 5, State::Open);
         let closed = || fork_s(State::Closed);
@@ -640,6 +960,7 @@ mod tests {
                 state: State::Open,
                 url: Some(url.to_owned()),
                 checks: Some(Checks::default()),
+                stale: false,
             })
         );
         let page = format!(r#"{head},"url":"https://github.com/owner/repo/pull/1""#);
