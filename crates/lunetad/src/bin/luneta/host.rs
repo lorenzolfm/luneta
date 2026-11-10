@@ -1272,6 +1272,8 @@ fn run_loop(
         app.ticked(Instant::now());
         app.alerting(Instant::now());
         app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
+        let look = app.sidebar.doubted();
+        app.look(look);
         app.draw(terminal)?;
     }
 }
@@ -1457,10 +1459,15 @@ impl App {
                 }
             },
             Event::Heard { number, heard } => {
+                let ended = matches!(heard, Heard::Ended(_));
                 if let Some(Over::Ask(ask)) = &mut self.focus.over
                     && ask.number() == number
                 {
                     ask.heard(heard);
+                    if ended {
+                        let look = self.sidebar.look_again();
+                        self.look(look);
+                    }
                 }
             },
             Event::Remotes { number, remotes } => {
@@ -2679,10 +2686,11 @@ impl App {
 
     /// Takes zellij's client to `place` on `machine`, and does `after` once it
     /// is there, in another session. On another machine than the one the
-    /// client runs on, a client there takes its place, as `swap` says, and
-    /// opens what `after` opens once it is in. Whether it went.
+    /// client runs on, or where luneta cannot tell which session the client
+    /// is in, a client there takes its place, as `swap` says, and opens what
+    /// `after` opens once it is in. Whether it went.
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
-        if machine != self.sidebar.on() {
+        if machine != self.sidebar.on() || self.sidebar.astray().is_some() {
             // The session a kill is of is the one the client leaves, of the
             // machine it leaves, which the sidebar asks for only as the
             // client goes on in a session of that machine.
@@ -2714,11 +2722,15 @@ impl App {
     /// is in, where `place` is one, or does `after` there, which opens what
     /// it goes to. Where the client fails, as where ssh does not reach the
     /// machine, or zellij cannot attach, luneta's zellij goes back to the
-    /// session it leaves. Whether it went.
+    /// session it leaves. Where luneta cannot tell which session that is, it
+    /// may be the one the client goes to, whose id there the one that takes
+    /// its place can take: what zellij listed of it before says nothing then.
+    /// Whether it went.
     fn swap(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
         let session = place.listed().name().clone();
         let fails = self.back();
         let before = match machine {
+            Machine::Local if self.sidebar.astray().is_some() => Before::Unknown,
             Machine::Local => zellij::before(session.as_str()),
             Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
         };
@@ -2782,8 +2794,11 @@ impl App {
         self.here_back().map_or(Fails::End, Fails::Back)
     }
 
+    /// The session luneta's zellij is in, of the machine it is on now, or the
+    /// one it left for a session luneta cannot tell.
     fn here_back(&self) -> Option<Back> {
-        let session = SessionName::running(self.sidebar.here()?).ok()?;
+        let here = self.sidebar.here().or_else(|| self.sidebar.astray())?;
+        let session = SessionName::running(here).ok()?;
         Some(Back { machine: self.sidebar.on().clone(), session })
     }
 
@@ -2942,6 +2957,11 @@ impl App {
     fn seat(&self) -> Result<SessionName, String> {
         if self.client.coming.is_some() {
             return Err("zellij has yet to come to its session".to_owned());
+        }
+        if let Some(left) = self.sidebar.astray() {
+            return Err(format!(
+                "zellij's client left {left} for a session luneta cannot tell: go to one"
+            ));
         }
         let Some(here) = self.sidebar.here() else {
             return Err("zellij has yet to say which session it is in".to_owned());
