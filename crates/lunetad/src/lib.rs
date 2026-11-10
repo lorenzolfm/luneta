@@ -13,7 +13,6 @@ pub mod checks;
 mod claude;
 pub mod cli;
 mod client;
-pub mod clients;
 pub mod closes;
 mod core;
 mod daemon;
@@ -29,7 +28,6 @@ pub mod issues;
 mod keeps;
 pub mod links;
 pub mod log;
-mod metadata;
 pub mod moves;
 pub mod names;
 pub mod opens;
@@ -62,10 +60,9 @@ pub use daemon::{serve, Claim};
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
-pub use metadata::folder as zellij_info_folder;
 pub use panes::newborn;
 pub use remote::{named_by as hosts_named, sharing, Destination, FILE as HOSTS_FILE, HOSTS_MAX};
 pub use zellij::{
     folder as zellij_folder, running as zellij_sessions, sockets as zellij_sockets, Id as SocketId,
-    SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX, SPOKEN as ZELLIJ_CONTRACT,
+    SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX,
 };

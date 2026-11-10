@@ -17,7 +17,7 @@ use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
 use lunetad::cli::{
-    done, done_once_reached, laid, quiet, Failure, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
+    done, done_once_reached, laid, Failure, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
 };
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
@@ -30,7 +30,7 @@ pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::carries::{self, Carry, Moved};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{cli, clients, moves, Destination, Directory, SocketId};
+use lunetad::{cli, moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -291,8 +291,9 @@ pub fn dropped(said: &str) -> bool {
     DROPPED.iter().any(|words| said.contains(words))
 }
 
-/// What zellij lists of the clients of `session`, where luneta's zellij may go
-/// on in it: none of one that may hold luneta's terminal, as
+/// The clients `session` has before luneta's zellij goes on in it, as
+/// `lunetad::moves::before` says them: none of one that may hold luneta's
+/// terminal, as
 /// `may_hold_terminal` says, which `lunetad::moves` passes over as it does one
 /// that does not answer. Its name in the pane's environment would not do, as a
 /// rename leaves it behind.
@@ -300,7 +301,7 @@ fn clients_of_refuge(session: &SessionName) -> Option<Vec<Client>> {
     if may_hold_terminal(session.as_str()) {
         return None;
     }
-    clients(session.as_str()).ok()
+    moves::before(session)
 }
 
 /// What sshd sets in a session it runs: in every one, and in one with a
@@ -372,7 +373,7 @@ pub fn settled() -> Option<Vec<(String, SocketId)>> {
 /// The first of `sessions`, of this machine's, whose clients zellij lists, as
 /// `lunetad::moves::answering` tries them: a socket can outlive its server.
 pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
-    moves::answering(sessions, |session| clients(session.as_str()).ok())
+    moves::answering(sessions, moves::before)
 }
 
 /// This machine's newest session, as `lunetad::moves::newest` finds it,
@@ -599,7 +600,7 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
     command.args(["--session", at, "action", "switch-session", to]);
     command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     done(command)?;
-    let new = |client: &clients::Client| before.iter().all(|was| was.id != client.id);
+    let new = |client: &cli::Client| before.iter().all(|was| was.id != client.id);
     let came = seen(to, |clients| clients.iter().copied().find(new));
     let came = came.ok_or_else(|| UNMOVED.to_owned())?;
     match pane {
@@ -622,7 +623,7 @@ pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
         Ok(()) | Err(Failure::Focused(_)) => {},
         Err(failure) => return Err(failure.into()),
     }
-    let on = |clients: &[clients::Client]| clients.iter().any(|client| client.pane == pane);
+    let on = |clients: &[cli::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
 
@@ -660,7 +661,7 @@ fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bo
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &str, seen: impl Fn(&[clients::Client]) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &str, seen: impl Fn(&[cli::Client]) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
         if let Some(seen) = clients_on_panes(session).ok().and_then(|clients| seen(&clients)) {
@@ -1174,16 +1175,14 @@ pub fn makes_away(
 /// up for good.
 pub fn clients(session: &str) -> Result<Vec<Client>, String> {
     let clients = clients_on_panes(session)?;
-    Ok(clients.iter().copied().map(clients::Client::to_api).collect())
+    Ok(clients.iter().copied().map(cli::Client::to_api).collect())
 }
 
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
-pub fn clients_on_panes(session: &str) -> Result<clients::Listed, String> {
+pub fn clients_on_panes(session: &str) -> Result<cli::Listed, String> {
     let session = SessionName::running(session)?;
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    Ok(clients::list(command, &session)?)
+    Ok(cli::clients(&session)?)
 }
 
 /// What luneta asks of zellij once an action has run.

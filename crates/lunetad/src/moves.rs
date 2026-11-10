@@ -7,7 +7,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::api;
+use crate::{api, cli};
 use crate::zellij::{self, SessionName};
 
 /// How long the refuge is looked for the session its client was in to be
@@ -95,6 +95,17 @@ fn sought(
 ) -> Option<Refuge> {
     let sessions = refuges(running, current).into_iter();
     answering(sessions.filter_map(|session| SessionName::running(&session).ok()), clients)
+}
+
+/// What `refuge`'s `clients` answers for `session` on this machine: every row
+/// zellij lists of its clients, as `cli::client_rows` says them, or none
+/// where zellij did not list them. A client that comes to it is none of these,
+/// and zellij is asked for no panes, which a session that answers may not
+/// list.
+#[must_use]
+pub fn before(session: &SessionName) -> Option<Vec<api::Client>> {
+    let rows = cli::client_rows(session).ok()?;
+    Some(rows.into_iter().map(cli::Client::to_api).collect())
 }
 
 /// The first of `sessions` that `clients` answers for, tried one after

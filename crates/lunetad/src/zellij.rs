@@ -1,4 +1,6 @@
-//! The zellij sessions that run, and the names they had.
+//! The zellij sessions that run, and the names they had, as zellij keeps them
+//! on the machine luneta runs on: by their sockets, and in `metadata`, by what
+//! zellij writes of each in its cache.
 //!
 //! Each session is a server that listens on a socket named for the session, in
 //! zellij's socket folder. A rename moves the socket to its new name with
@@ -30,6 +32,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::watch::{self, Troubles};
+
+pub mod metadata;
 
 /// The socket in the folder that is zellij's web server's, and no session's.
 const WEB_SERVER: &str = "web_server_bus";
@@ -142,6 +146,13 @@ pub fn folder() -> PathBuf {
     }
     let uid = rustix::process::getuid().as_raw();
     std::env::temp_dir().join(format!("zellij-{uid}"))
+}
+
+/// Where the socket of `session` is in `folder`, zellij's, as a zellij of the
+/// contract luneta speaks makes it.
+#[must_use]
+pub fn socket_at(folder: &Path, session: &SessionName) -> PathBuf {
+    folder.join(SPOKEN).join(session.as_str())
 }
 
 /// Whether a change at `path`, in the folder, can be a session's: one at a

@@ -1248,7 +1248,7 @@ fn session_for(dir: &str) -> Result<(String, SessionName), String> {
 /// that runs or one that ended, which zellij keeps to bring back, as zellij's
 /// folders say now; or why luneta cannot tell which names are free.
 fn free(name: &SessionName) -> Result<SessionName, String> {
-    let named = names::named().ok_or("luneta cannot tell which sessions zellij has")?;
+    let named = names::named()?;
     Ok(name.free(&named.iter().map(String::as_str).collect::<Vec<_>>()))
 }
 

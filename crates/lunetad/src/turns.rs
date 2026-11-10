@@ -69,7 +69,6 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::tab;
 
 use crate::cli::{self, laid, Asks, Laid, PaneId, TabId};
-use crate::clients;
 use crate::closes::{same_session, terminals};
 use crate::zellij::SessionName;
 
@@ -363,11 +362,11 @@ pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), Strin
 
 /// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
 /// no longer shown fullscreen and can be again with no client moved.
-fn ended_fullscreen(laid: &[Laid], clients: &[clients::Client], pane: PaneId) -> bool {
+fn ended_fullscreen(laid: &[Laid], clients: &[cli::Client], pane: PaneId) -> bool {
     let Some(shown) = laid.iter().find(|it| it.pane_id() == pane) else {
         return false;
     };
-    let beside = |client: &clients::Client| {
+    let beside = |client: &cli::Client| {
         client.pane != pane
             && laid.iter().any(|it| it.tab_id == shown.tab_id && it.pane_id() == client.pane)
     };
@@ -410,11 +409,11 @@ fn no_room(pane: PaneId, tab: TabId) -> String {
 
 /// Whether a client is in `session`, as zellij lists them now.
 fn has_client(session: &SessionName) -> Result<bool, String> {
-    Ok(!clients_of(session)?.is_empty())
+    Ok(cli::has_clients(session)?)
 }
 
 /// The clients in `session`, as zellij lists them now.
-fn clients_of(session: &SessionName) -> Result<clients::Listed, String> {
+fn clients_of(session: &SessionName) -> Result<cli::Listed, String> {
     Ok(cli::clients(session)?)
 }
 
@@ -511,7 +510,7 @@ fn stacked(
     moved: PaneId,
     tab: TabId,
 ) -> Result<Stacked, String> {
-    let on_it = |clients: clients::Listed| clients.iter().any(|it| it.pane == moved);
+    let on_it = |clients: cli::Listed| clients.iter().any(|it| it.pane == moved);
     if !clients_of(session).is_ok_and(on_it) {
         stack(session, [root, moved, NOWHERE])?;
         let listed = laid(session)?;
