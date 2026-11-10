@@ -7,13 +7,11 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, CloseRequest, On};
-use crate::cli::{done, laid, quiet, tabs, unrun, Laid, ANSWER};
-use crate::program;
+use crate::cli::{self, laid, tabs, Asks, Laid, PaneId};
 use crate::zellij::SessionName;
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
@@ -160,13 +158,10 @@ pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result
 /// between the list and the close goes with it.
 pub(crate) fn closed_as_listed(session: &SessionName, close: &Close) -> Result<(), String> {
     still(&laid(session.as_str())?, close)?;
-    let mut command = Command::new("zellij");
-    command.args(["--session", session.as_str(), "action"]);
     match close {
-        Close::Pane(pane) => command.args(["close-pane", "--pane-id", &format!("terminal_{pane}")]),
-        Close::Tab { id, .. } => command.args(["close-tab-by-id", &id.to_string()]),
-    };
-    done(command)
+        Close::Pane(pane) => cli::pane_closed(session, PaneId::Terminal(*pane), Asks::Once),
+        Close::Tab { id, .. } => cli::tab_closed(session, *id, Asks::Once),
+    }
 }
 
 /// Whether `laid`, the panes of a session, lists `close` as it was planned,
@@ -192,16 +187,6 @@ fn still(laid: &[Laid], close: &Close) -> Result<(), String> {
         },
     }
 }
-
-/// What `delete-session --force` says as it kills a session that runs:
-/// `assert_dead_session` in zellij-utils 0.45.1's `sessions.rs` says it, on
-/// stdout, of one it finds a server of.
-const KILLING: &str = "will be force killed and deleted";
-
-/// How `delete-session` ends where zellij keeps nothing of the session:
-/// `delete_session` in the same file ends so where it finds no folder of the
-/// session to take away.
-const UNKEPT: i32 = 2;
 
 /// How long the server of a session zellij killed has to take its socket
 /// away: it does within milliseconds.
@@ -230,15 +215,7 @@ const SETTLING: Duration = Duration::from_millis(100);
 pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> {
     same_session(session, started)?;
     let folder = crate::zellij::folder();
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    command.args(["delete-session", "--force", session.as_str()]);
-    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
-    let unkept = matches!(&ran, program::Ran::Ended { status, stdout, .. }
-        if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
-    if !unkept {
-        ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    }
+    cli::session_killed(session)?;
     settled(session, started, &folder)
 }
 
@@ -278,9 +255,7 @@ pub fn running_in(folder: &Path) -> Result<Vec<(String, SystemTime)>, String> {
 /// Has zellij let go of `session`, one that ended, which then cannot be
 /// brought back, or says why it did not. zellij keeps one that runs.
 pub fn deleted(session: &SessionName) -> Result<(), String> {
-    let mut command = Command::new("zellij");
-    command.args(["delete-session", session.as_str()]);
-    done(command)
+    cli::session_deleted(session)
 }
 
 #[cfg(test)]

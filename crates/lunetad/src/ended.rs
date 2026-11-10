@@ -3,16 +3,10 @@
 //! them of its own machine, and a daemon of its machine for a luneta on
 //! another, whose picker lists this one's.
 
-use std::process::Command;
 use std::time::Duration;
 
-use crate::cli::{quiet, unrun, ANSWER};
 use crate::zellij::SessionName;
-use crate::{log, program};
-
-/// What `list-sessions` says where no session runs, nor ended to be brought
-/// back, as it fails.
-const NO_SESSIONS: &str = "No active zellij sessions found.";
+use crate::{cli, log};
 
 /// What follows the name of a session `list-sessions` lists that ended, and
 /// that zellij keeps to bring back.
@@ -33,17 +27,7 @@ pub struct Exited {
 /// session's server, and one that hangs would hold it up for good. How many
 /// `exited_in` left out goes in the log.
 pub fn exited() -> Result<Vec<Exited>, String> {
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    command.args(["list-sessions", "--no-formatting"]);
-    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
-    if let program::Ran::Ended { stderr, .. } = &ran
-        && String::from_utf8_lossy(stderr).contains(NO_SESSIONS)
-    {
-        return Ok(Vec::new());
-    }
-    let listed = ran.answer().map_err(|why| format!("zellij: {why}"))?;
-    let (exited, left_out) = exited_in(&String::from_utf8_lossy(&listed));
+    let (exited, left_out) = exited_in(&cli::sessions_listed()?);
     if left_out > 0 {
         log::say(&format!("left out {left_out} sessions zellij keeps whose line does not read"));
     }

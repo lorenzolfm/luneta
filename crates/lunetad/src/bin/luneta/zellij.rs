@@ -30,7 +30,7 @@ pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::carries::{self, Carry, Moved};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{clients, moves, Destination, Directory, SocketId};
+use lunetad::{cli, clients, moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -1219,9 +1219,9 @@ impl Then {
 
 /// An action luneta has zellij take.
 enum Action {
-    /// A go, as `moves::go` says, on `on`.
+    /// A go, as `cli::go` says, on `on`.
     Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
-    /// A start, as `moves::start` says, on this machine. `switch-session`
+    /// A start, as `cli::start` says, on this machine. `switch-session`
     /// takes the client to whatever has the name by the time zellij takes
     /// it, which `start` looks for just before only here: on another
     /// machine, luneta makes a session by a client that makes it there, as
@@ -1372,13 +1372,13 @@ impl There {
         let command = match action {
             Action::Go { at, to, pane, .. } => match self {
                 There::Away(away) => return away.go(&at, &to, pane),
-                There::Here => match moves::go(Command::new("zellij"), &at, &to, pane) {
+                There::Here => match cli::go(Command::new("zellij"), &at, &to, pane) {
                     Some(command) => command,
                     None => return Ok(()),
                 },
             },
             Action::Start { at, to, cwd } => {
-                moves::start(Command::new("zellij"), &at, &to, cwd.as_deref())
+                cli::start(Command::new("zellij"), &at, &to, cwd.as_deref())
             },
         };
         let mut command = command;
@@ -1387,7 +1387,7 @@ impl There {
             Ok(output) if output.status.success() => Ok(()),
             Ok(output) => {
                 let said = failure(&output);
-                if said.contains(moves::FOCUSED) { Ok(()) } else { Err(said) }
+                if said.contains(cli::FOCUSED) { Ok(()) } else { Err(said) }
             },
             Err(error) => Err(unrun(&error)),
         }

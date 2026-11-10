@@ -4,6 +4,7 @@
 //! them.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::process::{Command, Output, Stdio};
@@ -11,7 +12,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::clients;
 use crate::program::{self, Ran};
+use crate::zellij::SessionName;
 
 /// What names the session of a zellij pane, in the variables of what runs in
 /// it.
@@ -29,8 +32,7 @@ pub const PANE_VAR: &str = "ZELLIJ_PANE_ID";
 pub const LEFT_OUT: [&str; 5] =
     ["ZELLIJ", SESSION_VAR, PANE_VAR, "WINDOWID", "ALACRITTY_WINDOW_ID"];
 
-/// How long zellij has to open a pane or a tab, or to list a session's
-/// panes, or the sessions: a server that runs answers at once.
+/// How long zellij has to answer: a server that runs answers at once.
 pub const ANSWER: Duration = Duration::from_secs(2);
 
 /// Has `command` run without what `LEFT_OUT` names, and with nothing to read.
@@ -233,9 +235,9 @@ impl fmt::Display for PaneId {
 /// The panes of `session` as zellij lists them now, the plugins' you can go
 /// to too: it leaves out the bars.
 pub fn laid(session: &str) -> Result<Vec<Laid>, String> {
-    let mut command = Command::new("zellij");
+    let mut command = action(session);
     quiet(&mut command);
-    command.args(["--session", session, "action", "list-panes", "--json"]);
+    command.args(["list-panes", "--json"]);
     heard(
         || answered(&mut command),
         |said| {
@@ -257,6 +259,349 @@ pub fn terminal_of(laid: &[Laid], tab: u32) -> Option<u32> {
 #[must_use]
 pub fn tabs(laid: &[Laid]) -> BTreeSet<u32> {
     laid.iter().map(|pane| pane.tab_id).collect()
+}
+
+/// zellij's CLI.
+fn zellij() -> Command {
+    Command::new("zellij")
+}
+
+/// zellij's `action` command on `session`.
+fn action(session: &str) -> Command {
+    let mut command = zellij();
+    command.args(["--session", session, "action"]);
+    command
+}
+
+/// How `command`, a zellij, ended within `ANSWER`, or why it could not be run.
+fn ran(command: &mut Command) -> Result<Ran, String> {
+    program::run(command, ANSWER).map_err(|error| format!("zellij could not be run: {error}"))
+}
+
+/// What `zellij action list-panes --all --json` said of `session`, or why
+/// zellij did not list them.
+pub fn panes_listed(session: &str) -> Result<Vec<u8>, String> {
+    let mut command = action(session);
+    command.args(["list-panes", "--all", "--json"]);
+    ran(&mut command)?.answer().map_err(|why| format!("zellij: {why}"))
+}
+
+/// The clients of `session`, as zellij lists them now, or why not.
+pub fn clients(session: &str) -> Result<clients::Listed, String> {
+    let mut command = zellij();
+    quiet(&mut command);
+    clients::list(command, session)
+}
+
+/// What a pane or a tab luneta opens runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runs<'a> {
+    /// Your shell, as a command, so that it closes as it ends.
+    Shell(&'a OsStr),
+    /// A command, as it is, or zellij's own shell where it is none.
+    Command(&'a [String]),
+}
+
+impl Runs<'_> {
+    /// Has `command`, a zellij that opens a pane or a tab, run it.
+    fn add_to(self, command: &mut Command) {
+        match self {
+            Runs::Shell(shell) => {
+                command.args(["--close-on-exit", "--"]).arg(shell);
+            },
+            Runs::Command([]) => {},
+            Runs::Command(runs) => {
+                command.arg("--").args(runs);
+            },
+        }
+    }
+}
+
+/// Has zellij open a pane `--no-focus` beside the pane `beside` of `session`,
+/// in its tab, and in `cwd`, that runs `runs`, and says which terminal it
+/// opened. zellij reads the pane it opens one beside in `PANE_VAR`.
+pub fn pane_opened(
+    session: &SessionName,
+    beside: u32,
+    cwd: &str,
+    runs: Runs,
+) -> Result<u32, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    command.env(PANE_VAR, beside.to_string());
+    command.args(["new-pane", "--no-focus", "--cwd", cwd]);
+    runs.add_to(&mut command);
+    terminal_said(&answered(&mut command)?)
+}
+
+/// Has zellij open a pane named `name` in the tab `tab` of `session`, with no
+/// client moved, that runs `runs` and closes as it ends, and says which: as
+/// it says it, or as `found` finds it where a pane closing cut its answer
+/// short, as `heard` says. One that does not show is asked for again, and the
+/// first opened then has a second beside it, which ends on its own.
+pub fn pane_opened_once_heard(
+    session: &SessionName,
+    tab: u32,
+    name: &str,
+    runs: &[&str],
+    found: impl Fn() -> Option<PaneId>,
+) -> Result<PaneId, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    command.args(["new-pane", "--tab-id", &tab.to_string(), "--no-focus", "--close-on-exit"]);
+    command.arg(format!("--name={name}")).arg("--").args(runs);
+    heard(
+        || answered(&mut command),
+        |said| terminal_said(said).map(PaneId::Terminal).or_else(|unnamed| found().ok_or(unnamed)),
+    )
+}
+
+/// The terminal zellij `said` it opened a pane as, `terminal_<id>`, or why
+/// there is none.
+fn terminal_said(said: &str) -> Result<u32, String> {
+    let pane = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
+    pane.ok_or_else(|| format!("zellij opened no pane it named: {:?}", said.trim()))
+}
+
+/// Has zellij open a tab `--no-focus` in `session`, in `cwd`, named `name` or
+/// as zellij numbers it, that runs `runs`, and says its id.
+pub fn tab_opened(
+    session: &SessionName,
+    cwd: &str,
+    name: Option<&str>,
+    runs: Runs,
+) -> Result<u32, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    command.args(["new-tab", "--no-focus", "--cwd", cwd]);
+    command.args(name.into_iter().flat_map(|name| ["--name", name]));
+    runs.add_to(&mut command);
+    tab_said(&answered(&mut command)?)
+}
+
+/// Has zellij open a tab in `session`, named `name` or as zellij numbers it,
+/// with no client moved, that runs `runs` and closes as it ends, and says its
+/// id. One zellij opened as a pane closing cut its answer short has a second
+/// open beside it, as `heard` says, and ends on its own. The name goes joined
+/// to its option: apart, zellij's CLI takes one that starts with `-` for an
+/// option too.
+pub fn tab_opened_once_heard(
+    session: &SessionName,
+    name: Option<&str>,
+    runs: &[&str],
+) -> Result<u32, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    command.args(["new-tab", "--no-focus", "--close-on-exit"]);
+    command.args(name.map(|name| format!("--name={name}")));
+    command.arg("--").args(runs);
+    heard(|| answered(&mut command), tab_said)
+}
+
+/// The tab zellij `said` it opened, by its id, or why there is none.
+fn tab_said(said: &str) -> Result<u32, String> {
+    let tab = said.trim().parse();
+    tab.map_err(|_| format!("zellij opened no tab it named: {:?}", said.trim()))
+}
+
+/// How often luneta asks zellij for what it says nothing of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asks {
+    /// Once, as `done` does.
+    Once,
+    /// Again where a pane closing kept it from asking, as `done_once_reached`
+    /// does.
+    OnceReached,
+}
+
+/// Has zellij do what `command` asks, as often as `asks` says.
+fn asked(command: Command, asks: Asks) -> Result<(), String> {
+    match asks {
+        Asks::Once => done(command),
+        Asks::OnceReached => done_once_reached(command),
+    }
+}
+
+/// Has zellij close `pane` of `session`.
+pub fn pane_closed(session: &SessionName, pane: PaneId, asks: Asks) -> Result<(), String> {
+    let mut command = action(session.as_str());
+    command.args(["close-pane", "--pane-id", &pane.to_string()]);
+    asked(command, asks)
+}
+
+/// Has zellij close the tab whose id is `tab` in `session`.
+pub fn tab_closed(session: &SessionName, tab: u32, asks: Asks) -> Result<(), String> {
+    let mut command = action(session.as_str());
+    command.args(["close-tab-by-id", &tab.to_string()]);
+    asked(command, asks)
+}
+
+/// Has zellij show `pane` of `session` over the other panes of its tab, or
+/// no longer, as `done_once_reached` does.
+pub fn fullscreen_toggled(session: &SessionName, pane: PaneId) -> Result<(), String> {
+    let mut command = action(session.as_str());
+    command.args(["toggle-fullscreen", "--pane-id", &pane.to_string()]);
+    done_once_reached(command)
+}
+
+/// Has zellij stack `panes` of `session` on the first of them, each from
+/// whatever tab it is in, as `done_once_reached` does. It stacks nothing
+/// where it has no room, and says nothing of it.
+pub fn panes_stacked(session: &SessionName, panes: &[PaneId]) -> Result<(), String> {
+    let mut command = action(session.as_str());
+    command.args(["stack-panes", "--"]).args(panes.iter().map(ToString::to_string));
+    done_once_reached(command)
+}
+
+/// Has zellij rename `session` to `to`, or says why it did not.
+pub fn session_renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
+    let mut command = action(session.as_str());
+    command.args(["rename-session", to.as_str()]);
+    done(command)
+}
+
+/// The screen of the terminal `pane` of `session`: its lines, in the colours
+/// it shows them in, as zellij dumps them; or why zellij did not.
+pub fn screen_dumped(session: &SessionName, pane: u32) -> Result<String, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    let terminal = format!("terminal_{pane}");
+    command.args(["dump-screen", "--pane-id", &terminal, "--ansi"]);
+    answered(&mut command)
+}
+
+/// The text of the terminal `pane` of `session`, its scrollback with it, as
+/// zellij dumps it: a line for each line written to it, however many rows it
+/// wraps over, with no styles and no spaces at its end.
+pub fn text_dumped(session: &SessionName, pane: u32) -> Result<String, String> {
+    let mut command = action(session.as_str());
+    quiet(&mut command);
+    command.args(["dump-screen", "--full", "--pane-id"]).arg(pane.to_string());
+    answered(&mut command)
+}
+
+/// What `list-sessions` says where no session runs, nor ended to be brought
+/// back, as it fails.
+const NO_SESSIONS: &str = "No active zellij sessions found.";
+
+/// What `zellij list-sessions --no-formatting` says, a line for each session,
+/// or nothing where there are none, or why it did not say, as in time:
+/// zellij's CLI waits on every session's server, and one that hangs would
+/// hold it up for good.
+pub fn sessions_listed() -> Result<String, String> {
+    let mut command = zellij();
+    quiet(&mut command);
+    command.args(["list-sessions", "--no-formatting"]);
+    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
+    if let Ran::Ended { stderr, .. } = &ran
+        && String::from_utf8_lossy(stderr).contains(NO_SESSIONS)
+    {
+        return Ok(String::new());
+    }
+    let listed = ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    Ok(String::from_utf8_lossy(&listed).into_owned())
+}
+
+/// What `delete-session --force` says as it kills a session that runs:
+/// `assert_dead_session` in zellij-utils 0.45.1's `sessions.rs` says it, on
+/// stdout, of one it finds a server of.
+const KILLING: &str = "will be force killed and deleted";
+
+/// How `delete-session` ends where zellij keeps nothing of the session:
+/// `delete_session` in the same file ends so where it finds no folder of the
+/// session to take away.
+const UNKEPT: i32 = 2;
+
+/// Has zellij kill `session` and delete what it keeps of it, or says why it
+/// did not: where it kept nothing yet, it only kills it.
+pub fn session_killed(session: &SessionName) -> Result<(), String> {
+    let mut command = zellij();
+    quiet(&mut command);
+    command.args(["delete-session", "--force", session.as_str()]);
+    let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
+    let unkept = matches!(&ran, Ran::Ended { status, stdout, .. }
+        if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
+    if !unkept {
+        ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    }
+    Ok(())
+}
+
+/// Has zellij delete what it keeps of `session`, or says why it did not.
+pub fn session_deleted(session: &SessionName) -> Result<(), String> {
+    let mut command = zellij();
+    command.args(["delete-session", session.as_str()]);
+    done(command)
+}
+
+/// What zellij says as it fails to focus a pane that has the focus already,
+/// which is where the client was to go, and no failure.
+pub const FOCUSED: &str = "is already focused";
+
+/// `zellij`, a command of zellij's set up as its caller needs, with the
+/// action that takes the client that last typed in the session `at` to the
+/// pane `pane` of `to`, or to `to` alone, on the pane it last had the focus
+/// on. None where the client is there already: in `at`, with no pane to go
+/// to.
+#[must_use]
+pub fn go(
+    mut zellij: Command,
+    at: &SessionName,
+    to: &SessionName,
+    pane: Option<u32>,
+) -> Option<Command> {
+    let pane = pane.map(|id| format!("terminal_{id}"));
+    let (at, to) = (at.as_str(), to.as_str());
+    match pane {
+        Some(pane) if at == to => {
+            zellij.args(["--session", at, "action", "focus-pane-id", &pane]);
+        },
+        None if at == to => return None,
+        pane => {
+            zellij.args(["--session", at, "action", "switch-session", to]);
+            zellij.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
+        },
+    }
+    Some(zellij)
+}
+
+/// Has zellij take the action `go` makes, or says why it did not, as zellij
+/// said it.
+pub fn went(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(), String> {
+    let Some(mut command) = go(zellij(), at, to, pane) else {
+        return Ok(());
+    };
+    match ran(&mut command)?.answer() {
+        Ok(_) => Ok(()),
+        Err(said) if said.contains(FOCUSED) => Ok(()),
+        Err(said) => Err(format!("zellij: {said}")),
+    }
+}
+
+/// `zellij`, a command of zellij's set up as its caller needs, with the
+/// action that takes the client that last typed in the session `at` to a
+/// session it makes, `to`, that starts in `cwd`, or where the client started.
+/// zellij takes it to a session that runs by that name instead, and makes
+/// none, and brings back one of that name it keeps, which ended: the
+/// directory goes unused then. zellij's client makes it, so that it has the
+/// client's environment, not the CLI's.
+#[must_use]
+pub fn start(
+    mut zellij: Command,
+    at: &SessionName,
+    to: &SessionName,
+    cwd: Option<&str>,
+) -> Command {
+    zellij.args(["--session", at.as_str(), "action", "switch-session", to.as_str()]);
+    zellij.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
+    zellij
+}
+
+/// Has zellij take the action `start` makes, or says why it did not, as
+/// zellij said it.
+pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&str>) -> Result<(), String> {
+    let mut command = start(zellij(), at, to, cwd);
+    ran(&mut command)?.answer().map(drop).map_err(|said| format!("zellij: {said}"))
 }
 
 #[cfg(test)]

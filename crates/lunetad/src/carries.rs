@@ -19,7 +19,6 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{File, TryLockError};
 use std::path::Path;
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -33,9 +32,8 @@ use crate::api::shell::Doing;
 use crate::api::{
     carry_response, Agent, CarryRequest, CarryResponse, Harness, On, Pane, Session, Status,
 };
-use crate::cli::{self, quiet, tabs, Laid};
+use crate::cli::{self, tabs, Laid};
 use crate::closes::{self, Close, Closes};
-use crate::clients;
 use crate::opens::{self, Open, Tab};
 use crate::process;
 use crate::seats::seated;
@@ -514,9 +512,7 @@ fn landing(to: &SessionName, lands: Lands) -> Result<(), String> {
             }
         },
         Lands::Tab => {
-            let mut zellij = Command::new("zellij");
-            quiet(&mut zellij);
-            if clients::list(zellij, to.as_str())?.is_empty() {
+            if cli::clients(to.as_str())?.is_empty() {
                 return Err(opens::no_client(to));
             }
             Ok(())

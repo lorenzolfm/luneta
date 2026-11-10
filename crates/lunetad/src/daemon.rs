@@ -97,9 +97,9 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    carries, checks, claude, client, clients, closes, ended, eza, fetches, git, github, keeps, log,
-    metadata, moves, names, opens, panes, pi, printed, release, remote, renames, screens, shells,
-    skills, topics, turns, watch, zellij, zoxide, Harness,
+    carries, checks, claude, cli, client, clients, closes, ended, eza, fetches, git, github, keeps,
+    log, metadata, moves, names, opens, panes, pi, printed, release, remote, renames, screens,
+    shells, skills, topics, turns, watch, zellij, zoxide, Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -589,7 +589,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || moves::went(&at, &to, pane)).await;
+        let went = task::spawn_blocking(move || cli::went(&at, &to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -818,7 +818,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || moves::started(&at, &to, cwd.as_ref().map(Directory::as_str));
+        let start = move || cli::started(&at, &to, cwd.as_ref().map(Directory::as_str));
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -1318,7 +1318,7 @@ where
 
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = clients::list(std::process::Command::new("zellij"), session.as_str())?;
+    let listed = cli::clients(session.as_str())?;
     Ok(listed.iter().copied().map(clients::Client::to_api).collect())
 }
 

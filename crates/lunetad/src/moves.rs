@@ -1,24 +1,14 @@
-//! What zellij's CLI does with a client on the machine it runs on: takes the
-//! one that last typed in a session to another session, or to a pane, and
-//! finds the session one goes on in once its own ended. luneta has zellij do
-//! so for its own client on its machine; a daemon has it do so here for a
-//! luneta on another machine, whose client runs here through ssh.
+//! The session a client on the machine zellij runs on goes on in once its
+//! own ended. luneta finds it for its own client on its machine; a daemon
+//! finds it here for a luneta on another machine, whose client runs here
+//! through ssh.
 
 use std::path::Path;
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api;
-use crate::program;
 use crate::zellij::{self, SessionName};
-
-/// How long zellij has to take an action: a server that runs answers at once.
-const LIMIT: Duration = Duration::from_secs(2);
-
-/// What zellij says as it fails to focus a pane that has the focus already,
-/// which is where the client was to go, and no failure.
-pub const FOCUSED: &str = "is already focused";
 
 /// How long the refuge is looked for the session its client was in to be
 /// gone, once the client ended. zellij takes the session's socket away a
@@ -34,76 +24,6 @@ const ENDING_LOOK: Duration = Duration::from_millis(10);
 /// it does not run, and a server that hangs holds up every zellij command for
 /// as long as its clients are waited for, which is longer: it costs one try.
 const SEEKING: Duration = Duration::from_secs(1);
-
-/// `zellij`, a command of zellij's set up as its caller needs, with the
-/// action that takes the client that last typed in the session `at` to the
-/// pane `pane` of `to`, or to `to` alone, on the pane it last had the focus
-/// on. None where the client is there already: in `at`, with no pane to go
-/// to.
-#[must_use]
-pub fn go(
-    mut zellij: Command,
-    at: &SessionName,
-    to: &SessionName,
-    pane: Option<u32>,
-) -> Option<Command> {
-    let pane = pane.map(|id| format!("terminal_{id}"));
-    let (at, to) = (at.as_str(), to.as_str());
-    match pane {
-        Some(pane) if at == to => {
-            zellij.args(["--session", at, "action", "focus-pane-id", &pane]);
-        },
-        None if at == to => return None,
-        pane => {
-            zellij.args(["--session", at, "action", "switch-session", to]);
-            zellij.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
-        },
-    }
-    Some(zellij)
-}
-
-/// Has zellij take the action `go` makes, or says why it did not, as zellij
-/// said it.
-pub fn went(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(), String> {
-    let Some(mut zellij) = go(Command::new("zellij"), at, to, pane) else {
-        return Ok(());
-    };
-    let ran = program::run(&mut zellij, LIMIT)
-        .map_err(|error| format!("zellij could not be run: {error}"))?;
-    match ran.answer() {
-        Ok(_) => Ok(()),
-        Err(said) if said.contains(FOCUSED) => Ok(()),
-        Err(said) => Err(format!("zellij: {said}")),
-    }
-}
-
-/// `zellij`, a command of zellij's set up as its caller needs, with the
-/// action that takes the client that last typed in the session `at` to a
-/// session it makes, `to`, that starts in `cwd`, or where the client started.
-/// zellij takes it to a session that runs by that name instead, and makes
-/// none, and brings back one of that name it keeps, which ended: the
-/// directory goes unused then. zellij's client makes it, so that it has the
-/// client's environment, not the CLI's.
-#[must_use]
-pub fn start(
-    mut zellij: Command,
-    at: &SessionName,
-    to: &SessionName,
-    cwd: Option<&str>,
-) -> Command {
-    zellij.args(["--session", at.as_str(), "action", "switch-session", to.as_str()]);
-    zellij.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
-    zellij
-}
-
-/// Has zellij take the action `start` makes, or says why it did not, as
-/// zellij said it.
-pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&str>) -> Result<(), String> {
-    let mut zellij = start(Command::new("zellij"), at, to, cwd);
-    let ran = program::run(&mut zellij, LIMIT)
-        .map_err(|error| format!("zellij could not be run: {error}"))?;
-    ran.answer().map(drop).map_err(|said| format!("zellij: {said}"))
-}
 
 /// A session a client can go on in: one that runs, as it answered for its
 /// clients, which are those it has before the client comes.

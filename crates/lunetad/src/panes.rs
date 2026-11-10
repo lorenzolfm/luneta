@@ -12,7 +12,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -22,17 +21,12 @@ use notify::RecursiveMode;
 use serde::Deserialize;
 
 use crate::api;
-use crate::clients;
+use crate::cli;
 use crate::core::{self, Addressed};
 use crate::metadata::{self, Metadata};
-use crate::program;
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
 use crate::zellij::Id;
-
-/// How long zellij has to list a session's panes: a server that runs answers
-/// at once.
-const LIMIT: Duration = Duration::from_secs(2);
 
 /// How long the daemon leaves a session's server be once it made its socket,
 /// before it asks zellij anything: every call of zellij's CLI asks the server
@@ -174,11 +168,7 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 
 /// The panes of `session`, or why zellij did not list them.
 fn list(session: &str) -> Result<Vec<Pane>, String> {
-    let mut zellij = Command::new("zellij");
-    zellij.args(["--session", session, "action", "list-panes", "--all", "--json"]);
-    let ran = program::run(&mut zellij, LIMIT)
-        .map_err(|error| format!("zellij could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("zellij: {why}"))?;
+    let said = cli::panes_listed(session)?;
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
@@ -195,7 +185,7 @@ struct Signs {
 /// When the daemon last asked zellij about a session, and its signs then.
 struct Asked {
     /// When it was done asking, rather than when it began: the daemon gives
-    /// zellij up to `LIMIT` for a session's panes and as long for its
+    /// zellij up to `cli::ANSWER` for a session's panes and as long for its
     /// clients, before it gives up on a server that hangs, longer than a
     /// sweep. Due again as soon as it was given up on, a session never listed
     /// would go first in every round a wake begins anew, and no other would
@@ -320,7 +310,7 @@ fn ask(
         core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
     }
     let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = clients::list(Command::new("zellij"), name).inspect_err(said) {
+    if let Ok(clients) = cli::clients(name).inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));
