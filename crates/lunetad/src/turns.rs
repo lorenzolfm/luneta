@@ -409,7 +409,7 @@ fn no_room(pane: PaneId, tab: TabId) -> String {
 
 /// Whether a client is in `session`, as zellij lists them now.
 fn has_client(session: &SessionName) -> Result<bool, String> {
-    Ok(!clients_of(session)?.is_empty())
+    Ok(cli::has_clients(session)?)
 }
 
 /// The clients in `session`, as zellij lists them now.

@@ -9,7 +9,7 @@
 
 use std::ops::Deref;
 
-use super::{laid, Laid, PaneId};
+use super::{laid, Failure, Laid, PaneId};
 use crate::api;
 use crate::zellij::SessionName;
 
@@ -107,25 +107,50 @@ fn pane_named(name: &str) -> Option<PaneId> {
     number("terminal_").map(PaneId::Terminal).or_else(|| number("plugin_").map(PaneId::Plugin))
 }
 
-fn commands_to_skip(said: &str, session: &SessionName) -> Result<Vec<(PaneId, String)>, String> {
-    if said.lines().filter_map(row).nth(1).is_none() {
-        return Ok(Vec::new());
-    }
-    let unlaid = |failure| format!("zellij did not list the panes its clients are on: {failure}");
-    let panes = laid(session).map_err(unlaid)?;
-    let many_lines = |pane: Laid| {
-        let id = pane.pane_id();
-        Some((id, pane.pane_command.filter(|command| command.contains('\n'))?))
-    };
-    Ok(panes.into_iter().filter_map(many_lines).collect())
+/// What zellij said as it listed a session's clients, where it reads as such
+/// a list: its rows, as many as zellij wrote. A row may be one that a command
+/// of many lines quotes, which only the session's panes tell.
+pub(super) struct Said {
+    said: String,
+    rows: Listed,
 }
 
-/// The clients in what zellij `said` it lists of `session`, or why it does
-/// not read: a row that a command of many lines quotes is skipped by that
-/// command, as zellij lists `session`'s panes.
-pub(super) fn read(said: &str, session: &SessionName) -> Result<Listed, String> {
-    parse(said, &commands_to_skip(said, session)?)
-        .map_err(|why| format!("zellij listed what does not read: {why}"))
+/// What zellij `said` as it listed clients, or why it is no such list.
+pub(super) fn said(said: &str) -> Result<Said, String> {
+    let rows = parse(said, &[]).map_err(|why| unreadable(&why))?;
+    Ok(Said { said: said.to_owned(), rows })
+}
+
+impl Said {
+    /// Whether it lists a client: its first row is one, as a command can
+    /// quote only rows after its own.
+    pub(super) fn any(&self) -> bool {
+        !self.rows.is_empty()
+    }
+
+    /// Every row it lists: each client, and each row a command quotes.
+    pub(super) fn rows(&self) -> Vec<Client> {
+        self.rows.iter().chain(self.rows.set_aside()).copied().collect()
+    }
+
+    /// The clients it lists, a row that a command of many lines quotes
+    /// skipped by that command, as zellij lists the panes of `session` now;
+    /// or why it did not list them. Of one row, none is quoted.
+    pub(super) fn clients(self, session: &SessionName) -> Result<Listed, Failure> {
+        if self.rows.len() + self.rows.set_aside().len() < 2 {
+            return Ok(self.rows);
+        }
+        let many_lines = |pane: Laid| {
+            let id = pane.pane_id();
+            Some((id, pane.pane_command.filter(|command| command.contains('\n'))?))
+        };
+        let commands: Vec<_> = laid(session)?.into_iter().filter_map(many_lines).collect();
+        parse(&self.said, &commands).map_err(|why| Failure::Unread(unreadable(&why)))
+    }
+}
+
+fn unreadable(why: &str) -> String {
+    format!("zellij listed what does not read: {why}")
 }
 
 #[cfg(test)]

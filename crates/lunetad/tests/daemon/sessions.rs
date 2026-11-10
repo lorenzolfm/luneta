@@ -13,11 +13,16 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::Head;
 use lunetad::api::work_tree::{NoCheckout, Stands};
-use lunetad::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream, Version};
+use lunetad::api::refuge_response::{Ended, Went};
+use lunetad::api::{
+    self, Branch, Changes, Checkout, ListClientsRequest, PullRequestState, RefugeRequest,
+    Upstream, Version,
+};
+use tonic::Code;
 use prost::Message as _;
 use serde_json::json;
 
-use crate::host::{eventually, start, Host, LUNETA};
+use crate::host::{eventually, folder_in, start, Host, LUNETA};
 
 impl Host {
     /// `luneta watch`, with `--after` as `after` gives it, and how long it
@@ -280,7 +285,7 @@ fn clients_wait_for_the_panes_that_say_which_rows_a_command_quotes() {
     let _daemon = start(host.vars()).unwrap();
 
     eventually("zellij is asked for the clients of work a sweep after it failed", || {
-        (host.zellij.asked_clients("work") > 3).then_some(())
+        (host.zellij.asked_clients("work") > 1).then_some(())
     });
     assert_eq!(session(&host.host(), "work").and_then(|work| work.clients.clone()), None);
 
@@ -289,6 +294,66 @@ fn clients_wait_for_the_panes_that_say_which_rows_a_command_quotes() {
         session(&host.host(), "work")?.clients.clone()
     });
     assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(1))]);
+}
+
+/// Where zellij lists two clients or more of a session and does not list its
+/// panes in time, the clients fail as the panes did, at once: zellij is not
+/// asked for them again, which would keep the daemon past the time luneta
+/// waits for it.
+#[test]
+fn clients_fail_at_once_where_their_panes_do_not_answer_in_time() {
+    let host = Host::new();
+    host.zellij.list("work", &json!([listed(0, "~", (0, "Tab #1"), None)]));
+    host.zellij.clients("work", &[(1, "terminal_0"), (2, "terminal_0")]);
+    host.zellij.hangs_laying("work");
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let failed = runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let work = ListClientsRequest { on: None, session: "work".to_owned() };
+        daemon.list_clients(work).await.unwrap_err()
+    });
+    assert_eq!(failed.code(), Code::FailedPrecondition, "{failed:?}");
+    assert_eq!(failed.message(), "zellij: it did not answer in time");
+}
+
+/// A session whose panes do not list still answers for its clients, and a
+/// client that ended goes on in it: before it comes there, the session has
+/// every row zellij lists, those a command quotes too, so that none of them
+/// is taken for the client that came.
+#[test]
+fn a_client_goes_on_in_a_session_whose_panes_do_not_list() {
+    let command = "claude Fix this.\n\nzellij lists:\n7         terminal_4     N/A\nThanks";
+    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
+    quoting["pane_command"] = json!(command);
+    let host = Host::new();
+    host.zellij.list("work", &json!([quoting, listed(1, "~", (0, "Tab #1"), None)]));
+    host.zellij.says_of_clients(
+        "work",
+        &format!(
+            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
+             1         terminal_0     {command}\n\
+             2         terminal_1     fish\n"
+        ),
+    );
+    host.zellij.unlays("work");
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    eventually("the daemon lists work", || session(&host.host(), "work").map(drop));
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let found = runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let ended = RefugeRequest { on: None, seats: vec!["gone".to_owned()] };
+        daemon.refuge(ended).await.unwrap().into_inner()
+    });
+    let before = vec![client(1, Some(0)), client(7, Some(4)), client(2, Some(1))];
+    let refuge = Some(api::Refuge { session: "work".to_owned(), before });
+    assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
 }
 
 /// What an agent says in a pane's title is on the host, without the glyph the

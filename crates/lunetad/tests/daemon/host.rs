@@ -189,7 +189,8 @@ fn shared_copy(text: &str) -> PathBuf {
 /// `unreaches` it, or hand it another call's answer, as a test had it
 /// `answers_another`, or fail it, as a test had it `fails` it. It fails to
 /// list a session's panes by tab, as a test had it `unlays` them, until it
-/// `lays` them again. It knows no other command.
+/// `lays` them again, or hangs as it lists them, as a test had it
+/// `hangs_laying` them. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -231,6 +232,9 @@ case "$*" in
         if [ -f "$panes/$session.unlaid" ]; then
             echo "zellij lists no panes of $session" >&2
             exit 1
+        fi
+        if [ -f "$panes/$session.laid.hung" ]; then
+            exec sleep 5
         fi
         if [ -f "$panes/$session.listed.clients" ]; then
             mv "$panes/$session.listed.clients" "$panes/$session.clients"
@@ -635,6 +639,12 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// by tab, as `list-panes --json` does, till it `lays` them again.
     pub fn unlays(&self, session: &str) {
         self.write(&format!("{session}.unlaid"), "");
+    }
+
+    /// Has zellij hang from now on as it lists the panes of the session
+    /// `session` by tab, as `list-panes --json` does, and answer the rest.
+    pub fn hangs_laying(&self, session: &str) {
+        self.write(&format!("{session}.laid.hung"), "");
     }
 
     /// Has zellij list the panes of the session `session` by tab again, once

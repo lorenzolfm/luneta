@@ -349,11 +349,36 @@ pub fn panes_listed(session: &SessionName) -> Result<Vec<u8>, Failure> {
     answer_of(ran(&mut command)?)
 }
 
-/// The clients of `session`, as zellij lists them now, or why not.
-pub fn clients(session: &SessionName) -> Result<Listed, Failure> {
+/// What zellij says now as it lists the clients of `session`, asked again as
+/// `heard` says.
+fn clients_said(session: &SessionName) -> Result<clients::Said, Failure> {
     let mut command = action(session);
     command.arg("list-clients");
-    heard(|| answered(&mut command), |said| clients::read(said, session))
+    heard(|| answered(&mut command), clients::said)
+}
+
+/// The clients of `session`, as zellij lists them now, or why not. Where it
+/// lists two rows or more, zellij is asked for the panes too, as `laid` asks,
+/// which say what a row a command quotes is: the list fails as they do, and
+/// zellij is not asked for the clients again.
+pub fn clients(session: &SessionName) -> Result<Listed, Failure> {
+    clients_said(session)?.clients(session)
+}
+
+/// Whether a client is attached to `session`, as zellij lists them now, or
+/// why not. The first row zellij lists is a client's, whatever the rows after
+/// it quote, and zellij is asked for no panes.
+pub fn has_clients(session: &SessionName) -> Result<bool, Failure> {
+    Ok(clients_said(session)?.any())
+}
+
+/// Every row zellij lists now of the clients of `session`: each client, and
+/// each row a command of many lines quotes, which `clients` skips. Or why
+/// zellij did not list them. As many as its clients, or more, and zellij is
+/// asked for no panes: of a client that comes to the session, none of these
+/// is the one that came.
+pub fn client_rows(session: &SessionName) -> Result<Vec<Client>, Failure> {
+    Ok(clients_said(session)?.rows())
 }
 
 /// What a pane or a tab luneta opens runs.

@@ -291,8 +291,9 @@ pub fn dropped(said: &str) -> bool {
     DROPPED.iter().any(|words| said.contains(words))
 }
 
-/// What zellij lists of the clients of `session`, where luneta's zellij may go
-/// on in it: none of one that may hold luneta's terminal, as
+/// The clients `session` has before luneta's zellij goes on in it, as
+/// `lunetad::moves::before` says them: none of one that may hold luneta's
+/// terminal, as
 /// `may_hold_terminal` says, which `lunetad::moves` passes over as it does one
 /// that does not answer. Its name in the pane's environment would not do, as a
 /// rename leaves it behind.
@@ -300,7 +301,7 @@ fn clients_of_refuge(session: &SessionName) -> Option<Vec<Client>> {
     if may_hold_terminal(session.as_str()) {
         return None;
     }
-    clients(session.as_str()).ok()
+    moves::before(session)
 }
 
 /// What sshd sets in a session it runs: in every one, and in one with a
@@ -372,7 +373,7 @@ pub fn settled() -> Option<Vec<(String, SocketId)>> {
 /// The first of `sessions`, of this machine's, whose clients zellij lists, as
 /// `lunetad::moves::answering` tries them: a socket can outlive its server.
 pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
-    moves::answering(sessions, |session| clients(session.as_str()).ok())
+    moves::answering(sessions, moves::before)
 }
 
 /// This machine's newest session, as `lunetad::moves::newest` finds it,

@@ -513,7 +513,7 @@ fn landing(to: &SessionName, lands: Lands) -> Result<(), String> {
             }
         },
         Lands::Tab => {
-            if cli::clients(to)?.is_empty() {
+            if !cli::has_clients(to)? {
                 return Err(opens::no_client(to));
             }
             Ok(())

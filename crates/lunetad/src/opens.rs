@@ -100,7 +100,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             Ok(terminal(cli::pane_opened(session, *beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if cli::clients(session)?.is_empty() {
+            if !cli::has_clients(session)? {
                 return Err(format!(
                     "{}: go there first, or open a pane beside one of its panes",
                     no_client(session)
