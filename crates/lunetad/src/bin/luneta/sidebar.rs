@@ -9381,7 +9381,7 @@ mod tests {
         // A click on the skill of a menu that closed since does nothing.
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
-        let command = ["claude", "--name", "tigerstyle", "/tigerstyle"].map(str::to_owned).to_vec();
+        let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
         let open = Open::Pane { session: session_name("older"), beside: 1, cwd, command };
         let open = Asked::Open { menu: 1, on: Machine::Local, open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
@@ -9402,7 +9402,7 @@ mod tests {
         }
         sidebar.focus(Keys::Sidebar);
         let started = |menu, session: &str, beside, cwd: &str, harness, spelled| {
-            let command = [harness, "--name", "tigerstyle", spelled].map(str::to_owned).to_vec();
+            let command = [harness, spelled].map(str::to_owned).to_vec();
             let (session, cwd) = (session_name(session), cwd.to_owned());
             let open = Open::Pane { session, beside, cwd, command };
             Asked::Open { menu, on: Machine::Local, open }
@@ -10256,7 +10256,7 @@ mod tests {
         assert_eq!(sidebar.float_menu(), Ok(()));
         sidebar.focus(Keys::Menu { lent: false });
         type_in(&mut sidebar, "c");
-        let command = ["claude", "--name", "thermo-nuclear-review: feat/menu", "/thermo-nuclear-review"];
+        let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
         let pane = Open::Pane { session: older, beside: 1, cwd, command };
         let pane = Asked::Open { menu: 2, on: Machine::Local, open: pane };

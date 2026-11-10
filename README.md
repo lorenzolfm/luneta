@@ -79,9 +79,20 @@ the order their panes were opened within each. Which agent wants you is the job
 of the glyph, not of the order. The agent in the pane you came from is pinned
 above the list.
 
-An agent goes by the name you gave it with `/rename`, or else [its
-topic](#luneta-in-your-terminal), the title Claude Code gives its pane, its tab or its
-directory. Two agents named alike are told apart by their panes, as
+An agent's row goes by the first of these it has:
+
+1. The name you gave it, with `/rename` or `claude --name`. You chose it, so it
+   holds the row for good, and lunetad asks no topic for it. Claude Code records
+   both the same way, so luneta can't tell one from the other, and luneta names
+   no agent it starts itself.
+2. [Its topic](#luneta-in-your-terminal), which lunetad keeps up as the agent
+   moves from one subject to the next.
+3. The title Claude Code gives its pane, which is its first topic and never
+   changes. A row goes by it until lunetad has a topic.
+4. Its tab, if you named it. It says where the agent runs, not what it does.
+5. The last two parts of the directory it works in.
+
+Two agents named alike are told apart by their panes, as
 `luneta/main:4`, and by their sessions too when they sit in two, as
 `luneta/main (review:4)`. A search finds an agent by what its row shows, the
 pane that tells it apart as well, by its session's name, or by the last two
@@ -189,9 +200,9 @@ and luneta keeps it in `luneta/agent` of `$XDG_STATE_HOME`, or of
 sidebar's are. Each harness is told in its own words: Claude Code runs a
 skill as `/tigerstyle`, and pi as `/skill:tigerstyle`.
 
-An agent started on a skill goes by the skill and the branch, as
-`thermo-nuclear-review: feat/sidebar`, as though you had named it with
-`/rename`, so the sidebar and the picker say what it is doing from the start.
+An agent started on a skill is given no name, so its row follows [its
+topic](#luneta-in-your-terminal) as it moves, as any agent's does. A name would
+hold the row for good.
 
 What a key starts on is the first message of the session, as
 `claude "/tigerstyle"` or `pi "/skill:tigerstyle"` would take it: a skill, a skill and its arguments, as
@@ -720,8 +731,7 @@ takes zellij there, and gives it the keys. A tab of another session opens once
 zellij is there: zellij makes a tab as big as a client of its session, and
 most have none attached.
 `c t` starts an agent on `/thermo-nuclear-review` in a pane of its own
-beside the highlighted pane, in its tab and in the directory it works in, named
-for the skill and the branch; `c m` on `/make-illegal-states-unrepresentable`,
+beside the highlighted pane, in its tab and in the directory it works in; `c m` on `/make-illegal-states-unrepresentable`,
 and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
 first group, where `/` searches the skills the pane's directory can run, and
 `Enter` starts an agent on the one highlighted, beside the pane, as `c`'s
@@ -787,7 +797,7 @@ the session that works in its repository: the one zellij is in, or else
 another, or else a session luneta makes in a clone of it that zoxide knows,
 named as the picker's directories name it. `r` does the
 same and starts an agent in the tab on `/thermo-nuclear-review` and the
-link, named for the skill and the branch, in the harness you picked last, which
+link, in the harness you picked last, which
 the line under the keys names, and `Tab` there picks the next, as in the
 Skills group. Where a pane has the pull request's
 branch checked out already, `w` takes zellij there, and `r` starts the agent
@@ -889,8 +899,8 @@ so then. Pasted again, the path finds the worktree the first paste made, as an
 issue's link does, on another branch too, and so does another file of the same
 name.
 
-An agent's row is named for the name you gave it with `/rename`, or else for
-its topic: the subject it is on now, in a few words, without request verbs like
+An agent's row is named for the name you gave it with `/rename` or `--name`, or
+else for its topic: the subject it is on now, in a few words, without request verbs like
 "fix" or "investigate". Claude Code titles a session on its first prompt and
 never again, so as an agent comes to a new prompt, lunetad on the machine it runs
 on asks a model for the topic, told the one it has, what you last asked, and the

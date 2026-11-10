@@ -1902,8 +1902,7 @@ impl Menu {
                 },
                 (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
-                        let branch = row.branch.as_deref();
-                        let command = agents::on_skill(keys.agent.harness(), &skill, None, branch);
+                        let command = agents::on_skill(keys.agent.harness(), &skill, None);
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
@@ -2188,7 +2187,7 @@ impl Menu {
         let command = match (pull, &readied) {
             (Pull::Worktree, _) => Vec::new(),
             (Pull::Agent, Readied::Link(link)) if link.kind() == Kind::Pull => {
-                agents::on_skill(agent, REVIEW, Some(&link.url()), branch.as_deref())
+                agents::on_skill(agent, REVIEW, Some(&link.url()))
             },
             (Pull::Agent, Readied::Link(link)) => {
                 agents::on_words(agent, format!("{TACKLE} {}", link.url()), &[])
@@ -3621,8 +3620,8 @@ mod tests {
     }
 
     /// `c` opens the Skills group, and a key in it starts an agent on its
-    /// skill beside the row's pane, in its directory, named for the skill
-    /// and the branch, as the search's `Enter` does: in the harness the line
+    /// skill beside the row's pane, in its directory, with no name, as the
+    /// search's `Enter` does: in the harness the line
     /// under the keys names, by its icon and its name, which `Tab` switches,
     /// and wants kept for the next menu. The rule names the group alone.
     #[test]
@@ -3644,8 +3643,7 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('t')));
-        let named = "thermo-nuclear-review: feat/menu";
-        let command = ["claude", "--name", named, "/thermo-nuclear-review"].map(str::to_owned);
+        let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned);
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
         assert!(menu.opening().is_some());
 
@@ -3658,7 +3656,7 @@ mod tests {
             " \u{f03ff} pi  <TAB> another agent",
         ]);
         let (menu, wants) = stays(menu.key(&char('t')));
-        let command = ["pi", "--name", named, "/skill:thermo-nuclear-review"].map(str::to_owned);
+        let command = ["pi", "/skill:thermo-nuclear-review"].map(str::to_owned);
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
         assert!(menu.opening().is_some());
     }
@@ -4433,7 +4431,7 @@ mod tests {
             " /tigerstyle  tigerstyle it".to_owned(),
         ]);
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(CLAUDE, "tigerstyle", None, Some("feat/menu"));
+        let command = agents::on_skill(CLAUDE, "tigerstyle", None);
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
@@ -4462,7 +4460,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
         assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(Harness::Pi, "tdd", None, Some("feat/menu"));
+        let command = agents::on_skill(Harness::Pi, "tdd", None);
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command }));
     }
 
@@ -4489,7 +4487,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
-        let command = agents::on_skill(CLAUDE, "code-review", None, Some("feat/menu"));
+        let command = agents::on_skill(CLAUDE, "code-review", None);
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
@@ -4859,8 +4857,6 @@ mod tests {
         };
         let review = [
             "claude",
-            "--name",
-            "thermo-nuclear-review: feat/x",
             "/thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
         ]
         .map(str::to_owned)
@@ -4912,8 +4908,6 @@ mod tests {
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
-            "--name",
-            "thermo-nuclear-review: feat/x",
             "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
         ];
         let command = review.map(str::to_owned).to_vec();

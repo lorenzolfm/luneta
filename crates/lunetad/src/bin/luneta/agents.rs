@@ -94,26 +94,16 @@ pub fn of(agent: &api::Agent) -> Option<Harness> {
 }
 
 /// An agent in `harness` on the skill named `skill`, as a command line,
-/// given `given` after it, as what the skill is asked. It is named for the
-/// skill and the branch it works on, as `/rename` would, so that the sidebar
-/// and the picker say what it is doing from the start. Claude Code runs a
-/// skill by `/<name>`, and pi by `/skill:<name>`.
-pub fn on_skill(
-    harness: Harness,
-    skill: &str,
-    given: Option<&str>,
-    branch: Option<&str>,
-) -> Vec<String> {
-    let named = match branch {
-        Some(branch) => format!("{skill}: {branch}"),
-        None => skill.to_owned(),
-    };
+/// given `given` after it, as what the skill is asked. It is given no name,
+/// so that its row follows its topic, as a name would hold the row for good.
+/// Claude Code runs a skill by `/<name>`, and pi by `/skill:<name>`.
+pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Vec<String> {
     let spelled = spelled(harness, skill);
     let prompt = match given {
         Some(given) => format!("{spelled} {given}"),
         None => spelled,
     };
-    vec![name(harness).to_owned(), "--name".to_owned(), named, prompt]
+    vec![name(harness).to_owned(), prompt]
 }
 
 /// An agent in `harness` on `words`, as a command line, let read `files`
@@ -261,22 +251,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_skill_names_the_agent_for_it_and_its_branch_in_its_harness_s_spelling() {
+    fn a_skill_starts_an_unnamed_agent_in_its_harness_s_spelling() {
         assert_eq!(
-            on_skill(Harness::ClaudeCode, "tigerstyle", None, Some("feat/menu")),
-            ["claude", "--name", "tigerstyle: feat/menu", "/tigerstyle"]
+            on_skill(Harness::ClaudeCode, "tigerstyle", None),
+            ["claude", "/tigerstyle"]
         );
         assert_eq!(
-            on_skill(Harness::ClaudeCode, "code-review", Some("since main"), None),
-            ["claude", "--name", "code-review", "/code-review since main"]
+            on_skill(Harness::ClaudeCode, "code-review", Some("since main")),
+            ["claude", "/code-review since main"]
         );
         assert_eq!(
-            on_skill(Harness::Pi, "tigerstyle", None, Some("feat/menu")),
-            ["pi", "--name", "tigerstyle: feat/menu", "/skill:tigerstyle"]
+            on_skill(Harness::Pi, "tigerstyle", None),
+            ["pi", "/skill:tigerstyle"]
         );
         assert_eq!(
-            on_skill(Harness::Pi, "code-review", Some("since main"), None),
-            ["pi", "--name", "code-review", "/skill:code-review since main"]
+            on_skill(Harness::Pi, "code-review", Some("since main")),
+            ["pi", "/skill:code-review since main"]
         );
     }
 
