@@ -1443,10 +1443,15 @@ impl App {
                 }
             },
             Event::Heard { number, heard } => {
+                let ended = matches!(heard, Heard::Ended(_));
                 if let Some(Over::Ask(ask)) = &mut self.focus.over
                     && ask.number() == number
                 {
                     ask.heard(heard);
+                    if ended {
+                        let look = self.sidebar.look_again();
+                        self.look(look);
+                    }
                 }
             },
             Event::Remotes { number, remotes } => {
@@ -2663,10 +2668,11 @@ impl App {
 
     /// Takes zellij's client to `place` on `machine`, and does `after` once it
     /// is there, in another session. On another machine than the one the
-    /// client runs on, a client there takes its place, as `swap` says, and
-    /// opens what `after` opens once it is in. Whether it went.
+    /// client runs on, or where luneta cannot tell which session the client
+    /// is in, a client there takes its place, as `swap` says, and opens what
+    /// `after` opens once it is in. Whether it went.
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
-        if machine != self.sidebar.on() {
+        if machine != self.sidebar.on() || self.sidebar.astray().is_some() {
             // The session a kill is of is the one the client leaves, of the
             // machine it leaves, which the sidebar asks for only as the
             // client goes on in a session of that machine.
@@ -2761,9 +2767,14 @@ impl App {
 
     /// Where luneta's zellij goes where a client that takes its place on
     /// another machine fails: back to the session it is in, of the machine it
-    /// is on now; or nowhere, where luneta does not know which that is.
+    /// is on now; or on, where its client left that session for one luneta
+    /// cannot tell; or nowhere, where luneta does not know which that is.
     fn back(&self) -> Fails {
-        self.here_back().map_or(Fails::End, Fails::Back)
+        match self.here_back() {
+            Some(back) => Fails::Back(back),
+            None if self.sidebar.astray().is_some() => Fails::Onward(Vec::new()),
+            None => Fails::End,
+        }
     }
 
     fn here_back(&self) -> Option<Back> {
@@ -2926,6 +2937,11 @@ impl App {
     fn seat(&self) -> Result<SessionName, String> {
         if self.client.coming.is_some() {
             return Err("zellij has yet to come to its session".to_owned());
+        }
+        if let Some(left) = self.sidebar.astray() {
+            return Err(format!(
+                "zellij's client left {left} for a session luneta cannot tell: go to one"
+            ));
         }
         let Some(here) = self.sidebar.here() else {
             return Err("zellij has yet to say which session it is in".to_owned());
