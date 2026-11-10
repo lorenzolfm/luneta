@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
-use crate::clients::{Client, Listed};
+use crate::cli::{Client, Listed};
 use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};

@@ -1,7 +1,7 @@
 //! zellij's CLI as luneta and its daemon run it, on the machine they run on:
 //! with none of the variables of a pane it may run in, and nothing to read,
-//! what it says as it answers or fails, and a session's panes as it lists
-//! them.
+//! what it says as it answers or fails, and a session's panes and clients as
+//! it lists them.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -12,10 +12,13 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::clients;
 use crate::program::{self, Ran};
 use crate::zellij::SessionName;
 use crate::Directory;
+
+mod clients;
+
+pub use clients::{Client, Listed};
 
 /// What names the session of a zellij pane, in the variables of what runs in
 /// it.
@@ -37,7 +40,7 @@ pub const LEFT_OUT: [&str; 5] =
 pub const ANSWER: Duration = Duration::from_secs(2);
 
 /// Has `command` run without what `LEFT_OUT` names, and with nothing to read.
-pub fn quiet(command: &mut Command) {
+fn quiet(command: &mut Command) {
     for name in LEFT_OUT {
         command.env_remove(name);
     }
@@ -96,7 +99,7 @@ pub fn answered(command: &mut Command) -> Result<String, Failure> {
 /// not answer it and others did, it says so, lists them on its stdout, and ends
 /// as that list does (`send_action_to_session` in zellij 0.45.1's `commands.rs`,
 /// and `list_sessions`, which exits 0).
-pub(crate) fn answer_of(ran: Ran) -> Result<Vec<u8>, Failure> {
+fn answer_of(ran: Ran) -> Result<Vec<u8>, Failure> {
     let (status, stdout, stderr) = match ran {
         Ran::Ended { status, stdout, stderr } => (status, stdout, stderr),
         Ran::Stuck => return Err(Failure::Stuck),
@@ -322,7 +325,7 @@ fn option(name: &str, value: impl fmt::Display) -> String {
 }
 
 /// The option that has zellij's CLI ask `session`.
-pub(crate) fn session_option(session: &SessionName) -> String {
+fn session_option(session: &SessionName) -> String {
     option("--session", session.as_str())
 }
 
@@ -347,8 +350,10 @@ pub fn panes_listed(session: &SessionName) -> Result<Vec<u8>, Failure> {
 }
 
 /// The clients of `session`, as zellij lists them now, or why not.
-pub fn clients(session: &SessionName) -> Result<clients::Listed, Failure> {
-    clients::list(zellij(), session)
+pub fn clients(session: &SessionName) -> Result<Listed, Failure> {
+    let mut command = action(session);
+    command.arg("list-clients");
+    heard(|| answered(&mut command), |said| clients::read(said, session))
 }
 
 /// What a pane or a tab luneta opens runs.
@@ -559,13 +564,13 @@ const NO_SESSIONS: &str = "No active zellij sessions found.";
 pub fn sessions_listed() -> Result<String, Failure> {
     let mut command = zellij();
     command.args(["list-sessions", "--no-formatting"]);
-    let ran = ran(&mut command)?;
-    if let Ran::Ended { stderr, .. } = &ran
+    let run = ran(&mut command)?;
+    if let Ran::Ended { stderr, .. } = &run
         && String::from_utf8_lossy(stderr).contains(NO_SESSIONS)
     {
         return Ok(String::new());
     }
-    Ok(String::from_utf8_lossy(&answer_of(ran)?).into_owned())
+    Ok(String::from_utf8_lossy(&answer_of(run)?).into_owned())
 }
 
 /// What `delete-session --force` says as it kills a session that runs:
@@ -583,11 +588,11 @@ const UNKEPT: i32 = 2;
 pub fn session_killed(session: &SessionName) -> Result<(), Failure> {
     let mut command = zellij();
     command.args(["delete-session", "--force", "--", session.as_str()]);
-    let ran = ran(&mut command)?;
-    let unkept = matches!(&ran, Ran::Ended { status, stdout, .. }
+    let run = ran(&mut command)?;
+    let unkept = matches!(&run, Ran::Ended { status, stdout, .. }
         if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
     if !unkept {
-        answer_of(ran)?;
+        answer_of(run)?;
     }
     Ok(())
 }

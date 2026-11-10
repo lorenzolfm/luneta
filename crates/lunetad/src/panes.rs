@@ -23,7 +23,7 @@ use serde::Deserialize;
 use crate::api;
 use crate::cli;
 use crate::core::{self, Addressed};
-use crate::metadata::{self, Metadata};
+use crate::zellij::metadata::{self, Metadata};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
 use crate::zellij::{Id, SessionName};

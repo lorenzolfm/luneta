@@ -8,17 +8,10 @@
 //! `session_layout_metadata.rs`).
 
 use std::ops::Deref;
-use std::process::Command;
-use std::time::Duration;
 
+use super::{laid, Laid, PaneId};
 use crate::api;
-use crate::cli::{self, answer_of, heard, laid, Failure, Laid, PaneId};
-use crate::program;
 use crate::zellij::SessionName;
-
-/// How long zellij has to list a session's clients: a server that runs
-/// answers at once.
-const LIMIT: Duration = Duration::from_secs(2);
 
 /// The line zellij 0.45 starts its list with, which names its columns.
 const HEADER: &str = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
@@ -68,7 +61,7 @@ impl Deref for Listed {
 /// After the line that names the columns, zellij writes one for each client,
 /// by its id: that id, the pane it has the focus on, as `terminal_3` or
 /// `plugin_2`, and what runs there, which can hold spaces and lines of its own.
-pub fn parse(said: &str, commands: &[(PaneId, String)]) -> Result<Listed, String> {
+fn parse(said: &str, commands: &[(PaneId, String)]) -> Result<Listed, String> {
     let said = said.trim_start();
     let (header, mut rest) = said.split_once('\n').unwrap_or((said, ""));
     if header.trim_end() != HEADER {
@@ -126,21 +119,12 @@ fn commands_to_skip(said: &str, session: &SessionName) -> Vec<(PaneId, String)> 
     panes.into_iter().filter_map(many_lines).collect()
 }
 
-/// The clients of `session`, as `zellij` lists them, or why it did not in
-/// `LIMIT`: a command of zellij's, set up as its caller needs, which this
-/// asks for them.
-pub fn list(mut zellij: Command, session: &SessionName) -> Result<Listed, Failure> {
-    zellij.arg(cli::session_option(session)).args(["action", "list-clients"]);
-    let ask = || {
-        let said = answer_of(program::run(&mut zellij, LIMIT).map_err(Failure::Unrun)?)?;
-        let unread = |_| Failure::Unread("zellij listed what is not UTF-8".to_owned());
-        String::from_utf8(said).map_err(unread)
-    };
-    let read = |said: &str| {
-        parse(said, &commands_to_skip(said, session))
-            .map_err(|why| format!("zellij listed what does not read: {why}"))
-    };
-    heard(ask, read)
+/// The clients in what zellij `said` it lists of `session`, or why it does
+/// not read: a row that a command of many lines quotes is skipped by that
+/// command, as zellij lists `session`'s panes.
+pub(super) fn read(said: &str, session: &SessionName) -> Result<Listed, String> {
+    parse(said, &commands_to_skip(said, session))
+        .map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
 #[cfg(test)]

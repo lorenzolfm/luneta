@@ -97,9 +97,9 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    carries, checks, claude, cli, client, clients, closes, ended, eza, fetches, git, github, keeps,
-    log, metadata, moves, names, opens, panes, pi, printed, release, remote, renames, screens,
-    shells, skills, topics, turns, watch, zellij, zoxide, Harness,
+    carries, checks, claude, cli, client, closes, ended, eza, fetches, git, github, keeps, log,
+    moves, names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills,
+    topics, turns, watch, zellij, zoxide, Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -251,7 +251,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let watchers = Arc::new(Watchers::default());
     let folders = (claude_folder.clone(), sockets.clone());
     follow(&core, &claim.folder, folders, watchers.clone(), end)?;
-    panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
+    panes::follow(core.clone(), wake_panes, panes_woken, zellij::metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -1323,7 +1323,7 @@ where
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     let listed = cli::clients(session)?;
-    Ok(listed.iter().copied().map(clients::Client::to_api).collect())
+    Ok(listed.iter().copied().map(cli::Client::to_api).collect())
 }
 
 /// When a session started, as a question says it, or why it is invalid: it

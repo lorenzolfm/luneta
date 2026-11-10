@@ -4,18 +4,11 @@
 
 use std::env;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::metadata;
 use crate::zellij::{self, SessionName};
 use crate::Directory;
-
-/// The file zellij keeps how a session is laid out in, in the session's
-/// folder in its cache, to bring it back from once it ends: zellij lists a
-/// session that ended to bring back where it has this file and no socket.
-const LAYOUT: &str = "session-layout.kdl";
 
 /// The session a directory is for, as the picker's directories name it: for
 /// the directory itself, or for its repository too when it is a worktree of
@@ -70,32 +63,8 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 pub fn named() -> Option<Vec<String>> {
     let running = zellij::running(&zellij::folder())?;
     let mut named: Vec<String> = running.into_iter().map(|(name, _)| name).collect();
-    named.extend(kept()?);
+    named.extend(zellij::metadata::kept()?);
     Some(named)
-}
-
-/// The sessions zellij keeps how they were laid out of, in its cache, to
-/// bring them back from: those that ended, and those that run. None where
-/// luneta cannot read the folder they are in. A zellij of another contract
-/// keeps them elsewhere, and none is kept here.
-#[must_use]
-pub fn kept() -> Option<Vec<String>> {
-    let entries = match fs::read_dir(metadata::folder()?) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Vec::new()),
-        Err(_) => return None,
-    };
-    let mut kept = Vec::new();
-    for entry in entries {
-        let entry = entry.ok()?;
-        // A name that is no UTF-8 is of no session luneta names.
-        if let Ok(name) = entry.file_name().into_string()
-            && entry.path().join(LAYOUT).is_file()
-        {
-            kept.push(name);
-        }
-    }
-    Some(kept)
 }
 
 /// The name a session luneta makes for `dir` takes: the one `session_for`
@@ -164,7 +133,7 @@ pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
     if running.iter().any(|(name, _)| name == to.as_str()) {
         return Err(format!("{to} runs already"));
     }
-    if kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
+    if zellij::metadata::kept().ok_or_else(cannot)?.iter().any(|kept| kept == to.as_str()) {
         return Err(format!("zellij keeps {to}, which ended, to bring back"));
     }
     Ok(since)

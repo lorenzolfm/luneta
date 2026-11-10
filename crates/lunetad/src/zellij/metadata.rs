@@ -1,5 +1,6 @@
-//! What zellij writes of each session that runs, in its cache folder, as the
-//! session changes: its tabs, its panes and where its clients are.
+//! What zellij writes of each session in its cache folder: as the session runs
+//! and changes, its tabs, its panes and where its clients are; and how it is
+//! laid out, to bring it back from once it ends.
 //!
 //! The server writes `session-metadata.kdl` in a folder named for the session
 //! within a second of a pane or a tab opening, closing or moving, or a client
@@ -16,21 +17,26 @@
 //! listing would have the session listed again.
 
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{self, ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 
-use crate::zellij;
+use super::{SessionName, SPOKEN};
 
 /// Where zellij writes the metadata of each session, in its cache folder: in
 /// the folder of the contract between a zellij client and its server that
 /// zellij 0.45 speaks. A zellij of another contract writes it elsewhere, and
 /// the panes of its sessions are listed on the sweep alone.
-const SESSIONS: [&str; 2] = [zellij::SPOKEN, "session_info"];
+const SESSIONS: [&str; 2] = [SPOKEN, "session_info"];
 
 /// The file zellij writes a session's metadata in, in the session's folder.
 const FILE: &str = "session-metadata.kdl";
+
+/// The file zellij keeps how a session is laid out in, in the session's
+/// folder, to bring it back from once it ends: zellij lists a session that
+/// ended to bring back where it has this file and no socket.
+const LAYOUT: &str = "session-layout.kdl";
 
 /// The most of a file the daemon reads. A file grows by a few hundred bytes
 /// for each pane: one past this has more panes than a screen holds, and what
@@ -141,6 +147,37 @@ pub fn read(folder: &Path, name: &str) -> io::Result<Option<Metadata>> {
     let mut written = Vec::new();
     file.take(FILE_BYTES_MAX).read_to_end(&mut written)?;
     Ok(Some(Metadata::of(&String::from_utf8_lossy(&written))))
+}
+
+/// The sessions zellij keeps how they were laid out of, in its cache, to
+/// bring them back from: those that ended, and those that run. None where
+/// luneta cannot read the folder they are in. A zellij of another contract
+/// keeps them elsewhere, and none is kept here.
+#[must_use]
+pub fn kept() -> Option<Vec<String>> {
+    let entries = match fs::read_dir(folder()?) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut kept = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        // A name that is no UTF-8 is of no session luneta names.
+        if let Ok(name) = entry.file_name().into_string()
+            && entry.path().join(LAYOUT).is_file()
+        {
+            kept.push(name);
+        }
+    }
+    Some(kept)
+}
+
+/// Whether zellij keeps anything of `session` in its cache: its metadata, or
+/// how it is laid out.
+#[must_use]
+pub fn keeps_any_of(session: &SessionName) -> bool {
+    folder().is_some_and(|folder| folder.join(session.as_str()).exists())
 }
 
 #[cfg(test)]

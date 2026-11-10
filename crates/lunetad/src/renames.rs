@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::cli::{session_renamed, ANSWER};
-use crate::zellij::{self, SessionName, SPOKEN};
+use crate::zellij::{self, SessionName};
 
 /// What zellij's web client says to its server to have it read again which
 /// sessions run and which ended, framed as zellij frames a message: four
@@ -50,7 +50,7 @@ pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
 /// `RELIST` is of has the name, the rename is left to say why, as zellij's
 /// CLI speaks its own.
 fn relisted_in(folder: &Path, session: &SessionName) -> Result<(), String> {
-    let socket = folder.join(SPOKEN).join(session.as_str());
+    let socket = zellij::socket_at(folder, session);
     let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
@@ -117,6 +117,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use crate::zellij::SPOKEN;
 
     /// Where no socket of zellij 0.45's contract has the name of the session
     /// a rename is of, the rename is left to say why: the session is of a
