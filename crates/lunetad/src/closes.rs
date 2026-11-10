@@ -236,8 +236,9 @@ fn settled(session: &SessionName, started: SystemTime, folder: &Path) -> Result<
         thread::sleep(GOING_LOOK);
     }
     thread::sleep(SETTLING);
-    let unknown = || format!("luneta cannot tell whether zellij keeps \"{session}\" in its cache");
-    let cached = crate::zellij::metadata::cached(session).ok_or_else(unknown)?;
+    let unknown =
+        |why| format!("luneta cannot tell whether zellij keeps \"{session}\" in its cache: {why}");
+    let cached = crate::zellij::metadata::cached(session).map_err(unknown)?;
     if cached && running_in(folder)?.iter().all(|(name, _)| name != session.as_str()) {
         return deleted(session);
     }

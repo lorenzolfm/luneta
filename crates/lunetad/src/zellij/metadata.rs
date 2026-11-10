@@ -17,6 +17,7 @@
 //! listing would have the session listed again.
 
 use std::ffi::OsString;
+use std::fmt;
 use std::fs::{self, File};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{self, ErrorKind, Read as _};
@@ -149,20 +150,41 @@ pub fn read(folder: &Path, name: &str) -> io::Result<Option<Metadata>> {
     Ok(Some(Metadata::of(&String::from_utf8_lossy(&written))))
 }
 
+/// Why luneta cannot tell what zellij keeps in its cache.
+#[derive(Debug)]
+pub enum Unknown {
+    /// No home says where the cache is.
+    NoHome,
+    /// The folder did not read, for the reason it holds.
+    Unread { folder: PathBuf, error: io::Error },
+}
+
+impl fmt::Display for Unknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unknown::NoHome => f.write_str("no home says where zellij's cache is"),
+            Unknown::Unread { folder, error } => {
+                write!(f, "{} does not read: {error}", folder.display())
+            },
+        }
+    }
+}
+
 /// The sessions zellij keeps how they were laid out of, in its cache, to
-/// bring them back from: those that ended, and those that run. None where
-/// luneta cannot read the folder they are in. A zellij of another contract
-/// keeps them elsewhere, and none is kept here.
-#[must_use]
-pub fn kept() -> Option<Vec<String>> {
-    let entries = match fs::read_dir(folder()?) {
+/// bring them back from: those that ended, and those that run. Or why luneta
+/// cannot read the folder they are in. A zellij of another contract keeps
+/// them elsewhere, and none is kept here.
+pub fn kept() -> Result<Vec<String>, Unknown> {
+    let folder = folder().ok_or(Unknown::NoHome)?;
+    let unread = |error| Unknown::Unread { folder: folder.clone(), error };
+    let entries = match fs::read_dir(&folder) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Some(Vec::new()),
-        Err(_) => return None,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unread(error)),
     };
     let mut kept = Vec::new();
     for entry in entries {
-        let entry = entry.ok()?;
+        let entry = entry.map_err(unread)?;
         // A name that is no UTF-8 is of no session luneta names.
         if let Ok(name) = entry.file_name().into_string()
             && entry.path().join(LAYOUT).is_file()
@@ -170,14 +192,14 @@ pub fn kept() -> Option<Vec<String>> {
             kept.push(name);
         }
     }
-    Some(kept)
+    Ok(kept)
 }
 
 /// Whether zellij has anything of `session` in its cache: its metadata, or
-/// how it is laid out. None where luneta cannot tell.
-#[must_use]
-pub fn cached(session: &SessionName) -> Option<bool> {
-    folder()?.join(session.as_str()).try_exists().ok()
+/// how it is laid out. Or why luneta cannot tell.
+pub fn cached(session: &SessionName) -> Result<bool, Unknown> {
+    let folder = folder().ok_or(Unknown::NoHome)?.join(session.as_str());
+    folder.try_exists().map_err(|error| Unknown::Unread { folder, error })
 }
 
 #[cfg(test)]
