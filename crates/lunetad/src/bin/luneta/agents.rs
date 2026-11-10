@@ -5,7 +5,7 @@
 //!
 //! The harness is the one you picked last, in any luneta on the host, kept
 //! for the next in the file `luneta/agent` of `$XDG_STATE_HOME`, or of
-//! `~/.local/state` where that is not set: `Tab` in the menu picks the other.
+//! `~/.local/state` where that is not set: `Tab` in the menu picks the next.
 //! On a pane an agent runs in, the menu starts the next in that one's harness.
 
 use std::fs;
@@ -43,11 +43,35 @@ pub fn named(program: &str) -> Option<Harness> {
     }
 }
 
-/// The harness `Tab` picks after `harness`.
-pub const fn other(harness: Harness) -> Harness {
+/// The harness `Tab` picks after `harness`, as it goes round those luneta
+/// knows.
+pub const fn next(harness: Harness) -> Harness {
     match harness {
         Harness::ClaudeCode => Harness::Pi,
         Harness::Pi => Harness::ClaudeCode,
+    }
+}
+
+/// The harness the menu starts agents in, and what picked it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picked {
+    /// The agent in the pane the menu is for runs in it.
+    ByPane(Harness),
+    /// You did, last, in any luneta on the host; or nobody has yet, and it is
+    /// Claude Code.
+    ByYou(Harness),
+}
+
+impl Picked {
+    pub const fn harness(self) -> Harness {
+        match self {
+            Picked::ByPane(harness) | Picked::ByYou(harness) => harness,
+        }
+    }
+
+    /// What `Tab` picks after it: the next harness, which you picked.
+    pub const fn next(self) -> Picked {
+        Picked::ByYou(next(self.harness()))
     }
 }
 

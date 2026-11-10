@@ -3601,8 +3601,11 @@ impl Sidebar {
 
     /// The harness the menu for `target` starts agents in: that of the agent
     /// in its pane, where one runs, or else the one you picked last.
-    fn agent_for(&self, target: &Target) -> agents::Harness {
-        self.harness_in(target).unwrap_or_else(|| self.agent.harness())
+    fn agent_for(&self, target: &Target) -> agents::Picked {
+        match self.harness_in(target) {
+            Some(harness) => agents::Picked::ByPane(harness),
+            None => agents::Picked::ByYou(self.agent.harness()),
+        }
     }
 
     /// The harness of the agent in the pane of `target`, where one runs that
@@ -8989,14 +8992,16 @@ mod tests {
             runs: crate::skills::Runs::ForAnyone,
         };
         sidebar.found(1, agent, Ok(vec![skill("code-review"), skill("tigerstyle")]));
-        let clicked = clicks(&mut sidebar, 15);
+        let clicked = clicks(&mut sidebar, 14);
         let skills: Vec<(&str, Option<Hit>)> =
-            clicked[1..4].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+            clicked[1..5].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
+        let tab = Some(Hit::Menu(1, Choice::Key(KeyEvent::from(KeyCode::Tab))));
         assert_eq!(skills, [
             (" _", None),
             (" /code-review", on("code-review")),
             (" /tigerstyle", on("tigerstyle")),
+            (" \u{ec82} claude, the pane's  <TAB>", tab),
         ]);
         // A click on the skill of a menu that closed since does nothing.
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
@@ -9189,7 +9194,7 @@ mod tests {
             "─ #5 ────── lorenzolfm/luneta ─",
             " w  worktree",
             " r  /thermo-nuclear-review",
-            " tab  use pi",
+            " \u{ec82} claude  <TAB> another agent",
             " <ESC> - Close",
         ]);
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
@@ -9514,7 +9519,7 @@ mod tests {
             "─ sync-rework ─ plans/sync-rework.md ─",
             " w  worktree",
             " t  tackle",
-            " tab  use pi",
+            " \u{ec82} claude  <TAB> another agent",
             " <ESC> - Close",
         ]);
         let Asked::Pull { on: asked_on, work, .. } = sidebar.key(&char('t'), moment(160_000))

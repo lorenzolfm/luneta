@@ -27,6 +27,12 @@ const TERMINAL: &str = "\u{e795}";
 /// `custom-neovim`, for vim as well.
 const NEOVIM: &str = "\u{e6ae}";
 
+/// `cod-claude`.
+const CLAUDE: &str = "\u{ec82}";
+
+/// `md-pi`.
+const PI: &str = "\u{f03ff}";
+
 /// `dev-python`.
 const PYTHON: &str = "\u{e73c}";
 
@@ -38,8 +44,8 @@ const GIT: &str = "\u{e702}";
 /// ssh's with 3.3.0: an older font has neither, and the terminal draws a box
 /// or nothing for them.
 const ICONS: [(&str, &str); 12] = [
-    ("claude", "\u{ec82}"), // `cod-claude`
-    ("pi", "\u{f03ff}"),    // `md-pi`
+    ("claude", CLAUDE),
+    ("pi", PI),
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
     ("cargo", "\u{e7a8}"), // `dev-rust`
@@ -51,6 +57,14 @@ const ICONS: [(&str, &str); 12] = [
     ("lazygit", GIT),
     ("htop", "\u{eb31}"), // `cod-pulse`
 ];
+
+/// The icon of an agent in `harness`, as its row has.
+pub const fn harness(harness: lunetad::Harness) -> &'static str {
+    match harness {
+        lunetad::Harness::ClaudeCode => CLAUDE,
+        lunetad::Harness::Pi => PI,
+    }
+}
 
 /// The program an agent runs in `harness`, by its binary's name, if luneta
 /// knows of that harness.
