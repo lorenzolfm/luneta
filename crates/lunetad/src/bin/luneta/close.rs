@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
+use lunetad::cli::TabId;
 
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};
@@ -152,7 +153,7 @@ pub enum Act {
     Pane { session: SessionName, started: SystemTime, pane: u32 },
     /// Close a tab of the session that started at `started`, by its id, and the
     /// terminals in it, the floating ones too.
-    Tab { session: SessionName, started: SystemTime, tab: u32, panes: Vec<u32> },
+    Tab { session: SessionName, started: SystemTime, tab: TabId, panes: Vec<u32> },
     /// Kill the session that started at `started`, and delete it, so that
     /// zellij keeps nothing to bring it back with. A key plans it for a
     /// session luneta's zellij is not in, or for its machine's only one,
@@ -340,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_pane_closes_alone_its_tab_or_its_session_as_zellij_would_close_them() {
-        let tab = Closes::Tab { id: 3, panes: vec![4, 5] };
+        let tab = Closes::Tab { id: TabId(3), panes: vec![4, 5] };
         let luneta = luneta();
         let planned = |seat: Seat, deletes: Deletes| {
             plan(&subject(&luneta, seat, deletes, Vec::new())).map(|plan| plan.act)
@@ -352,7 +353,7 @@ mod tests {
         );
         assert_eq!(
             planned(Seat::In, pane(tab)),
-            Ok(Act::Tab { session: session.clone(), started, tab: 3, panes: vec![4, 5] })
+            Ok(Act::Tab { session: session.clone(), started, tab: TabId(3), panes: vec![4, 5] })
         );
         let kill = Act::Kill { session: session.clone(), started };
         assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), Ok(kill.clone()));
@@ -415,7 +416,7 @@ mod tests {
             planned.ok().and_then(|plan| plan.question())
         };
         assert_eq!(question(pane(Closes::Pane)), None);
-        let tab = Closes::Tab { id: 1, panes: vec![4, 5, 8] };
+        let tab = Closes::Tab { id: TabId(1), panes: vec![4, 5, 8] };
         assert_eq!(question(pane(tab)), Some("Close its tab? 2 agents, 1 busy".to_owned()));
         assert_eq!(
             question(Deletes::Session),

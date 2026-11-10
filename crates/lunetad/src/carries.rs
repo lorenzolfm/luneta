@@ -39,6 +39,7 @@ use crate::process;
 use crate::seats::seated;
 use crate::transcripts::SessionId;
 use crate::zellij::SessionName;
+use crate::Directory;
 
 /// How long an agent has to end once its pane closed, before its session
 /// resumes in another: Claude Code ends at once as its terminal hangs up.
@@ -504,7 +505,7 @@ fn leaves(laid: &[Laid], carry: &Carry, planned: &Planned) -> Result<Leaves, Str
 fn landing(to: &SessionName, lands: Lands) -> Result<(), String> {
     match lands {
         Lands::Beside(beside) => {
-            let laid = cli::laid(to.as_str())?;
+            let laid = cli::laid(to)?;
             if laid.iter().any(|laid| laid.id == beside && !laid.is_plugin) {
                 Ok(())
             } else {
@@ -512,7 +513,7 @@ fn landing(to: &SessionName, lands: Lands) -> Result<(), String> {
             }
         },
         Lands::Tab => {
-            if cli::clients(to.as_str())?.is_empty() {
+            if cli::clients(to)?.is_empty() {
                 return Err(opens::no_client(to));
             }
             Ok(())
@@ -522,7 +523,7 @@ fn landing(to: &SessionName, lands: Lands) -> Result<(), String> {
 
 /// A pane on its way: its id, where it starts again, and the command it
 /// starts with there, or none for your shell.
-type Going = (u32, String, Vec<String>);
+type Going = (u32, Directory, Vec<String>);
 
 /// What starts what `going` would have started again, by hand.
 fn by_hand(going: &[Going]) -> String {
@@ -609,9 +610,11 @@ pub fn carried(folder: &Path, carry: &Carry, planned: &Planned) -> Result<Moved,
                 resuming(&args, id).map_err(|why| format!("its agent's command line: {why}"))?
             },
         };
-        going.push((*pane, again.cwd().to_owned(), command));
+        let cwd = Directory::parse(again.cwd().to_owned());
+        let cwd = cwd.map_err(|why| format!("pane {pane}: {why}"))?;
+        going.push((*pane, cwd, command));
     }
-    let laid = cli::laid(from.session.as_str())?;
+    let laid = cli::laid(&from.session)?;
     let leaving = leaves(&laid, carry, planned)?;
     landing(&to.session, *lands)?;
     let closed = match &leaving {
@@ -801,10 +804,11 @@ mod tests {
     #[test]
     fn what_starts_it_by_hand_is_quoted_for_a_shell() {
         let command = ["claude", "--append-system-prompt", "it's done", "--resume", ID];
-        let going = [(3, "/w".to_owned(), command.map(str::to_owned).to_vec())];
+        let w = Directory::parse("/w".to_owned()).unwrap();
+        let going = [(3, w, command.map(str::to_owned).to_vec())];
         let quoted = format!("`claude --append-system-prompt 'it'\\''s done' --resume {ID}` in /w");
         assert_eq!(by_hand(&going), quoted);
-        let shell = [(4, "/w/b".to_owned(), Vec::new())];
+        let shell = [(4, Directory::parse("/w/b".to_owned()).unwrap(), Vec::new())];
         assert_eq!(by_hand(&shell), "your shell in /w/b");
     }
 

@@ -32,7 +32,7 @@ const CONNECTED: [u8; 2] = [0x22, 0];
 /// client takes the name as well as one with.
 pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
     relisted_in(&zellij::folder(), session)?;
-    session_renamed(session, to)
+    Ok(session_renamed(session, to)?)
 }
 
 /// Has the server of `session`, where its socket is in `folder`, zellij's,

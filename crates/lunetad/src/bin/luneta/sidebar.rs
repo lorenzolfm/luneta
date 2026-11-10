@@ -1089,7 +1089,7 @@ pub enum Asked {
         on: Machine,
         session: SessionName,
         cwd: String,
-        tab_cwd: String,
+        tab_cwd: Directory,
         name: String,
         command: Vec<String>,
     },
@@ -6429,6 +6429,7 @@ mod tests {
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, Clients, NameSource, Pane, Panes, UnreadFile, Version, Zellij};
+    use lunetad::cli::TabId;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 
@@ -6436,6 +6437,10 @@ mod tests {
     use crate::own::Before;
     use crate::pull::{At, Readied, Ready};
     use crate::spots::Hit;
+
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
+    }
 
     fn pane(id: u32, tab: u32, cwd: &str, command: &str) -> Pane {
         Pane {
@@ -9616,7 +9621,8 @@ mod tests {
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
-        let open = Open::Pane { session: session_name("older"), beside: 1, cwd, command };
+        let (session, cwd) = (session_name("older"), directory(&cwd));
+        let open = Open::Pane { session, beside: 1, cwd, command };
         let open = Asked::Open { menu: 1, on: Machine::Local, open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
@@ -9637,7 +9643,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let started = |menu, session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
-            let (session, cwd) = (session_name(session), cwd.to_owned());
+            let (session, cwd) = (session_name(session), directory(cwd));
             let open = Open::Pane { session, beside, cwd, command };
             Asked::Open { menu, on: Machine::Local, open }
         };
@@ -9685,7 +9691,7 @@ mod tests {
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
-        let (older, cwd) = (session_name("older"), "/w/luneta/main".to_owned());
+        let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         let tab = Tab { cwd, name: None, command: Vec::new() };
         let tab = Open::Tab { session: older, tab, alone_since: None };
         let tab = Asked::Open { menu: 1, on: Machine::Local, open: tab };
@@ -9702,7 +9708,7 @@ mod tests {
         sidebar.step(2);
         type_in(&mut sidebar, "n");
         let newer = pane_of("newer", 20, 1);
-        let (session, cwd) = (session_name("newer"), "/w/b".to_owned());
+        let (session, cwd) = (session_name("newer"), directory("/w/b"));
         let tab = Tab { cwd, name: None, command: Vec::new() };
         let tab = Open::Tab { session, tab, alone_since: None };
         let asked = Asked::OpenThere { menu: 2, on: Machine::Local, place: newer, open: tab };
@@ -9832,7 +9838,7 @@ mod tests {
             on: Machine::Local,
             session: session_name("newer-2"),
             cwd: "/w/n".to_owned(),
-            tab_cwd: "/w/n/feat".to_owned(),
+            tab_cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
             command: Vec::new(),
         };
@@ -9938,7 +9944,8 @@ mod tests {
         let at = At::Session((listed("older", 10), 1));
         let worktree = "/w/luneta/feat".to_owned();
         let ready = Ready { at, worktree: worktree.clone(), branch: None, moved_off: false, work };
-        let tab = Tab { cwd: worktree, name: Some("#5".to_owned()), command: Vec::new() };
+        let (cwd, name) = (directory(&worktree), Some("#5".to_owned()));
+        let tab = Tab { cwd, name, command: Vec::new() };
         let open = Open::Tab { session: session_name("older"), tab, alone_since: None };
         assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), Asked::Open {
             menu: number,
@@ -10243,7 +10250,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 12, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
-        let (session, cwd) = (session_name("s"), "/w/luneta/main".to_owned());
+        let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
         let pane = Asked::Open { menu: 1, on: Machine::Local, open: pane };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), pane);
@@ -10275,7 +10282,7 @@ mod tests {
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
-        let cwd = "/w/luneta/main".to_owned();
+        let cwd = directory("/w/luneta/main");
         let open = Open::Pane { session: session_name("s"), beside: 1, cwd, command };
         let open = Asked::Open { menu: 1, on: Machine::Local, open };
         assert_eq!(sidebar.printed(1, nothing()), open);
@@ -10476,7 +10483,7 @@ mod tests {
             ran: Ran::Unhooked,
         })));
 
-        let (older, cwd) = (session_name("older"), "/w/luneta/main".to_owned());
+        let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };
         let tab = Open::Tab { session: older.clone(), tab, alone_since: None };
         type_in(&mut sidebar, "n");
@@ -10929,7 +10936,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         let closes = || closes_here(1, "older", 1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
-        let tab = || Closes::Tab { id: 0, panes: vec![1] };
+        let tab = || Closes::Tab { id: TabId(0), panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
         let lines = screen(&mut sidebar, true, 32, 16);
@@ -10938,7 +10945,7 @@ mod tests {
         let act = Act::Tab {
             session: session_name("older"),
             started: listed("older", 10).started(),
-            tab: 0,
+            tab: TabId(0),
             panes: vec![1],
         };
         assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
@@ -11891,7 +11898,7 @@ mod tests {
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();
-        let (session, cwd) = (session_name("main"), "/w/b".to_owned());
+        let (session, cwd) = (session_name("main"), directory("/w/b"));
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
         let asked = Asked::Open { menu: number, on: on.clone(), open };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
@@ -12238,7 +12245,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(here.clone()));
         type_in(&mut sidebar, "n");
         let menu = sidebar.menu.as_ref().map_or(0, Menu::number);
-        let tab = Tab { cwd: "/w/a".to_owned(), name: None, command: Vec::new() };
+        let tab = Tab { cwd: directory("/w/a"), name: None, command: Vec::new() };
         let open = Open::Tab { session: session_name("main"), tab, alone_since: None };
         let there = Asked::OpenThere { menu, on: Machine::Local, place: here, open };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), there);

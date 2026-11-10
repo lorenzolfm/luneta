@@ -26,7 +26,7 @@ use crate::core::{self, Addressed};
 use crate::metadata::{self, Metadata};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
-use crate::zellij::Id;
+use crate::zellij::{Id, SessionName};
 
 /// How long the daemon leaves a session's server be once it made its socket,
 /// before it asks zellij anything: every call of zellij's CLI asks the server
@@ -167,7 +167,7 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 }
 
 /// The panes of `session`, or why zellij did not list them.
-fn list(session: &str) -> Result<Vec<Pane>, String> {
+fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
     let said = cli::panes_listed(session)?;
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
@@ -305,12 +305,16 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
+    let Ok(session) = SessionName::running(name) else {
+        troubles.say(format!("the panes of {name}: zellij would take no session by that name"));
+        return Some(());
+    };
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
-    if let Ok(panes) = list(name).inspect_err(said) {
+    if let Ok(panes) = list(&session).inspect_err(said) {
         core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
     }
-    let said = |why: &String| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = cli::clients(name).inspect_err(said) {
+    let said = |why: &cli::Failure| troubles.say(format!("the clients of {name}: {why}"));
+    if let Ok(clients) = cli::clients(&session).inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));

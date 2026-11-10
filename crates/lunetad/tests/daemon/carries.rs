@@ -102,7 +102,7 @@ fn two_sessions(work: &Value, play: &Value) -> (Host, impl Sized) {
 /// `cwd`: as a command, as zellij starts its own shell where the pane beside
 /// works, whatever `--cwd` says.
 fn shell_opened(beside: u32, cwd: &str) -> String {
-    format!("{beside} --session=play action new-pane --no-focus --cwd {cwd} --close-on-exit -- ")
+    format!("{beside} --session=play action new-pane --no-focus --cwd={cwd} --close-on-exit -- ")
 }
 
 fn opened_as(opened: &[String], expected: &[String]) {
@@ -221,7 +221,7 @@ fn a_tab_goes_whole_to_a_tab_of_its_own_named_as_it_was() {
 
     assert_eq!(carried, [(2, 7), (4, 9)]);
     assert_eq!(host.zellij.closed(), ["--session=work action close-tab-by-id 1"]);
-    let tab = "- --session=play action new-tab --no-focus --cwd /w/b --name auth --close-on-exit";
+    let tab = "- --session=play action new-tab --no-focus --cwd=/w/b --name=auth --close-on-exit";
     opened_as(&host.zellij.opened(), &[tab.to_owned(), shell_opened(7, "/w/d")]);
 }
 
@@ -297,7 +297,7 @@ fn an_agent_at_its_prompt_resumes_once_it_has_ended() {
     assert_eq!(closed, ["--session=work action close-pane --pane-id terminal_3"]);
     assert_eq!(carried.unwrap(), [(3, 9)]);
     let resumes = format!(
-        "5 --session=play action new-pane --no-focus --cwd /home/you/work -- sleep --resume {ID}"
+        "5 --session=play action new-pane --no-focus --cwd=/home/you/work -- sleep --resume {ID}"
     );
     assert_eq!(host.zellij.opened(), [resumes]);
 }

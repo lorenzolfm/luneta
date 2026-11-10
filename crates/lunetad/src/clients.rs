@@ -12,8 +12,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::api;
-use crate::cli::{self, answer_of, heard, laid, Laid, PaneId};
+use crate::cli::{self, answer_of, heard, laid, Failure, Laid, PaneId};
 use crate::program;
+use crate::zellij::SessionName;
 
 /// How long zellij has to list a session's clients: a server that runs
 /// answers at once.
@@ -113,7 +114,7 @@ fn pane_named(name: &str) -> Option<PaneId> {
     number("terminal_").map(PaneId::Terminal).or_else(|| number("plugin_").map(PaneId::Plugin))
 }
 
-fn commands_to_skip(said: &str, session: &str) -> Vec<(PaneId, String)> {
+fn commands_to_skip(said: &str, session: &SessionName) -> Vec<(PaneId, String)> {
     if said.lines().filter_map(row).nth(1).is_none() {
         return Vec::new();
     }
@@ -128,13 +129,12 @@ fn commands_to_skip(said: &str, session: &str) -> Vec<(PaneId, String)> {
 /// The clients of `session`, as `zellij` lists them, or why it did not in
 /// `LIMIT`: a command of zellij's, set up as its caller needs, which this
 /// asks for them.
-pub fn list(mut zellij: Command, session: &str) -> Result<Listed, String> {
+pub fn list(mut zellij: Command, session: &SessionName) -> Result<Listed, Failure> {
     zellij.arg(cli::session_option(session)).args(["action", "list-clients"]);
     let ask = || {
-        let ran = program::run(&mut zellij, LIMIT)
-            .map_err(|error| format!("zellij could not be run: {error}"))?;
-        let said = answer_of(ran)?;
-        String::from_utf8(said).map_err(|_| "zellij listed what is not UTF-8".to_owned())
+        let said = answer_of(program::run(&mut zellij, LIMIT).map_err(Failure::Unrun)?)?;
+        let unread = |_| Failure::Unread("zellij listed what is not UTF-8".to_owned());
+        String::from_utf8(said).map_err(unread)
     };
     let read = |said: &str| {
         parse(said, &commands_to_skip(said, session))

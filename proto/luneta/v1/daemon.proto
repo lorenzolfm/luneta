@@ -283,7 +283,8 @@ message OpenRequest {
   string session = 2;
   // The directory it starts in.
   string cwd = 3;
-  // What runs in it: the shell of the user the daemon runs as, where empty.
+  // What runs in it. Where empty, a tab runs the shell of the user the
+  // daemon runs as, and a pane zellij's own shell.
   repeated string command = 4;
   // What it opens: one of these, always. A question with neither is
   // invalid.

@@ -857,7 +857,7 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_claude_or_pi() {
     let opened = luneta(&host, ("work", 2), &["open", "pane", "--cwd", cwd, "--", "touch", "x"]);
     assert!(opened.status.success(), "{}", String::from_utf8_lossy(&opened.stderr));
     assert_eq!(String::from_utf8_lossy(&opened.stdout), "work:9\n");
-    let touch = format!("action new-pane --no-focus --cwd {cwd} -- touch x");
+    let touch = format!("action new-pane --no-focus --cwd={cwd} -- touch x");
     assert!(last_opened().ends_with(&touch), "{}", last_opened());
 }
 

@@ -1440,7 +1440,7 @@ pub enum Wants {
     /// to take its client there: from its pane `pane`, the menu's row's,
     /// which it takes the client to first, for a tab of a session it is
     /// not in.
-    Open { session: Listed, pane: u32, cwd: String, opens: Opens },
+    Open { session: Listed, pane: u32, cwd: Directory, opens: Opens },
     /// zellij to list the tabs of `session` other than that of its pane
     /// `pane`, for `tabs`.
     Tabs { session: Listed, pane: u32 },
@@ -1461,7 +1461,13 @@ pub enum Wants {
     /// named `name`, with `command` in it, or your shell for none, in place
     /// of the tabs zellij makes it with, for luneta to take its client there
     /// in turn.
-    Make { session: SessionName, cwd: String, tab_cwd: String, name: String, command: Vec<String> },
+    Make {
+        session: SessionName,
+        cwd: String,
+        tab_cwd: Directory,
+        name: String,
+        command: Vec<String>,
+    },
 }
 
 /// What a menu that closed leaves the sidebar to do.
@@ -1905,7 +1911,7 @@ impl Menu {
                         let command = agents::on_skill(keys.agent.harness(), &skill, None);
                         let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1935,7 +1941,7 @@ impl Menu {
                     Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Pane { beside: pane, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -1943,7 +1949,7 @@ impl Menu {
                     Ok(Beside { session, pane, cwd }) => {
                         let opens = Opens::Tab { name: None, command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
-                        stays(stage, Wants::Open { session, pane, cwd: cwd.into(), opens })
+                        stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
@@ -2196,6 +2202,10 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
+        let dir = match Directory::parse(worktree.clone()) {
+            Ok(dir) => dir,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+        };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
             let row = PaneRow {
@@ -2210,7 +2220,7 @@ impl Menu {
             let target = Target::Pane(on.clone(), row);
             let step = Step::Waiting(Wait::Opening(session.clone()));
             let stage = Stage::Pull { work: work.clone(), agent, step };
-            let cwd = worktree.clone();
+            let cwd = dir.clone();
             Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
         match (at, pull) {
@@ -2225,7 +2235,7 @@ impl Menu {
                 opening(session, pane, opens)
             },
             (At::Clone { cwd, name }, _) => {
-                let (session, tab_cwd, tab) = (name.clone(), worktree, work.tab());
+                let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
                 // The session is the machine's, as zellij makes it, and the
@@ -2285,7 +2295,7 @@ impl Menu {
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
-        let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
+        let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
     }
 
@@ -2319,7 +2329,7 @@ impl Menu {
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
         let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
-        let wants = Wants::Open { session, pane, cwd: cwd.into(), opens };
+        let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
@@ -3323,6 +3333,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use lunetad::cli::TabId;
     use lunetad::Directory;
     use ratatui::layout::Position;
 
@@ -3373,7 +3384,7 @@ mod tests {
     /// What a key on `row()` wants opened: `opens`, from its pane, in the
     /// directory it works in.
     fn beside_row(opens: Opens) -> Wants {
-        Wants::Open { session: listed(), pane: 4, cwd: "/w/luneta/main".to_owned(), opens }
+        Wants::Open { session: listed(), pane: 4, cwd: main_dir(), opens }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -3438,7 +3449,7 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('p')));
-        let cwd = "/w/luneta/main".to_owned();
+        let cwd = main_dir();
         let opens = Opens::Pane { beside: 4, command: Vec::new() };
         assert_eq!(wants, Wants::Open { session: listed(), pane: 4, cwd: cwd.clone(), opens });
         assert!(menu.opening().is_some());
@@ -4081,6 +4092,10 @@ mod tests {
         Directory::parse("/w/luneta/main".to_owned()).unwrap()
     }
 
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
+    }
+
     fn merged_plan(names: &[(&str, u32, u64)]) -> prunes::Plan {
         let goes = names.iter().map(|(name, number, megabytes)| prunes::Goes {
             worktree: format!("/w/luneta/{name}"),
@@ -4584,7 +4599,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         // Another pane closes with it now: its tab, which it asks of again.
-        let tab = || Closes::Tab { id: 2, panes: vec![4, 5] };
+        let tab = || Closes::Tab { id: TabId(2), panes: vec![4, 5] };
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
         assert_eq!(wants, Wants::Nothing);
@@ -4598,7 +4613,7 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let (session, started) = (listed().name().clone(), listed().started());
-        let act = Act::Tab { session, started, tab: 2, panes: vec![4, 5] };
+        let act = Act::Tab { session, started, tab: TabId(2), panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 
@@ -4865,7 +4880,7 @@ mod tests {
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-            let cwd = worktree.clone();
+            let cwd = directory(&worktree);
             assert_eq!(wants, Wants::Open { session: other.clone(), pane: 7, cwd, opens });
             assert_eq!(menu.opening(), Some(Opening::In(other.clone())));
             let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
@@ -4878,7 +4893,7 @@ mod tests {
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
-        let cwd = worktree.clone();
+        let cwd = directory(&worktree);
         assert_eq!(wants, Wants::Open { session: other.clone(), pane: 9, cwd, opens });
         let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
         assert_eq!((&row.session, row.pane), (&other, 9));
@@ -4912,7 +4927,8 @@ mod tests {
         ];
         let command = review.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd: worktree, opens });
+        let cwd = directory(&worktree);
+        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd, opens });
     }
 
     /// A paste of an issue's link opens the menu for the issue, named for it,
@@ -4951,7 +4967,8 @@ mod tests {
         let tackle = ["claude", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
         let command = tackle.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
-        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd: worktree, opens });
+        let cwd = directory(&worktree);
+        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd, opens });
         assert!(menu.opening().is_some());
     }
 
@@ -5044,7 +5061,7 @@ mod tests {
         .to_vec();
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command };
         let session = other.clone();
-        let cwd = worktree.to_owned();
+        let cwd = directory(worktree);
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         let pressed = |key: char| {
@@ -5053,7 +5070,7 @@ mod tests {
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
-        let cwd = worktree.to_owned();
+        let cwd = directory(worktree);
         assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
 
         assert_eq!(
@@ -5078,7 +5095,7 @@ mod tests {
             Wants::Make {
                 session: name.clone(),
                 cwd: "/w/cdk".to_owned(),
-                tab_cwd: "/w/cdk/feat-x".to_owned(),
+                tab_cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
             }

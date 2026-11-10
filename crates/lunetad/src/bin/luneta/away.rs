@@ -25,6 +25,7 @@ use lunetad::api::{
 use lunetad::asks::{self, Asked, Step};
 use lunetad::carries::{self, Carry, Moved};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
+use lunetad::cli::TabId;
 use lunetad::closes::{Close, Closes};
 use lunetad::ended::Exited;
 use lunetad::images::{self, Png};
@@ -283,7 +284,7 @@ impl Away {
         match answer.closes {
             Some(closes_response::Closes::Pane(())) => Ok(Closes::Pane),
             Some(closes_response::Closes::Tab(tab)) => {
-                Ok(Closes::Tab { id: tab.id, panes: tab.panes })
+                Ok(Closes::Tab { id: TabId(tab.id), panes: tab.panes })
             },
             Some(closes_response::Closes::Session(())) => Ok(Closes::Session),
             None => Err(format!(

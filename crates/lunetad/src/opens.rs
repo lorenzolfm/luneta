@@ -12,9 +12,10 @@ use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::cli::{self, laid, tabs, terminal_of, Laid, Runs};
+use crate::cli::{self, laid, tabs, terminal_of, Laid, Runs, TabId};
 use crate::closes::{self, Close};
 use crate::zellij::{self, SessionName};
+use crate::Directory;
 
 /// What names your shell, in luneta's variables, as in those of the zellij
 /// it starts, which runs it where its config names no other. What runs luneta
@@ -34,7 +35,7 @@ const NO_SHELL: &str = "/bin/sh";
 pub enum Open {
     /// `command`, or your shell where there is none, in a pane of its own
     /// beside the pane `beside` of `session`, in its tab, and in `cwd`.
-    Pane { session: SessionName, beside: u32, cwd: String, command: Vec<String> },
+    Pane { session: SessionName, beside: u32, cwd: Directory, command: Vec<String> },
     /// The tab `tab`, in `session`. zellij makes a tab as big as a client of
     /// its session, and one it opens in a session with none has no room for
     /// its panes: in another session than luneta's client's, it opens once
@@ -62,7 +63,7 @@ impl Open {
                 (session, cwd, command, Opens::Tab(tab))
             },
         };
-        let (session, cwd, command) = (session.to_string(), cwd.clone(), command.clone());
+        let (session, cwd, command) = (session.to_string(), cwd.to_string(), command.clone());
         OpenRequest { on, session, cwd, command, opens: Some(opens) }
     }
 }
@@ -71,7 +72,7 @@ impl Open {
 /// `command` in it, or your shell where there is none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
-    pub cwd: String,
+    pub cwd: Directory,
     pub name: Option<String>,
     pub command: Vec<String>,
 }
@@ -95,11 +96,11 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
         Open::Pane { session, beside, cwd, command } => {
-            let runs = if command.is_empty() { Runs::ZellijShell } else { Runs::Command(command) };
-            cli::pane_opened(session, *beside, cwd, runs).map(terminal)
+            let runs = Runs::of(command, Runs::ZellijShell);
+            Ok(terminal(cli::pane_opened(session, *beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if cli::clients(session.as_str())?.is_empty() {
+            if cli::clients(session)?.is_empty() {
                 return Err(format!(
                     "{}: go there first, or open a pane beside one of its panes",
                     no_client(session)
@@ -120,9 +121,9 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
 /// zellij's own shell does. zellij starts its own shell in the directory of
 /// the pane it opens one beside, whatever `--cwd` says, and a command where
 /// it says.
-pub fn shell_beside(session: &SessionName, beside: u32, cwd: &str) -> Result<u32, String> {
+pub fn shell_beside(session: &SessionName, beside: u32, cwd: &Directory) -> Result<u32, String> {
     let shell = shell(login_shell(), env::var_os(SHELL_VAR));
-    cli::pane_opened(session, beside, cwd, Runs::Shell(&shell))
+    Ok(cli::pane_opened(session, beside, cwd, Runs::Shell(&shell))?)
 }
 
 /// Why no tab opens in `session`, which no client is in.
@@ -157,7 +158,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
         },
     };
     let made = match kept {
-        None => tabs(&laid(session.as_str())?),
+        None => tabs(&laid(session)?),
         Some(_) => BTreeSet::new(),
     };
     let (opened, laid) = tab_opened(session, tab)?;
@@ -190,17 +191,17 @@ fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
 /// own shell does: zellij starts a command in the tab's `--cwd`, but its own
 /// shell where the session's template for a tab says, and the template of a
 /// session zellij brought back says the directory the session was in.
-pub fn tab_opened(session: &SessionName, tab: &Tab) -> Result<(u32, Vec<Laid>), String> {
+pub fn tab_opened(session: &SessionName, tab: &Tab) -> Result<(TabId, Vec<Laid>), String> {
     let shell = shell(login_shell(), env::var_os(SHELL_VAR));
     let runs = runs(&tab.command, &shell);
     let opened = cli::tab_opened(session, &tab.cwd, tab.name.as_deref(), runs)?;
-    Ok((opened, laid(session.as_str())?))
+    Ok((opened, laid(session)?))
 }
 
 /// What a tab whose command is `command` runs: `shell`, your shell, where it
 /// has none.
 fn runs<'a>(command: &'a [String], shell: &'a OsStr) -> Runs<'a> {
-    if command.is_empty() { Runs::Shell(shell) } else { Runs::Command(command) }
+    Runs::of(command, Runs::Shell(shell))
 }
 
 /// Your shell: `login`, the one the user database names yours, or, where it
@@ -230,7 +231,8 @@ mod tests {
         let fish = OsStr::new("/bin/fish");
         assert_eq!(runs(&[], fish), Runs::Shell(fish));
         let claude = ["claude".to_owned(), "go".to_owned()];
-        assert_eq!(runs(&claude, fish), Runs::Command(&claude));
+        let go = Runs::Command { program: "claude", args: &claude[1..] };
+        assert_eq!(runs(&claude, fish), go);
     }
 
     /// Your shell is the one the user database names, over the one

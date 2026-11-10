@@ -20,7 +20,7 @@ pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String),
 /// first, a tiled one before one floating. zellij says which tab a session
 /// is on only while a client is on it.
 fn focused(session: &SessionName) -> Result<u32, String> {
-    let laid = laid(session.as_str())?;
+    let laid = laid(session)?;
     shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
 }
 
@@ -35,6 +35,7 @@ fn shown(laid: &[Laid]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::TabId;
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
@@ -46,7 +47,7 @@ mod tests {
             is_focused: false,
             is_fullscreen: false,
             title: String::new(),
-            tab_id,
+            tab_id: TabId(tab_id),
             tab_position: tab_id,
             tab_name: String::new(),
             pane_command: None,

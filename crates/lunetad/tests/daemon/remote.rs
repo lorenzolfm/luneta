@@ -854,8 +854,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let tab = daemon.open(open(Some(tab))).await.unwrap().into_inner();
         assert_eq!((pane.terminal, tab.terminal), (9, 4));
         let opened = [
-            "2 --session=work action new-pane --no-focus --cwd /w -- claude",
-            "- --session=work action new-tab --no-focus --cwd /w --name #5 -- claude",
+            "2 --session=work action new-pane --no-focus --cwd=/w -- claude",
+            "- --session=work action new-tab --no-focus --cwd=/w --name=#5 -- claude",
         ];
         assert_eq!(far.zellij.opened(), opened);
         let nothing = daemon.open(open(None)).await.unwrap_err();
@@ -874,6 +874,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert!(idle.message().contains("no client is in idle"), "{idle:?}");
         assert_eq!(far.zellij.opened(), opened);
         assert_eq!(here.zellij.opened(), [] as [String; 0]);
+        daemon.open(open(Some(unnamed("-x")))).await.unwrap();
+        let dashed = "- --session=work action new-tab --no-focus --cwd=/w --name=-x -- claude";
+        assert_eq!(far.zellij.opened().last().map(String::as_str), Some(dashed));
 
         let skills = dir.path().to_str().unwrap().to_owned();
         let skills = ListSkillsRequest { on: on("far"), dir: skills, harness: None };
@@ -988,7 +991,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         invalid(daemon.start(StartRequest { on: on("far"), at, to, cwd }).await.unwrap_err());
         let (at, cwd) = ("work".to_owned(), Some(work.clone()));
         daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
-        let started = format!("--session=work action switch-session --cwd {work} -- work-2");
+        let started = format!("--session=work action switch-session --cwd={work} -- work-2");
         assert_eq!(far.zellij.went().last(), Some(&started));
         assert_eq!(here.zellij.went(), [] as [String; 0]);
 

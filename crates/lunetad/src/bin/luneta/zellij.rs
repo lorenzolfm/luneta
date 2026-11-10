@@ -17,7 +17,7 @@ use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
 use lunetad::cli::{
-    done, done_once_reached, failure, laid, quiet, unrun, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
+    done, done_once_reached, laid, quiet, Failure, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
 };
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
@@ -342,7 +342,8 @@ pub fn may_hold_terminal(session: &str) -> bool {
     let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
         return false;
     };
-    let Ok(laid) = laid(session) else {
+    let Some(laid) = SessionName::running(session).ok().and_then(|session| laid(&session).ok())
+    else {
         return true;
     };
     laid.iter().filter(|listed| !listed.is_plugin && listed.id == pane).any(|listed| {
@@ -618,8 +619,8 @@ pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
     let pane_id = pane.to_string();
     command.args(["--session", session, "action", "focus-pane-id", &pane_id]);
     match done_once_reached(command) {
-        Err(said) if !said.contains("is already focused") => return Err(said),
-        _ => {},
+        Ok(()) | Err(Failure::Focused(_)) => {},
+        Err(failure) => return Err(failure.into()),
     }
     let on = |clients: &[clients::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
@@ -1179,9 +1180,10 @@ pub fn clients(session: &str) -> Result<Vec<Client>, String> {
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
 pub fn clients_on_panes(session: &str) -> Result<clients::Listed, String> {
+    let session = SessionName::running(session)?;
     let mut command = Command::new("zellij");
     quiet(&mut command);
-    clients::list(command, session)
+    Ok(clients::list(command, &session)?)
 }
 
 /// What luneta asks of zellij once an action has run.
@@ -1219,9 +1221,9 @@ impl Then {
 
 /// An action luneta has zellij take.
 enum Action {
-    /// A go, as `cli::go` says, on `on`.
+    /// A go, as `cli::went` says, on `on`.
     Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
-    /// A start, as `cli::start` says, on this machine. `switch-session`
+    /// A start, as `cli::started` says, on this machine. `switch-session`
     /// takes the client to whatever has the name by the time zellij takes
     /// it, which `start` looks for just before only here: on another
     /// machine, luneta makes a session by a client that makes it there, as
@@ -1369,27 +1371,15 @@ impl There {
     /// it by `Action::machine`, or says why it did not. A pane already
     /// focused is where the action would take the client, and no failure.
     fn take(&mut self, action: Action) -> Result<(), String> {
-        let command = match action {
+        match action {
             Action::Go { at, to, pane, .. } => match self {
-                There::Away(away) => return away.go(&at, &to, pane),
-                There::Here => match cli::go(Command::new("zellij"), &at, &to, pane) {
-                    Some(command) => command,
-                    None => return Ok(()),
-                },
+                There::Away(away) => away.go(&at, &to, pane),
+                There::Here => Ok(cli::went(&at, &to, pane)?),
             },
             Action::Start { at, to, cwd } => {
-                cli::start(Command::new("zellij"), &at, &to, cwd.as_deref())
+                let cwd = cwd.map(Directory::parse).transpose()?;
+                Ok(cli::started(&at, &to, cwd.as_ref())?)
             },
-        };
-        let mut command = command;
-        quiet(&mut command);
-        match command.output() {
-            Ok(output) if output.status.success() => Ok(()),
-            Ok(output) => {
-                let said = failure(&output);
-                if said.contains(cli::FOCUSED) { Ok(()) } else { Err(said) }
-            },
-            Err(error) => Err(unrun(&error)),
         }
     }
 }
@@ -1540,6 +1530,10 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+
+    fn directory(path: &str) -> Directory {
+        Directory::parse(path.to_owned()).unwrap()
+    }
 
     const AGES: Duration = Duration::from_secs(600);
 
@@ -1773,7 +1767,7 @@ There are a few things you can try now:
         let Ok(to) = SessionName::parse("cdk") else {
             panic!("a name zellij takes");
         };
-        let tab = Tab { cwd: "/w/cdk/feat".to_owned(), name: None, command: Vec::new() };
+        let tab = Tab { cwd: directory("/w/cdk/feat"), name: None, command: Vec::new() };
         After::tab(owed(7, &events), &to, tab).untold(&events);
         let heard: Vec<Event> = heard.try_iter().collect();
         let [Event::Opened { menu: 7, opened: Err(why) }] = &heard[..] else {
@@ -1790,7 +1784,7 @@ There are a few things you can try now:
         let Ok(to) = SessionName::parse("cdk") else {
             panic!("a name zellij takes");
         };
-        let tab = Tab { cwd: "/w/cdk/feat".to_owned(), name: None, command: Vec::new() };
+        let tab = Tab { cwd: directory("/w/cdk/feat"), name: None, command: Vec::new() };
         let after = After::tab(owed(7, &events), &to, tab);
         let look = Look { session: "cdk".to_owned(), number: 3, went: None };
         let arrival = Arrival::new(Machine::Local, look, Before::Made, Some(after));
