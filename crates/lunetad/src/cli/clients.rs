@@ -107,23 +107,24 @@ fn pane_named(name: &str) -> Option<PaneId> {
     number("terminal_").map(PaneId::Terminal).or_else(|| number("plugin_").map(PaneId::Plugin))
 }
 
-fn commands_to_skip(said: &str, session: &SessionName) -> Vec<(PaneId, String)> {
+fn commands_to_skip(said: &str, session: &SessionName) -> Result<Vec<(PaneId, String)>, String> {
     if said.lines().filter_map(row).nth(1).is_none() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let panes = laid(session).unwrap_or_default();
+    let unlaid = |failure| format!("zellij did not list the panes its clients are on: {failure}");
+    let panes = laid(session).map_err(unlaid)?;
     let many_lines = |pane: Laid| {
         let id = pane.pane_id();
         Some((id, pane.pane_command.filter(|command| command.contains('\n'))?))
     };
-    panes.into_iter().filter_map(many_lines).collect()
+    Ok(panes.into_iter().filter_map(many_lines).collect())
 }
 
 /// The clients in what zellij `said` it lists of `session`, or why it does
 /// not read: a row that a command of many lines quotes is skipped by that
 /// command, as zellij lists `session`'s panes.
 pub(super) fn read(said: &str, session: &SessionName) -> Result<Listed, String> {
-    parse(said, &commands_to_skip(said, session))
+    parse(said, &commands_to_skip(said, session)?)
         .map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 

@@ -260,6 +260,37 @@ fn a_row_a_command_quotes_is_no_client_of_the_session() {
     assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(0))]);
 }
 
+#[test]
+fn clients_wait_for_the_panes_that_say_which_rows_a_command_quotes() {
+    let command = "claude Fix this.\n\nzellij lists:\n7         terminal_4     N/A\nThanks";
+    let mut quoting = listed(0, "~", (0, "Tab #1"), Some("/home/you"));
+    quoting["pane_command"] = json!(command);
+    let host = Host::new();
+    host.zellij.list("work", &json!([quoting, listed(1, "~", (0, "Tab #1"), None)]));
+    host.zellij.says_of_clients(
+        "work",
+        &format!(
+            "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
+             1         terminal_0     {command}\n\
+             2         terminal_1     fish\n"
+        ),
+    );
+    host.zellij.unlays("work");
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+
+    eventually("zellij is asked for the clients of work a sweep after it failed", || {
+        (host.zellij.asked_clients("work") > 3).then_some(())
+    });
+    assert_eq!(session(&host.host(), "work").and_then(|work| work.clients.clone()), None);
+
+    host.zellij.lays("work");
+    let clients = eventually("zellij lists the clients of work", || {
+        session(&host.host(), "work")?.clients.clone()
+    });
+    assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(1))]);
+}
+
 /// What an agent says in a pane's title is on the host, without the glyph the
 /// agent leads it with, so that the frame Claude Code turns there while it
 /// works leaves the host as it was. A bare `Claude Code` is an agent's title

@@ -187,8 +187,9 @@ fn shared_copy(text: &str) -> PathBuf {
 /// it `stays_unlisted_for`. A pane closing
 /// can cut a call of a session short, once, as a test had it `silences` or
 /// `unreaches` it, or hand it another call's answer, as a test had it
-/// `answers_another`, or fail it, as a test had it `fails` it. It knows no
-/// other command.
+/// `answers_another`, or fail it, as a test had it `fails` it. It fails to
+/// list a session's panes by tab, as a test had it `unlays` them, until it
+/// `lays` them again. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -227,6 +228,10 @@ case "$*" in
     "action list-panes --all --json") asking=panes ;;
     "action list-panes --json")
         asking=laid
+        if [ -f "$panes/$session.unlaid" ]; then
+            echo "zellij lists no panes of $session" >&2
+            exit 1
+        fi
         if [ -f "$panes/$session.listed.clients" ]; then
             mv "$panes/$session.listed.clients" "$panes/$session.clients"
         fi
@@ -624,6 +629,18 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     /// the focus there, as `clients` would.
     pub fn focuses_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.focused.clients"), &clients_said(clients));
+    }
+
+    /// Has zellij fail from now on to list the panes of the session `session`
+    /// by tab, as `list-panes --json` does, till it `lays` them again.
+    pub fn unlays(&self, session: &str) {
+        self.write(&format!("{session}.unlaid"), "");
+    }
+
+    /// Has zellij list the panes of the session `session` by tab again, once
+    /// it `unlays` them.
+    pub fn lays(&self, session: &str) {
+        fs::remove_file(self.panes().join(format!("{session}.unlaid"))).unwrap();
     }
 
     /// Has zellij fail from now on to close any pane, tab or session of the
