@@ -300,7 +300,7 @@ fn a_pane_with_little_room_moves_all_the_same_and_the_client_goes_back() {
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
     let plain = "--session=work action stack-panes -- terminal_4 terminal_1";
     assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1"), plain.to_owned()]);
-    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
+    assert_eq!(host.lists.went(), ["--session=work action focus-pane-id terminal_2"]);
 }
 
 /// A client is on the pane that moves, so that it is to go with it, and zellij
@@ -319,7 +319,7 @@ fn a_client_zellij_took_to_a_pane_another_was_on_goes_back() {
     assert_eq!(said(&turned), "work:1\n");
     let plain = "--session=work action stack-panes -- terminal_4 terminal_1";
     assert_eq!(host.lists.turned(), [plain]);
-    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
+    assert_eq!(host.lists.went(), ["--session=work action focus-pane-id terminal_2"]);
     let warned = String::from_utf8_lossy(&turned.stderr);
     assert!(warned.contains("may not be on the pane they were on"), "{warned}");
 }
@@ -448,7 +448,7 @@ fn a_turn_takes_a_client_back_to_a_plugins_pane() {
 
     assert_eq!(said(&turned), "work:1\n");
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
-    assert_eq!(host.lists.went(), ["--session work action focus-pane-id plugin_1"]);
+    assert_eq!(host.lists.went(), ["--session=work action focus-pane-id plugin_1"]);
 }
 
 /// A tab whose one tiled pane is a plugin's has it move last, and the client
@@ -477,7 +477,7 @@ fn a_client_zellij_took_from_a_plugins_pane_to_another_goes_back() {
 
     assert_eq!(said(&turned), "work:1\n");
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
-    assert_eq!(host.lists.went(), ["--session work action focus-pane-id plugin_5"]);
+    assert_eq!(host.lists.went(), ["--session=work action focus-pane-id plugin_5"]);
 }
 
 /// What turned stays turned where a client has no way back, as one that typed
@@ -604,7 +604,7 @@ fn a_tab_that_turns_only_partly_fails_saying_so_and_the_client_goes_back() {
     let why = why(&turned);
     assert!(why.contains("turned 1 of the 2 panes"), "{why}");
     assert!(why.contains("no room for terminal_2"), "{why}");
-    assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_7"]);
+    assert_eq!(host.lists.went(), ["--session=work action focus-pane-id terminal_7"]);
 }
 
 /// A pane keeps the name its session had as it opened. Where no session runs

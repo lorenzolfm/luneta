@@ -1463,7 +1463,7 @@ pub enum Wants {
     /// in turn.
     Make {
         session: SessionName,
-        cwd: String,
+        cwd: Directory,
         tab_cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -4979,7 +4979,7 @@ mod tests {
         let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
-            at: At::Clone { cwd: "/w/cdk".to_owned(), name },
+            at: At::Clone { cwd: directory("/w/cdk"), name },
             worktree: "/w/cdk/issue-2736".to_owned(),
             branch: Some("dev-docs".to_owned()),
             moved_off: true,
@@ -5085,7 +5085,7 @@ mod tests {
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
-        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
+        let at = At::Clone { cwd: directory("/w/cdk"), name: name.clone() };
         let work = Readied::Link(pull_request());
         let worktree = "/w/cdk/feat-x".to_owned();
         let ready = Ready { at, worktree, branch: None, moved_off: false, work };
@@ -5094,7 +5094,7 @@ mod tests {
             wants,
             Wants::Make {
                 session: name.clone(),
-                cwd: "/w/cdk".to_owned(),
+                cwd: directory("/w/cdk"),
                 tab_cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
@@ -5133,7 +5133,7 @@ mod tests {
         let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
         assert_eq!((machine, row.pane), (&vps(), 7));
         let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
+        let clone = At::Clone { cwd: directory("/w/cdk"), name };
         let header = Target::Machine(vps());
         let (menu, wants) = stays(pulling_on(header.clone(), 'w').pulled(ready(clone)));
         assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
@@ -5166,7 +5166,7 @@ mod tests {
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
             let name = SessionName::parse("cdk").unwrap();
-            let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
+            let clone = At::Clone { cwd: directory("/w/cdk"), name };
             let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(clone)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));

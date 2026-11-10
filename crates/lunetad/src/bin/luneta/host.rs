@@ -30,6 +30,7 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::fmt;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -533,7 +534,7 @@ enum Joins<'a> {
     /// or zellij keeps one by it that ended, as `zellij::make` says. luneta
     /// finds it there once zellij titles its terminal in it, as `restart`
     /// says.
-    Make(&'a Unused, Option<&'a str>),
+    Make(&'a Unused, Option<&'a Directory>),
 }
 
 impl Joins<'_> {
@@ -541,6 +542,41 @@ impl Joins<'_> {
         match self {
             Joins::Attach(session) => session,
             Joins::Make(unused, _) => unused.name(),
+        }
+    }
+}
+
+/// Why luneta started no client in the place of zellij's.
+enum Unstarted {
+    /// zellij's client does not attach to the session, for this reason, as
+    /// `lunetad::cli::attaches_to` says: one sent there would fail.
+    Refused(String),
+    /// Its program did not start.
+    Failed(io::Error),
+}
+
+impl Unstarted {
+    /// Why zellij's client does not attach, or the error its program did not
+    /// start with.
+    fn refusal(self) -> io::Result<String> {
+        match self {
+            Unstarted::Refused(why) => Ok(why),
+            Unstarted::Failed(error) => Err(error),
+        }
+    }
+}
+
+impl From<io::Error> for Unstarted {
+    fn from(error: io::Error) -> Self {
+        Unstarted::Failed(error)
+    }
+}
+
+impl fmt::Display for Unstarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unstarted::Refused(why) => f.write_str(why),
+            Unstarted::Failed(error) => error.fmt(f),
         }
     }
 }
@@ -1067,7 +1103,13 @@ fn run_in(
             }
         },
     };
-    let ((program, args), fails, arrival) = first_client(first, &mut sidebar);
+    let ((program, args), fails, arrival) = match first_client(first, &mut sidebar) {
+        Ok(first) => first,
+        Err(refusal) => {
+            say_ends(&refusal);
+            return Ok(Some(format!("luneta: {refusal}")));
+        },
+    };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
     let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
@@ -1198,34 +1240,35 @@ fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: 
 
 /// The program of luneta's first client, and its arguments, where luneta's
 /// zellij goes where it fails, and the look for its arrival, if luneta looks
-/// for it: as `first` says, of which the sidebar hears.
-fn first_client(
-    first: First,
-    sidebar: &mut Sidebar,
-) -> ((String, Vec<String>), Fails, Option<Arrival>) {
+/// for it.
+type FirstClient = ((String, Vec<String>), Fails, Option<Arrival>);
+
+/// luneta's first client, as `first` says, of which the sidebar hears; or
+/// why zellij's client cannot attach.
+fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, String> {
     match first {
         First::Make(session) => {
             let arrival = session.as_ref().and_then(|session| {
-                let before = zellij::before(session.as_str());
+                let before = zellij::before(session);
                 let look = sidebar.sending(session)?;
                 Some(Arrival::new(Machine::Local, look, before, None))
             });
-            (zellij::client(session.as_ref()), Fails::End, arrival)
+            Ok((zellij::client(session.as_ref())?, Fails::End, arrival))
         },
         First::Here(session) => {
             // Just before the client starts, as `own` goes by: luneta may
             // have waited on its terminal since it chose the session.
-            let before = zellij::before(session.as_str());
+            let before = zellij::before(&session);
             let look = sidebar.sending(&session);
             let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
-            (zellij::rejoin(session.as_str()), Fails::End, arrival)
+            Ok((zellij::rejoin(&session)?, Fails::End, arrival))
         },
         First::Away(destination, Refuge { session, before }) => {
-            let program = zellij::attach_away(&destination, session.as_str());
+            let program = zellij::attach_away(&destination, &session)?;
             let machine = Machine::Remote(destination);
             let look = sidebar.swapping(&machine, &session);
             let arrival = Arrival::new(machine, look, Before::Listed(before), None);
-            (program, Fails::Onward(Vec::new()), Some(arrival))
+            Ok((program, Fails::Onward(Vec::new()), Some(arrival)))
         },
     }
 }
@@ -2323,7 +2366,7 @@ impl App {
             Asked::Start { on, starts } => {
                 match zellij::unused_at(&on, starts) {
                     Ok((unused, dir)) => {
-                        self.make(Ok(unused), Some(dir.as_str()), None);
+                        self.make(Ok(unused), Some(&dir), None);
                     },
                     Err(why) => self.sidebar.notify(format!("menu: {why}")),
                 }
@@ -2335,12 +2378,10 @@ impl App {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
                 let unused = match &on {
                     Machine::Local => zellij::makes(session),
-                    Machine::Remote(destination) => Directory::parse(cwd.clone())
-                        .map_err(|why| format!("no session made: {why}"))
-                        .and_then(|dir| zellij::makes_away(destination, &session, &dir)),
+                    Machine::Remote(destination) => zellij::makes_away(destination, &session, &cwd),
                 };
                 let owed = zellij::owed(menu, &self.events);
-                if !self.make(unused, Some(cwd.as_str()), Some((owed, tab))) {
+                if !self.make(unused, Some(&cwd), Some((owed, tab))) {
                     self.sidebar.drop_menu(menu);
                 }
             },
@@ -2431,7 +2472,7 @@ impl App {
                         zellij::makes_away(destination, &session, &cwd)
                     },
                 };
-                self.make(unused, Some(cwd.as_str()), None);
+                self.make(unused, Some(&cwd), None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -2731,8 +2772,8 @@ impl App {
         let fails = self.back();
         let before = match machine {
             Machine::Local if self.sidebar.astray().is_some() => Before::Unknown,
-            Machine::Local => zellij::before(session.as_str()),
-            Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
+            Machine::Local => zellij::before(&session),
+            Machine::Remote(destination) => zellij::before_away(destination, &session),
         };
         // The client goes on to what `after` opens, not to the pane it opens
         // it from.
@@ -2773,7 +2814,12 @@ impl App {
     /// taken by then, as `Joins::Make` says, which takes luneta's zellij
     /// back. Once it is in, the tab of `alone` opens there, if any, as
     /// `Alone` says. Whether it went.
-    fn swap_making(&mut self, unused: &Unused, cwd: Option<&str>, alone: Option<Alone>) -> bool {
+    fn swap_making(
+        &mut self,
+        unused: &Unused,
+        cwd: Option<&Directory>,
+        alone: Option<Alone>,
+    ) -> bool {
         let fails = self.back();
         let joins = Joins::Make(unused, cwd);
         let next = alone.map(|alone| Next::After(alone.after()));
@@ -2811,7 +2857,8 @@ impl App {
     /// makes its session is in it once zellij titles luneta's terminal there,
     /// not once it shows anything: one that fails, as where the name is
     /// taken by then, writes why, and a client of the session that took the
-    /// name is anyone's but luneta's.
+    /// name is anyone's but luneta's. Where luneta starts none, zellij's
+    /// client stays as it is.
     fn restart(
         &mut self,
         machine: &Machine,
@@ -2819,7 +2866,7 @@ impl App {
         before: Before,
         fails: Fails,
         next: Option<Next>,
-    ) -> io::Result<()> {
+    ) -> Result<(), Unstarted> {
         let (then_pane, after) = match next {
             Some(Next::Pane(place)) => (Some(place), None),
             Some(Next::After(after)) => (None, Some(after)),
@@ -2842,19 +2889,22 @@ impl App {
     /// Starts the program of a client on `machine` that `joins` its
     /// session, the next that luneta starts: zellij's client here, or there
     /// through ssh.
-    fn start_of(&mut self, machine: &Machine, joins: Joins<'_>) -> io::Result<Hosted> {
+    fn start_of(&mut self, machine: &Machine, joins: Joins<'_>) -> Result<Hosted, Unstarted> {
         let ((program, args), dir) = match (machine, joins) {
-            (Machine::Local, Joins::Attach(session)) => (zellij::rejoin(session.as_str()), None),
+            (Machine::Local, Joins::Attach(session)) => {
+                (zellij::rejoin(session).map_err(Unstarted::Refused)?, None)
+            },
             // zellij's client makes a session in the directory it starts in.
             (Machine::Local, Joins::Make(unused, cwd)) => (zellij::make(unused.name()), cwd),
             (Machine::Remote(destination), Joins::Attach(session)) => {
-                (zellij::attach_away(destination, session.as_str()), None)
+                let program = zellij::attach_away(destination, session);
+                (program.map_err(|why| Unstarted::Refused(of_machine(machine, &why)))?, None)
             },
             (Machine::Remote(destination), Joins::Make(unused, cwd)) => {
-                (zellij::make_away(destination, unused.name().as_str(), cwd), None)
+                (zellij::make_away(destination, unused.name(), cwd), None)
             },
         };
-        let dir = dir.map_or(self.dir.clone(), PathBuf::from);
+        let dir = dir.map_or(self.dir.clone(), |dir| PathBuf::from(dir.as_str()));
         let (number, size) = (self.started + 1, window(self.areas.1));
         let hosted = Hosted::start(program, args, &dir, size, number, self.events.clone())?;
         self.started = number;
@@ -2905,7 +2955,12 @@ impl App {
     /// cannot bear being asked anything before it takes the client: luneta
     /// asks for the client's arrival there once zellij titles its terminal in
     /// it. Whether it went.
-    fn start(&mut self, session: &SessionName, cwd: Option<&str>, alone: Option<Alone>) -> bool {
+    fn start(
+        &mut self,
+        session: &SessionName,
+        cwd: Option<&Directory>,
+        alone: Option<Alone>,
+    ) -> bool {
         let Some(nudged) = self.nudge() else {
             return false;
         };
@@ -2928,7 +2983,7 @@ impl App {
     fn make(
         &mut self,
         unused: Result<Unused, String>,
-        cwd: Option<&str>,
+        cwd: Option<&Directory>,
         tab: Option<(Due<u32>, Tab)>,
     ) -> bool {
         match unused {
@@ -3230,7 +3285,13 @@ impl App {
         let Some(Refuge { session: to, before }) = refuge else {
             return self.newest_away(&[]);
         };
-        let hosted = self.start_of(&Machine::Local, Joins::Attach(&to))?;
+        let hosted = match self.start_of(&Machine::Local, Joins::Attach(&to)) {
+            Ok(hosted) => hosted,
+            Err(unstarted) => {
+                let why = unstarted.refusal()?;
+                return self.refused(&Machine::Local, &why, Fails::End);
+            },
+        };
         let look = self.sidebar.rejoining(&to);
         let arrival = Arrival::new(Machine::Local, look, Before::Listed(before), None);
         self.put(hosted, Fails::End, Some(arrival), None);
@@ -3290,7 +3351,7 @@ impl App {
         match refuge {
             Some(Refuge { session, before }) => {
                 let joins = Joins::Attach(&session);
-                self.restart(&on, joins, Before::Listed(before), fails, None)
+                self.go_on(&on, joins, Before::Listed(before), fails)
             },
             None => self.newest_here(std::slice::from_ref(destination)),
         }
@@ -3368,7 +3429,7 @@ impl App {
     fn go_back(&mut self, on: &Machine, back: Back, fails: Fails) -> io::Result<()> {
         let Back { machine, session } = back;
         let before = match &machine {
-            Machine::Local => match zellij::before(session.as_str()) {
+            Machine::Local => match zellij::before(&session) {
                 Before::Made => {
                     let tried = match on {
                         Machine::Remote(destination) => vec![destination.clone()],
@@ -3378,9 +3439,9 @@ impl App {
                 },
                 before => before,
             },
-            Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
+            Machine::Remote(destination) => zellij::before_away(destination, &session),
         };
-        self.restart(&machine, Joins::Attach(&session), before, fails, None)
+        self.go_on(&machine, Joins::Attach(&session), before, fails)
     }
 
     /// Has a client of this machine's newest session that answers take the
@@ -3392,7 +3453,7 @@ impl App {
             return self.newest_away(tried);
         };
         let joins = Joins::Attach(&session);
-        self.restart(&Machine::Local, joins, Before::Listed(before), Fails::End, None)
+        self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
     }
 
     /// Has a client of the newest session that answers of another machine's
@@ -3412,7 +3473,49 @@ impl App {
         };
         let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
         let fails = Fails::Onward(tried.to_vec());
-        self.restart(&machine, joins, Before::Listed(before), fails, None)
+        self.go_on(&machine, joins, Before::Listed(before), fails)
+    }
+
+    /// Has a client on `machine` that `joins` its session take the place of
+    /// zellij's client, which ended, as `restart` has it. Where luneta
+    /// refuses it one, luneta's zellij goes where `fails` says, as it does
+    /// where that client fails, as `refused` says.
+    fn go_on(
+        &mut self,
+        machine: &Machine,
+        joins: Joins<'_>,
+        before: Before,
+        fails: Fails,
+    ) -> io::Result<()> {
+        match self.restart(machine, joins, before, fails.clone(), None) {
+            Ok(()) => Ok(()),
+            Err(unstarted) => {
+                let why = unstarted.refusal()?;
+                self.refused(machine, &why, fails)
+            },
+        }
+    }
+
+    /// luneta refused zellij's client a client on `on`, `why`, in the place
+    /// of one that ended: luneta's zellij goes where `fails` says, as
+    /// `client_ended` and `ended_away` have it go where that client failed,
+    /// and the notes say why. Each machine luneta goes on to is passed over
+    /// once tried, and luneta goes back from there to nowhere: the tries end.
+    fn refused(&mut self, on: &Machine, why: &str, fails: Fails) -> io::Result<()> {
+        match (on, fails.failed(on)) {
+            (_, Failed::Back(back)) => {
+                self.sidebar.notify(why.to_owned());
+                self.go_back(on, back, Fails::End)
+            },
+            (Machine::Remote(_), Failed::Onward(tried)) => {
+                self.sidebar.notify(why.to_owned());
+                self.newest_here(&tried)
+            },
+            (_, Failed::End | Failed::Onward(_)) => {
+                self.end(why);
+                Ok(())
+            },
+        }
     }
 
     /// Takes in what luneta's terminal answered, or said of itself unasked.

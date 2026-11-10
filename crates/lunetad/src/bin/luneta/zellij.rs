@@ -7,7 +7,6 @@
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
-use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -16,9 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{
-    done, done_once_reached, laid, Failure, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR,
-};
+use lunetad::cli::{laid, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -162,12 +159,9 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 
 /// The program luneta runs beside the sidebar, and its arguments: zellij's
 /// client, attached to `session` and making it if none runs, or without one
-/// in a session of a name zellij makes up.
-pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
-    match session {
-        Some(session) => client_with(&["attach", "--create", session.as_str()]),
-        None => client_with(&[]),
-    }
+/// in a session of a name zellij makes up; or why it cannot attach.
+pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), String> {
+    cli::client(session).map(client_with)
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -177,23 +171,24 @@ pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
 /// since luneta found it unused, where `attach --create` would take the
 /// client to that session, as though it had made it.
 pub fn make(session: &SessionName) -> (String, Vec<String>) {
-    client_with(&["--session", session.as_str()])
+    client_with(cli::client_making(session))
 }
 
 /// The program luneta runs beside the sidebar in place of a client that
 /// ended, and its arguments: zellij's client, attached to `session`, which
 /// runs. Without `--create`, which would make one gone since anew, empty.
-pub fn rejoin(session: &str) -> (String, Vec<String>) {
-    client_with(&["attach", session])
+/// Or why it cannot attach.
+pub fn rejoin(session: &SessionName) -> Result<(String, Vec<String>), String> {
+    cli::client_rejoining(session).map(client_with)
 }
 
 /// zellij's client, with `args`. It runs through `env`, to leave out what
 /// `LEFT_OUT` names, which luneta cannot take out of its own variables.
-fn client_with(args: &[&str]) -> (String, Vec<String>) {
+fn client_with(args: Vec<String>) -> (String, Vec<String>) {
     let mut through: Vec<String> =
         LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
-    through.push("zellij".to_owned());
-    through.extend(args.iter().map(|arg| (*arg).to_owned()));
+    through.push(cli::PROGRAM.to_owned());
+    through.extend(args);
     ("env".to_owned(), through)
 }
 
@@ -202,9 +197,12 @@ fn client_with(args: &[&str]) -> (String, Vec<String>) {
 /// through ssh, in a terminal ssh asks for there. It goes on the connection
 /// luneta's daemon reaches that machine's on, as `lunetad::sharing` says,
 /// where luneta's runtime folder is one ssh can name. ssh may ask for a
-/// password or a host's key in luneta's terminal.
-pub fn attach_away(destination: &Destination, session: &str) -> (String, Vec<String>) {
-    away(destination, format!("zellij attach {}", quoted(session)))
+/// password or a host's key in luneta's terminal. Or why it cannot attach.
+pub fn attach_away(
+    destination: &Destination,
+    session: &SessionName,
+) -> Result<(String, Vec<String>), String> {
+    Ok(away(destination, spelled(&cli::client_rejoining(session)?)))
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -213,11 +211,11 @@ pub fn attach_away(destination: &Destination, session: &str) -> (String, Vec<Str
 /// says of this machine's, which fails where the name is taken.
 pub fn make_away(
     destination: &Destination,
-    session: &str,
-    cwd: Option<&str>,
+    session: &SessionName,
+    cwd: Option<&Directory>,
 ) -> (String, Vec<String>) {
-    let cd = cwd.map_or_default(|cwd| format!("cd {} && ", quoted(cwd)));
-    away(destination, format!("{cd}zellij --session {}", quoted(session)))
+    let cd = cwd.map_or_default(|cwd| format!("cd {} && ", quoted(cwd.as_str())));
+    away(destination, format!("{cd}{}", spelled(&cli::client_making(session))))
 }
 
 /// ssh, to run `command` on `destination`, in a terminal it asks for there,
@@ -238,6 +236,15 @@ fn away(destination: &Destination, command: String) -> (String, Vec<String>) {
     // ssh hands the command to the shell there, which reads it as words.
     args.push(command);
     ("ssh".to_owned(), args)
+}
+
+/// zellij's client with `args`, as a shell there reads them back: each
+/// argument as `quoted` says, and the program bare, as some shells take a
+/// quoted first word for a string.
+fn spelled(args: &[String]) -> String {
+    let mut spelled = vec![cli::PROGRAM.to_owned()];
+    spelled.extend(args.iter().map(|arg| quoted(arg)));
+    spelled.join(" ")
 }
 
 /// `word` as a shell there reads it back, sh or fish: in single quotes, with
@@ -521,13 +528,13 @@ pub fn go(
 pub fn start(
     nudged: &Nudged,
     to: &SessionName,
-    cwd: Option<&str>,
+    cwd: Option<&Directory>,
     then: Option<Look>,
     alone: Option<Alone>,
     events: &Sender<Event>,
 ) -> Option<Arrival> {
-    let runs = runs(to.as_str());
-    let (at, cwd) = (nudged.session().clone(), cwd.map(str::to_owned));
+    let runs = runs(to);
+    let (at, cwd) = (nudged.session().clone(), cwd.cloned());
     let command = Action::Start { at, to: to.clone(), cwd };
     let when = nudged.until();
     match (then, alone) {
@@ -590,16 +597,12 @@ const UNMOVED: &str = "zellij moved nobody: it moves the client that last typed 
 /// of `to`, or to `to` alone, on the pane it last had the focus on, as the
 /// CLI does. Waits for the client to be there, and says why it is not: as
 /// `UNMOVED` says, or as zellij said.
-pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
+pub fn taken(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(), String> {
     if at == to {
         return pane.map_or(Ok(()), |pane| focused(at, PaneId::Terminal(pane)));
     }
-    let mut command = Command::new("zellij");
-    let pane_id = pane.map(|id| format!("terminal_{id}"));
-    let before = clients(to)?;
-    command.args(["--session", at, "action", "switch-session", to]);
-    command.args(pane_id.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
-    done(command)?;
+    let before = clients_on_panes(to)?;
+    cli::went(at, to, pane)?;
     let new = |client: &cli::Client| before.iter().all(|was| was.id != client.id);
     let came = seen(to, |clients| clients.iter().copied().find(new));
     let came = came.ok_or_else(|| UNMOVED.to_owned())?;
@@ -615,14 +618,8 @@ pub fn taken(at: &str, to: &str, pane: Option<u32>) -> Result<(), String> {
 /// or a plugin's. Waits for a client to be on it, and says why none is: as
 /// `UNMOVED` says, or as zellij said. It is asked again where a pane closing kept
 /// it from asking, as a turn's stand-ins do just before it takes a client back.
-pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
-    let mut command = Command::new("zellij");
-    let pane_id = pane.to_string();
-    command.args(["--session", session, "action", "focus-pane-id", &pane_id]);
-    match done_once_reached(command) {
-        Ok(()) | Err(Failure::Focused(_)) => {},
-        Err(failure) => return Err(failure.into()),
-    }
+pub fn focused(session: &SessionName, pane: PaneId) -> Result<(), String> {
+    cli::pane_focused(session, pane)?;
     let on = |clients: &[cli::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
@@ -636,12 +633,10 @@ pub fn focused(session: &str, pane: PaneId) -> Result<(), String> {
 /// A session made so is there once its socket is: no client but the one sent
 /// would make it, and zellij's server, asked anything before its first client
 /// is on, can fail.
-pub fn made(at: &str, to: &SessionName, cwd: &str) -> Result<(), String> {
-    let mut command = Command::new("zellij");
-    command.args(["--session", at, "action", "switch-session", to.as_str(), "--cwd", cwd]);
+pub fn made(at: &SessionName, to: &SessionName, cwd: &Directory) -> Result<(), String> {
     let asked = SystemTime::now();
-    done(command)?;
-    match made_since(to.as_str(), asked, START) {
+    cli::started(at, to, Some(cwd))?;
+    match made_since(to, asked, START) {
         Some(true) => Ok(()),
         Some(false) => Err(format!("{to} ran already, so zellij made none")),
         None => Err(UNMOVED.to_owned()),
@@ -654,14 +649,14 @@ pub fn made(at: &str, to: &SessionName, cwd: &str) -> Result<(), String> {
 /// renamed to it since, as a rename keeps the socket's time. A socket's time
 /// is of the kernel's coarse clock, a tick behind at most, and zellij takes
 /// far longer than a tick to make a session. None where none runs.
-fn made_since(session: &str, asked: SystemTime, patience: Duration) -> Option<bool> {
+fn made_since(session: &SessionName, asked: SystemTime, patience: Duration) -> Option<bool> {
     started(session, patience).map(|started| started >= asked)
 }
 
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &str, seen: impl Fn(&[cli::Client]) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &SessionName, seen: impl Fn(&[cli::Client]) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
         if let Some(seen) = clients_on_panes(session).ok().and_then(|clients| seen(&clients)) {
@@ -677,12 +672,13 @@ fn seen<T>(session: &str, seen: impl Fn(&[cli::Client]) -> Option<T>) -> Option<
 /// When the session named `session` started, by its socket, once one runs
 /// within `patience`. A folder it cannot read yet is one it has yet to see the
 /// socket in.
-fn started(session: &str, patience: Duration) -> Option<SystemTime> {
+fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     let folder = lunetad::zellij_folder();
     let deadline = Instant::now() + patience;
     loop {
         let running = lunetad::zellij_sessions(&folder).unwrap_or_default();
-        if let Some((_, started)) = running.into_iter().find(|(name, _)| name == session) {
+        let found = running.into_iter().find(|(name, _)| name == session.as_str());
+        if let Some((_, started)) = found {
             return Some(started);
         }
         if Instant::now() >= deadline {
@@ -1057,7 +1053,7 @@ pub fn arrive(arrival: Arrival, alive: &Arc<()>, events: &Sender<Event>) {
 /// What luneta knows of the clients of `session` before its own comes there:
 /// none of one that does not run, as zellij's sockets say, which zellij is to
 /// make, and otherwise what zellij lists, if it does.
-pub fn before(session: &str) -> Before {
+pub fn before(session: &SessionName) -> Before {
     if runs(session) == Some(false) {
         return Before::Made;
     }
@@ -1114,17 +1110,18 @@ pub fn unused_at(on: &Machine, starts: Starts) -> Result<(Unused, Directory), St
 /// What luneta knows of the clients of `session` on `destination`, which
 /// runs, before its own comes there, as zellij there lists them within
 /// `away::QUICK`, as luneta's screen waits on it: none, where it did not.
-pub fn before_away(destination: &Destination, session: &str) -> Before {
-    let listed = Away::reach(destination, away::QUICK).and_then(|mut away| away.clients(session));
+pub fn before_away(destination: &Destination, session: &SessionName) -> Before {
+    let reached = Away::reach(destination, away::QUICK);
+    let listed = reached.and_then(|mut away| away.clients(session.as_str()));
     listed.map_or(Before::Unknown, Before::Listed)
 }
 
 /// Whether a session runs under the name `session`, as zellij's sockets say
 /// now: none where luneta cannot read all of zellij's folder, as the socket
 /// could be in what it cannot.
-fn runs(session: &str) -> Option<bool> {
+fn runs(session: &SessionName) -> Option<bool> {
     let running = lunetad::zellij_sessions(&lunetad::zellij_folder())?;
-    Some(running.iter().any(|(name, _)| name == session))
+    Some(running.iter().any(|(name, _)| name == session.as_str()))
 }
 
 /// `to`, as a name zellij on this machine would make a session of now, or
@@ -1173,16 +1170,15 @@ pub fn makes_away(
 /// zellij did not list them, as of a session that does not run, or in time:
 /// zellij's CLI waits on every session's server, and one that hangs holds it
 /// up for good.
-pub fn clients(session: &str) -> Result<Vec<Client>, String> {
+pub fn clients(session: &SessionName) -> Result<Vec<Client>, String> {
     let clients = clients_on_panes(session)?;
     Ok(clients.iter().copied().map(cli::Client::to_api).collect())
 }
 
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
-pub fn clients_on_panes(session: &str) -> Result<cli::Listed, String> {
-    let session = SessionName::running(session)?;
-    Ok(cli::clients(&session)?)
+pub fn clients_on_panes(session: &SessionName) -> Result<cli::Listed, String> {
+    Ok(cli::clients(session)?)
 }
 
 /// What luneta asks of zellij once an action has run.
@@ -1227,7 +1223,7 @@ enum Action {
     /// it, which `start` looks for just before only here: on another
     /// machine, luneta makes a session by a client that makes it there, as
     /// `zellij --session` does, which zellij refuses a name taken by then.
-    Start { at: SessionName, to: SessionName, cwd: Option<String> },
+    Start { at: SessionName, to: SessionName, cwd: Option<Directory> },
 }
 
 impl Action {
@@ -1261,7 +1257,7 @@ impl There {
     /// The clients of `session`, as zellij lists them now, or why not.
     fn clients(&mut self, session: &str) -> Result<Vec<Client>, String> {
         match self {
-            There::Here => clients(session),
+            There::Here => clients(&SessionName::running(session)?),
             There::Away(away) => away.clients(session),
         }
     }
@@ -1270,7 +1266,7 @@ impl There {
     /// there, as `before` says.
     fn before(&mut self, session: &str) -> Before {
         match self {
-            There::Here => before(session),
+            There::Here => SessionName::running(session).map_or(Before::Unknown, |at| before(&at)),
             There::Away(away) => away.clients(session).map_or(Before::Unknown, Before::Listed),
         }
     }
@@ -1375,10 +1371,7 @@ impl There {
                 There::Away(away) => away.go(&at, &to, pane),
                 There::Here => Ok(cli::went(&at, &to, pane)?),
             },
-            Action::Start { at, to, cwd } => {
-                let cwd = cwd.map(Directory::parse).transpose()?;
-                Ok(cli::started(&at, &to, cwd.as_ref())?)
-            },
+            Action::Start { at, to, cwd } => Ok(cli::started(&at, &to, cwd.as_ref())?),
         }
     }
 }
@@ -1526,6 +1519,7 @@ fn resting(waited: Duration) -> Duration {
 mod tests {
     use std::cell::Cell;
     use std::io;
+    use std::process::Command;
     use std::sync::mpsc;
 
     use super::*;
@@ -1709,15 +1703,18 @@ There are a few things you can try now:
         let Ok(session) = SessionName::parse("luneta-main") else {
             panic!("a name zellij takes");
         };
-        let (program, args) = client(Some(&session));
+        let (program, args) = client(Some(&session)).unwrap();
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
         let (program, args) = make(&session);
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
-        assert_eq!(args[args.len() - 3..], ["zellij", "--session", "luneta-main"]);
-        let (program, args) = rejoin("elo");
+        assert_eq!(args[args.len() - 2..], ["zellij", "--session=luneta-main"]);
+        let Ok(elo) = SessionName::parse("elo") else {
+            panic!("a name zellij takes");
+        };
+        let (program, args) = rejoin(&elo).unwrap();
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);

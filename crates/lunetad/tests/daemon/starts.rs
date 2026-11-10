@@ -133,6 +133,21 @@ fn a_bare_luneta_joins_the_session_of_its_directory_or_else_the_newest() {
     assert_eq!(host.zellij.attached(), ["attach project", "attach newest"]);
 }
 
+/// A bare luneta passes over a session zellij's client does not attach to,
+/// though it is the newest: `attach` takes a name that starts with `-` for an
+/// option.
+#[test]
+fn a_bare_luneta_passes_over_a_session_zellij_does_not_attach_to() {
+    let host = Host::new();
+    let _older = runs(&host, "older");
+    thread::sleep(Duration::from_millis(20));
+    let _dashed = runs(&host, "-c");
+
+    let ended = on_terminal(luneta(host.vars(), &directory("elsewhere").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach older"]);
+}
+
 /// Of the sessions you were in, as the news keeps it for every luneta, a bare
 /// luneta joins the last, though another is newer: the news goes by the socket
 /// of each as the daemon lists it.
@@ -366,7 +381,7 @@ fn a_client_zellij_drops_on_another_machine_is_taken_back_there() {
 
     let ended = on_terminal(luneta(here.vars(), &directory("project").path));
     assert!(ended.status.success(), "{}", ended.said);
-    assert_eq!(ssh.clients("far"), ["zellij attach 'work'", "zellij attach 'work'"]);
+    assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'", "zellij 'attach' 'work'"]);
     assert_eq!(here.zellij.attached(), [] as [String; 0]);
     let log = log_of(&here);
     assert!(log.contains("far: zellij dropped its client: taking it back to work"), "{log}");
@@ -455,7 +470,7 @@ fn a_bare_luneta_with_no_session_here_joins_another_machine_s() {
 
     let ended = on_terminal(luneta(here.vars(), &directory("project").path));
     assert!(ended.status.success(), "{}", ended.said);
-    assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
+    assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'"]);
     assert_eq!(ssh.clients("next"), [] as [String; 0]);
     assert_eq!(here.zellij.attached(), [] as [String; 0]);
     assert!(far.host.zellij.attached().is_empty() && next.host.zellij.attached().is_empty());
@@ -475,8 +490,26 @@ fn a_bare_luneta_goes_on_to_the_next_machine_where_a_client_fails() {
 
     let ended = on_terminal(luneta(here.vars(), &directory("project").path));
     assert!(ended.status.success(), "{}", ended.said);
-    assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
-    assert_eq!(ssh.clients("next"), ["zellij attach 'later'"]);
+    assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'"]);
+    assert_eq!(ssh.clients("next"), ["zellij 'attach' 'later'"]);
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
+}
+
+/// A machine whose one session zellij's client does not attach to has none
+/// to join: a bare luneta goes on to the next, and sends no client there.
+#[test]
+fn a_bare_luneta_passes_over_another_machine_s_session_zellij_does_not_attach_to() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "-c", &json!([]));
+    let _next = machine(&ssh, "next", "later", &json!([]));
+    hosts(&here, "far\nnext\n");
+    let _daemon = start(here.vars()).unwrap();
+
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(ssh.clients("far"), [] as [String; 0]);
+    assert_eq!(ssh.clients("next"), ["zellij 'attach' 'later'"]);
     assert_eq!(here.zellij.attached(), [] as [String; 0]);
 }
 
@@ -516,7 +549,7 @@ fn a_bare_luneta_whose_client_failed_never_goes_on_in_its_own_renamed_session() 
     bare.env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
 
     let ended = on_terminal(bare);
-    assert_eq!(ssh.clients("far"), ["zellij attach 'work'"]);
+    assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'"]);
     assert!(here.zellij.attached().is_empty(), "{:?}", here.zellij.attached());
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
 }
@@ -702,5 +735,5 @@ fn run_through_ssh_a_bare_luneta_passes_over_what_may_hold_it() {
     free.env("SSH_TTY", "/dev/pts/9");
     let ended = on_terminal(free);
     assert!(ended.status.success(), "{}", ended.said);
-    assert_eq!(ssh.clients("free"), ["zellij attach 'free'"]);
+    assert_eq!(ssh.clients("free"), ["zellij 'attach' 'free'"]);
 }

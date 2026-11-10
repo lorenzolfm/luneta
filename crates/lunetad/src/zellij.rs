@@ -64,11 +64,15 @@ const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 pub struct SessionName(String);
 
 impl SessionName {
-    /// A name for luneta to make a session of: one zellij takes on any host.
+    /// A name for luneta to make a session of: one zellij takes on any host,
+    /// and attaches a client to.
     pub fn parse(name: &str) -> Result<Self, &'static str> {
         let name = SessionName::running(name)?;
         if name.0.len() > NAME_BYTES_MAX {
             return Err("name must be shorter than 61 bytes");
+        }
+        if name.0.starts_with('-') {
+            return Err("name cannot start with '-'");
         }
         Ok(name)
     }
@@ -472,5 +476,13 @@ mod tests {
             assert!(SessionName::parse(name).is_err(), "{name:?}");
             assert!(SessionName::running(name).is_err(), "{name:?}");
         }
+    }
+
+    /// zellij's client takes a name that starts with `-` for an option as it
+    /// attaches, so luneta makes none, but knows one zellij runs.
+    #[test]
+    fn a_name_that_starts_with_a_dash_is_made_by_no_one_but_zellij() {
+        assert!(SessionName::parse("-c").is_err());
+        assert!(SessionName::running("-c").is_ok());
     }
 }

@@ -1,7 +1,7 @@
 //! zellij's CLI as luneta and its daemon run it, on the machine they run on:
 //! with none of the variables of a pane it may run in, and nothing to read,
 //! what it says as it answers or fails, and a session's panes and clients as
-//! it lists them.
+//! it lists them; and the words that start its client.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -124,7 +124,7 @@ fn answer_of(outcome: Ran) -> Result<Vec<u8>, Failure> {
 
 /// Has `command`, a zellij, do what it was asked, and says why not when it
 /// did not.
-pub fn done(mut command: Command) -> Result<(), Failure> {
+fn done(mut command: Command) -> Result<(), Failure> {
     quiet(&mut command);
     answered(&mut command).map(drop)
 }
@@ -171,7 +171,7 @@ pub fn heard<T>(
 /// Has `command`, a zellij that says nothing as it does what it was asked, do
 /// it, as `done` does, asked again where a pane closing kept it from asking,
 /// as `heard` says.
-pub fn done_once_reached(mut command: Command) -> Result<(), Failure> {
+fn done_once_reached(mut command: Command) -> Result<(), Failure> {
     quiet(&mut command);
     heard(|| answered(&mut command), |_| Ok(()))
 }
@@ -313,7 +313,7 @@ pub fn tabs(laid: &[Laid]) -> BTreeSet<TabId> {
 
 /// zellij's CLI, as `quiet` has it run.
 fn zellij() -> Command {
-    let mut command = Command::new("zellij");
+    let mut command = Command::new(PROGRAM);
     quiet(&mut command);
     command
 }
@@ -634,20 +634,33 @@ pub fn session_deleted(session: &SessionName) -> Result<(), Failure> {
 /// focus on. None where the client is there already: in `at`, with no pane to
 /// go to.
 fn go(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Option<Command> {
+    if at == to {
+        return pane.map(|id| focus(at, PaneId::Terminal(id)));
+    }
     let pane = pane.map(|id| PaneId::Terminal(id).to_string());
     let mut command = action(at);
-    match pane {
-        Some(pane) if at == to => {
-            command.args(["focus-pane-id", &pane]);
-        },
-        None if at == to => return None,
-        pane => {
-            command.arg("switch-session");
-            command.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
-            command.args(["--", to.as_str()]);
-        },
-    }
+    command.arg("switch-session");
+    command.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
+    command.args(["--", to.as_str()]);
     Some(command)
+}
+
+/// The command that takes the client that last typed in `session` to its
+/// pane `pane`.
+fn focus(session: &SessionName, pane: PaneId) -> Command {
+    let mut command = action(session);
+    command.args(["focus-pane-id", &pane.to_string()]);
+    command
+}
+
+/// Has zellij take the client that last typed in `session` to its pane
+/// `pane`, a terminal's or a plugin's, as `done_once_reached` does, or says
+/// why it did not. A pane already focused is where it was to go.
+pub fn pane_focused(session: &SessionName, pane: PaneId) -> Result<(), Failure> {
+    match done_once_reached(focus(session, pane)) {
+        Ok(()) | Err(Failure::Focused(_)) => Ok(()),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// Has zellij take the client that last typed in `at` where `go` says, or
@@ -679,6 +692,55 @@ fn start(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> Command
 /// Has zellij take the client where `start` says, or says why it did not.
 pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> Result<(), Failure> {
     answer_of(ran(&mut start(at, to, cwd))?).map(drop)
+}
+
+/// The program of zellij's CLI and its client.
+pub const PROGRAM: &str = "zellij";
+
+/// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
+/// which it makes where none runs, or without one, in a session of a name
+/// zellij makes up; or why it cannot attach, as `attached` says.
+pub fn client(session: Option<&SessionName>) -> Result<Vec<String>, String> {
+    let Some(session) = session else {
+        return Ok(Vec::new());
+    };
+    Ok(vec!["attach".to_owned(), "--create".to_owned(), attached(session)?])
+}
+
+/// The arguments of zellij's client, as `client` says, that makes `session`
+/// in the directory it starts in, and fails where one runs by that name, or
+/// zellij keeps one that ended, to bring back.
+#[must_use]
+pub fn client_making(session: &SessionName) -> Vec<String> {
+    vec![session_option(session)]
+}
+
+/// The arguments of zellij's client, as `client` says, attached to `session`,
+/// which runs, or which ended, which zellij brings back. It makes none.
+pub fn client_rejoining(session: &SessionName) -> Result<Vec<String>, String> {
+    Ok(vec!["attach".to_owned(), attached(session)?])
+}
+
+/// Whether zellij's client attaches to `session`. `attach` takes its name
+/// bare, as it takes the words after `--` for a command to run in a session
+/// it makes, and a name that starts with `-` for an option, as `-c` for
+/// `--create`: it attaches to none so named, which only zellij makes, as
+/// `SessionName::parse` says.
+#[must_use]
+pub fn attaches_to(session: &SessionName) -> bool {
+    !session.as_str().starts_with('-')
+}
+
+/// `session` as `attach` takes its name, or why it takes none, as
+/// `attaches_to` says.
+fn attached(session: &SessionName) -> Result<String, String> {
+    if !attaches_to(session) {
+        return Err(format!(
+            "zellij attaches to no session whose name starts with '-', as \"{session}\"'s does: \
+             rename it"
+        ));
+    }
+    Ok(session.as_str().to_owned())
 }
 
 #[cfg(test)]
@@ -721,6 +783,9 @@ mod tests {
         let w = Directory::parse("/w".to_owned()).unwrap();
         let started = start(&at, &to, Some(&w));
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
+        assert_eq!(client_making(&at), ["--session=-at"]);
+        assert!(client_rejoining(&at).is_err());
+        assert!(client(Some(&at)).is_err());
     }
 
     /// A pane already focused is read apart from any other failure, as `went`
