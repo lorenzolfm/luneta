@@ -3,7 +3,7 @@
 //! text is never empty, and the protocol has it absent instead.
 
 /// Text a program said, never empty.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Said(String);
 
 impl Said {

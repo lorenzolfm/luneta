@@ -1164,7 +1164,8 @@ fn git_runs_no_command_a_repository_names() {
 /// How far behind its upstream a branch a pane works on is, is of what the
 /// remote has, with no one fetching it but the daemon, which moves no branch
 /// and runs no hook the repository names. A remote that is gone is said once
-/// in the log.
+/// in the log, and so is a branch the remote deleted, as one that is gone and
+/// not as a failure.
 #[test]
 fn the_behind_count_is_of_what_the_remote_has() {
     let host = Host::new();
@@ -1172,7 +1173,7 @@ fn the_behind_count_is_of_what_the_remote_has() {
     let path = |name: &str| dirs.path().join(name);
     let (origin, tree, elsewhere, ran) =
         (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
-    let (lost, lone) = (path("lost.git"), path("lone"));
+    let (lost, lone, merged) = (path("lost.git"), path("lone"), path("merged"));
     fs::create_dir(&origin).unwrap();
     assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
     let spelled = |dir: &Path| dir.display().to_string();
@@ -1187,14 +1188,17 @@ fn the_behind_count_is_of_what_the_remote_has() {
         commit(&elsewhere, file, "new\n");
     }
     assert!(git(&elsewhere, &["push", "-q"]));
+    assert!(git(&elsewhere, &["push", "-q", "origin", "HEAD:refs/heads/done"]));
+    assert!(git(dirs.path(), &["clone", "-q", "-b", "done", &spelled(&origin), "merged"]));
+    assert!(git(&elsewhere, &["push", "-q", "origin", "--delete", "done"]));
     let hook = tree.join(".git/hooks/reference-transaction");
     fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
     fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
     let here = fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap();
 
-    let (cwd, alone) = (spelled(&tree), spelled(&lone));
+    let (cwd, alone, done) = (spelled(&tree), spelled(&lone), spelled(&merged));
     let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
-    host.zellij.list("work", &json!([in_dir(1, &cwd), in_dir(2, &alone)]));
+    host.zellij.list("work", &json!([in_dir(1, &cwd), in_dir(2, &alone), in_dir(3, &done)]));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
     let upstream = |it: Checkout| match it.head {
@@ -1212,12 +1216,15 @@ fn the_behind_count_is_of_what_the_remote_has() {
 
     let log = host.home.path().join(".local/state/luneta/luneta.log");
     let failed = format!("git did not fetch the upstream of main in {alone}");
-    eventually("the log says the fetch failed", || {
-        fs::read_to_string(&log).ok().filter(|log| log.contains(&failed))
+    let gone = "the remote no longer has the upstream of done in ";
+    eventually("the log says the fetches failed and the branch is gone", || {
+        fs::read_to_string(&log).ok().filter(|log| log.contains(&failed) && log.contains(gone))
     });
     thread::sleep(Duration::from_secs(1));
     let said = fs::read_to_string(&log).unwrap();
     assert_eq!(said.matches(&failed).count(), 1, "{said}");
+    assert_eq!(said.matches(gone).count(), 1, "{said}");
+    assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
 }
 
 /// gh is asked for the pull request of the branch checked out where each pane

@@ -61,6 +61,7 @@ use tokio::time::timeout;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch};
+use wt::cmd::follow::Upstream;
 use wt::repo::Repo;
 
 use crate::api::daemon_client::DaemonClient;
@@ -1535,11 +1536,40 @@ pub fn followed(dir: &str) -> Result<(), String> {
     wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
 }
 
-/// Fetches the upstream branch of the branch checked out in `dir`, by wt's own
-/// code, as `wt follow` fetches it, and moves no branch; or why it did not.
-pub fn fetched_upstream(dir: &str) -> Result<(), String> {
+/// Fetches the upstream branch of `branch`, of the repository `dir` is in, by
+/// wt's own code, as `wt follow` fetches it, and moves no branch: what wt
+/// found of it, or why it did not.
+pub fn fetched_upstream(dir: &str, branch: &str) -> Result<Upstream, String> {
     git_reads(dir)?;
-    wt::cmd::follow::fetch_upstream(Path::new(dir)).map_err(|error| format!("{error:#}"))
+    wt::cmd::follow::fetch_upstream(Path::new(dir), branch).map_err(|error| format!("{error:#}"))
+}
+
+/// Each of what wt finds of an upstream branch, for `upstream_of_word`.
+const UPSTREAMS: [Upstream; 5] = [
+    Upstream::Untracked,
+    Upstream::Current,
+    Upstream::Advanced,
+    Upstream::Rewritten,
+    Upstream::Gone,
+];
+
+/// What `luneta fetch-upstream` prints of what wt found, for lunetad to read
+/// back with `upstream_of_word`.
+#[must_use]
+pub fn upstream_word(found: Upstream) -> &'static str {
+    match found {
+        Upstream::Untracked => "untracked",
+        Upstream::Current => "current",
+        Upstream::Advanced => "advanced",
+        Upstream::Rewritten => "rewritten",
+        Upstream::Gone => "gone",
+    }
+}
+
+/// What wt found, as `upstream_word` says it; none for a word it does not say.
+#[must_use]
+pub fn upstream_of_word(word: &str) -> Option<Upstream> {
+    UPSTREAMS.into_iter().find(|found| upstream_word(*found) == word)
 }
 
 /// Why wt's git would not read the repository `dir` is in, where a variable

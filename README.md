@@ -971,8 +971,11 @@ remote-tracking ref only where no commit is lost, so a rewrite still moves on
 `r`. Nothing in `core.hooksPath` or `core.fsmonitor` runs for it, nor
 maintenance or a submodule's fetch, and it asks for no password: a remote that
 wants one, is gone, or takes more than a minute fails, and lunetad's log says so
-once while it keeps failing. A branch whose upstream is not a remote-tracking
-ref, as a fork's `refs/pull/N/head`, shows no count and is not fetched.
+once while it keeps failing. A branch whose upstream the remote deleted, as a
+merged pull request's, is said once in the log and not fetched again while a
+pane works on it; its count is of what the remote had last. A branch whose
+upstream is not a remote-tracking ref, as a fork's `refs/pull/N/head`, shows no
+count and is not fetched.
 
 A pane outside a repository, or on a detached `HEAD`, has no branch, and its
 row stays one line. After the branch is how many lines changed on it, against

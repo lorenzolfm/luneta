@@ -200,11 +200,15 @@ pub fn follow(dir: &str) -> ExitCode {
     }
 }
 
-/// Fetches the upstream branch of the branch checked out in `dir`, as
-/// `links::fetched_upstream` does. Or prints why it did not, as `make` does.
-pub fn fetch_upstream(dir: &str) -> ExitCode {
-    match links::fetched_upstream(dir) {
-        Ok(()) => ExitCode::SUCCESS,
+/// Fetches the upstream branch of `branch`, of the repository `dir` is in, as
+/// `links::fetched_upstream` does, and prints the word for what wt found. Or
+/// prints why it did not, as `make` does.
+pub fn fetch_upstream(dir: &str, branch: &str) -> ExitCode {
+    match links::fetched_upstream(dir, branch) {
+        Ok(found) => {
+            println!("{}", links::upstream_word(found));
+            ExitCode::SUCCESS
+        },
         Err(why) => {
             eprintln!("{}{why}", links::WHY);
             ExitCode::FAILURE
