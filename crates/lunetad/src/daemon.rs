@@ -63,7 +63,7 @@ use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Went};
 use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
-    self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
     DumpScreenResponse, FileIssueRequest, FileIssueResponse, GoRequest, InfoResponse,
     IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
@@ -97,7 +97,7 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    carries, checks, claude, cli, client, closes, ended, eza, fetches, git, github, keeps, log,
+    checks, claude, cli, client, closes, ended, eza, fetches, git, github, keeps, log,
     moves, names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills,
     topics, turns, watch, zellij, zoxide, Harness,
 };
@@ -269,8 +269,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let folder = claim.folder.clone();
-    let host = Host { started, folder, sockets, claude_folder, core, watchers, bridges };
+    let host = Host { started, sockets, claude_folder, core, watchers, bridges };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     // Once the daemon has been alone long enough, or the thread that would say
@@ -537,8 +536,6 @@ impl Drop for Waits<'_> {
 /// What the daemon answers from.
 struct Host {
     started: SystemTime,
-    /// The folder it holds.
-    folder: PathBuf,
     /// The folder it reads zellij's sessions in.
     sockets: PathBuf,
     /// The folder it reads Claude Code's sessions in, if its environment
@@ -931,29 +928,6 @@ impl Daemon for Host {
             },
         };
         Ok(Response::new(TurnIntoPanesResponse { came: Some(came) }))
-    }
-
-    type CarryStream = Pin<Box<dyn Stream<Item = Result<CarryResponse, Status>> + Send>>;
-
-    async fn carry(
-        &self,
-        request: Request<CarryRequest>,
-    ) -> Result<Response<Self::CarryStream>, Status> {
-        let (on, carry) =
-            carries::Carry::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        if let Some(mut daemon) = self.bridged(on)? {
-            let answer = daemon.carry(carry.asked(None)).await?.into_inner();
-            return Ok(Response::new(Box::pin(answer)));
-        }
-        let host = self.watched(None).await?;
-        let planned = carry.planned(&host.sessions, &host.agents);
-        let planned = planned.map_err(Status::failed_precondition)?;
-        let folder = self.folder.clone();
-        let answer = late(move || {
-            let moved = carries::carried(&folder, &carry, &planned);
-            Ok(carries::answer(&moved.map_err(Status::failed_precondition)?))
-        });
-        Ok(Response::new(Box::pin(answer)))
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {

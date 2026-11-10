@@ -111,22 +111,6 @@ service Daemon {
   // runs in them runs on, and each keeps its id. It answers once they have
   // moved, or how many did before zellij stopped, or with why none did.
   rpc TurnIntoPanes(TurnIntoPanesRequest) returns (TurnIntoPanesResponse);
-  // Has zellij move a terminal of a session, or every terminal of its tab, to
-  // another session: zellij moves no pane from one session to another, so it
-  // closes each, and opens it anew there, where what ran in it starts again.
-  // Claude Code's agent at its prompt resumes its session, where it started,
-  // with the options it started with but those that pick the session; a shell
-  // at its prompt starts anew where it works. Nothing moves that would be cut
-  // short, nor what the daemon cannot tell: a shell that runs a command, or
-  // holds one stopped, an agent at work or that waits for an answer, another
-  // harness's, a program, a pane whose command ended. Nor does a pane that
-  // would take floating panes along, nor one that would end its session, but
-  // where the question says it may. It answers once each is open there, with
-  // the terminal each opened as, or with what it closed and did not open
-  // again, and how to start that by hand, beside those that did; or with why
-  // it closed nothing. It answers once, as `Prunes` does, and a question that
-  // hangs up does not stop it.
-  rpc Carry(CarryRequest) returns (stream CarryResponse);
   // Has zellij kill a session and delete it, so that it keeps nothing to
   // bring it back with, as `zellij delete-session --force` does. It answers
   // once the session's server has ended, or with why it did not: a session
@@ -627,49 +611,6 @@ message TurnIntoPanesResponse {
     uint32 of = 2;
     // Why the rest stay.
     string why = 3;
-  }
-}
-
-message CarryRequest {
-  On on = 1;
-  string session = 2;
-  // When the session started, as its `Session.started_at` says: a session by
-  // its name that started at another time took the name since, and what is in
-  // it stays. A question without it is invalid.
-  google.protobuf.Timestamp started_at = 3;
-  // The terminal, by its id.
-  uint32 pane = 4;
-  // Whether every terminal of its tab goes, the tab's name with them.
-  bool tab = 5;
-  // The session they go to: another than `session`, a question that names
-  // that one is invalid.
-  string to = 6;
-  // When it started, as `started_at` says of `session`.
-  google.protobuf.Timestamp to_started_at = 7;
-  // Where they land: one of these, always. A question with neither is
-  // invalid.
-  oneof lands {
-    // Beside this terminal of `to`, by its id, in its tab.
-    uint32 beside = 8;
-    // In a tab of their own, which opens after the others.
-    google.protobuf.Empty new_tab = 9;
-  }
-  // Whether the session may end, as it does with the last of its terminals:
-  // you said it may. Without it, a move that would end it moves nothing.
-  bool ending = 10;
-}
-
-message CarryResponse {
-  // The terminals it opened, each by the one it closed, in their order.
-  repeated Carried carried = 1;
-  // What it closed and did not open again, and what starts each of those by
-  // hand: absent where each opened. A move that closes nothing answers with
-  // why instead.
-  optional string stranded = 2;
-
-  message Carried {
-    uint32 from = 1;
-    uint32 terminal = 2;
   }
 }
 

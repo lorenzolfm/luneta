@@ -571,12 +571,13 @@ and a click on a key the line under the search names presses it, as `<TAB>`.
 
 The sidebar lists every session, under a header for the machine it runs on,
 as [other machines](#other-machines) says, oldest first until you move them,
-the panes in each, in the order of their tabs, and what the agent in each pane
+the panes in each, in the order of their tabs until you move those too, and
+what the agent in each pane
 is doing, with the branch under it, all as [`lunetad`](#building-from-source)
 says:
 luneta starts the daemon when none runs, and the sidebar says so at its bottom
 while it does not answer. A bracket, `╭`, `│` and `╰`, down the column after
-`▌` joins the panes of a tab that holds more than one. Each session has a
+`▌` joins the panes of a tab that sit next to each other. Each session has a
 colour of its own, as a browser's group of tabs has, which its name sits on and
 its brackets are drawn in: a session takes the first that no other has as it
 starts, and keeps it until it ends, renamed too, the same in every luneta. `j`
@@ -707,15 +708,14 @@ shows what can come next, as which-key does in neovim: `d d`, `g g` or `y p`
 typed fast draws nothing in between, and a slow `d` shows the Delete group. A
 click on `d  Delete ▸` shows it at once. A lone `g` waits the same way, then shows
 `g  First row`, as `y` shows what it yanks. While `v` selects, the bottom
-lists the keys of the selection instead, and while `V` carries a pane, those
-of the move:
+lists the keys of the selection instead, and while `V` has picked a pane,
+those of the move:
 
 ```text
 ─ Move pane ───────────────────
- j k    Where it lands
- V      Tab or pane
- Enter  Set down
- Esc    Put back
+ J K  Move
+ V    Tab, then done
+ Esc  Done
 ```
 
 `?` in the legend lists every key luneta has in its place, in groups: Move,
@@ -1100,12 +1100,12 @@ every luneta opens that wide from its next start: one already running keeps
 its own. Collapsed, the strip stays four columns wide, and opens to the width
 you dragged.
 
-You can move the sessions, of any machine, and the machines; panes stay in
-the order of their tabs. `v` selects the session of the highlighted row, `j`
-and `k` grow the selection from session to session of its machine, folded or
-not, and `J` and `K` move the sessions it holds, each with its panes, one down
-or one up, as a visual selection and `:m` do in vim. A session moves among
-its machine's alone: never under another machine's header. On a machine's
+You can move the sessions, of any machine, the machines, and the panes. `v`
+selects the session of the highlighted row, `j` and `k` grow the selection
+from session to session of its machine, folded or not, and `J` and `K` move
+the sessions it holds, each with its panes, one down or one up, as a visual
+selection and `:m` do in vim. A session moves among its machine's alone: never
+under another machine's header. On a machine's
 header, which the highlight stops on while the machine is folded or lists no
 session, `v` selects the machine, this one too, `j` and `k` grow the
 selection from header to header, and `J` and `K` move the machines it holds,
@@ -1113,35 +1113,25 @@ each with every row under its header. They stay selected, so `JJJ` goes on.
 `v` or `Esc` ends the selection, `Esc` doing nothing else; any other key ends
 it and does what it does.
 
-A pane moves to another session of its machine too, or a tab with every pane
-of it, though zellij moves no pane between sessions: luneta closes it, and
-opens it anew there, so what runs in it starts again. An agent of Claude
-Code's at its prompt resumes its session there, as `claude --resume` does, in
-the directory it started in and with the options it started with, but those
-that pick or name a session; a shell at its prompt starts anew in the
-directory it works in. What would be cut short stays, and a note says why: a
-shell that runs a command or a script, or holds one stopped, an agent at work
-or that waits for an answer, a program, pi's agents for now, and a pane whose
-command ended. A tab goes whole or not at all, and a pane that alone holds its tab
-open for floating panes stays, as they would close with it. Each pane closes
-first, and opens once what ran in it has ended, so that no two agents write
-one transcript, and a machine moves one at a time: another says so meanwhile. Its scrollback stays behind, and so does its dot, as the new
-pane has an id of its own; a tab's splits do too, and its panes open side by
-side in the order of their ids.
-
-`V` picks the highlighted pane, `V` again takes up the rest of its tab, and
-once more puts it back. `J` and `K`, or `j` and `k`, take where it lands among
-the rows of the machine's other sessions, lit, with what it lands on a step
-softer: a session's row opens a tab of its own there, after its others, named
-as the tab it left where that one was named and it was all of it, and a
-pane's row has it beside that pane, in its tab. `Enter` moves it, and `Esc`
-puts it back. Moving all a session has ends the session, so luneta asks
-first, in the notes: `y` moves it, and any other key keeps it. zellij's client
-goes with the pane it is on, first to the other session where the session it
-leaves ends, or where the tab it opens has no client there to make room for
-it; any other client stays where it is. What fails once the pane closed is
-said, with the command that starts it again by hand, and the client still goes
-to its pane where that one opened.
+`V` picks the highlighted pane, and `J` and `K`, or `j` and `k`, move it one
+row down or one up, among the panes of its session, and past the last of
+them, or the first, under the next session of its machine, or the one before,
+passing over a folded one. `V` again takes up the rest of its tab, the panes
+of it next to each other, which move together, and once more ends, as `Esc`
+does; any other key ends it and does what it does. A pane moves among its
+machine's alone, and it moves only where its row shows: zellij moves no pane
+between sessions, so it goes on in its own, and what runs in it runs on,
+untouched. `Enter` on it goes to it there, the menu acts on it there, and its
+session's rule is the one in the accent while zellij is on it. Its bracket,
+or under another session a `┆` where it is alone of its tab, is drawn in its
+own session's colour, so you can tell where it lives. It folds with the
+session it shows under, and `h` on it folds that one. Where you moved each
+pane is kept for every luneta, and the next, in the same file as the order of
+the sessions, for as long as its session runs: zellij numbers a session's
+panes from 0 each time it starts, so no pane keeps a place past it. Once the
+session it shows under has ended, it shows under its own again, after the
+panes you moved there. A pane you have not moved shows under its own session,
+after those you moved there.
 
 With the mouse, a press on a session's row, or on a machine's header, lifts
 it once the mouse moves a line, and the sidebar takes the keys. It shows where
@@ -1150,12 +1140,10 @@ session among its machine's alone. Held on the first or last line of the
 rows, it scrolls them. Let go, it stays there. Let go off the sidebar, or
 press `Esc`, and it goes back. A press on a pane's row lifts the pane, as `V`
 picks it, and one on the bracket that joins it to the panes of its tab lifts
-the tab: it shows under the row of another session the pointer is on, which
-it lands on as it lets go, as `Enter` lands what `V` picked; over its own
-session's rows, it goes back. A pane that cannot go lifts nothing, and a note
-says why. What the mouse holds stays with the sidebar until it lets go, over
-zellij too, and while the button is down no key reaches zellij, and the
-sidebar does nothing with one but `Esc`, which lets go, as the window losing
+the tab: it shows where it lands, lit, among the panes of its machine's
+sessions, and lands there as it lets go. What the mouse holds stays with the
+sidebar until it lets go, over zellij too, and while the button is down no key
+reaches zellij, and the sidebar does nothing with one but `Esc`, which lets go, as the window losing
 the focus does. The button does nothing more then until it comes up: zellij
 hears nothing of it. So
 a click is a press let go on the line it went down on, and acts as it lets go,
