@@ -181,12 +181,13 @@ pub fn rejoin(session: &SessionName) -> (String, Vec<String>) {
     client_with(cli::client_rejoining(session))
 }
 
-/// zellij's client, started by `words`. It runs through `env`, to leave out
-/// what `LEFT_OUT` names, which luneta cannot take out of its own variables.
-fn client_with(words: Vec<String>) -> (String, Vec<String>) {
+/// zellij's client, with `args`. It runs through `env`, to leave out what
+/// `LEFT_OUT` names, which luneta cannot take out of its own variables.
+fn client_with(args: Vec<String>) -> (String, Vec<String>) {
     let mut through: Vec<String> =
         LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
-    through.extend(words);
+    through.push(cli::PROGRAM.to_owned());
+    through.extend(args);
     ("env".to_owned(), through)
 }
 
@@ -233,15 +234,12 @@ fn away(destination: &Destination, command: String) -> (String, Vec<String>) {
     ("ssh".to_owned(), args)
 }
 
-/// `words`, a program and its arguments, as a shell there reads them back:
-/// each argument as `quoted` says, and the program bare, as some shells take
-/// a quoted first word for a string.
-fn spelled(words: &[String]) -> String {
-    let mut spelled = Vec::with_capacity(words.len());
-    if let Some((program, args)) = words.split_first() {
-        spelled.push(program.clone());
-        spelled.extend(args.iter().map(|arg| quoted(arg)));
-    }
+/// zellij's client with `args`, as a shell there reads them back: each
+/// argument as `quoted` says, and the program bare, as some shells take a
+/// quoted first word for a string.
+fn spelled(args: &[String]) -> String {
+    let mut spelled = vec![cli::PROGRAM.to_owned()];
+    spelled.extend(args.iter().map(|arg| quoted(arg)));
     spelled.join(" ")
 }
 

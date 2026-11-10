@@ -675,7 +675,7 @@ pub enum At<P> {
     /// the clone of the repository is. No session the machine's zellij has
     /// was called so as it was named: luneta has it named again just before
     /// it makes the session, as a while can go by first.
-    Clone { cwd: String, name: SessionName },
+    Clone { cwd: Directory, name: SessionName },
 }
 
 /// What a key of the menu goes on with: where it goes, the worktree made for
@@ -723,7 +723,7 @@ impl Ready<usize> {
             At::There(at) => paste_response::At::There(place(at)),
             At::Session(at) => paste_response::At::Session(place(at)),
             At::Clone { cwd, name } => {
-                paste_response::At::Clone(MadeClone { cwd, name: name.to_string() })
+                paste_response::At::Clone(MadeClone { cwd: cwd.into(), name: name.to_string() })
             },
         };
         let file = match work {
@@ -949,9 +949,7 @@ impl Pasted {
             Some(paste_response::At::There(at)) => At::There(place(at)),
             Some(paste_response::At::Session(at)) => At::Session(place(at)),
             Some(paste_response::At::Clone(MadeClone { cwd, name })) => {
-                if !cwd.starts_with('/') {
-                    return Err(format!("clone: {cwd:?} is no absolute path"));
-                }
+                let cwd = Directory::parse(cwd).map_err(|why| format!("clone: {why}"))?;
                 let name = SessionName::parse(&name)
                     .map_err(|why| format!("clone: \"{name}\" names no session: {why}"))?;
                 At::Clone { cwd, name }
@@ -1171,7 +1169,7 @@ enum Found {
 /// worktree is, when the session is about to be made.
 enum Going {
     Session(usize),
-    Clone { cwd: String, name: SessionName },
+    Clone { cwd: Directory, name: SessionName },
 }
 
 /// Where a key goes for `link` among the panes `worked`: the pane that has
@@ -1217,7 +1215,7 @@ fn session_among<R: Ord>(
 fn clone(
     link: &Link,
     repository_of: impl FnMut(&str) -> Option<Repository>,
-) -> Result<Option<(String, String, SessionName)>, String> {
+) -> Result<Option<(String, Directory, SessionName)>, String> {
     let repository = link.repository();
     let dirs: Vec<String> = zoxide::visited()
         .map_err(|why| {
@@ -1237,9 +1235,10 @@ fn clone(
 /// The directory a session made for the repository `dir` is in starts in,
 /// which holds it, and the name the picker gives that directory; or why it
 /// has none.
-fn session_for(dir: &str) -> Result<(String, SessionName), String> {
+fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
     let cwd = holder(dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
-    let name = names::session_for(Path::new(&cwd))
+    let cwd = Directory::parse(cwd)?;
+    let name = names::session_for(Path::new(cwd.as_str()))
         .ok_or_else(|| format!("no session can be named for {cwd}"))?;
     Ok((cwd, name))
 }
@@ -2429,7 +2428,7 @@ mod tests {
         let of_link = || Readied::Link(issue());
         let of_file = || Readied::File { real: "/w/cdk/main/plan.md".to_owned() };
         let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
+        let clone = At::Clone { cwd: directory("/w/cdk"), name };
         for at in [At::There(1), At::Session(0), clone] {
             let worktree = "/w/cdk/issue-2736".to_owned();
             let branch = Some("issue-2736".to_owned());

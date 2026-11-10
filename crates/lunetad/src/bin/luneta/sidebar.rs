@@ -9829,7 +9829,7 @@ mod tests {
         let pull = Asked::Pull { menu: 1, on, work, wanted, worked, others: Vec::new() };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
 
-        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("newer-2") };
+        let at = At::Clone { cwd: directory("/w/n"), name: session_name("newer-2") };
         let work = Readied::Link(link);
         let worktree = "/w/n/feat".to_owned();
         let ready = Ready { at, worktree, branch: None, moved_off: false, work };
@@ -10363,7 +10363,7 @@ mod tests {
             assert!(!sidebar.turning());
             sidebar.notice
         };
-        let made = left(At::Clone { cwd: "/w/n".to_owned(), name: session_name("luneta") });
+        let made = left(At::Clone { cwd: directory("/w/n"), name: session_name("luneta") });
         let said = "menu: the worktree of /w/luneta/feat is made: no session is made for it, as \
                     luneta's zellij is where you went; open luneta and try again";
         assert_eq!(made.as_deref(), Some(said));
@@ -11949,7 +11949,7 @@ mod tests {
         let wanted = Wanted::AsItIs;
         let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
-        let at = At::Clone { cwd: "/w/n".to_owned(), name: session_name("main") };
+        let at = At::Clone { cwd: directory("/w/n"), name: session_name("main") };
         let worktree = "/w/n/feat".to_owned();
         let of_link = Readied::Link(link);
         let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };

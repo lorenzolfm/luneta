@@ -313,7 +313,7 @@ pub fn tabs(laid: &[Laid]) -> BTreeSet<TabId> {
 
 /// zellij's CLI, as `quiet` has it run.
 fn zellij() -> Command {
-    let mut command = Command::new("zellij");
+    let mut command = Command::new(PROGRAM);
     quiet(&mut command);
     command
 }
@@ -694,38 +694,33 @@ pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> R
     answer_of(ran(&mut start(at, to, cwd))?).map(drop)
 }
 
-/// The words that start zellij's client, the program first: attached to
-/// `session`, which it makes where none runs, or without one, in a session of
-/// a name zellij makes up. The name goes bare: after `--`, `attach` takes the
-/// words for a command to run in a session it makes, so that no name that
-/// starts with `-` reaches it.
+/// The program of zellij's CLI and its client.
+pub const PROGRAM: &str = "zellij";
+
+/// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
+/// which it makes where none runs, or without one, in a session of a name
+/// zellij makes up. The name goes bare, as `attach` takes the words after `--`
+/// for a command to run in a session it makes: it takes no name that starts
+/// with `-`, which only `client_making` reaches.
 #[must_use]
 pub fn client(session: Option<&SessionName>) -> Vec<String> {
     let attach = session.map(|session| ["attach", "--create", session.as_str()]);
-    words(attach.into_iter().flatten())
+    attach.into_iter().flatten().map(str::to_owned).collect()
 }
 
-/// The words that start zellij's client, as `client` says, that makes
-/// `session` in the directory it starts in, and fails where one runs by that
-/// name, or zellij keeps one that ended, to bring back.
+/// The arguments of zellij's client, as `client` says, that makes `session`
+/// in the directory it starts in, and fails where one runs by that name, or
+/// zellij keeps one that ended, to bring back.
 #[must_use]
 pub fn client_making(session: &SessionName) -> Vec<String> {
-    words([session_option(session).as_str()])
+    vec![session_option(session)]
 }
 
-/// The words that start zellij's client, as `client` says, attached to
-/// `session`, which runs, or which ended, which zellij brings back. It makes
-/// none.
+/// The arguments of zellij's client, as `client` says, attached to `session`,
+/// which runs, or which ended, which zellij brings back. It makes none.
 #[must_use]
 pub fn client_rejoining(session: &SessionName) -> Vec<String> {
-    words(["attach", session.as_str()])
-}
-
-/// zellij, with `args` after it.
-fn words<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut words = vec!["zellij".to_owned()];
-    words.extend(args.into_iter().map(str::to_owned));
-    words
+    vec!["attach".to_owned(), session.as_str().to_owned()]
 }
 
 #[cfg(test)]
@@ -768,7 +763,7 @@ mod tests {
         let w = Directory::parse("/w".to_owned()).unwrap();
         let started = start(&at, &to, Some(&w));
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
-        assert_eq!(client_making(&at), ["zellij", "--session=-at"]);
+        assert_eq!(client_making(&at), ["--session=-at"]);
     }
 
     /// A pane already focused is read apart from any other failure, as `went`

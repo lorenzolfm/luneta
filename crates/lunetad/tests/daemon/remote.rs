@@ -1858,7 +1858,8 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
         let Ready { at: At::Clone { cwd, name }, worktree: again, .. } = made.unwrap() else {
             panic!("no session to make");
         };
-        assert_eq!((cwd, name.as_str(), again), (clone.display().to_string(), "n", worktree));
+        let held = clone.display().to_string();
+        assert_eq!((cwd.as_str(), name.as_str(), again), (held.as_str(), "n", worktree));
 
         let relative = Pasted::new(link.clone(), vec![worked("n/main")]);
         let relative = pasted_on(&mut daemon, "far", &relative).await.unwrap_err();
@@ -2565,7 +2566,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let asked = Pasted::new(file(&plan, None), vec![worked("/nowhere/at/all")]);
         let made = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let At::Clone { cwd, name } = made.at else { panic!("no session to make") };
-        assert_eq!((cwd, name.as_str()), (clone.display().to_string(), "n"));
+        assert_eq!((cwd.as_str(), name.as_str()), (&*clone.display().to_string(), "n"));
 
         // In no repository, by the far machine's `~/`: the row's repository,
         // and the file where it is.

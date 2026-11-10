@@ -2202,19 +2202,9 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
-        let at = match (at, pull) {
-            (At::There((session, pane)), Pull::Worktree) => {
-                return Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })));
-            },
-            (at, _) => at,
-        };
-        let parsed = |path| {
-            let wrong = |why| Did::Closed(Done::Wrong(format!("menu: {work}: {why}")));
-            Directory::parse(path).map_err(wrong)
-        };
-        let dir = match parsed(worktree.clone()) {
+        let dir = match Directory::parse(worktree.clone()) {
             Ok(dir) => dir,
-            Err(wrong) => return wrong,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
@@ -2233,19 +2223,18 @@ impl Menu {
             let cwd = dir.clone();
             Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
-        match at {
-            At::There((session, pane)) => {
+        match (at, pull) {
+            (At::There((session, pane)), Pull::Worktree) => {
+                Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
+            },
+            (At::There((session, pane)), Pull::Agent) => {
                 opening(session, pane, Opens::Pane { beside: pane, command })
             },
-            At::Session((session, pane)) => {
+            (At::Session((session, pane)), _) => {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
                 opening(session, pane, opens)
             },
-            At::Clone { cwd, name } => {
-                let cwd = match parsed(cwd) {
-                    Ok(cwd) => cwd,
-                    Err(wrong) => return wrong,
-                };
+            (At::Clone { cwd, name }, _) => {
                 let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
@@ -4990,7 +4979,7 @@ mod tests {
         let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
-            at: At::Clone { cwd: "/w/cdk".to_owned(), name },
+            at: At::Clone { cwd: directory("/w/cdk"), name },
             worktree: "/w/cdk/issue-2736".to_owned(),
             branch: Some("dev-docs".to_owned()),
             moved_off: true,
@@ -5096,7 +5085,7 @@ mod tests {
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
-        let at = At::Clone { cwd: "/w/cdk".to_owned(), name: name.clone() };
+        let at = At::Clone { cwd: directory("/w/cdk"), name: name.clone() };
         let work = Readied::Link(pull_request());
         let worktree = "/w/cdk/feat-x".to_owned();
         let ready = Ready { at, worktree, branch: None, moved_off: false, work };
@@ -5144,7 +5133,7 @@ mod tests {
         let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
         assert_eq!((machine, row.pane), (&vps(), 7));
         let name = SessionName::parse("cdk").unwrap();
-        let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
+        let clone = At::Clone { cwd: directory("/w/cdk"), name };
         let header = Target::Machine(vps());
         let (menu, wants) = stays(pulling_on(header.clone(), 'w').pulled(ready(clone)));
         assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
@@ -5177,7 +5166,7 @@ mod tests {
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
             let name = SessionName::parse("cdk").unwrap();
-            let clone = At::Clone { cwd: "/w/cdk".to_owned(), name };
+            let clone = At::Clone { cwd: directory("/w/cdk"), name };
             let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(clone)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));
