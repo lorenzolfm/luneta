@@ -110,13 +110,15 @@ pub fn before(session: &SessionName) -> Option<Vec<api::Client>> {
 
 /// The first of `sessions` that `clients` answers for, tried one after
 /// another within `SEEKING`, where a client goes on: of this machine's, or
-/// of another's, as its daemon there lists their clients.
+/// of another's, as its daemon there lists their clients. Never one zellij's
+/// client does not attach to, as `cli::attaches_to` says, which is not asked.
 pub fn answering(
     sessions: impl IntoIterator<Item = SessionName>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
     let seeking = Instant::now() + SEEKING;
-    let mut sessions = sessions.into_iter().take_while(|_| Instant::now() < seeking);
+    let sessions = sessions.into_iter().filter(cli::attaches_to);
+    let mut sessions = sessions.take_while(|_| Instant::now() < seeking);
     sessions.find_map(|session| {
         let before = clients(&session)?;
         Some(Refuge { session, before })
@@ -173,6 +175,20 @@ mod tests {
         });
         assert_eq!(found.map(|refuge| refuge.session.to_string()), Some("up".to_owned()));
         assert_eq!(asked, ["gone", "up"]);
+    }
+
+    /// A session zellij's client does not attach to is passed over unasked,
+    /// though it answers: a client sent there would fail.
+    #[test]
+    fn the_refuge_is_never_one_zellij_s_client_does_not_attach_to() {
+        let sessions = ["-c", "up"].map(|name| SessionName::running(name).unwrap());
+        let mut asked = Vec::new();
+        let found = answering(sessions, |session| {
+            asked.push(session.to_string());
+            Some(Vec::new())
+        });
+        assert_eq!(found.map(|refuge| refuge.session.to_string()), Some("up".to_owned()));
+        assert_eq!(asked, ["up"]);
     }
 
     /// A client that ended on its way from one session to another may have

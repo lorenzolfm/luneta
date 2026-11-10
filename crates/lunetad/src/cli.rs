@@ -721,12 +721,20 @@ pub fn client_rejoining(session: &SessionName) -> Result<Vec<String>, String> {
     Ok(vec!["attach".to_owned(), attached(session)?])
 }
 
-/// `session` as `attach` takes its name: bare, as it takes the words after
-/// `--` for a command to run in a session it makes. A name that starts with
-/// `-` it takes for an option, as `-c` for `--create`, so it attaches to none
-/// so named, which only zellij makes, as `SessionName::parse` says.
+/// Whether zellij's client attaches to `session`. `attach` takes its name
+/// bare, as it takes the words after `--` for a command to run in a session
+/// it makes, and a name that starts with `-` for an option, as `-c` for
+/// `--create`: it attaches to none so named, which only zellij makes, as
+/// `SessionName::parse` says.
+#[must_use]
+pub fn attaches_to(session: &SessionName) -> bool {
+    !session.as_str().starts_with('-')
+}
+
+/// `session` as `attach` takes its name, or why it takes none, as
+/// `attaches_to` says.
 fn attached(session: &SessionName) -> Result<String, String> {
-    if session.as_str().starts_with('-') {
+    if !attaches_to(session) {
         return Err(format!(
             "zellij attaches to no session whose name starts with '-', as \"{session}\"'s does: \
              rename it"

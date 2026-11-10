@@ -133,6 +133,21 @@ fn a_bare_luneta_joins_the_session_of_its_directory_or_else_the_newest() {
     assert_eq!(host.zellij.attached(), ["attach project", "attach newest"]);
 }
 
+/// A bare luneta passes over a session zellij's client does not attach to,
+/// though it is the newest: `attach` takes a name that starts with `-` for an
+/// option.
+#[test]
+fn a_bare_luneta_passes_over_a_session_zellij_does_not_attach_to() {
+    let host = Host::new();
+    let _older = runs(&host, "older");
+    thread::sleep(Duration::from_millis(20));
+    let _dashed = runs(&host, "-c");
+
+    let ended = on_terminal(luneta(host.vars(), &directory("elsewhere").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(host.zellij.attached(), ["attach older"]);
+}
+
 /// Of the sessions you were in, as the news keeps it for every luneta, a bare
 /// luneta joins the last, though another is newer: the news goes by the socket
 /// of each as the daemon lists it.
@@ -476,6 +491,24 @@ fn a_bare_luneta_goes_on_to_the_next_machine_where_a_client_fails() {
     let ended = on_terminal(luneta(here.vars(), &directory("project").path));
     assert!(ended.status.success(), "{}", ended.said);
     assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'"]);
+    assert_eq!(ssh.clients("next"), ["zellij 'attach' 'later'"]);
+    assert_eq!(here.zellij.attached(), [] as [String; 0]);
+}
+
+/// A machine whose one session zellij's client does not attach to has none
+/// to join: a bare luneta goes on to the next, and sends no client there.
+#[test]
+fn a_bare_luneta_passes_over_another_machine_s_session_zellij_does_not_attach_to() {
+    let here = Host::new();
+    let ssh = FakeSsh::new(here.zellij.bin());
+    let _far = machine(&ssh, "far", "-c", &json!([]));
+    let _next = machine(&ssh, "next", "later", &json!([]));
+    hosts(&here, "far\nnext\n");
+    let _daemon = start(here.vars()).unwrap();
+
+    let ended = on_terminal(luneta(here.vars(), &directory("project").path));
+    assert!(ended.status.success(), "{}", ended.said);
+    assert_eq!(ssh.clients("far"), [] as [String; 0]);
     assert_eq!(ssh.clients("next"), ["zellij 'attach' 'later'"]);
     assert_eq!(here.zellij.attached(), [] as [String; 0]);
 }

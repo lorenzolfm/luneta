@@ -30,6 +30,7 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::fmt;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -541,6 +542,41 @@ impl Joins<'_> {
         match self {
             Joins::Attach(session) => session,
             Joins::Make(unused, _) => unused.name(),
+        }
+    }
+}
+
+/// Why luneta started no client in the place of zellij's.
+enum Unstarted {
+    /// zellij's client does not attach to the session, for this reason, as
+    /// `lunetad::cli::attaches_to` says: one sent there would fail.
+    Refused(String),
+    /// Its program did not start.
+    Failed(io::Error),
+}
+
+impl Unstarted {
+    /// Why zellij's client does not attach, or the error its program did not
+    /// start with.
+    fn refusal(self) -> io::Result<String> {
+        match self {
+            Unstarted::Refused(why) => Ok(why),
+            Unstarted::Failed(error) => Err(error),
+        }
+    }
+}
+
+impl From<io::Error> for Unstarted {
+    fn from(error: io::Error) -> Self {
+        Unstarted::Failed(error)
+    }
+}
+
+impl fmt::Display for Unstarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unstarted::Refused(why) => f.write_str(why),
+            Unstarted::Failed(error) => error.fmt(f),
         }
     }
 }
@@ -2821,7 +2857,8 @@ impl App {
     /// makes its session is in it once zellij titles luneta's terminal there,
     /// not once it shows anything: one that fails, as where the name is
     /// taken by then, writes why, and a client of the session that took the
-    /// name is anyone's but luneta's.
+    /// name is anyone's but luneta's. Where luneta starts none, zellij's
+    /// client stays as it is.
     fn restart(
         &mut self,
         machine: &Machine,
@@ -2829,7 +2866,7 @@ impl App {
         before: Before,
         fails: Fails,
         next: Option<Next>,
-    ) -> io::Result<()> {
+    ) -> Result<(), Unstarted> {
         let (then_pane, after) = match next {
             Some(Next::Pane(place)) => (Some(place), None),
             Some(Next::After(after)) => (None, Some(after)),
@@ -2852,15 +2889,16 @@ impl App {
     /// Starts the program of a client on `machine` that `joins` its
     /// session, the next that luneta starts: zellij's client here, or there
     /// through ssh.
-    fn start_of(&mut self, machine: &Machine, joins: Joins<'_>) -> io::Result<Hosted> {
+    fn start_of(&mut self, machine: &Machine, joins: Joins<'_>) -> Result<Hosted, Unstarted> {
         let ((program, args), dir) = match (machine, joins) {
             (Machine::Local, Joins::Attach(session)) => {
-                (zellij::rejoin(session).map_err(io::Error::other)?, None)
+                (zellij::rejoin(session).map_err(Unstarted::Refused)?, None)
             },
             // zellij's client makes a session in the directory it starts in.
             (Machine::Local, Joins::Make(unused, cwd)) => (zellij::make(unused.name()), cwd),
             (Machine::Remote(destination), Joins::Attach(session)) => {
-                (zellij::attach_away(destination, session).map_err(io::Error::other)?, None)
+                let program = zellij::attach_away(destination, session);
+                (program.map_err(|why| Unstarted::Refused(of_machine(machine, &why)))?, None)
             },
             (Machine::Remote(destination), Joins::Make(unused, cwd)) => {
                 (zellij::make_away(destination, unused.name(), cwd), None)
@@ -3247,7 +3285,13 @@ impl App {
         let Some(Refuge { session: to, before }) = refuge else {
             return self.newest_away(&[]);
         };
-        let hosted = self.start_of(&Machine::Local, Joins::Attach(&to))?;
+        let hosted = match self.start_of(&Machine::Local, Joins::Attach(&to)) {
+            Ok(hosted) => hosted,
+            Err(unstarted) => {
+                let why = unstarted.refusal()?;
+                return self.refused(&Machine::Local, &why, Fails::End);
+            },
+        };
         let look = self.sidebar.rejoining(&to);
         let arrival = Arrival::new(Machine::Local, look, Before::Listed(before), None);
         self.put(hosted, Fails::End, Some(arrival), None);
@@ -3307,7 +3351,7 @@ impl App {
         match refuge {
             Some(Refuge { session, before }) => {
                 let joins = Joins::Attach(&session);
-                self.restart(&on, joins, Before::Listed(before), fails, None)
+                self.go_on(&on, joins, Before::Listed(before), fails)
             },
             None => self.newest_here(std::slice::from_ref(destination)),
         }
@@ -3397,7 +3441,7 @@ impl App {
             },
             Machine::Remote(destination) => zellij::before_away(destination, &session),
         };
-        self.restart(&machine, Joins::Attach(&session), before, fails, None)
+        self.go_on(&machine, Joins::Attach(&session), before, fails)
     }
 
     /// Has a client of this machine's newest session that answers take the
@@ -3409,7 +3453,7 @@ impl App {
             return self.newest_away(tried);
         };
         let joins = Joins::Attach(&session);
-        self.restart(&Machine::Local, joins, Before::Listed(before), Fails::End, None)
+        self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
     }
 
     /// Has a client of the newest session that answers of another machine's
@@ -3429,7 +3473,49 @@ impl App {
         };
         let (machine, joins) = (Machine::Remote(destination), Joins::Attach(&session));
         let fails = Fails::Onward(tried.to_vec());
-        self.restart(&machine, joins, Before::Listed(before), fails, None)
+        self.go_on(&machine, joins, Before::Listed(before), fails)
+    }
+
+    /// Has a client on `machine` that `joins` its session take the place of
+    /// zellij's client, which ended, as `restart` has it. Where luneta
+    /// refuses it one, luneta's zellij goes where `fails` says, as it does
+    /// where that client fails, as `refused` says.
+    fn go_on(
+        &mut self,
+        machine: &Machine,
+        joins: Joins<'_>,
+        before: Before,
+        fails: Fails,
+    ) -> io::Result<()> {
+        match self.restart(machine, joins, before, fails.clone(), None) {
+            Ok(()) => Ok(()),
+            Err(unstarted) => {
+                let why = unstarted.refusal()?;
+                self.refused(machine, &why, fails)
+            },
+        }
+    }
+
+    /// luneta refused zellij's client a client on `on`, `why`, in the place
+    /// of one that ended: luneta's zellij goes where `fails` says, as
+    /// `client_ended` and `ended_away` have it go where that client failed,
+    /// and the notes say why. Each machine luneta goes on to is passed over
+    /// once tried, and luneta goes back from there to nowhere: the tries end.
+    fn refused(&mut self, on: &Machine, why: &str, fails: Fails) -> io::Result<()> {
+        match (on, fails.failed(on)) {
+            (_, Failed::Back(back)) => {
+                self.sidebar.notify(why.to_owned());
+                self.go_back(on, back, Fails::End)
+            },
+            (Machine::Remote(_), Failed::Onward(tried)) => {
+                self.sidebar.notify(why.to_owned());
+                self.newest_here(&tried)
+            },
+            (_, Failed::End | Failed::Onward(_)) => {
+                self.end(why);
+                Ok(())
+            },
+        }
     }
 
     /// Takes in what luneta's terminal answered, or said of itself unasked.
