@@ -97,7 +97,7 @@ xn = "=0.2.13"
 # Makes the worktree of a pull request or an issue pasted in the sidebar, as
 # `wt add` does: wt's own code, of a commit of its, so that no `wt` need be on
 # the `PATH`, and what wt says of it is luneta's to read, in its own types.
-wt = { git = "https://github.com/lorenzolfm/wt", rev = "6994b059f2f2c4728fd9f4d2d2578511e310b7a7" }
+wt = { git = "https://github.com/lorenzolfm/wt", rev = "a6fee7e0024b5a8f245c3777bbc27543913b22ac" }
 
 # What a process's environment, start and command line are, on macOS. Linux
 # has `/proc` and needs nothing.
