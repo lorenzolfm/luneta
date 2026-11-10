@@ -234,7 +234,7 @@ pub enum Event {
     /// You clicked the notification of an issue the issue box sent, which
     /// does this. The Notification Center of macOS does it on its own.
     #[cfg(not(target_os = "macos"))]
-    IssueClicked(desktop::Click),
+    IssueClicked(desktop::Came),
     /// What came of the lock that the luneta of this machine that puts the
     /// notifications up holds, or of another luneta of the machine.
     Peers(peers::Heard),
@@ -1375,13 +1375,13 @@ impl App {
             },
             Event::Clicked(key) => self.clicked(&key),
             #[cfg(not(target_os = "macos"))]
-            Event::IssueClicked(desktop::Click::Open(link)) => {
+            Event::IssueClicked(desktop::Came::Filed(link)) => {
                 if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
                     self.sidebar.notify(why);
                 }
             },
             #[cfg(not(target_os = "macos"))]
-            Event::IssueClicked(desktop::Click::Raise) => {
+            Event::IssueClicked(desktop::Came::Unfiled) => {
                 desktop::raise(self.sidebar.terminal_title());
             },
             Event::Peers(heard) => {
@@ -1476,8 +1476,9 @@ impl App {
                 self.desktop.tell(Told::issue(&to.to_string(), &filed));
                 match filed {
                     Ok(filed) => {
-                        clip(terminal, ClipboardType::Clipboard, filed.url())?;
-                        self.copied = Some(filed.url().to_owned());
+                        let url = filed.link().url();
+                        clip(terminal, ClipboardType::Clipboard, &url)?;
+                        self.copied = Some(url);
                     },
                     Err(_) => self.unfiled.keep(number, repository, to, words),
                 }
