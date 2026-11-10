@@ -1260,9 +1260,6 @@ pub struct Sidebar {
     /// Where each machine's panes show, under which of its sessions, as the
     /// rows were last built: folded ones, and those a search leaves out, too.
     placed: Vec<(Machine, Vec<Headed>)>,
-    /// The session each pane shows under, as the rows were last built, by the
-    /// pane's row, of those that show under another than their own.
-    shown_under: HashMap<Spot, Listed>,
     /// The `here_row` the view last scrolled to show while the sidebar did
     /// not have the focus, after which the wheel can scroll it out of sight.
     revealed: Option<Spot>,
@@ -2595,7 +2592,6 @@ impl Sidebar {
         let mut counts = Counts::default();
         let mut rows = Vec::new();
         let mut placed_all = Vec::new();
-        let mut shown_under = HashMap::new();
         let mut best: Option<(usize, Fit)> = None;
         let mut weigh = |at: usize, fit: Fit| {
             if best.is_none_or(|(_, top)| fit > top) {
@@ -2654,10 +2650,6 @@ impl Sidebar {
                     session: sessions[owner].0.clone(),
                     pane: pane.id,
                 };
-                for (owner, pane) in panes.iter().filter(|(owner, _)| *owner != session_at) {
-                    let spot = Spot::on(&machine, Place::Pane(place_of(*owner, pane)));
-                    shown_under.insert(spot, listed.clone());
-                }
                 let under = panes.iter().map(|(owner, pane)| (place_of(*owner, pane), pane.tab));
                 headed.push(Headed {
                     session: listed.clone(),
@@ -2852,7 +2844,6 @@ impl Sidebar {
         }
         self.rows = rows;
         self.placed = placed_all;
-        self.shown_under = shown_under;
         self.counts = counts;
         self.unlisted = unlisted;
         self.unlisted_machines = unlisted_machines;
@@ -2900,11 +2891,16 @@ impl Sidebar {
     }
 
     /// The session whose row heads that of `spot`: a pane's, the session it
-    /// shows under, which a move can make another than its own; a
-    /// session's, itself. None for a machine's header.
+    /// shows under as the rows were last built, which a move can make another
+    /// than its own; a session's, itself. None for a machine's header.
     fn heads<'a>(&'a self, spot: &'a Spot) -> Option<&'a Listed> {
-        let place = spot.place()?;
-        Some(self.shown_under.get(spot).unwrap_or_else(|| place.listed()))
+        let pane = match spot.place()? {
+            Place::Session(session) => return Some(session),
+            Place::Pane(pane) => pane,
+        };
+        let shows = |headed: &&Headed| headed.panes.iter().any(|(place, _)| place == pane);
+        let under = self.placed_of(&spot.machine()).iter().find(shows);
+        Some(under.map_or(&pane.session, |headed| &headed.session))
     }
 
     /// The row of the session that `heads` the row of `spot`.
@@ -5544,16 +5540,15 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
 /// show, as `order` has them: under each, its own and those moved there, each
 /// with the index of its own session in `sessions`.
 fn placed<'a>(order: &Order, sessions: &[(Listed, &'a Session)]) -> Vec<Vec<(usize, &'a Pane)>> {
-    let mut by_key: HashMap<Key, (usize, &'a Pane)> = HashMap::new();
     let mut keyed = Vec::with_capacity(sessions.len());
     for (at, (listed, session)) in sessions.iter().enumerate() {
         let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
         panes.sort_by_key(|pane| (pane.tab, pane.id));
-        by_key.extend(panes.iter().map(|pane| (listed.key(pane.id), (at, *pane))));
-        keyed.push((listed.kept, panes.iter().map(|pane| listed.key(pane.id)).collect()));
+        let panes: Vec<(Key, (usize, &Pane))> =
+            panes.into_iter().map(|pane| (listed.key(pane.id), (at, pane))).collect();
+        keyed.push((listed.kept, panes));
     }
-    let placed = order.placed(&keyed);
-    placed.iter().map(|keys| keys.iter().map(|key| by_key[key]).collect()).collect()
+    order.placed(&keyed)
 }
 
 /// Where the panes `held` of those under the session `under` of `placed` can

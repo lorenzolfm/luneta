@@ -45,7 +45,7 @@
 //! lock cannot be had, it changes it without. Each luneta watches the file,
 //! and takes up a move another makes as it makes it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::Hash;
 use std::io::ErrorKind;
@@ -244,25 +244,30 @@ impl Order {
         self.keep(|kept| kept.machines = merged(&kept.machines, &machines));
     }
 
-    /// Where the panes of `sessions`, those of one machine, show: under each
-    /// of them, in their order, first those the order keeps under it, as it
-    /// keeps them, and then its own that the order keeps under none, as
-    /// `sessions` has them, in the order of their tabs. A pane shows once,
-    /// under the first that keeps it. One the order keeps that none of
-    /// `sessions` has, as one that ended, or that another machine has, is
-    /// passed over, and so is all it keeps under a session that `sessions`
-    /// does not have.
-    pub fn placed(&self, sessions: &[(ledger::Session, Vec<Key>)]) -> Vec<Vec<Key>> {
-        let all: HashSet<Key> = sessions.iter().flat_map(|(_, panes)| panes).copied().collect();
+    /// Where the panes of `sessions`, those of one machine, each by its key
+    /// with what it is, show: under each of them, in their order, first those
+    /// the order keeps under it, as it keeps them, and then its own that the
+    /// order keeps under none, as `sessions` has them, in the order of their
+    /// tabs. Each is given back as what it is, and so none that `sessions`
+    /// does not have. A pane shows once, under the first that keeps it. One
+    /// the order keeps that none of `sessions` has, as one that ended, or that
+    /// another machine has, is passed over, and so is all it keeps under a
+    /// session that `sessions` does not have.
+    pub fn placed<T: Copy>(&self, sessions: &[(ledger::Session, Vec<(Key, T)>)]) -> Vec<Vec<T>> {
+        let all: HashMap<Key, T> = sessions.iter().flat_map(|(_, panes)| panes).copied().collect();
         let mut shown: HashSet<Key> = HashSet::new();
-        let mut placed: Vec<Vec<Key>> = Vec::with_capacity(sessions.len());
+        let mut placed: Vec<Vec<T>> = Vec::with_capacity(sessions.len());
         for (session, _) in sessions {
             let kept = self.kept.panes.get(session).map_or(&[][..], Vec::as_slice);
-            let under = kept.iter().filter(|key| all.contains(key) && shown.insert(**key));
-            placed.push(under.copied().collect());
+            let under = kept.iter().filter_map(|key| {
+                let pane = all.get(key)?;
+                shown.insert(*key).then_some(*pane)
+            });
+            placed.push(under.collect());
         }
         for ((_, own), under) in sessions.iter().zip(&mut placed) {
-            under.extend(own.iter().filter(|key| shown.insert(**key)));
+            let left = own.iter().filter(|(key, _)| shown.insert(*key));
+            under.extend(left.map(|(_, pane)| *pane));
         }
         placed
     }
@@ -913,6 +918,12 @@ mod tests {
         Key { session, pane }
     }
 
+    /// `session` with its panes `panes`, each by its key, which is what it
+    /// is too.
+    fn own(session: ledger::Session, panes: &[u32]) -> (ledger::Session, Vec<(Key, Key)>) {
+        (session, panes.iter().map(|pane| (key(session, *pane), key(session, *pane))).collect())
+    }
+
     /// With nothing moved, each session's panes show under it, as they came.
     /// A pane moved shows where the order keeps it, the first time it keeps
     /// it, and those it does not keep after, under their own. What it keeps
@@ -922,7 +933,7 @@ mod tests {
     fn a_pane_shows_where_the_order_keeps_it_and_else_under_its_own() {
         let [a, b, c] = [1, 2, 3].map(session);
         let mut order = Order::default();
-        let sessions = [(a, vec![key(a, 0), key(a, 1)]), (b, vec![key(b, 0)])];
+        let sessions = [own(a, &[0, 1]), own(b, &[0])];
         assert_eq!(order.placed(&sessions), [vec![key(a, 0), key(a, 1)], vec![key(b, 0)]]);
 
         order.keep_panes(vec![(b, vec![key(a, 1), key(b, 0), key(a, 7)])]);
@@ -948,7 +959,7 @@ mod tests {
         let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(kept["panes"], serde_json::json!({"1000000000-1": ["2000000000-2-4"]}));
         let there = Order::within(file);
-        let sessions = [(a, vec![key(a, 0)]), (b, vec![key(b, 3), key(b, 4)])];
+        let sessions = [own(a, &[0]), own(b, &[3, 4])];
         assert_eq!(there.placed(&sessions), [vec![key(b, 4), key(a, 0)], vec![key(b, 3)]]);
     }
 
