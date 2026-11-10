@@ -1708,6 +1708,7 @@ impl Sidebar {
         let Some(session) = found else {
             return false;
         };
+        log::say(&format!("zellij: luneta's client is the one that came to {session}"));
         if let Ok(name) = SessionName::running(&session) {
             self.unfold(&name);
         }

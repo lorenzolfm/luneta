@@ -53,14 +53,52 @@ pub struct Roster {
     pub clients: Option<Vec<Client>>,
 }
 
+/// What a list of the sessions of the machine says of the clients of one.
+enum Was<'a> {
+    /// It lists no session of that name.
+    Absent,
+    /// It lists the session, but not its clients, or more than one session
+    /// of that name.
+    Unlisted,
+    Listed(&'a [Client]),
+}
+
+/// What `rosters` lists of the clients of `session`.
+fn was<'a>(rosters: &'a [Roster], session: &str) -> Was<'a> {
+    let mut named = rosters.iter().filter(|roster| roster.session == session);
+    match (named.next(), named.next()) {
+        (None, _) => Was::Absent,
+        (Some(Roster { clients: Some(clients), .. }), None) => Was::Listed(clients),
+        (Some(_), _) => Was::Unlisted,
+    }
+}
+
 /// The clients `rosters` lists of `session`: none where they list none, or
 /// more than one session of that name.
 fn roster<'a>(rosters: &'a [Roster], session: &str) -> Option<&'a [Client]> {
-    let mut named = rosters.iter().filter(|roster| roster.session == session);
-    let (Some(roster), None) = (named.next(), named.next()) else {
-        return None;
-    };
-    roster.clients.as_deref()
+    match was(rosters, session) {
+        Was::Listed(clients) => Some(clients),
+        Was::Absent | Was::Unlisted => None,
+    }
+}
+
+/// The clients `rosters` lists that `seen` did not, of every session: all
+/// those of one made since. None where `seen` did not list the clients of a
+/// session that `rosters` lists any of, which may be anyone's.
+fn newcomers<'r>(seen: &[Roster], rosters: &'r [Roster]) -> Option<Vec<(&'r str, Client)>> {
+    let mut came = Vec::new();
+    for listed in rosters {
+        let clients = listed.clients.as_deref().unwrap_or_default();
+        let before = match was(seen, &listed.session) {
+            Was::Absent => &[][..],
+            Was::Listed(before) => before,
+            Was::Unlisted if clients.is_empty() => continue,
+            Was::Unlisted => return None,
+        };
+        let new = clients.iter().filter(|client| before.iter().all(|was| was.id != client.id));
+        came.extend(new.map(|client| (listed.session.as_str(), *client)));
+    }
+    Some(came)
 }
 
 /// What luneta asks zellij: the clients of `session`, as they are.
@@ -405,23 +443,16 @@ impl OwnClient {
     /// Looks for luneta's client, astray, among the clients `rosters` lists at
     /// `now`: it is the one client listed in any session that was not as the
     /// daemon last listed luneta's where it was, while luneta looks. Where
-    /// more than one came, luneta cannot tell. The session it found it in,
+    /// more than one came, or one came to a session it had not listed the
+    /// clients of then, luneta cannot tell. The session it found it in,
     /// where it did.
     fn hunt(&mut self, rosters: &[Roster], now: Instant) -> Option<String> {
         let astray = self.astray.as_mut()?;
         let seen = astray.seen.as_deref().filter(|_| now < astray.until)?;
-        let mut came = rosters.iter().flat_map(|listed| {
-            let before = roster(seen, &listed.session);
-            let clients = listed.clients.as_deref().unwrap_or_default();
-            let new = move |client: &&Client| {
-                before.is_none_or(|before| before.iter().all(|was| was.id != client.id))
-            };
-            clients.iter().filter(new).map(|client| (&listed.session, *client))
-        });
-        let (session, own) = match (came.next(), came.next()) {
-            (Some((session, own)), None) => (session.clone(), own),
-            (None, _) => return None,
-            (Some(_), Some(_)) => {
+        let (session, own) = match newcomers(seen, rosters).as_deref() {
+            Some(&[(session, own)]) => (session.to_owned(), own),
+            Some([]) => return None,
+            Some(_) | None => {
                 astray.seen = None;
                 return None;
             },
@@ -850,6 +881,30 @@ mod tests {
         assert_eq!(own.astray(), Some("work"));
         own.titled();
         assert_eq!(own.astray(), None);
+    }
+
+    /// The daemon had yet to list the clients of `play` as it last listed
+    /// luneta's client in `work`: one it lists there since may be anyone's,
+    /// and luneta cannot tell. Where it lists none there, the one that came
+    /// to another session is luneta's.
+    #[test]
+    fn a_session_whose_clients_were_not_listed_hides_none() {
+        let now = Instant::now();
+        let unlisted = Roster { session: "play".to_owned(), clients: None };
+        for play in [listed("play", &[client(1, 2)]), unlisted.clone()] {
+            let mut own = OwnClient::default();
+            let look = own.came("work", None, now);
+            own.looked(answer(&look, &[client(1, 3)]), None, now);
+            own.heard(&[listed("work", &[client(1, 3)]), unlisted.clone()], now + TRUSTED);
+            let left = [listed("work", &[]), play.clone()];
+            own.heard(&left, now + TRUSTED);
+            let came = [listed("work", &[]), play.clone(), listed("other", &[client(1, 4)])];
+            let found = own.heard(&came, now + TRUSTED);
+            match play.clients {
+                Some(_) => assert_eq!((found, own.astray()), (None, Some("work"))),
+                None => assert_eq!(own.place(), Ok(("other", 4))),
+            }
+        }
     }
 
     /// luneta sends its client from `work` to `play`, and the daemon lists
