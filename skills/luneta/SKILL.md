@@ -124,8 +124,9 @@ luneta's ask box, the one its line names, which the user picked last in
 luneta's menu; anywhere else, the one you run in. In the box, luneta opens pi
 only where the line names pi: where it names Claude Code and the user asks for
 pi, tell them to pick pi with `Tab` in luneta's menu. Don't give it a name
-(`--name`) unless the user asks for one: a name holds the agent's row in the
-sidebar for good, where an unnamed agent's row follows what it works on.
+(`--name`) unless the user asks for one: in Claude Code, a name holds the
+agent's row in the sidebar for good, where an unnamed agent's row follows what
+it works on.
 
 ```sh
 luneta open tab --session app --cwd ~/code/app --name issue-42 -- claude "let's tackle this one: https://github.com/o/app/issues/42"
