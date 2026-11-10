@@ -99,8 +99,8 @@ pub fn answered(command: &mut Command) -> Result<String, Failure> {
 /// not answer it and others did, it says so, lists them on its stdout, and ends
 /// as that list does (`send_action_to_session` in zellij 0.45.1's `commands.rs`,
 /// and `list_sessions`, which exits 0).
-fn answer_of(ran: Ran) -> Result<Vec<u8>, Failure> {
-    let (status, stdout, stderr) = match ran {
+fn answer_of(outcome: Ran) -> Result<Vec<u8>, Failure> {
+    let (status, stdout, stderr) = match outcome {
         Ran::Ended { status, stdout, stderr } => (status, stdout, stderr),
         Ran::Stuck => return Err(Failure::Stuck),
     };
@@ -564,13 +564,13 @@ const NO_SESSIONS: &str = "No active zellij sessions found.";
 pub fn sessions_listed() -> Result<String, Failure> {
     let mut command = zellij();
     command.args(["list-sessions", "--no-formatting"]);
-    let run = ran(&mut command)?;
-    if let Ran::Ended { stderr, .. } = &run
+    let outcome = ran(&mut command)?;
+    if let Ran::Ended { stderr, .. } = &outcome
         && String::from_utf8_lossy(stderr).contains(NO_SESSIONS)
     {
         return Ok(String::new());
     }
-    Ok(String::from_utf8_lossy(&answer_of(run)?).into_owned())
+    Ok(String::from_utf8_lossy(&answer_of(outcome)?).into_owned())
 }
 
 /// What `delete-session --force` says as it kills a session that runs:
@@ -588,11 +588,11 @@ const UNKEPT: i32 = 2;
 pub fn session_killed(session: &SessionName) -> Result<(), Failure> {
     let mut command = zellij();
     command.args(["delete-session", "--force", "--", session.as_str()]);
-    let run = ran(&mut command)?;
-    let unkept = matches!(&run, Ran::Ended { status, stdout, .. }
+    let outcome = ran(&mut command)?;
+    let unkept = matches!(&outcome, Ran::Ended { status, stdout, .. }
         if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
     if !unkept {
-        answer_of(run)?;
+        answer_of(outcome)?;
     }
     Ok(())
 }

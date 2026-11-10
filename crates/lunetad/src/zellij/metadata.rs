@@ -173,11 +173,11 @@ pub fn kept() -> Option<Vec<String>> {
     Some(kept)
 }
 
-/// Whether zellij keeps anything of `session` in its cache: its metadata, or
-/// how it is laid out.
+/// Whether zellij has anything of `session` in its cache: its metadata, or
+/// how it is laid out. None where luneta cannot tell.
 #[must_use]
-pub fn keeps_any_of(session: &SessionName) -> bool {
-    folder().is_some_and(|folder| folder.join(session.as_str()).exists())
+pub fn cached(session: &SessionName) -> Option<bool> {
+    folder()?.join(session.as_str()).try_exists().ok()
 }
 
 #[cfg(test)]
