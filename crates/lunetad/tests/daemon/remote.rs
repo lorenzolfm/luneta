@@ -1442,7 +1442,7 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         let filed = filed.unwrap().into_inner().message().await.unwrap().unwrap();
         let filed = Filed::of(filed).unwrap();
         assert_eq!((filed.number().get(), filed.title()), (360, "A red button"));
-        assert_eq!(filed.url(), "https://github.com/o/n/issues/360");
+        assert_eq!(filed.link().url(), "https://github.com/o/n/issues/360");
         let wrote = fs::read_to_string(far.home.path().join("wrote")).unwrap();
         let wrote: Vec<&str> = wrote.lines().collect();
         let cwd = format!("cwd={there}");

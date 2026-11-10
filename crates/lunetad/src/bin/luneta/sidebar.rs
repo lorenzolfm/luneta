@@ -2457,7 +2457,7 @@ impl Sidebar {
         self.filing.remove(&number);
         match filed {
             Ok(filed) => {
-                log::say(&format!("issue: filed {}", filed.url()));
+                log::say(&format!("issue: filed {}", filed.link().url()));
                 let (number, title) = (filed.number(), filed.title());
                 self.filed = Some(format!("filed #{number} in {repository}: {title}; link copied"));
             },
@@ -8737,7 +8737,7 @@ mod tests {
             " ⠋ Filing an issue in luneta…",
             " ⠋ Filing an issue in zed…",
         ]);
-        let url = "https://github.com/o/luneta/issues/355".to_owned();
+        let url = "https://github.com/o/luneta/issues/355";
         let filed = Filed::page(url, "A red button").unwrap();
         sidebar.filed(1, "luneta", &Ok(filed));
         sidebar.filed(2, "zed", &Err(Unfiled::Refused("gh: no GitHub remote".to_owned())));

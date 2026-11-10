@@ -42,7 +42,7 @@ use tonic::{Code, Status};
 
 use crate::api::{FileIssueRequest, FileIssueResponse, IssueRepository, On};
 use crate::directory::Directory;
-use crate::links::{self, Remotes};
+use crate::links::{self, Kind, Link, Remotes};
 use crate::program::{self, Ran};
 use crate::{asks, claude, git, log};
 
@@ -135,13 +135,11 @@ pub struct Filing {
     words: String,
 }
 
-/// An issue gh filed: its page, as gh said it, the number at its end, and
-/// its title, on one line.
+/// An issue gh filed: its page, and its title, on one line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filed {
-    number: NonZeroU32,
+    link: Link,
     title: String,
-    url: String,
 }
 
 /// Why no issue was filed.
@@ -416,25 +414,26 @@ impl Filing {
         };
         let said = String::from_utf8_lossy(&said);
         let url = said.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or_default();
-        Filed::page(url.to_owned(), &written.title).map_err(Unfiled::InDoubt)
+        Filed::page(url, &written.title).map_err(Unfiled::InDoubt)
     }
 }
 
 impl Filed {
     /// The issue whose page is `url`, titled `title`, or why that is none:
     /// it is no issue's page, or the title is only white space.
-    pub fn page(url: String, title: &str) -> Result<Filed, String> {
-        let number = number_of(&url).ok_or_else(|| format!("gh said {url:?}, no issue's page"))?;
+    pub fn page(url: &str, title: &str) -> Result<Filed, String> {
+        let link = Link::parse(url).filter(|link| link.kind() == Kind::Issue);
+        let link = link.ok_or_else(|| format!("gh said {url:?}, no issue's page"))?;
         let title = one_line(title);
         if title.is_empty() {
-            return Err(format!("issue #{number} has no title"));
+            return Err(format!("issue #{} has no title", link.number()));
         }
-        Ok(Filed { number, title, url })
+        Ok(Filed { link, title })
     }
 
     #[must_use]
     pub fn number(&self) -> NonZeroU32 {
-        self.number
+        self.link.number()
     }
 
     #[must_use]
@@ -443,21 +442,21 @@ impl Filed {
     }
 
     #[must_use]
-    pub fn url(&self) -> &str {
-        &self.url
+    pub fn link(&self) -> &Link {
+        &self.link
     }
 
     /// It, as a daemon answers with it.
     #[must_use]
     pub fn answer(self) -> FileIssueResponse {
-        FileIssueResponse { url: self.url, title: self.title }
+        FileIssueResponse { url: self.link.url(), title: self.title }
     }
 
     /// The issue a daemon said it filed, or why that is none: its page is no
     /// issue's, or it has no title.
     pub fn of(answer: FileIssueResponse) -> Result<Filed, String> {
         let FileIssueResponse { url, title } = answer;
-        Filed::page(url, &title)
+        Filed::page(&url, &title)
     }
 }
 
@@ -554,21 +553,6 @@ fn answered(ran: Ran) -> Result<Vec<u8>, String> {
         Ran::Ended { status, stderr, .. } => Err(format!("gh: {}", refused(&stderr, status))),
         Ran::Stuck => Err("gh: it did not answer in time".to_owned()),
     }
-}
-
-/// The number of the issue whose page is `url`, as gh says one it filed:
-/// `https://<host>/<owner>/<name>/issues/<number>`. None for anything else.
-fn number_of(url: &str) -> Option<NonZeroU32> {
-    let path = url.strip_prefix("https://")?;
-    let mut parts = path.rsplit('/');
-    let number = parts.next()?;
-    let digits = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-    if !digits || parts.next()? != "issues" {
-        return None;
-    }
-    let (_name, _owner, host) = (parts.next()?, parts.next()?, parts.next()?);
-    (!host.is_empty()).then_some(())?;
-    number.parse().ok()
 }
 
 /// Whether gh, which failed with `status` and said `why`, as `refused` has
@@ -875,18 +859,18 @@ mod tests {
         assert_eq!(written(&maxed), Err("claude failed: error_max_turns".to_owned()));
     }
 
-    /// gh says the page of the issue it filed, of whichever host, and the
+    /// gh says the page of the issue it filed, on github.com, and the
     /// number is its last part. Nothing else is an issue's page.
     #[test]
     fn the_issue_s_number_is_the_last_part_of_its_page() {
-        let number = |url| number_of(url).map(NonZeroU32::get);
+        let number = |url: &str| Filed::page(url, "Red").ok().map(|f| f.number().get());
         assert_eq!(number("https://github.com/o/n/issues/355"), Some(355));
-        assert_eq!(number("https://ghe.example.com/o/n/issues/7"), Some(7));
         for url in [
+            "https://ghe.example.com/o/n/issues/7",
+            "https://github.com/a/b/c/issues/5",
             "https://github.com/o/n/pull/355",
             "https://github.com/o/n/issues/0",
             "https://github.com/o/n/issues/",
-            "http://github.com/o/n/issues/3",
             "https://github.com/o/issues/3",
             "Creating issue in o/n",
         ] {
@@ -975,8 +959,9 @@ mod tests {
     #[test]
     fn a_daemon_s_answer_reads_as_the_issue_filed() {
         let url = "https://github.com/o/n/issues/355".to_owned();
-        let filed = Filed::page(url.clone(), " Red\n button ").unwrap();
-        assert_eq!((filed.number().get(), filed.title(), filed.url()), (355, "Red button", &*url));
+        let filed = Filed::page(&url, " Red\n button ").unwrap();
+        let said = (filed.number().get(), filed.title(), filed.link().url());
+        assert_eq!(said, (355, "Red button", url.clone()));
         assert_eq!(Filed::of(filed.clone().answer()), Ok(filed.clone()));
         let pull = "https://github.com/o/n/pull/355".to_owned();
         let pageless = FileIssueResponse { url: pull, ..filed.clone().answer() };

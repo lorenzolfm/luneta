@@ -16,7 +16,10 @@ use std::thread::{self, JoinHandle};
 
 use tokio::sync::mpsc::{self as channel, UnboundedReceiver, UnboundedSender};
 
-use crate::alerts::{Alert, Key};
+use lunetad::issues::{Filed, Unfiled};
+use lunetad::links::Link;
+
+use crate::alerts::{Alert, Key, Sound};
 use crate::host::Event;
 use crate::peers::{self, Heard, Peers, Reaching, NO_READER};
 
@@ -33,10 +36,73 @@ pub fn elsewhere() -> bool {
 enum Order {
     Post(Alert),
     Close(Key),
+    /// Put this up, whether or not this luneta holds the lock.
+    Tell(Told),
     /// Put the notifications up from now on, as this luneta holds the lock:
     /// with the socket it hears on, where it does, which a click on one tells
     /// on macOS.
     Hold(Option<PathBuf>),
+}
+
+/// A notification of what came of an issue the issue box sent. The luneta
+/// that sent it puts it up, whether or not it holds the lock: no other heard
+/// of the issue, to put it up again. It goes up whether or not a window of
+/// luneta's has the focus, as you asked for it, and the note that says the
+/// same is easy to miss while you type in zellij.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Told {
+    pub title: String,
+    pub body: String,
+    pub came: Came,
+}
+
+/// What came of an issue the issue box sent, which says what its
+/// notification sounds and what a click on it does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Came {
+    /// It was filed: silent, and a click opens its page.
+    Filed(Link),
+    /// None was, or one may be: it sounds, is urgent, and a click brings
+    /// luneta's window forward, where the issue box has your words again.
+    Unfiled,
+}
+
+impl Came {
+    /// What its notification sounds as it goes up.
+    fn sound(&self) -> Option<Sound> {
+        match self {
+            Came::Filed(_) => None,
+            Came::Unfiled => Some(Sound::Bell),
+        }
+    }
+}
+
+impl Told {
+    /// What came of the issue sent to be filed in `repository`, as `filed`
+    /// says: its number and title, which a click opens; or why gh filed none,
+    /// or may have, which sounds.
+    pub fn issue(repository: &str, filed: &Result<Filed, Unfiled>) -> Told {
+        let unfiled = |title: String, why: &str, then: &str| Told {
+            title,
+            body: format!("{why}; {then}"),
+            came: Came::Unfiled,
+        };
+        match filed {
+            Ok(filed) => Told {
+                title: format!("Filed #{} in {repository}", filed.number()),
+                body: filed.title().to_owned(),
+                came: Came::Filed(filed.link().clone()),
+            },
+            Err(Unfiled::Refused(why)) => {
+                unfiled(format!("No issue filed in {repository}"), why, "i has your words again")
+            },
+            Err(Unfiled::InDoubt(why)) => unfiled(
+                format!("An issue in {repository} may be filed"),
+                why,
+                "i has your words, look first",
+            ),
+        }
+    }
 }
 
 /// The desktop, through a thread of its own, which takes luneta's orders in
@@ -101,6 +167,13 @@ impl Desktop {
 
     pub fn close(&self, key: Key) {
         self.order(Order::Close(key));
+    }
+
+    /// Puts `told` up, whether or not this luneta holds the lock. A click on
+    /// it comes back as `Event::IssueClicked`, on Linux: on macOS, the
+    /// Notification Center does what it says on its own.
+    pub fn tell(&self, told: Told) {
+        self.order(Order::Tell(told));
     }
 
     fn order(&self, order: Order) {
@@ -288,7 +361,7 @@ mod freedesktop {
     use zbus::names::UniqueName;
     use zbus::{Connection, Proxy, Variant};
 
-    use super::{say, Order};
+    use super::{say, Came, Order, Told};
     use crate::alerts::{Alert, Key, Kind, Sound};
     use crate::host::Event;
 
@@ -340,6 +413,8 @@ mod freedesktop {
         let orders = UnboundedReceiverStream::new(orders).map(Heard::Order);
         let mut heard = orders.chain(stream::once(Heard::Ended)).merge(signals);
         let (mut up, mut holding) = (HashMap::<Key, Posted>::new(), false);
+        // The notifications of issues up, and what a click on each does.
+        let mut told: Vec<(Posted, Came)> = Vec::new();
         while let Some(heard) = heard.next().await {
             match heard {
                 // A click comes back here, and not by the socket.
@@ -361,6 +436,16 @@ mod freedesktop {
                         Err(error) => say(events, &mut said, &why(&error)),
                     }
                 },
+                Heard::Order(Order::Tell(telling)) => match tell(&proxy, &telling).await {
+                    Ok(posted) => {
+                        told.retain(|(was, _)| was.by == posted.by);
+                        if let Some(sound) = telling.came.sound() {
+                            play(sound);
+                        }
+                        told.push((posted, telling.came));
+                    },
+                    Err(error) => say(events, &mut said, &why(&error)),
+                },
                 Heard::Order(Order::Close(key)) => {
                     if let Some(posted) = up.remove(&key) {
                         // One the server has let go of, or a server that has
@@ -369,19 +454,27 @@ mod freedesktop {
                     }
                 },
                 Heard::Clicked(posted, action) => {
+                    if action != CLICK {
+                        continue;
+                    }
                     let clicked = up.iter().find(|(_, up)| **up == posted).map(|(key, _)| key);
-                    if action == CLICK
-                        && let Some(key) = clicked
-                    {
-                        // luneta is on its way out.
+                    // luneta is on its way out where these fail.
+                    if let Some(key) = clicked {
                         let _ = events.send(Event::Clicked(key.clone()));
+                    } else if let Some(at) = told.iter().position(|(up, _)| *up == posted) {
+                        let _ = events.send(Event::IssueClicked(told.swap_remove(at).1));
                     }
                 },
-                Heard::Closed(posted) => up.retain(|_, up| *up != posted),
+                Heard::Closed(posted) => {
+                    up.retain(|_, up| *up != posted);
+                    told.retain(|(up, _)| *up != posted);
+                },
                 Heard::Ended => break,
             }
         }
-        for posted in up.into_values() {
+        // A click on one left up would go nowhere once luneta ends.
+        let told = told.into_iter().map(|(posted, _)| posted);
+        for posted in up.into_values().chain(told) {
             let _ = tokio::time::timeout(CLOSING, close(proxy.connection(), &posted)).await;
         }
     }
@@ -420,11 +513,32 @@ mod freedesktop {
             Kind::Done => 1,
             Kind::Asked | Kind::Plan | Kind::Permission | Kind::Wants => 2,
         };
+        post(proxy, &alert.title, &alert.body, "Go to the pane", urgency).await
+    }
+
+    /// Puts `told` up: the server that did, and the id it gave it.
+    async fn tell(proxy: &Proxy<'_>, told: &Told) -> zbus::Result<Posted> {
+        let (click, urgency) = match told.came {
+            Came::Filed(_) => ("Open the issue", 1),
+            Came::Unfiled => ("Go to luneta", 2),
+        };
+        post(proxy, &told.title, &told.body, click, urgency).await
+    }
+
+    /// Puts up a notification of `title` and `body`, of `urgency` as
+    /// freedesktop counts it, which a click on does what `click` says.
+    async fn post(
+        proxy: &Proxy<'_>,
+        title: &str,
+        body: &str,
+        click: &str,
+        urgency: u8,
+    ) -> zbus::Result<Posted> {
         let hints = HashMap::from([("urgency", Variant::from(urgency))]);
         let icon = icon();
-        let body = escaped(&alert.body);
-        let actions = [CLICK, "Go to the pane"];
-        let asked = ("luneta", 0_u32, icon.as_str(), alert.title.as_str(), body.as_str());
+        let body = escaped(body);
+        let actions = [CLICK, click];
+        let asked = ("luneta", 0_u32, icon.as_str(), title, body.as_str());
         let told = (asked.0, asked.1, asked.2, asked.3, asked.4, &actions[..], hints, -1_i32);
         let answer = proxy.call_method("Notify", &told).await?;
         let unsaid = |what: &str| zbus::Error::Failure(format!("the server's answer {what}"));
@@ -536,6 +650,7 @@ mod notifier {
     #[cfg(target_os = "macos")]
     use std::sync::mpsc::Sender;
 
+    use super::{Came, Told};
     use crate::alerts::{Alert, Sound};
     #[cfg(target_os = "macos")]
     use crate::alerts::Key;
@@ -557,15 +672,31 @@ mod notifier {
             ("-message", guarded(&alert.body)),
             ("-activate", TERMINAL.to_owned()),
         ];
-        if let Some(sound) = alert.sound {
-            let sound = match sound {
-                Sound::Question => "Glass",
-                Sound::Bell => "Ping",
-            };
-            args.push(("-sound", sound.to_owned()));
-        }
+        args.extend(alert.sound.map(|sound| ("-sound", sounded(sound).to_owned())));
         args.extend(clicked.map(|clicked| ("-execute", clicked.to_owned())));
         args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value]).collect()
+    }
+
+    /// The arguments that put `told` up, in no group, for each issue's to
+    /// stay up: a click opens the issue's page, or brings the terminal
+    /// forward, with no luneta to tell, so one left up as luneta ends still
+    /// does.
+    pub fn telling(told: &Told) -> Vec<String> {
+        let mut args = vec![("-title", guarded(&told.title)), ("-message", guarded(&told.body))];
+        args.push(match &told.came {
+            Came::Filed(link) => ("-open", link.url()),
+            Came::Unfiled => ("-activate", TERMINAL.to_owned()),
+        });
+        args.extend(told.came.sound().map(|sound| ("-sound", sounded(sound).to_owned())));
+        args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value]).collect()
+    }
+
+    /// The sound of macOS that `sound` is.
+    fn sounded(sound: Sound) -> &'static str {
+        match sound {
+            Sound::Question => "Glass",
+            Sound::Bell => "Ping",
+        }
     }
 
     /// `text` as terminal-notifier takes it for a value, whatever it starts
@@ -647,6 +778,11 @@ mod notifier {
                         say(events, &mut said, &why);
                     }
                 },
+                Order::Tell(told) => {
+                    if let Err(why) = run(&telling(&told)) {
+                        say(events, &mut said, &why);
+                    }
+                },
                 // The luneta that puts them up takes them down, and with
                 // them what another left up of the agent.
                 Order::Close(key) => {
@@ -664,6 +800,8 @@ mod notifier {
 
     #[cfg(test)]
     mod tests {
+        use lunetad::links::Link;
+
         use super::*;
         use crate::alerts::{Key, Kind};
         use crate::machines::Machine;
@@ -700,6 +838,36 @@ mod notifier {
             }
             let again = posting(&alert(Kind::Done, "All done.", None), "luneta-41", None);
             assert_eq!((value(&again, "-sound"), value(&again, "-execute")), (None, None));
+        }
+
+        /// The notification of an issue filed opens its page on a click, and
+        /// one of an issue that did not go through brings the terminal
+        /// forward and sounds. Neither has a group, nor a luneta to run.
+        #[test]
+        fn an_issue_notification_opens_its_page_or_brings_the_terminal_forward() {
+            let url = "https://github.com/owner/repo/issues/362";
+            let link = Link::parse(url).expect("a link");
+            let filed = Told {
+                title: "Filed #362 in owner/repo".to_owned(),
+                body: "[wip] a red button".to_owned(),
+                came: Came::Filed(link),
+            };
+            let pairs = |told: &Told| -> Vec<(String, String)> {
+                let args = telling(told);
+                args.chunks(2).map(|pair| (pair[0].clone(), pair[1].clone())).collect()
+            };
+            let owned = |said: &[(&str, &str)]| -> Vec<(String, String)> {
+                said.iter().map(|(flag, value)| ((*flag).to_owned(), (*value).to_owned())).collect()
+            };
+            let said = [
+                ("-title", r"\Filed #362 in owner/repo"),
+                ("-message", r"\[wip] a red button"),
+                ("-open", url),
+            ];
+            assert_eq!(pairs(&filed), owned(&said));
+            let refused = Told { came: Came::Unfiled, ..filed };
+            let said = [("-activate", TERMINAL), ("-sound", "Ping")];
+            assert_eq!(pairs(&refused)[2..], owned(&said));
         }
     }
 }
@@ -753,6 +921,38 @@ mod tests {
         let mut over_ssh = Desktop { serving: None, role: Role::Elsewhere, events };
         assert!(!over_ssh.heard(Heard::Peering(socket), false));
         assert!(matches!(over_ssh.reader(), Reader::Nobody(NO_SPEAKERS)));
+    }
+
+    /// The notification of an issue filed gives its number and title, and a
+    /// click opens its page, with no sound. One of an issue gh did not file,
+    /// or may have, says why and that the box has your words again, sounds,
+    /// and a click brings luneta's window forward.
+    #[test]
+    fn an_issue_notification_says_what_came_of_it() {
+        let url = "https://github.com/owner/repo/issues/362";
+        let filed = Filed::page(url, "A red button").expect("an issue");
+        let told = Told::issue("owner/repo", &Ok(filed));
+        let open = Came::Filed(Link::parse(url).expect("a link"));
+        let said = Told {
+            title: "Filed #362 in owner/repo".to_owned(),
+            body: "A red button".to_owned(),
+            came: open,
+        };
+        assert_eq!(told, said);
+
+        let refused = Told::issue("luneta", &Err(Unfiled::Refused("gh: no labels".to_owned())));
+        let said = Told {
+            title: "No issue filed in luneta".to_owned(),
+            body: "gh: no labels; i has your words again".to_owned(),
+            came: Came::Unfiled,
+        };
+        assert_eq!(refused, said);
+
+        let doubt = Unfiled::InDoubt("gh: it did not answer in time".to_owned());
+        let doubted = Told::issue("luneta", &Err(doubt));
+        assert_eq!(doubted.title, "An issue in luneta may be filed");
+        assert_eq!(doubted.body, "gh: it did not answer in time; i has your words, look first");
+        assert_eq!(doubted.came, Came::Unfiled);
     }
 
     /// A luneta that holds the lock, in a folder it may not hear in, reads
