@@ -412,7 +412,7 @@ fn session(
             .ok_or_else(|| format!("no session can be named for {cwd}"))?
             .free(&names),
     };
-    zellij::made(&at, &session, cwd.as_str())?;
+    zellij::made(&at, &session, &cwd)?;
     Ok(session.to_string())
 }
 
@@ -423,8 +423,11 @@ const UNSEATED: &str = "this runs in no pane of zellij, and zellij moves the cli
 /// The session this runs in, of those `running`, for zellij to move the
 /// client that last typed in it, by the name it has now, as `seat` tells it
 /// among `agents`.
-fn seated(agents: Option<&[Agent]>, running: &[(String, SystemTime)]) -> Result<String, String> {
-    Ok(seat(agents, running)?.pane()?.ok_or(UNSEATED)?.session)
+fn seated(
+    agents: Option<&[Agent]>,
+    running: &[(String, SystemTime)],
+) -> Result<SessionName, String> {
+    session_named(&seat(agents, running)?.pane()?.ok_or(UNSEATED)?.session)
 }
 
 /// Takes the client that last typed in the session this runs in to `to`.
@@ -437,7 +440,7 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
             Address::Session(_) => None,
             Address::Pane(pane) => Some(pane.pane),
         };
-        zellij::taken(&at, to.session(), pane)
+        zellij::taken(&at, &session_named(to.session())?, pane)
     });
     said(went.map(|()| String::new()))
 }
@@ -485,9 +488,9 @@ fn pane_into_tab(given: &Pane) -> Result<String, String> {
     let Some(leaving) = turns::pane_leaving(&session, started, given.pane)? else {
         return Err(opens::no_client(&session));
     };
-    let before = zellij::clients_on_panes(&given.session)?;
+    let before = zellij::clients_on_panes(&session)?;
     let turned = leaving.turn(&session);
-    take_back(&given.session, &before, &[leaving.pane()]);
+    take_back(&session, &before, &[leaving.pane()]);
     fullscreen_again(&session, leaving.fullscreen());
     turned?;
     Ok(given.to_string())
@@ -506,9 +509,9 @@ fn tab_into_panes(given: &Pane, into: &Pane) -> Result<String, String> {
     let session = session_named(&given.session)?;
     let started = started(&given.session, &zellij::running()?)?;
     let moving = turns::panes_moving(&session, started, given.pane, into.pane)?;
-    let before = zellij::clients_on_panes(&given.session)?;
+    let before = zellij::clients_on_panes(&session)?;
     let came = moving.turn(&session);
-    take_back(&given.session, &before, moving.panes());
+    take_back(&session, &before, moving.panes());
     fullscreen_again(&session, moving.fullscreen());
     match came? {
         IntoPanes::Done => Ok(given.to_string()),
@@ -522,7 +525,7 @@ fn tab_into_panes(given: &Pane, into: &Pane) -> Result<String, String> {
 /// Takes the client zellij took to one of `moved`, the panes of `session` a turn
 /// asked it to move, back to the pane it was on `before`, and says where it could
 /// not: what turned stays turned either way.
-fn take_back(session: &str, before: &[Client], moved: &[PaneId]) {
+fn take_back(session: &SessionName, before: &[Client], moved: &[PaneId]) {
     if let Err(why) = taken_back(session, before, moved) {
         eprintln!("luneta: the user may not be on the pane they were on before: {why}");
     }
@@ -541,7 +544,7 @@ fn fullscreen_again(session: &SessionName, pane: Option<PaneId>) {
 /// What `take_back` does, or why it did not. zellij acts for the same client
 /// as it moves the focus as it did as it stacked a pane, and for no other: one
 /// whose pane left without it, or whose tab went, stays where zellij put it.
-fn taken_back(session: &str, before: &[Client], moved: &[PaneId]) -> Result<(), String> {
+fn taken_back(session: &SessionName, before: &[Client], moved: &[PaneId]) -> Result<(), String> {
     let mut now = zellij::clients_on_panes(session)?;
     if let Some(was) = moved_from(before, &now, moved) {
         zellij::focused(session, was.pane)?;

@@ -1463,7 +1463,7 @@ pub enum Wants {
     /// in turn.
     Make {
         session: SessionName,
-        cwd: String,
+        cwd: Directory,
         tab_cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -2202,9 +2202,19 @@ impl Menu {
                 agents::on_words(agent, format!("{TACKLE} {real}"), &[real.as_str()])
             },
         };
-        let dir = match Directory::parse(worktree.clone()) {
+        let at = match (at, pull) {
+            (At::There((session, pane)), Pull::Worktree) => {
+                return Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })));
+            },
+            (at, _) => at,
+        };
+        let parsed = |path| {
+            let wrong = |why| Did::Closed(Done::Wrong(format!("menu: {work}: {why}")));
+            Directory::parse(path).map_err(wrong)
+        };
+        let dir = match parsed(worktree.clone()) {
             Ok(dir) => dir,
-            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+            Err(wrong) => return wrong,
         };
         let opening = |session: Listed, pane: u32, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
@@ -2223,18 +2233,19 @@ impl Menu {
             let cwd = dir.clone();
             Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
         };
-        match (at, pull) {
-            (At::There((session, pane)), Pull::Worktree) => {
-                Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
-            },
-            (At::There((session, pane)), Pull::Agent) => {
+        match at {
+            At::There((session, pane)) => {
                 opening(session, pane, Opens::Pane { beside: pane, command })
             },
-            (At::Session((session, pane)), _) => {
+            At::Session((session, pane)) => {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { cwd, name }, _) => {
+            At::Clone { cwd, name } => {
+                let cwd = match parsed(cwd) {
+                    Ok(cwd) => cwd,
+                    Err(wrong) => return wrong,
+                };
                 let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
@@ -5094,7 +5105,7 @@ mod tests {
             wants,
             Wants::Make {
                 session: name.clone(),
-                cwd: "/w/cdk".to_owned(),
+                cwd: directory("/w/cdk"),
                 tab_cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
