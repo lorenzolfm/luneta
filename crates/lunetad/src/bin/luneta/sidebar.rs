@@ -1368,6 +1368,14 @@ impl Pending {
     }
 }
 
+/// How a key came: typed, maybe blind, or off keys the bottom showed, which you
+/// read, for what it waits for to show at once.
+#[derive(Clone, Copy, Debug)]
+enum Came {
+    Typed,
+    Read,
+}
+
 /// What the bottom holds back of the menu, by its number, showing nothing in
 /// its place: nothing of a menu with another number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3001,12 +3009,12 @@ impl Sidebar {
     /// menu's. What a key that waits for the next shows of it shows once
     /// `PAUSE` passed, or at once from the legend, which you read.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
-        self.key_showing(key, now, now + PAUSE)
+        self.key_from(key, now, Came::Typed)
     }
 
     /// What `key` does, pressed at `now`, as `key` says, where what it waits
-    /// for shows from `shows`.
-    fn key_showing(&mut self, key: &KeyEvent, now: SystemTime, mut shows: SystemTime) -> Asked {
+    /// for shows as `came` says.
+    fn key_from(&mut self, key: &KeyEvent, now: SystemTime, came: Came) -> Asked {
         if self.pressed() {
             if key.code == KeyCode::Esc {
                 self.let_go();
@@ -3020,6 +3028,10 @@ impl Sidebar {
         let held = self.menu.as_ref().is_some_and(|menu| self.menu_paused(menu, now));
         self.holds = Holds::Nothing;
         let pending = std::mem::take(&mut self.pending);
+        let shows = match (came, &pending) {
+            (Came::Read, _) | (_, Pending::Legend) => now,
+            (Came::Typed, _) => now + PAUSE,
+        };
         // `Esc` and `Ctrl c` close a menu, and what a key of it started goes on
         // wherever the keys went, as it does as they leave it for zellij.
         if menu::closes(key) && self.menu.as_ref().is_some_and(Menu::waits) {
@@ -3055,10 +3067,7 @@ impl Sidebar {
                     self.pending = Pending::AllKeys(AllKeys::default());
                     return Asked::Nothing;
                 },
-                _ => {
-                    shows = now;
-                    Pending::Nothing
-                },
+                _ => Pending::Nothing,
             },
             Pending::AllKeys(all) => match self.all_keys_key(all, key) {
                 Some(asked) => return asked,
@@ -3939,7 +3948,7 @@ impl Sidebar {
         if self.keys != Keys::Sidebar || there != Some(keyed) {
             return Asked::Nothing;
         }
-        self.key_showing(key, now, now)
+        self.key_from(key, now, Came::Read)
     }
 
     /// What `Enter` does with the cursor of the menu's search box on the
