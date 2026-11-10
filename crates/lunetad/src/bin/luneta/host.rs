@@ -1268,6 +1268,8 @@ fn run_loop(
         app.ticked(Instant::now());
         app.alerting(Instant::now());
         app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
+        let look = app.sidebar.doubted();
+        app.look(look);
         app.draw(terminal)?;
     }
 }
@@ -2704,11 +2706,15 @@ impl App {
     /// is in, where `place` is one, or does `after` there, which opens what
     /// it goes to. Where the client fails, as where ssh does not reach the
     /// machine, or zellij cannot attach, luneta's zellij goes back to the
-    /// session it leaves. Whether it went.
+    /// session it leaves. Where luneta cannot tell which session that is, it
+    /// may be the one the client goes to, whose id there the one that takes
+    /// its place can take: what zellij listed of it before says nothing then.
+    /// Whether it went.
     fn swap(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
         let session = place.listed().name().clone();
         let fails = self.back();
         let before = match machine {
+            Machine::Local if self.sidebar.astray().is_some() => Before::Unknown,
             Machine::Local => zellij::before(session.as_str()),
             Machine::Remote(destination) => zellij::before_away(destination, session.as_str()),
         };
@@ -2767,18 +2773,16 @@ impl App {
 
     /// Where luneta's zellij goes where a client that takes its place on
     /// another machine fails: back to the session it is in, of the machine it
-    /// is on now; or on, where its client left that session for one luneta
-    /// cannot tell; or nowhere, where luneta does not know which that is.
+    /// is on now; or nowhere, where luneta does not know which that is.
     fn back(&self) -> Fails {
-        match self.here_back() {
-            Some(back) => Fails::Back(back),
-            None if self.sidebar.astray().is_some() => Fails::Onward(Vec::new()),
-            None => Fails::End,
-        }
+        self.here_back().map_or(Fails::End, Fails::Back)
     }
 
+    /// The session luneta's zellij is in, of the machine it is on now, or the
+    /// one it left for a session luneta cannot tell.
     fn here_back(&self) -> Option<Back> {
-        let session = SessionName::running(self.sidebar.here()?).ok()?;
+        let here = self.sidebar.here().or_else(|| self.sidebar.astray())?;
+        let session = SessionName::running(here).ok()?;
         Some(Back { machine: self.sidebar.on().clone(), session })
     }
 

@@ -101,6 +101,60 @@ fn newcomers<'r>(seen: &[Roster], rosters: &'r [Roster]) -> Option<Vec<(&'r str,
     Some(came)
 }
 
+/// What the daemon listed of every session as it last listed luneta's client
+/// where it is, but for the clients it listed in another session since it
+/// first listed them there, until `TRUSTED` after: the daemon lists each
+/// session apart, and can list luneta's client in the session it came to
+/// before it lists the one it left without it.
+#[derive(Clone, Debug)]
+struct Seen {
+    rosters: Vec<Roster>,
+    /// The clients left out of `rosters`, by the session and the id the daemon
+    /// listed each by, and when it first did.
+    coming: Vec<(String, u32, Instant)>,
+}
+
+impl Seen {
+    /// What the daemon lists of every session so, at `now`, as it lists
+    /// luneta's client in `own`, after it listed them as `before`. A session
+    /// it had not listed the clients of, that it lists one of yet to stand
+    /// `TRUSTED`, it still has not.
+    fn after(before: Option<&Seen>, own: &str, rosters: &[Roster], now: Instant) -> Seen {
+        let Some(before) = before else {
+            return Seen { rosters: rosters.to_vec(), coming: Vec::new() };
+        };
+        let mut coming = Vec::new();
+        let mut kept = Vec::with_capacity(rosters.len());
+        for listed in rosters {
+            let Some(clients) = listed.clients.as_deref().filter(|_| listed.session != own) else {
+                kept.push(listed.clone());
+                continue;
+            };
+            let was = match was(&before.rosters, &listed.session) {
+                Was::Absent => Some(&[][..]),
+                Was::Listed(was) => Some(was),
+                Was::Unlisted => None,
+            };
+            let mut settled = Vec::with_capacity(clients.len());
+            for client in clients {
+                let there = was.is_some_and(|was| was.iter().any(|it| it.id == client.id));
+                let since = (before.coming.iter())
+                    .find(|(session, id, _)| *session == listed.session && *id == client.id)
+                    .map_or(now, |(.., since)| *since);
+                if there || now >= since + TRUSTED {
+                    settled.push(*client);
+                } else {
+                    coming.push((listed.session.clone(), client.id, since));
+                }
+            }
+            let held = settled.len() < clients.len();
+            let clients = (was.is_some() || !held).then_some(settled);
+            kept.push(Roster { session: listed.session.clone(), clients });
+        }
+        Seen { rosters: kept, coming }
+    }
+}
+
 /// What luneta asks zellij: the clients of `session`, as they are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Look {
@@ -208,7 +262,7 @@ struct Left {
     id: u32,
     sure: bool,
     pane: Option<u32>,
-    seen: Option<Vec<Roster>>,
+    seen: Option<Seen>,
 }
 
 /// luneta's client, which left the session it was in with no go of luneta's,
@@ -220,7 +274,7 @@ struct Astray {
     /// What the daemon listed of every session as it last listed the client
     /// in the one it left, until luneta gives up looking: none of the clients
     /// it listed is luneta's.
-    seen: Option<Vec<Roster>>,
+    seen: Option<Seen>,
     until: Instant,
 }
 
@@ -261,11 +315,15 @@ pub struct OwnClient {
     /// The number of the newest look taken in.
     taken: u64,
     /// What the daemon listed of every session as it last listed luneta's
-    /// client where it is, while luneta is sure of it.
-    seen: Option<Vec<Roster>>,
+    /// client where it is, while luneta is sure of it, as `Seen` says.
+    seen: Option<Seen>,
     /// Where luneta's client left with no go of luneta's, until luneta finds
     /// it, or zellij titles luneta's terminal, or luneta's sends it anywhere.
     astray: Option<Astray>,
+    /// Whether the daemon no longer lists the client luneta is sure of where
+    /// it is, which zellij is to be asked about: the daemon's list can be
+    /// older than luneta's look there.
+    doubt: bool,
 }
 
 impl OwnClient {
@@ -319,6 +377,7 @@ impl OwnClient {
         self.since = self.asked + 1;
         self.seen = back.and_then(|left| left.seen.clone());
         self.astray = None;
+        self.doubt = false;
         if going.is_some() {
             self.left = left;
         }
@@ -337,6 +396,7 @@ impl OwnClient {
         self.left = None;
         self.seen = None;
         self.astray = None;
+        self.doubt = false;
     }
 
     /// The session luneta's client left with no go of luneta's, for one luneta
@@ -379,9 +439,10 @@ impl OwnClient {
     /// The daemon lists the clients of each session of the machine so, at
     /// `now`. Once those of the session luneta's client is in are not as they
     /// were when luneta last knew better, or are still so `TRUSTED` after,
-    /// they say where its client is, if luneta is sure which it is; or that it
-    /// left, where they no longer list it, and luneta sent it nowhere. The
-    /// session luneta found it in since, as `hunt` says, if it did.
+    /// they say where its client is, if luneta is sure which it is; or, where
+    /// they no longer list it, and luneta sent it nowhere, that zellij is to
+    /// be asked whether it left, as `doubted` asks. The session luneta found
+    /// it in since it left, as `hunt` says, if it did.
     pub fn heard(&mut self, rosters: &[Roster], now: Instant) -> Option<String> {
         if self.astray.is_some() {
             return self.hunt(rosters, now);
@@ -404,13 +465,15 @@ impl OwnClient {
             Some(id) => match listed.iter().find(|client| client.id == id) {
                 Some(client) => {
                     self.pane = client.pane;
-                    if self.sure {
-                        self.seen = Some(rosters.to_vec());
+                    if let (true, Some(own)) = (self.sure, self.session.as_deref()) {
+                        self.seen = Some(Seen::after(self.seen.as_ref(), own, rosters, now));
+                        self.doubt = false;
                     }
                 },
                 None if self.sure && self.going.is_none() => {
-                    self.strayed(now);
-                    return self.hunt(rosters, now);
+                    let listed = Some(listed.to_vec());
+                    self.word = Word::Own { listed, until: now + TRUSTED };
+                    self.doubt = true;
                 },
                 None => {},
             },
@@ -438,6 +501,7 @@ impl OwnClient {
         self.looked = None;
         self.left = None;
         self.since = self.asked + 1;
+        self.doubt = false;
     }
 
     /// Looks for luneta's client, astray, among the clients `rosters` lists at
@@ -448,8 +512,8 @@ impl OwnClient {
     /// where it did.
     fn hunt(&mut self, rosters: &[Roster], now: Instant) -> Option<String> {
         let astray = self.astray.as_mut()?;
-        let seen = astray.seen.as_deref().filter(|_| now < astray.until)?;
-        let (session, own) = match newcomers(seen, rosters).as_deref() {
+        let seen = astray.seen.as_ref().filter(|_| now < astray.until)?;
+        let (session, own) = match newcomers(&seen.rosters, rosters).as_deref() {
             Some(&[(session, own)]) => (session.to_owned(), own),
             Some([]) => return None,
             Some(_) | None => {
@@ -462,7 +526,7 @@ impl OwnClient {
         self.id = Some(own.id);
         self.sure = true;
         self.pane = own.pane;
-        self.seen = Some(rosters.to_vec());
+        self.seen = Some(Seen { rosters: rosters.to_vec(), coming: Vec::new() });
         Some(session)
     }
 
@@ -544,13 +608,23 @@ impl OwnClient {
     }
 
     /// A look at the session luneta's client is in, if luneta knows which,
-    /// and sends it to no other: a client luneta is sure of that zellij does
-    /// not list there left it.
+    /// is sure which client is its own, and sends it to no other: one that
+    /// zellij does not list there left it. Of a client luneta is not sure of,
+    /// the look would take another's for its own, where one is left.
     pub fn again(&mut self) -> Option<Look> {
-        if self.session.is_none() || self.going.is_some() {
+        if self.session.is_none() || self.going.is_some() || !self.sure {
             return None;
         }
         Some(self.look(None))
+    }
+
+    /// A look at the session luneta's client is in, where the daemon no
+    /// longer lists the client luneta is sure of there, as `heard` says, once.
+    pub fn doubted(&mut self) -> Option<Look> {
+        if !std::mem::take(&mut self.doubt) {
+            return None;
+        }
+        self.again()
     }
 
     fn look(&mut self, went: Option<u32>) -> Look {
@@ -825,6 +899,19 @@ mod tests {
         own
     }
 
+    /// The daemon lists these at `now`, which no longer list luneta's client
+    /// where it was, and zellij answers the look luneta asks for then with no
+    /// client there. The session luneta found its client in, as the sidebar
+    /// has `heard` say once it is astray.
+    fn left(own: &mut OwnClient, rosters: &[Roster], now: Instant) -> Option<String> {
+        assert_eq!(own.heard(rosters, now), None);
+        assert_eq!(own.astray(), None);
+        let look = own.doubted().expect("luneta asks zellij whether its client left");
+        assert_eq!(own.doubted(), None);
+        assert!(!own.looked(answer(&look, &[]), None, now));
+        own.heard(rosters, now)
+    }
+
     /// Something other than luneta takes its client from `work` to `play`,
     /// where zellij gives it a new id, and the daemon lists `work` first. Until
     /// it lists `play` again, luneta does not know where its client is, and
@@ -833,15 +920,55 @@ mod tests {
     fn a_client_moved_by_another_is_the_one_that_came_to_any_session() {
         let now = Instant::now();
         let mut own = sure_in_work(now);
-        let left = [listed("work", &[]), listed("play", &[client(1, 2)])];
-        assert_eq!(own.heard(&left, now + TRUSTED), None);
+        let later = now + TRUSTED;
+        let gone = [listed("work", &[]), listed("play", &[client(1, 2)])];
+        assert_eq!(left(&mut own, &gone, later), None);
         assert_eq!((own.astray(), own.session()), (Some("work"), None));
         assert_eq!(own.place(), Err(Unplaced::Waiting));
         let came = [listed("work", &[]), listed("play", &[client(1, 2), client(2, 5)])];
-        assert_eq!(own.heard(&came, now + TRUSTED), Some("play".to_owned()));
+        assert_eq!(own.heard(&came, later), Some("play".to_owned()));
         assert_eq!((own.astray(), own.place()), (None, Ok(("play", 5))));
         own.heard(&[listed("work", &[]), listed("play", &[client(1, 2), client(2, 6)])], now);
         assert_eq!(own.pane(), Some(6));
+    }
+
+    /// The daemon lists luneta's client in `play`, where something other than
+    /// luneta took it, before it lists `work` without it: the client that came
+    /// to `play` while the daemon still listed luneta's in `work` is luneta's.
+    /// One the daemon listed there for `TRUSTED` while it listed luneta's in
+    /// `work` is another's.
+    #[test]
+    fn the_session_a_client_came_to_can_be_listed_before_the_one_it_left() {
+        let now = Instant::now();
+        let later = now + TRUSTED;
+        let play = listed("play", &[client(1, 2), client(2, 5)]);
+        let mut own = sure_in_work(now);
+        assert_eq!(own.heard(&[listed("work", &[client(1, 3)]), play.clone()], later), None);
+        let found = left(&mut own, &[listed("work", &[]), play.clone()], later + TRUSTED / 2);
+        assert_eq!((found.as_deref(), own.place()), (Some("play"), Ok(("play", 5))));
+
+        let mut own = sure_in_work(now);
+        own.heard(&[listed("work", &[client(1, 3)]), play.clone()], later);
+        own.heard(&[listed("work", &[client(1, 3)]), play.clone()], later + TRUSTED);
+        assert_eq!(left(&mut own, &[listed("work", &[]), play], later + TRUSTED), None);
+        assert_eq!(own.astray(), Some("work"));
+    }
+
+    /// The daemon no longer lists luneta's client in `work`, as a list it had
+    /// from before luneta last looked, which still stands `TRUSTED` after, as
+    /// it can where another server hangs. zellij still lists it there: it is
+    /// where it was, and the same list says nothing for `TRUSTED` more.
+    #[test]
+    fn a_daemon_list_older_than_the_look_does_not_set_luneta_looking() {
+        let now = Instant::now();
+        let mut own = sure_in_work(now);
+        let stale = [listed("work", &[]), listed("play", &[client(1, 2)])];
+        assert_eq!(own.heard(&stale, now + TRUSTED), None);
+        let look = own.doubted().unwrap();
+        assert!(!own.looked(answer(&look, &[client(1, 4)]), Some(&[][..]), now + TRUSTED));
+        assert_eq!((own.astray(), own.place()), (None, Ok(("work", 4))));
+        assert_eq!(own.heard(&stale, now + TRUSTED * 3 / 2), None);
+        assert_eq!(own.doubted(), None);
     }
 
     /// zellij no longer lists luneta's client in the session it was in, as the
@@ -860,6 +987,20 @@ mod tests {
         assert_eq!(own.place(), Ok(("new", 0)));
     }
 
+    /// luneta looks again only for a client it is sure of: of two in `work`
+    /// that it cannot tell apart, a look once its own left would take the
+    /// other for it.
+    #[test]
+    fn luneta_looks_again_only_for_a_client_it_is_sure_of() {
+        let now = Instant::now();
+        let mut own = OwnClient::default();
+        let look = own.came("work", None, now);
+        own.looked(answer(&look, &[client(1, 3), client(2, 4)]), None, now);
+        assert_eq!(own.place(), Err(Unplaced::Unsure));
+        assert_eq!(own.again(), None);
+        assert_eq!(sure_in_work(now).again().map(|look| look.session), Some("work".to_owned()));
+    }
+
     /// Two clients came as luneta's left, and luneta cannot tell which is its
     /// own, nor one that comes after, nor one that comes once it has looked
     /// for as long as it does. A title of zellij's says where it is.
@@ -868,14 +1009,13 @@ mod tests {
         let now = Instant::now();
         let mut own = sure_in_work(now);
         let play = listed("play", &[client(1, 2), client(2, 5), client(3, 5)]);
-        let two = [listed("work", &[]), play];
-        assert_eq!(own.heard(&two, now + TRUSTED), None);
+        assert_eq!(left(&mut own, &[listed("work", &[]), play], now + TRUSTED), None);
         let one = [listed("work", &[]), listed("play", &[client(1, 2), client(2, 5)])];
         assert_eq!(own.heard(&one, now + TRUSTED), None);
         assert_eq!(own.astray(), Some("work"));
 
         let mut own = sure_in_work(now);
-        own.heard(&[listed("work", &[]), listed("play", &[client(1, 2)])], now + TRUSTED);
+        left(&mut own, &[listed("work", &[]), listed("play", &[client(1, 2)])], now + TRUSTED);
         let late = [listed("work", &[]), listed("play", &[client(1, 2), client(2, 5)])];
         assert_eq!(own.heard(&late, now + TRUSTED + HUNT), None);
         assert_eq!(own.astray(), Some("work"));
@@ -896,8 +1036,7 @@ mod tests {
             let look = own.came("work", None, now);
             own.looked(answer(&look, &[client(1, 3)]), None, now);
             own.heard(&[listed("work", &[client(1, 3)]), unlisted.clone()], now + TRUSTED);
-            let left = [listed("work", &[]), play.clone()];
-            own.heard(&left, now + TRUSTED);
+            left(&mut own, &[listed("work", &[]), play.clone()], now + TRUSTED);
             let came = [listed("work", &[]), play.clone(), listed("other", &[client(1, 4)])];
             let found = own.heard(&came, now + TRUSTED);
             match play.clients {
@@ -909,13 +1048,14 @@ mod tests {
 
     /// luneta sends its client from `work` to `play`, and the daemon lists
     /// `work` without it before luneta's client comes to `play`: it is on its
-    /// way, not astray.
+    /// way, not astray, and zellij is not asked whether it left.
     #[test]
     fn a_client_luneta_sends_elsewhere_is_not_astray() {
         let now = Instant::now();
         let mut own = sure_in_work(now);
         assert_eq!(own.went("play", None, None, now), None);
         own.heard(&[listed("work", &[]), listed("play", &[client(1, 2)])], now + TRUSTED);
+        assert_eq!(own.doubted(), None);
         assert_eq!((own.astray(), own.session()), (None, Some("work")));
     }
 }

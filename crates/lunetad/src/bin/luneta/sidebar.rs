@@ -1928,6 +1928,16 @@ impl Sidebar {
         self.own.again()
     }
 
+    /// A look at the session luneta's zellij is in, once the daemon no longer
+    /// lists its client there, which luneta is sure of, as zellij is to say
+    /// whether it left: none while it is on its way elsewhere.
+    pub fn doubted(&mut self) -> Option<Look> {
+        if self.going().is_some() {
+            return None;
+        }
+        self.own.doubted()
+    }
+
     /// The session luneta's zellij left with no go of luneta's, for one
     /// luneta cannot tell, while it cannot.
     pub fn astray(&self) -> Option<&str> {
@@ -7447,22 +7457,47 @@ mod tests {
         sidebar.heard(host);
     }
 
+    /// zellij answers the look luneta asks for, once the daemon no longer
+    /// lists its zellij's client in `older`, with no client there.
+    fn left_older(sidebar: &mut Sidebar) {
+        assert_eq!(sidebar.astray(), None);
+        let look = sidebar.doubted().expect("luneta asks zellij whether its client left");
+        assert_eq!(look.session, "older");
+        sidebar.looked(Looked { number: look.number, went: None, clients: vec![], before: None });
+    }
+
     /// Something other than luneta takes its zellij's client from `older` to
     /// `newer`, as the ask box's agent can, and zellij titles luneta's
-    /// terminal nothing there. Once the daemon lists the client there, and no
-    /// longer in `older`, luneta's zellij is in `newer`, and a go to a pane
-    /// there moves it within that session.
+    /// terminal nothing there. Once the daemon lists the client there, and
+    /// zellij no longer in `older`, luneta's zellij is in `newer`, and a go to
+    /// a pane there moves it within that session.
     #[test]
     fn a_client_another_moved_is_where_the_daemon_lists_it_come() {
         let mut sidebar = alone_in_older();
         assert_eq!(sidebar.here(), Some("older"));
         listing(&mut sidebar, &[], &[]);
+        left_older(&mut sidebar);
         assert_eq!((sidebar.here(), sidebar.astray()), (None, Some("older")));
         listing(&mut sidebar, &[Client { id: 1, pane: Some(1) }], &[]);
         assert_eq!((sidebar.here(), sidebar.astray()), (Some("newer"), None));
         assert_eq!(sidebar.terminal_title(), Some("older | ~/w/luneta"));
         let look = sidebar.went(&pane_of("newer", 20, 1)).unwrap();
         assert_eq!((look.session.as_str(), sidebar.going()), ("newer", None));
+    }
+
+    /// The daemon lists luneta's zellij's client in `newer`, where something
+    /// other than luneta took it, before it lists `older` without it: it is
+    /// the one that came there all the same.
+    #[test]
+    fn a_client_another_moved_can_be_listed_where_it_came_first() {
+        let mut sidebar = alone_in_older();
+        let one = [Client { id: 1, pane: Some(1) }];
+        listing(&mut sidebar, &one, &one);
+        assert_eq!(sidebar.doubted(), None);
+        assert_eq!(sidebar.here(), Some("older"));
+        listing(&mut sidebar, &one, &[]);
+        left_older(&mut sidebar);
+        assert_eq!((sidebar.here(), sidebar.astray()), (Some("newer"), None));
     }
 
     /// luneta sends its zellij to `newer`, which it is in already, as something
@@ -7490,6 +7525,7 @@ mod tests {
         let mut sidebar = alone_in_older();
         let two = [Client { id: 1, pane: Some(1) }, Client { id: 2, pane: Some(1) }];
         listing(&mut sidebar, &two, &[]);
+        left_older(&mut sidebar);
         assert_eq!((sidebar.here(), sidebar.astray()), (None, Some("older")));
         assert_eq!(sidebar.seats(), Vec::<SessionName>::new());
         sidebar.titled("newer | fish".to_owned());
