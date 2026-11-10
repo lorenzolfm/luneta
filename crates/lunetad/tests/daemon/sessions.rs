@@ -1161,6 +1161,111 @@ fn git_runs_no_command_a_repository_names() {
     assert!(ran.exists(), "git runs no command the repository names here");
 }
 
+/// How far behind its upstream a branch a pane works on is, is of what the
+/// remote has, with no one fetching it but the daemon, which moves no branch
+/// and runs no hook the repository names. A remote that is gone is said once
+/// in the log, and so is a branch the remote deleted, as one that is gone and
+/// not as a failure.
+#[test]
+fn the_behind_count_is_of_what_the_remote_has() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, tree, elsewhere, ran) =
+        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    let (lost, lone, merged) = (path("lost.git"), path("lone"), path("merged"));
+    fs::create_dir(&origin).unwrap();
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    commit(&elsewhere, "README", "start\n");
+    assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
+    assert!(git(dirs.path(), &["clone", "-q", "--bare", &spelled(&origin), "lost.git"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&lost), "lone"]));
+    fs::remove_dir_all(&lost).unwrap();
+    for file in ["one", "two", "three"] {
+        commit(&elsewhere, file, "new\n");
+    }
+    assert!(git(&elsewhere, &["push", "-q"]));
+    assert!(git(&elsewhere, &["push", "-q", "origin", "HEAD:refs/heads/done"]));
+    assert!(git(dirs.path(), &["clone", "-q", "-b", "done", &spelled(&origin), "merged"]));
+    assert!(git(&elsewhere, &["push", "-q", "origin", "--delete", "done"]));
+    let hook = tree.join(".git/hooks/reference-transaction");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+    fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
+    let here = fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap();
+
+    let (cwd, alone, done) = (spelled(&tree), spelled(&lone), spelled(&merged));
+    let in_dir = |id, dir: &str| listed(id, "~", (0, "Tab #1"), Some(dir));
+    host.zellij.list("work", &json!([in_dir(1, &cwd), in_dir(2, &alone), in_dir(3, &done)]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let upstream = |it: Checkout| match it.head {
+        Some(Head::Branch(branch)) => branch.upstream.map(|it| (it.ahead, it.behind)),
+        _ => None,
+    };
+    eventually("the branch is three behind", || {
+        checkout(&host, &cwd).and_then(upstream).filter(|it| *it == (0, 3))
+    });
+    assert_eq!(fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap(), here);
+    assert!(!ran.exists(), "the fetch ran the hook the repository names");
+    // As it would have, let move a ref.
+    assert!(git(&tree, &["update-ref", "refs/heads/moved", "HEAD"]));
+    assert!(ran.exists(), "git runs no hook the repository names here");
+
+    let log = host.home.path().join(".local/state/luneta/luneta.log");
+    let failed = format!("git did not fetch the upstream of main in {alone}");
+    let gone = "the remote no longer has the upstream of done in ";
+    eventually("the log says the fetches failed and the branch is gone", || {
+        fs::read_to_string(&log).ok().filter(|log| log.contains(&failed) && log.contains(gone))
+    });
+    thread::sleep(Duration::from_secs(1));
+    let said = fs::read_to_string(&log).unwrap();
+    assert_eq!(said.matches(&failed).count(), 1, "{said}");
+    assert_eq!(said.matches(gone).count(), 1, "{said}");
+    assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
+}
+
+/// The daemon fetches no upstream by a way of reaching its remote that the
+/// repository's own config names, as `core.sshCommand`, which git would run,
+/// and says why once.
+#[test]
+fn the_fetch_runs_no_command_a_repository_names() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, tree, elsewhere, ran) =
+        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    fs::create_dir(&origin).unwrap();
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    commit(&elsewhere, "README", "start\n");
+    assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
+    assert!(git(&tree, &["config", "remote.origin.url", "ssh://nowhere.invalid/x"]));
+    let named = format!("touch '{}'; :", ran.display());
+    assert!(git(&tree, &["config", "core.sshCommand", &named]));
+
+    let cwd = spelled(&tree);
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let log = host.home.path().join(".local/state/luneta/luneta.log");
+    let refused = format!("git did not fetch the upstream of main in {cwd}");
+    let why = |line: &str| line.contains(&refused) && line.contains("core.sshcommand");
+    eventually("the log says why the branch was not fetched", || {
+        fs::read_to_string(&log).ok().filter(|log| log.lines().any(why))
+    });
+    assert!(!ran.exists(), "the fetch ran the command the repository named");
+    let said = fs::read_to_string(&log).unwrap();
+    assert_eq!(said.matches(&refused).count(), 1, "{said}");
+    // As it would have, let reach the remote.
+    let _ = git(&tree, &["ls-remote", "origin"]);
+    assert!(ran.exists(), "git runs no command the repository names here");
+}
+
 /// gh is asked for the pull request of the branch checked out where each pane
 /// works: once for a branch of a repository, however many of its directories
 /// panes work in, and at once as a pane comes to a branch. What gh found of a

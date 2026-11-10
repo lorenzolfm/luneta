@@ -26,6 +26,13 @@ use crate::shells::Shell;
 use crate::transcripts::SessionId;
 use crate::zellij::{Id, Sessions, Socket};
 
+/// A branch, by the directory that holds its repository, and its name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Branch {
+    pub repository: Said,
+    pub name: Said,
+}
+
 pub enum Command {
     /// What Claude Code's files say now.
     Agents(Scan),
@@ -60,6 +67,10 @@ pub enum Command {
     /// Asks for the branch checked out in each directory a pane works in, by
     /// the directory, where git has said one is, for gh to be asked about.
     Branches(oneshot::Sender<BTreeMap<String, String>>),
+    /// Asks for the branch checked out in each directory a pane works in that
+    /// has an upstream, by the directory, where git has said one is, for its
+    /// upstream to be fetched.
+    Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     /// Asks for Claude Code's agents, for their topics.
     Claudes(oneshot::Sender<Vec<Agent>>),
     /// Asks for every agent, as the API gives it.
@@ -275,6 +286,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let _ = answer.send(known.branches());
                 continue;
             },
+            Command::Tracking(answer) => {
+                let _ = answer.send(known.tracking());
+                continue;
+            },
             Command::Claudes(answer) => {
                 let _ = answer.send(known.found.agents.clone());
                 continue;
@@ -427,6 +442,22 @@ impl Known {
     fn branches(&self) -> BTreeMap<String, String> {
         let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
         self.trees.keys().filter_map(branch).collect()
+    }
+
+    /// The branch checked out in each directory, as `Tracking` asks for it.
+    fn tracking(&self) -> BTreeMap<String, Branch> {
+        let tracking = |(dir, tree): (&String, &WorkTree)| {
+            let WorkTree::Checkout {
+                repository: Some(repository),
+                head: Head::Branch { name, upstream: Some(_), .. },
+                ..
+            } = tree
+            else {
+                return None;
+            };
+            Some((dir.clone(), Branch { repository: repository.clone(), name: name.clone() }))
+        };
+        self.trees.iter().filter_map(tracking).collect()
     }
 
     /// Each agent, of whichever harness.

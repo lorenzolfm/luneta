@@ -61,6 +61,7 @@ use tokio::time::timeout;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch};
+use wt::cmd::follow::Upstream;
 use wt::repo::Repo;
 
 use crate::api::daemon_client::DaemonClient;
@@ -1498,7 +1499,7 @@ fn worktree_said(ran: Ran) -> Result<String, Unready> {
 /// The `luneta` that makes the worktree: the one this runs as, or else the
 /// one beside it, as beside `lunetad`, as old or as new as it is; or why
 /// there is none.
-fn luneta() -> Result<PathBuf, String> {
+pub(crate) fn luneta() -> Result<PathBuf, String> {
     let this = env::current_exe()
         .map_err(|error| format!("luneta cannot tell where it is: {error}"))?;
     if this.file_name().is_some_and(|name| name == "luneta") {
@@ -1533,6 +1534,101 @@ pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
 pub fn followed(dir: &str) -> Result<(), String> {
     git_reads(dir)?;
     wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
+}
+
+/// Fetches the upstream branch of `branch`, of the repository `dir` is in, by
+/// wt's own code, as `wt follow` fetches it, and moves no branch: what wt
+/// found of it, or why it did not.
+pub fn fetched_upstream(dir: &str, branch: &str) -> Result<Upstream, String> {
+    git_reads(dir)?;
+    reaches_as_the_user_does(dir)?;
+    wt::cmd::follow::fetch_upstream(Path::new(dir), branch).map_err(|error| format!("{error:#}"))
+}
+
+/// The keys of git's config that name a command git runs as it reaches a
+/// remote, or that let a remote's URL name one.
+const REACHES: &str = concat!(
+    r"^(core\.(sshcommand|gitproxy|askpass|alternaterefscommand)",
+    r"|credential\..*helper|remote\..*\.uploadpack|protocol\.(.*\.)?allow)$",
+);
+
+/// Why git is not to reach the remote of the repository `dir` is in, where
+/// that repository's own config sets how, as one in a folder unpacked from
+/// anywhere can: what it names would run as it was fetched.
+fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
+    let mut git = Command::new("git");
+    git::local(git.args(["-C", dir, "config", "-z", "--show-scope", "--get-regexp", REACHES]))
+        .env("LC_ALL", "C");
+    let ran = program::run(&mut git, ANSWER)
+        .map_err(|error| format!("git config could not be run: {error}"))?;
+    if let Ran::Ended { status, stderr, .. } = &ran
+        && status.code() == Some(1)
+        && stderr.is_empty()
+    {
+        return Ok(());
+    }
+    let listed = ran
+        .answer()
+        .map_err(|why| format!("git config did not say how git reaches the remote: {why}"))?;
+    let listed = String::from_utf8_lossy(&listed);
+    let own = own_keys(&listed);
+    if own.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the repository's own config sets {}, which would run as git reached the remote, and \
+         lunetad fetches by no repository's own way",
+        own.join(", ")
+    ))
+}
+
+/// The keys of `listed`, as `git config -z --show-scope --get-regexp` lists
+/// them, that the repository's own config sets to anything: one set to
+/// nothing, as `credential.helper` is to forget the helpers before it, names
+/// nothing to run.
+fn own_keys(listed: &str) -> Vec<&str> {
+    let fields: Vec<&str> = listed.split('\0').collect();
+    let mut keys: Vec<&str> = fields
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|[scope, _]| matches!(*scope, "local" | "worktree"))
+        .filter_map(|[_, set]| match set.split_once('\n') {
+            Some((_, "")) => None,
+            Some((key, _)) => Some(key),
+            None => Some(*set),
+        })
+        .collect();
+    keys.dedup();
+    keys
+}
+
+/// Each of what wt finds of an upstream branch, for `upstream_of_word`.
+const UPSTREAMS: [Upstream; 5] = [
+    Upstream::Untracked,
+    Upstream::Current,
+    Upstream::Advanced,
+    Upstream::Rewritten,
+    Upstream::Gone,
+];
+
+/// What `luneta fetch-upstream` prints of what wt found, for lunetad to read
+/// back with `upstream_of_word`.
+#[must_use]
+pub fn upstream_word(found: Upstream) -> &'static str {
+    match found {
+        Upstream::Untracked => "untracked",
+        Upstream::Current => "current",
+        Upstream::Advanced => "advanced",
+        Upstream::Rewritten => "rewritten",
+        Upstream::Gone => "gone",
+    }
+}
+
+/// What wt found, as `upstream_word` says it; none for a word it does not say.
+#[must_use]
+pub fn upstream_of_word(word: &str) -> Option<Upstream> {
+    UPSTREAMS.into_iter().find(|found| upstream_word(*found) == word)
 }
 
 /// Why wt's git would not read the repository `dir` is in, where a variable
@@ -1571,7 +1667,7 @@ fn directory(path: &str) -> Option<String> {
 /// Why `luneta worktree` made no worktree, as it says on stderr after what wt
 /// and git say there as they go: the lines from its last that starts with
 /// `WHY`, on one, as what wt says can take more than one.
-fn failure(stderr: &str) -> Option<String> {
+pub(crate) fn failure(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let why = lines.iter().rposition(|line| line.starts_with(WHY))?;
     lines[why..].join(", ").strip_prefix(WHY).map(str::to_owned)
@@ -2007,6 +2103,30 @@ mod tests {
         assert_eq!(failure("  pull  #1\n"), None);
     }
 
+    /// How git reaches a remote stops a fetch only where the repository's
+    /// own config sets it to something: not where the user's config does, or
+    /// lunetad's environment.
+    #[test]
+    fn only_the_repository_s_own_way_of_reaching_a_remote_stops_a_fetch() {
+        let listed = "global\0credential.https://github.com.helper\n\0\
+                      global\0credential.https://github.com.helper\n!gh auth git-credential\0\
+                      command\0core.sshcommand\nssh -i key\0\
+                      local\0credential.helper\n\0\
+                      local\0core.sshcommand\nssh -i other\0\
+                      worktree\0remote.my origin.uploadpack\ngit-upload-pack\0\
+                      local\0protocol.allow\0";
+        let own = ["core.sshcommand", "remote.my origin.uploadpack", "protocol.allow"];
+        assert_eq!(own_keys(listed), own);
+        let scratch = tempfile::tempdir().unwrap();
+        let tree = scratch.path().join("tree");
+        let tree = tree.to_str().unwrap();
+        assert!(git(scratch.path(), &["init", "-q", "-b", "main", tree]).is_some());
+        assert_eq!(reaches_as_the_user_does(tree), Ok(()));
+        assert!(git(tree, &["config", "core.sshCommand", "ssh -i other"]).is_some());
+        let refused = reaches_as_the_user_does(tree).unwrap_err();
+        assert!(refused.contains("sets core.sshcommand,"), "{refused}");
+    }
+
     /// What a daemon is asked for a paste names a link, and the panes of its
     /// machine, each by an absolute path, with the page of the pull request
     /// of its branch, if any: no more of them than a machine has. Anything
@@ -2388,7 +2508,8 @@ mod tests {
             let bare = bare.to_str().unwrap();
             assert!(git(scratch.path(), &["init", "-q", "--bare", bare]).is_some());
             let Common::Of(common) = common_dir(bare) else { panic!("no repository at {bare}") };
-            let wt = Repo::discover(Some(Path::new(bare))).unwrap().container().join("issue-7");
+            let found = Repo::discover(Some(Path::new(bare))).unwrap();
+            let wt = found.container().unwrap().join("issue-7");
             assert_eq!(wt_makes(&common, "issue-7"), wt.to_str().unwrap());
         }
     }

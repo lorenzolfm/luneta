@@ -2,7 +2,6 @@
 //! it. wt moves it, as `wt follow` does, and never one that holds work of its
 //! own. wt follows the branch's upstream, so this checks it came to the head.
 
-use std::env;
 use std::path::Path;
 use std::process::Command;
 
@@ -81,14 +80,7 @@ fn fetch(dir: &str, remote: &str, base: &str) -> Result<(), String> {
 }
 
 fn trusting_no_tree(command: &mut Command) -> &mut Command {
-    let count = env::var("GIT_CONFIG_COUNT").ok();
-    let mut next = count.and_then(|count| count.parse().ok()).unwrap_or(0_u32);
-    for (key, value) in NOTHING_OF_THE_TREE {
-        command.env(format!("GIT_CONFIG_KEY_{next}"), key);
-        command.env(format!("GIT_CONFIG_VALUE_{next}"), value);
-        next = next.saturating_add(1);
-    }
-    command.env("GIT_CONFIG_COUNT", next.to_string())
+    git::configured(command, &NOTHING_OF_THE_TREE)
 }
 
 fn here(dir: &str) -> Result<String, String> {

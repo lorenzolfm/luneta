@@ -97,9 +97,9 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    carries, checks, claude, client, clients, closes, ended, eza, git, github, keeps, log, metadata, moves,
-    names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills, topics,
-    turns, watch, zellij, zoxide, Harness,
+    carries, checks, claude, client, clients, closes, ended, eza, fetches, git, github, keeps, log,
+    metadata, moves, names, opens, panes, pi, printed, release, remote, renames, screens, shells,
+    skills, topics, turns, watch, zellij, zoxide, Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -120,6 +120,10 @@ const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 /// tree, which takes a large one a while, and git rests from one for as long
 /// as it took over it.
 const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
+
+/// How long a branch rests from a fetch of its upstream before it is fetched
+/// again: a round trip across the network, of each branch a pane works on.
+const FETCH_SWEEP: Duration = Duration::from_mins(5);
 
 /// How long gh rests from a branch before it is asked about its pull request
 /// again. gh asks GitHub, and each ask counts against the hourly limit that
@@ -249,6 +253,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     follow(&core, &claim.folder, folders, watchers.clone(), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, metadata::folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
+    fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
     github::follow(core.clone(), wake_github, github_woken, rests)?;
     let bridges = Arc::new(Bridges::default());
