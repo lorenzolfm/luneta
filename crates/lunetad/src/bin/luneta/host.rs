@@ -289,6 +289,21 @@ const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTR
 /// The key that opens the picker over zellij, on the directories.
 const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
 
+/// The keys luneta takes before zellij, whichever has the keys, and what each
+/// does, as the list of every key names them.
+pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 10] = [
+    (SWAP, "Sidebar or zellij"),
+    (NEXT, "Next pane"),
+    (COLLAPSE, "Collapse sidebar"),
+    (MENU, "Menu over zellij"),
+    (SESSIONS, "Pick a session"),
+    (AGENTS, "Pick an agent"),
+    (DIRS, "Pick a directory"),
+    (dictation::KEY, "Hold to dictate"),
+    (aloud::KEY, "Read aloud, pause"),
+    (aloud::STOPS, "Stop reading"),
+];
+
 /// Where the keys are: with a side, or with a box over zellij, which has them
 /// and the mouse until it closes, when that side has them again.
 #[derive(Debug)]

@@ -89,8 +89,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran,
-    Target, Top, Wants,
+    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Label, Menu, Opening, Opens, PaneRow,
+    Ran, Target, Top, Wants,
 };
 use crate::news::News;
 use crate::order::{Colour, Order};
@@ -114,19 +114,28 @@ pub const PAUSE: Duration = Duration::from_millis(200);
 
 /// What the bottom says `g` waits for, under a rule that names it `GO`.
 const GO: &str = "Go";
-const GO_KEYS: [(&str, &str); 1] = [("g", "First row")];
+const GO_KEYS: [(Label, &str); 1] = [(Label::char('g'), "First row")];
 
 /// What the bottom says the keys do while `v` selects.
-const SELECTED_KEYS: [(&str, &str); 4] =
-    [("j k", "Grow"), ("J K", "Move"), ("v", "Done"), ("Esc", "Done")];
+const SELECTED_KEYS: [(Label, &str); 4] = [
+    (Label::Two('j', 'k'), "Grow"),
+    (Label::Two('J', 'K'), "Move"),
+    (Label::char('v'), "Done"),
+    (Label::code(KeyCode::Esc), "Done"),
+];
 
 /// What the bottom says the keys do while `V` carries a pane, or its tab.
-const CARRYING_KEYS: [(&str, &str); 4] =
-    [("j k", "Where it lands"), ("V", "Tab or pane"), ("Enter", "Set down"), ("Esc", "Put back")];
+const CARRYING_KEYS: [(Label, &str); 4] = [
+    (Label::Two('j', 'k'), "Where it lands"),
+    (Label::char('V'), "Tab or pane"),
+    (Label::code(KeyCode::Enter), "Set down"),
+    (Label::code(KeyCode::Esc), "Put back"),
+];
 
 /// What the bottom says the keys do while a move asks whether it may end its
 /// session.
-const ASKING_KEYS: [(&str, &str); 2] = [("y", "Move it"), ("Esc", "Keep it")];
+const ASKING_KEYS: [(Label, &str); 2] =
+    [(Label::char('y'), "Move it"), (Label::code(KeyCode::Esc), "Keep it")];
 
 /// How long the notes say a pull request's link was copied, where no key takes
 /// that back sooner: a click on its number can leave the keys with zellij.
@@ -5480,7 +5489,7 @@ enum Bottom<'a> {
     Yank,
     /// What the keys do, under a rule so named, in the legend's place: what
     /// `g` waits for, or the keys of a selection or a move.
-    Keys(&'static str, &'static [(&'static str, &'static str)]),
+    Keys(&'static str, &'static [(Label, &'static str)]),
     /// The list of every key, in the legend's place.
     AllKeys(&'a AllKeys),
     /// The legend, as it was before the key that opened the menu, until

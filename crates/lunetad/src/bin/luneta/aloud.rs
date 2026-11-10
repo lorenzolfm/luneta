@@ -49,11 +49,15 @@ use crate::voice::{self, Reading, Voice};
 /// The key that reads what you selected, and pauses what plays or has it go on.
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('u'), KeyModifiers::ALT);
 
-/// Whether `chord` is `Alt Shift u`, which stops what plays and lets go of what
-/// waits: `u` as kitty's keys say it, and `U` as a terminal without them types
-/// it.
+/// The key that stops what plays and lets go of what waits, as kitty's keys
+/// say it.
+pub const STOPS: (KeyCode, KeyModifiers) =
+    (KeyCode::Char('u'), KeyModifiers::ALT.union(KeyModifiers::SHIFT));
+
+/// Whether `chord` is `STOPS`: `u` as kitty's keys say it, and `U` as a
+/// terminal without them types it.
 pub fn stops((code, modifiers): (KeyCode, KeyModifiers)) -> bool {
-    matches!(code, KeyCode::Char('u' | 'U')) && modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT
+    matches!(code, KeyCode::Char('u' | 'U')) && modifiers == STOPS.1
 }
 
 /// The mark of what is being read, `md-volume_high` of the Nerd Fonts.

@@ -77,6 +77,7 @@ use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::host;
 use crate::icons;
 use crate::issue::Repository;
 use crate::machines::Machine;
@@ -93,53 +94,97 @@ use crate::zellij::{SessionName, Starts};
 pub const ALL_KEYS: char = '?';
 const ALL_KEYS_DOES: &str = "All keys";
 
+/// The keys a line of a list of keys names: one key, with what is held with
+/// it, or two characters, as `g g` typed one after the other, or `j k`, each
+/// one way of what the line says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Label {
+    Key(KeyCode, KeyModifiers),
+    Two(char, char),
+}
+
+impl Label {
+    /// The character `c`, with nothing held.
+    pub const fn char(c: char) -> Label {
+        Label::Key(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// The key `code`, with nothing held.
+    pub const fn code(code: KeyCode) -> Label {
+        Label::Key(code, KeyModifiers::NONE)
+    }
+
+    /// The key a click on its line presses: none for two.
+    fn pressed(self) -> Option<KeyEvent> {
+        match self {
+            Label::Key(code, modifiers) => Some(KeyEvent::new(code, modifiers)),
+            Label::Two(..) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Label {
+    /// What is held, as `Ctrl`, `Alt` and `Shift`, then the key, `Space`,
+    /// `Enter`, `Esc`, `Tab` and `BS` by name; or the two characters.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (code, modifiers) = match *self {
+            Label::Two(first, second) => return write!(f, "{first} {second}"),
+            Label::Key(code, modifiers) => (code, modifiers),
+        };
+        let held = [
+            (KeyModifiers::CONTROL, "Ctrl"),
+            (KeyModifiers::ALT, "Alt"),
+            (KeyModifiers::SHIFT, "Shift"),
+        ];
+        for (modifier, name) in held {
+            if modifiers.contains(modifier) {
+                write!(f, "{name} ")?;
+            }
+        }
+        match code {
+            KeyCode::Char(' ') => f.write_str("Space"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("Enter"),
+            KeyCode::Esc => f.write_str("Esc"),
+            KeyCode::Tab => f.write_str("Tab"),
+            KeyCode::Backspace => f.write_str("BS"),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
 /// The moves and folds at the top of the sidebar, as the list of every key
 /// names them.
-const MOVES: [(&str, &str); 10] = [
-    ("j k", "Next row, row before"),
-    ("g g", "First row"),
-    ("G", "Last row"),
-    ("h l", "Fold, unfold"),
-    ("Space", "Fold or unfold"),
-    ("J K", "Move what v or V holds"),
-    ("Enter", "Go to the row"),
-    ("m", "Menu"),
-    ("?", "All keys"),
-    ("Esc", "Back to zellij"),
+const MOVES: [(Label, &str); 10] = [
+    (Label::Two('j', 'k'), "Next row, row before"),
+    (Label::Two('g', 'g'), "First row"),
+    (Label::char('G'), "Last row"),
+    (Label::Two('h', 'l'), "Fold, unfold"),
+    (Label::char(' '), "Fold or unfold"),
+    (Label::Two('J', 'K'), "Move what v or V holds"),
+    (Label::code(KeyCode::Enter), "Go to the row"),
+    (Label::char('m'), "Menu"),
+    (Label::char(ALL_KEYS), "All keys"),
+    (Label::code(KeyCode::Esc), "Back to zellij"),
 ];
 
 /// The keys of the menu besides its entries, as the list of every key names
 /// them: those it takes in any group, and those of the menu for a pasted link.
-const MENU_MOVES: [(&str, &str); 6] = [
-    ("Tab", "use another agent"),
-    ("BS", "back a group"),
-    ("Esc", "close"),
-    ("w", "worktree of a pasted link"),
-    ("r", "review a pasted PR"),
-    ("t", "tackle a pasted issue"),
+const MENU_MOVES: [(Label, &str); 6] = [
+    (Label::code(KeyCode::Tab), "use another agent"),
+    (Label::code(KeyCode::Backspace), "back a group"),
+    (Label::code(KeyCode::Esc), "close"),
+    (Label::char('w'), "worktree of a pasted link"),
+    (Label::char('r'), "review a pasted PR"),
+    (Label::char('t'), "tackle a pasted issue"),
 ];
 
 /// The Delete group's keys, as the list of every key names them, on no row in
 /// particular: what `d d` deletes is the row's.
-const DELETES: [(&str, &str); 3] = [
-    ("d d", "delete the row"),
-    ("d s", "delete the session"),
-    ("d m", DELETE_MERGED_DOES),
-];
-
-/// The keys luneta takes before zellij, whichever has the keys, as `host`
-/// binds them, and the list of every key names them.
-const ANYWHERE: [(&str, &str); 10] = [
-    ("Ctrl a", "Sidebar or zellij"),
-    ("Alt Tab", "Next pane"),
-    ("Ctrl q", "Collapse sidebar"),
-    ("Alt a", "Menu over zellij"),
-    ("Ctrl j", "Pick a session"),
-    ("Ctrl b", "Pick an agent"),
-    ("Ctrl d", "Pick a directory"),
-    ("Alt r", "Hold to dictate"),
-    ("Alt u", "Read aloud, pause"),
-    ("Alt Shift u", "Stop reading"),
+const DELETES: [(Label, &str); 3] = [
+    (Label::Two(DELETE, 'd'), "delete the row"),
+    (Label::Two(DELETE, 's'), "delete the session"),
+    (Label::Two(DELETE, 'm'), DELETE_MERGED_DOES),
 ];
 
 /// The key that opens the search over the skills, at the top of the menu, and
@@ -719,7 +764,7 @@ impl Entry {
         let keys = format!("{before}{}", self.key());
         match self {
             Entry::Group { key: DELETE, .. } => {
-                into.extend(DELETES.map(|(keys, does)| (keys.to_owned(), does.to_owned())));
+                into.extend(DELETES.map(|(label, does)| (label.to_string(), does.to_owned())));
             },
             Entry::Group { entries, .. } => {
                 for entry in entries {
@@ -2832,16 +2877,17 @@ pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>
 /// Each that is one key is a spot that presses it.
 pub fn shortcuts(
     title: &str,
-    keys: &[(&str, &str)],
+    keys: &[(Label, &str)],
     width: usize,
     room: usize,
 ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let inner = width.saturating_sub(1);
-    let column = keys.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
-    let line = |(keys, does): &(&str, &str)| {
-        (keys_line_of(keys, column, does, inner), pressed_by(keys))
-    };
-    fitted(title, keys.iter().map(line).collect(), width, room)
+    let spelled: Vec<String> = keys.iter().map(|(label, _)| label.to_string()).collect();
+    let column = spelled.iter().map(|spelled| spelled.width()).max().unwrap_or(0);
+    let rows = keys.iter().zip(&spelled).map(|((label, does), spelled)| {
+        (keys_line_of(spelled, column, does, inner), label.pressed())
+    });
+    fitted(title, rows.collect(), width, room)
 }
 
 /// What the bottom of the sidebar lists in the legend's place while `y` waits
@@ -2915,9 +2961,11 @@ pub struct AllKeys {
 impl AllKeys {
     /// Each group, its name and its keys, each the keys and what they do.
     fn groups() -> [(&'static str, Vec<(String, String)>); 4] {
-        let owned = |keys: &[(&str, &str)]| -> Vec<(String, String)> {
-            keys.iter().map(|(keys, does)| ((*keys).to_owned(), (*does).to_owned())).collect()
+        let named = |keys: &[(Label, &str)]| -> Vec<(String, String)> {
+            keys.iter().map(|(label, does)| (label.to_string(), (*does).to_owned())).collect()
         };
+        let anywhere =
+            host::ANYWHERE.map(|((code, modifiers), does)| (Label::Key(code, modifiers), does));
         let mut sidebar: Vec<(String, String)> = Command::ALL
             .into_iter()
             .map(|command| (command.key().to_string(), command.does().to_owned()))
@@ -2927,12 +2975,12 @@ impl AllKeys {
         for entry in Keys::every(None) {
             entry.spelled("", &mut menu);
         }
-        menu.extend(owned(&MENU_MOVES));
+        menu.extend(named(&MENU_MOVES));
         [
-            ("Move", owned(&MOVES)),
+            ("Move", named(&MOVES)),
             ("Sidebar", sidebar),
             ("Menu", menu),
-            ("Anywhere", owned(&ANYWHERE)),
+            ("Anywhere", named(&anywhere)),
         ]
     }
 
@@ -3056,24 +3104,6 @@ fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'st
 /// space it starts with: `ALL_KEYS`, which lists those it left out.
 fn all_keys_line(inner: usize) -> Line<'static> {
     keys_line_of(&ALL_KEYS.to_string(), 1, ALL_KEYS_DOES, inner)
-}
-
-/// The key a list of keys names by `label`, which a click on its line
-/// presses: a character, `Space`, `Enter` or `Esc`. None for more than one.
-fn pressed_by(label: &str) -> Option<KeyEvent> {
-    let code = match label {
-        "Space" => KeyCode::Char(' '),
-        "Enter" => KeyCode::Enter,
-        "Esc" => KeyCode::Esc,
-        _ => {
-            let mut chars = label.chars();
-            let (Some(c), None) = (chars.next(), chars.next()) else {
-                return None;
-            };
-            KeyCode::Char(c)
-        },
-    };
-    Some(KeyEvent::from(code))
 }
 
 /// The line under the keys that start agents, `inner` wide past the space it
@@ -3370,6 +3400,27 @@ mod tests {
     /// The text of each line.
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
+    }
+
+    /// The list of every key names each key the top of the sidebar moves,
+    /// folds or opens with, as `Top::moves` takes it, and none it does not:
+    /// but `y`, which the Sidebar group names with what it yanks.
+    #[test]
+    fn the_list_of_every_key_names_the_moves_of_the_top() {
+        let named: Vec<char> = MOVES
+            .iter()
+            .flat_map(|(label, _)| match *label {
+                Label::Key(KeyCode::Char(c), _) => vec![c],
+                Label::Two(first, second) => vec![first, second],
+                Label::Key(..) => Vec::new(),
+            })
+            .collect();
+        for c in &named {
+            assert!(Top::moves(*c).is_some(), "{c:?}");
+        }
+        for c in (' '..='~').filter(|c| *c != YANK && Top::moves(*c).is_some()) {
+            assert!(named.contains(&c), "{c:?}");
+        }
     }
 
     #[test]
