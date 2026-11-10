@@ -81,8 +81,10 @@ impl TryFrom<String> for Session {
     }
 }
 
-/// A pane, as a ledger keeps it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A pane, as a ledger keeps it. It is written as the name of its file, as
+/// the order keeps the panes you moved by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Key {
     pub session: Session,
     pub pane: u32,
@@ -107,6 +109,20 @@ impl Key {
     /// The pane whose file `name` is, or was while a luneta wrote it.
     fn of_file(name: &str) -> Option<Self> {
         Key::read(name.split_once('.').map_or(name, |(pane, _)| pane))
+    }
+}
+
+impl From<Key> for String {
+    fn from(key: Key) -> Self {
+        key.name()
+    }
+}
+
+impl TryFrom<String> for Key {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Key::read(&name).ok_or_else(|| format!("no pane is named {name:?}"))
     }
 }
 

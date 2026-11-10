@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::daemon_server::{Daemon, DaemonServer};
 use lunetad::api::{
-    self, AskRequest, AskResponse, CarryRequest, CarryResponse, CheckNameRequest, CheckNameResponse,
+    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse,
     CloseRequest, ClosesRequest,
     ClosesResponse, DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, GoRequest,
     FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
@@ -704,12 +704,6 @@ impl Daemon for StandIn {
         &self,
         _: Request<TurnIntoPanesRequest>,
     ) -> Result<Response<TurnIntoPanesResponse>, Status> {
-        Err(Status::unimplemented("a stand-in has zellij do nothing"))
-    }
-
-    type CarryStream = tokio_stream::Empty<Result<CarryResponse, Status>>;
-
-    async fn carry(&self, _: Request<CarryRequest>) -> Result<Response<Self::CarryStream>, Status> {
         Err(Status::unimplemented("a stand-in has zellij do nothing"))
     }
 

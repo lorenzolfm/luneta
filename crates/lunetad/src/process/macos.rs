@@ -1,10 +1,8 @@
-//! Processes on macOS, through sysinfo, which asks the kernel with `sysctl`;
-//! their command lines, which sysinfo reads wrong, through `sysctl` asked
-//! here; and their ends, through kqueue.
+//! Processes on macOS, through sysinfo, which asks the kernel with `sysctl`,
+//! and without code of ours that is unsafe; and their ends, through kqueue.
 
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -41,61 +39,6 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
     with(pid, refresh, |process| process.environ().to_vec())
-}
-
-/// The command line `pid` runs, an argument to a string, an empty one too:
-/// sysinfo 0.36 skips one, and reads an entry of the environment in the
-/// place of the last. None for one that ended, or whose arguments the kernel
-/// shows none of.
-#[must_use]
-pub fn args(pid: u32) -> Option<Vec<OsString>> {
-    laid_out(&procargs(pid)?)
-}
-
-/// What the kernel lays out of `pid`'s start, as `KERN_PROCARGS2` asks: how
-/// many arguments it has, the path it was run by, and then its arguments and
-/// its environment, each ended by a 0.
-#[expect(
-    unsafe_code,
-    reason = "libc's sysctl writes no more into a buffer than the length it is given of it"
-)]
-fn procargs(pid: u32) -> Option<Vec<u8>> {
-    let mut asked = [libc::CTL_KERN, libc::KERN_PROCARGS2, libc::c_int::try_from(pid).ok()?];
-    let named = asked.len() as libc::c_uint;
-    let mut size: libc::size_t = 0;
-    // SAFETY: with no buffer, it says only how long one must be.
-    let sized = unsafe {
-        libc::sysctl(asked.as_mut_ptr(), named, ptr::null_mut(), &raw mut size, ptr::null_mut(), 0)
-    };
-    if sized != 0 {
-        return None;
-    }
-    let mut laid = vec![0_u8; size];
-    let buffer = laid.as_mut_ptr().cast();
-    // SAFETY: `laid` is `size` long, and sysctl writes no more, and says how
-    // much it wrote.
-    let read = unsafe {
-        libc::sysctl(asked.as_mut_ptr(), named, buffer, &raw mut size, ptr::null_mut(), 0)
-    };
-    if read != 0 {
-        return None;
-    }
-    laid.truncate(size);
-    Some(laid)
-}
-
-/// The arguments in `laid`, as `procargs` says it: as many as it counts,
-/// after the path and the 0s that pad it, so that an empty one, but for the
-/// first, reads as one. None where it lays out fewer, or counts none.
-fn laid_out(laid: &[u8]) -> Option<Vec<OsString>> {
-    let (count, rest) = laid.split_first_chunk::<4>()?;
-    let count = usize::try_from(i32::from_ne_bytes(*count)).ok().filter(|count| *count > 0)?;
-    let path = rest.iter().position(|byte| *byte == 0)?;
-    let rest = &rest[path..];
-    let first = rest.iter().position(|byte| *byte != 0)?;
-    let each = rest[first..].split(|byte| *byte == 0).take(count);
-    let args: Vec<OsString> = each.map(|arg| OsString::from_vec(arg.to_vec())).collect();
-    Some(args).filter(|args| args.len() == count)
 }
 
 /// Waits for `pid` to end, as kqueue says. A process that has ended already, or

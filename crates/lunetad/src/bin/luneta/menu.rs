@@ -309,9 +309,9 @@ pub enum Command {
     /// Selects the session of the highlighted row, or the machine of the
     /// highlighted header, for `Top::Shift` to move, and ends the selection.
     Reorder,
-    /// Picks the highlighted pane to move to another session, then its tab,
-    /// and puts it back.
-    Carry,
+    /// Picks the highlighted pane for `Top::Shift` to move among the panes,
+    /// then its tab, and ends.
+    MovePane,
     /// Opens the pull request of the highlighted row in your browser.
     Open,
 }
@@ -319,14 +319,14 @@ pub enum Command {
 impl Command {
     /// Every command, in the order the legend lists them.
     const ALL: [Command; 5] =
-        [Command::Search, Command::Unread, Command::Reorder, Command::Carry, Command::Open];
+        [Command::Search, Command::Unread, Command::Reorder, Command::MovePane, Command::Open];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Unread => 'u',
             Command::Reorder => 'v',
-            Command::Carry => 'V',
+            Command::MovePane => 'V',
             Command::Open => 'o',
         }
     }
@@ -338,7 +338,7 @@ impl Command {
             Command::Search => "Search",
             Command::Unread => "Unread",
             Command::Reorder => "Reorder",
-            Command::Carry => "Move pane",
+            Command::MovePane => "Move pane",
             Command::Open => "Open PR",
         }
     }
@@ -3620,7 +3620,7 @@ mod tests {
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('o'), Some(Top::Command(Command::Open)));
-        assert_eq!(Top::of('V'), Some(Top::Command(Command::Carry)));
+        assert_eq!(Top::of('V'), Some(Top::Command(Command::MovePane)));
         assert_eq!(Top::of('y'), Some(Top::Yank));
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);

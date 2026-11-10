@@ -115,17 +115,6 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     }
 }
 
-/// Opens your shell beside the pane `beside` of `session`, in its tab, and in
-/// `cwd`, as `opening` opens a pane, with no client moved, and says the
-/// terminal it opened: as a command, which closes as it ends, as a pane of
-/// zellij's own shell does. zellij starts its own shell in the directory of
-/// the pane it opens one beside, whatever `--cwd` says, and a command where
-/// it says.
-pub fn shell_beside(session: &SessionName, beside: u32, cwd: &Directory) -> Result<u32, String> {
-    let shell = shell(login_shell(), env::var_os(SHELL_VAR));
-    Ok(cli::pane_opened(session, beside, cwd, Runs::Shell(&shell))?)
-}
-
 /// Why no tab opens in `session`, which no client is in.
 #[must_use]
 pub fn no_client(session: &SessionName) -> String {

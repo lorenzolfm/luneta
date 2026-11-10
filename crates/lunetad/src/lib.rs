@@ -8,7 +8,6 @@
 mod agent;
 pub mod api;
 pub mod asks;
-pub mod carries;
 pub mod checks;
 mod claude;
 pub mod cli;

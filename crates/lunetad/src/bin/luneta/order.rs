@@ -8,8 +8,14 @@
 //! those of its machine, and two machines can each run one of a name. A
 //! session the order does not have goes after those it has, oldest first: with
 //! nothing moved, the rows go as they always went. A session's panes go in the
-//! order of their tabs: zellij numbers a session's panes from 0 each time it
-//! starts, so no id would keep a pane's place in one started again.
+//! order of their tabs, until you move them: among its own, or under another
+//! session of its machine, which is only where its row shows, as zellij moves
+//! no pane between sessions. A pane goes by its session in the ledger and its
+//! id, as the news does: zellij numbers a session's panes from 0 each time it
+//! starts, so no id would keep a pane's place in one started again, and the
+//! place goes once its session has ended, or the one it shows under has. A
+//! pane the order does not have goes under its own session, with the panes
+//! of its tab there, or else before those of the tabs after it.
 //!
 //! A machine goes by its destination, and this one by `-`, which no
 //! destination starts with, as its fold does. One the order does not have
@@ -39,7 +45,7 @@
 //! lock cannot be had, it changes it without. Each luneta watches the file,
 //! and takes up a move another makes as it makes it.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::hash::Hash;
 use std::io::ErrorKind;
@@ -52,7 +58,7 @@ use notify::RecommendedWatcher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::host::Event;
-use crate::ledger;
+use crate::ledger::{self, Key};
 use crate::live::{Lists, Missing};
 use crate::machines::Machine;
 use crate::state;
@@ -87,6 +93,11 @@ struct Kept {
     /// ledger.
     #[serde(deserialize_with = "known", skip_serializing_if = "BTreeMap::is_empty")]
     colours: BTreeMap<ledger::Session, Colour>,
+    /// The panes that show under each session that runs, in their order, by
+    /// the session's name in the ledger: those you moved there, and its own
+    /// as you moved them.
+    #[serde(deserialize_with = "panes_known", skip_serializing_if = "BTreeMap::is_empty")]
+    panes: BTreeMap<ledger::Session, Vec<Key>>,
     /// What else the file has, as a luneta of another build keeps there,
     /// written back as it was read.
     #[serde(flatten)]
@@ -233,6 +244,58 @@ impl Order {
         self.keep(|kept| kept.machines = merged(&kept.machines, &machines));
     }
 
+    /// Where the panes of `sessions`, those of one machine, each by its key
+    /// and its tab with what it is, show: under each of them, in their order,
+    /// those the order keeps under it, as it keeps them, and among them its
+    /// own that the order keeps under none, as `sessions` has them, in the
+    /// order of their tabs: each after the last of its tab there, or else
+    /// before the first of a tab after it, or else last. Each is given back as
+    /// what it is, and so none that `sessions` does not have. A pane shows
+    /// once, under the first that keeps it. One the order keeps that none of
+    /// `sessions` has, as one that ended, or that another machine has, is
+    /// passed over, and so is all it keeps under a session that `sessions`
+    /// does not have.
+    pub fn placed<T: Copy>(&self, sessions: &[(ledger::Session, Vec<Tabbed<T>>)]) -> Vec<Vec<T>> {
+        let all: HashMap<Key, (u32, T)> = (sessions.iter().flat_map(|(_, panes)| panes))
+            .map(|(key, tab, pane)| (*key, (*tab, *pane)))
+            .collect();
+        let mut shown: HashSet<Key> = HashSet::new();
+        let mut placed: Vec<Vec<Tabbed<T>>> = Vec::with_capacity(sessions.len());
+        for (session, _) in sessions {
+            let kept = self.kept.panes.get(session).map_or(&[][..], Vec::as_slice);
+            let under = kept.iter().filter_map(|key| {
+                let (tab, pane) = *all.get(key)?;
+                shown.insert(*key).then_some((*key, tab, pane))
+            });
+            placed.push(under.collect());
+        }
+        for ((session, own), under) in sessions.iter().zip(&mut placed) {
+            for &(key, tab, pane) in own {
+                if shown.insert(key) {
+                    under.insert(slot(under, *session, tab), (key, tab, pane));
+                }
+            }
+        }
+        let bare = |under: Vec<Tabbed<T>>| under.into_iter().map(|(.., pane)| pane).collect();
+        placed.into_iter().map(bare).collect()
+    }
+
+    /// Keeps `panes` under each of its sessions, in their order now, for
+    /// every luneta: a pane shows under one session alone, so one kept under
+    /// another goes from there.
+    pub fn keep_panes(&mut self, panes: Vec<(ledger::Session, Vec<Key>)>) {
+        self.keep(|kept| {
+            for (session, under) in panes {
+                let under = once_each(under);
+                for others in kept.panes.values_mut() {
+                    others.retain(|key| !under.contains(key));
+                }
+                kept.panes.insert(session, under);
+            }
+            kept.panes.retain(|_, under| !under.is_empty());
+        });
+    }
+
     /// Gives each of `running`, the sessions that run, in its order, that
     /// has no colour the first that the fewest of the others hold, kept for
     /// every luneta. None gives its own up here: a session the daemon leaves
@@ -261,17 +324,32 @@ impl Order {
 
     /// The daemon lists the sessions of `live` at `at`, by luneta's own
     /// clock, or none, as it does not answer. The colour of a session that
-    /// has ended since, as `Missing` tells, goes, for every luneta. Says
-    /// whether the order was kept, and so taken up as another luneta left it.
+    /// has ended since, as `Missing` tells, goes, for every luneta, and so do
+    /// the panes kept under it, and its own kept under another. Says whether
+    /// the order was kept, and so taken up as another luneta left it.
     pub fn listed(&mut self, live: Option<&Lists>, at: Instant) -> bool {
+        let moved = self.kept.panes.iter().flat_map(|(session, under)| {
+            std::iter::once(session).chain(under.iter().map(|key| &key.session))
+        });
         let kept: BTreeSet<ledger::Session> =
-            self.kept.colours.keys().chain(&self.heard).copied().collect();
+            self.kept.colours.keys().chain(&self.heard).chain(moved).copied().collect();
         let gone = self.missing.gone(&kept, live, at);
         self.heard.retain(|session| !gone.contains(session));
-        if !self.kept.colours.keys().any(|session| gone.contains(session)) {
+        let ended = |session: &ledger::Session| gone.contains(session);
+        let panes_gone = self.kept.panes.iter().any(|(session, under)| {
+            ended(session) || under.iter().any(|key| ended(&key.session))
+        });
+        if !self.kept.colours.keys().any(ended) && !panes_gone {
             return false;
         }
-        self.keep_read(|kept| kept.colours.retain(|session, _| !gone.contains(session)));
+        self.keep_read(|kept| {
+            kept.colours.retain(|session, _| !ended(session));
+            kept.panes.retain(|session, _| !ended(session));
+            for under in kept.panes.values_mut() {
+                under.retain(|key| !ended(&key.session));
+            }
+            kept.panes.retain(|_, under| !under.is_empty());
+        });
         true
     }
 
@@ -361,6 +439,20 @@ fn once_each<T: Eq + Hash + Clone>(mut items: Vec<T>) -> Vec<T> {
     items
 }
 
+/// A pane, by its key and its tab, with what it is.
+pub type Tabbed<T> = (Key, u32, T);
+
+/// Where a pane of the tab `tab` of `session` goes among `under`: after the
+/// last of that tab there, or else before the first of a tab of `session`
+/// after it, or else last.
+fn slot<T>(under: &[Tabbed<T>], session: ledger::Session, tab: u32) -> usize {
+    let tab_of = |(key, of, _): &Tabbed<T>| (key.session == session).then_some(*of);
+    if let Some(last) = under.iter().rposition(|pane| tab_of(pane) == Some(tab)) {
+        return last + 1;
+    }
+    under.iter().position(|pane| tab_of(pane).is_some_and(|of| of > tab)).unwrap_or(under.len())
+}
+
 /// Where `item` goes in `order`: where it stands there, or after all of it.
 fn rank<T: PartialEq<U>, U: ?Sized>(order: &[T], item: &U) -> usize {
     order.iter().position(|it| it == item).unwrap_or(usize::MAX)
@@ -416,6 +508,22 @@ fn known<'de, D: Deserializer<'de>>(
     let kept = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
     let known = kept.into_iter().filter_map(|(session, colour)| {
         Some((ledger::Session::try_from(session).ok()?, serde_json::from_value(colour).ok()?))
+    });
+    Ok(known.collect())
+}
+
+/// The panes kept under each session, by its name in the ledger. A list kept
+/// for what names no session, or that is not of names of panes, reads as
+/// none, and so does a name in it that names no pane, as a colour of no
+/// session does.
+fn panes_known<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<ledger::Session, Vec<Key>>, D::Error> {
+    let kept = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    let known = kept.into_iter().filter_map(|(session, under)| {
+        let names = Vec::<String>::deserialize(under).ok()?;
+        let under = names.into_iter().filter_map(|name| Key::try_from(name).ok());
+        Some((ledger::Session::try_from(session).ok()?, under.collect()))
     });
     Ok(known.collect())
 }
@@ -825,6 +933,129 @@ mod tests {
         let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
         let colours = serde_json::json!({"1000000000-1": "blue", "2000000000-2": "purple"});
         assert_eq!(kept["colours"], colours);
+    }
+
+    /// The pane `pane` of `session`.
+    fn key(session: ledger::Session, pane: u32) -> Key {
+        Key { session, pane }
+    }
+
+    /// `session` with its panes `panes`, each by its id and its tab, and by
+    /// its key, which is what it is too.
+    fn tabbed(
+        session: ledger::Session,
+        panes: &[(u32, u32)],
+    ) -> (ledger::Session, Vec<Tabbed<Key>>) {
+        let each = panes.iter().map(|(pane, tab)| (key(session, *pane), *tab, key(session, *pane)));
+        (session, each.collect())
+    }
+
+    /// `session` with its panes `panes`, each alone in a tab of its id.
+    fn own(session: ledger::Session, panes: &[u32]) -> (ledger::Session, Vec<Tabbed<Key>>) {
+        let panes: Vec<(u32, u32)> = panes.iter().map(|pane| (*pane, *pane)).collect();
+        tabbed(session, &panes)
+    }
+
+    /// With nothing moved, each session's panes show under it, as they came.
+    /// A pane moved shows where the order keeps it, the first time it keeps
+    /// it, and those it does not keep go under their own, by their tabs. What
+    /// it keeps that none of the sessions has, or under one that does not
+    /// run, is passed over.
+    #[test]
+    fn a_pane_shows_where_the_order_keeps_it_and_else_under_its_own() {
+        let [a, b, c] = [1, 2, 3].map(session);
+        let mut order = Order::default();
+        let sessions = [own(a, &[0, 1]), own(b, &[0])];
+        assert_eq!(order.placed(&sessions), [vec![key(a, 0), key(a, 1)], vec![key(b, 0)]]);
+
+        order.keep_panes(vec![(b, vec![key(a, 1), key(b, 0), key(a, 7)])]);
+        order.kept.panes.insert(a, vec![key(b, 0), key(a, 1)]);
+        order.kept.panes.insert(c, vec![key(a, 0)]);
+        let placed = order.placed(&sessions);
+        assert_eq!(placed, [vec![key(b, 0), key(a, 0), key(a, 1)], Vec::new()]);
+    }
+
+    /// A pane the order keeps under no session, as one that opened since a
+    /// move, or that comes back from a session that ended, goes among its
+    /// own session's: after the last of its tab there, or else before the
+    /// first of a tab after it, or else last.
+    #[test]
+    fn a_pane_the_order_does_not_keep_goes_with_its_tab() {
+        let [a, b] = [1, 2].map(session);
+        let mut order = Order::default();
+        order.kept.panes.insert(a, vec![key(a, 1), key(b, 0), key(a, 0), key(a, 5)]);
+        let panes = [(0, 0), (4, 0), (1, 1), (2, 1), (5, 2), (6, 2), (3, 3), (7, 9)];
+        let sessions = [tabbed(a, &panes), tabbed(b, &[(0, 0)])];
+        let placed = [(a, 1), (a, 2), (b, 0), (a, 0), (a, 4), (a, 5), (a, 6), (a, 3), (a, 7)];
+        let placed = placed.map(|(session, pane)| key(session, pane)).to_vec();
+        assert_eq!(order.placed(&sessions), [placed, Vec::new()]);
+
+        order.kept.panes.insert(a, vec![key(b, 0), key(a, 5)]);
+        let sessions = [tabbed(a, &[(1, 1), (5, 2)]), tabbed(b, &[(0, 0)])];
+        assert_eq!(order.placed(&sessions)[0], [key(b, 0), key(a, 1), key(a, 5)]);
+    }
+
+    /// A pane kept under one session goes from any other that kept it, and a
+    /// session left with none keeps none. The panes are kept by their names
+    /// in the ledger, and shared through the file.
+    #[test]
+    fn a_pane_moved_is_kept_under_one_session_alone() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let mut here = Order::within(file.clone());
+        let [a, b] = [1, 2].map(session);
+        here.keep_panes(vec![(a, vec![key(b, 3), key(a, 0)]), (b, vec![key(b, 4)])]);
+        here.keep_panes(vec![(b, vec![key(b, 4), key(b, 3)])]);
+        here.keep_panes(vec![(a, vec![key(b, 4)]), (b, Vec::new())]);
+        let text = fs::read_to_string(&file).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(kept["panes"], serde_json::json!({"1000000000-1": ["2000000000-2-4"]}));
+        let there = Order::within(file);
+        let sessions = [own(a, &[0]), own(b, &[3, 4])];
+        assert_eq!(there.placed(&sessions), [vec![key(b, 4), key(a, 0)], vec![key(b, 3)]]);
+    }
+
+    /// Once a session has ended, as `Missing` tells, the panes kept under it
+    /// go, and so do its own kept under another, for every luneta.
+    #[test]
+    fn a_pane_s_place_goes_with_its_session_and_the_one_it_shows_under() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let mut order = Order::within(file.clone());
+        let [a, b, c] = [1, 2, 3].map(session);
+        order.keep_panes(vec![(a, vec![key(b, 1), key(c, 1)]), (c, vec![key(a, 1)])]);
+        let start = Instant::now();
+        let a_and_c = listing(&[a, c]);
+        assert!(!order.listed(Some(&a_and_c), start));
+        assert!(order.listed(Some(&a_and_c), start + GONE));
+        let kept = |order: &Order| order.kept.panes.clone();
+        let left = BTreeMap::from([(a, vec![key(c, 1)]), (c, vec![key(a, 1)])]);
+        assert_eq!(kept(&order), left);
+        let only_a = listing(&[a]);
+        assert!(!order.listed(Some(&only_a), start + GONE * 2));
+        assert!(order.listed(Some(&only_a), start + GONE * 3));
+        assert_eq!(kept(&order), BTreeMap::new());
+        let text = fs::read_to_string(&file).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(kept.get("panes"), None);
+    }
+
+    /// What the file keeps of the panes for what names no session, or that
+    /// is not a list of names, reads as none, and so does a name in a list
+    /// that names no pane; the rest reads as it was.
+    #[test]
+    fn a_pane_kept_by_no_name_reads_as_none() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("order");
+        let kept = r#"{"panes": {
+            "1000000000-1": ["2000000000-2-3", "pane"], "a": ["1000000000-1-1"],
+            "2000000000-2": "1000000000-1-1"
+        }}"#;
+        fs::write(&file, kept).unwrap();
+        let order = Order::within(file);
+        assert_eq!(order.unread(), None);
+        let (a, b) = (session(1), session(2));
+        assert_eq!(order.kept.panes, BTreeMap::from([(a, vec![key(b, 3)])]));
     }
 
     /// The colour kept of a session this luneta never heard the daemon list,

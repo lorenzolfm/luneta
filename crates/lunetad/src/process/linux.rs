@@ -84,18 +84,6 @@ pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
 }
 
-/// The command line `pid` runs, an argument to a string, as it started with it
-/// unless it wrote over it since. None for one that ended, or whose arguments
-/// the kernel shows none of, as a zombie's.
-#[must_use]
-pub fn args(pid: u32) -> Option<Vec<OsString>> {
-    let raw = fs::read(proc(pid, "cmdline")).ok()?;
-    let raw = raw.strip_suffix(&[0]).unwrap_or(&raw);
-    let args: Vec<OsString> =
-        raw.split(|byte| *byte == 0).map(|arg| OsString::from_vec(arg.to_vec())).collect();
-    Some(args).filter(|args| args.iter().any(|arg| !arg.is_empty()))
-}
-
 /// The pids of this system, as Claude Code tells one system's from another's:
 /// `linux:<machine id>:pid:[<namespace>]`, the namespace being the one the
 /// daemon runs in. A container that shares the folder has a namespace of its

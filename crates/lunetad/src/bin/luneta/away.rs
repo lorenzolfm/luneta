@@ -23,7 +23,6 @@ use lunetad::api::{
     RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
-use lunetad::carries::{self, Carry, Moved};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
 use lunetad::cli::TabId;
 use lunetad::closes::{Close, Closes};
@@ -513,18 +512,6 @@ impl Away {
             timeout(patience, daemon.prune(request)).await
         })?;
         prunes::pruned_of(answer)
-    }
-
-    /// Has zellij there move what `carry` says to another session there, as
-    /// `lunetad::carries::carried` does there, and says what it moved, or why
-    /// it closed nothing. A question that hangs up does not stop it.
-    pub fn carry(&mut self, carry: &Carry) -> Result<Moved, String> {
-        let request = carry.asked(Some(self.on()));
-        let (patience, mut daemon) = (self.patience, self.daemon.clone());
-        let answer = self.answer_of(carries::CARRYING, async move {
-            timeout(patience, daemon.carry(request)).await
-        })?;
-        Ok(Moved::of(answer))
     }
 
     /// The one answer of a stream the daemon there answers `asking` with, by
