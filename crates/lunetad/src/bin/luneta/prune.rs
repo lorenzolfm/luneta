@@ -33,7 +33,7 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
         Ok(turn) => turn,
         Err(why) => return failed(&why),
     };
-    let dir = match drive::directory(repo).and_then(Directory::parse) {
+    let dir = match drive::directory(repo) {
         Ok(dir) => dir,
         Err(why) => return failed(&why),
     };

@@ -6,10 +6,9 @@
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
-use crate::cli::{done, ANSWER};
+use crate::cli::{session_renamed, ANSWER};
 use crate::zellij::{self, SessionName, SPOKEN};
 
 /// What zellij's web client says to its server to have it read again which
@@ -33,9 +32,7 @@ const CONNECTED: [u8; 2] = [0x22, 0];
 /// client takes the name as well as one with.
 pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
     relisted_in(&zellij::folder(), session)?;
-    let mut command = Command::new("zellij");
-    command.args(["--session", session.as_str(), "action", "rename-session", to.as_str()]);
-    done(command)
+    Ok(session_renamed(session, to)?)
 }
 
 /// Has the server of `session`, where its socket is in `folder`, zellij's,

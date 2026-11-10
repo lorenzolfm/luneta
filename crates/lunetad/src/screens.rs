@@ -3,9 +3,7 @@
 //! its own machine, and a daemon of its machine for a luneta on another,
 //! whose picker shows a session or an agent of this one.
 
-use std::process::Command;
-
-use crate::cli::{answered, laid, quiet, Laid};
+use crate::cli::{laid, screen_dumped, Laid};
 use crate::zellij::SessionName;
 
 /// The screen of the terminal `pane` of `session`, or of the one a client
@@ -14,12 +12,7 @@ use crate::zellij::SessionName;
 /// dumps them; or why zellij did not.
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
     let pane = pane.map_or_else(|| focused(session), Ok)?;
-    let mut command = Command::new("zellij");
-    quiet(&mut command);
-    let terminal = format!("terminal_{pane}");
-    let session = session.as_str();
-    command.args(["--session", session, "action", "dump-screen", "--pane-id", &terminal, "--ansi"]);
-    Ok((pane, answered(&mut command)?))
+    Ok((pane, screen_dumped(session, pane)?))
 }
 
 /// The terminal of `session` a client coming there would be on, as zellij
@@ -27,7 +20,7 @@ pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String),
 /// first, a tiled one before one floating. zellij says which tab a session
 /// is on only while a client is on it.
 fn focused(session: &SessionName) -> Result<u32, String> {
-    let laid = laid(session.as_str())?;
+    let laid = laid(session)?;
     shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
 }
 
@@ -42,6 +35,7 @@ fn shown(laid: &[Laid]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::TabId;
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
@@ -53,7 +47,7 @@ mod tests {
             is_focused: false,
             is_fullscreen: false,
             title: String::new(),
-            tab_id,
+            tab_id: TabId(tab_id),
             tab_position: tab_id,
             tab_name: String::new(),
             pane_command: None,

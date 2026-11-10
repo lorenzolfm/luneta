@@ -63,13 +63,12 @@
 //! `pane_leaving` or `panes_moving`, so that what stops it there has moved nobody,
 //! and `Leaving` and `Moving` say what it asks zellij to move.
 
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::tab;
 
-use crate::cli::{answered, done_once_reached, heard, laid, quiet, Laid, PaneId};
+use crate::cli::{self, laid, Asks, Laid, PaneId, TabId};
 use crate::clients;
 use crate::closes::{same_session, terminals};
 use crate::zellij::SessionName;
@@ -139,7 +138,7 @@ pub struct OtherTab {
 /// The tabs of `session` other than that of its terminal `pane`, in their
 /// order, as zellij lists its panes now, or why it does not say.
 pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
-    others(&laid(session.as_str())?, pane)
+    others(&laid(session)?, pane)
 }
 
 /// The tabs among `laid` other than that of the terminal `pane`, in their
@@ -180,7 +179,7 @@ impl Leaving {
     pub fn turn(&self, session: &SessionName) -> Result<(), String> {
         let tab = new_tab(session, self.name.as_deref())?;
         let stand_ins: Vec<PaneId> =
-            terminals(&laid(session.as_str())?, tab).into_iter().map(PaneId::Terminal).collect();
+            terminals(&laid(session)?, tab).into_iter().map(PaneId::Terminal).collect();
         let moved = self.pane();
         let listed = over_stand_ins(session, &stand_ins, moved, tab)?;
         match landed(&listed, moved, tab) {
@@ -201,7 +200,7 @@ pub fn pane_leaving(
     pane: u32,
 ) -> Result<Option<Leaving>, String> {
     same_session(session, started)?;
-    let laid = laid(session.as_str())?;
+    let laid = laid(session)?;
     let name = leaving(&laid, pane)?;
     let fullscreen = fullscreen_of(&laid, terminal(&laid, pane)?.tab_id)
         .filter(|it| *it != PaneId::Terminal(pane));
@@ -255,7 +254,7 @@ pub fn panes_moving(
     beside: u32,
 ) -> Result<Moving, String> {
     same_session(session, started)?;
-    moving(&laid(session.as_str())?, pane, beside)
+    moving(&laid(session)?, pane, beside)
 }
 
 /// Moves the panes of the tab of the terminal `pane` of `session`, the one that
@@ -285,8 +284,8 @@ fn stopped(moved: u32, of: u32, why: String) -> Result<IntoPanes, String> {
 /// to move none of them yet.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Moving {
-    from: u32,
-    to: u32,
+    from: TabId,
+    to: TabId,
     panes: Vec<PaneId>,
     fullscreen: Option<PaneId>,
 }
@@ -347,7 +346,7 @@ fn moving(laid: &[Laid], pane: u32, beside: u32) -> Result<Moving, String> {
 }
 
 /// The pane shown fullscreen in the tab `tab` among `laid`, if one is.
-fn fullscreen_of(laid: &[Laid], tab: u32) -> Option<PaneId> {
+fn fullscreen_of(laid: &[Laid], tab: TabId) -> Option<PaneId> {
     laid.iter().find(|it| it.tab_id == tab && it.is_fullscreen).map(Laid::pane_id)
 }
 
@@ -356,12 +355,10 @@ fn fullscreen_of(laid: &[Laid], tab: u32) -> Option<PaneId> {
 /// that. Not one that is gone, or that still is, nor while a client is on another
 /// pane of its tab, whom zellij would move to it.
 pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), String> {
-    if !ended_fullscreen(&laid(session.as_str())?, &clients_of(session)?, pane) {
+    if !ended_fullscreen(&laid(session)?, &clients_of(session)?, pane) {
         return Ok(());
     }
-    let mut toggle = action(session);
-    toggle.args(["toggle-fullscreen", "--pane-id", &pane.to_string()]);
-    done_once_reached(toggle)
+    Ok(cli::fullscreen_toggled(session, pane)?)
 }
 
 /// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
@@ -398,7 +395,7 @@ enum Landed {
 
 /// Where `laid`, the panes of a session, lists `pane`, as it was to move into
 /// the tab `tab`.
-fn landed(laid: &[Laid], pane: PaneId, tab: u32) -> Landed {
+fn landed(laid: &[Laid], pane: PaneId, tab: TabId) -> Landed {
     match laid.iter().find(|it| it.pane_id() == pane) {
         Some(it) if it.tab_id == tab => Landed::There,
         Some(_) => Landed::Stayed,
@@ -407,7 +404,7 @@ fn landed(laid: &[Laid], pane: PaneId, tab: u32) -> Landed {
 }
 
 /// Why `pane` stays out of the tab `tab`.
-fn no_room(pane: PaneId, tab: u32) -> String {
+fn no_room(pane: PaneId, tab: TabId) -> String {
     format!("zellij found no room for {pane} in tab {tab}, so it stays")
 }
 
@@ -418,42 +415,21 @@ fn has_client(session: &SessionName) -> Result<bool, String> {
 
 /// The clients in `session`, as zellij lists them now.
 fn clients_of(session: &SessionName) -> Result<clients::Listed, String> {
-    let mut zellij = Command::new("zellij");
-    quiet(&mut zellij);
-    clients::list(zellij, session.as_str())
-}
-
-/// zellij's `action` command on `session`.
-fn action(session: &SessionName) -> Command {
-    let mut command = Command::new("zellij");
-    command.args(["--session", session.as_str(), "action"]);
-    command
+    Ok(cli::clients(session)?)
 }
 
 /// Has zellij open a tab for a pane in `session`, named `name` or as zellij
 /// numbers it, with no client moved, and says its id. One zellij opened as a
 /// pane closing cut its answer short has a second open beside it, and ends on
-/// its own with its stand-in. The name goes joined to its option: apart, zellij's
-/// CLI takes one that starts with `-` for an option too.
-fn new_tab(session: &SessionName, name: Option<&str>) -> Result<u32, String> {
-    let mut command = action(session);
-    quiet(&mut command);
-    command.args(["new-tab", "--no-focus", "--close-on-exit"]);
-    command.args(name.map(|name| format!("--name={name}")));
-    command.arg("--").args(STAND_IN);
-    heard(
-        || answered(&mut command),
-        |said| {
-            let tab = said.trim().parse();
-            tab.map_err(|_| format!("zellij opened no tab it named: {:?}", said.trim()))
-        },
-    )
+/// its own with its stand-in.
+fn new_tab(session: &SessionName, name: Option<&str>) -> Result<TabId, String> {
+    Ok(cli::tab_opened_once_heard(session, name, &STAND_IN)?)
 }
 
 /// Moves `pane` to the tab `to` of `session`, by stacking it on a stand-in
 /// opened there, which then closes and leaves it in its place; and says where
 /// it ended up, or why zellij was not asked to the end.
-fn over_stand_in(session: &SessionName, pane: PaneId, to: u32) -> Result<Landed, String> {
+fn over_stand_in(session: &SessionName, pane: PaneId, to: TabId) -> Result<Landed, String> {
     let stand_in = open_stand_in(session, to, STAND_IN_NAME)?;
     let listed = over_stand_ins(session, &[stand_in], pane, to)?;
     Ok(landed(&listed, pane, to))
@@ -463,31 +439,20 @@ fn over_stand_in(session: &SessionName, pane: PaneId, to: u32) -> Result<Landed,
 /// client moved, and says which. One whose answer a pane closing cut short opens
 /// all the same, so it is found by its name, and asked for again only where it does
 /// not show: that one has a second open beside it, which ends on its own.
-fn open_stand_in(session: &SessionName, to: u32, name: &str) -> Result<PaneId, String> {
-    let mut command = action(session);
-    quiet(&mut command);
-    command.args(["new-pane", "--tab-id", &to.to_string(), "--no-focus", "--close-on-exit"]);
-    command.arg(format!("--name={name}")).arg("--").args(STAND_IN);
-    heard(
-        || answered(&mut command),
-        |said| {
-            let id = said.trim().strip_prefix("terminal_").and_then(|id| id.parse().ok());
-            let unnamed = || format!("zellij opened no pane it named: {:?}", said.trim());
-            let id = id.map(PaneId::Terminal);
-            id.or_else(|| found_stand_in(session, to, name)).ok_or_else(unnamed)
-        },
-    )
+fn open_stand_in(session: &SessionName, to: TabId, name: &str) -> Result<PaneId, String> {
+    let found = || found_stand_in(session, to, name);
+    Ok(PaneId::Terminal(cli::pane_opened_once_heard(session, to, name, &STAND_IN, found)?))
 }
 
 /// The newest stand-in named `name` in the tab `to` of `session`, as zellij lists
 /// it within `FINDING`, or none.
-fn found_stand_in(session: &SessionName, to: u32, name: &str) -> Option<PaneId> {
+fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
     let deadline = Instant::now() + FINDING;
     loop {
-        let listed = laid(session.as_str()).unwrap_or_default();
+        let listed = laid(session).unwrap_or_default();
         let is_it = |it: &&Laid| !it.is_plugin && it.tab_id == to && it.title == name;
         if let Some(it) = listed.iter().filter(is_it).max_by_key(|it| it.id) {
-            return Some(it.pane_id());
+            return Some(it.id);
         }
         if Instant::now() >= deadline {
             return None;
@@ -499,9 +464,7 @@ fn found_stand_in(session: &SessionName, to: u32, name: &str) -> Option<PaneId> 
 /// Has zellij close the stand-in `pane` of `session`. What came of the move
 /// stands whether it does: a stand-in ends on its own, and closes as it does.
 fn close_stand_in(session: &SessionName, pane: PaneId) {
-    let mut close = action(session);
-    close.args(["close-pane", "--pane-id", &pane.to_string()]);
-    let _ = done_once_reached(close);
+    let _ = cli::pane_closed(session, pane, Asks::OnceReached);
 }
 
 /// Has zellij stack `moved` on the first of `stand_ins`, in the tab `tab` of
@@ -511,7 +474,7 @@ fn over_stand_ins(
     session: &SessionName,
     stand_ins: &[PaneId],
     moved: PaneId,
-    tab: u32,
+    tab: TabId,
 ) -> Result<Vec<Laid>, String> {
     let Some(&root) = stand_ins.first() else {
         return Err("zellij opened a tab with no pane".to_owned());
@@ -546,20 +509,20 @@ fn stacked(
     session: &SessionName,
     root: PaneId,
     moved: PaneId,
-    tab: u32,
+    tab: TabId,
 ) -> Result<Stacked, String> {
     let on_it = |clients: clients::Listed| clients.iter().any(|it| it.pane == moved);
     if !clients_of(session).is_ok_and(on_it) {
-        stack(session, &[root, moved, NOWHERE])?;
-        let listed = laid(session.as_str())?;
+        stack(session, [root, moved, NOWHERE])?;
+        let listed = laid(session)?;
         match landed(&listed, moved, tab) {
             Landed::There => return Ok(Stacked { listed, unfocused: true }),
             Landed::Gone => return Ok(Stacked { listed, unfocused: false }),
             Landed::Stayed => {},
         }
     }
-    stack(session, &[root, moved])?;
-    Ok(Stacked { listed: laid(session.as_str())?, unfocused: false })
+    stack(session, [root, moved])?;
+    Ok(Stacked { listed: laid(session)?, unfocused: false })
 }
 
 /// Has zellij stack a second stand-in in the tab `tab` of `session` under the pane
@@ -571,30 +534,26 @@ fn stacked(
 /// second stand-in takes that from it. Where it finds no room for this one, the
 /// pane stays a stack of one, as it ends with no client in the session: it has
 /// moved all the same.
-fn under_stack(session: &SessionName, root: PaneId, tab: u32) -> Option<PaneId> {
+fn under_stack(session: &SessionName, root: PaneId, tab: TabId) -> Option<PaneId> {
     let last = open_stand_in(session, tab, SECOND_STAND_IN_NAME).ok()?;
-    let _ = stack(session, &[root, last, NOWHERE]);
+    let _ = stack(session, [root, last, NOWHERE]);
     Some(last)
 }
 
 /// Has zellij stack `panes` on the first of them, each from whatever tab it is
 /// in. It stacks nothing where it has no room, and says nothing of it.
-fn stack(session: &SessionName, panes: &[PaneId]) -> Result<(), String> {
-    let mut command = action(session);
-    command.args(["stack-panes", "--"]).args(panes.iter().map(ToString::to_string));
-    done_once_reached(command)
+fn stack<const N: usize>(session: &SessionName, panes: [PaneId; N]) -> Result<(), String> {
+    Ok(cli::panes_stacked(session, panes)?)
 }
 
 /// Closes the tab `from`, which the panes of `session` left, where zellij
 /// keeps it: it closes one as it next draws for a client, and with none it
 /// lists it on with nothing in it. One that has panes in it by now stays.
-fn close_emptied(session: &SessionName, from: u32) -> Result<(), String> {
-    if has_client(session)? || laid(session.as_str())?.iter().any(|it| it.tab_id == from) {
+fn close_emptied(session: &SessionName, from: TabId) -> Result<(), String> {
+    if has_client(session)? || laid(session)?.iter().any(|it| it.tab_id == from) {
         return Ok(());
     }
-    let mut close = action(session);
-    close.args(["close-tab-by-id", &from.to_string()]);
-    done_once_reached(close)
+    Ok(cli::tab_closed(session, from, Asks::OnceReached)?)
 }
 
 #[cfg(test)]
@@ -611,7 +570,7 @@ mod tests {
             is_focused: false,
             is_fullscreen: false,
             title: String::new(),
-            tab_id,
+            tab_id: TabId(tab_id),
             tab_position: tab_id,
             tab_name: format!("Tab #{}", tab_id + 1),
             pane_command: None,
@@ -687,7 +646,7 @@ mod tests {
             pane(8, 2),
         ];
         let Moving { from, panes, .. } = moving(&laid, 3, 7).unwrap();
-        assert_eq!(from, 0);
+        assert_eq!(from, TabId(0));
         let spelled = panes.iter().map(ToString::to_string).collect::<Vec<_>>();
         let order = ["terminal_2", "terminal_4", "terminal_1", "terminal_3", "plugin_5"];
         assert_eq!(spelled, order);
@@ -699,7 +658,7 @@ mod tests {
     #[test]
     fn panes_go_to_the_tab_of_the_terminal_picked() {
         let laid = [pane(1, 0), pane(2, 0), plugin(pane(7, 1)), pane(7, 5)];
-        assert_eq!(moving(&laid, 1, 7).unwrap().to, 5);
+        assert_eq!(moving(&laid, 1, 7).unwrap().to, TabId(5));
     }
 
     /// The terminal picked may have closed, and taken its tab, since; nothing
@@ -739,9 +698,10 @@ mod tests {
     #[test]
     fn what_zellij_lists_says_where_a_pane_landed() {
         let moved = PaneId::Terminal(1);
-        assert_eq!(landed(&[pane(1, 3)], moved, 3), Landed::There);
-        assert_eq!(landed(&[pane(1, 0)], moved, 3), Landed::Stayed);
-        assert_eq!(landed(&[pane(2, 3)], moved, 3), Landed::Gone);
-        assert_eq!(landed(&[plugin(pane(1, 3))], moved, 3), Landed::Gone);
+        let to = TabId(3);
+        assert_eq!(landed(&[pane(1, 3)], moved, to), Landed::There);
+        assert_eq!(landed(&[pane(1, 0)], moved, to), Landed::Stayed);
+        assert_eq!(landed(&[pane(2, 3)], moved, to), Landed::Gone);
+        assert_eq!(landed(&[plugin(pane(1, 3))], moved, to), Landed::Gone);
     }
 }

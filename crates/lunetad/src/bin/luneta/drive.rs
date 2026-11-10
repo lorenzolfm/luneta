@@ -53,6 +53,7 @@ use lunetad::clients::Client;
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
+use lunetad::Directory;
 
 use crate::agents::{self, Harness};
 use crate::close::{self, Act, Doing, Plan, Untold};
@@ -408,11 +409,11 @@ fn session(
             return Err(format!("{name} runs already: `luneta go {name}` takes you there"));
         },
         Some(name) => name.clone(),
-        None => zellij::session_for(Path::new(&cwd))
+        None => zellij::session_for(Path::new(cwd.as_str()))
             .ok_or_else(|| format!("no session can be named for {cwd}"))?
             .free(&names),
     };
-    zellij::made(&at, &session, &cwd)?;
+    zellij::made(&at, &session, cwd.as_str())?;
     Ok(session.to_string())
 }
 
@@ -944,14 +945,15 @@ fn started(session: &str, running: &[(String, SystemTime)]) -> Result<SystemTime
 /// else this one, as zellij takes it, in words. Its `.` and `..` are taken
 /// out, as `plain` does, so that a session is named for the directory they
 /// lead to.
-pub fn directory(cwd: Option<&Path>) -> Result<String, String> {
+pub fn directory(cwd: Option<&Path>) -> Result<Directory, String> {
     let here = env::current_dir().map_err(|error| format!("no directory to open in: {error}"))?;
     let dir = plain(&cwd.map_or_else(|| here.clone(), |cwd| here.join(cwd)));
     if !dir.is_dir() {
         return Err(format!("{} is no directory", dir.display()));
     }
     let shown = dir.display().to_string();
-    dir.into_os_string().into_string().map_err(|_| format!("{shown} is not UTF-8, as zellij needs"))
+    let dir = dir.into_os_string().into_string();
+    Directory::parse(dir.map_err(|_| format!("{shown} is not UTF-8, as zellij needs"))?)
 }
 
 /// `path` with its `.` and `..` taken out by where they stand in it, as a
@@ -1057,7 +1059,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let app = scratch.path().join("app");
         fs::create_dir_all(app.join("src")).unwrap();
-        let opens = |given: PathBuf| directory(Some(&given)).unwrap();
+        let opens = |given: PathBuf| String::from(directory(Some(&given)).unwrap());
         let app_said = app.to_str().unwrap();
         assert_eq!(opens(app.join(".")), app_said);
         assert_eq!(opens(app.join("./src/..")), app_said);

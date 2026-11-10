@@ -102,7 +102,7 @@ fn two_sessions(work: &Value, play: &Value) -> (Host, impl Sized) {
 /// `cwd`: as a command, as zellij starts its own shell where the pane beside
 /// works, whatever `--cwd` says.
 fn shell_opened(beside: u32, cwd: &str) -> String {
-    format!("{beside} --session play action new-pane --no-focus --cwd {cwd} --close-on-exit -- ")
+    format!("{beside} --session=play action new-pane --no-focus --cwd={cwd} --close-on-exit -- ")
 }
 
 fn opened_as(opened: &[String], expected: &[String]) {
@@ -123,7 +123,7 @@ fn a_shell_at_its_prompt_moves_beside_a_pane_of_another_session() {
     let carried = carried(&host, asked(&host, 2, false, Lands::Beside(5), false)).unwrap();
 
     assert_eq!(carried, [(2, 9)]);
-    assert_eq!(host.zellij.closed(), ["--session work action close-pane --pane-id terminal_2"]);
+    assert_eq!(host.zellij.closed(), ["--session=work action close-pane --pane-id terminal_2"]);
     opened_as(&host.zellij.opened(), &[shell_opened(5, "/w/b")]);
     assert_eq!(host.zellij.went(), Vec::<String>::new());
 }
@@ -178,7 +178,7 @@ fn the_last_pane_ends_its_session_only_where_it_may() {
 
     let carried = carried(&host, asked(&host, 1, false, Lands::Beside(5), true)).unwrap();
     assert_eq!(carried, [(1, 9)]);
-    assert_eq!(host.zellij.closed(), ["delete-session --force work"]);
+    assert_eq!(host.zellij.closed(), ["delete-session --force -- work"]);
     opened_as(&host.zellij.opened(), &[shell_opened(5, "/w/a")]);
 }
 
@@ -220,8 +220,8 @@ fn a_tab_goes_whole_to_a_tab_of_its_own_named_as_it_was() {
     let carried = carried(&host, asked(&host, 4, true, Lands::NewTab(()), false)).unwrap();
 
     assert_eq!(carried, [(2, 7), (4, 9)]);
-    assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 1"]);
-    let tab = "- --session play action new-tab --no-focus --cwd /w/b --name auth --close-on-exit";
+    assert_eq!(host.zellij.closed(), ["--session=work action close-tab-by-id 1"]);
+    let tab = "- --session=play action new-tab --no-focus --cwd=/w/b --name=auth --close-on-exit";
     opened_as(&host.zellij.opened(), &[tab.to_owned(), shell_opened(7, "/w/d")]);
 }
 
@@ -247,7 +247,7 @@ fn what_does_not_open_again_is_said_beside_what_did() {
     assert!(stranded.starts_with(said), "{stranded}");
     assert!(stranded.contains("no room"), "{stranded}");
     assert!(stranded.ends_with("Start the rest by hand: your shell in /w/d"), "{stranded}");
-    assert_eq!(host.zellij.closed(), ["--session work action close-tab-by-id 1"]);
+    assert_eq!(host.zellij.closed(), ["--session=work action close-tab-by-id 1"]);
 }
 
 /// Has the daemon of `host` read `agent` as Claude Code's, with `status`.
@@ -294,10 +294,10 @@ fn an_agent_at_its_prompt_resumes_once_it_has_ended() {
         (closed, moving.join().unwrap())
     });
 
-    assert_eq!(closed, ["--session work action close-pane --pane-id terminal_3"]);
+    assert_eq!(closed, ["--session=work action close-pane --pane-id terminal_3"]);
     assert_eq!(carried.unwrap(), [(3, 9)]);
     let resumes = format!(
-        "5 --session play action new-pane --no-focus --cwd /home/you/work -- sleep --resume {ID}"
+        "5 --session=play action new-pane --no-focus --cwd=/home/you/work -- sleep --resume {ID}"
     );
     assert_eq!(host.zellij.opened(), [resumes]);
 }

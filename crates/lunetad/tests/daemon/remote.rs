@@ -811,7 +811,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let (at, to) = ("work".to_owned(), "play".to_owned());
         let go = GoRequest { on: on("far"), at, to, pane: Some(2) };
         daemon.go(go).await.unwrap();
-        let went = ["--session work action switch-session play --pane-id terminal_2"];
+        let went = ["--session=work action switch-session --pane-id terminal_2 -- play"];
         assert_eq!(far.zellij.went(), went);
         assert_eq!(here.zellij.went(), [] as [String; 0]);
 
@@ -854,8 +854,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let tab = daemon.open(open(Some(tab))).await.unwrap().into_inner();
         assert_eq!((pane.terminal, tab.terminal), (9, 4));
         let opened = [
-            "2 --session work action new-pane --no-focus --cwd /w -- claude",
-            "- --session work action new-tab --no-focus --cwd /w --name #5 -- claude",
+            "2 --session=work action new-pane --no-focus --cwd=/w -- claude",
+            "- --session=work action new-tab --no-focus --cwd=/w --name=#5 -- claude",
         ];
         assert_eq!(far.zellij.opened(), opened);
         let nothing = daemon.open(open(None)).await.unwrap_err();
@@ -874,6 +874,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert!(idle.message().contains("no client is in idle"), "{idle:?}");
         assert_eq!(far.zellij.opened(), opened);
         assert_eq!(here.zellij.opened(), [] as [String; 0]);
+        daemon.open(open(Some(unnamed("-x")))).await.unwrap();
+        let dashed = "- --session=work action new-tab --no-focus --cwd=/w --name=-x -- claude";
+        assert_eq!(far.zellij.opened().last().map(String::as_str), Some(dashed));
 
         let skills = dir.path().to_str().unwrap().to_owned();
         let skills = ListSkillsRequest { on: on("far"), dir: skills, harness: None };
@@ -988,7 +991,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         invalid(daemon.start(StartRequest { on: on("far"), at, to, cwd }).await.unwrap_err());
         let (at, cwd) = ("work".to_owned(), Some(work.clone()));
         daemon.start(StartRequest { on: on("far"), at, to: named.name, cwd }).await.unwrap();
-        let started = format!("--session work action switch-session work-2 --cwd {work}");
+        let started = format!("--session=work action switch-session --cwd={work} -- work-2");
         assert_eq!(far.zellij.went().last(), Some(&started));
         assert_eq!(here.zellij.went(), [] as [String; 0]);
 
@@ -1041,8 +1044,8 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let none = CloseRequest { closes: None, ..close("two", pane(4)) };
         invalid(daemon.close(none).await.unwrap_err());
         let closed_there = [
-            "--session held action close-pane --pane-id terminal_4",
-            "--session two action close-tab-by-id 3",
+            "--session=held action close-pane --pane-id terminal_4",
+            "--session=two action close-tab-by-id 3",
         ];
         assert_eq!(far.zellij.closed(), closed_there);
 
@@ -1063,10 +1066,10 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let came = daemon.turn_into_panes(turn).await.unwrap().into_inner().came;
         let done = turn_into_panes_response::Came::Done(());
         assert_eq!(came, Some(done));
-        let stacked = "--session turning action stack-panes -- terminal_9 terminal_4";
+        let stacked = "--session=turning action stack-panes -- terminal_9 terminal_4";
         assert_eq!(far.zellij.turned(), [stacked]);
         assert_eq!(here.zellij.turned(), [] as [String; 0]);
-        let stand_in = "--session turning action close-pane --pane-id terminal_9";
+        let stand_in = "--session=turning action close-pane --pane-id terminal_9";
         assert_eq!(far.zellij.closed()[2], stand_in);
 
         // A pane there that a client has to come for says so.
@@ -1093,7 +1096,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let stays = daemon.close(held(since)).await.unwrap_err();
         assert!(stays.message().contains("a session made since"), "{stays:?}");
         daemon.kill(kill(work_started)).await.unwrap();
-        assert_eq!(far.zellij.closed()[3..], ["delete-session --force work"]);
+        assert_eq!(far.zellij.closed()[3..], ["delete-session --force -- work"]);
         assert_eq!(here.zellij.closed(), [] as [String; 0]);
 
         // The sessions that ended there are listed there, each by how long
@@ -1114,7 +1117,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             DeleteExitedRequest { on: on("far"), session: session.to_owned() }
         };
         daemon.delete_exited(delete("old")).await.unwrap();
-        assert_eq!(far.zellij.closed()[4..], ["delete-session old"]);
+        assert_eq!(far.zellij.closed()[4..], ["delete-session -- old"]);
         let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
         assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
         invalid(daemon.delete_exited(delete("")).await.unwrap_err());
@@ -1125,7 +1128,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             RenameSessionRequest { on: on("far"), session, to: to.to_owned() }
         };
         daemon.rename_session(rename("rest")).await.unwrap();
-        assert_eq!(far.zellij.renamed(), ["--session idle action rename-session rest"]);
+        assert_eq!(far.zellij.renamed(), ["--session=idle action rename-session -- rest"]);
         invalid(daemon.rename_session(rename(&"long".repeat(16))).await.unwrap_err());
         assert_eq!(here.zellij.renamed(), [] as [String; 0]);
 
@@ -2801,7 +2804,7 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
         let alone = |since| alone_in("work", since);
         let made = daemon.open(alone(SystemTime::UNIX_EPOCH)).await.unwrap().into_inner();
         assert_eq!((made.terminal, made.notes), (12, Vec::new()));
-        let closed = [1, 2].map(|tab| format!("--session work action close-tab-by-id {tab}"));
+        let closed = [1, 2].map(|tab| format!("--session=work action close-tab-by-id {tab}"));
         assert_eq!(far.zellij.closed(), closed);
         let later = SystemTime::now() + Duration::from_hours(1);
         let kept = daemon.open(alone(later)).await.unwrap().into_inner();
