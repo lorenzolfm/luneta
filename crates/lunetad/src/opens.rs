@@ -94,8 +94,9 @@ pub struct Opened {
 pub fn opening(open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
-        Open::Pane { session, beside, cwd, command: runs } => {
-            cli::pane_opened(session, *beside, cwd, Runs::Command(runs)).map(terminal)
+        Open::Pane { session, beside, cwd, command } => {
+            let runs = if command.is_empty() { Runs::ZellijShell } else { Runs::Command(command) };
+            cli::pane_opened(session, *beside, cwd, runs).map(terminal)
         },
         Open::Tab { session, tab, alone_since } => {
             if cli::clients(session.as_str())?.is_empty() {

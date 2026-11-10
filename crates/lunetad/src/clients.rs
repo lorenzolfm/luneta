@@ -12,7 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::api;
-use crate::cli::{answer_of, heard, laid, Laid, PaneId};
+use crate::cli::{self, answer_of, heard, laid, Laid, PaneId};
 use crate::program;
 
 /// How long zellij has to list a session's clients: a server that runs
@@ -129,7 +129,7 @@ fn commands_to_skip(said: &str, session: &str) -> Vec<(PaneId, String)> {
 /// `LIMIT`: a command of zellij's, set up as its caller needs, which this
 /// asks for them.
 pub fn list(mut zellij: Command, session: &str) -> Result<Listed, String> {
-    zellij.args(["--session", session, "action", "list-clients"]);
+    zellij.arg(cli::session_option(session)).args(["action", "list-clients"]);
     let ask = || {
         let ran = program::run(&mut zellij, LIMIT)
             .map_err(|error| format!("zellij could not be run: {error}"))?;

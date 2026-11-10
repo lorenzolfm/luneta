@@ -266,10 +266,16 @@ fn zellij() -> Command {
     Command::new("zellij")
 }
 
+/// The option that has zellij's CLI ask `session`, joined to its name: apart,
+/// it takes a name that starts with `-` for an option.
+pub(crate) fn session_option(session: &str) -> String {
+    format!("--session={session}")
+}
+
 /// zellij's `action` command on `session`.
 fn action(session: &str) -> Command {
     let mut command = zellij();
-    command.args(["--session", session, "action"]);
+    command.arg(session_option(session)).arg("action");
     command
 }
 
@@ -298,7 +304,9 @@ pub fn clients(session: &str) -> Result<clients::Listed, String> {
 pub enum Runs<'a> {
     /// Your shell, as a command, so that it closes as it ends.
     Shell(&'a OsStr),
-    /// A command, as it is, or zellij's own shell where it is none.
+    /// zellij's own shell, as it opens one where it is given no command.
+    ZellijShell,
+    /// A command, as it is.
     Command(&'a [String]),
 }
 
@@ -307,10 +315,12 @@ impl Runs<'_> {
     fn add_to(self, command: &mut Command) {
         match self {
             Runs::Shell(shell) => {
+                assert!(!shell.is_empty());
                 command.args(["--close-on-exit", "--"]).arg(shell);
             },
-            Runs::Command([]) => {},
+            Runs::ZellijShell => {},
             Runs::Command(runs) => {
+                assert_ne!(runs.len(), 0);
                 command.arg("--").args(runs);
             },
         }
@@ -346,6 +356,7 @@ pub fn pane_opened_once_heard(
     runs: &[&str],
     found: impl Fn() -> Option<PaneId>,
 ) -> Result<PaneId, String> {
+    assert_ne!(runs.len(), 0);
     let mut command = action(session.as_str());
     quiet(&mut command);
     command.args(["new-pane", "--tab-id", &tab.to_string(), "--no-focus", "--close-on-exit"]);
@@ -390,6 +401,7 @@ pub fn tab_opened_once_heard(
     name: Option<&str>,
     runs: &[&str],
 ) -> Result<u32, String> {
+    assert_ne!(runs.len(), 0);
     let mut command = action(session.as_str());
     quiet(&mut command);
     command.args(["new-tab", "--no-focus", "--close-on-exit"]);
@@ -448,6 +460,7 @@ pub fn fullscreen_toggled(session: &SessionName, pane: PaneId) -> Result<(), Str
 /// whatever tab it is in, as `done_once_reached` does. It stacks nothing
 /// where it has no room, and says nothing of it.
 pub fn panes_stacked(session: &SessionName, panes: &[PaneId]) -> Result<(), String> {
+    assert!(panes.len() >= 2);
     let mut command = action(session.as_str());
     command.args(["stack-panes", "--"]).args(panes.iter().map(ToString::to_string));
     done_once_reached(command)
@@ -456,7 +469,7 @@ pub fn panes_stacked(session: &SessionName, panes: &[PaneId]) -> Result<(), Stri
 /// Has zellij rename `session` to `to`, or says why it did not.
 pub fn session_renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
     let mut command = action(session.as_str());
-    command.args(["rename-session", to.as_str()]);
+    command.args(["rename-session", "--", to.as_str()]);
     done(command)
 }
 
@@ -465,7 +478,7 @@ pub fn session_renamed(session: &SessionName, to: &SessionName) -> Result<(), St
 pub fn screen_dumped(session: &SessionName, pane: u32) -> Result<String, String> {
     let mut command = action(session.as_str());
     quiet(&mut command);
-    let terminal = format!("terminal_{pane}");
+    let terminal = PaneId::Terminal(pane).to_string();
     command.args(["dump-screen", "--pane-id", &terminal, "--ansi"]);
     answered(&mut command)
 }
@@ -476,7 +489,7 @@ pub fn screen_dumped(session: &SessionName, pane: u32) -> Result<String, String>
 pub fn text_dumped(session: &SessionName, pane: u32) -> Result<String, String> {
     let mut command = action(session.as_str());
     quiet(&mut command);
-    command.args(["dump-screen", "--full", "--pane-id"]).arg(pane.to_string());
+    command.args(["dump-screen", "--full", "--pane-id"]).arg(PaneId::Terminal(pane).to_string());
     answered(&mut command)
 }
 
@@ -517,7 +530,7 @@ const UNKEPT: i32 = 2;
 pub fn session_killed(session: &SessionName) -> Result<(), String> {
     let mut command = zellij();
     quiet(&mut command);
-    command.args(["delete-session", "--force", session.as_str()]);
+    command.args(["delete-session", "--force", "--", session.as_str()]);
     let ran = program::run(&mut command, ANSWER).map_err(|error| unrun(&error))?;
     let unkept = matches!(&ran, Ran::Ended { status, stdout, .. }
         if status.code() == Some(UNKEPT) && String::from_utf8_lossy(stdout).contains(KILLING));
@@ -530,7 +543,7 @@ pub fn session_killed(session: &SessionName) -> Result<(), String> {
 /// Has zellij delete what it keeps of `session`, or says why it did not.
 pub fn session_deleted(session: &SessionName) -> Result<(), String> {
     let mut command = zellij();
-    command.args(["delete-session", session.as_str()]);
+    command.args(["delete-session", "--", session.as_str()]);
     done(command)
 }
 
@@ -554,12 +567,13 @@ pub fn go(
     let (at, to) = (at.as_str(), to.as_str());
     match pane {
         Some(pane) if at == to => {
-            zellij.args(["--session", at, "action", "focus-pane-id", &pane]);
+            zellij.arg(session_option(at)).args(["action", "focus-pane-id", &pane]);
         },
         None if at == to => return None,
         pane => {
-            zellij.args(["--session", at, "action", "switch-session", to]);
+            zellij.arg(session_option(at)).args(["action", "switch-session"]);
             zellij.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
+            zellij.args(["--", to]);
         },
     }
     Some(zellij)
@@ -592,8 +606,9 @@ pub fn start(
     to: &SessionName,
     cwd: Option<&str>,
 ) -> Command {
-    zellij.args(["--session", at.as_str(), "action", "switch-session", to.as_str()]);
+    zellij.arg(session_option(at.as_str())).args(["action", "switch-session"]);
     zellij.args(cwd.iter().flat_map(|cwd| ["--cwd", cwd]));
+    zellij.args(["--", to.as_str()]);
     zellij
 }
 
@@ -623,6 +638,23 @@ mod tests {
             tab_name: String::new(),
             pane_command: None,
         }
+    }
+
+    /// A session whose name starts with `-` goes to zellij as a name: joined to
+    /// its option, or after `--`. Apart, zellij's CLI takes it for an option.
+    #[test]
+    fn a_session_name_that_starts_with_a_dash_is_no_option() {
+        let args = |command: &Command| {
+            let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned());
+            args.collect::<Vec<_>>()
+        };
+        let at = SessionName::running("-at").unwrap();
+        let to = SessionName::running("-to").unwrap();
+        let switch = ["--session=-at", "action", "switch-session"];
+        let went = go(zellij(), &at, &to, Some(2)).unwrap();
+        assert_eq!(args(&went), [&switch[..], &["--pane-id", "terminal_2", "--", "-to"]].concat());
+        let started = start(zellij(), &at, &to, Some("/w"));
+        assert_eq!(args(&started), [&switch[..], &["--cwd", "/w", "--", "-to"]].concat());
     }
 
     /// luneta goes to the terminal of a tab it opened, of that tab.

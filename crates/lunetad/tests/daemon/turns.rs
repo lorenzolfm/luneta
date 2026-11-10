@@ -82,7 +82,7 @@ const TAB_DONE: Option<TabCame> = Some(TabCame::Done(()));
 const PANES_DONE: Option<PanesCame> = Some(PanesCame::Done(()));
 
 fn action(said: &str) -> String {
-    format!("--session work action {said}")
+    format!("--session=work action {said}")
 }
 
 /// A stand-in as zellij is asked to open one in the tab `tab`.
@@ -203,7 +203,7 @@ fn a_pane_zellij_finds_no_room_for_stays_and_only_its_stand_in_closes() {
     refused(&into_tab(&host, 1).unwrap_err(), "no room for terminal_1 in tab 3");
 
     // A tab zellij numbered gives no name to the one made for its pane.
-    let opened = "- --session work action new-tab --no-focus --close-on-exit -- sleep 10";
+    let opened = "- --session=work action new-tab --no-focus --close-on-exit -- sleep 10";
     assert_eq!(host.zellij.opened(), [opened]);
     assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_4")]);
 }

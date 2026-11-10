@@ -78,7 +78,7 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     assert_eq!(String::from_utf8(told.stdout).unwrap(), plan);
     let closed =
-        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
+        ["delete-session --force -- play", "--session=work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 }
 
@@ -160,7 +160,7 @@ fn a_close_closes_what_it_is_given_in_a_session_together() {
 
     let told = luneta(&host, ("work", 4), &[&given[..], &["--yes", &agreed]].concat());
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    let closed = ["delete-session --force play", "--session work action close-tab-by-id 0"];
+    let closed = ["delete-session --force -- play", "--session=work action close-tab-by-id 0"];
     assert_eq!(host.lists.closed(), closed);
 }
 
@@ -246,7 +246,7 @@ fn fullscreen(mut pane: serde_json::Value) -> serde_json::Value {
 /// What has zellij stack `moved` on `root` with no client moved: it focuses the
 /// last it is told to stack, and that is none of the session's.
 fn unfocused(root: &str, moved: &str) -> String {
-    format!("--session work action stack-panes -- {root} {moved} terminal_4294967295")
+    format!("--session=work action stack-panes -- {root} {moved} terminal_4294967295")
 }
 
 /// What a command said on its stdout, having gone well.
@@ -298,7 +298,7 @@ fn a_pane_with_little_room_moves_all_the_same_and_the_client_goes_back() {
 
     assert_eq!(said(&turned), "work:1\n");
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
-    let plain = "--session work action stack-panes -- terminal_4 terminal_1";
+    let plain = "--session=work action stack-panes -- terminal_4 terminal_1";
     assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1"), plain.to_owned()]);
     assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
 }
@@ -317,7 +317,7 @@ fn a_client_zellij_took_to_a_pane_another_was_on_goes_back() {
     let turned = luneta(&host, ("work", 1), &["turn", "pane", "work:1"]);
 
     assert_eq!(said(&turned), "work:1\n");
-    let plain = "--session work action stack-panes -- terminal_4 terminal_1";
+    let plain = "--session=work action stack-panes -- terminal_4 terminal_1";
     assert_eq!(host.lists.turned(), [plain]);
     assert_eq!(host.lists.went(), ["--session work action focus-pane-id terminal_2"]);
     let warned = String::from_utf8_lossy(&turned.stderr);
@@ -342,7 +342,7 @@ fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
 
     assert_eq!(said(&turned), "work:1\n");
     assert_eq!(String::from_utf8_lossy(&turned.stderr), "");
-    let plain = "--session work action stack-panes -- terminal_9 terminal_2";
+    let plain = "--session=work action stack-panes -- terminal_9 terminal_2";
     let (one, five) = (unfocused("terminal_9", "terminal_1"), unfocused("terminal_9", "terminal_5"));
     assert_eq!(host.lists.turned(), [one, plain.to_owned(), five]);
     assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
@@ -364,7 +364,7 @@ fn a_turn_shows_fullscreen_again_what_it_ended() {
     let turned = luneta(&host, ("work", 2), &["turn", "pane", "work:1"]);
 
     assert_eq!(said(&turned), "work:1\n");
-    let toggled = "--session work action toggle-fullscreen --pane-id terminal_2";
+    let toggled = "--session=work action toggle-fullscreen --pane-id terminal_2";
     assert_eq!(host.lists.turned(), [unfocused("terminal_4", "terminal_1"), toggled.to_owned()]);
 
     let host = Host::new();
@@ -377,7 +377,7 @@ fn a_turn_shows_fullscreen_again_what_it_ended() {
     let turned = luneta(&host, ("work", 3), &["turn", "tab", "work:1", "--into", "work:3"]);
 
     assert_eq!(said(&turned), "work:1\n");
-    let toggled = "--session work action toggle-fullscreen --pane-id terminal_3";
+    let toggled = "--session=work action toggle-fullscreen --pane-id terminal_3";
     assert_eq!(host.lists.turned(), [unfocused("terminal_9", "terminal_1"), toggled.to_owned()]);
 }
 
@@ -413,7 +413,7 @@ fn a_turn_leaves_fullscreen_as_it_is_where_it_ended_none_or_would_move_a_client(
     host.lists.stacks_into("work", 1, &json!([pane(1, to), pane(3, to), pane(5, to)]));
     host.lists.clients("work", &[(1, "terminal_1")]);
     said(&luneta(&host, ("work", 1), &["turn", "tab", "work:1", "--into", "work:3"]));
-    let plain = "--session work action stack-panes -- terminal_9 terminal_1";
+    let plain = "--session=work action stack-panes -- terminal_9 terminal_1";
     assert_eq!(host.lists.turned(), [plain]);
 }
 
@@ -580,7 +580,7 @@ fn a_tab_turns_into_panes_where_no_client_is_and_says_the_pane_it_was_given() {
 
     assert_eq!(said(&turned), "work:1\n");
     let closed = host.lists.closed();
-    assert!(closed.contains(&"--session work action close-tab-by-id 0".to_owned()), "{closed:?}");
+    assert!(closed.contains(&"--session=work action close-tab-by-id 0".to_owned()), "{closed:?}");
 }
 
 /// zellij runs out of room partway: the agent hears how many moved, as those
@@ -689,7 +689,7 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let told = asked(&host, &second, &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     let closed =
-        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
+        ["delete-session --force -- play", "--session=work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 
     let untold = [("LUNETA_TURN", "00000000000000aa")];
@@ -744,7 +744,7 @@ fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
     let told = asked(&host, &second, &["close", "work:2", "play", "--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
     let closed =
-        ["delete-session --force play", "--session work action close-pane --pane-id terminal_2"];
+        ["delete-session --force -- play", "--session=work action close-pane --pane-id terminal_2"];
     assert_eq!(host.lists.closed(), closed);
 
     for args in [
@@ -923,7 +923,7 @@ fn a_close_in_the_ask_box_takes_a_yes_only_in_the_turn_after_its_plan() {
 
     let told = close(&second, &["--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    assert_eq!(host.lists.closed(), ["--session work action close-pane --pane-id terminal_3"]);
+    assert_eq!(host.lists.closed(), ["--session=work action close-pane --pane-id terminal_3"]);
 
     let malformed = close(&[("LUNETA_TURN", "forged")], &[]);
     let why = String::from_utf8_lossy(&malformed.stderr);
@@ -965,7 +965,8 @@ fn a_close_takes_the_session_it_runs_in_last_by_the_name_it_has_now() {
     assert_eq!(said, plan);
     let told = close(&["--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    assert_eq!(host.lists.closed(), ["delete-session --force play", "delete-session --force fix"]);
+    let killed = ["delete-session --force -- play", "delete-session --force -- fix"];
+    assert_eq!(host.lists.closed(), killed);
 }
 
 /// What holds the pane a close runs in goes last, as the agent that ran it
@@ -1017,7 +1018,7 @@ fn a_close_deletes_a_session_zellij_kills_though_it_kept_nothing_of_it() {
     assert!(why.contains(r#"Session: "fix" not found."#), "{why}");
     assert!(!why.contains(r#""play""#), "{why}");
     assert!(why.contains("did not close pane work:2"), "{why}");
-    assert_eq!(host.lists.closed(), ["delete-session --force play"]);
+    assert_eq!(host.lists.closed(), ["delete-session --force -- play"]);
 }
 
 /// zellij takes away what it keeps of a session before the session's server
@@ -1035,7 +1036,7 @@ fn a_close_lets_go_again_of_what_the_server_of_a_session_it_deletes_writes_anew(
     let (_, agreed) = planned(&close(&[]));
     let told = close(&["--yes", &agreed]);
     assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
-    assert_eq!(host.lists.closed(), ["delete-session --force play", "delete-session play"]);
+    assert_eq!(host.lists.closed(), ["delete-session --force -- play", "delete-session -- play"]);
 }
 
 /// A session made by the name of one a close deletes, as the close goes, is
@@ -1057,5 +1058,5 @@ fn a_close_leaves_a_session_made_by_the_name_of_one_it_deletes_as_it_goes() {
     let why = String::from_utf8_lossy(&told.stderr);
     assert_eq!(told.status.code(), Some(1), "{why}");
     assert!(why.contains(r#""play" is a session made since, which stays"#), "{why}");
-    assert_eq!(host.lists.closed(), ["delete-session --force away"]);
+    assert_eq!(host.lists.closed(), ["delete-session --force -- away"]);
 }

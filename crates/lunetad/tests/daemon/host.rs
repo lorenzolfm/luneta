@@ -200,9 +200,14 @@ impl FakeZellij {
         let text = format!(
             r#"panes="${{0%/*}}/panes"
 asked="$*"
-session="$2"
-[ "$1" = --session ] && shift 2
-[ "$1" = delete-session ] && session="${{3:-$2}}"
+case "$1" in
+    --session=*) session="${{1#--session=}}"; shift ;;
+    --session) session="$2"; shift 2 ;;
+    *) session="$2" ;;
+esac
+if [ "$1" = delete-session ]; then
+    for session do :; done
+fi
 socket="$ZELLIJ_SOCKET_DIR/contract_version_1/$session"
 cache="$HOME/{CACHE}"
 kept="$cache/contract_version_1/session_info/$session"
