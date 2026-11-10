@@ -1533,14 +1533,15 @@ impl App {
     }
 
     /// When the picker asks zellij for what its preview shows, while it is
-    /// open and is to ask, or an agent's notification is to go up, whichever
-    /// is first.
+    /// open and is to ask, or an agent's notification is to go up, or the
+    /// sidebar's bottom is to show what a key waits for, whichever is first.
     fn due(&self) -> Option<Instant> {
         let picker = match &self.focus.over {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
         };
-        picker.into_iter().chain(self.alerts.due()).min()
+        let shows = self.sidebar.due(SystemTime::now()).map(|left| Instant::now() + left);
+        picker.into_iter().chain(self.alerts.due()).chain(shows).min()
     }
 
     /// Takes down the notification of an agent in a pane you look at, in

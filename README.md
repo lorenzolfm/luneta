@@ -196,7 +196,9 @@ An agent started on a skill goes by the skill and the branch, as
 What a key starts on is the first message of the session, as
 `claude "/tigerstyle"` or `pi "/skill:tigerstyle"` would take it: a skill, a skill and its arguments, as
 `/code-review since main`, or words. `Backspace` goes back a group, and out of
-the menu from the first; `Esc` closes it.
+the menu from the first; `Esc` closes it. In the sidebar, a group's key shows
+its group only once you pause after it, and `?` lists every key: the
+[sidebar's section](#luneta-in-your-terminal) says how.
 
 The Skills group's `f` and `e` start an agent beside a shell on the command it
 ran last, to fix what went wrong, or to explain it: on its command line and its
@@ -519,6 +521,9 @@ zellij sees them, whichever of the two has the keys:
 - `Alt u` [reads aloud](#read-aloud) what you selected, and pauses what plays
   and has it go on. `Alt Shift u` stops it.
 
+`?` in the sidebar lists them too, under Anywhere, with the sidebar's and the
+menu's own keys.
+
 Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
 line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
 and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
@@ -680,6 +685,31 @@ fast after another on the same cell, or one next to it, is none, the second
 of a double click and the third of a triple: a click that opened a group
 leaves another entry under the pointer, as `d` opens Delete onto
 `d  close the pane`, and `s  delete the session` under it.
+
+A key of the legend that waits for the next, as `d` waits for what to delete,
+leaves the legend as it is for a fifth of a second, and only then shows what
+can come next, as which-key does in neovim: `d d`, `g g` or `y p` typed fast
+draws nothing in between, and a slow `d` shows the Delete group. A click on
+`d  Delete ▸` shows it at once. A lone `g` waits the same way, then shows
+`g  First row`, as `y` shows what it yanks. While `v` selects, the bottom
+lists the keys of the selection instead, and while `V` carries a pane, those
+of the move:
+
+```text
+─ Move pane ───────────────────
+ j k    Where it lands
+ V      Tab or pane
+ Enter  Set down
+ Esc    Put back
+```
+
+`?` lists every key luneta has in the legend's place, in groups: Move, the
+moves and folds; Sidebar, the legend's commands; Menu, each group's keys; and
+Anywhere, the keys luneta takes before zellij. `j` and `k` scroll it, `Esc`
+closes it, and any other key closes it and does what it does. A legend, or a
+menu at the bottom of the sidebar, short of room for all its keys, keeps its
+last line for `?  All keys`, so you see that it left keys out; `?` in that
+menu closes it for the list.
 
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
 tab and in the directory it works in, `n t` a tab of its session there, and

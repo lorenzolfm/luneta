@@ -89,8 +89,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::Machine;
 use crate::menu::{
-    self, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran, Target,
-    Top, Wants,
+    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Menu, Opening, Opens, PaneRow, Ran,
+    Target, Top, Wants,
 };
 use crate::news::News;
 use crate::order::{Colour, Order};
@@ -106,6 +106,27 @@ use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Within};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
+
+/// How long a key that waits for the next leaves the bottom as it was before
+/// it shows what can come next, as which-key waits in neovim: two keys typed
+/// faster draw nothing between them.
+pub const PAUSE: Duration = Duration::from_millis(200);
+
+/// What the bottom says `g` waits for, under a rule that names it `GO`.
+const GO: &str = "Go";
+const GO_KEYS: [(&str, &str); 1] = [("g", "First row")];
+
+/// What the bottom says the keys do while `v` selects.
+const SELECTED_KEYS: [(&str, &str); 4] =
+    [("j k", "Grow"), ("J K", "Move"), ("v", "Done"), ("Esc", "Done")];
+
+/// What the bottom says the keys do while `V` carries a pane, or its tab.
+const CARRYING_KEYS: [(&str, &str); 4] =
+    [("j k", "Where it lands"), ("V", "Tab or pane"), ("Enter", "Set down"), ("Esc", "Put back")];
+
+/// What the bottom says the keys do while a move asks whether it may end its
+/// session.
+const ASKING_KEYS: [(&str, &str); 2] = [("y", "Move it"), ("Esc", "Keep it")];
 
 /// How long the notes say a pull request's link was copied, where no key takes
 /// that back sooner: a click on its number can leave the keys with zellij.
@@ -1231,6 +1252,11 @@ pub struct Sidebar {
     /// it, `Esc` doing nothing else, and so do a click, the wheel and the
     /// focus going.
     pending: Pending,
+    /// What the bottom holds back of what a key waits for, showing the
+    /// legend in its place.
+    holds: Holds,
+    /// The list of every key, in the legend's place, while it is open.
+    all_keys: Option<AllKeys>,
     /// What `v` and the left button do to the order of the machines and
     /// their sessions, and what `V` and the left button move to another.
     moving: Moving,
@@ -1314,6 +1340,22 @@ enum Pending {
     First,
     /// `Top::Yank` was pressed, which waits for what to yank.
     Yank,
+}
+
+/// What the bottom holds back of what a key waits for, and shows the legend
+/// in its place, as it showed before the key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Holds {
+    #[default]
+    Nothing,
+    /// `g`, `y`, or a group's key at the top, which opened the menu, was
+    /// pressed then: until `PAUSE` from then, after which the bottom shows
+    /// what can come next.
+    Since(SystemTime),
+    /// The next key came before that, and the menu works on what it asked,
+    /// still showing the group it was pressed in: until the menu shows
+    /// something else, or closes, so the group never shows.
+    Quiet,
 }
 
 /// What `v` and the left button do to the order of the machines and their
@@ -1873,6 +1915,7 @@ impl Sidebar {
             return;
         }
         self.pending = Pending::Nothing;
+        self.all_keys = None;
         if holds {
             if self.here_row.is_some() {
                 self.cursor.clone_from(&self.here_row);
@@ -2943,6 +2986,8 @@ impl Sidebar {
         self.copied = None;
         self.filed = None;
         self.arriving = None;
+        let held = self.paused(now);
+        self.holds = Holds::Nothing;
         let pending = std::mem::take(&mut self.pending);
         // `Esc` and `Ctrl c` close a menu, and what a key of it started goes on
         // wherever the keys went, as it does as they leave it for zellij.
@@ -2950,8 +2995,20 @@ impl Sidebar {
             self.close_menu();
             return Asked::Nothing;
         }
+        if key.code == KeyCode::Char(menu::ALL_KEYS)
+            && self.menu.as_ref().is_some_and(Menu::lists)
+            && !self.floats()
+        {
+            self.close_menu();
+            self.all_keys = Some(AllKeys::default());
+            return Asked::Nothing;
+        }
         if let Some(menu) = self.menu.take() {
-            return self.menu_did(menu.key(key));
+            let asked = self.menu_did(menu.key(key));
+            if held && self.menu.as_ref().is_some_and(Menu::quiet) {
+                self.holds = Holds::Quiet;
+            }
+            return asked;
         }
         if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
             return Asked::Nothing;
@@ -2959,6 +3016,11 @@ impl Sidebar {
         if let Some(term) = self.search() {
             let term = term.to_owned();
             return self.search_key(key, term);
+        }
+        if self.all_keys.is_some()
+            && let Some(asked) = self.all_keys_key(key)
+        {
+            return asked;
         }
         if let Moving::Asking(..) = self.moving {
             return self.asking_key(key);
@@ -2989,8 +3051,9 @@ impl Sidebar {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Last) => self.end(true),
                 Some(Top::First) if pending == Pending::First => self.end(false),
-                Some(Top::First) => self.pending = Pending::First,
-                Some(Top::Yank) => self.pending = Pending::Yank,
+                Some(Top::First) => self.wait(Pending::First, now),
+                Some(Top::Yank) => self.wait(Pending::Yank, now),
+                Some(Top::AllKeys) => self.all_keys = Some(AllKeys::default()),
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
@@ -3001,11 +3064,67 @@ impl Sidebar {
                 Some(Top::Command(Command::Open)) => return self.browse(),
                 // Without a selection, there is nothing to move.
                 Some(Top::Shift(_)) => {},
-                None => return self.open_menu(Some(c)),
+                None => {
+                    let asked = self.open_menu(Some(c));
+                    if self.menu.is_some() {
+                        self.holds = Holds::Since(now);
+                    }
+                    return asked;
+                },
             },
             _ => {},
         }
         Asked::Nothing
+    }
+
+    /// Has the next key finish what `pending` waits for, pressed at `now`.
+    fn wait(&mut self, pending: Pending, now: SystemTime) {
+        self.pending = pending;
+        self.holds = Holds::Since(now);
+    }
+
+    /// Whether the bottom, at `now`, still shows what it did before the key
+    /// that waits for the next, as `Holds` says.
+    fn paused(&self, now: SystemTime) -> bool {
+        match self.holds {
+            Holds::Nothing => false,
+            Holds::Since(since) => now < since + PAUSE,
+            Holds::Quiet => self.menu.as_ref().is_some_and(Menu::quiet),
+        }
+    }
+
+    /// How long from `now` until the bottom shows what a key waits for, for
+    /// luneta to draw it then; none while it waits for nothing, or shows it.
+    pub fn due(&self, now: SystemTime) -> Option<Duration> {
+        let Holds::Since(since) = self.holds else {
+            return None;
+        };
+        let waits = self.pending != Pending::Nothing || self.menu.is_some();
+        let at = since + PAUSE;
+        (waits && now < at).then(|| at.duration_since(now).unwrap_or_default())
+    }
+
+    /// What a key does while the list of every key is open: `j` and `k` and
+    /// the arrows scroll it, and `Esc` and `?` close it, doing nothing else.
+    /// Any other key closes it too, and does what it does without it, for
+    /// which it is None.
+    fn all_keys_key(&mut self, key: &KeyEvent) -> Option<Asked> {
+        let by = match key.code {
+            KeyCode::Down | KeyCode::Char('j') => 1,
+            KeyCode::Up | KeyCode::Char('k') => -1,
+            KeyCode::Esc | KeyCode::Char(menu::ALL_KEYS) => {
+                self.all_keys = None;
+                return Some(Asked::Nothing);
+            },
+            _ => {
+                self.all_keys = None;
+                return None;
+            },
+        };
+        if let Some(all) = &mut self.all_keys {
+            all.scroll(by);
+        }
+        Some(Asked::Nothing)
     }
 
     /// The link of the pull request the highlighted row shows the number of;
@@ -3775,15 +3894,19 @@ impl Sidebar {
     /// over zellij, but its keys are the box's, and the menu floating there
     /// would take an `Enter` meant for the search.
     pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: SystemTime) -> Asked {
-        let there = match self.bottom() {
-            Bottom::Legend | Bottom::Yank => Some(Keyed::Legend),
+        let there = match self.bottom(now) {
+            Bottom::Legend | Bottom::Yank | Bottom::Keys(..) | Bottom::AllKeys(_) => {
+                Some(Keyed::Legend)
+            },
             Bottom::Search(_) => Some(Keyed::Search),
-            Bottom::Menu(_) | Bottom::Nothing => None,
+            Bottom::Menu(_) | Bottom::Paused | Bottom::Nothing => None,
         };
         if self.keys != Keys::Sidebar || there != Some(keyed) {
             return Asked::Nothing;
         }
-        self.key(key, now)
+        let asked = self.key(key, now);
+        self.holds = Holds::Nothing;
+        asked
     }
 
     /// What `Enter` does with the cursor of the menu's search box on the
@@ -4837,7 +4960,7 @@ impl Sidebar {
         let frame = frame(now);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width, frame));
-        let (notes, spotted, buttons) = self.notes(width, height, frame);
+        let (notes, spotted, buttons) = self.notes(width, height, now);
         let room = height.saturating_sub(HEADER + notes.lines.len());
         self.room = room;
         let highlight = self.highlight();
@@ -5115,8 +5238,9 @@ impl Sidebar {
         &self,
         width: usize,
         height: usize,
-        frame: usize,
+        now: SystemTime,
     ) -> (Notes, Drawn, Spots<aloud::Button>) {
+        let frame = frame(now);
         let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -5213,7 +5337,7 @@ impl Sidebar {
         }
         let room = height.saturating_sub(HEADER + 1 + notes.lines.len());
         let above = notes.lines.len();
-        let (lines, spotted) = match self.bottom() {
+        let (lines, spotted) = match self.bottom(now) {
             Bottom::Menu(menu) => {
                 let (lines, spots) = menu.lines(width, room, frame);
                 let spots = spots.down(above);
@@ -5231,6 +5355,15 @@ impl Sidebar {
                 let (lines, spots) = menu::yanks(width, room);
                 (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
             },
+            Bottom::Keys(title, keys) => {
+                let (lines, spots) = menu::shortcuts(title, keys, width, room);
+                (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
+            },
+            Bottom::AllKeys(all) => {
+                let (lines, spots) = all.lines(width, room);
+                (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
+            },
+            Bottom::Paused => (menu::legend(width, room).0, Drawn::Nothing),
             Bottom::Nothing => (Vec::new(), Drawn::Nothing),
         };
         notes.lines.extend(lines);
@@ -5288,18 +5421,40 @@ impl Sidebar {
         }
     }
 
-    /// What the sidebar shows under its rows: the menu while it is open
-    /// there, or else the search while that is, or else, while the sidebar
-    /// has the keys, what `y` waits for while it does, or else the legend.
-    fn bottom(&self) -> Bottom<'_> {
+    /// What the sidebar shows under its rows at `now`: the menu while it is
+    /// open there, or else the search while that is, or else, while the
+    /// sidebar has the keys, the list of every key while it is open, or what
+    /// `g` or `y` waits for while it does, or the keys of a selection or a
+    /// move while it lasts, or else the legend. A menu a group's key opened,
+    /// and what `g` and `y` wait for, show once `PAUSE` passed since the
+    /// key, and the legend until then.
+    fn bottom(&self, now: SystemTime) -> Bottom<'_> {
+        let paused = self.paused(now);
         if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
-            Bottom::Menu(menu)
+            if paused { Bottom::Paused } else { Bottom::Menu(menu) }
         } else if let Some(search) = &self.search {
             Bottom::Search(search)
-        } else if self.keys == Keys::Sidebar {
-            if self.pending == Pending::Yank { Bottom::Yank } else { Bottom::Legend }
-        } else {
+        } else if self.keys != Keys::Sidebar {
             Bottom::Nothing
+        } else if let Some(all) = &self.all_keys {
+            Bottom::AllKeys(all)
+        } else if paused {
+            Bottom::Legend
+        } else {
+            match (self.pending, &self.moving) {
+                (Pending::Yank, _) => Bottom::Yank,
+                (Pending::First, _) => Bottom::Keys(GO, &GO_KEYS),
+                (Pending::Nothing, Moving::Selected(_)) => {
+                    Bottom::Keys(Command::Reorder.does(), &SELECTED_KEYS)
+                },
+                (Pending::Nothing, Moving::Carrying(..)) => {
+                    Bottom::Keys(Command::Carry.does(), &CARRYING_KEYS)
+                },
+                (Pending::Nothing, Moving::Asking(..)) => {
+                    Bottom::Keys(Command::Carry.does(), &ASKING_KEYS)
+                },
+                (Pending::Nothing, _) => Bottom::Legend,
+            }
         }
     }
 }
@@ -5312,6 +5467,14 @@ enum Bottom<'a> {
     Legend,
     /// What `y` waits for, in the legend's place.
     Yank,
+    /// What the keys do, under a rule so named, in the legend's place: what
+    /// `g` waits for, or the keys of a selection or a move.
+    Keys(&'static str, &'static [(&'static str, &'static str)]),
+    /// The list of every key, in the legend's place.
+    AllKeys(&'a AllKeys),
+    /// The legend, as it was before the key that opened the menu, until
+    /// `PAUSE` passed.
+    Paused,
     Nothing,
 }
 
@@ -8594,7 +8757,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
-        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now + PAUSE);
         let rule = format!("─ Yank {}", "─".repeat(24));
         assert_eq!(lines[22..], [rule, " p  PR link".to_owned()]);
 
@@ -8973,6 +9136,160 @@ mod tests {
         assert_ne!(deleted, Asked::Nothing);
     }
 
+    /// Whether the sidebar, focused and 32 by 20, drawn at `at`, shows a line
+    /// that starts with `start`.
+    fn shows_at(sidebar: &mut Sidebar, at: SystemTime, start: &str) -> bool {
+        seen_at(sidebar, true, 32, 20, at).0.iter().any(|line| line.starts_with(start))
+    }
+
+    /// A group's key at the top leaves the legend at the bottom for `PAUSE`,
+    /// after which luneta is due to draw again, and then shows its group.
+    /// The group's key typed fast after it draws no group at all, while
+    /// zellij plans what it deletes.
+    #[test]
+    fn a_group_shows_once_a_pause_passes_and_never_when_typed_fast() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let now = moment(160_000);
+        sidebar.key(&char('d'), now);
+        assert_eq!(sidebar.due(now), Some(PAUSE));
+        let before = now + PAUSE - Duration::from_millis(1);
+        assert!(shows_at(&mut sidebar, before, "─ luneta ─"));
+        assert!(!shows_at(&mut sidebar, before, "─ Delete ─"));
+        assert!(shows_at(&mut sidebar, now + PAUSE, "─ Delete ─"));
+        assert_eq!(sidebar.due(now + PAUSE), None);
+
+        sidebar.close_menu();
+        sidebar.key(&char('d'), now);
+        let fast = now + Duration::from_millis(50);
+        assert_ne!(sidebar.key(&char('d'), fast), Asked::Nothing);
+        assert!(sidebar.menu.as_ref().is_some_and(Menu::quiet));
+        let later = now + 10 * PAUSE;
+        assert!(shows_at(&mut sidebar, later, "─ luneta ─"));
+        assert!(!shows_at(&mut sidebar, later, "─ Delete ─"));
+        assert_eq!(sidebar.due(later), None);
+    }
+
+    /// A lone `g` shows, once `PAUSE` passed, what a second one does, as `y`
+    /// shows what it yanks; and `v` and `V` show their keys while they last,
+    /// each a spot that presses it where it is one key.
+    #[test]
+    fn a_lone_g_a_selection_and_a_move_show_their_keys() {
+        let mut sidebar = carrying();
+        let earlier = moment(160_000) - PAUSE;
+        let esc = || Some(Hit::Keys(Keyed::Legend, KeyEvent::from(KeyCode::Esc)));
+        sidebar.key(&char('g'), earlier);
+        assert_eq!(clicks(&mut sidebar, 18), [
+            (format!("─ Go {}", "─".repeat(26)), None),
+            (" g  First row".to_owned(), Some(on_legend('g'))),
+        ]);
+        sidebar.key(&char('g'), earlier);
+
+        sidebar.key(&char('v'), earlier);
+        assert_eq!(clicks(&mut sidebar, 15), [
+            (format!("─ Reorder {}", "─".repeat(21)), None),
+            (" j k  Grow".to_owned(), None),
+            (" J K  Move".to_owned(), None),
+            (" v    Done".to_owned(), Some(on_legend('v'))),
+            (" Esc  Done".to_owned(), esc()),
+        ]);
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), earlier);
+
+        sidebar.key(&char('j'), earlier);
+        sidebar.key(&char('V'), earlier);
+        assert!(matches!(sidebar.moving, Moving::Carrying(..)), "{:?}", sidebar.moving);
+        let enter = Some(Hit::Keys(Keyed::Legend, KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(clicks(&mut sidebar, 15), [
+            (format!("─ Move pane {}", "─".repeat(19)), None),
+            (" j k    Where it lands".to_owned(), None),
+            (" V      Tab or pane".to_owned(), Some(on_legend('V'))),
+            (" Enter  Set down".to_owned(), enter),
+            (" Esc    Put back".to_owned(), esc()),
+        ]);
+    }
+
+    /// `?` lists every key in the legend's place, in groups, under a rule
+    /// that says how far down it shows; `j` and `k` scroll it as far as its
+    /// ends, and `Esc` closes it, doing nothing else.
+    #[test]
+    fn question_mark_lists_every_key_and_esc_closes_it() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let here = sidebar.cursor.clone();
+        let now = moment(160_000);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        let every = screen(&mut sidebar, true, 32, 80);
+        let start = every.iter().position(|line| line.starts_with("─ All keys ─")).unwrap();
+        let listed = &every[start + 1..every.len() - 1];
+        let names: Vec<&str> =
+            listed.iter().filter(|line| !line.contains("  ")).map(String::as_str).collect();
+        assert_eq!(names, [" Move", " Sidebar", " Menu", " Anywhere"]);
+        for line in [
+            " g g    First row",
+            " ?      All keys",
+            " y p  Yank PR link",
+            " n p  new pane",
+            " d d  delete the row",
+            " BS   back a group",
+            " Ctrl a       Sidebar or zellij",
+            " Alt Shift u  Stop reading",
+        ] {
+            assert!(listed.iter().any(|shown| shown == line), "{line:?} in {listed:#?}");
+        }
+        assert_eq!(every.last().map(String::as_str), Some(" <↓↑> - Scroll, <ESC> - Close"));
+
+        let total = listed.len();
+        let short = screen(&mut sidebar, true, 32, 20);
+        assert_eq!(short[4], format!("─ All keys ──────────── 14/{total} ─"));
+        assert_eq!(short[5], " Move");
+        sidebar.key(&char('j'), now);
+        assert_eq!(screen(&mut sidebar, true, 32, 20)[5], " j k    Next row, row before");
+        for _ in 0..2 * total {
+            sidebar.key(&char('j'), now);
+        }
+        let end = screen(&mut sidebar, true, 32, 20);
+        assert_eq!(end[4], format!("─ All keys ──────────── {total}/{total} ─"));
+        assert_eq!(end[18], " Alt Shift u  Stop reading");
+        sidebar.key(&char('k'), now);
+        assert_eq!(screen(&mut sidebar, true, 32, 20)[18], " Alt u        Read aloud, pause");
+
+        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), now), Asked::Nothing);
+        assert!(shows_at(&mut sidebar, now, "─ luneta ─"));
+        assert_eq!(sidebar.cursor, here);
+    }
+
+    /// A legend short of room keeps its last line for `?`, which lists the
+    /// keys it left out, and a click there presses it; so does the menu at
+    /// the bottom, where `?` closes it for the list.
+    #[test]
+    fn a_list_of_keys_short_of_room_ends_in_the_key_that_lists_them_all() {
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let now = moment(160_000);
+        let area = Rect::new(0, 0, 32, 12);
+        let drawn = |sidebar: &mut Sidebar| {
+            let mut buffer = Buffer::empty(area);
+            let drawn = sidebar.draw(&mut buffer, area, now);
+            let last = (0..31).map(|x| buffer[(x, 11)].symbol()).collect::<String>();
+            (last.trim_end().to_owned(), drawn.at(Position::new(4, 11)))
+        };
+        assert_eq!(drawn(&mut sidebar), (" ?  All keys".to_owned(), Some(on_legend('?'))));
+        sidebar.keys_clicked(Keyed::Legend, &char('?'), now);
+        assert!(sidebar.all_keys.is_some());
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), now);
+
+        sidebar.key(&char('m'), now);
+        let all = Some(on_menu(KeyCode::Char('?')));
+        let lines = screen(&mut sidebar, true, 32, 12);
+        assert_eq!(lines[10], " ?  All keys", "{lines:#?}");
+        let mut buffer = Buffer::empty(area);
+        let at = sidebar.draw(&mut buffer, area, now).at(Position::new(4, 10));
+        assert_eq!(at, all);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
+        assert!(sidebar.all_keys.is_some());
+    }
+
     /// The skills the menu's search finds at the bottom of the sidebar are
     /// spots that pick them: a click on one starts an agent on it, as
     /// `Enter` does with the cursor on it.
@@ -9067,7 +9384,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        let lines = screen(&mut sidebar, true, 32, 16);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 16, moment(160_000) + PAUSE);
         assert_eq!(lines[10..], [
             "─ New ─────────── luneta/main ─",
             " p  new pane",
@@ -9632,7 +9949,7 @@ mod tests {
         type_in(&mut sidebar, "j");
         assert_eq!(cursor(&sidebar), Some(pane_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        let lines = screen(&mut sidebar, true, 32, 12);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 12, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (session, cwd) = (session_name("s"), "/w/luneta/main".to_owned());
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
