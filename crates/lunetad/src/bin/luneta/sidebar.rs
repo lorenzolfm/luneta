@@ -96,7 +96,7 @@ use crate::menu::{
     Ran, Target, Top, Wants,
 };
 use crate::news::News;
-use crate::order::{Colour, Order};
+use crate::order::{Colour, Order, Tabbed};
 use crate::own::{Look, Looked, OwnClient, Roster, Unplaced};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
@@ -1942,13 +1942,21 @@ impl Sidebar {
         let listed = clients(self.on_sessions(), place.session()).map(<[Client]>::to_vec);
         let now = Instant::now();
         let look = self.own.went(place.session(), place.pane(), listed.as_deref(), now);
+        let spot = Spot::on(&self.on, place.clone());
+        let shows_under = match place {
+            Place::Pane(_) => self.heads(&spot).map(|session| session.name.clone()),
+            Place::Session(_) => None,
+        };
         if self.here() == Some(place.session()) {
             // A search goes to the panes of a folded session too.
-            if place.pane().is_some() {
-                self.unfold(&place.listed().name);
+            if let Some(under) = &shows_under {
+                self.unfold(under);
             }
             self.rebuild();
             return look;
+        }
+        if let Some(under) = &shows_under {
+            self.unfold(under);
         }
         // The client is on the pane as it comes to the other session.
         self.send(&place.listed().name, ends)
@@ -3451,7 +3459,8 @@ impl Sidebar {
 
     /// Moves the panes `held` of those under the session `under` of
     /// `machine`'s to `gap`, keeps where they show now for every luneta, and
-    /// builds the rows again so.
+    /// builds the rows again so. A session left with its own panes alone, in
+    /// the order of their tabs, keeps none, as one never moved.
     fn keep_panes(&mut self, machine: &Machine, under: usize, held: Range<usize>, gap: Gap) {
         let mut placed = self.placed_of(machine).to_vec();
         let taken: Vec<(PanePlace, u32)> = placed[under].panes.drain(held).collect();
@@ -3459,8 +3468,15 @@ impl Sidebar {
         let changed = BTreeSet::from([under, gap.under]);
         let kept = changed.into_iter().map(|at| {
             let Headed { session, panes, .. } = &placed[at];
+            let own = panes.iter().all(|(place, _)| place.session == *session);
+            let tabbed = panes.windows(2).all(|two| {
+                let [(first, first_tab), (next, next_tab)] = two else {
+                    return true;
+                };
+                (first_tab, first.pane) <= (next_tab, next.pane)
+            });
             let keys = panes.iter().map(|(place, _)| place.session.key(place.pane));
-            (session.kept, keys.collect())
+            (session.kept, if own && tabbed { Vec::new() } else { keys.collect() })
         });
         self.order.keep_panes(kept.collect());
         self.rebuild();
@@ -5544,8 +5560,8 @@ fn placed<'a>(order: &Order, sessions: &[(Listed, &'a Session)]) -> Vec<Vec<(usi
     for (at, (listed, session)) in sessions.iter().enumerate() {
         let mut panes: Vec<&Pane> = session.panes.iter().flat_map(|panes| &panes.panes).collect();
         panes.sort_by_key(|pane| (pane.tab, pane.id));
-        let panes: Vec<(Key, (usize, &Pane))> =
-            panes.into_iter().map(|pane| (listed.key(pane.id), (at, pane))).collect();
+        let panes: Vec<Tabbed<(usize, &Pane)>> =
+            panes.into_iter().map(|pane| (listed.key(pane.id), pane.tab, (at, pane))).collect();
         keyed.push((listed.kept, panes));
     }
     order.placed(&keyed)
@@ -12826,7 +12842,7 @@ mod tests {
     }
 
     /// Once the session a pane shows under has ended, it shows under its own
-    /// again, after those the order keeps there.
+    /// again, with the panes of its tab, or before those of the tabs after it.
     #[test]
     fn a_pane_goes_back_to_its_own_session_once_the_other_ends() {
         let mut sidebar = two_to_move();
@@ -12835,7 +12851,57 @@ mod tests {
         let mut host = two_to_move_host();
         host.sessions.pop();
         sidebar.heard(host);
-        assert_eq!(ends_shown(&mut sidebar).0, ["work", "auth", "fold", "w/a"]);
+        assert_eq!(ends_shown(&mut sidebar).0, ["work", "w/a", "auth", "fold"]);
+    }
+
+    /// A pane that opens after a move goes with the panes of its tab, under
+    /// its own session, whether that session's panes moved or not.
+    #[test]
+    fn a_pane_that_opens_after_a_move_goes_with_its_tab() {
+        let mut sidebar = two_to_move();
+        type_in(&mut sidebar, "VJJJ");
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
+        let mut host = two_to_move_host();
+        host.sessions[0].panes.as_mut().unwrap().panes.push(pane(4, 1, "/w/n", "fish"));
+        let play = &mut host.sessions[1].panes.as_mut().unwrap().panes;
+        play.extend([pane(6, 1, "/w/r", "fish"), pane(7, 0, "/w/q", "fish")]);
+        sidebar.heard(host);
+        let rows = ["work", "auth", "fold", "w/n", "play", "w/a", "w/p", "w/q", "w/r"];
+        assert_eq!(ends_shown(&mut sidebar).0, rows);
+    }
+
+    /// A session whose panes are back in the order of their tabs, its own
+    /// alone, keeps no order of them: it follows its tabs again, as zellij
+    /// moves them.
+    #[test]
+    fn panes_put_back_follow_their_tabs_again() {
+        let mut sidebar = two_to_move();
+        type_in(&mut sidebar, "VJK");
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
+        let mut host = two_to_move_host();
+        for pane in &mut host.sessions[0].panes.as_mut().unwrap().panes {
+            pane.tab = 1 - pane.tab;
+        }
+        sidebar.heard(host);
+        assert_eq!(ends_shown(&mut sidebar).0, ["work", "auth", "fold", "w/a", "play", "w/p"]);
+    }
+
+    /// Going to a pane unfolds the session it shows under, where a move put
+    /// it under another than its own: from another session, and from its own.
+    #[test]
+    fn going_to_a_moved_pane_unfolds_where_it_shows() {
+        let mut sidebar = two_to_move();
+        type_in(&mut sidebar, "VJJJ");
+        sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000));
+        let moved = pane_of("work", 10, 1);
+        for title in ["play | Tab #1", "work | Tab #1"] {
+            sidebar.titled(title.to_owned());
+            fold(&mut sidebar, "play");
+            assert!(folded(&sidebar, "play"), "{title}");
+            sidebar.went(&moved);
+            assert!(!folded(&sidebar, "play"), "{title}");
+            assert_eq!(ends_shown(&mut sidebar).0[3..5], ["play", "w/a"], "{title}");
+        }
     }
 
     /// A press on a pane's row lifts it once the mouse goes straight off its

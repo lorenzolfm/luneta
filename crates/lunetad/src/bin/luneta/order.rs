@@ -14,8 +14,8 @@
 //! id, as the news does: zellij numbers a session's panes from 0 each time it
 //! starts, so no id would keep a pane's place in one started again, and the
 //! place goes once its session has ended, or the one it shows under has. A
-//! pane the order does not have goes under its own session, after those it
-//! has there.
+//! pane the order does not have goes under its own session, with the panes
+//! of its tab there, or else before those of the tabs after it.
 //!
 //! A machine goes by its destination, and this one by `-`, which no
 //! destination starts with, as its fold does. One the order does not have
@@ -245,31 +245,39 @@ impl Order {
     }
 
     /// Where the panes of `sessions`, those of one machine, each by its key
-    /// with what it is, show: under each of them, in their order, first those
-    /// the order keeps under it, as it keeps them, and then its own that the
-    /// order keeps under none, as `sessions` has them, in the order of their
-    /// tabs. Each is given back as what it is, and so none that `sessions`
-    /// does not have. A pane shows once, under the first that keeps it. One
-    /// the order keeps that none of `sessions` has, as one that ended, or that
-    /// another machine has, is passed over, and so is all it keeps under a
-    /// session that `sessions` does not have.
-    pub fn placed<T: Copy>(&self, sessions: &[(ledger::Session, Vec<(Key, T)>)]) -> Vec<Vec<T>> {
-        let all: HashMap<Key, T> = sessions.iter().flat_map(|(_, panes)| panes).copied().collect();
+    /// and its tab with what it is, show: under each of them, in their order,
+    /// those the order keeps under it, as it keeps them, and among them its
+    /// own that the order keeps under none, as `sessions` has them, in the
+    /// order of their tabs: each after the last of its tab there, or else
+    /// before the first of a tab after it, or else last. Each is given back as
+    /// what it is, and so none that `sessions` does not have. A pane shows
+    /// once, under the first that keeps it. One the order keeps that none of
+    /// `sessions` has, as one that ended, or that another machine has, is
+    /// passed over, and so is all it keeps under a session that `sessions`
+    /// does not have.
+    pub fn placed<T: Copy>(&self, sessions: &[(ledger::Session, Vec<Tabbed<T>>)]) -> Vec<Vec<T>> {
+        let all: HashMap<Key, (u32, T)> = (sessions.iter().flat_map(|(_, panes)| panes))
+            .map(|(key, tab, pane)| (*key, (*tab, *pane)))
+            .collect();
         let mut shown: HashSet<Key> = HashSet::new();
-        let mut placed: Vec<Vec<T>> = Vec::with_capacity(sessions.len());
+        let mut placed: Vec<Vec<Tabbed<T>>> = Vec::with_capacity(sessions.len());
         for (session, _) in sessions {
             let kept = self.kept.panes.get(session).map_or(&[][..], Vec::as_slice);
             let under = kept.iter().filter_map(|key| {
-                let pane = all.get(key)?;
-                shown.insert(*key).then_some(*pane)
+                let (tab, pane) = *all.get(key)?;
+                shown.insert(*key).then_some((*key, tab, pane))
             });
             placed.push(under.collect());
         }
-        for ((_, own), under) in sessions.iter().zip(&mut placed) {
-            let left = own.iter().filter(|(key, _)| shown.insert(*key));
-            under.extend(left.map(|(_, pane)| *pane));
+        for ((session, own), under) in sessions.iter().zip(&mut placed) {
+            for &(key, tab, pane) in own {
+                if shown.insert(key) {
+                    under.insert(slot(under, *session, tab), (key, tab, pane));
+                }
+            }
         }
-        placed
+        let bare = |under: Vec<Tabbed<T>>| under.into_iter().map(|(.., pane)| pane).collect();
+        placed.into_iter().map(bare).collect()
     }
 
     /// Keeps `panes` under each of its sessions, in their order now, for
@@ -429,6 +437,20 @@ fn once_each<T: Eq + Hash + Clone>(mut items: Vec<T>) -> Vec<T> {
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.clone()));
     items
+}
+
+/// A pane, by its key and its tab, with what it is.
+pub type Tabbed<T> = (Key, u32, T);
+
+/// Where a pane of the tab `tab` of `session` goes among `under`: after the
+/// last of that tab there, or else before the first of a tab of `session`
+/// after it, or else last.
+fn slot<T>(under: &[Tabbed<T>], session: ledger::Session, tab: u32) -> usize {
+    let tab_of = |(key, of, _): &Tabbed<T>| (key.session == session).then_some(*of);
+    if let Some(last) = under.iter().rposition(|pane| tab_of(pane) == Some(tab)) {
+        return last + 1;
+    }
+    under.iter().position(|pane| tab_of(pane).is_some_and(|of| of > tab)).unwrap_or(under.len())
 }
 
 /// Where `item` goes in `order`: where it stands there, or after all of it.
@@ -918,17 +940,27 @@ mod tests {
         Key { session, pane }
     }
 
-    /// `session` with its panes `panes`, each by its key, which is what it
-    /// is too.
-    fn own(session: ledger::Session, panes: &[u32]) -> (ledger::Session, Vec<(Key, Key)>) {
-        (session, panes.iter().map(|pane| (key(session, *pane), key(session, *pane))).collect())
+    /// `session` with its panes `panes`, each by its id and its tab, and by
+    /// its key, which is what it is too.
+    fn tabbed(
+        session: ledger::Session,
+        panes: &[(u32, u32)],
+    ) -> (ledger::Session, Vec<Tabbed<Key>>) {
+        let each = panes.iter().map(|(pane, tab)| (key(session, *pane), *tab, key(session, *pane)));
+        (session, each.collect())
+    }
+
+    /// `session` with its panes `panes`, each alone in a tab of its id.
+    fn own(session: ledger::Session, panes: &[u32]) -> (ledger::Session, Vec<Tabbed<Key>>) {
+        let panes: Vec<(u32, u32)> = panes.iter().map(|pane| (*pane, *pane)).collect();
+        tabbed(session, &panes)
     }
 
     /// With nothing moved, each session's panes show under it, as they came.
     /// A pane moved shows where the order keeps it, the first time it keeps
-    /// it, and those it does not keep after, under their own. What it keeps
-    /// that none of the sessions has, or under one that does not run, is
-    /// passed over.
+    /// it, and those it does not keep go under their own, by their tabs. What
+    /// it keeps that none of the sessions has, or under one that does not
+    /// run, is passed over.
     #[test]
     fn a_pane_shows_where_the_order_keeps_it_and_else_under_its_own() {
         let [a, b, c] = [1, 2, 3].map(session);
@@ -937,10 +969,30 @@ mod tests {
         assert_eq!(order.placed(&sessions), [vec![key(a, 0), key(a, 1)], vec![key(b, 0)]]);
 
         order.keep_panes(vec![(b, vec![key(a, 1), key(b, 0), key(a, 7)])]);
-        order.kept.panes.insert(a, vec![key(a, 1), key(b, 0)]);
+        order.kept.panes.insert(a, vec![key(b, 0), key(a, 1)]);
         order.kept.panes.insert(c, vec![key(a, 0)]);
         let placed = order.placed(&sessions);
-        assert_eq!(placed, [vec![key(a, 1), key(b, 0), key(a, 0)], Vec::new()]);
+        assert_eq!(placed, [vec![key(b, 0), key(a, 0), key(a, 1)], Vec::new()]);
+    }
+
+    /// A pane the order keeps under no session, as one that opened since a
+    /// move, or that comes back from a session that ended, goes among its
+    /// own session's: after the last of its tab there, or else before the
+    /// first of a tab after it, or else last.
+    #[test]
+    fn a_pane_the_order_does_not_keep_goes_with_its_tab() {
+        let [a, b] = [1, 2].map(session);
+        let mut order = Order::default();
+        order.kept.panes.insert(a, vec![key(a, 1), key(b, 0), key(a, 0), key(a, 5)]);
+        let panes = [(0, 0), (4, 0), (1, 1), (2, 1), (5, 2), (6, 2), (3, 3), (7, 9)];
+        let sessions = [tabbed(a, &panes), tabbed(b, &[(0, 0)])];
+        let placed = [(a, 1), (a, 2), (b, 0), (a, 0), (a, 4), (a, 5), (a, 6), (a, 3), (a, 7)];
+        let placed = placed.map(|(session, pane)| key(session, pane)).to_vec();
+        assert_eq!(order.placed(&sessions), [placed, Vec::new()]);
+
+        order.kept.panes.insert(a, vec![key(b, 0), key(a, 5)]);
+        let sessions = [tabbed(a, &[(1, 1), (5, 2)]), tabbed(b, &[(0, 0)])];
+        assert_eq!(order.placed(&sessions)[0], [key(b, 0), key(a, 1), key(a, 5)]);
     }
 
     /// A pane kept under one session goes from any other that kept it, and a

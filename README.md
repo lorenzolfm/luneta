@@ -1128,10 +1128,12 @@ own session's colour, so you can tell where it lives. It folds with the
 session it shows under, and `h` on it folds that one. Where you moved each
 pane is kept for every luneta, and the next, in the same file as the order of
 the sessions, for as long as its session runs: zellij numbers a session's
-panes from 0 each time it starts, so no pane keeps a place past it. Once the
-session it shows under has ended, it shows under its own again, after the
-panes you moved there. A pane you have not moved shows under its own session,
-after those you moved there.
+panes from 0 each time it starts, so no pane keeps a place past it. A pane
+you have not moved, as one that opens later, shows under its own session with
+the panes of its tab there, or else before those of the tabs after it; and so
+does one whose place has gone, as the session it shows under has ended. A
+session whose own panes are back in the order of their tabs, with none of
+another's, keeps no order of them, and follows its tabs again.
 
 With the mouse, a press on a session's row, or on a machine's header, lifts
 it once the mouse moves a line, and the sidebar takes the keys. It shows where
