@@ -669,7 +669,8 @@ says why it does not open: zellij is on a plugin's pane, or luneta cannot yet
 tell which pane zellij is on. `Alt a` there tries again. A key that waits for
 something, as a pasted link's does, goes on after the menu closes, wherever the
 keys went: the pasted link's section below says how. While the sidebar
-has the keys and no menu is open, its bottom lists what you can press there:
+has the keys and no menu is open, `?` opens the legend at its bottom, which
+lists what you can press there, until the next key:
 
 ```text
 ─ luneta ──────────────────────
@@ -688,20 +689,23 @@ has the keys and no menu is open, its bottom lists what you can press there:
  b  Brief ▸
 ```
 
-A click on an entry of it presses its key, as a click on one of the menu's
-does at the bottom of the sidebar or over zellij. The entry, the row of the
-picker or the key under the pointer is lit, a step softer than the
+`Esc` closes it and does nothing else, `?` lists every key in its place, and
+any other key closes it and does what it does. A key of the legend that waits
+for the next, as `d` waits for what to delete, shows what can come next at
+once. A click on an entry of it presses its key, as a click on one of the
+menu's does at the bottom of the sidebar or over zellij. The entry, the row of
+the picker or the key under the pointer is lit, a step softer than the
 highlight, so you see what a click hits before you click. A click that comes
 fast after another on the same cell, or one next to it, is none, the second
 of a double click and the third of a triple: a click that opened a group
 leaves another entry under the pointer, as `d` opens Delete onto
 `d  close the pane`, and `s  delete the session` under it.
 
-A key of the legend that waits for the next, as `d` waits for what to delete,
-leaves the legend as it is for a fifth of a second, and only then shows what
-can come next, as which-key does in neovim: `d d`, `g g` or `y p` typed fast
-draws nothing in between, and a slow `d` shows the Delete group. A click on
-`d  Delete ▸` shows it at once. A lone `g` waits the same way, then shows
+Without the legend, a key that waits for the next, as `d` waits for what to
+delete, leaves the bottom as it is for a fifth of a second, and only then
+shows what can come next, as which-key does in neovim: `d d`, `g g` or `y p`
+typed fast draws nothing in between, and a slow `d` shows the Delete group. A
+click on `d  Delete ▸` shows it at once. A lone `g` waits the same way, then shows
 `g  First row`, as `y` shows what it yanks. While `v` selects, the bottom
 lists the keys of the selection instead, and while `V` carries a pane, those
 of the move:
@@ -714,8 +718,8 @@ of the move:
  Esc    Put back
 ```
 
-`?` lists every key luneta has in the legend's place, in groups: Move, the
-moves and folds; Sidebar, the legend's commands; Menu, each group's keys; and
+`?` in the legend lists every key luneta has in its place, in groups: Move,
+the moves and folds; Sidebar, the legend's commands; Menu, each group's keys; and
 Anywhere, the keys luneta takes before zellij. `j` and `k` scroll it, `Esc`
 closes it, and any other key closes it and does what it does. A legend, or a
 menu at the bottom of the sidebar, short of room for all its keys, keeps its
