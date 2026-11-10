@@ -699,13 +699,12 @@ pub const PROGRAM: &str = "zellij";
 
 /// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
 /// which it makes where none runs, or without one, in a session of a name
-/// zellij makes up. The name goes bare, as `attach` takes the words after `--`
-/// for a command to run in a session it makes: it takes no name that starts
-/// with `-`, which only `client_making` reaches.
-#[must_use]
-pub fn client(session: Option<&SessionName>) -> Vec<String> {
-    let attach = session.map(|session| ["attach", "--create", session.as_str()]);
-    attach.into_iter().flatten().map(str::to_owned).collect()
+/// zellij makes up; or why it cannot attach, as `attached` says.
+pub fn client(session: Option<&SessionName>) -> Result<Vec<String>, String> {
+    let Some(session) = session else {
+        return Ok(Vec::new());
+    };
+    Ok(vec!["attach".to_owned(), "--create".to_owned(), attached(session)?])
 }
 
 /// The arguments of zellij's client, as `client` says, that makes `session`
@@ -718,9 +717,22 @@ pub fn client_making(session: &SessionName) -> Vec<String> {
 
 /// The arguments of zellij's client, as `client` says, attached to `session`,
 /// which runs, or which ended, which zellij brings back. It makes none.
-#[must_use]
-pub fn client_rejoining(session: &SessionName) -> Vec<String> {
-    vec!["attach".to_owned(), session.as_str().to_owned()]
+pub fn client_rejoining(session: &SessionName) -> Result<Vec<String>, String> {
+    Ok(vec!["attach".to_owned(), attached(session)?])
+}
+
+/// `session` as `attach` takes its name: bare, as it takes the words after
+/// `--` for a command to run in a session it makes. A name that starts with
+/// `-` it takes for an option, as `-c` for `--create`, so it attaches to none
+/// so named, which only zellij makes, as `SessionName::parse` says.
+fn attached(session: &SessionName) -> Result<String, String> {
+    if session.as_str().starts_with('-') {
+        return Err(format!(
+            "zellij attaches to no session whose name starts with '-', as \"{session}\"'s does: \
+             rename it"
+        ));
+    }
+    Ok(session.as_str().to_owned())
 }
 
 #[cfg(test)]
@@ -764,6 +776,8 @@ mod tests {
         let started = start(&at, &to, Some(&w));
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
         assert_eq!(client_making(&at), ["--session=-at"]);
+        assert!(client_rejoining(&at).is_err());
+        assert!(client(Some(&at)).is_err());
     }
 
     /// A pane already focused is read apart from any other failure, as `went`

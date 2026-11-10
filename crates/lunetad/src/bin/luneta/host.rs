@@ -1067,7 +1067,13 @@ fn run_in(
             }
         },
     };
-    let ((program, args), fails, arrival) = first_client(first, &mut sidebar);
+    let ((program, args), fails, arrival) = match first_client(first, &mut sidebar) {
+        Ok(first) => first,
+        Err(refusal) => {
+            say_ends(&refusal);
+            return Ok(Some(format!("luneta: {refusal}")));
+        },
+    };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
     let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
@@ -1198,11 +1204,12 @@ fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: 
 
 /// The program of luneta's first client, and its arguments, where luneta's
 /// zellij goes where it fails, and the look for its arrival, if luneta looks
-/// for it: as `first` says, of which the sidebar hears.
-fn first_client(
-    first: First,
-    sidebar: &mut Sidebar,
-) -> ((String, Vec<String>), Fails, Option<Arrival>) {
+/// for it.
+type FirstClient = ((String, Vec<String>), Fails, Option<Arrival>);
+
+/// luneta's first client, as `first` says, of which the sidebar hears; or
+/// why zellij's client cannot attach.
+fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, String> {
     match first {
         First::Make(session) => {
             let arrival = session.as_ref().and_then(|session| {
@@ -1210,7 +1217,7 @@ fn first_client(
                 let look = sidebar.sending(session)?;
                 Some(Arrival::new(Machine::Local, look, before, None))
             });
-            (zellij::client(session.as_ref()), Fails::End, arrival)
+            Ok((zellij::client(session.as_ref())?, Fails::End, arrival))
         },
         First::Here(session) => {
             // Just before the client starts, as `own` goes by: luneta may
@@ -1218,14 +1225,14 @@ fn first_client(
             let before = zellij::before(&session);
             let look = sidebar.sending(&session);
             let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
-            (zellij::rejoin(&session), Fails::End, arrival)
+            Ok((zellij::rejoin(&session)?, Fails::End, arrival))
         },
         First::Away(destination, Refuge { session, before }) => {
-            let program = zellij::attach_away(&destination, &session);
+            let program = zellij::attach_away(&destination, &session)?;
             let machine = Machine::Remote(destination);
             let look = sidebar.swapping(&machine, &session);
             let arrival = Arrival::new(machine, look, Before::Listed(before), None);
-            (program, Fails::Onward(Vec::new()), Some(arrival))
+            Ok((program, Fails::Onward(Vec::new()), Some(arrival)))
         },
     }
 }
@@ -2847,11 +2854,13 @@ impl App {
     /// through ssh.
     fn start_of(&mut self, machine: &Machine, joins: Joins<'_>) -> io::Result<Hosted> {
         let ((program, args), dir) = match (machine, joins) {
-            (Machine::Local, Joins::Attach(session)) => (zellij::rejoin(session), None),
+            (Machine::Local, Joins::Attach(session)) => {
+                (zellij::rejoin(session).map_err(io::Error::other)?, None)
+            },
             // zellij's client makes a session in the directory it starts in.
             (Machine::Local, Joins::Make(unused, cwd)) => (zellij::make(unused.name()), cwd),
             (Machine::Remote(destination), Joins::Attach(session)) => {
-                (zellij::attach_away(destination, session), None)
+                (zellij::attach_away(destination, session).map_err(io::Error::other)?, None)
             },
             (Machine::Remote(destination), Joins::Make(unused, cwd)) => {
                 (zellij::make_away(destination, unused.name(), cwd), None)

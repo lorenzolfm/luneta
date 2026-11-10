@@ -159,9 +159,9 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 
 /// The program luneta runs beside the sidebar, and its arguments: zellij's
 /// client, attached to `session` and making it if none runs, or without one
-/// in a session of a name zellij makes up.
-pub fn client(session: Option<&SessionName>) -> (String, Vec<String>) {
-    client_with(cli::client(session))
+/// in a session of a name zellij makes up; or why it cannot attach.
+pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), String> {
+    cli::client(session).map(client_with)
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -177,8 +177,9 @@ pub fn make(session: &SessionName) -> (String, Vec<String>) {
 /// The program luneta runs beside the sidebar in place of a client that
 /// ended, and its arguments: zellij's client, attached to `session`, which
 /// runs. Without `--create`, which would make one gone since anew, empty.
-pub fn rejoin(session: &SessionName) -> (String, Vec<String>) {
-    client_with(cli::client_rejoining(session))
+/// Or why it cannot attach.
+pub fn rejoin(session: &SessionName) -> Result<(String, Vec<String>), String> {
+    cli::client_rejoining(session).map(client_with)
 }
 
 /// zellij's client, with `args`. It runs through `env`, to leave out what
@@ -196,9 +197,12 @@ fn client_with(args: Vec<String>) -> (String, Vec<String>) {
 /// through ssh, in a terminal ssh asks for there. It goes on the connection
 /// luneta's daemon reaches that machine's on, as `lunetad::sharing` says,
 /// where luneta's runtime folder is one ssh can name. ssh may ask for a
-/// password or a host's key in luneta's terminal.
-pub fn attach_away(destination: &Destination, session: &SessionName) -> (String, Vec<String>) {
-    away(destination, spelled(&cli::client_rejoining(session)))
+/// password or a host's key in luneta's terminal. Or why it cannot attach.
+pub fn attach_away(
+    destination: &Destination,
+    session: &SessionName,
+) -> Result<(String, Vec<String>), String> {
+    Ok(away(destination, spelled(&cli::client_rejoining(session)?)))
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -1699,7 +1703,7 @@ There are a few things you can try now:
         let Ok(session) = SessionName::parse("luneta-main") else {
             panic!("a name zellij takes");
         };
-        let (program, args) = client(Some(&session));
+        let (program, args) = client(Some(&session)).unwrap();
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
@@ -1710,7 +1714,7 @@ There are a few things you can try now:
         let Ok(elo) = SessionName::parse("elo") else {
             panic!("a name zellij takes");
         };
-        let (program, args) = rejoin(&elo);
+        let (program, args) = rejoin(&elo).unwrap();
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
         assert_eq!(args[args.len() - 3..], ["zellij", "attach", "elo"]);
