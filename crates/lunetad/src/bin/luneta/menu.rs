@@ -49,8 +49,12 @@
 //! At the top of the sidebar, a key the sidebar has no use of its own for
 //! opens the menu on the group it opens, and `m` opens it on its first group,
 //! where every key is the menu's. While the sidebar has the focus and no menu
-//! is open, the legend at its bottom lists the keys it takes there.
+//! is open, the legend at its bottom lists the keys it takes there. A key
+//! there that waits for the next, as a group's does, shows what can come next
+//! only once a pause passes with none, as which-key does, and `?` lists every
+//! key luneta has in the legend's place.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::SystemTime;
@@ -73,6 +77,7 @@ use crate::brief;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
 use crate::gruvbox;
+use crate::host;
 use crate::icons;
 use crate::issue::Repository;
 use crate::machines::Machine;
@@ -83,6 +88,104 @@ use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TA
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{SessionName, Starts};
+
+/// The key that lists every key luneta has, at the bottom of the sidebar, and
+/// what a list of keys short of room says it does on its last line.
+pub const ALL_KEYS: char = '?';
+const ALL_KEYS_DOES: &str = "All keys";
+
+/// The keys a line of a list of keys names: one key, with what is held with
+/// it, or two characters, as `g g` typed one after the other, or `j k`, each
+/// one way of what the line says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Label {
+    Key(KeyCode, KeyModifiers),
+    Two(char, char),
+}
+
+impl Label {
+    /// The character `c`, with nothing held.
+    pub const fn char(c: char) -> Label {
+        Label::Key(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// The key `code`, with nothing held.
+    pub const fn code(code: KeyCode) -> Label {
+        Label::Key(code, KeyModifiers::NONE)
+    }
+
+    /// The key a click on its line presses: none for two.
+    fn pressed(self) -> Option<KeyEvent> {
+        match self {
+            Label::Key(code, modifiers) => Some(KeyEvent::new(code, modifiers)),
+            Label::Two(..) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Label {
+    /// What is held, as `Ctrl`, `Alt` and `Shift`, then the key, `Space`,
+    /// `Enter`, `Esc`, `Tab` and `BS` by name; or the two characters.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (code, modifiers) = match *self {
+            Label::Two(first, second) => return write!(f, "{first} {second}"),
+            Label::Key(code, modifiers) => (code, modifiers),
+        };
+        let held = [
+            (KeyModifiers::CONTROL, "Ctrl"),
+            (KeyModifiers::ALT, "Alt"),
+            (KeyModifiers::SHIFT, "Shift"),
+        ];
+        for (modifier, name) in held {
+            if modifiers.contains(modifier) {
+                write!(f, "{name} ")?;
+            }
+        }
+        match code {
+            KeyCode::Char(' ') => f.write_str("Space"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("Enter"),
+            KeyCode::Esc => f.write_str("Esc"),
+            KeyCode::Tab => f.write_str("Tab"),
+            KeyCode::Backspace => f.write_str("BS"),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+/// The moves and folds at the top of the sidebar, as the list of every key
+/// names them.
+const MOVES: [(Label, &str); 10] = [
+    (Label::Two('j', 'k'), "Next row, row before"),
+    (Label::Two('g', 'g'), "First row"),
+    (Label::char('G'), "Last row"),
+    (Label::Two('h', 'l'), "Fold, unfold"),
+    (Label::char(' '), "Fold or unfold"),
+    (Label::Two('J', 'K'), "Move what v or V holds"),
+    (Label::code(KeyCode::Enter), "Go to the row"),
+    (Label::char('m'), "Menu"),
+    (Label::char(ALL_KEYS), "All keys"),
+    (Label::code(KeyCode::Esc), "Back to zellij"),
+];
+
+/// The keys of the menu besides its entries, as the list of every key names
+/// them: those it takes in any group, and those of the menu for a pasted link.
+const MENU_MOVES: [(Label, &str); 6] = [
+    (Label::code(KeyCode::Tab), "use another agent"),
+    (Label::code(KeyCode::Backspace), "back a group"),
+    (Label::code(KeyCode::Esc), "close"),
+    (Label::char('w'), "worktree of a pasted link"),
+    (Label::char('r'), "review a pasted PR"),
+    (Label::char('t'), "tackle a pasted issue"),
+];
+
+/// The Delete group's keys, as the list of every key names them, on no row in
+/// particular: what `d d` deletes is the row's.
+const DELETES: [(Label, &str); 3] = [
+    (Label::Two(DELETE, 'd'), "delete the row"),
+    (Label::Two(DELETE, 's'), "delete the session"),
+    (Label::Two(DELETE, 'm'), DELETE_MERGED_DOES),
+];
 
 /// The key that opens the search over the skills, at the top of the menu, and
 /// what the menu says it does.
@@ -271,6 +374,8 @@ pub enum Top {
     /// copies the link of the highlighted row's pull request. Any other key
     /// drops it, `Esc` doing only that, as after a lone `First`.
     Yank,
+    /// Lists every key luneta has, in the legend's place.
+    AllKeys,
     /// Runs a command of the sidebar's own.
     Command(Command),
 }
@@ -292,6 +397,7 @@ impl Top {
             ' ' => Some(Top::Fold(None)),
             'm' => Some(Top::Menu),
             YANK => Some(Top::Yank),
+            ALL_KEYS => Some(Top::AllKeys),
             _ => None,
         }
     }
@@ -624,6 +730,48 @@ impl Entry {
             Entry::Search => SEARCH,
             Entry::Ask => ASK,
             Entry::Issue => ISSUE,
+        }
+    }
+
+    /// What the menu says the key does: for a group, its name.
+    fn does(&self) -> String {
+        match self {
+            Entry::Group { name, .. } => (*name).to_owned(),
+            Entry::Start { skill, .. } => format!("/{skill}"),
+            Entry::Last(last) => last.does().to_owned(),
+            Entry::Checks => CHECKS_DOES.to_owned(),
+            Entry::New(new) => new.does().to_owned(),
+            Entry::Turn(turning) => turning.does().to_owned(),
+            Entry::Tab { name, .. } => name.clone(),
+            Entry::Close { scope, .. } => scope.does().to_owned(),
+            Entry::Prune { .. } => DELETE_MERGED_DOES.to_owned(),
+            Entry::Forget(_) => FORGET_DOES.to_owned(),
+            Entry::Brief(scope) => scope.does().to_owned(),
+            Entry::Command(command) => command.does().to_owned(),
+            Entry::YankPull => YANK_PULL_DOES.to_owned(),
+            Entry::Pull(pull, asks) => pull.does(*asks),
+            Entry::Search => SEARCH_DOES.to_owned(),
+            Entry::Ask => ASK_DOES.to_owned(),
+            Entry::Issue => ISSUE_DOES.to_owned(),
+        }
+    }
+
+    /// The keys under it, each the keys that press it from the group it is
+    /// in, after `before`, and what it does, as the list of every key names
+    /// them: a group's are those of its entries, and the Delete group's are
+    /// `DELETES`, on no row in particular.
+    fn spelled(&self, before: &str, into: &mut Vec<(String, String)>) {
+        let keys = format!("{before}{}", self.key());
+        match self {
+            Entry::Group { key: DELETE, .. } => {
+                into.extend(DELETES.map(|(label, does)| (label.to_string(), does.to_owned())));
+            },
+            Entry::Group { entries, .. } => {
+                for entry in entries {
+                    entry.spelled(&format!("{keys} "), into);
+                }
+            },
+            _ => into.push((keys, self.does())),
         }
     }
 }
@@ -2216,14 +2364,46 @@ impl Menu {
     /// where the pane works, what the menu shows under it, and the keys that
     /// go back and close under them. Short of room, what it shows goes first,
     /// then the rule. And the spots on those lines, as `Shown::lines` says.
-    /// A spinner that turns shows `frame`.
+    /// A spinner that turns shows `frame`. Short of room for the keys of the
+    /// group open, the last line under the rule says that `ALL_KEYS` lists
+    /// the rest, as it does there.
     pub fn lines(
         &self,
         width: usize,
         room: usize,
         frame: usize,
     ) -> (Vec<Line<'static>>, Spots<Choice>) {
-        self.shown(width, room.saturating_sub(2), frame).lines(width, room)
+        let body = room.saturating_sub(2);
+        let mut shown = self.shown(width, body, frame);
+        if self.lists() && shown.body.len() > body && body > 0 {
+            shown.body.truncate(body - 1);
+            shown.spots = shown.spots.first(body - 1);
+            let all = Choice::Key(KeyEvent::from(KeyCode::Char(ALL_KEYS)));
+            shown.spots.add(body - 1, 0..width, all);
+            shown.body.push(all_keys_line(width.saturating_sub(1)));
+        }
+        shown.lines(width, room)
+    }
+
+    /// Whether a key of the group open works on what it asked, the menu
+    /// showing that group still, its keys doing nothing but close it: zellij
+    /// plans a delete, opens or turns what the key asked for, or lists the
+    /// tabs to turn into, or luneta keeps what a shell printed.
+    pub fn quiet(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Planning { .. }
+                | Stage::Opening { .. }
+                | Stage::Listing { .. }
+                | Stage::Turning { .. }
+                | Stage::Reading { .. }
+        )
+    }
+
+    /// Whether the keys of a group choose, with no search box open: where
+    /// `ALL_KEYS` lists every key, as it types in the search box.
+    pub fn lists(&self) -> bool {
+        matches!(&self.stage, Stage::Choosing(keys) if keys.search.is_none())
     }
 
     /// Draws the menu floating at the bottom right of `over`, zellij's side,
@@ -2691,6 +2871,25 @@ pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>
     listed(TITLE, &Keys::legend(), width, room)
 }
 
+/// What the bottom of the sidebar lists in the legend's place while a key
+/// waits for the next, or `v` or `V` lasts: `keys`, each the keys and what
+/// they do, under a rule that names them `title`, as `legend` lists its own.
+/// Each that is one key is a spot that presses it.
+pub fn shortcuts(
+    title: &str,
+    keys: &[(Label, &str)],
+    width: usize,
+    room: usize,
+) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+    let inner = width.saturating_sub(1);
+    let spelled: Vec<String> = keys.iter().map(|(label, _)| label.to_string()).collect();
+    let column = spelled.iter().map(|spelled| spelled.width()).max().unwrap_or(0);
+    let rows = keys.iter().zip(&spelled).map(|((label, does), spelled)| {
+        (keys_line_of(spelled, column, does, inner), label.pressed())
+    });
+    fitted(title, rows.collect(), width, room)
+}
+
 /// What the bottom of the sidebar lists in the legend's place while `y` waits
 /// for what to yank, as `legend` lists it.
 pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
@@ -2705,15 +2904,132 @@ fn listed(
     width: usize,
     room: usize,
 ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    let mut lines = Vec::with_capacity(room);
-    if room == 0 {
-        return (lines, Spots::default());
-    }
-    lines.push(rule(title, "", width));
     let inner = width.saturating_sub(1);
-    lines.extend(entries.iter().map(|entry| entry_line(entry, inner)).take(room - 1));
-    let spots = entry_spots(entries, width).first(lines.len() - 1).down(1);
+    let line = |entry: &Entry| {
+        (entry_line(entry, inner), Some(KeyEvent::from(KeyCode::Char(entry.key()))))
+    };
+    fitted(title, entries.iter().map(line).collect(), width, room)
+}
+
+/// `rows` under a rule that names them `title`, `width` wide, in `room` lines
+/// at most, each a spot that presses its key, where it has one, by its line
+/// among them. Short of room, the last line says that `ALL_KEYS` lists the
+/// rest, and is a spot that presses it; and short of a line for the rule
+/// too, it is all there is.
+fn fitted(
+    title: &str,
+    rows: Vec<(Line<'static>, Option<KeyEvent>)>,
+    width: usize,
+    room: usize,
+) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+    let mut lines = Vec::with_capacity(room);
+    let mut spots = Spots::default();
+    if room == 0 {
+        return (lines, spots);
+    }
+    let all = rows.len() < room;
+    if all || room >= 2 {
+        lines.push(rule(title, "", width));
+    }
+    let shown = if all { rows.len() } else { room.saturating_sub(2) };
+    for (line, pressed) in rows.into_iter().take(shown) {
+        if let Some(pressed) = pressed {
+            spots.add(lines.len(), 0..width, pressed);
+        }
+        lines.push(line);
+    }
+    if !all {
+        spots.add(lines.len(), 0..width, KeyEvent::from(KeyCode::Char(ALL_KEYS)));
+        lines.push(all_keys_line(width.saturating_sub(1)));
+    }
     (lines, spots)
+}
+
+/// Every key luneta has, as `ALL_KEYS` lists them at the bottom of the
+/// sidebar, in groups: the moves and folds at the top of the sidebar, its
+/// commands, the menu's keys, and those luneta takes before zellij. And how
+/// far down the list is scrolled.
+#[derive(Debug, Default)]
+pub struct AllKeys {
+    /// The first line of the list on screen.
+    first: usize,
+    /// How many lines of the list it had on screen when drawn last, for
+    /// `scroll` to stop at its end.
+    room: Cell<usize>,
+}
+
+impl AllKeys {
+    /// Each group, its name and its keys, each the keys and what they do.
+    fn groups() -> [(&'static str, Vec<(String, String)>); 4] {
+        let named = |keys: &[(Label, &str)]| -> Vec<(String, String)> {
+            keys.iter().map(|(label, does)| (label.to_string(), (*does).to_owned())).collect()
+        };
+        let anywhere =
+            host::ANYWHERE.map(|((code, modifiers), does)| (Label::Key(code, modifiers), does));
+        let mut sidebar: Vec<(String, String)> = Command::ALL
+            .into_iter()
+            .map(|command| (command.key().to_string(), command.does().to_owned()))
+            .collect();
+        sidebar.push((format!("{YANK} {YANK_PULL}"), format!("{YANK_NAME} {YANK_PULL_DOES}")));
+        let mut menu = Vec::new();
+        for entry in Keys::every(None) {
+            entry.spelled("", &mut menu);
+        }
+        menu.extend(named(&MENU_MOVES));
+        [
+            ("Move", named(&MOVES)),
+            ("Sidebar", sidebar),
+            ("Menu", menu),
+            ("Anywhere", named(&anywhere)),
+        ]
+    }
+
+    /// The lines of the whole list, `width` wide: each group's name, and its
+    /// keys under it, what they do in a column of the group's own.
+    fn rows(width: usize) -> Vec<Line<'static>> {
+        let inner = width.saturating_sub(1);
+        let bold = Style::new().add_modifier(Modifier::BOLD);
+        let mut rows = Vec::new();
+        for (name, keys) in AllKeys::groups() {
+            rows.push(Line::from(vec![Span::raw(" "), Span::styled(name, bold)]));
+            let column = keys.iter().map(|(keys, _)| keys.width()).max().unwrap_or(0);
+            rows.extend(keys.iter().map(|(keys, does)| keys_line_of(keys, column, does, inner)));
+        }
+        rows
+    }
+
+    /// Scrolls the list `by` lines down, or up, as far as its last line at
+    /// the bottom, as last drawn, and its first at the top.
+    pub fn scroll(&mut self, by: isize) {
+        let last = AllKeys::rows(0).len().saturating_sub(self.room.get());
+        self.first = self.first.min(last).saturating_add_signed(by).min(last);
+    }
+
+    /// The list, `width` wide, in `room` lines at most: under a rule that
+    /// names it, and says how far down it is where it has more than shows,
+    /// as many of its lines as fit from the first scrolled to, and the keys
+    /// it takes, each a spot that presses it.
+    pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
+        let rows = AllKeys::rows(width);
+        let body = room.saturating_sub(2);
+        self.room.set(body);
+        let first = self.first.min(rows.len().saturating_sub(body));
+        let shown = rows.len().min(first + body);
+        let right =
+            if rows.len() > body { format!("{shown}/{}", rows.len()) } else { String::new() };
+        let mut lines = Vec::with_capacity(room);
+        if room >= 2 {
+            lines.push(rule(ALL_KEYS_DOES, &right, width));
+        }
+        lines.extend(rows.into_iter().skip(first).take(body));
+        if room == 0 {
+            return (lines, Spots::default());
+        }
+        let (keys, spots) = keyed(width, &[(Hint::Moves, "Scroll"), (Hint::Esc, "Close")]);
+        let at = lines.len();
+        lines.push(keys);
+        (lines, spots.down(at))
+    }
 }
 
 /// A spot on the line of each of `entries`, `width` wide, one to a line, that
@@ -2757,37 +3073,37 @@ pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
 /// and what it does.
 fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
     let key = entry.key().to_string();
+    let Entry::Group { name, .. } = entry else {
+        return keys_line_of(&key, key.width(), &entry.does(), inner);
+    };
     let room = inner.saturating_sub(key.width() + GAP);
-    let mut spans = vec![
+    Line::from(vec![
         Span::raw(" "),
         Span::styled(key, Style::new().fg(ACCENT)),
         Span::raw(" ".repeat(GAP)),
-    ];
-    let does = |does: &str| Span::styled(sidebar::cut(does, room), Style::new().fg(NAME));
-    match entry {
-        Entry::Group { name, .. } => {
-            spans.push(Span::raw(sidebar::cut(name, room.saturating_sub(1 + GROUP.width()))));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(GROUP, Style::new().fg(TAG)));
-        },
-        Entry::Start { skill, .. } => spans.push(does(&format!("/{skill}"))),
-        Entry::Last(last) => spans.push(does(last.does())),
-        Entry::Checks => spans.push(does(CHECKS_DOES)),
-        Entry::New(new) => spans.push(does(new.does())),
-        Entry::Turn(turning) => spans.push(does(turning.does())),
-        Entry::Tab { name, .. } => spans.push(does(name)),
-        Entry::Close { scope, .. } => spans.push(does(scope.does())),
-        Entry::Prune { .. } => spans.push(does(DELETE_MERGED_DOES)),
-        Entry::Forget(_) => spans.push(does(FORGET_DOES)),
-        Entry::Brief(scope) => spans.push(does(scope.does())),
-        Entry::Command(command) => spans.push(does(command.does())),
-        Entry::YankPull => spans.push(does(YANK_PULL_DOES)),
-        Entry::Pull(pull, asks) => spans.push(does(&pull.does(*asks))),
-        Entry::Search => spans.push(does(SEARCH_DOES)),
-        Entry::Ask => spans.push(does(ASK_DOES)),
-        Entry::Issue => spans.push(does(ISSUE_DOES)),
-    }
-    Line::from(spans)
+        Span::raw(sidebar::cut(name, room.saturating_sub(1 + GROUP.width()))),
+        Span::raw(" "),
+        Span::styled(GROUP, Style::new().fg(TAG)),
+    ])
+}
+
+/// A line of a list of keys, `inner` wide past the space it starts with: the
+/// keys, in a column `column` wide, and what they do.
+fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'static> {
+    let room = inner.saturating_sub(column + GAP);
+    let pad = column.saturating_sub(keys.width()) + GAP;
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(keys.to_owned(), Style::new().fg(ACCENT)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(sidebar::cut(does, room), Style::new().fg(NAME)),
+    ])
+}
+
+/// The line a list of keys short of room ends with, `inner` wide past the
+/// space it starts with: `ALL_KEYS`, which lists those it left out.
+fn all_keys_line(inner: usize) -> Line<'static> {
+    keys_line_of(&ALL_KEYS.to_string(), 1, ALL_KEYS_DOES, inner)
 }
 
 /// The line under the keys that start agents, `inner` wide past the space it
@@ -3084,6 +3400,27 @@ mod tests {
     /// The text of each line.
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
+    }
+
+    /// The list of every key names each key the top of the sidebar moves,
+    /// folds or opens with, as `Top::moves` takes it, and none it does not:
+    /// but `y`, which the Sidebar group names with what it yanks.
+    #[test]
+    fn the_list_of_every_key_names_the_moves_of_the_top() {
+        let named: Vec<char> = MOVES
+            .iter()
+            .flat_map(|(label, _)| match *label {
+                Label::Key(KeyCode::Char(c), _) => vec![c],
+                Label::Two(first, second) => vec![first, second],
+                Label::Key(..) => Vec::new(),
+            })
+            .collect();
+        for c in &named {
+            assert!(Top::moves(*c).is_some(), "{c:?}");
+        }
+        for c in (' '..='~').filter(|c| *c != YANK && Top::moves(*c).is_some()) {
+            assert!(named.contains(&c), "{c:?}");
+        }
     }
 
     #[test]
