@@ -120,12 +120,16 @@ pub fn follow(core: SyncSender<core::Command>, sweep: Duration) -> io::Result<()
                     },
                 }
             }
-            let next = wanted
-                .keys()
-                .filter(|branch| !fetching.contains(*branch))
-                .filter_map(|branch| last(branch)?.due(sweep))
-                .map(|due| due.saturating_duration_since(now))
-                .fold(LOOK, Duration::min);
+            let next = if fetching.len() >= AT_ONCE {
+                LOOK
+            } else {
+                wanted
+                    .keys()
+                    .filter(|branch| !fetching.contains(*branch))
+                    .filter_map(|branch| last(branch)?.due(sweep))
+                    .map(|due| due.saturating_duration_since(now))
+                    .fold(LOOK, Duration::min)
+            };
             match finished.recv_timeout(next) {
                 Ok(one) => ended.push(one),
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {},

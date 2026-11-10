@@ -1541,7 +1541,66 @@ pub fn followed(dir: &str) -> Result<(), String> {
 /// found of it, or why it did not.
 pub fn fetched_upstream(dir: &str, branch: &str) -> Result<Upstream, String> {
     git_reads(dir)?;
+    reaches_as_the_user_does(dir)?;
     wt::cmd::follow::fetch_upstream(Path::new(dir), branch).map_err(|error| format!("{error:#}"))
+}
+
+/// The keys of git's config that name a command git runs as it reaches a
+/// remote, or that let a remote's URL name one.
+const REACHES: &str = concat!(
+    r"^(core\.(sshcommand|gitproxy|askpass|alternaterefscommand)",
+    r"|credential\..*helper|remote\..*\.uploadpack|protocol\.(.*\.)?allow)$",
+);
+
+/// Why git is not to reach the remote of the repository `dir` is in, where
+/// that repository's own config sets how, as one in a folder unpacked from
+/// anywhere can: what it names would run as it was fetched.
+fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
+    let mut git = Command::new("git");
+    git::local(git.args(["-C", dir, "config", "-z", "--show-scope", "--get-regexp", REACHES]))
+        .env("LC_ALL", "C");
+    let ran = program::run(&mut git, ANSWER)
+        .map_err(|error| format!("git config could not be run: {error}"))?;
+    if let Ran::Ended { status, stderr, .. } = &ran
+        && status.code() == Some(1)
+        && stderr.is_empty()
+    {
+        return Ok(());
+    }
+    let listed = ran
+        .answer()
+        .map_err(|why| format!("git config did not say how git reaches the remote: {why}"))?;
+    let listed = String::from_utf8_lossy(&listed);
+    let own = own_keys(&listed);
+    if own.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the repository's own config sets {}, which would run as git reached the remote, and \
+         lunetad fetches by no repository's own way",
+        own.join(", ")
+    ))
+}
+
+/// The keys of `listed`, as `git config -z --show-scope --get-regexp` lists
+/// them, that the repository's own config sets to anything: one set to
+/// nothing, as `credential.helper` is to forget the helpers before it, names
+/// nothing to run.
+fn own_keys(listed: &str) -> Vec<&str> {
+    let fields: Vec<&str> = listed.split('\0').collect();
+    let mut keys: Vec<&str> = fields
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|[scope, _]| matches!(*scope, "local" | "worktree"))
+        .filter_map(|[_, set]| match set.split_once('\n') {
+            Some((_, "")) => None,
+            Some((key, _)) => Some(key),
+            None => Some(*set),
+        })
+        .collect();
+    keys.dedup();
+    keys
 }
 
 /// Each of what wt finds of an upstream branch, for `upstream_of_word`.
@@ -2042,6 +2101,30 @@ mod tests {
             Some("wt add: wt cannot fetch origin/feat, run git fetch origin feat")
         );
         assert_eq!(failure("  pull  #1\n"), None);
+    }
+
+    /// How git reaches a remote stops a fetch only where the repository's
+    /// own config sets it to something: not where the user's config does, or
+    /// lunetad's environment.
+    #[test]
+    fn only_the_repository_s_own_way_of_reaching_a_remote_stops_a_fetch() {
+        let listed = "global\0credential.https://github.com.helper\n\0\
+                      global\0credential.https://github.com.helper\n!gh auth git-credential\0\
+                      command\0core.sshcommand\nssh -i key\0\
+                      local\0credential.helper\n\0\
+                      local\0core.sshcommand\nssh -i other\0\
+                      worktree\0remote.my origin.uploadpack\ngit-upload-pack\0\
+                      local\0protocol.allow\0";
+        let own = ["core.sshcommand", "remote.my origin.uploadpack", "protocol.allow"];
+        assert_eq!(own_keys(listed), own);
+        let scratch = tempfile::tempdir().unwrap();
+        let tree = scratch.path().join("tree");
+        let tree = tree.to_str().unwrap();
+        assert!(git(scratch.path(), &["init", "-q", "-b", "main", tree]).is_some());
+        assert_eq!(reaches_as_the_user_does(tree), Ok(()));
+        assert!(git(tree, &["config", "core.sshCommand", "ssh -i other"]).is_some());
+        let refused = reaches_as_the_user_does(tree).unwrap_err();
+        assert!(refused.contains("sets core.sshcommand,"), "{refused}");
     }
 
     /// What a daemon is asked for a paste names a link, and the panes of its

@@ -1227,6 +1227,45 @@ fn the_behind_count_is_of_what_the_remote_has() {
     assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
 }
 
+/// The daemon fetches no upstream by a way of reaching its remote that the
+/// repository's own config names, as `core.sshCommand`, which git would run,
+/// and says why once.
+#[test]
+fn the_fetch_runs_no_command_a_repository_names() {
+    let host = Host::new();
+    let dirs = tempfile::tempdir().unwrap();
+    let path = |name: &str| dirs.path().join(name);
+    let (origin, tree, elsewhere, ran) =
+        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    fs::create_dir(&origin).unwrap();
+    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
+    let spelled = |dir: &Path| dir.display().to_string();
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    commit(&elsewhere, "README", "start\n");
+    assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
+    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
+    assert!(git(&tree, &["config", "remote.origin.url", "ssh://nowhere.invalid/x"]));
+    let named = format!("touch '{}'; :", ran.display());
+    assert!(git(&tree, &["config", "core.sshCommand", &named]));
+
+    let cwd = spelled(&tree);
+    host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
+    let _work = host.serve("work");
+    let _daemon = start(host.vars()).unwrap();
+    let log = host.home.path().join(".local/state/luneta/luneta.log");
+    let refused = format!("git did not fetch the upstream of main in {cwd}");
+    let why = |line: &str| line.contains(&refused) && line.contains("core.sshcommand");
+    eventually("the log says why the branch was not fetched", || {
+        fs::read_to_string(&log).ok().filter(|log| log.lines().any(why))
+    });
+    assert!(!ran.exists(), "the fetch ran the command the repository named");
+    let said = fs::read_to_string(&log).unwrap();
+    assert_eq!(said.matches(&refused).count(), 1, "{said}");
+    // As it would have, let reach the remote.
+    let _ = git(&tree, &["ls-remote", "origin"]);
+    assert!(ran.exists(), "git runs no command the repository names here");
+}
+
 /// gh is asked for the pull request of the branch checked out where each pane
 /// works: once for a branch of a repository, however many of its directories
 /// panes work in, and at once as a pane comes to a branch. What gh found of a

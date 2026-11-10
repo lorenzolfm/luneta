@@ -971,7 +971,10 @@ remote-tracking ref only where no commit is lost, so a rewrite still moves on
 `r`. Nothing in `core.hooksPath` or `core.fsmonitor` runs for it, nor
 maintenance or a submodule's fetch, and it asks for no password: a remote that
 wants one, is gone, or takes more than a minute fails, and lunetad's log says so
-once while it keeps failing. A branch whose upstream the remote deleted, as a
+once while it keeps failing. Nor is a repository fetched whose own config, and
+not yours, sets how git reaches its remote, as `core.sshCommand`, a credential
+helper or `protocol.allow` do, as what they name would run: the log says so
+once. A branch whose upstream the remote deleted, as a
 merged pull request's, is said once in the log and not fetched again while a
 pane works on it; its count is of what the remote had last. A branch whose
 upstream is not a remote-tracking ref, as a fork's `refs/pull/N/head`, shows no
@@ -1864,7 +1867,7 @@ that was up, without a sound.
 | [`zoxide`](https://github.com/ajeetdsouza/zoxide) | optional | the directory list, and the clone of a pasted pull request's or issue's repository that no session works in |
 | [`wt`](https://github.com/lorenzolfm/wt) | optional | the clone a worktree of a pull request, an issue or a `.md` file you paste in [luneta's sidebar](#luneta-in-your-terminal) is made in, which `wt clone` makes, and the links of the files git ignores there, which wt's hook makes. luneta makes the worktree with wt's code, which it is built with, so `wt` needn't be on the `PATH` |
 | [`eza`](https://github.com/eza-community/eza) | optional | the directory preview |
-| [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal) |
+| [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal), and, from 2.41, the fetch that keeps its count behind of what the remote has |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), with the mark of its checks, the logs `c c` hands an agent, the issue of a link you paste there, and the issues `i` files |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
 | the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
