@@ -75,7 +75,7 @@ use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
 use crate::close::Act;
-use crate::desktop::{self, Desktop, Reader};
+use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::drops::{Dropped, Drops, SOON, TOO_MANY};
 use crate::due::Due;
@@ -231,6 +231,10 @@ pub enum Event {
     Alerted(alerts::Read),
     /// You clicked the notification of this agent.
     Clicked(alerts::Key),
+    /// You clicked the notification of an issue the issue box sent, which
+    /// does this. The Notification Center of macOS does it on its own.
+    #[cfg(not(target_os = "macos"))]
+    IssueClicked(desktop::Click),
     /// What came of the lock that the luneta of this machine that puts the
     /// notifications up holds, or of another luneta of the machine.
     Peers(peers::Heard),
@@ -1370,6 +1374,16 @@ impl App {
                 }
             },
             Event::Clicked(key) => self.clicked(&key),
+            #[cfg(not(target_os = "macos"))]
+            Event::IssueClicked(desktop::Click::Open(link)) => {
+                if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
+                    self.sidebar.notify(why);
+                }
+            },
+            #[cfg(not(target_os = "macos"))]
+            Event::IssueClicked(desktop::Click::Raise) => {
+                desktop::raise(self.sidebar.terminal_title());
+            },
             Event::Peers(heard) => {
                 if self.desktop.heard(heard, self.focused) {
                     let acts = self.alerts.again();
@@ -1459,6 +1473,7 @@ impl App {
             },
             Event::Filed { number, repository, to, words, filed } => {
                 self.sidebar.filed(number, &to.to_string(), &filed);
+                self.desktop.tell(Told::issue(&to.to_string(), &filed));
                 match filed {
                     Ok(filed) => {
                         clip(terminal, ClipboardType::Clipboard, filed.url())?;

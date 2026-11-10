@@ -1543,6 +1543,15 @@ again, but look on GitHub before you send them. `Esc` closes the box and sends
 nothing, and keeps the words it opened with as you left them; `Ctrl u` and then
 `Esc` drops them.
 
+Your desktop says it too, with a [notification](#notifications) from the luneta
+you filed it in, whether or not its window has the focus: `Filed #362 in
+lorenzolfm/luneta` and the issue's title, which a click opens in your browser;
+or `No issue filed in lorenzolfm/luneta`, or that one may be filed, and why,
+with a sound, which a click brings luneta's window forward for, where `i` has
+your words. On macOS the Notification Center does what a click asks on its own,
+so one left up after luneta ends still opens the issue there; on Linux, luneta
+takes it down as it ends. A luneta that runs over ssh says it in the notes only.
+
 luneta has `gh` list the names of the labels of the repository on GitHub it goes
 to, and the last five issues you filed there, telling each `gh` that repository,
 and hands them, with what you said, to `claude -p --model sonnet`, on your
@@ -1853,7 +1862,8 @@ the one whose window had the focus last. A luneta that runs over ssh puts none
 up, as the desktop of the machine it runs on is not the one you sit at, nor
 does any while no luneta runs. luneta takes down what it put up as it ends, its
 window closed too, and another luneta of the machine puts up again each wait
-that was up, without a sound.
+that was up, without a sound. An issue the [issue box](#file-an-issue) filed,
+or did not, has its own notification.
 
 ## Getting started
 
