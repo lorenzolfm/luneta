@@ -115,10 +115,25 @@
           ];
           speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
 
-          libghosttyVt = pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
-            optimize = "ReleaseFast";
-            revision = ghostty.shortRev;
+          ghosttyRevs = {
+            "0.2.2" = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
           };
+          ghosttySys =
+            pkgs.lib.findFirst (crate: crate.name == "libghostty-vt-sys")
+              (throw "Cargo.lock has no libghostty-vt-sys")
+              (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
+          ghosttySysRev =
+            ghosttyRevs.${ghosttySys.version}
+              or (throw "ghosttyRevs has no commit for libghostty-vt-sys ${ghosttySys.version}");
+          libghosttyVt =
+            pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
+              "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
+              (
+                pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
+                  optimize = "ReleaseSafe";
+                  revision = ghostty.shortRev;
+                }
+              );
 
           # ggml builds for the CPU it is built on, with -march=native, which nix's
           # compiler drops, as what a derivation makes must not hang on the machine
