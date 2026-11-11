@@ -11,7 +11,7 @@ use crate::mux::{Laid, Mux, SessionName};
 /// dumps them; or why zellij did not.
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
     let pane = pane.map_or_else(|| focused(session), Ok)?;
-    Ok((pane, Mux::Zellij.screen_dumped(session, pane)?))
+    Ok((pane, Mux::Zellij(session).screen_dumped(pane)?))
 }
 
 /// The terminal of `session` a client coming there would be on, as zellij
@@ -19,7 +19,7 @@ pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String),
 /// first, a tiled one before one floating. zellij says which tab a session
 /// is on only while a client is on it.
 fn focused(session: &SessionName) -> Result<u32, String> {
-    let laid = Mux::Zellij.laid(session)?;
+    let laid = Mux::Zellij(session).laid()?;
     shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
 }
 

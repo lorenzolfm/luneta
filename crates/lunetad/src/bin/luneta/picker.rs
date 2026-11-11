@@ -342,7 +342,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Rename { on, from, to } => {
                 let renamed = match &on {
-                    Machine::Local => Mux::Zellij.renamed(&from, &to),
+                    Machine::Local => Mux::Zellij(&from).renamed(&to),
                     Machine::Remote(destination) => {
                         reach(destination).and_then(|mut away| away.rename(&from, &to))
                     },

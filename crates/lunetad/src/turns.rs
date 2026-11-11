@@ -136,7 +136,7 @@ pub struct OtherTab {
 /// The tabs of `session` other than that of its terminal `pane`, in their
 /// order, as zellij lists its panes now, or why it does not say.
 pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
-    others(&Mux::Zellij.laid(session)?, pane)
+    others(&Mux::Zellij(session).laid()?, pane)
 }
 
 /// The tabs among `laid` other than that of the terminal `pane`, in their
@@ -178,7 +178,7 @@ impl Leaving {
     /// What runs in it runs on either way.
     pub fn turn(&self, session: &SessionName) -> Result<(), String> {
         let tab = new_tab(session, self.name.as_deref())?;
-        let laid = Mux::Zellij.laid(session)?;
+        let laid = Mux::Zellij(session).laid()?;
         let stand_ins: Vec<PaneId> =
             terminals(&laid, tab).into_iter().map(PaneId::Terminal).collect();
         let moved = self.pane();
@@ -201,7 +201,7 @@ pub fn pane_leaving(
     pane: u32,
 ) -> Result<Option<Leaving>, String> {
     same_session(session, started)?;
-    let laid = Mux::Zellij.laid(session)?;
+    let laid = Mux::Zellij(session).laid()?;
     let name = leaving(&laid, pane)?;
     let fullscreen = fullscreen_of(&laid, terminal(&laid, pane)?.tab_id)
         .filter(|it| *it != PaneId::Terminal(pane));
@@ -254,7 +254,7 @@ pub fn panes_moving(
     beside: u32,
 ) -> Result<Moving, String> {
     same_session(session, started)?;
-    moving(&Mux::Zellij.laid(session)?, pane, beside)
+    moving(&Mux::Zellij(session).laid()?, pane, beside)
 }
 
 /// Moves the panes of the tab of the terminal `pane` of `session`, the one that
@@ -361,10 +361,10 @@ fn fullscreen_of(laid: &[Laid], tab: TabId) -> Option<PaneId> {
 /// that. Not one that is gone, or that still is, nor while a client is on another
 /// pane of its tab, whom zellij would move to it.
 pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), String> {
-    if !ended_fullscreen(&Mux::Zellij.laid(session)?, &clients_of(session)?, pane) {
+    if !ended_fullscreen(&Mux::Zellij(session).laid()?, &clients_of(session)?, pane) {
         return Ok(());
     }
-    Ok(Mux::Zellij.fullscreen_toggled(session, pane)?)
+    Ok(Mux::Zellij(session).fullscreen_toggled(pane)?)
 }
 
 /// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
@@ -416,12 +416,12 @@ fn no_room(pane: PaneId, tab: TabId) -> String {
 
 /// Whether a client is in `session`, as zellij lists them now.
 fn has_client(session: &SessionName) -> Result<bool, String> {
-    Ok(Mux::Zellij.has_clients(session)?)
+    Ok(Mux::Zellij(session).has_clients()?)
 }
 
 /// The clients in `session`, as zellij lists them now.
 fn clients_of(session: &SessionName) -> Result<Listed, String> {
-    Ok(Mux::Zellij.clients(session)?)
+    Ok(Mux::Zellij(session).clients()?)
 }
 
 /// Has zellij open a tab for a pane in `session`, named `name` or as zellij
@@ -429,7 +429,7 @@ fn clients_of(session: &SessionName) -> Result<Listed, String> {
 /// pane closing cut its answer short has a second open beside it, and ends on
 /// its own with its stand-in.
 fn new_tab(session: &SessionName, name: Option<&str>) -> Result<TabId, String> {
-    Ok(Mux::Zellij.tab_opened_once_heard(session, name, &STAND_IN)?)
+    Ok(Mux::Zellij(session).tab_opened_once_heard(name, &STAND_IN)?)
 }
 
 /// Moves `pane` to the tab `to` of `session`, by stacking it on a stand-in
@@ -447,7 +447,7 @@ fn over_stand_in(session: &SessionName, pane: PaneId, to: TabId) -> Result<Lande
 /// not show: that one has a second open beside it, which ends on its own.
 fn open_stand_in(session: &SessionName, to: TabId, name: &str) -> Result<PaneId, String> {
     let found = || found_stand_in(session, to, name);
-    Ok(PaneId::Terminal(Mux::Zellij.pane_opened_once_heard(session, to, name, &STAND_IN, found)?))
+    Ok(PaneId::Terminal(Mux::Zellij(session).pane_opened_once_heard(to, name, &STAND_IN, found)?))
 }
 
 /// The newest stand-in named `name` in the tab `to` of `session`, as zellij lists
@@ -455,7 +455,7 @@ fn open_stand_in(session: &SessionName, to: TabId, name: &str) -> Result<PaneId,
 fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
     let deadline = Instant::now() + FINDING;
     loop {
-        let listed = Mux::Zellij.laid(session).unwrap_or_default();
+        let listed = Mux::Zellij(session).laid().unwrap_or_default();
         let is_it = |it: &&Laid| it.tab_id == to && it.title == name;
         if let Some(id) = listed.iter().filter(is_it).filter_map(|it| it.pane.terminal()).max() {
             return Some(id);
@@ -470,7 +470,7 @@ fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
 /// Has zellij close the stand-in `pane` of `session`. What came of the move
 /// stands whether it does: a stand-in ends on its own, and closes as it does.
 fn close_stand_in(session: &SessionName, pane: PaneId) {
-    let _ = Mux::Zellij.pane_closed(session, pane, Asks::OnceReached);
+    let _ = Mux::Zellij(session).pane_closed(pane, Asks::OnceReached);
 }
 
 /// Has zellij stack `moved` on the first of `stand_ins`, in the tab `tab` of
@@ -520,7 +520,7 @@ fn stacked(
     let on_it = |clients: Listed| clients.iter().any(|it| it.pane == moved);
     if !clients_of(session).is_ok_and(on_it) {
         stack(session, [root, moved, NOWHERE])?;
-        let listed = Mux::Zellij.laid(session)?;
+        let listed = Mux::Zellij(session).laid()?;
         match landed(&listed, moved, tab) {
             Landed::There => return Ok(Stacked { listed, unfocused: true }),
             Landed::Gone => return Ok(Stacked { listed, unfocused: false }),
@@ -528,7 +528,7 @@ fn stacked(
         }
     }
     stack(session, [root, moved])?;
-    Ok(Stacked { listed: Mux::Zellij.laid(session)?, unfocused: false })
+    Ok(Stacked { listed: Mux::Zellij(session).laid()?, unfocused: false })
 }
 
 /// Has zellij stack a second stand-in in the tab `tab` of `session` under the pane
@@ -549,17 +549,17 @@ fn under_stack(session: &SessionName, root: PaneId, tab: TabId) -> Option<PaneId
 /// Has zellij stack `panes` on the first of them, each from whatever tab it is
 /// in. It stacks nothing where it has no room, and says nothing of it.
 fn stack<const N: usize>(session: &SessionName, panes: [PaneId; N]) -> Result<(), String> {
-    Ok(Mux::Zellij.panes_stacked(session, panes)?)
+    Ok(Mux::Zellij(session).panes_stacked(panes)?)
 }
 
 /// Closes the tab `from`, which the panes of `session` left, where zellij
 /// keeps it: it closes one as it next draws for a client, and with none it
 /// lists it on with nothing in it. One that has panes in it by now stays.
 fn close_emptied(session: &SessionName, from: TabId) -> Result<(), String> {
-    if has_client(session)? || Mux::Zellij.laid(session)?.iter().any(|it| it.tab_id == from) {
+    if has_client(session)? || Mux::Zellij(session).laid()?.iter().any(|it| it.tab_id == from) {
         return Ok(());
     }
-    Ok(Mux::Zellij.tab_closed(session, from, Asks::OnceReached)?)
+    Ok(Mux::Zellij(session).tab_closed(from, Asks::OnceReached)?)
 }
 
 #[cfg(test)]

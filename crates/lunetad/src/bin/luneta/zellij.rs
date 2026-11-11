@@ -321,7 +321,7 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
     let Some(pane) = here.pane() else {
         return false;
     };
-    let Ok(laid) = Mux::Zellij.laid(session) else {
+    let Ok(laid) = Mux::Zellij(session).laid() else {
         return true;
     };
     laid.iter().filter(|listed| listed.pane == PaneId::Terminal(pane)).any(|listed| {
@@ -546,7 +546,7 @@ pub fn taken(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<()
         return pane.map_or(Ok(()), |pane| focused(at, PaneId::Terminal(pane)));
     }
     let before = clients_on_panes(to)?;
-    Mux::Zellij.went(at, to, pane)?;
+    Mux::Zellij(at).went(to, pane)?;
     let new = |client: &mux::Client| before.iter().all(|was| was.id != client.id);
     let came = seen(to, |clients| clients.iter().copied().find(new));
     let came = came.ok_or_else(|| UNMOVED.to_owned())?;
@@ -563,7 +563,7 @@ pub fn taken(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<()
 /// `UNMOVED` says, or as zellij said. It is asked again where a pane closing kept
 /// it from asking, as a turn's stand-ins do just before it takes a client back.
 pub fn focused(session: &SessionName, pane: PaneId) -> Result<(), String> {
-    Mux::Zellij.pane_focused(session, pane)?;
+    Mux::Zellij(session).pane_focused(pane)?;
     let on = |clients: &[mux::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
@@ -579,7 +579,7 @@ pub fn focused(session: &SessionName, pane: PaneId) -> Result<(), String> {
 /// is on, can fail.
 pub fn made(at: &SessionName, to: &SessionName, cwd: &Directory) -> Result<(), String> {
     let asked = SystemTime::now();
-    Mux::Zellij.started(at, to, Some(cwd))?;
+    Mux::Zellij(at).started(to, Some(cwd))?;
     match made_since(to, asked, START) {
         Some(true) => Ok(()),
         Some(false) => Err(format!("{to} ran already, so zellij made none")),
@@ -1091,7 +1091,7 @@ pub fn clients(session: &SessionName) -> Result<Vec<Client>, String> {
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
 pub fn clients_on_panes(session: &SessionName) -> Result<mux::Listed, String> {
-    Ok(Mux::Zellij.clients(session)?)
+    Ok(Mux::Zellij(session).clients()?)
 }
 
 /// What luneta asks of zellij once an action has run.
@@ -1273,9 +1273,9 @@ impl There {
         match action {
             Action::Go { at, to, pane, .. } => match self {
                 There::Away(away) => away.go(&at, &to, pane),
-                There::Here => Ok(Mux::Zellij.went(&at, &to, pane)?),
+                There::Here => Ok(Mux::Zellij(&at).went(&to, pane)?),
             },
-            Action::Start { at, to, cwd } => Ok(Mux::Zellij.started(&at, &to, cwd.as_ref())?),
+            Action::Start { at, to, cwd } => Ok(Mux::Zellij(&at).started(&to, cwd.as_ref())?),
         }
     }
 }

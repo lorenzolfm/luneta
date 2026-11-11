@@ -28,7 +28,7 @@ pub enum Closes {
 /// What closing the terminal `pane` of `session` closes, as zellij lists the
 /// session's panes now, or why it closes nothing.
 pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
-    closing(&Mux::Zellij.laid(session)?, pane)
+    closing(&Mux::Zellij(session).laid()?, pane)
 }
 
 /// What closing the terminal `pane` closes among `laid`, the panes of its
@@ -57,7 +57,7 @@ pub enum Closing {
 /// What closing the terminals `panes` of `session` closes, together, as
 /// zellij lists the session's panes now, or why it closes nothing.
 pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    together(&Mux::Zellij.laid(session)?, panes)
+    together(&Mux::Zellij(session).laid()?, panes)
 }
 
 /// What closing the terminals `panes` closes among `laid`, the panes of their
@@ -155,12 +155,12 @@ pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result
 /// now, stays. zellij closes nothing on a condition of its own: what changes
 /// between the list and the close goes with it.
 pub(crate) fn closed_as_listed(session: &SessionName, close: &Close) -> Result<(), String> {
-    still(&Mux::Zellij.laid(session)?, close)?;
+    still(&Mux::Zellij(session).laid()?, close)?;
     match close {
         Close::Pane(pane) => {
-            Mux::Zellij.pane_closed(session, PaneId::Terminal(*pane), Asks::Once)?;
+            Mux::Zellij(session).pane_closed(PaneId::Terminal(*pane), Asks::Once)?;
         },
-        Close::Tab { id, .. } => Mux::Zellij.tab_closed(session, *id, Asks::Once)?,
+        Close::Tab { id, .. } => Mux::Zellij(session).tab_closed(*id, Asks::Once)?,
     }
     Ok(())
 }
@@ -216,7 +216,7 @@ const SETTLING: Duration = Duration::from_millis(100);
 pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> {
     same_session(session, started)?;
     let folder = Zellij::socket_folder();
-    Mux::Zellij.session_killed(session)?;
+    Mux::Zellij(session).session_killed()?;
     settled(session, started, &folder)
 }
 
@@ -262,7 +262,7 @@ pub fn running_in(folder: &SocketFolder) -> Result<Vec<(SessionName, SystemTime)
 /// Has zellij let go of `session`, one that ended, which then cannot be
 /// brought back, or says why it did not. zellij keeps one that runs.
 pub fn deleted(session: &SessionName) -> Result<(), String> {
-    Ok(Mux::Zellij.session_deleted(session)?)
+    Ok(Mux::Zellij(session).session_deleted()?)
 }
 
 #[cfg(test)]

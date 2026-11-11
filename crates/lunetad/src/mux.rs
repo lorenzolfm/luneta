@@ -31,10 +31,11 @@ pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
 
-/// A multiplexer luneta has its sessions in.
+/// A session of a multiplexer's that luneta has its sessions in, by what that
+/// multiplexer finds it by: zellij by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mux {
-    Zellij,
+pub enum Mux<'a> {
+    Zellij(&'a SessionName),
 }
 
 /// A pane of a multiplexer's, as the variables of what runs in it name it.
@@ -104,218 +105,193 @@ pub struct ClientWords {
     pub unset: &'static [&'static str],
 }
 
-impl Mux {
-    /// The panes of `session` as it lays them out now, the plugins' you can
+impl Mux<'_> {
+    /// The panes of the session as it lays them out now, the plugins' you can
     /// go to too.
-    pub fn laid(self, session: &SessionName) -> Result<Vec<Laid>, Failure> {
+    pub fn laid(self) -> Result<Vec<Laid>, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::laid(session),
+            Mux::Zellij(session) => zellij::cli::laid(session),
         }
     }
 
-    /// Every pane of `session` as it lays them out now, the bars too, asked
+    /// Every pane of the session as it lays them out now, the bars too, asked
     /// once.
-    pub fn panes_listed(self, session: &SessionName) -> Result<Vec<Laid>, Failure> {
+    pub fn panes_listed(self) -> Result<Vec<Laid>, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::panes_listed(session),
+            Mux::Zellij(session) => zellij::cli::panes_listed(session),
         }
     }
 
-    /// The clients of `session` now, each on the pane it has the focus on.
-    pub fn clients(self, session: &SessionName) -> Result<Listed, Failure> {
+    /// The clients of the session now, each on the pane it has the focus on.
+    pub fn clients(self) -> Result<Listed, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::clients(session),
+            Mux::Zellij(session) => zellij::cli::clients(session),
         }
     }
 
-    /// Whether a client is attached to `session` now.
-    pub fn has_clients(self, session: &SessionName) -> Result<bool, Failure> {
+    /// Whether a client is attached to the session now.
+    pub fn has_clients(self) -> Result<bool, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::has_clients(session),
+            Mux::Zellij(session) => zellij::cli::has_clients(session),
         }
     }
 
-    /// As many clients of `session` as it has now, or more, none of which is
+    /// As many clients of the session as it has now, or more, none of which is
     /// one that comes to it after: the cheaper ask, for a client on its way.
-    pub fn client_rows(self, session: &SessionName) -> Result<Vec<Client>, Failure> {
+    pub fn client_rows(self) -> Result<Vec<Client>, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::client_rows(session),
+            Mux::Zellij(session) => zellij::cli::client_rows(session),
         }
     }
 
-    /// Opens a pane beside the terminal `beside` of `session`, in its tab and
+    /// Opens a pane beside the terminal `beside` of the session, in its tab and
     /// in `cwd`, that runs `runs`, with no client moved, and says which
     /// terminal it opened.
-    pub fn pane_opened(
-        self,
-        session: &SessionName,
-        beside: u32,
-        cwd: &Directory,
-        runs: Runs,
-    ) -> Result<u32, Failure> {
+    pub fn pane_opened(self, beside: u32, cwd: &Directory, runs: Runs) -> Result<u32, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::pane_opened(session, beside, cwd, runs),
+            Mux::Zellij(session) => zellij::cli::pane_opened(session, beside, cwd, runs),
         }
     }
 
-    /// Opens a pane named `name` in the tab `tab` of `session`, with no client
-    /// moved, that runs `runs` and closes as it ends, and says which: as
+    /// Opens a pane named `name` in the tab `tab` of the session, with no
+    /// client moved, that runs `runs` and closes as it ends, and says which: as
     /// `found` finds it, where the multiplexer does not say. It may open a
     /// second, which ends on its own.
     pub fn pane_opened_once_heard<const N: usize>(
         self,
-        session: &SessionName,
         tab: TabId,
         name: &str,
         runs: &[&str; N],
         found: impl Fn() -> Option<u32>,
     ) -> Result<u32, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::pane_opened_once_heard(session, tab, name, runs, found),
+            Mux::Zellij(session) => {
+                zellij::cli::pane_opened_once_heard(session, tab, name, runs, found)
+            },
         }
     }
 
-    /// Opens a tab in `session`, in `cwd`, named `name` or as the multiplexer
+    /// Opens a tab in the session, in `cwd`, named `name` or as the multiplexer
     /// numbers it, that runs `runs`, with no client moved, and says its id.
     pub fn tab_opened(
         self,
-        session: &SessionName,
         cwd: &Directory,
         name: Option<&str>,
         runs: Runs,
     ) -> Result<TabId, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::tab_opened(session, cwd, name, runs),
+            Mux::Zellij(session) => zellij::cli::tab_opened(session, cwd, name, runs),
         }
     }
 
-    /// Opens a tab in `session`, named `name` or as the multiplexer numbers
+    /// Opens a tab in the session, named `name` or as the multiplexer numbers
     /// it, with no client moved, that runs `runs` and closes as it ends, and
     /// says its id. It may open a second, which ends on its own.
     pub fn tab_opened_once_heard<const N: usize>(
         self,
-        session: &SessionName,
         name: Option<&str>,
         runs: &[&str; N],
     ) -> Result<TabId, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::tab_opened_once_heard(session, name, runs),
+            Mux::Zellij(session) => zellij::cli::tab_opened_once_heard(session, name, runs),
         }
     }
 
-    /// Closes `pane` of `session`, asked as often as `asks` says.
-    pub fn pane_closed(
-        self,
-        session: &SessionName,
-        pane: PaneId,
-        asks: Asks,
-    ) -> Result<(), Failure> {
+    /// Closes `pane` of the session, asked as often as `asks` says.
+    pub fn pane_closed(self, pane: PaneId, asks: Asks) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::pane_closed(session, pane, asks),
+            Mux::Zellij(session) => zellij::cli::pane_closed(session, pane, asks),
         }
     }
 
-    /// Closes the tab `tab` of `session`, asked as often as `asks` says.
-    pub fn tab_closed(self, session: &SessionName, tab: TabId, asks: Asks) -> Result<(), Failure> {
+    /// Closes the tab `tab` of the session, asked as often as `asks` says.
+    pub fn tab_closed(self, tab: TabId, asks: Asks) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::tab_closed(session, tab, asks),
+            Mux::Zellij(session) => zellij::cli::tab_closed(session, tab, asks),
         }
     }
 
-    /// Shows `pane` of `session` over the other panes of its tab, or no
+    /// Shows `pane` of the session over the other panes of its tab, or no
     /// longer.
-    pub fn fullscreen_toggled(self, session: &SessionName, pane: PaneId) -> Result<(), Failure> {
+    pub fn fullscreen_toggled(self, pane: PaneId) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::fullscreen_toggled(session, pane),
+            Mux::Zellij(session) => zellij::cli::fullscreen_toggled(session, pane),
         }
     }
 
-    /// Stacks `panes` of `session` on the first of them, each from whatever
+    /// Stacks `panes` of the session on the first of them, each from whatever
     /// tab it is in. Where there is no room, it stacks nothing, and says
     /// nothing of it.
-    pub fn panes_stacked<const N: usize>(
-        self,
-        session: &SessionName,
-        panes: [PaneId; N],
-    ) -> Result<(), Failure> {
+    pub fn panes_stacked<const N: usize>(self, panes: [PaneId; N]) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::panes_stacked(session, panes),
+            Mux::Zellij(session) => zellij::cli::panes_stacked(session, panes),
         }
     }
 
-    /// Renames `session` to `to`, or says why not. A session with no client
+    /// Renames the session to `to`, or says why not. A session with no client
     /// takes the name as well as one with.
-    pub fn renamed(self, session: &SessionName, to: &SessionName) -> Result<(), String> {
+    pub fn renamed(self, to: &SessionName) -> Result<(), String> {
         match self {
-            Mux::Zellij => zellij::renamed(session, to),
+            Mux::Zellij(session) => zellij::renamed(session, to),
         }
     }
 
-    /// The screen of the terminal `pane` of `session`: its lines, in the
+    /// The screen of the terminal `pane` of the session: its lines, in the
     /// colours it shows them in.
-    pub fn screen_dumped(self, session: &SessionName, pane: u32) -> Result<String, Failure> {
+    pub fn screen_dumped(self, pane: u32) -> Result<String, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::screen_dumped(session, pane),
+            Mux::Zellij(session) => zellij::cli::screen_dumped(session, pane),
         }
     }
 
-    /// The text of the terminal `pane` of `session`, its scrollback with it: a
-    /// line for each line written to it, however many rows it wraps over, with
-    /// no styles and no spaces at its end.
-    pub fn text_dumped(self, session: &SessionName, pane: u32) -> Result<String, Failure> {
+    /// The text of the terminal `pane` of the session, its scrollback with it:
+    /// a line for each line written to it, however many rows it wraps over,
+    /// with no styles and no spaces at its end.
+    pub fn text_dumped(self, pane: u32) -> Result<String, Failure> {
         match self {
-            Mux::Zellij => zellij::cli::text_dumped(session, pane),
+            Mux::Zellij(session) => zellij::cli::text_dumped(session, pane),
         }
     }
 
-    /// Kills `session` and lets go of what the multiplexer keeps of it.
-    pub fn session_killed(self, session: &SessionName) -> Result<(), Failure> {
+    /// Kills the session and lets go of what the multiplexer keeps of it.
+    pub fn session_killed(self) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::session_killed(session),
+            Mux::Zellij(session) => zellij::cli::session_killed(session),
         }
     }
 
-    /// Lets go of what the multiplexer keeps of `session`, one that ended.
-    pub fn session_deleted(self, session: &SessionName) -> Result<(), Failure> {
+    /// Lets go of what the multiplexer keeps of the session, one that ended.
+    pub fn session_deleted(self) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::session_deleted(session),
+            Mux::Zellij(session) => zellij::cli::session_deleted(session),
         }
     }
 
-    /// Takes the client that last typed in `session` to its pane `pane`. A
+    /// Takes the client that last typed in the session to its pane `pane`. A
     /// pane already focused is where it was to go.
-    pub fn pane_focused(self, session: &SessionName, pane: PaneId) -> Result<(), Failure> {
+    pub fn pane_focused(self, pane: PaneId) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::pane_focused(session, pane),
+            Mux::Zellij(session) => zellij::cli::pane_focused(session, pane),
         }
     }
 
-    /// Takes the client that last typed in `at` to the terminal `pane` of
-    /// `to`, or to `to` alone, on the pane it last had the focus on: in `at`
-    /// itself, as `pane_focused` does. A pane already focused is where it was
-    /// to go.
-    pub fn went(
-        self,
-        at: &SessionName,
-        to: &SessionName,
-        pane: Option<u32>,
-    ) -> Result<(), Failure> {
+    /// Takes the client that last typed in the session to the terminal `pane`
+    /// of `to`, or to `to` alone, on the pane it last had the focus on: in the
+    /// session itself, as `pane_focused` does. A pane already focused is where
+    /// it was to go.
+    pub fn went(self, to: &SessionName, pane: Option<u32>) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::went(at, to, pane),
+            Mux::Zellij(at) => zellij::cli::went(at, to, pane),
         }
     }
 
-    /// Takes the client that last typed in `at` to a session it makes, `to`,
-    /// that starts in `cwd`, or where the client started: to one that runs or
-    /// ended by that name instead, which it brings back, with `cwd` unused.
-    pub fn started(
-        self,
-        at: &SessionName,
-        to: &SessionName,
-        cwd: Option<&Directory>,
-    ) -> Result<(), Failure> {
+    /// Takes the client that last typed in the session to a session it makes,
+    /// `to`, that starts in `cwd`, or where the client started: to one that
+    /// runs or ended by that name instead, which it brings back, with `cwd`
+    /// unused.
+    pub fn started(self, to: &SessionName, cwd: Option<&Directory>) -> Result<(), Failure> {
         match self {
-            Mux::Zellij => zellij::cli::started(at, to, cwd),
+            Mux::Zellij(at) => zellij::cli::started(at, to, cwd),
         }
     }
 }

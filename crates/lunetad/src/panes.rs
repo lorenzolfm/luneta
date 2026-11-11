@@ -138,7 +138,7 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 
 /// The panes of `session`, or why zellij did not list them.
 fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
-    let laid = Mux::Zellij.panes_listed(session)?;
+    let laid = Mux::Zellij(session).panes_listed()?;
     terminals(laid).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
@@ -282,7 +282,7 @@ fn ask(
         core.send(core::Command::Panes { session: key, name: name.clone(), panes }).ok()?;
     }
     let said = |why: &Failure| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = Mux::Zellij.clients(name).inspect_err(said) {
+    if let Ok(clients) = Mux::Zellij(name).clients().inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));

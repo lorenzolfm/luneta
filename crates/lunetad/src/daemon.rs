@@ -587,7 +587,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || Mux::Zellij.went(&at, &to, pane)).await;
+        let went = task::spawn_blocking(move || Mux::Zellij(&at).went(&to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -816,7 +816,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || Mux::Zellij.started(&at, &to, cwd.as_ref());
+        let start = move || Mux::Zellij(&at).started(&to, cwd.as_ref());
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -999,7 +999,7 @@ impl Daemon for Host {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
-        let renamed = task::spawn_blocking(move || Mux::Zellij.renamed(&session, &to)).await;
+        let renamed = task::spawn_blocking(move || Mux::Zellij(&session).renamed(&to)).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -1297,7 +1297,7 @@ where
 
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = Mux::Zellij.clients(session)?;
+    let listed = Mux::Zellij(session).clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 

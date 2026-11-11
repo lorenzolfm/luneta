@@ -100,7 +100,7 @@ fn sought(
 /// list.
 #[must_use]
 pub fn before(session: &SessionName) -> Option<Vec<api::Client>> {
-    let rows = Mux::Zellij.client_rows(session).ok()?;
+    let rows = Mux::Zellij(session).client_rows().ok()?;
     Some(rows.into_iter().map(Client::to_api).collect())
 }
 
