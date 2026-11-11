@@ -6,6 +6,10 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
+    ghostty = {
+      url = "github:ghostty-org/ghostty/a887df42c56f6de86c0fe6da9c4eeca37931e083";
+      flake = false;
+    };
   };
 
   outputs =
@@ -14,6 +18,7 @@
       nixpkgs,
       rust-overlay,
       crane,
+      ghostty,
       ...
     }:
     let
@@ -110,6 +115,26 @@
           ];
           speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
 
+          ghosttyRevs = {
+            "0.2.2" = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
+          };
+          ghosttySys =
+            pkgs.lib.findFirst (crate: crate.name == "libghostty-vt-sys")
+              (throw "Cargo.lock has no libghostty-vt-sys")
+              (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
+          ghosttySysRev =
+            ghosttyRevs.${ghosttySys.version}
+              or (throw "ghosttyRevs has no commit for libghostty-vt-sys ${ghosttySys.version}");
+          libghosttyVt =
+            pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
+              "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
+              (
+                pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
+                  optimize = "ReleaseSafe";
+                  revision = ghostty.shortRev;
+                }
+              );
+
           # ggml builds for the CPU it is built on, with -march=native, which nix's
           # compiler drops, as what a derivation makes must not hang on the machine
           # that made it. It then builds for the first x86_64 CPUs, and the speech
@@ -141,7 +166,7 @@
             export LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libiconv ]}''${LIBRARY_PATH:+:$LIBRARY_PATH}"
           '';
 
-          testRun = "-p lunetad -p luneta-protocol";
+          testRun = "-p lunetad -p luneta-protocol -p luneta-mux";
 
           # What the daemon's derivations share.
           daemon = {
@@ -154,7 +179,7 @@
             # The build scripts write the protocol out as Rust, through protoc, and
             # build the speech model's library.
             nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
-            buildInputs = speechLibs;
+            buildInputs = speechLibs ++ [ libghosttyVt.dev ];
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
 
             # The daemon asks git how each work tree stands, and the tests make work
@@ -279,7 +304,7 @@
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${
                 pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
-              }''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+              }:${libghosttyVt.dev}/share/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
               ${macBuildEnv}
             '';
           };
@@ -318,7 +343,7 @@
               pkgs.cargo-nextest
               pkgs.nodejs
             ];
-            buildInputs = speechLibs;
+            buildInputs = speechLibs ++ [ libghosttyVt.dev ];
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
             LUNETA_TEST_RUN = testRun;
 
