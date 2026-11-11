@@ -34,6 +34,7 @@ pub enum Mux {
 /// The words that start a multiplexer's client: `program`, with `args`, run
 /// without the variables `unset` names.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClientWords {
     pub program: &'static str,
     pub args: Vec<String>,

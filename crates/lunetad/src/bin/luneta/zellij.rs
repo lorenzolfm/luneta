@@ -181,7 +181,7 @@ pub fn rejoin(session: &SessionName) -> Result<(String, Vec<String>), String> {
 /// The client `words` say. It runs through `env`, to leave out what they say
 /// to, which luneta cannot take out of its own variables.
 fn client_with(words: ClientWords) -> (String, Vec<String>) {
-    let ClientWords { program, args, unset } = words;
+    let ClientWords { program, args, unset, .. } = words;
     let mut through: Vec<String> =
         unset.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
     through.push(program.to_owned());
