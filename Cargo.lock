@@ -2035,6 +2035,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "proto-mux"
+version = "0.3.0"
+dependencies = [
+ "alacritty_terminal",
+ "base64 0.22.1",
+ "crossterm",
+ "log",
+ "ratatui",
+ "rustix",
+]
+
+[[package]]
 name = "ptts"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

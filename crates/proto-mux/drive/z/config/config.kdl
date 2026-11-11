@@ -1,0 +1,4 @@
+show_release_notes false
+show_startup_tips false
+pane_frames false
+default_shell "/bin/sh"

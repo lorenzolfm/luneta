@@ -1,0 +1,40 @@
+import subprocess
+from harness import *
+HERE = os.path.dirname(os.path.abspath(__file__)) + "/work"
+subprocess.run([BIN, "kill", "life"], env=env(), capture_output=True); time.sleep(0.3)
+a = proto("life", ["/bin/sh"], cols=80, rows=12, cwd=HERE)
+a.pump(1)
+a.send("seq 1 40\r", 0.5)
+print("A sees      :", [l.rstrip() for l in a.screen.display[8:11]])
+# a second client, smaller, on the same session
+b = proto("life", ["/bin/sh"], cols=60, rows=8, cwd=HERE)
+b.pump(1)
+print("B attached  :", [l.rstrip() for l in b.screen.display[4:7]], "|", b.screen.display[7].rstrip()[:40])
+b.send("echo from-b\r", 0.6)
+a.pump(0.3)
+print("A after B   :", [l.rstrip() for l in a.screen.display[:11] if "from-b" in l])
+# scroll back in B
+b.send("\x1b[5;2~", 0.4)
+print("B scrolled  :", [l.rstrip() for l in b.screen.display[:7]], "|", b.screen.display[7].rstrip()[50:])
+print("A unmoved   :", a.screen.display[10].rstrip())
+b.send("x", 0.4)
+print("B typed x   :", b.screen.display[6].rstrip(), "|", b.screen.display[7].rstrip()[50:])
+b.send("\x15", 0.2)
+# detach A, then reattach
+a.send("\x1d", 0.05); a.send("d", 0.8)
+print("A detached  :", a.text().strip().splitlines()[-1])
+a.close()
+print("ls          :", subprocess.run([BIN, "ls"], env=env(), capture_output=True, text=True).stdout.split())
+c = proto("life", ["/bin/sh"], cols=80, rows=12, cwd=HERE)
+c.pump(1)
+print("C reattached:", [l.rstrip() for l in c.screen.display[:11]])
+# resize C
+c.resize(50, 10); c.pump(0.8)
+print("C resized   :", c.screen.display[9].rstrip())
+c.send("stty size\r", 0.5)
+print("stty size   :", [l.rstrip() for l in c.screen.display[:9] if l.strip() and l.strip()[0].isdigit()][-1:])
+c.send("exit\r", 1)
+print("C end       :", c.text().strip().splitlines()[-1])
+b.pump(0.5)
+print("B end       :", b.text().strip().splitlines()[-1])
+for w in (b, c): w.close()

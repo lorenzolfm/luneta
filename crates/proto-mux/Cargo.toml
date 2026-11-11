@@ -1,0 +1,19 @@
+[package]
+name = "proto-mux"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "PROTOTYPE, throwaway (#331 step 2): a pty server that emulates, and a client that draws the grid it sends. Never merged."
+
+[[bin]]
+name = "proto-mux"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+base64 = "0.22.1"
+crossterm = "0.29.0"
+log = { version = "0.4.34", features = ["std"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+rustix = { version = "1.1.4", features = ["event", "fs", "process", "pty", "termios"] }
