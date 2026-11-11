@@ -15,6 +15,8 @@ let
     rustc-link-lib = ["transcribe"]
     [target.${target}.alsa]
     rustc-link-lib = ["asound"]
+    [target.${target}.ghostty-vt]
+    rustc-link-lib = ["ghostty-vt"]
   '';
   crossRun = ''cargo clippy --config ${buildScriptsSkipped} --locked ${clippyRun} --target ${target} "$@" -- -D warnings'';
 in
