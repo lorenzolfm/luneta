@@ -4,10 +4,9 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
 
-use crate::mux::{Named, PaneVars};
+use crate::mux::{value_in, Named, PaneVars};
 use crate::process;
 
 /// What names the session of a zellij pane, in the variables of what runs in
@@ -35,20 +34,9 @@ pub fn here() -> Result<PaneVars, String> {
 /// The pane `environ`, the variables of a process, name, if they name one.
 #[must_use]
 pub fn pane_in(environ: &[OsString]) -> Option<Named> {
-    let (mut session, mut pane) = (None, None);
-    for entry in environ {
-        let entry = entry.as_bytes();
-        let Some(equals) = entry.iter().position(|byte| *byte == b'=') else {
-            continue;
-        };
-        let (name, value) = (&entry[..equals], &entry[equals + 1..]);
-        if name == SESSION_VAR.as_bytes() {
-            session = Some(String::from_utf8_lossy(value).into_owned());
-        } else if name == PANE_VAR.as_bytes() {
-            pane = std::str::from_utf8(value).ok().map(str::to_owned);
-        }
-    }
-    PaneVars::spelled(session, pane.as_deref()).pane_named().map(Named::Zellij)
+    let session = value_in(environ, SESSION_VAR).map(|value| String::from_utf8_lossy(value).into());
+    let pane = value_in(environ, PANE_VAR).and_then(|value| std::str::from_utf8(value).ok());
+    PaneVars::spelled(session, pane).pane_named().map(Named::Zellij)
 }
 
 /// Whether this process may run in a pane of zellij's: what zellij sets in

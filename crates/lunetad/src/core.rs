@@ -361,6 +361,10 @@ impl Known {
         let now = self.addressed();
         let addressed = |session: &SessionKey| match session {
             SessionKey::Zellij(session) => now.iter().any(|(id, _)| id == session),
+            // zellij's sockets say nothing of an own session, which only
+            // its server can say has ended. Until the core hears that from
+            // it, `runs` says no own session runs, and `answers` takes in
+            // nothing of one, so none is kept here.
             SessionKey::Own(_) => true,
         };
         self.panes.retain(|session, _| addressed(session));
@@ -428,7 +432,7 @@ impl Known {
     fn listed(&mut self, session: SessionKey, mut panes: Vec<Pane>) -> bool {
         assert!(self.runs(session));
         // `keep` finds the pane each was by its id: zellij gives each terminal
-        // of a session one of its own, which `panes::parse` checks.
+        // of a session one of its own, which `panes::terminals` checks.
         let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
         assert_eq!(ids.len(), panes.len(), "a pane's id comes twice");
         if let Some(listed) = self.panes.get(&session) {
@@ -546,9 +550,15 @@ impl Known {
         // it.
         for session in self.panes.keys().chain(self.clients.keys()) {
             assert!(self.runs(*session), "a session its multiplexer listed runs");
-            let SessionKey::Zellij(id) = session else { continue };
-            let name = self.sessions.name_of(*id).expect("a zellij session that runs has a name");
-            assert_eq!(self.sessions.addressed(name), Some(*id));
+            match session {
+                SessionKey::Zellij(id) => {
+                    let name =
+                        self.sessions.name_of(*id).expect("a zellij session that runs has a name");
+                    assert_eq!(self.sessions.addressed(name), Some(*id));
+                },
+                // `runs` says none runs, so the assertion above holds of none.
+                SessionKey::Own(_) => unreachable!("the core knows no own session yet"),
+            }
         }
         // `saw` says a word of each session as zellij can be asked about it,
         // and lets the word go as it no longer can be.

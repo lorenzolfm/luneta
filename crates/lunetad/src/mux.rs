@@ -13,6 +13,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -452,6 +453,14 @@ fn pane_in(environ: &[OsString]) -> Option<Named> {
     zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ))
 }
 
+/// What `environ`, the variables of a process, sets `name` to: the first that
+/// sets it, as `getenv` reads it, where more than one does.
+fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
+    environ.iter().find_map(|entry| {
+        entry.as_bytes().strip_prefix(name.as_bytes())?.strip_prefix(b"=")
+    })
+}
+
 /// Has `command` run without the variables any multiplexer gives what runs in
 /// its panes: in none, as the daemon and luneta's commands see it.
 pub fn in_no_pane(command: &mut Command) {
@@ -506,5 +515,19 @@ mod tests {
         let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(pane_in(&environ(&[&own[..], &zellij].concat())), Some(named));
         assert_eq!(pane_in(&environ(&["HOME=/h"])), None);
+    }
+
+    /// A process whose variables set one twice reads the first, as `getenv`
+    /// does, for either multiplexer's.
+    #[test]
+    fn a_variable_set_twice_reads_as_its_first() {
+        let environ = |entries: &[&str]| -> Vec<OsString> {
+            entries.iter().map(OsString::from).collect()
+        };
+        let twice = ["ZELLIJ_SESSION_NAME=work", "ZELLIJ_PANE_ID=2", "ZELLIJ_PANE_ID=5"];
+        let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
+        assert_eq!(pane_in(&environ(&twice)), Some(named));
+        let twice = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=12", "LUNETA_MUX_SESSION=4"];
+        assert_eq!(pane_in(&environ(&twice)), Some(Named::Own { session: 3, pane: 12 }));
     }
 }

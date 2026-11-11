@@ -3,10 +3,9 @@
 //! neither id to another, so a rename leaves them as they are.
 
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStrExt;
 use std::process::Command;
 
-use crate::mux::Named;
+use crate::mux::{value_in, Named};
 
 /// What names the session of an own pane, by its id, in the variables of what
 /// runs in it.
@@ -21,13 +20,7 @@ const PANE_VARS: [&str; 2] = [SESSION_VAR, PANE_VAR];
 /// The pane `environ`, the variables of a process, name, where they name
 /// both its session and its id.
 pub fn pane_in(environ: &[OsString]) -> Option<Named> {
-    let id = |name: &str| {
-        let value = environ.iter().find_map(|entry| {
-            let entry = entry.as_bytes();
-            entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")
-        })?;
-        std::str::from_utf8(value).ok()?.parse().ok()
-    };
+    let id = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok()?.parse().ok();
     Some(Named::Own { session: id(SESSION_VAR)?, pane: id(PANE_VAR)? })
 }
 
