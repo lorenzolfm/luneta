@@ -42,6 +42,19 @@
           };
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+          localToolchain =
+            if pkgs.stdenv.hostPlatform.isDarwin then
+              pkgs.symlinkJoin {
+                name = "${toolchain.name}-unwrapped-cargo";
+                paths = [ toolchain ];
+                postBuild = ''
+                  rm "$out/bin/cargo"
+                  ln -s ${toolchain.availableComponents.cargo}/bin/cargo "$out/bin/cargo"
+                '';
+              }
+            else
+              toolchain;
+
           craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
             _: prev: { writeTOML = prev.writeTOMLViaRemarshal; }
           );
@@ -123,7 +136,7 @@
             .${system} or "-DGGML_NATIVE=OFF";
 
           buildTools = [
-            toolchain
+            localToolchain
             pkgs.coreutils
             pkgs.gnumake
             pkgs.protobuf
