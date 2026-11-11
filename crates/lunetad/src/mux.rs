@@ -44,18 +44,37 @@ pub struct Named {
 /// pane this process runs in: the name its session had as it opened, where
 /// they name one, and its id, where they name a terminal's. A rename leaves
 /// the name behind, so a pane goes by the id where the name does not match.
+/// Only `spelled` makes one, so that a name is never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneVars {
-    pub named: Option<String>,
-    pub pane: Option<u32>,
+    named: Option<String>,
+    pane: Option<u32>,
 }
 
 impl PaneVars {
-    /// The pane, where the variables name both its session and its id. A
-    /// name they spell empty names no session, and `Mux::here` holds none.
+    /// What `session` and `pane`, as the variables spell them, say: a name,
+    /// where it is not empty, and a terminal's id, where it is one.
+    #[must_use]
+    pub fn spelled(session: Option<String>, pane: Option<&str>) -> PaneVars {
+        let named = session.filter(|session| !session.is_empty());
+        PaneVars { named, pane: pane.and_then(|pane| pane.parse().ok()) }
+    }
+
+    /// The name the session had as the pane opened, where they name one.
+    #[must_use]
+    pub fn named(&self) -> Option<&str> {
+        self.named.as_deref()
+    }
+
+    /// The pane's id, where they name a terminal's.
+    #[must_use]
+    pub fn pane(&self) -> Option<u32> {
+        self.pane
+    }
+
+    /// The pane, where the variables name both its session and its id.
     #[must_use]
     pub fn pane_named(self) -> Option<Named> {
-        assert!(self.named.as_ref().is_none_or(|named| !named.is_empty()), "{self:?}");
         Some(Named { session: self.named?, pane: self.pane? })
     }
 }

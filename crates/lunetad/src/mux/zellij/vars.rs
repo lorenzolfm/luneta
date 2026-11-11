@@ -28,7 +28,7 @@ pub const PANE_VARS: [&str; 3] = [IN_A_PANE_VAR, SESSION_VAR, PANE_VAR];
 /// do not read.
 pub fn here() -> Result<PaneVars, String> {
     let (session, pane) = (process::var(SESSION_VAR)?, process::var(PANE_VAR)?);
-    Ok(said(session, pane.as_deref()))
+    Ok(PaneVars::spelled(session, pane.as_deref()))
 }
 
 /// The pane the variables of the process `pid` name, if they name one.
@@ -47,14 +47,7 @@ pub fn pane_of(pid: u32) -> Option<Named> {
             pane = std::str::from_utf8(value).ok().map(str::to_owned);
         }
     }
-    said(session, pane.as_deref()).pane_named()
-}
-
-/// What `session` and `pane`, as the variables spell them, say: a name, where
-/// it is not empty, and a terminal's id.
-fn said(session: Option<String>, pane: Option<&str>) -> PaneVars {
-    let named = session.filter(|session| !session.is_empty());
-    PaneVars { named, pane: pane.and_then(|pane| pane.parse().ok()) }
+    PaneVars::spelled(session, pane.as_deref()).pane_named()
 }
 
 /// Whether this process may run in a pane of zellij's: what zellij sets in
@@ -80,7 +73,7 @@ mod tests {
     /// spell it, which zellij had for its session as the pane opened, or not.
     #[test]
     fn the_variables_name_a_pane_by_its_session_and_a_terminal_s_id() {
-        let both = said(Some("a/b".to_owned()), Some("2"));
+        let both = PaneVars::spelled(Some("a/b".to_owned()), Some("2"));
         assert_eq!(both.pane_named(), Some(Named { session: "a/b".to_owned(), pane: 2 }));
         let some = |text: &str| Some(text.to_owned());
         let halves = [
@@ -92,8 +85,8 @@ mod tests {
             (None, None, None, None),
         ];
         for (session, pane, named, id) in halves {
-            let here = said(session.clone(), pane);
-            assert_eq!(here, PaneVars { named, pane: id }, "{session:?} {pane:?}");
+            let here = PaneVars::spelled(session.clone(), pane);
+            assert_eq!((here.named(), here.pane()), (named.as_deref(), id), "{session:?} {pane:?}");
             assert_eq!(here.pane_named(), None, "{session:?} {pane:?}");
         }
     }

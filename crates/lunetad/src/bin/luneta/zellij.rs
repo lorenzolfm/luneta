@@ -96,8 +96,7 @@ pub fn here() -> Result<Option<Seat>, String> {
 /// The seat of the turn of luneta's ask box `asked`, and where it says you
 /// are, or else the pane zellij's variables name, as `here` says, or none.
 fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, String> {
-    assert!(here.named.as_ref().is_none_or(|named| !named.is_empty()), "{here:?}");
-    match (asked, here.named.as_deref()) {
+    match (asked, here.named()) {
         (Some((_, user)), Some(session)) => {
             let asked = match user {
                 User::Pane { session: from, pane } => {
@@ -126,14 +125,7 @@ fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, 
 /// terminal may be a pane of any session, and of this one too.
 pub fn refusal(session: &SessionName) -> Option<String> {
     let here = Mux::Zellij.here();
-    refused(session, here.as_ref().map(|here| here.named.as_deref()).map_err(String::as_str))
-}
-
-/// The session luneta's terminal is a pane of, by the name it had as the pane
-/// opened, as `Mux::here` says: none where it says none, nor where the
-/// variables do not read.
-fn current() -> Option<String> {
-    Mux::Zellij.here().ok()?.named
+    refused(session, here.as_ref().map(PaneVars::named).map_err(String::as_str))
 }
 
 /// `refusal`, for a terminal in the session `current`, if it is a pane's, or
@@ -270,7 +262,7 @@ fn quoted(word: &str) -> String {
 /// may hold luneta's terminal, as `clients_of_refuge` says.
 pub fn ended(seats: &[SessionName]) -> Ended {
     let folder = Mux::Zellij.socket_folder();
-    moves::refuge(&folder, seats, current().as_deref(), clients_of_refuge)
+    moves::refuge(&folder, seats, clients_of_refuge)
 }
 
 /// The clients `session` has before luneta's zellij goes on in it, as
@@ -323,10 +315,10 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
     let Ok(here) = Mux::Zellij.here() else {
         return true;
     };
-    if here.named.as_deref() == Some(session.as_str()) {
+    if here.named() == Some(session.as_str()) {
         return true;
     }
-    let Some(pane) = here.pane else {
+    let Some(pane) = here.pane() else {
         return false;
     };
     let Ok(laid) = Mux::Zellij.laid(session) else {
@@ -366,7 +358,7 @@ pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
 /// never a session that may hold luneta's terminal, as `clients_of_refuge`
 /// says.
 pub fn newest() -> Option<Refuge> {
-    moves::newest(&Mux::Zellij.socket_folder(), current().as_deref(), clients_of_refuge)
+    moves::newest(&Mux::Zellij.socket_folder(), clients_of_refuge)
 }
 
 /// The first of `sessions` of `destination` whose clients its daemon lists,
@@ -1531,18 +1523,25 @@ mod tests {
     /// and asks from another.
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
-        let here = |named: Option<&str>, pane| PaneVars { named: named.map(str::to_owned), pane };
+        let here = |named: Option<&str>, pane| PaneVars::spelled(named.map(str::to_owned), pane);
         let opened = Seat::Opened(Named { session: "work".to_owned(), pane: 2 });
-        assert_eq!(seat_in(None, here(Some("work"), Some(2))), Ok(Some(opened)));
-        for unnamed in [here(Some("work"), None), here(None, Some(2)), here(None, None)] {
-            assert_eq!(seat_in(None, unnamed.clone()), Ok(None), "{unnamed:?}");
+        assert_eq!(seat_in(None, here(Some("work"), Some("2"))), Ok(Some(opened)));
+        let unnamed = [
+            (Some(""), Some("2")),
+            (Some("work"), Some("terminal_2")),
+            (Some("work"), None),
+            (None, Some("2")),
+            (None, None),
+        ];
+        for (session, pane) in unnamed {
+            assert_eq!(seat_in(None, here(session, pane)), Ok(None), "{session:?} {pane:?}");
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
         for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
             assert_eq!(seat_in(Some((turn, user.clone())), here(None, None)), asked);
-            assert_eq!(seat_in(Some((turn, user.clone())), here(None, Some(2))), asked);
+            assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2"))), asked);
             let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None));
             assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
         }
