@@ -48,7 +48,7 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
-use lunetad::mux::{Client, PaneId};
+use lunetad::mux::{Client, Named, PaneId};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
@@ -171,7 +171,7 @@ fn seat(
                  now: it was renamed since"
             ));
         },
-        Some(Seat::Opened { named, pane }) => (named, pane),
+        Some(Seat::Opened(Named { session, pane })) => (session, pane),
     };
     let in_pane = |zellij: &&Zellij| zellij.named == named && zellij.pane == pane;
     let zellij = agents.unwrap_or_default().iter().filter_map(|agent| agent.zellij.as_ref());

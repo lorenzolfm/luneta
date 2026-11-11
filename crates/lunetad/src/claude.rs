@@ -26,9 +26,9 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    file_text, moment, named_pid, nonempty, pane_of, Agent, Harness, Name, Named, Source, Status,
-    Unread,
+    file_text, moment, named_pid, nonempty, Agent, Harness, Name, Source, Status, Unread,
 };
+use crate::mux::{Mux, Named};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 
@@ -36,11 +36,6 @@ use crate::watch::{self, Troubles};
 /// Code writes a file in place, and in a moment: one that does not read for
 /// longer is cut short for good, or in a shape of a newer Claude Code's.
 const TORN: Duration = Duration::from_secs(1);
-
-/// Variables a `claude` run for luneta must not have: with them, the daemon
-/// places it in the pane they name, as an agent of its own, and luneta's
-/// commands take that pane for the one they run in.
-pub const PANE_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
 /// `claude`, to have `model`, told `system`, answer `prompt` once, and the stdin
 /// that tells it `prompt`: its arguments are there for any user of the machine
@@ -51,9 +46,7 @@ pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Comman
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", system]);
-    for name in PANE_VARS {
-        claude.env_remove(name);
-    }
+    Mux::Zellij.in_no_pane(&mut claude);
     Ok((claude, program::saying(prompt)?))
 }
 
@@ -209,7 +202,7 @@ impl SessionFiles {
         // The pane of each process, read from its environment once.
         let mut pane = |pid: u32, start: String| {
             let key = (pid, start);
-            let pane = self.panes.remove(&key).unwrap_or_else(|| pane_of(pid));
+            let pane = self.panes.remove(&key).unwrap_or_else(|| Mux::Zellij.pane_of(pid));
             panes.insert(key, pane.clone());
             pane
         };
@@ -319,8 +312,7 @@ mod tests {
         assert_eq!(args, said.map(OsStr::new));
         let unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
-        assert_eq!(unset.len(), PANE_VARS.len());
-        assert!(PANE_VARS.map(OsStr::new).iter().all(|name| unset.contains(name)), "{unset:?}");
+        assert_eq!(unset, ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new));
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
     }

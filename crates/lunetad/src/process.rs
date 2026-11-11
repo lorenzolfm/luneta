@@ -1,8 +1,9 @@
 //! What the daemon reads of another process: when it started, spelled as Claude
 //! Code records it and as a time, and the environment it started with; and when
 //! it ends, which it hears. Each system has its own way to say them, and a
-//! backend of its own.
+//! backend of its own. And a variable of this process's own, in `var`.
 
+use std::env;
 use std::io;
 
 use rustix::io::Errno;
@@ -22,6 +23,16 @@ use macos as os;
 compile_error!("lunetad reads processes on Linux and macOS, and on nothing else yet");
 
 pub use os::{environ, start, started, Domain};
+
+/// The variable `name` of this process: none where it is not set, or why it
+/// does not read.
+pub fn var(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} does not read")),
+    }
+}
 
 /// Waits for the process `pid` to end, or says why it cannot tell. One that has
 /// ended already has at once, whether or not its parent has waited for it. A

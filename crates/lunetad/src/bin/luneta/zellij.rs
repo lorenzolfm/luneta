@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::mux::{self, ClientWords, Mux, PaneId, PANE_VAR, SESSION_VAR};
+use lunetad::mux::{self, ClientWords, Mux, Named, PaneId, PaneVars};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -25,7 +25,7 @@ pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{moves, Destination, Directory, SocketId};
-pub use lunetad::SessionName;
+pub use lunetad::{var, SessionName};
 
 use crate::away::{self, Away};
 use crate::due::Due;
@@ -64,7 +64,7 @@ pub fn pane_address(spelled: &str) -> Result<Pane, String> {
 pub enum Seat {
     /// In a pane of zellij, by the name its session had as the pane opened,
     /// which a rename leaves behind.
-    Opened { named: String, pane: u32 },
+    Opened(Named),
     /// In no pane, as the agent of luneta's ask box runs, in `turn`, for you
     /// where `user` says: in the pane you asked from, by the name its session
     /// had as you asked, or on another machine, where luneta's zellij was,
@@ -77,7 +77,7 @@ impl Seat {
     pub fn turn(&self) -> Option<Turn> {
         match self {
             Seat::Asked { turn, .. } => Some(*turn),
-            Seat::Opened { .. } => None,
+            Seat::Opened(_) => None,
         }
     }
 }
@@ -90,28 +90,13 @@ pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
     let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), asked.as_deref(), away.as_deref());
-    let (session, pane) = (var(SESSION_VAR)?, var(PANE_VAR)?);
-    seat_in(turn?, session.as_deref(), pane.as_deref())
-}
-
-/// The variable `name` of this process: none where it is not set, or why it
-/// does not read.
-pub fn var(name: &str) -> Result<Option<String>, String> {
-    match env::var(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} does not read")),
-    }
+    seat_in(turn?, Mux::Zellij.here()?)
 }
 
 /// The seat of the turn of luneta's ask box `asked`, and where it says you
-/// are, or else the one zellij's `session` and `pane` name, or none.
-fn seat_in(
-    asked: Option<(Turn, User)>,
-    session: Option<&str>,
-    pane: Option<&str>,
-) -> Result<Option<Seat>, String> {
-    match (asked, session.filter(|session| !session.is_empty())) {
+/// are, or else the pane zellij's variables name, as `here` says, or none.
+fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, String> {
+    match (asked, here.named.as_deref()) {
         (Some((_, user)), Some(session)) => {
             let asked = match user {
                 User::Pane { session: from, pane } => {
@@ -125,10 +110,7 @@ fn seat_in(
             Err(format!("{asked}, and this runs in a pane of {session}"))
         },
         (Some((turn, user)), None) => Ok(Some(Seat::Asked { turn, user })),
-        (None, Some(named)) => {
-            let pane = pane.and_then(|pane| pane.parse().ok());
-            Ok(pane.map(|pane| Seat::Opened { named: named.to_owned(), pane }))
-        },
+        (None, Some(_)) => Ok(here.pane_named().map(Seat::Opened)),
         (None, None) => Ok(None),
     }
 }
@@ -137,10 +119,18 @@ fn seat_in(
 /// runs in, where it must not: the terminal is a pane of that session, which
 /// the client would show inside itself, with the focus on it, so that a key
 /// typed there would come round to it again for good. zellij refuses this by
-/// `SESSION_VAR`, which the client runs without. A pane of a session renamed
-/// since it opened holds the name it had then, and zellij's check goes by it.
+/// the name the pane's variables give its session, which the client runs
+/// without. A pane of a session renamed since it opened holds the name it had
+/// then, and zellij's check goes by it.
 pub fn refusal(session: &SessionName) -> Option<String> {
-    refused(session, env::var(SESSION_VAR).ok().as_deref())
+    refused(session, current().as_deref())
+}
+
+/// The session luneta's terminal is a pane of, by the name it had as the pane
+/// opened, as `Mux::here` says: none where it says none, nor where the
+/// variables do not read.
+fn current() -> Option<String> {
+    Mux::Zellij.here().ok()?.named
 }
 
 /// `refusal`, for a terminal in the session `current`, if it is a pane's.
@@ -269,9 +259,8 @@ fn quoted(word: &str) -> String {
 /// machine, as `lunetad::moves::refuge` finds them here: never a session that
 /// may hold luneta's terminal, as `clients_of_refuge` says.
 pub fn ended(seats: &[SessionName]) -> Ended {
-    let current = env::var(SESSION_VAR).ok();
     let folder = Mux::Zellij.socket_folder();
-    moves::refuge(&folder, seats, current.as_deref(), clients_of_refuge)
+    moves::refuge(&folder, seats, current().as_deref(), clients_of_refuge)
 }
 
 /// The clients `session` has before luneta's zellij goes on in it, as
@@ -306,7 +295,7 @@ pub enum Within {
 /// Where luneta's own terminal may be, as `Within` says.
 pub fn within() -> Within {
     let set = |var: &&str| env::var_os(var).is_some();
-    if SSH_VARS.iter().any(set) || ["ZELLIJ", SESSION_VAR].iter().any(set) {
+    if SSH_VARS.iter().any(set) || Mux::Zellij.may_be_in_a_pane() {
         Within::MaybeAway
     } else {
         Within::Here
@@ -315,15 +304,19 @@ pub fn within() -> Within {
 
 /// Whether `session`, which runs here, may hold luneta's terminal in a pane: it
 /// has the name the pane opened under, or zellij lists the pane there running
-/// luneta, or what it has yet to say, or will not list its panes. The name
-/// alone will not do: a rename leaves it behind in the pane, and another
-/// session can take it. Nor can the list tell the pane of a script that runs
-/// luneta, which it lists as that script.
+/// luneta, or what it has yet to say, or will not list its panes, or the
+/// variables that would name the pane do not read. The name alone will not
+/// do: a rename leaves it behind in the pane, and another session can take
+/// it. Nor can the list tell the pane of a script that runs luneta, which it
+/// lists as that script.
 pub fn may_hold_terminal(session: &SessionName) -> bool {
-    if env::var(SESSION_VAR).is_ok_and(|named| named == session.as_str()) {
+    let Ok(here) = Mux::Zellij.here() else {
+        return true;
+    };
+    if here.named.as_deref() == Some(session.as_str()) {
         return true;
     }
-    let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
+    let Some(pane) = here.pane else {
         return false;
     };
     let Ok(laid) = Mux::Zellij.laid(session) else {
@@ -363,8 +356,7 @@ pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
 /// never a session that may hold luneta's terminal, as `clients_of_refuge`
 /// says.
 pub fn newest() -> Option<Refuge> {
-    let current = env::var(SESSION_VAR).ok();
-    moves::newest(&Mux::Zellij.socket_folder(), current.as_deref(), clients_of_refuge)
+    moves::newest(&Mux::Zellij.socket_folder(), current().as_deref(), clients_of_refuge)
 }
 
 /// The first of `sessions` of `destination` whose clients its daemon lists,
@@ -1529,20 +1521,18 @@ mod tests {
     /// and asks from another.
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
-        let opened = |named: &str, pane| Ok(Some(Seat::Opened { named: named.to_owned(), pane }));
-        assert_eq!(seat_in(None, Some("work"), Some("2")), opened("work", 2));
-        for (session, pane) in
-            [(Some(""), Some("2")), (Some("work"), Some("terminal_2")), (Some("work"), None), (None, None)]
-        {
-            assert_eq!(seat_in(None, session, pane), Ok(None), "{session:?} {pane:?}");
+        let here = |named: Option<&str>, pane| PaneVars { named: named.map(str::to_owned), pane };
+        let opened = Seat::Opened(Named { session: "work".to_owned(), pane: 2 });
+        assert_eq!(seat_in(None, here(Some("work"), Some(2))), Ok(Some(opened)));
+        for unnamed in [here(Some("work"), None), here(None, Some(2)), here(None, None)] {
+            assert_eq!(seat_in(None, unnamed.clone()), Ok(None), "{unnamed:?}");
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
         for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
-            assert_eq!(seat_in(Some((turn, user.clone())), None, None), asked);
-            assert_eq!(seat_in(Some((turn, user.clone())), Some(""), Some("2")), asked);
-            let in_a_pane = seat_in(Some((turn, user.clone())), Some("play"), Some("2"));
+            assert_eq!(seat_in(Some((turn, user.clone())), here(None, Some(2))), asked);
+            let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None));
             assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
         }
     }
