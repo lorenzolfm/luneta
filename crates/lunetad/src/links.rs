@@ -1248,7 +1248,7 @@ fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
 /// folders say now; or why luneta cannot tell which names are free.
 fn free(name: &SessionName) -> Result<SessionName, String> {
     let named = names::named()?;
-    Ok(name.free(&named.iter().map(String::as_str).collect::<Vec<_>>()))
+    Ok(name.free(&named.iter().map(SessionName::as_str).collect::<Vec<_>>()))
 }
 
 /// Why no clone of `link`'s repository is for `wt add`, as what luneta has

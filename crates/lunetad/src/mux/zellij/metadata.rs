@@ -79,7 +79,7 @@ const COUNTED: [&str; 15] = [
 /// `consts.rs` has the `directories` crate find it. None without a home to
 /// find it in.
 #[must_use]
-pub fn folder() -> Option<PathBuf> {
+pub fn folder() -> Option<CacheFolder> {
     let set = |name| {
         std::env::var_os(name).filter(|value: &OsString| !value.is_empty()).map(PathBuf::from)
     };
@@ -89,7 +89,19 @@ pub fn folder() -> Option<PathBuf> {
         let xdg = set("XDG_CACHE_HOME").filter(|dir| dir.is_absolute());
         xdg.or_else(|| Some(set("HOME")?.join(".cache")))?.join("zellij")
     };
-    Some(SESSIONS.iter().fold(cache, |path, part| path.join(part)))
+    Some(CacheFolder(SESSIONS.iter().fold(cache, |path, part| path.join(part))))
+}
+
+/// zellij's folder of the metadata of its sessions, as `folder` finds it:
+/// apart from the folder of their sockets, which `SocketFolder` is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheFolder(PathBuf);
+
+impl CacheFolder {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// Whether a change at `path`, in the folder, can be to a session's metadata.
@@ -139,8 +151,8 @@ impl Metadata {
 
 /// What zellij last wrote of the session `name`, in `folder`: none before it
 /// has, or where it writes none.
-pub fn read(folder: &Path, name: &str) -> io::Result<Option<Metadata>> {
-    let file = match File::open(folder.join(name).join(FILE)) {
+pub fn read(folder: &CacheFolder, name: &SessionName) -> io::Result<Option<Metadata>> {
+    let file = match File::open(folder.0.join(name.as_str()).join(FILE)) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -174,8 +186,8 @@ impl fmt::Display for Unknown {
 /// bring them back from: those that ended, and those that run. Or why luneta
 /// cannot read the folder they are in. A zellij of another contract keeps
 /// them elsewhere, and none is kept here.
-pub fn kept() -> Result<Vec<String>, Unknown> {
-    let folder = folder().ok_or(Unknown::NoHome)?;
+pub fn kept() -> Result<Vec<SessionName>, Unknown> {
+    let CacheFolder(folder) = folder().ok_or(Unknown::NoHome)?;
     let unread = |error| Unknown::Unread { folder: folder.clone(), error };
     let entries = match fs::read_dir(&folder) {
         Ok(entries) => entries,
@@ -185,8 +197,9 @@ pub fn kept() -> Result<Vec<String>, Unknown> {
     let mut kept = Vec::new();
     for entry in entries {
         let entry = entry.map_err(unread)?;
-        // A name that is no UTF-8 is of no session luneta names.
-        if let Ok(name) = entry.file_name().into_string()
+        // A name that is no UTF-8, or no name zellij takes, is of no session.
+        let file_name = entry.file_name();
+        if let Some(name) = file_name.to_str().and_then(|name| SessionName::running(name).ok())
             && entry.path().join(LAYOUT).is_file()
         {
             kept.push(name);
@@ -198,7 +211,7 @@ pub fn kept() -> Result<Vec<String>, Unknown> {
 /// Whether zellij has anything of `session` in its cache: its metadata, or
 /// how it is laid out. Or why luneta cannot tell.
 pub fn cached(session: &SessionName) -> Result<bool, Unknown> {
-    let folder = folder().ok_or(Unknown::NoHome)?.join(session.as_str());
+    let folder = folder().ok_or(Unknown::NoHome)?.0.join(session.as_str());
     folder.try_exists().map_err(|error| Unknown::Unread { folder, error })
 }
 

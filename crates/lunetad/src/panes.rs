@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -21,21 +21,10 @@ use notify::RecursiveMode;
 use serde::Deserialize;
 
 use crate::api;
-use crate::cli;
 use crate::core::{self, Addressed};
-use crate::zellij::metadata::{self, Metadata};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
-use crate::zellij::{Id, SessionName};
-
-/// How long the daemon leaves a session's server be once it made its socket,
-/// before it asks zellij anything: every call of zellij's CLI asks the server
-/// of every session whether it runs, and zellij-server 0.45.1 panics where
-/// such a call hangs up before the server took its first client (`lib.rs:1462`,
-/// fixed after 0.45.1 in zellij's 81f56e1), and the session ends with it. The
-/// client that started the server comes a few milliseconds after the socket,
-/// and the socket wakes the sweep as soon as `watch` lets the folder settle.
-const NEWBORN: Duration = Duration::from_millis(500);
+use crate::mux::{CacheFolder, Failure, Id, Metadata, Mux, SessionName};
 
 /// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,7 +157,7 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 
 /// The panes of `session`, or why zellij did not list them.
 fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
-    let said = cli::panes_listed(session)?;
+    let said = Mux::Zellij.panes_listed(session)?;
     parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
@@ -185,8 +174,8 @@ struct Signs {
 /// When the daemon last asked zellij about a session, and its signs then.
 struct Asked {
     /// When it was done asking, rather than when it began: the daemon gives
-    /// zellij up to `cli::ANSWER` for a session's panes and as long for its
-    /// clients, before it gives up on a server that hangs, longer than a
+    /// zellij as long as it has to answer, 2s, for a session's panes and as
+    /// long for its clients, before it gives up on a server that hangs, longer than a
     /// sweep. Due again as soon as it was given up on, a session never listed
     /// would go first in every round a wake begins anew, and no other would
     /// be asked about while the wakes kept coming.
@@ -203,13 +192,13 @@ struct Asked {
 /// its pane. The core wakes it on `woken`, and so does a change to the folder,
 /// which it watches with `wake`. One the host has no panes of goes first, and
 /// one that turns up while others are asked about goes before those left.
-/// None is asked about while a session is `NEWBORN`. The thread ends once the
-/// core has.
+/// None is asked about while a session is newborn, as `Mux::newborn` says.
+/// The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     wake: SyncSender<()>,
     woken: Receiver<()>,
-    metadata_folder: Option<PathBuf>,
+    metadata_folder: Option<CacheFolder>,
     sweep: Duration,
 ) -> io::Result<()> {
     thread::Builder::new().name("panes".to_owned()).spawn(move || {
@@ -218,10 +207,11 @@ pub fn follow(
         let mut watcher = None;
         let mut watching = Troubles::default();
         'round: loop {
-            if let Some(folder) = metadata_folder.as_deref()
+            if let Some(folder) = metadata_folder.as_ref().map(CacheFolder::path)
                 && watcher.is_none()
             {
-                let (mode, wanted) = (RecursiveMode::Recursive, metadata::is_metadata);
+                let wanted = |path: &Path| Mux::Zellij.is_metadata(path);
+                let mode = RecursiveMode::Recursive;
                 watcher = watch::watching(folder, mode, wanted, &wake, &mut watching);
                 watching.done();
             }
@@ -229,7 +219,7 @@ pub fn follow(
                 return;
             };
             let started = sessions.iter().map(|session| session.id.started());
-            if let Some(wait) = newborn(started, SystemTime::now()) {
+            if let Some(wait) = Mux::Zellij.newborn(started, SystemTime::now()) {
                 thread::sleep(wait);
                 continue;
             }
@@ -242,7 +232,7 @@ pub fn follow(
                 .filter_map(|session| {
                     let troubles = troubles.entry(session.id).or_default();
                     let metadata = metadata_folder
-                        .as_deref()
+                        .as_ref()
                         .and_then(|folder| written(folder, &session.name, troubles));
                     let signs = Signs { metadata, told: session.told };
                     due(asked.get(&session.id), signs, now, sweep).then_some((session, signs))
@@ -273,8 +263,8 @@ pub fn follow(
 
 /// What zellij last wrote of the session `name` in `folder`. One that cannot
 /// be read, `troubles` says, and it says nothing.
-fn written(folder: &Path, name: &str, troubles: &mut Troubles) -> Option<Metadata> {
-    metadata::read(folder, name).unwrap_or_else(|error| {
+fn written(folder: &CacheFolder, name: &SessionName, troubles: &mut Troubles) -> Option<Metadata> {
+    folder.metadata(name).unwrap_or_else(|error| {
         troubles.say(format!("the metadata of {name}: {error}"));
         None
     })
@@ -305,16 +295,12 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
-    let Ok(session) = SessionName::running(name) else {
-        troubles.say(format!("the panes of {name}: zellij would take no session by that name"));
-        return Some(());
-    };
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
-    if let Ok(panes) = list(&session).inspect_err(said) {
+    if let Ok(panes) = list(name).inspect_err(said) {
         core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
     }
-    let said = |why: &cli::Failure| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = cli::clients(&session).inspect_err(said) {
+    let said = |why: &Failure| troubles.say(format!("the clients of {name}: {why}"));
+    if let Ok(clients) = Mux::Zellij.clients(name).inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));
@@ -322,35 +308,4 @@ fn ask(
         core.send(core::Command::Clients { session: *id, name: name.clone(), clients }).ok()?;
     }
     Some(())
-}
-
-/// How long until the youngest of the sessions that `started` so is no longer
-/// `NEWBORN`, at `now`, where one is. One that started after `now`, by a clock
-/// set back since, is taken for old: it would hold the sweep up for as long
-/// as the clock went back.
-#[must_use]
-pub fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
-    let left = |started| NEWBORN.checked_sub(now.duration_since(started).ok()?);
-    started.filter_map(left).filter(|left| !left.is_zero()).max()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The sweep waits out the youngest session that is newborn, and none
-    /// that is not. One that started after now, as by a clock set back since,
-    /// holds nothing up: the sweep would wait for as long as the clock went
-    /// back.
-    #[test]
-    fn the_sweep_waits_out_the_youngest_newborn_session() {
-        let now = SystemTime::now();
-        let ago = |age: Duration| now - age;
-        let quarter = NEWBORN / 4;
-        let started = [ago(quarter), ago(quarter * 3), ago(NEWBORN * 4)];
-        assert_eq!(newborn(started.into_iter(), now), Some(quarter * 3));
-        assert_eq!(newborn([ago(NEWBORN), ago(NEWBORN * 4)].into_iter(), now), None);
-        assert_eq!(newborn([now + Duration::from_mins(1)].into_iter(), now), None);
-        assert_eq!(newborn(std::iter::empty(), now), None);
-    }
 }

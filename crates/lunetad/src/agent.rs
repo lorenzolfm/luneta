@@ -15,7 +15,7 @@ use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::process;
-use crate::zellij::Sessions;
+use crate::mux::Sessions;
 
 /// The most an agent's file holds that an adapter reads. Each holds a few hundred
 /// bytes: a file past this is no agent's.
@@ -323,7 +323,7 @@ impl Agent {
             waiting_for,
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
-                session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
+                session: sessions.lead(&named.session, self.started_at).map(ToString::to_string),
                 pane: named.pane,
             }),
             topic: topic.map(String::from),
@@ -343,7 +343,7 @@ impl Unread {
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: self.started.and_then(|started| {
-                    sessions.lead(&named.session, Some(started)).map(str::to_owned)
+                    sessions.lead(&named.session, Some(started)).map(ToString::to_string)
                 }),
                 pane: named.pane,
             }),

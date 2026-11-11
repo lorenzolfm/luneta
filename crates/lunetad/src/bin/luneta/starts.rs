@@ -61,7 +61,7 @@ pub enum Start {
 
 /// A session of this machine's that runs, as a bare luneta chooses among them.
 struct Running {
-    name: String,
+    name: SessionName,
     started: SystemTime,
     /// When you were last in a pane of it, if you were.
     seen: Option<SystemTime>,
@@ -72,7 +72,7 @@ enum Here {
     /// The session to join, of those that answer.
     Join(SessionName),
     /// None to join, and those that run that may hold luneta's terminal.
-    Nothing { holding: Vec<String> },
+    Nothing { holding: Vec<SessionName> },
 }
 
 /// Where a `luneta <name>` starts, or why it does not: naming a session is
@@ -177,15 +177,13 @@ fn here(named: Option<&SessionName>, news: &News) -> Option<Here> {
 /// The sessions of `running` a bare luneta can join, the likeliest first: the
 /// one `named` for its directory; then those you were last in; then those you
 /// have not been in, the newest first, and of two that started at once the one
-/// whose name comes last, as the picker has them. Never one of a name luneta
-/// cannot hand zellij.
+/// whose name comes last, as the picker has them.
 fn joinable(mut running: Vec<Running>, named: Option<&SessionName>) -> Vec<SessionName> {
-    let is_named = |session: &Running| named.is_some_and(|named| named.as_str() == session.name);
+    let is_named = |session: &Running| named == Some(&session.name);
     running.sort_by(|a, b| {
         (is_named(b), b.seen, b.started, &b.name).cmp(&(is_named(a), a.seen, a.started, &a.name))
     });
-    let sessions = running.into_iter();
-    sessions.filter_map(|session| SessionName::running(&session.name).ok()).collect()
+    running.into_iter().map(|session| session.name).collect()
 }
 
 /// luneta has no session to join, whose directory's session is `named`. It
@@ -193,7 +191,7 @@ fn joinable(mut running: Vec<Running>, named: Option<&SessionName>) -> Vec<Sessi
 /// refuses for, as `refusal_to_make` says.
 fn left(
     named: Option<SessionName>,
-    holding: &[String],
+    holding: &[SessionName],
     held: &[Destination],
 ) -> Result<First, String> {
     match refusal_to_make(holding, held) {
@@ -215,7 +213,7 @@ fn make(named: Option<SessionName>) -> Result<First, String> {
 /// `holding`, those here its terminal may be a pane of, and every session of
 /// the machines `held`, which may hold it: sessions run, and you did not ask
 /// for another by naming it.
-fn refusal_to_make(holding: &[String], held: &[Destination]) -> Option<String> {
+fn refusal_to_make(holding: &[SessionName], held: &[Destination]) -> Option<String> {
     let mut holders = Vec::new();
     if !holding.is_empty() {
         let sessions: Vec<String> = holding.iter().map(|name| format!("\"{name}\"")).collect();
@@ -244,7 +242,7 @@ mod tests {
     }
 
     fn running(name: &str, started: u64, seen: Option<u64>) -> Running {
-        Running { name: name.to_owned(), started: at(started), seen: seen.map(at) }
+        Running { name: self::name(name), started: at(started), seen: seen.map(at) }
     }
 
     fn name(name: &str) -> SessionName {
@@ -286,20 +284,12 @@ mod tests {
         assert_eq!(order(sessions, None), ["b", "a"]);
     }
 
-    /// One of a name luneta cannot hand zellij is passed over, though it is
-    /// the last you were in.
-    #[test]
-    fn a_session_of_a_name_luneta_cannot_hand_zellij_is_passed_over() {
-        let sessions = vec![running("other", 20, None), running("no/name", 40, Some(400))];
-        assert_eq!(order(sessions, None), ["other"]);
-    }
-
     /// With nothing left to join, luneta refuses where what it passed over
     /// runs, which says what it found, and otherwise has nothing to refuse:
     /// it makes one. The session's words are those of the refusal of old.
     #[test]
     fn luneta_refuses_to_make_a_session_only_where_it_passed_sessions_over() {
-        let work = ["work".to_owned()];
+        let work = [name("work")];
         assert_eq!(refusal_to_make(&[], &[]), None);
         assert_eq!(
             refusal_to_make(&work, &[]).unwrap(),
@@ -312,7 +302,7 @@ mod tests {
             "each session of pi, me@vps may hold this terminal in a pane, which zellij would show \
              inside itself: name another session, or run luneta outside zellij"
         );
-        let two = ["work".to_owned(), "play".to_owned()];
+        let two = [name("work"), name("play")];
         let two = refusal_to_make(&two, &[]).unwrap();
         assert!(two.starts_with("this terminal is a pane of \"work\" or \"play\", which"), "{two}");
         let both = refusal_to_make(&work, &held[..1]).unwrap();

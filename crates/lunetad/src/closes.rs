@@ -6,13 +6,11 @@
 //! row of this one.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, CloseRequest, On};
-use crate::cli::{self, laid, tabs, Asks, Laid, PaneId, TabId};
-use crate::zellij::SessionName;
+use crate::mux::{tabs, Asks, Laid, Mux, PaneId, SessionName, SocketFolder, TabId};
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,7 +28,7 @@ pub enum Closes {
 /// What closing the terminal `pane` of `session` closes, as zellij lists the
 /// session's panes now, or why it closes nothing.
 pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
-    closing(&laid(session)?, pane)
+    closing(&Mux::Zellij.laid(session)?, pane)
 }
 
 /// What closing the terminal `pane` closes among `laid`, the panes of its
@@ -59,28 +57,28 @@ pub enum Closing {
 /// What closing the terminals `panes` of `session` closes, together, as
 /// zellij lists the session's panes now, or why it closes nothing.
 pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    together(&laid(session)?, panes)
+    together(&Mux::Zellij.laid(session)?, panes)
 }
 
 /// What closing the terminals `panes` closes among `laid`, the panes of their
 /// session, together: a tab goes once nothing left in it holds it open, and
 /// the session once all its tabs do. Or why it closes nothing: one is gone.
 fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    let given = |laid: &Laid| !laid.is_plugin && panes.contains(&laid.id);
-    let listed = |pane: u32| laid.iter().any(|laid| given(laid) && laid.id == pane);
+    let given = |laid: &Laid| laid.pane.terminal().filter(|id| panes.contains(id));
+    let listed = |pane: u32| laid.iter().any(|laid| laid.pane == PaneId::Terminal(pane));
     if let Some(gone) = panes.iter().find(|pane| !listed(**pane)) {
         return Err(format!("pane {gone} is gone"));
     }
     let tabs = tabs(laid);
     let in_tab = |tab: TabId| laid.iter().filter(move |laid| laid.tab_id == tab);
-    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(given));
-    let held = |tab: &TabId| in_tab(*tab).any(|laid| !given(laid) && laid.holds_tab());
+    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(|it| given(it).is_some()));
+    let held = |tab: &TabId| in_tab(*tab).any(|laid| given(laid).is_none() && laid.holds_tab());
     let (held, closed): (Vec<TabId>, Vec<TabId>) = touched.partition(held);
     if closed.len() == tabs.len() {
         return Ok(Closing::Session);
     }
     let tabs = closed.into_iter().map(|tab| (tab, terminals(laid, tab))).collect();
-    let alone = |tab| in_tab(tab).filter(|laid| given(laid)).map(|laid| laid.id);
+    let alone = |tab| in_tab(tab).filter_map(given);
     let panes = held.into_iter().flat_map(alone).collect();
     Ok(Closing::Parts { tabs, panes })
 }
@@ -88,8 +86,8 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
 /// The terminals in the tab `tab` among `laid`, the panes of its session,
 /// the floating ones too, as zellij lists them.
 pub(crate) fn terminals(laid: &[Laid], tab: TabId) -> Vec<u32> {
-    let terminals = laid.iter().filter(|laid| laid.tab_id == tab && !laid.is_plugin);
-    terminals.map(|laid| laid.id).collect()
+    let terminals = laid.iter().filter(|laid| laid.tab_id == tab);
+    terminals.filter_map(|laid| laid.pane.terminal()).collect()
 }
 
 /// What zellij closes of a session, short of the session, as what closing
@@ -143,8 +141,8 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
 /// that no longer runs took no name, and what asks of it hears that from
 /// zellij.
 pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result<(), String> {
-    let running = running_in(&crate::zellij::folder())?;
-    if running.iter().any(|(name, at)| name == session.as_str() && *at != started) {
+    let running = running_in(&Mux::Zellij.socket_folder())?;
+    if running.iter().any(|(name, at)| name == session && *at != started) {
         return Err(format!("\"{session}\" is a session made since, which stays"));
     }
     Ok(())
@@ -157,10 +155,12 @@ pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result
 /// now, stays. zellij closes nothing on a condition of its own: what changes
 /// between the list and the close goes with it.
 pub(crate) fn closed_as_listed(session: &SessionName, close: &Close) -> Result<(), String> {
-    still(&laid(session)?, close)?;
+    still(&Mux::Zellij.laid(session)?, close)?;
     match close {
-        Close::Pane(pane) => cli::pane_closed(session, PaneId::Terminal(*pane), Asks::Once)?,
-        Close::Tab { id, .. } => cli::tab_closed(session, *id, Asks::Once)?,
+        Close::Pane(pane) => {
+            Mux::Zellij.pane_closed(session, PaneId::Terminal(*pane), Asks::Once)?;
+        },
+        Close::Tab { id, .. } => Mux::Zellij.tab_closed(session, *id, Asks::Once)?,
     }
     Ok(())
 }
@@ -215,8 +215,8 @@ const SETTLING: Duration = Duration::from_millis(100);
 /// the session, that ends with the session may not be there by then.
 pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> {
     same_session(session, started)?;
-    let folder = crate::zellij::folder();
-    cli::session_killed(session)?;
+    let folder = Mux::Zellij.socket_folder();
+    Mux::Zellij.session_killed(session)?;
     settled(session, started, &folder)
 }
 
@@ -227,9 +227,13 @@ pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> 
 /// it drops the word to the server that it fails to send, and ends well
 /// where it fails to take away what it keeps, but for finding none. What is
 /// in `folder`, zellij's sockets, and in its folder of what it keeps, says.
-fn settled(session: &SessionName, started: SystemTime, folder: &Path) -> Result<(), String> {
+fn settled(
+    session: &SessionName,
+    started: SystemTime,
+    folder: &SocketFolder,
+) -> Result<(), String> {
     let deadline = Instant::now() + GOING;
-    while running_in(folder)?.iter().any(|(name, at)| name == session.as_str() && *at == started) {
+    while running_in(folder)?.iter().any(|(name, at)| name == session && *at == started) {
         if Instant::now() >= deadline {
             return Err(format!("zellij did not kill \"{session}\""));
         }
@@ -238,8 +242,8 @@ fn settled(session: &SessionName, started: SystemTime, folder: &Path) -> Result<
     thread::sleep(SETTLING);
     let unknown =
         |why| format!("luneta cannot tell whether zellij keeps \"{session}\" in its cache: {why}");
-    let cached = crate::zellij::metadata::cached(session).map_err(unknown)?;
-    if cached && running_in(folder)?.iter().all(|(name, _)| name != session.as_str()) {
+    let cached = Mux::Zellij.cached(session).map_err(unknown)?;
+    if cached && running_in(folder)?.iter().all(|(name, _)| name != session) {
         return deleted(session);
     }
     Ok(())
@@ -248,9 +252,9 @@ fn settled(session: &SessionName, started: SystemTime, folder: &Path) -> Result<
 /// The sessions that run, each by its name and when it started, as their
 /// sockets in `folder` say now; or why luneta cannot tell them, as a
 /// session's socket could be in what it cannot read.
-pub fn running_in(folder: &Path) -> Result<Vec<(String, SystemTime)>, String> {
-    crate::zellij::running(folder).ok_or_else(|| {
-        let folder = folder.display();
+pub fn running_in(folder: &SocketFolder) -> Result<Vec<(SessionName, SystemTime)>, String> {
+    folder.running().ok_or_else(|| {
+        let folder = folder.path().display();
         format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
     })
 }
@@ -258,7 +262,7 @@ pub fn running_in(folder: &Path) -> Result<Vec<(String, SystemTime)>, String> {
 /// Has zellij let go of `session`, one that ended, which then cannot be
 /// brought back, or says why it did not. zellij keeps one that runs.
 pub fn deleted(session: &SessionName) -> Result<(), String> {
-    Ok(cli::session_deleted(session)?)
+    Ok(Mux::Zellij.session_deleted(session)?)
 }
 
 #[cfg(test)]
@@ -267,8 +271,7 @@ mod tests {
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
-            id,
-            is_plugin: false,
+            pane: PaneId::Terminal(id),
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
@@ -289,8 +292,8 @@ mod tests {
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab_or_the_session() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
-        let plugin = Laid { is_plugin: true, ..laid(4, 0) };
+        let bar = Laid { pane: PaneId::Plugin(1), is_selectable: false, ..laid(1, 0) };
+        let plugin = Laid { pane: PaneId::Plugin(4), ..laid(4, 0) };
         let suspended = Laid { is_suppressed: true, ..laid(7, 0) };
         let other_tab = laid(9, 1);
         let tab = |panes: Vec<u32>| Ok(Closes::Tab { id: TabId(0), panes });
@@ -337,7 +340,7 @@ mod tests {
     #[test]
     fn a_close_goes_ahead_only_while_zellij_lists_what_was_planned() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
+        let bar = Laid { pane: PaneId::Plugin(1), is_selectable: false, ..laid(1, 0) };
         let planned = vec![laid(4, 0), laid(6, 0), floating.clone(), bar, laid(9, 1)];
         let opened = [planned.clone(), vec![laid(7, 0)]].concat();
         let last = planned[..4].to_vec();

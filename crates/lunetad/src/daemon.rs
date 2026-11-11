@@ -89,7 +89,7 @@ use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
-use crate::zellij::SessionName;
+use crate::mux::{self, Mux, SessionName, SocketFolder};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -97,9 +97,9 @@ use crate::agent::Agent;
 use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
-    checks, claude, cli, client, closes, ended, eza, fetches, git, github, keeps, log,
-    moves, names, opens, panes, pi, printed, release, remote, renames, screens, shells, skills,
-    topics, turns, watch, zellij, zoxide, Harness,
+    checks, claude, client, closes, eza, fetches, git, github, keeps, log, moves, names, opens,
+    panes, pi, printed, release, remote, screens, shells, skills, topics, turns, watch, zoxide,
+    Harness,
 };
 
 /// How often a folder is read again with no word that it changed: for a folder
@@ -246,12 +246,12 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let (end, ending) = oneshot::channel();
     // Read once, so that the folders the daemon says it reads are the ones it
     // does.
-    let sockets = zellij::folder();
+    let sockets = Mux::Zellij.socket_folder();
     let claude_folder = claude::folder();
     let watchers = Arc::new(Watchers::default());
     let folders = (claude_folder.clone(), sockets.clone());
     follow(&core, &claim.folder, folders, watchers.clone(), end)?;
-    panes::follow(core.clone(), wake_panes, panes_woken, zellij::metadata::folder(), SWEEP)?;
+    panes::follow(core.clone(), wake_panes, panes_woken, Mux::Zellij.cache_folder(), SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -356,7 +356,7 @@ impl Alone {
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
-    (claude_folder, sockets): (Option<PathBuf>, PathBuf),
+    (claude_folder, sockets): (Option<PathBuf>, SocketFolder),
     watchers: Arc<Watchers>,
     end: oneshot::Sender<()>,
 ) -> io::Result<()> {
@@ -397,11 +397,11 @@ fn follow(
     let read = {
         let sockets = sockets.clone();
         let mut troubles = Troubles::default();
-        move || zellij::scan(&sockets, &mut troubles)
+        move || sockets.scan(&mut troubles)
     };
     let mut alone = Alone::default();
     let mut end = Some(end);
-    let tell = move |scan: zellij::Scan| {
+    let tell = move |scan: mux::Scan| {
         // Looked at on each look, whether zellij has a session or not, so that
         // only a client that asked since the look before counts.
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
@@ -421,7 +421,8 @@ fn follow(
         }
         core.send(Command::Sockets { sockets: scan.sockets, unread: scan.unread }).is_ok()
     };
-    let wanted = zellij::of_sessions;
+    let wanted = |path: &Path| Mux::Zellij.of_sessions(path);
+    let sockets = sockets.path().to_owned();
     watch::watch("zellij", sockets, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
 
@@ -537,7 +538,7 @@ impl Drop for Waits<'_> {
 struct Host {
     started: SystemTime,
     /// The folder it reads zellij's sessions in.
-    sockets: PathBuf,
+    sockets: SocketFolder,
     /// The folder it reads Claude Code's sessions in, if its environment
     /// named one.
     claude_folder: Option<PathBuf>,
@@ -554,7 +555,7 @@ impl Daemon for Host {
             version: release::VERSION.to_owned(),
             pid: std::process::id(),
             started_at: Some(self.started.into()),
-            zellij_folder: Some(self.sockets.as_os_str().as_bytes().to_vec()),
+            zellij_folder: Some(self.sockets.path().as_os_str().as_bytes().to_vec()),
             claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
             built: release::BUILT,
         }))
@@ -586,7 +587,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || cli::went(&at, &to, pane)).await;
+        let went = task::spawn_blocking(move || Mux::Zellij.went(&at, &to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -815,7 +816,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || cli::started(&at, &to, cwd.as_ref());
+        let start = move || Mux::Zellij.started(&at, &to, cwd.as_ref());
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -854,7 +855,7 @@ impl Daemon for Host {
                 return Err(Status::invalid_argument("closes: a tab of no terminal"));
             },
             Some(close_request::Closes::Tab(ClosedTab { id, panes })) => {
-                Close::Tab { id: cli::TabId(id), panes }
+                Close::Tab { id: mux::TabId(id), panes }
             },
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
@@ -952,13 +953,13 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on)? {
             return daemon.list_exited(ListExitedRequest { on: None }).await;
         }
-        let listed = task::spawn_blocking(ended::exited).await;
+        let listed = task::spawn_blocking(|| Mux::Zellij.exited()).await;
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
         // An age past what a Duration holds, some 292 billion years, is one
         // zellij said of no session, as a line that does not read: how many
         // go so goes in the log.
-        let exited = |ended::Exited { name, ago }| {
+        let exited = |mux::Exited { name, ago }| {
             Some(Exited { name: name.to_string(), ago: Some(ago.try_into().ok()?) })
         };
         let read = listed.len();
@@ -998,7 +999,7 @@ impl Daemon for Host {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
-        let renamed = task::spawn_blocking(move || renames::renamed(&session, &to)).await;
+        let renamed = task::spawn_blocking(move || Mux::Zellij.renamed(&session, &to)).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -1296,8 +1297,8 @@ where
 
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = cli::clients(session)?;
-    Ok(listed.iter().copied().map(cli::Client::to_api).collect())
+    let listed = Mux::Zellij.clients(session)?;
+    Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 
 /// When a session started, as a question says it, or why it is invalid: it

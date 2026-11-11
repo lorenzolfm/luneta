@@ -10,10 +10,11 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
+use super::SessionName;
+use crate::mux::ClientWords;
 use crate::program::{self, Ran};
-use crate::zellij::SessionName;
 use crate::Directory;
 
 mod clients;
@@ -191,30 +192,23 @@ pub fn unrun(error: &io::Error) -> String {
 #[derive(Clone, Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "zellij lists each as a bool of its own")]
 pub struct Laid {
-    pub id: u32,
-    pub is_plugin: bool,
+    #[serde(flatten, deserialize_with = "pane_listed")]
+    pub pane: PaneId,
     pub is_selectable: bool,
     pub is_suppressed: bool,
     pub is_floating: bool,
     /// Whether a client has the focus on it in its tab, or the last one had.
-    /// Only the preview of a session goes by it, and by `tab_position`: a
-    /// list without them still says what closing a pane closes.
-    #[serde(default)]
     pub is_focused: bool,
     /// Whether it is shown over the other panes of its tab. Only a turn goes by
     /// it, to show it so again, as a pane leaving the tab or coming into it ends
     /// that.
-    #[serde(default)]
     pub is_fullscreen: bool,
     /// What its frame calls it, by which a turn finds a stand-in of its own.
-    #[serde(default)]
     pub title: String,
     pub tab_id: TabId,
     /// Where its tab stands among the session's, from the first.
-    #[serde(default)]
     pub tab_position: u32,
     /// What its tab is called, as you pick a tab for another's panes by it.
-    #[serde(default)]
     pub tab_name: String,
     /// What runs in its foreground: none where zellij took too long to say,
     /// which does not mean nothing runs.
@@ -222,12 +216,6 @@ pub struct Laid {
 }
 
 impl Laid {
-    /// The pane it is, as zellij's CLI names it.
-    #[must_use]
-    pub fn pane_id(&self) -> PaneId {
-        if self.is_plugin { PaneId::Plugin(self.id) } else { PaneId::Terminal(self.id) }
-    }
-
     /// Whether it is tiled in its tab, for you to go to: a plugin's as well.
     #[must_use]
     pub fn is_tiled(&self) -> bool {
@@ -240,8 +228,19 @@ impl Laid {
     /// does a bar, which you cannot go to.
     #[must_use]
     pub fn holds_tab(&self) -> bool {
-        self.is_tiled() || (self.is_suppressed && !self.is_plugin)
+        self.is_tiled() || (self.is_suppressed && self.pane.terminal().is_some())
     }
+}
+
+/// The pane zellij lists by its `id` and whether it `is_plugin`.
+fn pane_listed<'de, D: Deserializer<'de>>(listed: D) -> Result<PaneId, D::Error> {
+    #[derive(Deserialize)]
+    struct Pane {
+        id: u32,
+        is_plugin: bool,
+    }
+    let Pane { id, is_plugin } = Pane::deserialize(listed)?;
+    Ok(if is_plugin { PaneId::Plugin(id) } else { PaneId::Terminal(id) })
 }
 
 /// A pane as zellij's CLI names it. It numbers terminals and plugins apart, so
@@ -301,8 +300,7 @@ pub fn laid(session: &SessionName) -> Result<Vec<Laid>, Failure> {
 /// lists: where luneta goes in a tab it opened.
 #[must_use]
 pub fn terminal_of(laid: &[Laid], tab: TabId) -> Option<u32> {
-    let terminal = |pane: &&Laid| !pane.is_plugin && pane.tab_id == tab;
-    laid.iter().find(terminal).map(|pane| pane.id)
+    laid.iter().filter(|laid| laid.tab_id == tab).find_map(|laid| laid.pane.terminal())
 }
 
 /// The ids of the tabs `laid` lists a pane of, a plugin's as well.
@@ -630,19 +628,16 @@ pub fn session_deleted(session: &SessionName) -> Result<(), Failure> {
 }
 
 /// The command that takes the client that last typed in the session `at` to
-/// the pane `pane` of `to`, or to `to` alone, on the pane it last had the
-/// focus on. None where the client is there already: in `at`, with no pane to
-/// go to.
-fn go(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Option<Command> {
-    if at == to {
-        return pane.map(|id| focus(at, PaneId::Terminal(id)));
-    }
+/// the pane `pane` of `to`, another session, or to `to` alone, on the pane it
+/// last had the focus on.
+fn go(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Command {
+    assert_ne!(at, to);
     let pane = pane.map(|id| PaneId::Terminal(id).to_string());
     let mut command = action(at);
     command.arg("switch-session");
     command.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     command.args(["--", to.as_str()]);
-    Some(command)
+    command
 }
 
 /// The command that takes the client that last typed in `session` to its
@@ -664,12 +659,14 @@ pub fn pane_focused(session: &SessionName, pane: PaneId) -> Result<(), Failure> 
 }
 
 /// Has zellij take the client that last typed in `at` where `go` says, or
-/// says why it did not. A pane already focused is where it was to go.
+/// says why it did not. In `at` itself, it goes to the pane as
+/// `pane_focused` does, and with no pane to go to, it is there already. A
+/// pane already focused is where it was to go.
 pub fn went(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(), Failure> {
-    let Some(mut command) = go(at, to, pane) else {
-        return Ok(());
-    };
-    match answer_of(ran(&mut command)?) {
+    if at == to {
+        return pane.map_or(Ok(()), |pane| pane_focused(at, PaneId::Terminal(pane)));
+    }
+    match answer_of(ran(&mut go(at, to, pane))?) {
         Ok(_) | Err(Failure::Focused(_)) => Ok(()),
         Err(failure) => Err(failure),
     }
@@ -695,28 +692,36 @@ pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> R
 }
 
 /// The program of zellij's CLI and its client.
-pub const PROGRAM: &str = "zellij";
+const PROGRAM: &str = "zellij";
+
+/// The words that start zellij's client with `args`, as `client_attaching` and
+/// those after it give them, without what `LEFT_OUT` names.
+#[must_use]
+pub fn words(args: Vec<String>) -> ClientWords {
+    ClientWords { program: PROGRAM, args, unset: &LEFT_OUT }
+}
 
 /// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
 /// which it makes where none runs, or without one, in a session of a name
 /// zellij makes up; or why it cannot attach, as `attached` says.
-pub fn client(session: Option<&SessionName>) -> Result<Vec<String>, String> {
+pub fn client_attaching(session: Option<&SessionName>) -> Result<Vec<String>, String> {
     let Some(session) = session else {
         return Ok(Vec::new());
     };
     Ok(vec!["attach".to_owned(), "--create".to_owned(), attached(session)?])
 }
 
-/// The arguments of zellij's client, as `client` says, that makes `session`
-/// in the directory it starts in, and fails where one runs by that name, or
-/// zellij keeps one that ended, to bring back.
+/// The arguments of zellij's client, as `client_attaching` says, that makes
+/// `session` in the directory it starts in, and fails where one runs by that
+/// name, or zellij keeps one that ended, to bring back.
 #[must_use]
 pub fn client_making(session: &SessionName) -> Vec<String> {
     vec![session_option(session)]
 }
 
-/// The arguments of zellij's client, as `client` says, attached to `session`,
-/// which runs, or which ended, which zellij brings back. It makes none.
+/// The arguments of zellij's client, as `client_attaching` says, attached to
+/// `session`, which runs, or which ended, which zellij brings back. It makes
+/// none.
 pub fn client_rejoining(session: &SessionName) -> Result<Vec<String>, String> {
     Ok(vec!["attach".to_owned(), attached(session)?])
 }
@@ -752,8 +757,7 @@ mod tests {
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
-            id,
-            is_plugin: false,
+            pane: PaneId::Terminal(id),
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
@@ -778,14 +782,14 @@ mod tests {
         let at = SessionName::running("-at").unwrap();
         let to = SessionName::running("-to").unwrap();
         let switch = ["--session=-at", "action", "switch-session"];
-        let went = go(&at, &to, Some(2)).unwrap();
+        let went = go(&at, &to, Some(2));
         assert_eq!(args(&went), [&switch[..], &["--pane-id", "terminal_2", "--", "-to"]].concat());
         let w = Directory::parse("/w".to_owned()).unwrap();
         let started = start(&at, &to, Some(&w));
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
         assert_eq!(client_making(&at), ["--session=-at"]);
         assert!(client_rejoining(&at).is_err());
-        assert!(client(Some(&at)).is_err());
+        assert!(client_attaching(Some(&at)).is_err());
     }
 
     /// A pane already focused is read apart from any other failure, as `went`
@@ -804,6 +808,25 @@ mod tests {
         assert!(matches!(&refused, Err(Failure::Refused(it)) if it == said), "{refused:?}");
     }
 
+    /// zellij numbers terminals and plugins apart, so a plugin's pane listed
+    /// by a terminal's id is no terminal.
+    #[test]
+    fn a_plugin_s_pane_is_read_apart_from_a_terminal_of_its_id() {
+        let listed = |id: u32, is_plugin: bool| {
+            serde_json::json!({
+                "id": id, "is_plugin": is_plugin, "is_selectable": true,
+                "is_suppressed": false, "is_floating": false, "is_focused": false,
+                "is_fullscreen": false, "title": "", "tab_id": 0, "tab_position": 0,
+                "tab_name": "",
+            })
+        };
+        let said = serde_json::json!([listed(2, true), listed(2, false)]).to_string();
+        let laid: Vec<Laid> = serde_json::from_str(&said).unwrap();
+        let panes: Vec<PaneId> = laid.iter().map(|laid| laid.pane).collect();
+        assert_eq!(panes, [PaneId::Plugin(2), PaneId::Terminal(2)]);
+        assert_eq!(terminal_of(&laid, TabId(0)), Some(2));
+    }
+
     /// luneta goes to the terminal of a tab it opened, of that tab.
     #[test]
     fn a_tab_opened_is_gone_to_on_its_terminal() {
@@ -815,7 +838,7 @@ mod tests {
     /// are every tab it lists, those that hold a plugin's pane alone as well.
     #[test]
     fn a_made_session_s_tabs_are_all_it_lists_a_plugin_s_too() {
-        let bar = Laid { is_plugin: true, ..laid(0, 2) };
+        let bar = Laid { pane: PaneId::Plugin(0), ..laid(0, 2) };
         let panes = [laid(0, 0), laid(1, 1), laid(2, 1), bar];
         assert_eq!(tabs(&panes), BTreeSet::from([TabId(0), TabId(1), TabId(2)]));
     }

@@ -17,14 +17,13 @@ use tokio::sync::oneshot;
 use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
-use crate::cli::{Client, Listed};
 use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::Shell;
 use crate::transcripts::SessionId;
-use crate::zellij::{Id, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, SessionName, Sessions, Socket};
 
 /// A branch, by the directory that holds its repository, and its name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,9 +41,9 @@ pub enum Command {
     /// sockets could not be read, any of which could be another's.
     Sockets { sockets: Vec<Socket>, unread: u32 },
     /// What zellij listed of the panes of `session`, asked for by `name`.
-    Panes { session: Id, name: String, panes: Vec<Pane> },
+    Panes { session: Id, name: SessionName, panes: Vec<Pane> },
     /// What zellij listed of the clients of `session`, asked for by `name`.
-    Clients { session: Id, name: String, clients: Listed },
+    Clients { session: Id, name: SessionName, clients: Listed },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
@@ -84,7 +83,7 @@ pub enum Command {
 pub struct Addressed {
     pub id: Id,
     /// The name to ask by.
-    pub name: String,
+    pub name: SessionName,
     /// The last word said of it, as the core counts the words said of every
     /// session: one as zellij could first be asked about it by its name, and
     /// one each time a shell in it runs a command, which can change where its
@@ -320,10 +319,10 @@ fn wake(thread: &SyncSender<()>) {
 impl Known {
     /// The sessions zellij can be asked about by name: each that runs under a
     /// name no other runs under, and that name.
-    fn addressed(&self) -> HashSet<(Id, String)> {
+    fn addressed(&self) -> HashSet<(Id, SessionName)> {
         let sessions = &self.sessions;
-        let alone = |&(id, name): &(Id, &str)| sessions.addressed(name) == Some(id);
-        sessions.running().filter(alone).map(|(id, name)| (id, name.to_owned())).collect()
+        let alone = |&(id, name): &(Id, &SessionName)| sessions.addressed(name) == Some(id);
+        sessions.running().filter(alone).map(|(id, name)| (id, name.clone())).collect()
     }
 
     /// Takes in the sessions that run now. A session that ended takes its
@@ -524,13 +523,13 @@ impl Known {
         assert!(addressed.iter().all(|(id, _)| self.told.contains_key(id)));
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
-        let mut running: Vec<(Id, &str)> = self.sessions.running().collect();
+        let mut running: Vec<(Id, &SessionName)> = self.sessions.running().collect();
         running.sort_unstable_by_key(|&(id, name)| (name, id.started()));
         let shells = self.shells();
         let sessions = running
             .into_iter()
             .map(|(id, name)| api::Session {
-                name: name.to_owned(),
+                name: name.to_string(),
                 started_at: Some(id.started().into()),
                 socket: id.socket(),
                 panes: self.panes.get(&id).map(|panes| api::Panes {

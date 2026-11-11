@@ -11,7 +11,7 @@ use std::ops::Deref;
 
 use super::{laid, Failure, Laid, PaneId};
 use crate::api;
-use crate::zellij::SessionName;
+use crate::mux::SessionName;
 
 /// The line zellij 0.45 starts its list with, which names its columns.
 const HEADER: &str = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
@@ -141,8 +141,7 @@ impl Said {
             return Ok(self.rows);
         }
         let many_lines = |pane: Laid| {
-            let id = pane.pane_id();
-            Some((id, pane.pane_command.filter(|command| command.contains('\n'))?))
+            Some((pane.pane, pane.pane_command.filter(|command| command.contains('\n'))?))
         };
         let commands: Vec<_> = laid(session)?.into_iter().filter_map(many_lines).collect();
         parse(&self.said, &commands).map_err(|why| Failure::Unread(unreadable(&why)))

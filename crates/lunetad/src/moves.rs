@@ -3,12 +3,11 @@
 //! finds it here for a luneta on another machine, whose client runs here
 //! through ssh.
 
-use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{api, cli};
-use crate::zellij::{self, SessionName};
+use crate::api;
+use crate::mux::{Client, Mux, SessionName, SocketFolder};
 
 /// How long the refuge is looked for the session its client was in to be
 /// gone, once the client ended. zellij takes the session's socket away a
@@ -54,14 +53,14 @@ pub enum Ended {
 /// zellij kept it to resurrect, and otherwise zellij's client fails: only a
 /// session that answers is one to go on in.
 pub fn refuge(
-    folder: &Path,
+    folder: &SocketFolder,
     seats: &[SessionName],
     current: Option<&str>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Ended {
     let deadline = Instant::now() + ENDING;
     loop {
-        let Some(running) = zellij::running(folder) else {
+        let Some(running) = folder.running() else {
             return Ended::Kept;
         };
         if gone(seats, &running) {
@@ -79,45 +78,44 @@ pub fn refuge(
 /// `current`, nor one of a name luneta cannot hand zellij. None where none
 /// answers, and where not all of `folder` reads.
 pub fn newest(
-    folder: &Path,
+    folder: &SocketFolder,
     current: Option<&str>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    sought(zellij::running(folder)?, current, &mut clients)
+    sought(folder.running()?, current, &mut clients)
 }
 
 /// The first of `running` of a name luneta can hand zellij that `clients`
 /// answers for, as `refuges` orders them, within `SEEKING`.
 fn sought(
-    running: Vec<(String, SystemTime)>,
+    running: Vec<(SessionName, SystemTime)>,
     current: Option<&str>,
     clients: &mut impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    let sessions = refuges(running, current).into_iter();
-    answering(sessions.filter_map(|session| SessionName::running(&session).ok()), clients)
+    answering(refuges(running, current), clients)
 }
 
 /// What `refuge`'s `clients` answers for `session` on this machine: every row
-/// zellij lists of its clients, as `cli::client_rows` says them, or none
+/// zellij lists of its clients, as `Mux::client_rows` says them, or none
 /// where zellij did not list them. A client that comes to it is none of these,
 /// and zellij is asked for no panes, which a session that answers may not
 /// list.
 #[must_use]
 pub fn before(session: &SessionName) -> Option<Vec<api::Client>> {
-    let rows = cli::client_rows(session).ok()?;
-    Some(rows.into_iter().map(cli::Client::to_api).collect())
+    let rows = Mux::Zellij.client_rows(session).ok()?;
+    Some(rows.into_iter().map(Client::to_api).collect())
 }
 
 /// The first of `sessions` that `clients` answers for, tried one after
 /// another within `SEEKING`, where a client goes on: of this machine's, or
 /// of another's, as its daemon there lists their clients. Never one zellij's
-/// client does not attach to, as `cli::attaches_to` says, which is not asked.
+/// client does not attach to, as `Mux::attaches_to` says, which is not asked.
 pub fn answering(
     sessions: impl IntoIterator<Item = SessionName>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
     let seeking = Instant::now() + SEEKING;
-    let sessions = sessions.into_iter().filter(cli::attaches_to);
+    let sessions = sessions.into_iter().filter(|session| Mux::Zellij.attaches_to(session));
     let mut sessions = sessions.take_while(|_| Instant::now() < seeking);
     sessions.find_map(|session| {
         let before = clients(&session)?;
@@ -131,14 +129,17 @@ pub fn answering(
 /// is taken for the client's: one that detached as it went to a session
 /// that never came up goes on, rather than one whose session was killed as
 /// it left ending luneta.
-fn gone(seats: &[SessionName], running: &[(String, SystemTime)]) -> bool {
-    seats.iter().any(|seat| running.iter().all(|(name, _)| name != seat.as_str()))
+fn gone(seats: &[SessionName], running: &[(SessionName, SystemTime)]) -> bool {
+    seats.iter().any(|seat| running.iter().all(|(name, _)| name != seat))
 }
 
 /// The names of `running` that a client can go on in, newest first, by when
 /// each started and then by name, as the picker lists them: all but
 /// `current`.
-fn refuges(mut running: Vec<(String, SystemTime)>, current: Option<&str>) -> Vec<String> {
+fn refuges(
+    mut running: Vec<(SessionName, SystemTime)>,
+    current: Option<&str>,
+) -> Vec<SessionName> {
     running.retain(|(name, _)| current != Some(name.as_str()));
     running.sort_by(|(a, a_at), (b, b_at)| (b_at, b).cmp(&(a_at, a)));
     running.into_iter().map(|(name, _)| name).collect()
@@ -155,11 +156,12 @@ mod tests {
     #[test]
     fn the_refuge_is_sought_in_the_order_the_picker_lists_sessions() {
         let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let name = |name: &str| SessionName::running(name).unwrap();
         let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
-        let running = running.map(|(name, started)| (name.to_owned(), started)).to_vec();
-        assert_eq!(refuges(running.clone(), None), ["b", "a", "c"]);
-        assert_eq!(refuges(running, Some("b")), ["a", "c"]);
-        assert_eq!(refuges(Vec::new(), None), [] as [String; 0]);
+        let running = running.map(|(it, started)| (name(it), started)).to_vec();
+        assert_eq!(refuges(running.clone(), None), ["b", "a", "c"].map(name));
+        assert_eq!(refuges(running, Some("b")), ["a", "c"].map(name));
+        assert_eq!(refuges(Vec::new(), None), []);
     }
 
     /// The refuge is the first session that answers for its clients, tried
@@ -196,8 +198,9 @@ mod tests {
     /// is taken for one that detached only where both run.
     #[test]
     fn a_client_s_session_went_where_any_it_may_have_been_in_did() {
-        let running = |names: &[&str]| -> Vec<(String, SystemTime)> {
-            names.iter().map(|name| ((*name).to_owned(), SystemTime::UNIX_EPOCH)).collect()
+        let running = |names: &[&str]| -> Vec<(SessionName, SystemTime)> {
+            let at = |name: &&str| (SessionName::running(name).unwrap(), SystemTime::UNIX_EPOCH);
+            names.iter().map(at).collect()
         };
         let seats = |names: &[&str]| -> Vec<SessionName> {
             names.iter().map(|name| SessionName::running(name).unwrap()).collect()

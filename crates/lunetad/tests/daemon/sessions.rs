@@ -54,6 +54,8 @@ pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serd
         "is_selectable": true,
         "is_suppressed": false,
         "is_floating": false,
+        "is_focused": false,
+        "is_fullscreen": false,
         "is_held": false,
         "title": title,
         "tab_id": tab.0,

@@ -12,9 +12,8 @@ use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::cli::{self, laid, tabs, terminal_of, Laid, Runs, TabId};
+use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId};
 use crate::closes::{self, Close};
-use crate::zellij::{self, SessionName};
 use crate::Directory;
 
 /// What names your shell, in luneta's variables, as in those of the zellij
@@ -97,10 +96,10 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     match open {
         Open::Pane { session, beside, cwd, command } => {
             let runs = Runs::of(command, Runs::ZellijShell);
-            Ok(terminal(cli::pane_opened(session, *beside, cwd, runs)?))
+            Ok(terminal(Mux::Zellij.pane_opened(session, *beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if !cli::has_clients(session)? {
+            if !Mux::Zellij.has_clients(session)? {
                 return Err(format!(
                     "{}: go there first, or open a pane beside one of its panes",
                     no_client(session)
@@ -147,7 +146,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
         },
     };
     let made = match kept {
-        None => tabs(&laid(session)?),
+        None => tabs(&Mux::Zellij.laid(session)?),
         Some(_) => BTreeSet::new(),
     };
     let (opened, laid) = tab_opened(session, tab)?;
@@ -169,8 +168,8 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
 /// tick to make a session. None where none runs, or where luneta cannot
 /// read all of zellij's folder, which could hold it.
 fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
-    let running = zellij::running(&zellij::folder())?;
-    let (_, started) = running.into_iter().find(|(name, _)| name == session.as_str())?;
+    let running = Mux::Zellij.socket_folder().running()?;
+    let (_, started) = running.into_iter().find(|(name, _)| name == session)?;
     Some(started >= since)
 }
 
@@ -183,8 +182,8 @@ fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
 pub fn tab_opened(session: &SessionName, tab: &Tab) -> Result<(TabId, Vec<Laid>), String> {
     let shell = shell(login_shell(), env::var_os(SHELL_VAR));
     let runs = runs(&tab.command, &shell);
-    let opened = cli::tab_opened(session, &tab.cwd, tab.name.as_deref(), runs)?;
-    Ok((opened, laid(session)?))
+    let opened = Mux::Zellij.tab_opened(session, &tab.cwd, tab.name.as_deref(), runs)?;
+    Ok((opened, Mux::Zellij.laid(session)?))
 }
 
 /// What a tab whose command is `command` runs: `shell`, your shell, where it

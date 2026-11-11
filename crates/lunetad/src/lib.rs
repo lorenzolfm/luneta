@@ -10,13 +10,11 @@ pub mod api;
 pub mod asks;
 pub mod checks;
 mod claude;
-pub mod cli;
 mod client;
 pub mod closes;
 mod core;
 mod daemon;
 mod directory;
-pub mod ended;
 pub mod eza;
 mod fetches;
 pub mod folder;
@@ -28,6 +26,7 @@ mod keeps;
 pub mod links;
 pub mod log;
 pub mod moves;
+pub mod mux;
 pub mod names;
 pub mod opens;
 mod panes;
@@ -38,7 +37,6 @@ pub mod program;
 pub mod prunes;
 pub mod release;
 mod remote;
-pub mod renames;
 pub mod sayings;
 pub mod screens;
 pub mod seats;
@@ -49,7 +47,6 @@ mod topics;
 pub mod transcripts;
 pub mod turns;
 mod watch;
-mod zellij;
 pub mod zoxide;
 
 pub use agent::Harness;
@@ -59,9 +56,5 @@ pub use daemon::{serve, Claim};
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
-pub use panes::newborn;
 pub use remote::{named_by as hosts_named, sharing, Destination, FILE as HOSTS_FILE, HOSTS_MAX};
-pub use zellij::{
-    folder as zellij_folder, running as zellij_sessions, sockets as zellij_sockets, Id as SocketId,
-    SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX,
-};
+pub use mux::{Id as SocketId, SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX};
