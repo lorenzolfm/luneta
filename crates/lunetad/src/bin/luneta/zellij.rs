@@ -96,6 +96,7 @@ pub fn here() -> Result<Option<Seat>, String> {
 /// The seat of the turn of luneta's ask box `asked`, and where it says you
 /// are, or else the pane zellij's variables name, as `here` says, or none.
 fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, String> {
+    assert!(here.named.as_ref().is_none_or(|named| !named.is_empty()), "{here:?}");
     match (asked, here.named.as_deref()) {
         (Some((_, user)), Some(session)) => {
             let asked = match user {
@@ -121,9 +122,11 @@ fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, 
 /// typed there would come round to it again for good. zellij refuses this by
 /// the name the pane's variables give its session, which the client runs
 /// without. A pane of a session renamed since it opened holds the name it had
-/// then, and zellij's check goes by it.
+/// then, and zellij's check goes by it. Where the variables do not read, the
+/// terminal may be a pane of any session, and of this one too.
 pub fn refusal(session: &SessionName) -> Option<String> {
-    refused(session, current().as_deref())
+    let here = Mux::Zellij.here();
+    refused(session, here.as_ref().map(|here| here.named.as_deref()).map_err(String::as_str))
 }
 
 /// The session luneta's terminal is a pane of, by the name it had as the pane
@@ -133,14 +136,21 @@ fn current() -> Option<String> {
     Mux::Zellij.here().ok()?.named
 }
 
-/// `refusal`, for a terminal in the session `current`, if it is a pane's.
-fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
-    (current == Some(session.as_str())).then(|| {
-        format!(
-            "this terminal is a pane of \"{session}\", which zellij would show inside itself: \
-             name another session, or run luneta outside zellij"
-        )
-    })
+/// `refusal`, for a terminal in the session `current`, if it is a pane's, or
+/// one whose variables do not read, as `current` says why.
+fn refused(session: &SessionName, current: Result<Option<&str>, &str>) -> Option<String> {
+    match current {
+        Ok(current) => (current == Some(session.as_str())).then(|| {
+            format!(
+                "this terminal is a pane of \"{session}\", which zellij would show inside \
+                 itself: name another session, or run luneta outside zellij"
+            )
+        }),
+        Err(why) => Some(format!(
+            "{why}, so this terminal may be a pane of \"{session}\", which zellij would show \
+             inside itself: run luneta outside zellij"
+        )),
+    }
 }
 
 /// The program luneta runs beside the sidebar, and its arguments: zellij's
@@ -1531,6 +1541,7 @@ mod tests {
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
         for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
+            assert_eq!(seat_in(Some((turn, user.clone())), here(None, None)), asked);
             assert_eq!(seat_in(Some((turn, user.clone())), here(None, Some(2))), asked);
             let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None));
             assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
@@ -1597,9 +1608,11 @@ mod tests {
         let Ok(session) = SessionName::parse("outer") else {
             panic!("a name zellij takes");
         };
-        assert!(refused(&session, Some("outer")).is_some());
-        assert_eq!(refused(&session, Some("other")), None);
-        assert_eq!(refused(&session, None), None);
+        assert!(refused(&session, Ok(Some("outer"))).is_some());
+        assert_eq!(refused(&session, Ok(Some("other"))), None);
+        assert_eq!(refused(&session, Ok(None)), None);
+        let unread = refused(&session, Err("ZELLIJ_PANE_ID does not read"));
+        assert!(unread.is_some_and(|why| why.starts_with("ZELLIJ_PANE_ID does not read, so")));
     }
 
     /// Where nothing would tell luneta its client came, what a menu waited

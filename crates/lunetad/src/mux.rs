@@ -51,9 +51,11 @@ pub struct PaneVars {
 }
 
 impl PaneVars {
-    /// The pane, where the variables name both its session and its id.
+    /// The pane, where the variables name both its session and its id. A
+    /// name they spell empty names no session, and `Mux::here` holds none.
     #[must_use]
     pub fn pane_named(self) -> Option<Named> {
+        assert!(self.named.as_ref().is_none_or(|named| !named.is_empty()), "{self:?}");
         Some(Named { session: self.named?, pane: self.pane? })
     }
 }

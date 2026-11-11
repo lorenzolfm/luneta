@@ -27,9 +27,12 @@ pub use clients::{Client, Listed};
 /// window. With `ZELLIJ` set, the client takes itself for one started in a
 /// pane of that session, and will not attach, as when luneta itself runs in
 /// a pane. Its CLI would take the session and the pane they name for the ones
-/// it is asked from.
-pub const LEFT_OUT: [&str; 5] =
-    [PANE_VARS[0], PANE_VARS[1], PANE_VARS[2], "WINDOWID", "ALACRITTY_WINDOW_ID"];
+/// it is asked from. `PANE_VARS` is taken apart whole, so that one more of
+/// them will not build until it is left out too.
+pub const LEFT_OUT: [&str; 5] = {
+    let [in_a_pane, session, pane] = PANE_VARS;
+    [in_a_pane, session, pane, "WINDOWID", "ALACRITTY_WINDOW_ID"]
+};
 
 /// How long zellij has to answer: a server that runs answers at once.
 pub const ANSWER: Duration = Duration::from_secs(2);

@@ -310,8 +310,9 @@ mod tests {
             "--system-prompt", "be brief",
         ];
         assert_eq!(args, said.map(OsStr::new));
-        let unset: Vec<&OsStr> =
+        let mut unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
+        unset.sort_unstable();
         assert_eq!(unset, ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new));
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
