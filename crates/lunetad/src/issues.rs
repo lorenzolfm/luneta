@@ -498,14 +498,24 @@ impl Unfiled {
 /// says of the end of its run, has it: or why it wrote nothing, as the run
 /// failed, or what it answered is not what `schema` asks for of `labels`.
 /// Its title goes on one line.
+///
+/// A run can succeed with no structured output, as when Claude Code drops
+/// the call that gave it and the agent ends on words of its own: the issue
+/// is then what it said, where that is one, and what it said says why not
+/// where it is not.
 fn written(record: &Value, labels: &[String]) -> Result<Written, String> {
+    let said = record["result"].as_str().map_or_default(str::trim);
     let failed = record["is_error"].as_bool() != Some(false) || record["subtype"] != "success";
     if failed {
-        let said = record["result"].as_str().map(str::trim).filter(|said| !said.is_empty());
+        let said = Some(said).filter(|said| !said.is_empty());
         let why = said.or_else(|| record["subtype"].as_str()).unwrap_or("the run failed");
         return Err(format!("claude failed: {why}"));
     }
-    let structured = record.get("structured_output").cloned().unwrap_or_default();
+    let structured = record.get("structured_output").filter(|output| !output.is_null());
+    let structured = match structured {
+        Some(structured) => structured.clone(),
+        None => unstructured(record, said)?,
+    };
     let Written { title, body, label } = serde_json::from_value(structured)
         .map_err(|error| format!("claude wrote no issue luneta reads: {error}"))?;
     let title = one_line(&title);
@@ -516,6 +526,33 @@ fn written(record: &Value, labels: &[String]) -> Result<Written, String> {
         return Err(format!("claude took the label {label:?}, which the repository has not"));
     }
     Ok(Written { title, body: body.trim().to_owned(), label })
+}
+
+/// The issue of `record`, a run that succeeded with no structured output,
+/// where the agent `said` it in words of its own, as `said_as_issue` reads
+/// them: or why it is none. The log keeps how the run ended, which says
+/// nothing else of why it gave none.
+fn unstructured(record: &Value, said: &str) -> Result<Value, String> {
+    let [stop, terminal, turns] =
+        ["stop_reason", "terminal_reason", "num_turns"].map(|key| &record[key]);
+    log::say(&format!(
+        "issue: claude ended with no structured output, on {stop} and {terminal}, in {turns} \
+         turns: {said:?}"
+    ));
+    said_as_issue(said)
+}
+
+/// The issue the agent `said`, in words of its own rather than as structured
+/// output: what `schema` asks for, as JSON, bare or in a fence; or why it is
+/// none, which is what it said, on one line.
+fn said_as_issue(said: &str) -> Result<Value, String> {
+    let fenced = said.strip_prefix("```json").or_else(|| said.strip_prefix("```"));
+    let json = fenced.and_then(|fenced| fenced.strip_suffix("```")).unwrap_or(said);
+    match serde_json::from_str(json.trim()) {
+        Ok(issue @ Value::Object(_)) => Ok(issue),
+        _ if said.is_empty() => Err("claude ended without writing an issue".to_owned()),
+        _ => Err(format!("claude wrote no issue, and said: {}", one_line(said))),
+    }
 }
 
 /// `text` on one line, each run of white space a space.
@@ -828,7 +865,9 @@ mod tests {
 
     /// What the agent wrote reads from the record of the run's end: its title
     /// on one line, and its label one of the repository's, or none. A run
-    /// that failed says why, and one that answered no issue says so.
+    /// that failed says why, and one that answered no issue says so. One with
+    /// no structured output reads the issue from what the agent said, bare
+    /// or fenced, and says what it said where that is none.
     #[test]
     fn what_the_agent_wrote_reads_from_the_run_s_end() {
         let labels = ["bug".to_owned()];
@@ -849,8 +888,24 @@ mod tests {
         assert_eq!(written(&mislabelled), Err(why));
         let untitled = ended(json!({"title": " ", "body": "", "label": null}));
         assert_eq!(written(&untitled), Err("claude wrote an issue with no title".to_owned()));
+        let misshapen = ended(json!({"title": "Red"}));
+        assert!(written(&misshapen).unwrap_err().starts_with("claude wrote no issue luneta reads"));
         let unwritten = json!({"type": "result", "subtype": "success", "is_error": false});
-        assert!(written(&unwritten).unwrap_err().starts_with("claude wrote no issue"));
+        let why = "claude ended without writing an issue".to_owned();
+        assert_eq!(written(&unwritten), Err(why.clone()));
+        let empty = json!({"type": "result", "subtype": "success", "is_error": false,
+                           "result": " ", "structured_output": null});
+        assert_eq!(written(&empty), Err(why));
+        let talked = |said: &str| {
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": said})
+        };
+        let why = "claude wrote no issue, and said: Which button? The red one?".to_owned();
+        assert_eq!(written(&talked("Which button?\n\nThe red one?")), Err(why));
+        let issue = r#"{"title": "Red", "body": "It is red.", "label": "bug"}"#;
+        for said in [issue.to_owned(), format!("```json\n{issue}\n```"), format!("```\n{issue}```")]
+        {
+            assert_eq!(written(&talked(&said)).unwrap().title, "Red", "{said}");
+        }
         let failed = json!({"type": "result", "subtype": "success", "is_error": true,
                             "result": "Not logged in · Please run /login"});
         let why = "claude failed: Not logged in · Please run /login".to_owned();
