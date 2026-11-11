@@ -1,7 +1,14 @@
 //! The multiplexer that holds the sessions of the machine luneta and its
 //! daemon run on: what they have it do, what they read of its sessions, and
-//! the words that start its client. zellij is the only one, and all luneta
-//! knows of its ways is in `zellij`, behind `Mux`.
+//! the words that start its client. zellij is the only one, and what luneta
+//! does with it goes through `Mux`, as `zellij` is private.
+//!
+//! Not all luneta knows of zellij's ways is behind it yet. The interface
+//! speaks zellij's own types, `Laid`, `PaneId`, `Asks` and `Failure`, and
+//! `tabs` and `terminal_of` read `Laid` outside it. `panes` parses the JSON
+//! `panes_listed` gives, `closes` waits on zellij's sockets and cache as a
+//! session it killed settles, and the app keeps the rest, in its `zellij`
+//! and `own`.
 
 use std::io;
 use std::path::Path;
@@ -257,9 +264,9 @@ impl Mux {
     /// The client, attached to `session`, which it makes where none runs, or
     /// without one, in a session of a name the multiplexer makes up; or why
     /// it cannot attach.
-    pub fn client(self, session: Option<&SessionName>) -> Result<ClientWords, String> {
+    pub fn client_attaching(self, session: Option<&SessionName>) -> Result<ClientWords, String> {
         match self {
-            Mux::Zellij => zellij::cli::client(session).map(zellij::cli::words),
+            Mux::Zellij => zellij::cli::client_attaching(session).map(zellij::cli::words),
         }
     }
 

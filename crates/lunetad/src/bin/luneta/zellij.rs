@@ -157,7 +157,7 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 /// client, attached to `session` and making it if none runs, or without one
 /// in a session of a name zellij makes up; or why it cannot attach.
 pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), String> {
-    Mux::Zellij.client(session).map(client_with)
+    Mux::Zellij.client_attaching(session).map(client_with)
 }
 
 /// The program luneta runs beside the sidebar for a client that makes

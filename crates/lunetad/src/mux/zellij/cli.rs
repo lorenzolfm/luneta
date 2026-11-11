@@ -697,8 +697,8 @@ pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> R
 /// The program of zellij's CLI and its client.
 const PROGRAM: &str = "zellij";
 
-/// The words that start zellij's client with `args`, as `client` and those
-/// after it give them, without what `LEFT_OUT` names.
+/// The words that start zellij's client with `args`, as `client_attaching` and
+/// those after it give them, without what `LEFT_OUT` names.
 #[must_use]
 pub fn words(args: Vec<String>) -> ClientWords {
     ClientWords { program: PROGRAM, args, unset: &LEFT_OUT }
@@ -707,23 +707,24 @@ pub fn words(args: Vec<String>) -> ClientWords {
 /// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
 /// which it makes where none runs, or without one, in a session of a name
 /// zellij makes up; or why it cannot attach, as `attached` says.
-pub fn client(session: Option<&SessionName>) -> Result<Vec<String>, String> {
+pub fn client_attaching(session: Option<&SessionName>) -> Result<Vec<String>, String> {
     let Some(session) = session else {
         return Ok(Vec::new());
     };
     Ok(vec!["attach".to_owned(), "--create".to_owned(), attached(session)?])
 }
 
-/// The arguments of zellij's client, as `client` says, that makes `session`
-/// in the directory it starts in, and fails where one runs by that name, or
-/// zellij keeps one that ended, to bring back.
+/// The arguments of zellij's client, as `client_attaching` says, that makes
+/// `session` in the directory it starts in, and fails where one runs by that
+/// name, or zellij keeps one that ended, to bring back.
 #[must_use]
 pub fn client_making(session: &SessionName) -> Vec<String> {
     vec![session_option(session)]
 }
 
-/// The arguments of zellij's client, as `client` says, attached to `session`,
-/// which runs, or which ended, which zellij brings back. It makes none.
+/// The arguments of zellij's client, as `client_attaching` says, attached to
+/// `session`, which runs, or which ended, which zellij brings back. It makes
+/// none.
 pub fn client_rejoining(session: &SessionName) -> Result<Vec<String>, String> {
     Ok(vec!["attach".to_owned(), attached(session)?])
 }
@@ -792,7 +793,7 @@ mod tests {
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
         assert_eq!(client_making(&at), ["--session=-at"]);
         assert!(client_rejoining(&at).is_err());
-        assert!(client(Some(&at)).is_err());
+        assert!(client_attaching(Some(&at)).is_err());
     }
 
     /// A pane already focused is read apart from any other failure, as `went`
