@@ -451,7 +451,7 @@ mod tests {
 
     use super::*;
     use crate::agent::{Harness, Source};
-    use crate::mux::Named;
+    use crate::mux::{Named, ZellijPane};
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
@@ -472,7 +472,7 @@ mod tests {
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
-            pane: Some(Named { session: "work".to_owned(), pane: 1 }),
+            pane: Some(Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 1 })),
         }
     }
 

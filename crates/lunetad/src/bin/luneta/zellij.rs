@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::mux::{self, ClientWords, Mux, Named, PaneId, PaneVars, Zellij};
+use lunetad::mux::{self, ClientWords, Mux, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
@@ -64,7 +64,7 @@ pub fn pane_address(spelled: &str) -> Result<Pane, String> {
 pub enum Seat {
     /// In a pane of zellij, by the name its session had as the pane opened,
     /// which a rename leaves behind.
-    Opened(Named),
+    Opened(ZellijPane),
     /// In no pane, as the agent of luneta's ask box runs, in `turn`, for you
     /// where `user` says: in the pane you asked from, by the name its session
     /// had as you asked, or on another machine, where luneta's zellij was,
@@ -90,7 +90,7 @@ pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
     let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), asked.as_deref(), away.as_deref());
-    seat_in(turn?, Mux::Zellij.here()?)
+    seat_in(turn?, Zellij::here()?)
 }
 
 /// The seat of the turn of luneta's ask box `asked`, and where it says you
@@ -124,7 +124,7 @@ fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, 
 /// then, and zellij's check goes by it. Where the variables do not read, the
 /// terminal may be a pane of any session, and of this one too.
 pub fn refusal(session: &SessionName) -> Option<String> {
-    let here = Mux::Zellij.here();
+    let here = Zellij::here();
     refused(session, here.as_ref().map(PaneVars::named).map_err(String::as_str))
 }
 
@@ -297,7 +297,7 @@ pub enum Within {
 /// Where luneta's own terminal may be, as `Within` says.
 pub fn within() -> Within {
     let set = |var: &&str| env::var_os(var).is_some();
-    if SSH_VARS.iter().any(set) || Mux::Zellij.may_be_in_a_pane() {
+    if SSH_VARS.iter().any(set) || Zellij::may_be_in_a_pane() {
         Within::MaybeAway
     } else {
         Within::Here
@@ -312,7 +312,7 @@ pub fn within() -> Within {
 /// it. Nor can the list tell the pane of a script that runs luneta, which it
 /// lists as that script.
 pub fn may_hold_terminal(session: &SessionName) -> bool {
-    let Ok(here) = Mux::Zellij.here() else {
+    let Ok(here) = Zellij::here() else {
         return true;
     };
     if here.named() == Some(session.as_str()) {
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let here = |named: Option<&str>, pane| PaneVars::spelled(named.map(str::to_owned), pane);
-        let opened = Seat::Opened(Named { session: "work".to_owned(), pane: 2 });
+        let opened = Seat::Opened(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(seat_in(None, here(Some("work"), Some("2"))), Ok(Some(opened)));
         let unnamed = [
             (Some(""), Some("2")),

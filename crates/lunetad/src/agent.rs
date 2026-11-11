@@ -13,7 +13,7 @@ use serde::Deserialize as _;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
-use crate::mux::{Named, Sessions};
+use crate::mux::{Named, Sessions, ZellijPane};
 
 /// The most an agent's file holds that an adapter reads. Each holds a few hundred
 /// bytes: a file past this is no agent's.
@@ -295,10 +295,10 @@ impl Agent {
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
-            zellij: self.pane.as_ref().map(|named| api::Zellij {
-                named: named.session.clone(),
-                session: sessions.lead(&named.session, self.started_at).map(ToString::to_string),
-                pane: named.pane,
+            zellij: self.pane.as_ref().and_then(zellij_of).map(|(named, pane)| api::Zellij {
+                named: named.to_owned(),
+                session: sessions.lead(named, self.started_at).map(ToString::to_string),
+                pane,
             }),
             topic: topic.map(String::from),
         }
@@ -314,14 +314,23 @@ impl Unread {
         assert!(self.pid > 1);
         api::UnreadFile {
             pid: self.pid,
-            zellij: self.pane.as_ref().map(|named| api::Zellij {
-                named: named.session.clone(),
+            zellij: self.pane.as_ref().and_then(zellij_of).map(|(named, pane)| api::Zellij {
+                named: named.to_owned(),
                 session: self.started.and_then(|started| {
-                    sessions.lead(&named.session, Some(started)).map(ToString::to_string)
+                    sessions.lead(named, Some(started)).map(ToString::to_string)
                 }),
-                pane: named.pane,
+                pane,
             }),
         }
+    }
+}
+
+/// The name and the terminal of the zellij pane `named` is, as the API gives
+/// one: none of an own pane, which it gives nothing of yet.
+fn zellij_of(named: &Named) -> Option<(&str, u32)> {
+    match named {
+        Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
+        Named::Own { .. } => None,
     }
 }
 

@@ -1,25 +1,28 @@
-//! The multiplexer that holds the sessions of the machine luneta and its
-//! daemon run on: what they have it do, what they read of its sessions, and
-//! the words that start its client. zellij is the only one, and what luneta
-//! does with it goes through `Mux`, and the folders it finds, as `zellij` is
-//! private.
+//! The multiplexers that hold the sessions of the machine luneta and its
+//! daemon run on, in luneta's own words: what they have one do to a session,
+//! and what they read of it. zellij is the only one yet. What luneta asks of
+//! a session goes through `Mux`; what zellij alone has, its folders, what it
+//! keeps of sessions that ended and the words of its client, through
+//! `Zellij`; and which pane a process runs in, of either multiplexer, through
+//! `pane_of` and `in_no_pane`. `zellij` is private.
 //!
-//! Not all luneta knows of zellij's ways is behind it yet. The interface
-//! speaks zellij's own types, `Laid`, `PaneId`, `Asks` and `Failure`, and
-//! `tabs` and `terminal_of` read `Laid` outside it. `panes` parses the JSON
-//! `panes_listed` gives, `closes` waits on zellij's sockets and cache as a
-//! session it killed settles, and the app keeps the rest, in its `zellij`
-//! and `own`.
+//! Not all luneta knows of zellij's ways is behind it yet. `Laid` still has
+//! zellij's plugins, bars and suppressed panes, `Asks` and `Failure` are
+//! zellij's, `closes` waits on zellij's sockets and cache as a session it
+//! killed settles, and the app keeps the rest, in its `zellij` and `own`.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::process;
 use crate::watch::Troubles;
 use crate::Directory;
 
 mod laid;
+mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
@@ -33,11 +36,20 @@ pub enum Mux {
     Zellij,
 }
 
-/// A pane of a multiplexer's, as the variables of what runs in it name it: by
-/// the name its session had as the pane opened, which a rename leaves behind,
-/// and the pane's id there. The name is as they spell it, held to nothing.
+/// A pane of a multiplexer's, as the variables of what runs in it name it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Named {
+pub enum Named {
+    Zellij(ZellijPane),
+    /// A pane of luneta's own multiplexer, by the ids its server gave its
+    /// session and it, which it gives no other.
+    Own { session: u64, pane: u64 },
+}
+
+/// A pane of zellij's, as the variables of what runs in it name it: by the
+/// name its session had as the pane opened, which a rename leaves behind, and
+/// the terminal's id there. The name is as they spell it, held to nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZellijPane {
     pub session: String,
     pub pane: u32,
 }
@@ -76,8 +88,8 @@ impl PaneVars {
 
     /// The pane, where the variables name both its session and its id.
     #[must_use]
-    pub fn pane_named(self) -> Option<Named> {
-        Some(Named { session: self.named?, pane: self.pane? })
+    pub fn pane_named(self) -> Option<ZellijPane> {
+        Some(ZellijPane { session: self.named?, pane: self.pane? })
     }
 }
 
@@ -305,40 +317,6 @@ impl Mux {
             Mux::Zellij => zellij::cli::started(at, to, cwd),
         }
     }
-
-    /// What the variables the multiplexer gives what runs in its panes say of
-    /// the pane this process runs in. Or why they do not read.
-    pub fn here(self) -> Result<PaneVars, String> {
-        match self {
-            Mux::Zellij => zellij::vars::here(),
-        }
-    }
-
-    /// The pane the variables of the process `pid` name, if they name one.
-    #[must_use]
-    pub fn pane_of(self, pid: u32) -> Option<Named> {
-        match self {
-            Mux::Zellij => zellij::vars::pane_of(pid),
-        }
-    }
-
-    /// Whether this process may run in a pane of the multiplexer's: what it
-    /// sets in its panes is set, though it may name none.
-    #[must_use]
-    pub fn may_be_in_a_pane(self) -> bool {
-        match self {
-            Mux::Zellij => zellij::vars::may_be_in_a_pane(),
-        }
-    }
-
-    /// Has `command` run without the variables the multiplexer gives what
-    /// runs in its panes: in none, as the daemon and luneta's commands see
-    /// it.
-    pub fn in_no_pane(self, command: &mut Command) {
-        match self {
-            Mux::Zellij => zellij::vars::in_no_pane(command),
-        }
-    }
 }
 
 /// What luneta finds and runs of zellij's alone, which no other multiplexer
@@ -348,6 +326,19 @@ impl Mux {
 pub struct Zellij;
 
 impl Zellij {
+    /// What the variables zellij gives what runs in its panes say of the pane
+    /// this process runs in. Or why they do not read.
+    pub fn here() -> Result<PaneVars, String> {
+        zellij::vars::here()
+    }
+
+    /// Whether this process may run in a pane of zellij's: what it sets in its
+    /// panes is set, though it may name none.
+    #[must_use]
+    pub fn may_be_in_a_pane() -> bool {
+        zellij::vars::may_be_in_a_pane()
+    }
+
     /// The sessions that ended which zellij keeps to bring back.
     pub fn exited() -> Result<Vec<Exited>, String> {
         zellij::exited()
@@ -448,6 +439,26 @@ impl Zellij {
     }
 }
 
+/// The pane the variables of the process `pid` name, of whichever
+/// multiplexer, if they name one. zellij's go first: a zellij server that
+/// started in an own pane gives its panes the variables it started with.
+#[must_use]
+pub fn pane_of(pid: u32) -> Option<Named> {
+    pane_in(&process::environ(pid)?)
+}
+
+/// The pane `environ`, the variables of a process, name, as `pane_of` says.
+fn pane_in(environ: &[OsString]) -> Option<Named> {
+    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ))
+}
+
+/// Has `command` run without the variables any multiplexer gives what runs in
+/// its panes: in none, as the daemon and luneta's commands see it.
+pub fn in_no_pane(command: &mut Command) {
+    zellij::vars::in_no_pane(command);
+    own::in_no_pane(command);
+}
+
 impl SocketFolder {
     /// The sessions whose sockets are in it now. What goes wrong in reading
     /// it, `troubles` says.
@@ -475,5 +486,25 @@ impl CacheFolder {
     /// before it has.
     pub fn metadata(&self, name: &SessionName) -> io::Result<Option<Metadata>> {
         zellij::metadata::read(self, name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A process in a pane of zellij's whose server started in an own pane
+    /// has the variables of both, and is in zellij's.
+    #[test]
+    fn a_pane_of_zellij_s_in_an_own_pane_is_zellij_s() {
+        let environ = |entries: &[&str]| -> Vec<OsString> {
+            entries.iter().map(OsString::from).collect()
+        };
+        let own = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=12"];
+        assert_eq!(pane_in(&environ(&own)), Some(Named::Own { session: 3, pane: 12 }));
+        let zellij = ["ZELLIJ_SESSION_NAME=work", "ZELLIJ_PANE_ID=2"];
+        let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
+        assert_eq!(pane_in(&environ(&[&own[..], &zellij].concat())), Some(named));
+        assert_eq!(pane_in(&environ(&["HOME=/h"])), None);
     }
 }
