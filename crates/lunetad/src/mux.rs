@@ -44,7 +44,7 @@ pub enum Named {
     Zellij(ZellijPane),
     /// A pane of luneta's own multiplexer, by the ids its server gave its
     /// session and it, which it gives no other.
-    Own { session: u64, pane: u64 },
+    Own { session: u64, pane: u32 },
 }
 
 /// A pane of zellij's, as the variables of what runs in it name it: by the

@@ -20,8 +20,9 @@ const PANE_VARS: [&str; 2] = [SESSION_VAR, PANE_VAR];
 /// The pane `environ`, the variables of a process, name, where they name
 /// both its session and its id.
 pub fn pane_in(environ: &[OsString]) -> Option<Named> {
-    let id = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok()?.parse().ok();
-    Some(Named::Own { session: id(SESSION_VAR)?, pane: id(PANE_VAR)? })
+    let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
+    let session = text(SESSION_VAR)?.parse().ok()?;
+    Some(Named::Own { session, pane: text(PANE_VAR)?.parse().ok()? })
 }
 
 /// Has `command` run without the variables luneta's own multiplexer gives
@@ -50,6 +51,7 @@ mod tests {
             environ(&["LUNETA_MUX_PANE=12"]),
             environ(&["LUNETA_MUX_SESSION=work", "LUNETA_MUX_PANE=12"]),
             environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE="]),
+            environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=4294967296"]),
             environ(&["LUNETA_MUX_SESSIONS=3", "LUNETA_MUX_PANE=12"]),
         ];
         for environ in unnamed {
