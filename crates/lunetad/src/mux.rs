@@ -255,13 +255,6 @@ impl Mux {
         }
     }
 
-    /// The sessions that ended which the multiplexer keeps to bring back.
-    pub fn exited(self) -> Result<Vec<Exited>, String> {
-        match self {
-            Mux::Zellij => zellij::exited(),
-        }
-    }
-
     /// Kills `session` and lets go of what the multiplexer keeps of it.
     pub fn session_killed(self, session: &SessionName) -> Result<(), Failure> {
         match self {
@@ -313,70 +306,6 @@ impl Mux {
         }
     }
 
-    /// The client, attached to `session`, which it makes where none runs, or
-    /// without one, in a session of a name the multiplexer makes up; or why
-    /// it cannot attach.
-    pub fn client_attaching(self, session: Option<&SessionName>) -> Result<ClientWords, String> {
-        match self {
-            Mux::Zellij => zellij::cli::client_attaching(session).map(zellij::cli::words),
-        }
-    }
-
-    /// The client that makes `session` in the directory it starts in, and
-    /// fails where one runs by that name, or one that ended is kept by it.
-    #[must_use]
-    pub fn client_making(self, session: &SessionName) -> ClientWords {
-        match self {
-            Mux::Zellij => zellij::cli::words(zellij::cli::client_making(session)),
-        }
-    }
-
-    /// The client attached to `session`, which runs, or which ended and comes
-    /// back; it makes none. Or why it cannot attach.
-    pub fn client_rejoining(self, session: &SessionName) -> Result<ClientWords, String> {
-        match self {
-            Mux::Zellij => zellij::cli::client_rejoining(session).map(zellij::cli::words),
-        }
-    }
-
-    /// Whether a client attaches to `session`.
-    #[must_use]
-    pub fn attaches_to(self, session: &SessionName) -> bool {
-        match self {
-            Mux::Zellij => zellij::cli::attaches_to(session),
-        }
-    }
-
-    /// What luneta types into the client before it asks the multiplexer to
-    /// move it, and as keys come to luneta, where the multiplexer moves only
-    /// a client that typed: none where it would not read it as a key, as
-    /// `kitty_keys` says whether the client asked for keys as kitty spells
-    /// them.
-    #[must_use]
-    pub fn nudge(self, kitty_keys: bool) -> Option<&'static [u8]> {
-        match self {
-            Mux::Zellij => zellij::client::nudge(kitty_keys),
-        }
-    }
-
-    /// How long an action waits after the client typed, for the multiplexer to
-    /// take the key in first.
-    #[must_use]
-    pub fn nudged(self) -> Duration {
-        match self {
-            Mux::Zellij => zellij::client::NUDGED,
-        }
-    }
-
-    /// Whether `said`, what the client left on its terminal as it ended well,
-    /// says that the multiplexer dropped it, and the session runs on.
-    #[must_use]
-    pub fn dropped(self, said: &str) -> bool {
-        match self {
-            Mux::Zellij => zellij::client::dropped(said),
-        }
-    }
-
     /// What the variables the multiplexer gives what runs in its panes say of
     /// the pane this process runs in. Or why they do not read.
     pub fn here(self) -> Result<PaneVars, String> {
@@ -410,67 +339,112 @@ impl Mux {
             Mux::Zellij => zellij::vars::in_no_pane(command),
         }
     }
+}
 
-    /// Where the multiplexer keeps the sockets of its sessions.
+/// What luneta finds and runs of zellij's alone, which no other multiplexer
+/// has: the folders it keeps its sessions in, what it keeps of those that
+/// ended, and the words of its client.
+#[derive(Clone, Copy, Debug)]
+pub struct Zellij;
+
+impl Zellij {
+    /// The sessions that ended which zellij keeps to bring back.
+    pub fn exited() -> Result<Vec<Exited>, String> {
+        zellij::exited()
+    }
+
+    /// The client, attached to `session`, which it makes where none runs, or
+    /// without one, in a session of a name zellij makes up; or why
+    /// it cannot attach.
+    pub fn client_attaching(session: Option<&SessionName>) -> Result<ClientWords, String> {
+        zellij::cli::client_attaching(session).map(zellij::cli::words)
+    }
+
+    /// The client that makes `session` in the directory it starts in, and
+    /// fails where one runs by that name, or one that ended is kept by it.
     #[must_use]
-    pub fn socket_folder(self) -> SocketFolder {
-        match self {
-            Mux::Zellij => zellij::folder(),
-        }
+    pub fn client_making(session: &SessionName) -> ClientWords {
+        zellij::cli::words(zellij::cli::client_making(session))
+    }
+
+    /// The client attached to `session`, which runs, or which ended and comes
+    /// back; it makes none. Or why it cannot attach.
+    pub fn client_rejoining(session: &SessionName) -> Result<ClientWords, String> {
+        zellij::cli::client_rejoining(session).map(zellij::cli::words)
+    }
+
+    /// Whether a client attaches to `session`.
+    #[must_use]
+    pub fn attaches_to(session: &SessionName) -> bool {
+        zellij::cli::attaches_to(session)
+    }
+
+    /// What luneta types into the client before it asks zellij to
+    /// move it, and as keys come to luneta, where zellij moves only
+    /// a client that typed: none where it would not read it as a key, as
+    /// `kitty_keys` says whether the client asked for keys as kitty spells
+    /// them.
+    #[must_use]
+    pub fn nudge(kitty_keys: bool) -> Option<&'static [u8]> {
+        zellij::client::nudge(kitty_keys)
+    }
+
+    /// How long an action waits after the client typed, for zellij to
+    /// take the key in first.
+    #[must_use]
+    pub fn nudged() -> Duration {
+        zellij::client::NUDGED
+    }
+
+    /// Whether `said`, what the client left on its terminal as it ended well,
+    /// says that zellij dropped it, and the session runs on.
+    #[must_use]
+    pub fn dropped(said: &str) -> bool {
+        zellij::client::dropped(said)
+    }
+
+    /// Where zellij keeps the sockets of its sessions.
+    #[must_use]
+    pub fn socket_folder() -> SocketFolder {
+        zellij::folder()
     }
 
     /// Whether a change at `path`, in the socket folder, can be a session's.
     #[must_use]
-    pub fn of_sessions(self, path: &Path) -> bool {
-        match self {
-            Mux::Zellij => zellij::of_sessions(path),
-        }
+    pub fn of_sessions(path: &Path) -> bool {
+        zellij::of_sessions(path)
     }
 
     /// How long until the youngest of the sessions that `started` so is old
     /// enough to be asked anything, at `now`, where one is too young.
     #[must_use]
-    pub fn newborn(
-        self,
-        started: impl Iterator<Item = SystemTime>,
-        now: SystemTime,
-    ) -> Option<Duration> {
-        match self {
-            Mux::Zellij => zellij::newborn(started, now),
-        }
+    pub fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
+        zellij::newborn(started, now)
     }
 
-    /// Where the multiplexer writes what it keeps of each session: none
+    /// Where zellij writes what it keeps of each session: none
     /// without a home to find it in.
     #[must_use]
-    pub fn cache_folder(self) -> Option<CacheFolder> {
-        match self {
-            Mux::Zellij => zellij::metadata::folder(),
-        }
+    pub fn cache_folder() -> Option<CacheFolder> {
+        zellij::metadata::folder()
     }
 
     /// Whether a change at `path`, in the cache folder, can be to a session's
     /// metadata.
     #[must_use]
-    pub fn is_metadata(self, path: &Path) -> bool {
-        match self {
-            Mux::Zellij => zellij::metadata::is_metadata(path),
-        }
+    pub fn is_metadata(path: &Path) -> bool {
+        zellij::metadata::is_metadata(path)
     }
 
-    /// The sessions the multiplexer keeps to bring back from, those that
+    /// The sessions zellij keeps to bring back from, those that
     /// ended and those that run, by name.
-    pub fn kept(self) -> Result<Vec<SessionName>, Unknown> {
-        match self {
-            Mux::Zellij => zellij::metadata::kept(),
-        }
+    pub fn kept() -> Result<Vec<SessionName>, Unknown> {
+        zellij::metadata::kept()
     }
 
-    /// Whether the multiplexer keeps anything of `session` in its cache.
-    pub fn cached(self, session: &SessionName) -> Result<bool, Unknown> {
-        match self {
-            Mux::Zellij => zellij::metadata::cached(session),
-        }
+    /// Whether zellij keeps anything of `session` in its cache.
+    pub fn cached(session: &SessionName) -> Result<bool, Unknown> {
+        zellij::metadata::cached(session)
     }
 }
 
@@ -497,7 +471,7 @@ impl SocketFolder {
 }
 
 impl CacheFolder {
-    /// What the multiplexer last wrote in it of the session `name`: none
+    /// What zellij last wrote in it of the session `name`: none
     /// before it has.
     pub fn metadata(&self, name: &SessionName) -> io::Result<Option<Metadata>> {
         zellij::metadata::read(self, name)

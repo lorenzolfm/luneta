@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId};
+use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId, Zellij};
 use crate::closes::{self, Close};
 use crate::Directory;
 
@@ -168,7 +168,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
 /// tick to make a session. None where none runs, or where luneta cannot
 /// read all of zellij's folder, which could hold it.
 fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
-    let running = Mux::Zellij.socket_folder().running()?;
+    let running = Zellij::socket_folder().running()?;
     let (_, started) = running.into_iter().find(|(name, _)| name == session)?;
     Some(started >= since)
 }

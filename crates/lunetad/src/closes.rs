@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, CloseRequest, On};
-use crate::mux::{tabs, Asks, Laid, Mux, PaneId, SessionName, SocketFolder, TabId};
+use crate::mux::{tabs, Asks, Laid, Mux, PaneId, SessionName, SocketFolder, TabId, Zellij};
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,7 +141,7 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
 /// that no longer runs took no name, and what asks of it hears that from
 /// zellij.
 pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result<(), String> {
-    let running = running_in(&Mux::Zellij.socket_folder())?;
+    let running = running_in(&Zellij::socket_folder())?;
     if running.iter().any(|(name, at)| name == session && *at != started) {
         return Err(format!("\"{session}\" is a session made since, which stays"));
     }
@@ -215,7 +215,7 @@ const SETTLING: Duration = Duration::from_millis(100);
 /// the session, that ends with the session may not be there by then.
 pub fn killed(session: &SessionName, started: SystemTime) -> Result<(), String> {
     same_session(session, started)?;
-    let folder = Mux::Zellij.socket_folder();
+    let folder = Zellij::socket_folder();
     Mux::Zellij.session_killed(session)?;
     settled(session, started, &folder)
 }
@@ -242,7 +242,7 @@ fn settled(
     thread::sleep(SETTLING);
     let unknown =
         |why| format!("luneta cannot tell whether zellij keeps \"{session}\" in its cache: {why}");
-    let cached = Mux::Zellij.cached(session).map_err(unknown)?;
+    let cached = Zellij::cached(session).map_err(unknown)?;
     if cached && running_in(folder)?.iter().all(|(name, _)| name != session) {
         return deleted(session);
     }

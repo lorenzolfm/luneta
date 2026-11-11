@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api;
-use crate::mux::{Client, Mux, SessionName, SocketFolder};
+use crate::mux::{Client, Mux, SessionName, SocketFolder, Zellij};
 
 /// How long the refuge is looked for the session its client was in to be
 /// gone, once the client ended. zellij takes the session's socket away a
@@ -107,13 +107,13 @@ pub fn before(session: &SessionName) -> Option<Vec<api::Client>> {
 /// The first of `sessions` that `clients` answers for, tried one after
 /// another within `SEEKING`, where a client goes on: of this machine's, or
 /// of another's, as its daemon there lists their clients. Never one zellij's
-/// client does not attach to, as `Mux::attaches_to` says, which is not asked.
+/// client does not attach to, as `Zellij::attaches_to` says, which is not asked.
 pub fn answering(
     sessions: impl IntoIterator<Item = SessionName>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
     let seeking = Instant::now() + SEEKING;
-    let sessions = sessions.into_iter().filter(|session| Mux::Zellij.attaches_to(session));
+    let sessions = sessions.into_iter().filter(Zellij::attaches_to);
     let mut sessions = sessions.take_while(|_| Instant::now() < seeking);
     sessions.find_map(|session| {
         let before = clients(&session)?;

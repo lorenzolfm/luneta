@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::InfoResponse;
 use lunetad::folder::{self, Folder, ANOTHER_RUNS, LOG};
-use lunetad::mux::Mux;
+use lunetad::mux::Zellij;
 use lunetad::program;
 use lunetad::release::{self, Build};
 use rustix::process::{Pid, Signal};
@@ -122,7 +122,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     // The build of the lunetad luneta starts, once asked.
     let starting = OnceCell::new();
     // Where luneta's zellij keeps its sessions.
-    let own = Mux::Zellij.socket_folder().path().to_owned();
+    let own = Zellij::socket_folder().path().to_owned();
     loop {
         let why = match lunetad::connect(&folder).await {
             Ok(mut daemon) => match daemon.info(()).await {

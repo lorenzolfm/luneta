@@ -23,7 +23,7 @@ use crate::api;
 use crate::core::{self, Addressed, SessionKey};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
-use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName};
+use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName, Zellij};
 
 /// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,7 +173,7 @@ struct Asked {
 /// its pane. The core wakes it on `woken`, and so does a change to the folder,
 /// which it watches with `wake`. One the host has no panes of goes first, and
 /// one that turns up while others are asked about goes before those left.
-/// None is asked about while a session is newborn, as `Mux::newborn` says.
+/// None is asked about while a session is newborn, as `Zellij::newborn` says.
 /// The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
@@ -191,7 +191,7 @@ pub fn follow(
             if let Some(folder) = metadata_folder.as_ref().map(CacheFolder::path)
                 && watcher.is_none()
             {
-                let wanted = |path: &Path| Mux::Zellij.is_metadata(path);
+                let wanted = |path: &Path| Zellij::is_metadata(path);
                 let mode = RecursiveMode::Recursive;
                 watcher = watch::watching(folder, mode, wanted, &wake, &mut watching);
                 watching.done();
@@ -200,7 +200,7 @@ pub fn follow(
                 return;
             };
             let started = sessions.iter().map(|session| session.id.started());
-            if let Some(wait) = Mux::Zellij.newborn(started, SystemTime::now()) {
+            if let Some(wait) = Zellij::newborn(started, SystemTime::now()) {
                 thread::sleep(wait);
                 continue;
             }

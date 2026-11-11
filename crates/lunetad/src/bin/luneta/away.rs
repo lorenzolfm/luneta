@@ -382,7 +382,7 @@ impl Away {
     }
 
     /// The sessions zellij keeps to bring back there, which ended, as
-    /// `Mux::exited` lists them there, as `exited_of` reads them; or why it
+    /// `Zellij::exited` lists them there, as `exited_of` reads them; or why it
     /// did not list them. How many `exited_of` left out goes in the log.
     pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
         let request = ListExitedRequest { on: Some(self.on()) };

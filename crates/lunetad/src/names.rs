@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::closes::running_in;
-use crate::mux::{Mux, SessionName};
+use crate::mux::{SessionName, Zellij};
 use crate::Directory;
 
 /// The session a directory is for, as the picker's directories name it: for
@@ -61,10 +61,10 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 /// that ended, which zellij keeps to bring back. Or why luneta cannot tell
 /// them, as it cannot read where zellij keeps either.
 pub fn named() -> Result<Vec<SessionName>, String> {
-    let running = running_in(&Mux::Zellij.socket_folder())?;
+    let running = running_in(&Zellij::socket_folder())?;
     let mut named: Vec<SessionName> = running.into_iter().map(|(name, _)| name).collect();
     let unknown = |why| format!("luneta cannot tell which sessions zellij keeps: {why}");
-    named.extend(Mux::Zellij.kept().map_err(unknown)?);
+    named.extend(Zellij::kept().map_err(unknown)?);
     Ok(named)
 }
 
@@ -129,12 +129,12 @@ fn home() -> Result<Directory, String> {
 /// make none.
 pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
     let since = SystemTime::now();
-    let running = running_in(&Mux::Zellij.socket_folder())?;
+    let running = running_in(&Zellij::socket_folder())?;
     if running.iter().any(|(name, _)| name == to) {
         return Err(format!("{to} runs already"));
     }
     let unknown = |why| format!("luneta cannot tell whether zellij keeps {to}: {why}");
-    if Mux::Zellij.kept().map_err(unknown)?.contains(to) {
+    if Zellij::kept().map_err(unknown)?.contains(to) {
         return Err(format!("zellij keeps {to}, which ended, to bring back"));
     }
     Ok(since)
