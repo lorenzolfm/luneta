@@ -153,11 +153,15 @@ pub enum Unfiled {
     InDoubt(String),
 }
 
-/// What the agent wrote, as `schema` has it.
+/// What the agent wrote, as `schema` has it: each of its fields, `label`
+/// too, and no other, where it said it in words of its own as well as where
+/// Claude Code held it to `schema`.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Written {
     title: String,
     body: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     label: Option<String>,
 }
 
@@ -867,7 +871,8 @@ mod tests {
     /// on one line, and its label one of the repository's, or none. A run
     /// that failed says why, and one that answered no issue says so. One with
     /// no structured output reads the issue from what the agent said, bare
-    /// or fenced, and says what it said where that is none.
+    /// or fenced, held to the schema's fields as the structured output is,
+    /// and says what it said where that is none.
     #[test]
     fn what_the_agent_wrote_reads_from_the_run_s_end() {
         let labels = ["bug".to_owned()];
@@ -905,6 +910,12 @@ mod tests {
         for said in [issue.to_owned(), format!("```json\n{issue}\n```"), format!("```\n{issue}```")]
         {
             assert_eq!(written(&talked(&said)).unwrap().title, "Red", "{said}");
+        }
+        let misspelled = r#"{"title": "Red", "body": "", "labels": ["bug"]}"#;
+        let unlabelled = r#"{"title": "Red", "body": ""}"#;
+        for said in [misspelled, unlabelled] {
+            let why = written(&talked(said)).unwrap_err();
+            assert!(why.starts_with("claude wrote no issue luneta reads"), "{said}: {why}");
         }
         let failed = json!({"type": "result", "subtype": "success", "is_error": true,
                             "result": "Not logged in · Please run /login"});
