@@ -325,7 +325,7 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
         return true;
     };
     laid.iter().filter(|listed| listed.pane == PaneId::Terminal(pane)).any(|listed| {
-        let runs = listed.pane_command.as_deref();
+        let runs = listed.command.as_deref();
         runs.is_none_or(|command| icons::program(command) == Some("luneta"))
     })
 }

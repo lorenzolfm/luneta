@@ -18,13 +18,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use notify::RecursiveMode;
-use serde::Deserialize;
 
 use crate::api;
 use crate::core::{self, Addressed};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
-use crate::mux::{CacheFolder, Failure, Id, Metadata, Mux, SessionName};
+use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName};
 
 /// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,43 +76,25 @@ impl Titled {
     }
 }
 
-/// A pane as zellij 0.45 lists it, as much of it as the daemon reads. zellij
-/// leaves out where a pane works and what runs in it when it does not know,
-/// and writes the rest every time: a listing without one does not read, where
-/// a default would have a plugin's pane read as a terminal in the first tab.
-#[derive(Deserialize)]
-struct Wire {
-    id: u32,
-    is_plugin: bool,
-    is_suppressed: bool,
-    is_held: bool,
-    tab_id: u32,
-    tab_position: u32,
-    tab_name: String,
-    #[serde(default)]
-    pane_cwd: Option<String>,
-    #[serde(default)]
-    pane_command: Option<String>,
-    title: String,
-}
-
-/// The terminals in what zellij listed, or why it does not read. A plugin's
-/// pane is no terminal, and a suppressed one is off the screen, in the place
-/// another took. zellij gives each terminal of a session an id of its own.
-fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
-    let wire: Vec<Wire> = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-    let panes: Vec<Pane> = wire
+/// The terminals among `laid`, every pane of a session, or why they do not
+/// read. A plugin's pane is no terminal, and a suppressed one is off the
+/// screen, in the place another took. A session gives each terminal an id of
+/// its own.
+fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
+    let panes: Vec<Pane> = laid
         .into_iter()
-        .filter(|pane| !pane.is_plugin && !pane.is_suppressed)
-        .map(|pane| Pane {
-            id: pane.id,
-            tab: pane.tab_position,
-            tab_id: pane.tab_id,
-            tab_name: pane.tab_name,
-            cwd: pane.pane_cwd.and_then(Said::new),
-            command: pane.pane_command.and_then(Said::new),
-            titled: titled(&pane.title),
-            held: pane.is_held,
+        .filter(|laid| !laid.is_suppressed)
+        .filter_map(|laid| {
+            Some(Pane {
+                id: laid.pane.terminal()?,
+                tab: laid.tab_position,
+                tab_id: laid.tab_id.0,
+                tab_name: laid.tab_name,
+                cwd: laid.cwd.and_then(Said::new),
+                command: laid.command.and_then(Said::new),
+                titled: titled(&laid.title),
+                held: laid.is_held,
+            })
         })
         .collect();
     let mut ids = HashSet::new();
@@ -157,8 +138,8 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 
 /// The panes of `session`, or why zellij did not list them.
 fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
-    let said = Mux::Zellij.panes_listed(session)?;
-    parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
+    let laid = Mux::Zellij.panes_listed(session)?;
+    terminals(laid).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
 /// What tells the daemon that the panes of a session may have changed, short

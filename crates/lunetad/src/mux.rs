@@ -19,9 +19,11 @@ use std::time::{Duration, SystemTime};
 use crate::watch::Troubles;
 use crate::Directory;
 
+mod laid;
 mod zellij;
 
-pub use zellij::cli::{tabs, terminal_of, Asks, Client, Failure, Laid, Listed, PaneId, Runs, TabId};
+pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
+pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
 
@@ -98,9 +100,9 @@ impl Mux {
         }
     }
 
-    /// What the multiplexer said of every pane of `session`, in JSON, as
-    /// `panes` reads it.
-    pub fn panes_listed(self, session: &SessionName) -> Result<Vec<u8>, Failure> {
+    /// Every pane of `session` as it lays them out now, the bars too, asked
+    /// once.
+    pub fn panes_listed(self, session: &SessionName) -> Result<Vec<Laid>, Failure> {
         match self {
             Mux::Zellij => zellij::cli::panes_listed(session),
         }

@@ -45,11 +45,13 @@ mod tests {
             is_floating: false,
             is_focused: false,
             is_fullscreen: false,
+            is_held: false,
             title: String::new(),
             tab_id: TabId(tab_id),
             tab_position: tab_id,
             tab_name: String::new(),
-            pane_command: None,
+            cwd: None,
+            command: None,
         }
     }
 
