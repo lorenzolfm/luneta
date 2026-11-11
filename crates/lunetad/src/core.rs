@@ -25,6 +25,17 @@ use crate::shells::Shell;
 use crate::transcripts::SessionId;
 use crate::mux::{Client, Id, Listed, SessionName, Sessions, Socket};
 
+/// Which session the core keeps something of, and of which multiplexer's: as
+/// it stays through a rename.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SessionKey {
+    /// A zellij session, by its socket.
+    Zellij(Id),
+    /// An own session, by the id its server gave it, which it gives no other.
+    #[expect(dead_code, reason = "the daemon follows own sessions from #331's step 2, PR 3")]
+    Own(u64),
+}
+
 /// A branch, by the directory that holds its repository, and its name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Branch {
@@ -40,10 +51,12 @@ pub enum Command {
     /// The zellij sessions that run now, and how many of zellij's folders and
     /// sockets could not be read, any of which could be another's.
     Sockets { sockets: Vec<Socket>, unread: u32 },
-    /// What zellij listed of the panes of `session`, asked for by `name`.
-    Panes { session: Id, name: SessionName, panes: Vec<Pane> },
-    /// What zellij listed of the clients of `session`, asked for by `name`.
-    Clients { session: Id, name: SessionName, clients: Listed },
+    /// What the multiplexer listed of the panes of `session`, asked for by
+    /// `name`.
+    Panes { session: SessionKey, name: SessionName, panes: Vec<Pane> },
+    /// What the multiplexer listed of the clients of `session`, asked for by
+    /// `name`.
+    Clients { session: SessionKey, name: SessionName, clients: Listed },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
@@ -142,10 +155,11 @@ struct Known {
     sessions: Sessions,
     /// How many of zellij's folders and sockets the last scan could not read.
     unread_sockets: u32,
-    /// What zellij last listed of each session's panes.
-    panes: HashMap<Id, Vec<Pane>>,
-    /// What zellij last listed of each session's clients, by their ids.
-    clients: HashMap<Id, Listed>,
+    /// What its multiplexer last listed of each session's panes.
+    panes: HashMap<SessionKey, Vec<Pane>>,
+    /// What its multiplexer last listed of each session's clients, by their
+    /// ids.
+    clients: HashMap<SessionKey, Listed>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
     /// What gh last found of the branch in each directory a pane works in.
@@ -166,7 +180,7 @@ struct Known {
     /// says a new line, or goes.
     words: u64,
     /// The last word said of each session that zellij can be asked about.
-    told: HashMap<Id, u64>,
+    told: HashMap<SessionKey, u64>,
     /// The host as the API gives it, its version with it.
     host: api::Host,
     /// How many times the host has changed.
@@ -221,8 +235,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Panes { session, name, panes } => {
                 // One that went, took another name, or now shares it, since
-                // zellij was asked.
-                if known.sessions.addressed(&name) != Some(session) {
+                // its multiplexer was asked.
+                if !known.answers(session, &name) {
                     continue;
                 }
                 if known.listed(session, panes) {
@@ -230,7 +244,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
             },
             Command::Clients { session, name, clients } => {
-                if known.sessions.addressed(&name) != Some(session) {
+                if !known.answers(session, &name) {
                     continue;
                 }
                 known.clients.insert(session, clients);
@@ -267,11 +281,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let _ = answer.send(());
             },
             Command::Sessions(answer) => {
-                let sessions = known.addressed().into_iter().map(|(id, name)| Addressed {
-                    id,
-                    name,
-                    told: *known.told.get(&id).expect("a word is said of each as it comes"),
-                    listed: known.panes.contains_key(&id),
+                let sessions = known.addressed().into_iter().map(|(id, name)| {
+                    let key = SessionKey::Zellij(id);
+                    let told = known.told.get(&key).expect("a word is said of each as it comes");
+                    Addressed { id, name, told: *told, listed: known.panes.contains_key(&key) }
                 });
                 // One who stopped waiting has no use for the answer.
                 let _ = answer.send(sessions.collect());
@@ -317,6 +330,15 @@ fn wake(thread: &SyncSender<()>) {
 }
 
 impl Known {
+    /// Whether `session` is the one that answers to `name` now, as it was
+    /// asked by it. The core knows no own session yet.
+    fn answers(&self, session: SessionKey, name: &SessionName) -> bool {
+        match session {
+            SessionKey::Zellij(id) => self.sessions.addressed(name) == Some(id),
+            SessionKey::Own(_) => false,
+        }
+    }
+
     /// The sessions zellij can be asked about by name: each that runs under a
     /// name no other runs under, and that name.
     fn addressed(&self) -> HashSet<(Id, SessionName)> {
@@ -337,13 +359,16 @@ impl Known {
         let before = self.addressed();
         self.sessions.saw(sockets);
         let now = self.addressed();
-        let addressed = |session: &Id| now.iter().any(|(id, _)| id == session);
+        let addressed = |session: &SessionKey| match session {
+            SessionKey::Zellij(session) => now.iter().any(|(id, _)| id == session),
+            SessionKey::Own(_) => true,
+        };
         self.panes.retain(|session, _| addressed(session));
         self.clients.retain(|session, _| addressed(session));
         self.told.retain(|session, _| addressed(session));
         let came: Vec<Id> = now.difference(&before).map(|(id, _)| *id).collect();
         for session in &came {
-            self.say(*session);
+            self.say(SessionKey::Zellij(*session));
         }
         !came.is_empty()
     }
@@ -356,8 +381,8 @@ impl Known {
         let new = now.iter().filter(|shell| unsaid(shell, &self.shells));
         let gone = self.shells.iter().filter(|shell| unsaid(shell, &now));
         // A word was said of each session as zellij could be asked about it.
-        let can_ask = |session: &Id| self.told.contains_key(session);
-        let told: HashSet<Id> =
+        let can_ask = |session: &SessionKey| self.told.contains_key(session);
+        let told: HashSet<SessionKey> =
             new.chain(gone).filter_map(|shell| self.house(shell)).filter(can_ask).collect();
         for session in &told {
             self.say(*session);
@@ -385,23 +410,23 @@ impl Known {
     }
 
     /// Says a word of `session`, which zellij can be asked about.
-    fn say(&mut self, session: Id) {
+    fn say(&mut self, session: SessionKey) {
         self.words = self.words.checked_add(1).expect("fewer than 2^64 words are said");
         self.told.insert(session, self.words);
     }
 
     /// The session `shell` is in, as `Sessions::housing` has it. The hook
     /// counts whole seconds: the shell started by the end of the one it says.
-    fn house(&self, shell: &Shell) -> Option<Id> {
+    fn house(&self, shell: &Shell) -> Option<SessionKey> {
         let by = shell.started.checked_add(Duration::from_secs(1))?;
-        self.sessions.housing(&shell.named, by)
+        self.sessions.housing(&shell.named, by).map(SessionKey::Zellij)
     }
 
     /// Takes in what zellij listed of the panes of `session`, which runs, and
     /// keeps what it said before where it says nothing now. True when a pane
     /// works in a directory that none did.
-    fn listed(&mut self, session: Id, mut panes: Vec<Pane>) -> bool {
-        assert!(self.sessions.name_of(session).is_some());
+    fn listed(&mut self, session: SessionKey, mut panes: Vec<Pane>) -> bool {
+        assert!(self.runs(session));
         // `keep` finds the pane each was by its id: zellij gives each terminal
         // of a session one of its own, which `panes::parse` checks.
         let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
@@ -412,6 +437,14 @@ impl Known {
         let before = self.dirs();
         self.panes.insert(session, panes);
         !self.dirs().is_subset(&before)
+    }
+
+    /// Whether `session` runs, as the core knows: it knows no own session yet.
+    fn runs(&self, session: SessionKey) -> bool {
+        match session {
+            SessionKey::Zellij(id) => self.sessions.name_of(id).is_some(),
+            SessionKey::Own(_) => false,
+        }
     }
 
     /// The directories the panes work in.
@@ -485,8 +518,8 @@ impl Known {
     /// an agent is, or, of more than one, in the one that has that name now;
     /// and one that started before a session took that name is none of that
     /// session's.
-    fn shells(&self) -> HashMap<(Id, u32), &Shell> {
-        let mut shells: HashMap<(Id, u32), &Shell> = HashMap::new();
+    fn shells(&self) -> HashMap<(SessionKey, u32), &Shell> {
+        let mut shells: HashMap<(SessionKey, u32), &Shell> = HashMap::new();
         for shell in &self.shells {
             let Some(session) = self.house(shell) else {
                 continue;
@@ -511,16 +544,17 @@ impl Known {
         // would be left out, or go stale, without a word: `saw` lets them go
         // as it ends or comes to share its name, and `run` takes in none for
         // it.
-        let sessions = &self.sessions;
         for session in self.panes.keys().chain(self.clients.keys()) {
-            let name = sessions.name_of(*session).expect("a session zellij listed runs");
-            assert_eq!(sessions.addressed(name), Some(*session));
+            assert!(self.runs(*session), "a session its multiplexer listed runs");
+            let SessionKey::Zellij(id) = session else { continue };
+            let name = self.sessions.name_of(*id).expect("a zellij session that runs has a name");
+            assert_eq!(self.sessions.addressed(name), Some(*id));
         }
         // `saw` says a word of each session as zellij can be asked about it,
         // and lets the word go as it no longer can be.
         let addressed = self.addressed();
         assert_eq!(self.told.len(), addressed.len());
-        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(id)));
+        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(&SessionKey::Zellij(*id))));
         // By name, and those that share one, as sessions of zellij versions
         // with contracts of their own can, by when each started.
         let mut running: Vec<(Id, &SessionName)> = self.sessions.running().collect();
@@ -528,19 +562,22 @@ impl Known {
         let shells = self.shells();
         let sessions = running
             .into_iter()
-            .map(|(id, name)| api::Session {
-                name: name.to_string(),
-                started_at: Some(id.started().into()),
-                socket: id.socket(),
-                panes: self.panes.get(&id).map(|panes| api::Panes {
-                    panes: panes
-                        .iter()
-                        .map(|pane| pane.to_api(shells.get(&(id, pane.id)).copied()))
-                        .collect(),
-                }),
-                clients: self.clients.get(&id).map(|clients| api::Clients {
-                    clients: clients.iter().copied().map(Client::to_api).collect(),
-                }),
+            .map(|(id, name)| {
+                let key = SessionKey::Zellij(id);
+                api::Session {
+                    name: name.to_string(),
+                    started_at: Some(id.started().into()),
+                    socket: id.socket(),
+                    panes: self.panes.get(&key).map(|panes| api::Panes {
+                        panes: panes
+                            .iter()
+                            .map(|pane| pane.to_api(shells.get(&(key, pane.id)).copied()))
+                            .collect(),
+                    }),
+                    clients: self.clients.get(&key).map(|clients| api::Clients {
+                        clients: clients.iter().copied().map(Client::to_api).collect(),
+                    }),
+                }
             })
             .collect();
         let mut agents = self.agents();

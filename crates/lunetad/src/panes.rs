@@ -20,7 +20,7 @@ use luneta_protocol::said::Said;
 use notify::RecursiveMode;
 
 use crate::api;
-use crate::core::{self, Addressed};
+use crate::core::{self, Addressed, SessionKey};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
 use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName};
@@ -276,9 +276,10 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
+    let key = SessionKey::Zellij(*id);
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
     if let Ok(panes) = list(name).inspect_err(said) {
-        core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
+        core.send(core::Command::Panes { session: key, name: name.clone(), panes }).ok()?;
     }
     let said = |why: &Failure| troubles.say(format!("the clients of {name}: {why}"));
     if let Ok(clients) = Mux::Zellij.clients(name).inspect_err(said) {
@@ -286,7 +287,7 @@ fn ask(
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));
         }
-        core.send(core::Command::Clients { session: *id, name: name.clone(), clients }).ok()?;
+        core.send(core::Command::Clients { session: key, name: name.clone(), clients }).ok()?;
     }
     Some(())
 }
