@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
 
+use super::vars::{PANE_VAR, PANE_VARS};
 use super::SessionName;
 use crate::mux::ClientWords;
 use crate::program::{self, Ran};
@@ -21,21 +22,17 @@ mod clients;
 
 pub use clients::{Client, Listed};
 
-/// What names the session of a zellij pane, in the variables of what runs in
-/// it.
-pub const SESSION_VAR: &str = "ZELLIJ_SESSION_NAME";
-
-/// What names the pane a zellij command runs in, in its variables, which
-/// zellij opens a pane beside.
-pub const PANE_VAR: &str = "ZELLIJ_PANE_ID";
-
-/// Variables that zellij's client must not have. With `ZELLIJ` set, it takes
-/// itself for one started in a pane of that session, and will not attach, as
-/// when luneta itself runs in a pane. Its CLI would take the session and the
-/// pane they name for the ones it is asked from. The window ids are of the
-/// terminal luneta's own is made by, and name no window.
-pub const LEFT_OUT: [&str; 5] =
-    ["ZELLIJ", SESSION_VAR, PANE_VAR, "WINDOWID", "ALACRITTY_WINDOW_ID"];
+/// Variables that zellij's client must not have: those of `PANE_VARS`, and
+/// the window ids of the terminal luneta's own is made by, which name no
+/// window. With `ZELLIJ` set, the client takes itself for one started in a
+/// pane of that session, and will not attach, as when luneta itself runs in
+/// a pane. Its CLI would take the session and the pane they name for the ones
+/// it is asked from. `PANE_VARS` is taken apart whole, so that one more of
+/// them will not build until it is left out too.
+pub const LEFT_OUT: [&str; 5] = {
+    let [in_a_pane, session, pane] = PANE_VARS;
+    [in_a_pane, session, pane, "WINDOWID", "ALACRITTY_WINDOW_ID"]
+};
 
 /// How long zellij has to answer: a server that runs answers at once.
 pub const ANSWER: Duration = Duration::from_secs(2);

@@ -29,8 +29,8 @@ use crate::api::ask_request::{self, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::SessionName;
-use crate::{claude, git, program, Harness};
+use crate::mux::{Mux, SessionName};
+use crate::{git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
 /// runs a few commands in a row, without slips.
@@ -453,9 +453,7 @@ impl Asked {
         // It takes every word after it for one more rule: the words you typed
         // go on its stdin.
         claude.arg("--allowedTools").args(ALLOWED);
-        for name in claude::PANE_VARS {
-            claude.env_remove(name);
-        }
+        Mux::Zellij.in_no_pane(&mut claude);
         git::local(&mut claude);
         self.user.name_in(&mut claude);
         self.turn.name_in(&mut claude);
@@ -753,7 +751,8 @@ mod tests {
         let pi = told(&first.user, Harness::Pi, "go");
         let line = "[luneta: start an agent in pi, unless the user names Claude Code.]";
         assert_eq!(pi, format!("{you}\n{line}\n\ngo"));
-        for name in claude::PANE_VARS.into_iter().chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
+        let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+        for name in panes.into_iter().chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
         assert_eq!(var(&claude, ASKED_VAR), Some(Some("luneta:2".to_owned())));

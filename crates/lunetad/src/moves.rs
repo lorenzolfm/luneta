@@ -45,8 +45,9 @@ pub enum Ended {
 /// What became of the session of a client that ended in one of `seats`, the
 /// sessions it may have been in, as zellij's sockets in `folder` say, and
 /// where the client goes on where it went: the newest session of those that
-/// run that `clients` answers for, which the picker lists first. Never
-/// `current`, nor one of a name luneta cannot hand zellij.
+/// run that `clients` answers for, which the picker lists first. Never one
+/// of a name luneta cannot hand zellij, and never one `clients` does not
+/// answer for, as one that may hold the terminal of the client's luneta.
 ///
 /// A socket can outlive its server, as one that crashed, and a session can
 /// end as it is looked for. `attach` brings back a session that ended, where
@@ -55,7 +56,6 @@ pub enum Ended {
 pub fn refuge(
     folder: &SocketFolder,
     seats: &[SessionName],
-    current: Option<&str>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Ended {
     let deadline = Instant::now() + ENDING;
@@ -64,7 +64,7 @@ pub fn refuge(
             return Ended::Kept;
         };
         if gone(seats, &running) {
-            return Ended::Went(sought(running, current, &mut clients));
+            return Ended::Went(sought(running, &mut clients));
         }
         if Instant::now() >= deadline {
             return Ended::Kept;
@@ -75,24 +75,22 @@ pub fn refuge(
 
 /// The newest session that runs, as zellij's sockets in `folder` say, that
 /// `clients` answers for, where a client goes on that ended elsewhere: never
-/// `current`, nor one of a name luneta cannot hand zellij. None where none
-/// answers, and where not all of `folder` reads.
+/// one of a name luneta cannot hand zellij. None where none answers, and
+/// where not all of `folder` reads.
 pub fn newest(
     folder: &SocketFolder,
-    current: Option<&str>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    sought(folder.running()?, current, &mut clients)
+    sought(folder.running()?, &mut clients)
 }
 
 /// The first of `running` of a name luneta can hand zellij that `clients`
 /// answers for, as `refuges` orders them, within `SEEKING`.
 fn sought(
     running: Vec<(SessionName, SystemTime)>,
-    current: Option<&str>,
     clients: &mut impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    answering(refuges(running, current), clients)
+    answering(refuges(running), clients)
 }
 
 /// What `refuge`'s `clients` answers for `session` on this machine: every row
@@ -134,13 +132,8 @@ fn gone(seats: &[SessionName], running: &[(SessionName, SystemTime)]) -> bool {
 }
 
 /// The names of `running` that a client can go on in, newest first, by when
-/// each started and then by name, as the picker lists them: all but
-/// `current`.
-fn refuges(
-    mut running: Vec<(SessionName, SystemTime)>,
-    current: Option<&str>,
-) -> Vec<SessionName> {
-    running.retain(|(name, _)| current != Some(name.as_str()));
+/// each started and then by name, as the picker lists them.
+fn refuges(mut running: Vec<(SessionName, SystemTime)>) -> Vec<SessionName> {
     running.sort_by(|(a, a_at), (b, b_at)| (b_at, b).cmp(&(a_at, a)));
     running.into_iter().map(|(name, _)| name).collect()
 }
@@ -151,17 +144,15 @@ mod tests {
 
     /// The refuge is sought in the order the picker lists sessions: the
     /// newest first, and of two that started at once, the one whose name
-    /// comes last, as the sidebar has them. Never the current one, which
-    /// zellij would show inside itself.
+    /// comes last, as the sidebar has them.
     #[test]
     fn the_refuge_is_sought_in_the_order_the_picker_lists_sessions() {
         let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
         let name = |name: &str| SessionName::running(name).unwrap();
         let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
         let running = running.map(|(it, started)| (name(it), started)).to_vec();
-        assert_eq!(refuges(running.clone(), None), ["b", "a", "c"].map(name));
-        assert_eq!(refuges(running, Some("b")), ["a", "c"].map(name));
-        assert_eq!(refuges(Vec::new(), None), []);
+        assert_eq!(refuges(running), ["b", "a", "c"].map(name));
+        assert_eq!(refuges(Vec::new()), []);
     }
 
     /// The refuge is the first session that answers for its clients, tried

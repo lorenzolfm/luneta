@@ -23,6 +23,7 @@ use lunetad::api::{
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
+use lunetad::mux::Named;
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
@@ -238,7 +239,7 @@ fn from_stdin() -> Result<String, String> {
 /// outside zellij.
 fn speaker_here() -> Option<Zellij> {
     let (named, pane) = match zellij::here().ok()?? {
-        Seat::Opened { named, pane } => (named, pane),
+        Seat::Opened(Named { session, pane }) => (session, pane),
         Seat::Asked { user: User::Pane { session, pane }, .. } => (session.to_string(), pane),
         Seat::Asked { .. } => return None,
     };

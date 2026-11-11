@@ -85,8 +85,8 @@ pub struct Opened {
 }
 
 /// Opens `open`, and says which terminal it opened. zellij opens a pane
-/// `--no-focus` beside the one the command runs in, which it reads in
-/// `PANE_VAR`, whatever tab that is in and whether a client is on it, and
+/// `--no-focus` beside the one the command runs in, which it reads in the
+/// pane's variables, whatever tab that is in and whether a client is on it, and
 /// says it as `terminal_<id>`. It says a tab's id, and the tab's terminal is
 /// the one it lists in that tab. No tab opens in a session no client is in,
 /// where it would have no room for its panes, as `Open::Tab` says, alone or

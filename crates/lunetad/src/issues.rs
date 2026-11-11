@@ -43,8 +43,9 @@ use tonic::{Code, Status};
 use crate::api::{FileIssueRequest, FileIssueResponse, IssueRepository, On};
 use crate::directory::Directory;
 use crate::links::{self, Kind, Link, Remotes};
+use crate::mux::Mux;
 use crate::program::{self, Ran};
-use crate::{asks, claude, git, log};
+use crate::{asks, git, log};
 
 /// The model the agent writes on: the ask box's, which reads a repository's
 /// issues and writes one as they are written.
@@ -377,9 +378,7 @@ impl Filing {
         claude.args(["--no-session-persistence", "--output-format", "json"]);
         claude.arg("--json-schema").arg(schema(labels));
         claude.arg("--append-system-prompt").arg(SYSTEM);
-        for name in claude::PANE_VARS {
-            claude.env_remove(name);
-        }
+        Mux::Zellij.in_no_pane(&mut claude);
         git::local(&mut claude);
         claude.current_dir(self.dir.as_str());
         claude
@@ -760,7 +759,8 @@ mod tests {
         let removed = |name: &str| {
             claude.get_envs().any(|(key, value)| key.to_str() == Some(name) && value.is_none())
         };
-        for name in claude::PANE_VARS.into_iter().chain(git::REPOSITORY_VARS) {
+        let panes = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
+        for name in panes.into_iter().chain(git::REPOSITORY_VARS) {
             assert!(removed(name), "{name}");
         }
         assert_eq!(filing().words, "a red button");

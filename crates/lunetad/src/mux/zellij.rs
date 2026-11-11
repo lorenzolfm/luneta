@@ -40,6 +40,7 @@ pub mod client;
 mod ended;
 pub mod metadata;
 mod renames;
+pub mod vars;
 
 pub use ended::{exited, Exited};
 pub use renames::renamed;

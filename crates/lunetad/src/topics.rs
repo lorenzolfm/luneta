@@ -450,7 +450,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::agent::{Harness, Named, Source};
+    use crate::agent::{Harness, Source};
+    use crate::mux::Named;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 

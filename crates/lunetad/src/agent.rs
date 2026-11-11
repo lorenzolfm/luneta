@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::io::{self, ErrorKind, Read as _};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,8 +13,7 @@ use serde::Deserialize as _;
 use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
-use crate::process;
-use crate::mux::Sessions;
+use crate::mux::{Named, Sessions};
 
 /// The most an agent's file holds that an adapter reads. Each holds a few hundred
 /// bytes: a file past this is no agent's.
@@ -223,30 +221,6 @@ pub struct Unread {
     pub started: Option<SystemTime>,
     /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
-}
-
-/// A pane as an agent's environment names it: by the name its session had when
-/// the pane opened, and the pane's id there.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Named {
-    pub session: String,
-    pub pane: u32,
-}
-
-/// The pane the environment of `pid` names, if it names one.
-#[must_use]
-pub fn pane_of(pid: u32) -> Option<Named> {
-    let (mut session, mut pane) = (None, None);
-    for entry in process::environ(pid)? {
-        let entry = entry.as_bytes();
-        if let Some(name) = entry.strip_prefix(b"ZELLIJ_SESSION_NAME=") {
-            session = Some(String::from_utf8_lossy(name).into_owned());
-        } else if let Some(id) = entry.strip_prefix(b"ZELLIJ_PANE_ID=") {
-            pane = std::str::from_utf8(id).ok().and_then(|id| id.parse().ok());
-        }
-    }
-    let session = session.filter(|session| !session.is_empty())?;
-    Some(Named { session, pane: pane? })
 }
 
 /// The pid an agent's file is named for: `<pid>.json`, spelled as a harness

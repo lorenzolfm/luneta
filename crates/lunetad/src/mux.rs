@@ -13,6 +13,7 @@
 
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use crate::watch::Troubles;
@@ -21,7 +22,6 @@ use crate::Directory;
 mod zellij;
 
 pub use zellij::cli::{tabs, terminal_of, Asks, Client, Failure, Laid, Listed, PaneId, Runs, TabId};
-pub use zellij::cli::{PANE_VAR, SESSION_VAR};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
 
@@ -29,6 +29,54 @@ pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mux {
     Zellij,
+}
+
+/// A pane of a multiplexer's, as the variables of what runs in it name it: by
+/// the name its session had as the pane opened, which a rename leaves behind,
+/// and the pane's id there. The name is as they spell it, held to nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Named {
+    pub session: String,
+    pub pane: u32,
+}
+
+/// What the variables a multiplexer gives what runs in its panes say of the
+/// pane this process runs in: the name its session had as it opened, where
+/// they name one, and its id, where they name a terminal's. A rename leaves
+/// the name behind, so a pane goes by the id where the name does not match.
+/// Only `spelled` makes one, so that a name is never empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneVars {
+    named: Option<String>,
+    pane: Option<u32>,
+}
+
+impl PaneVars {
+    /// What `session` and `pane`, as the variables spell them, say: a name,
+    /// where it is not empty, and a terminal's id, where it is one.
+    #[must_use]
+    pub fn spelled(session: Option<String>, pane: Option<&str>) -> PaneVars {
+        let named = session.filter(|session| !session.is_empty());
+        PaneVars { named, pane: pane.and_then(|pane| pane.parse().ok()) }
+    }
+
+    /// The name the session had as the pane opened, where they name one.
+    #[must_use]
+    pub fn named(&self) -> Option<&str> {
+        self.named.as_deref()
+    }
+
+    /// The pane's id, where they name a terminal's.
+    #[must_use]
+    pub fn pane(&self) -> Option<u32> {
+        self.pane
+    }
+
+    /// The pane, where the variables name both its session and its id.
+    #[must_use]
+    pub fn pane_named(self) -> Option<Named> {
+        Some(Named { session: self.named?, pane: self.pane? })
+    }
 }
 
 /// The words that start a multiplexer's client: `program`, with `args`, run
@@ -324,6 +372,40 @@ impl Mux {
     pub fn dropped(self, said: &str) -> bool {
         match self {
             Mux::Zellij => zellij::client::dropped(said),
+        }
+    }
+
+    /// What the variables the multiplexer gives what runs in its panes say of
+    /// the pane this process runs in. Or why they do not read.
+    pub fn here(self) -> Result<PaneVars, String> {
+        match self {
+            Mux::Zellij => zellij::vars::here(),
+        }
+    }
+
+    /// The pane the variables of the process `pid` name, if they name one.
+    #[must_use]
+    pub fn pane_of(self, pid: u32) -> Option<Named> {
+        match self {
+            Mux::Zellij => zellij::vars::pane_of(pid),
+        }
+    }
+
+    /// Whether this process may run in a pane of the multiplexer's: what it
+    /// sets in its panes is set, though it may name none.
+    #[must_use]
+    pub fn may_be_in_a_pane(self) -> bool {
+        match self {
+            Mux::Zellij => zellij::vars::may_be_in_a_pane(),
+        }
+    }
+
+    /// Has `command` run without the variables the multiplexer gives what
+    /// runs in its panes: in none, as the daemon and luneta's commands see
+    /// it.
+    pub fn in_no_pane(self, command: &mut Command) {
+        match self {
+            Mux::Zellij => zellij::vars::in_no_pane(command),
         }
     }
 

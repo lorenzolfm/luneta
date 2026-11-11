@@ -627,7 +627,7 @@ impl Daemon for Host {
         let found = task::spawn_blocking(move || {
             // No session here is one luneta's terminal is a pane of: that
             // luneta's client is on another machine.
-            moves::refuge(&sockets, &seats, None, moves::before)
+            moves::refuge(&sockets, &seats, moves::before)
         });
         let refuge = |moves::Refuge { session, before }| api::Refuge {
             session: session.to_string(),
