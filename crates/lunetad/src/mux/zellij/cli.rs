@@ -9,6 +9,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use super::vars::{PANE_VAR, PANE_VARS};
@@ -222,8 +223,8 @@ impl Wire {
             tab_id: TabId(self.tab_id),
             tab_position: self.tab_position,
             tab_name: self.tab_name,
-            cwd: self.pane_cwd,
-            command: self.pane_command,
+            cwd: self.pane_cwd.and_then(Said::new),
+            command: self.pane_command.and_then(Said::new),
         }
     }
 }

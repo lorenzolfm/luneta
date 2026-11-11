@@ -5,6 +5,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use luneta_protocol::said::Said;
+
 /// A pane of a session's, as much of it as says what it holds open, whether
 /// a client coming there is on it, and what runs in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,10 +35,10 @@ pub struct Laid {
     pub tab_name: String,
     /// Where it works: none where the multiplexer did not say, which does not
     /// mean it works nowhere.
-    pub cwd: Option<String>,
+    pub cwd: Option<Said>,
     /// What runs in its foreground: none where the multiplexer did not say,
     /// which does not mean nothing runs.
-    pub command: Option<String>,
+    pub command: Option<Said>,
 }
 
 impl Laid {

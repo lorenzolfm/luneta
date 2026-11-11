@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::TermMode;
+use luneta_protocol::said::Said;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
 use lunetad::mux::{self, ClientWords, Mux, PaneId, PaneVars, Zellij, ZellijPane};
@@ -325,7 +326,7 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
         return true;
     };
     laid.iter().filter(|listed| listed.pane == PaneId::Terminal(pane)).any(|listed| {
-        let runs = listed.command.as_deref();
+        let runs = listed.command.as_ref().map(Said::as_str);
         runs.is_none_or(|command| icons::program(command) == Some("luneta"))
     })
 }

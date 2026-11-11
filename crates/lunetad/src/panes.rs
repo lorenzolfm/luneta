@@ -90,8 +90,8 @@ fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
                 tab: laid.tab_position,
                 tab_id: laid.tab_id.0,
                 tab_name: laid.tab_name,
-                cwd: laid.cwd.and_then(Said::new),
-                command: laid.command.and_then(Said::new),
+                cwd: laid.cwd,
+                command: laid.command,
                 titled: titled(&laid.title),
                 held: laid.is_held,
             })
