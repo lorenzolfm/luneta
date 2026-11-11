@@ -3,10 +3,10 @@
 //! behind, and the pane's id there.
 
 use std::env;
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsString;
 use std::process::Command;
 
-use crate::mux::{Named, PaneVars};
+use crate::mux::{value_in, Named, PaneVars};
 use crate::process;
 
 /// What names the session of a zellij pane, in the variables of what runs in
@@ -31,23 +31,12 @@ pub fn here() -> Result<PaneVars, String> {
     Ok(PaneVars::spelled(session, pane.as_deref()))
 }
 
-/// The pane the variables of the process `pid` name, if they name one.
+/// The pane `environ`, the variables of a process, name, if they name one.
 #[must_use]
-pub fn pane_of(pid: u32) -> Option<Named> {
-    let (mut session, mut pane) = (None, None);
-    for entry in process::environ(pid)? {
-        let entry = entry.as_bytes();
-        let Some(equals) = entry.iter().position(|byte| *byte == b'=') else {
-            continue;
-        };
-        let (name, value) = (&entry[..equals], &entry[equals + 1..]);
-        if name == SESSION_VAR.as_bytes() {
-            session = Some(String::from_utf8_lossy(value).into_owned());
-        } else if name == PANE_VAR.as_bytes() {
-            pane = std::str::from_utf8(value).ok().map(str::to_owned);
-        }
-    }
-    PaneVars::spelled(session, pane.as_deref()).pane_named()
+pub fn pane_in(environ: &[OsString]) -> Option<Named> {
+    let session = value_in(environ, SESSION_VAR).map(|value| String::from_utf8_lossy(value).into());
+    let pane = value_in(environ, PANE_VAR).and_then(|value| std::str::from_utf8(value).ok());
+    PaneVars::spelled(session, pane).pane_named().map(Named::Zellij)
 }
 
 /// Whether this process may run in a pane of zellij's: what zellij sets in
@@ -67,6 +56,7 @@ pub fn in_no_pane(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mux::ZellijPane;
 
     /// The variables name a session by a name that is not empty, and a pane
     /// by a terminal's id, and a pane they name by both. A name is as they
@@ -74,7 +64,7 @@ mod tests {
     #[test]
     fn the_variables_name_a_pane_by_its_session_and_a_terminal_s_id() {
         let both = PaneVars::spelled(Some("a/b".to_owned()), Some("2"));
-        assert_eq!(both.pane_named(), Some(Named { session: "a/b".to_owned(), pane: 2 }));
+        assert_eq!(both.pane_named(), Some(ZellijPane { session: "a/b".to_owned(), pane: 2 }));
         let some = |text: &str| Some(text.to_owned());
         let halves = [
             (some(""), Some("2"), None, Some(2)),

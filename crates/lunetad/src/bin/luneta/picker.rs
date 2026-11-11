@@ -37,7 +37,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use lunetad::mux::{Exited, Mux};
+use lunetad::mux::{Exited, Mux, Zellij};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
@@ -315,7 +315,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
         let heard = match ask {
             Ask::Exited { on, ask } => {
                 let exited = match &on {
-                    Machine::Local => Mux::Zellij.exited(),
+                    Machine::Local => Zellij::exited(),
                     // The notes over the list say why, of each machine.
                     Machine::Remote(destination) => reach(destination)
                         .and_then(|mut away| away.exited()),
@@ -342,7 +342,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Rename { on, from, to } => {
                 let renamed = match &on {
-                    Machine::Local => Mux::Zellij.renamed(&from, &to),
+                    Machine::Local => Mux::Zellij(&from).renamed(&to),
                     Machine::Remote(destination) => {
                         reach(destination).and_then(|mut away| away.rename(&from, &to))
                     },

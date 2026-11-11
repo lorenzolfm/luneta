@@ -30,7 +30,7 @@ use luneta_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{file_text, moment, named_pid, nonempty, Agent, Harness, Status};
-use crate::mux::{Mux, Named};
+use crate::mux::{self, Named};
 use crate::watch::{self, Troubles};
 use crate::{log, process};
 
@@ -155,7 +155,7 @@ impl AgentFiles {
             };
             let key = (pid, start);
             let found = self.processes.remove(&key).or_else(|| {
-                Some(Process { started: process::started(pid)?, pane: Mux::Zellij.pane_of(pid) })
+                Some(Process { started: process::started(pid)?, pane: mux::pane_of(pid) })
             });
             // The system said when it started, and now does not: it has ended,
             // and if not, the next scan asks again.

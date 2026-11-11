@@ -28,7 +28,7 @@ use serde::Deserialize;
 use crate::agent::{
     file_text, moment, named_pid, nonempty, Agent, Harness, Name, Source, Status, Unread,
 };
-use crate::mux::{Mux, Named};
+use crate::mux::{self, Named};
 use crate::{log, process, program};
 use crate::watch::{self, Troubles};
 
@@ -46,7 +46,7 @@ pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Comman
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", system]);
-    Mux::Zellij.in_no_pane(&mut claude);
+    mux::in_no_pane(&mut claude);
     Ok((claude, program::saying(prompt)?))
 }
 
@@ -202,7 +202,7 @@ impl SessionFiles {
         // The pane of each process, read from its environment once.
         let mut pane = |pid: u32, start: String| {
             let key = (pid, start);
-            let pane = self.panes.remove(&key).unwrap_or_else(|| Mux::Zellij.pane_of(pid));
+            let pane = self.panes.remove(&key).unwrap_or_else(|| mux::pane_of(pid));
             panes.insert(key, pane.clone());
             pane
         };
@@ -313,7 +313,9 @@ mod tests {
         let mut unset: Vec<&OsStr> =
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
         unset.sort_unstable();
-        assert_eq!(unset, ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new));
+        let own = ["LUNETA_MUX_PANE", "LUNETA_MUX_SESSION"].map(OsStr::new);
+        let zellij = ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new);
+        assert_eq!(unset, [own.as_slice(), &zellij].concat());
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
     }

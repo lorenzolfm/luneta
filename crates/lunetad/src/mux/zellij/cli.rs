@@ -3,18 +3,18 @@
 //! what it says as it answers or fails, and a session's panes and clients as
 //! it lists them; and the words that start its client.
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer};
+use luneta_protocol::said::Said;
+use serde::Deserialize;
 
 use super::vars::{PANE_VAR, PANE_VARS};
 use super::SessionName;
-use crate::mux::ClientWords;
+use crate::mux::{ClientWords, Laid, PaneId, TabId};
 use crate::program::{self, Ran};
 use crate::Directory;
 
@@ -183,127 +183,70 @@ pub fn unrun(error: &io::Error) -> String {
     format!("zellij could not be run: {error}")
 }
 
-/// A pane as `zellij action list-panes --json` lists it, as much of it as
-/// says what it holds open, whether a client coming there is on it, and what
-/// runs in it.
-#[derive(Clone, Deserialize)]
+/// A pane as zellij 0.45 lists it with `action list-panes --json`, with
+/// `--all` or without. zellij leaves out where a pane works and what runs in
+/// it when it does not know, and writes the rest every time: a listing
+/// without one does not read, where a default would have a plugin's pane read
+/// as a terminal in the first tab.
+#[derive(Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "zellij lists each as a bool of its own")]
-pub struct Laid {
-    #[serde(flatten, deserialize_with = "pane_listed")]
-    pub pane: PaneId,
-    pub is_selectable: bool,
-    pub is_suppressed: bool,
-    pub is_floating: bool,
-    /// Whether a client has the focus on it in its tab, or the last one had.
-    pub is_focused: bool,
-    /// Whether it is shown over the other panes of its tab. Only a turn goes by
-    /// it, to show it so again, as a pane leaving the tab or coming into it ends
-    /// that.
-    pub is_fullscreen: bool,
-    /// What its frame calls it, by which a turn finds a stand-in of its own.
-    pub title: String,
-    pub tab_id: TabId,
-    /// Where its tab stands among the session's, from the first.
-    pub tab_position: u32,
-    /// What its tab is called, as you pick a tab for another's panes by it.
-    pub tab_name: String,
-    /// What runs in its foreground: none where zellij took too long to say,
-    /// which does not mean nothing runs.
-    pub pane_command: Option<String>,
+struct Wire {
+    id: u32,
+    is_plugin: bool,
+    is_selectable: bool,
+    is_suppressed: bool,
+    is_floating: bool,
+    is_focused: bool,
+    is_fullscreen: bool,
+    is_held: bool,
+    title: String,
+    tab_id: u32,
+    tab_position: u32,
+    tab_name: String,
+    #[serde(default)]
+    pane_cwd: Option<String>,
+    #[serde(default)]
+    pane_command: Option<String>,
 }
 
-impl Laid {
-    /// Whether it is tiled in its tab, for you to go to: a plugin's as well.
-    #[must_use]
-    pub fn is_tiled(&self) -> bool {
-        self.is_selectable && !self.is_suppressed && !self.is_floating
-    }
-
-    /// Whether it keeps its tab open: a tiled pane you can go to, a plugin's
-    /// as well, or a terminal another took the place of, which zellij brings
-    /// back once that one closes. A floating pane goes with the tab, and so
-    /// does a bar, which you cannot go to.
-    #[must_use]
-    pub fn holds_tab(&self) -> bool {
-        self.is_tiled() || (self.is_suppressed && self.pane.terminal().is_some())
-    }
-}
-
-/// The pane zellij lists by its `id` and whether it `is_plugin`.
-fn pane_listed<'de, D: Deserializer<'de>>(listed: D) -> Result<PaneId, D::Error> {
-    #[derive(Deserialize)]
-    struct Pane {
-        id: u32,
-        is_plugin: bool,
-    }
-    let Pane { id, is_plugin } = Pane::deserialize(listed)?;
-    Ok(if is_plugin { PaneId::Plugin(id) } else { PaneId::Terminal(id) })
-}
-
-/// A pane as zellij's CLI names it. It numbers terminals and plugins apart, so
-/// that a session can have one of each by an id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneId {
-    Terminal(u32),
-    Plugin(u32),
-}
-
-impl PaneId {
-    /// The terminal it is, or none: it is a plugin's.
-    #[must_use]
-    pub fn terminal(self) -> Option<u32> {
-        match self {
-            PaneId::Terminal(id) => Some(id),
-            PaneId::Plugin(_) => None,
+impl Wire {
+    fn laid(self) -> Laid {
+        Laid {
+            pane: if self.is_plugin { PaneId::Plugin(self.id) } else { PaneId::Terminal(self.id) },
+            is_selectable: self.is_selectable,
+            is_suppressed: self.is_suppressed,
+            is_floating: self.is_floating,
+            is_focused: self.is_focused,
+            is_fullscreen: self.is_fullscreen,
+            is_held: self.is_held,
+            title: self.title,
+            tab_id: TabId(self.tab_id),
+            tab_position: self.tab_position,
+            tab_name: self.tab_name,
+            cwd: self.pane_cwd.and_then(Said::new),
+            command: self.pane_command.and_then(Said::new),
         }
     }
 }
 
-impl fmt::Display for PaneId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PaneId::Terminal(id) => write!(f, "terminal_{id}"),
-            PaneId::Plugin(id) => write!(f, "plugin_{id}"),
-        }
-    }
-}
-
-/// A tab, by the id zellij gave it, which it numbers apart from its panes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
-#[serde(transparent)]
-pub struct TabId(pub u32);
-
-impl fmt::Display for TabId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+/// The panes in what zellij listed, or why it does not read.
+fn listed(said: &[u8]) -> Result<Vec<Laid>, serde_json::Error> {
+    let wire: Vec<Wire> = serde_json::from_slice(said)?;
+    Ok(wire.into_iter().map(Wire::laid).collect())
 }
 
 /// The panes of `session` as zellij lists them now, the plugins' you can go
-/// to too: it leaves out the bars.
+/// to too: it leaves out the bars. Asked again as `heard` says.
 pub fn laid(session: &SessionName) -> Result<Vec<Laid>, Failure> {
     let mut command = action(session);
     command.args(["list-panes", "--json"]);
     heard(
         || answered(&mut command),
         |said| {
-            serde_json::from_str(said)
+            listed(said.as_bytes())
                 .map_err(|error| format!("zellij listed panes that do not read: {error}"))
         },
     )
-}
-
-/// The terminal of the tab whose id is `tab` among `laid`, the first it
-/// lists: where luneta goes in a tab it opened.
-#[must_use]
-pub fn terminal_of(laid: &[Laid], tab: TabId) -> Option<u32> {
-    laid.iter().filter(|laid| laid.tab_id == tab).find_map(|laid| laid.pane.terminal())
-}
-
-/// The ids of the tabs `laid` lists a pane of, a plugin's as well.
-#[must_use]
-pub fn tabs(laid: &[Laid]) -> BTreeSet<TabId> {
-    laid.iter().map(|pane| pane.tab_id).collect()
 }
 
 /// zellij's CLI, as `quiet` has it run.
@@ -336,12 +279,14 @@ fn ran(command: &mut Command) -> Result<Ran, Failure> {
     program::run(command, ANSWER).map_err(Failure::Unrun)
 }
 
-/// What `zellij action list-panes --all --json` said of `session`, or why
-/// zellij did not list them.
-pub fn panes_listed(session: &SessionName) -> Result<Vec<u8>, Failure> {
+/// Every pane of `session` as zellij lists them now, the bars too, asked
+/// once, or why zellij did not list them.
+pub fn panes_listed(session: &SessionName) -> Result<Vec<Laid>, Failure> {
     let mut command = action(session);
     command.args(["list-panes", "--all", "--json"]);
-    answer_of(ran(&mut command)?)
+    let said = answer_of(ran(&mut command)?)?;
+    let unread = |error| Failure::Unread(format!("zellij listed what does not read: {error}"));
+    listed(&said).map_err(unread)
 }
 
 /// What zellij says now as it lists the clients of `session`, asked again as
@@ -752,22 +697,6 @@ mod tests {
 
     use super::*;
 
-    fn laid(id: u32, tab_id: u32) -> Laid {
-        Laid {
-            pane: PaneId::Terminal(id),
-            is_selectable: true,
-            is_suppressed: false,
-            is_floating: false,
-            is_focused: false,
-            is_fullscreen: false,
-            title: String::new(),
-            tab_id: TabId(tab_id),
-            tab_position: tab_id,
-            tab_name: String::new(),
-            pane_command: None,
-        }
-    }
-
     /// A session whose name starts with `-` goes to zellij as a name: joined to
     /// its option, or after `--`. Apart, zellij's CLI takes it for an option.
     #[test]
@@ -813,30 +742,13 @@ mod tests {
             serde_json::json!({
                 "id": id, "is_plugin": is_plugin, "is_selectable": true,
                 "is_suppressed": false, "is_floating": false, "is_focused": false,
-                "is_fullscreen": false, "title": "", "tab_id": 0, "tab_position": 0,
-                "tab_name": "",
+                "is_fullscreen": false, "is_held": false, "title": "", "tab_id": 0,
+                "tab_position": 0, "tab_name": "",
             })
         };
         let said = serde_json::json!([listed(2, true), listed(2, false)]).to_string();
-        let laid: Vec<Laid> = serde_json::from_str(&said).unwrap();
+        let laid = super::listed(said.as_bytes()).unwrap();
         let panes: Vec<PaneId> = laid.iter().map(|laid| laid.pane).collect();
         assert_eq!(panes, [PaneId::Plugin(2), PaneId::Terminal(2)]);
-        assert_eq!(terminal_of(&laid, TabId(0)), Some(2));
-    }
-
-    /// luneta goes to the terminal of a tab it opened, of that tab.
-    #[test]
-    fn a_tab_opened_is_gone_to_on_its_terminal() {
-        let panes = [laid(1, 0), laid(3, 1)];
-        assert_eq!(terminal_of(&panes, TabId(1)), Some(3));
-    }
-
-    /// The tabs zellij made a session with, which a tab opened there closes,
-    /// are every tab it lists, those that hold a plugin's pane alone as well.
-    #[test]
-    fn a_made_session_s_tabs_are_all_it_lists_a_plugin_s_too() {
-        let bar = Laid { pane: PaneId::Plugin(0), ..laid(0, 2) };
-        let panes = [laid(0, 0), laid(1, 1), laid(2, 1), bar];
-        assert_eq!(tabs(&panes), BTreeSet::from([TabId(0), TabId(1), TabId(2)]));
     }
 }

@@ -18,13 +18,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use notify::RecursiveMode;
-use serde::Deserialize;
 
 use crate::api;
 use crate::core::{self, Addressed};
 use crate::shells::Shell;
 use crate::watch::{self, Troubles};
-use crate::mux::{CacheFolder, Failure, Id, Metadata, Mux, SessionName};
+use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName, Zellij};
 
 /// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,43 +76,25 @@ impl Titled {
     }
 }
 
-/// A pane as zellij 0.45 lists it, as much of it as the daemon reads. zellij
-/// leaves out where a pane works and what runs in it when it does not know,
-/// and writes the rest every time: a listing without one does not read, where
-/// a default would have a plugin's pane read as a terminal in the first tab.
-#[derive(Deserialize)]
-struct Wire {
-    id: u32,
-    is_plugin: bool,
-    is_suppressed: bool,
-    is_held: bool,
-    tab_id: u32,
-    tab_position: u32,
-    tab_name: String,
-    #[serde(default)]
-    pane_cwd: Option<String>,
-    #[serde(default)]
-    pane_command: Option<String>,
-    title: String,
-}
-
-/// The terminals in what zellij listed, or why it does not read. A plugin's
-/// pane is no terminal, and a suppressed one is off the screen, in the place
-/// another took. zellij gives each terminal of a session an id of its own.
-fn parse(said: &[u8]) -> Result<Vec<Pane>, String> {
-    let wire: Vec<Wire> = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-    let panes: Vec<Pane> = wire
+/// The terminals among `laid`, every pane of a session, or why they do not
+/// read. A plugin's pane is no terminal, and a suppressed one is off the
+/// screen, in the place another took. A session gives each terminal an id of
+/// its own.
+fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
+    let panes: Vec<Pane> = laid
         .into_iter()
-        .filter(|pane| !pane.is_plugin && !pane.is_suppressed)
-        .map(|pane| Pane {
-            id: pane.id,
-            tab: pane.tab_position,
-            tab_id: pane.tab_id,
-            tab_name: pane.tab_name,
-            cwd: pane.pane_cwd.and_then(Said::new),
-            command: pane.pane_command.and_then(Said::new),
-            titled: titled(&pane.title),
-            held: pane.is_held,
+        .filter(|laid| !laid.is_suppressed)
+        .filter_map(|laid| {
+            Some(Pane {
+                id: laid.pane.terminal()?,
+                tab: laid.tab_position,
+                tab_id: laid.tab_id.0,
+                tab_name: laid.tab_name,
+                cwd: laid.cwd,
+                command: laid.command,
+                titled: titled(&laid.title),
+                held: laid.is_held,
+            })
         })
         .collect();
     let mut ids = HashSet::new();
@@ -157,8 +138,8 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
 
 /// The panes of `session`, or why zellij did not list them.
 fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
-    let said = Mux::Zellij.panes_listed(session)?;
-    parse(&said).map_err(|why| format!("zellij listed what does not read: {why}"))
+    let laid = Mux::Zellij(session).panes_listed()?;
+    terminals(laid).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
 /// What tells the daemon that the panes of a session may have changed, short
@@ -192,7 +173,7 @@ struct Asked {
 /// its pane. The core wakes it on `woken`, and so does a change to the folder,
 /// which it watches with `wake`. One the host has no panes of goes first, and
 /// one that turns up while others are asked about goes before those left.
-/// None is asked about while a session is newborn, as `Mux::newborn` says.
+/// None is asked about while a session is newborn, as `Zellij::newborn` says.
 /// The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
@@ -210,7 +191,7 @@ pub fn follow(
             if let Some(folder) = metadata_folder.as_ref().map(CacheFolder::path)
                 && watcher.is_none()
             {
-                let wanted = |path: &Path| Mux::Zellij.is_metadata(path);
+                let wanted = |path: &Path| Zellij::is_metadata(path);
                 let mode = RecursiveMode::Recursive;
                 watcher = watch::watching(folder, mode, wanted, &wake, &mut watching);
                 watching.done();
@@ -219,7 +200,7 @@ pub fn follow(
                 return;
             };
             let started = sessions.iter().map(|session| session.id.started());
-            if let Some(wait) = Mux::Zellij.newborn(started, SystemTime::now()) {
+            if let Some(wait) = Zellij::newborn(started, SystemTime::now()) {
                 thread::sleep(wait);
                 continue;
             }
@@ -295,17 +276,18 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
+    let asked = core::Asked::Zellij { id: *id, name: name.clone() };
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
     if let Ok(panes) = list(name).inspect_err(said) {
-        core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
+        core.send(core::Command::Panes { asked: asked.clone(), panes }).ok()?;
     }
     let said = |why: &Failure| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = Mux::Zellij.clients(name).inspect_err(said) {
+    if let Ok(clients) = Mux::Zellij(name).clients().inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));
         }
-        core.send(core::Command::Clients { session: *id, name: name.clone(), clients }).ok()?;
+        core.send(core::Command::Clients { asked, clients }).ok()?;
     }
     Some(())
 }
