@@ -32,8 +32,25 @@ pub enum SessionKey {
     /// A zellij session, by its socket.
     Zellij(Id),
     /// An own session, by the id its server gave it, which it gives no other.
+    Own(u64),
+}
+
+/// A session its multiplexer was asked about, as it was asked: a zellij one by
+/// the name it had then, which a rename moves to another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asked {
+    Zellij { id: Id, name: SessionName },
     #[expect(dead_code, reason = "the daemon follows own sessions from #331's step 2, PR 3")]
     Own(u64),
+}
+
+impl Asked {
+    fn key(&self) -> SessionKey {
+        match self {
+            Asked::Zellij { id, .. } => SessionKey::Zellij(*id),
+            Asked::Own(id) => SessionKey::Own(*id),
+        }
+    }
 }
 
 /// A branch, by the directory that holds its repository, and its name.
@@ -51,12 +68,12 @@ pub enum Command {
     /// The zellij sessions that run now, and how many of zellij's folders and
     /// sockets could not be read, any of which could be another's.
     Sockets { sockets: Vec<Socket>, unread: u32 },
-    /// What the multiplexer listed of the panes of `session`, asked for by
-    /// `name`.
-    Panes { session: SessionKey, name: SessionName, panes: Vec<Pane> },
-    /// What the multiplexer listed of the clients of `session`, asked for by
-    /// `name`.
-    Clients { session: SessionKey, name: SessionName, clients: Listed },
+    /// What the multiplexer listed of the panes of the session it was `asked`
+    /// about.
+    Panes { asked: Asked, panes: Vec<Pane> },
+    /// What the multiplexer listed of the clients of the session it was
+    /// `asked` about.
+    Clients { asked: Asked, clients: Listed },
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
@@ -233,21 +250,21 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.panes);
                 }
             },
-            Command::Panes { session, name, panes } => {
+            Command::Panes { asked, panes } => {
                 // One that went, took another name, or now shares it, since
                 // its multiplexer was asked.
-                if !known.answers(session, &name) {
+                if !known.answers(&asked) {
                     continue;
                 }
-                if known.listed(session, panes) {
+                if known.listed(asked.key(), panes) {
                     wake(&wakes.git);
                 }
             },
-            Command::Clients { session, name, clients } => {
-                if !known.answers(session, &name) {
+            Command::Clients { asked, clients } => {
+                if !known.answers(&asked) {
                     continue;
                 }
-                known.clients.insert(session, clients);
+                known.clients.insert(asked.key(), clients);
             },
             Command::WorkTree { dir, tree } => {
                 // One that no pane works in since git was asked.
@@ -330,12 +347,11 @@ fn wake(thread: &SyncSender<()>) {
 }
 
 impl Known {
-    /// Whether `session` is the one that answers to `name` now, as it was
-    /// asked by it. The core knows no own session yet.
-    fn answers(&self, session: SessionKey, name: &SessionName) -> bool {
-        match session {
-            SessionKey::Zellij(id) => self.sessions.addressed(name) == Some(id),
-            SessionKey::Own(_) => false,
+    /// Whether the session `asked` is still the one it was asked as.
+    fn answers(&self, asked: &Asked) -> bool {
+        match asked {
+            Asked::Zellij { id, name } => self.sessions.addressed(name) == Some(*id),
+            Asked::Own(_) => self.runs(asked.key()),
         }
     }
 
