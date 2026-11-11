@@ -64,21 +64,21 @@ pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<C
 /// session, together: a tab goes once nothing left in it holds it open, and
 /// the session once all its tabs do. Or why it closes nothing: one is gone.
 fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    let given = |laid: &Laid| !laid.is_plugin && panes.contains(&laid.id);
-    let listed = |pane: u32| laid.iter().any(|laid| given(laid) && laid.id == pane);
+    let given = |laid: &Laid| laid.pane.terminal().filter(|id| panes.contains(id));
+    let listed = |pane: u32| laid.iter().any(|laid| laid.pane == PaneId::Terminal(pane));
     if let Some(gone) = panes.iter().find(|pane| !listed(**pane)) {
         return Err(format!("pane {gone} is gone"));
     }
     let tabs = tabs(laid);
     let in_tab = |tab: TabId| laid.iter().filter(move |laid| laid.tab_id == tab);
-    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(given));
-    let held = |tab: &TabId| in_tab(*tab).any(|laid| !given(laid) && laid.holds_tab());
+    let touched = tabs.iter().copied().filter(|tab| in_tab(*tab).any(|it| given(it).is_some()));
+    let held = |tab: &TabId| in_tab(*tab).any(|laid| given(laid).is_none() && laid.holds_tab());
     let (held, closed): (Vec<TabId>, Vec<TabId>) = touched.partition(held);
     if closed.len() == tabs.len() {
         return Ok(Closing::Session);
     }
     let tabs = closed.into_iter().map(|tab| (tab, terminals(laid, tab))).collect();
-    let alone = |tab| in_tab(tab).filter(|laid| given(laid)).map(|laid| laid.id);
+    let alone = |tab| in_tab(tab).filter_map(given);
     let panes = held.into_iter().flat_map(alone).collect();
     Ok(Closing::Parts { tabs, panes })
 }
@@ -86,8 +86,8 @@ fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
 /// The terminals in the tab `tab` among `laid`, the panes of its session,
 /// the floating ones too, as zellij lists them.
 pub(crate) fn terminals(laid: &[Laid], tab: TabId) -> Vec<u32> {
-    let terminals = laid.iter().filter(|laid| laid.tab_id == tab && !laid.is_plugin);
-    terminals.map(|laid| laid.id).collect()
+    let terminals = laid.iter().filter(|laid| laid.tab_id == tab);
+    terminals.filter_map(|laid| laid.pane.terminal()).collect()
 }
 
 /// What zellij closes of a session, short of the session, as what closing
@@ -271,8 +271,7 @@ mod tests {
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
-            id,
-            is_plugin: false,
+            pane: PaneId::Terminal(id),
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
@@ -293,8 +292,8 @@ mod tests {
     #[test]
     fn the_last_pane_that_holds_its_tab_open_closes_the_tab_or_the_session() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
-        let plugin = Laid { is_plugin: true, ..laid(4, 0) };
+        let bar = Laid { pane: PaneId::Plugin(1), is_selectable: false, ..laid(1, 0) };
+        let plugin = Laid { pane: PaneId::Plugin(4), ..laid(4, 0) };
         let suspended = Laid { is_suppressed: true, ..laid(7, 0) };
         let other_tab = laid(9, 1);
         let tab = |panes: Vec<u32>| Ok(Closes::Tab { id: TabId(0), panes });
@@ -341,7 +340,7 @@ mod tests {
     #[test]
     fn a_close_goes_ahead_only_while_zellij_lists_what_was_planned() {
         let floating = Laid { is_floating: true, ..laid(5, 0) };
-        let bar = Laid { is_plugin: true, is_selectable: false, ..laid(1, 0) };
+        let bar = Laid { pane: PaneId::Plugin(1), is_selectable: false, ..laid(1, 0) };
         let planned = vec![laid(4, 0), laid(6, 0), floating.clone(), bar, laid(9, 1)];
         let opened = [planned.clone(), vec![laid(7, 0)]].concat();
         let last = planned[..4].to_vec();

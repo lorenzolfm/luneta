@@ -143,10 +143,12 @@ pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, Str
 /// order, that have a terminal to name them by; or why not: it is gone.
 fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
     let own = terminal(laid, pane)?.tab_id;
-    let mut tabs: Vec<&Laid> = laid.iter().filter(|it| !it.is_plugin && it.tab_id != own).collect();
-    tabs.sort_by_key(|it| it.tab_position);
-    tabs.dedup_by_key(|it| it.tab_id);
-    Ok(tabs.into_iter().map(|it| OtherTab { pane: it.id, name: it.tab_name.clone() }).collect())
+    let others = laid.iter().filter(|it| it.tab_id != own);
+    let mut tabs: Vec<(&Laid, u32)> =
+        others.filter_map(|it| Some((it, it.pane.terminal()?))).collect();
+    tabs.sort_by_key(|(it, _)| it.tab_position);
+    tabs.dedup_by_key(|(it, _)| it.tab_id);
+    Ok(tabs.into_iter().map(|(it, pane)| OtherTab { pane, name: it.tab_name.clone() }).collect())
 }
 
 /// A pane that can turn into a tab of its own, and what that tab is named, as
@@ -226,9 +228,8 @@ pub fn into_tab(
 /// after it, as its floating panes do not, which would end.
 fn leaving(laid: &[Laid], pane: u32) -> Result<Option<String>, String> {
     let leaves = terminal(laid, pane)?;
-    let is_it = |it: &&Laid| !it.is_plugin && it.id == pane;
     let beside = |it: &&Laid| {
-        it.tab_id == leaves.tab_id && !is_it(it) && !(it.is_suppressed && it.is_plugin)
+        it.tab_id == leaves.tab_id && it.pane != PaneId::Terminal(pane) && !suppressed_plugin(it)
     };
     let others: Vec<&Laid> = laid.iter().filter(beside).collect();
     if others.is_empty() {
@@ -337,16 +338,22 @@ fn moving(laid: &[Laid], pane: u32, beside: u32) -> Result<Moving, String> {
     if from == to {
         return Err(format!("pane {pane} is in the tab of pane {beside} already"));
     }
-    let moves = |it: &&Laid| it.tab_id == from && !(it.is_suppressed && it.is_plugin);
+    let moves = |it: &&Laid| it.tab_id == from && !suppressed_plugin(it);
     let (tiled, others): (Vec<&Laid>, Vec<&Laid>) =
         laid.iter().filter(moves).partition(|it| it.is_tiled());
-    let panes = others.into_iter().chain(tiled).map(Laid::pane_id).collect();
+    let panes = others.into_iter().chain(tiled).map(|it| it.pane).collect();
     Ok(Moving { from, to, panes, fullscreen: fullscreen_of(laid, to) })
+}
+
+/// Whether `it` is a plugin's pane off the screen, as a bar of a tab is, which
+/// goes with its tab.
+fn suppressed_plugin(it: &Laid) -> bool {
+    it.is_suppressed && matches!(it.pane, PaneId::Plugin(_))
 }
 
 /// The pane shown fullscreen in the tab `tab` among `laid`, if one is.
 fn fullscreen_of(laid: &[Laid], tab: TabId) -> Option<PaneId> {
-    laid.iter().find(|it| it.tab_id == tab && it.is_fullscreen).map(Laid::pane_id)
+    laid.iter().find(|it| it.tab_id == tab && it.is_fullscreen).map(|it| it.pane)
 }
 
 /// Shows `pane` of `session` fullscreen again, as it was before a turn, once the
@@ -363,19 +370,19 @@ pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), Strin
 /// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
 /// no longer shown fullscreen and can be again with no client moved.
 fn ended_fullscreen(laid: &[Laid], clients: &[Client], pane: PaneId) -> bool {
-    let Some(shown) = laid.iter().find(|it| it.pane_id() == pane) else {
+    let Some(shown) = laid.iter().find(|it| it.pane == pane) else {
         return false;
     };
     let beside = |client: &Client| {
         client.pane != pane
-            && laid.iter().any(|it| it.tab_id == shown.tab_id && it.pane_id() == client.pane)
+            && laid.iter().any(|it| it.tab_id == shown.tab_id && it.pane == client.pane)
     };
     !shown.is_fullscreen && !clients.iter().any(beside)
 }
 
 /// The terminal `pane` among `laid`, or why not: it is gone.
 fn terminal(laid: &[Laid], pane: u32) -> Result<&Laid, String> {
-    let found = laid.iter().find(|it| !it.is_plugin && it.id == pane);
+    let found = laid.iter().find(|it| it.pane == PaneId::Terminal(pane));
     found.ok_or_else(|| format!("pane {pane} is gone"))
 }
 
@@ -395,7 +402,7 @@ enum Landed {
 /// Where `laid`, the panes of a session, lists `pane`, as it was to move into
 /// the tab `tab`.
 fn landed(laid: &[Laid], pane: PaneId, tab: TabId) -> Landed {
-    match laid.iter().find(|it| it.pane_id() == pane) {
+    match laid.iter().find(|it| it.pane == pane) {
         Some(it) if it.tab_id == tab => Landed::There,
         Some(_) => Landed::Stayed,
         None => Landed::Gone,
@@ -449,9 +456,9 @@ fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
     let deadline = Instant::now() + FINDING;
     loop {
         let listed = Mux::Zellij.laid(session).unwrap_or_default();
-        let is_it = |it: &&Laid| !it.is_plugin && it.tab_id == to && it.title == name;
-        if let Some(it) = listed.iter().filter(is_it).max_by_key(|it| it.id) {
-            return Some(it.id);
+        let is_it = |it: &&Laid| it.tab_id == to && it.title == name;
+        if let Some(id) = listed.iter().filter(is_it).filter_map(|it| it.pane.terminal()).max() {
+            return Some(id);
         }
         if Instant::now() >= deadline {
             return None;
@@ -561,8 +568,7 @@ mod tests {
 
     fn pane(id: u32, tab_id: u32) -> Laid {
         Laid {
-            id,
-            is_plugin: false,
+            pane: PaneId::Terminal(id),
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
@@ -585,7 +591,10 @@ mod tests {
     }
 
     fn plugin(laid: Laid) -> Laid {
-        Laid { is_plugin: true, ..laid }
+        let PaneId::Terminal(id) = laid.pane else {
+            panic!("a plugin of a terminal's pane");
+        };
+        Laid { pane: PaneId::Plugin(id), ..laid }
     }
 
     /// A pane leaves a tab another pane holds open, whether it floats itself,

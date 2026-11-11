@@ -330,7 +330,7 @@ pub fn may_hold_terminal(session: &str) -> bool {
     let Some(laid) = SessionName::running(session).ok().and_then(laid) else {
         return true;
     };
-    laid.iter().filter(|listed| !listed.is_plugin && listed.id == pane).any(|listed| {
+    laid.iter().filter(|listed| listed.pane == PaneId::Terminal(pane)).any(|listed| {
         let runs = listed.pane_command.as_deref();
         runs.is_none_or(|command| icons::program(command) == Some("luneta"))
     })

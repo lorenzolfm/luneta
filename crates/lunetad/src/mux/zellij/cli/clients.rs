@@ -141,8 +141,7 @@ impl Said {
             return Ok(self.rows);
         }
         let many_lines = |pane: Laid| {
-            let id = pane.pane_id();
-            Some((id, pane.pane_command.filter(|command| command.contains('\n'))?))
+            Some((pane.pane, pane.pane_command.filter(|command| command.contains('\n'))?))
         };
         let commands: Vec<_> = laid(session)?.into_iter().filter_map(many_lines).collect();
         parse(&self.said, &commands).map_err(|why| Failure::Unread(unreadable(&why)))

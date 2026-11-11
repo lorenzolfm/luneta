@@ -10,7 +10,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::SessionName;
 use crate::mux::ClientWords;
@@ -192,8 +192,8 @@ pub fn unrun(error: &io::Error) -> String {
 #[derive(Clone, Deserialize)]
 #[expect(clippy::struct_excessive_bools, reason = "zellij lists each as a bool of its own")]
 pub struct Laid {
-    pub id: u32,
-    pub is_plugin: bool,
+    #[serde(flatten, deserialize_with = "pane_listed")]
+    pub pane: PaneId,
     pub is_selectable: bool,
     pub is_suppressed: bool,
     pub is_floating: bool,
@@ -223,12 +223,6 @@ pub struct Laid {
 }
 
 impl Laid {
-    /// The pane it is, as zellij's CLI names it.
-    #[must_use]
-    pub fn pane_id(&self) -> PaneId {
-        if self.is_plugin { PaneId::Plugin(self.id) } else { PaneId::Terminal(self.id) }
-    }
-
     /// Whether it is tiled in its tab, for you to go to: a plugin's as well.
     #[must_use]
     pub fn is_tiled(&self) -> bool {
@@ -241,8 +235,19 @@ impl Laid {
     /// does a bar, which you cannot go to.
     #[must_use]
     pub fn holds_tab(&self) -> bool {
-        self.is_tiled() || (self.is_suppressed && !self.is_plugin)
+        self.is_tiled() || (self.is_suppressed && self.pane.terminal().is_some())
     }
+}
+
+/// The pane zellij lists by its `id` and whether it `is_plugin`.
+fn pane_listed<'de, D: Deserializer<'de>>(listed: D) -> Result<PaneId, D::Error> {
+    #[derive(Deserialize)]
+    struct Pane {
+        id: u32,
+        is_plugin: bool,
+    }
+    let Pane { id, is_plugin } = Pane::deserialize(listed)?;
+    Ok(if is_plugin { PaneId::Plugin(id) } else { PaneId::Terminal(id) })
 }
 
 /// A pane as zellij's CLI names it. It numbers terminals and plugins apart, so
@@ -302,8 +307,7 @@ pub fn laid(session: &SessionName) -> Result<Vec<Laid>, Failure> {
 /// lists: where luneta goes in a tab it opened.
 #[must_use]
 pub fn terminal_of(laid: &[Laid], tab: TabId) -> Option<u32> {
-    let terminal = |pane: &&Laid| !pane.is_plugin && pane.tab_id == tab;
-    laid.iter().find(terminal).map(|pane| pane.id)
+    laid.iter().filter(|laid| laid.tab_id == tab).find_map(|laid| laid.pane.terminal())
 }
 
 /// The ids of the tabs `laid` lists a pane of, a plugin's as well.
@@ -760,8 +764,7 @@ mod tests {
 
     fn laid(id: u32, tab_id: u32) -> Laid {
         Laid {
-            id,
-            is_plugin: false,
+            pane: PaneId::Terminal(id),
             is_selectable: true,
             is_suppressed: false,
             is_floating: false,
@@ -812,6 +815,24 @@ mod tests {
         assert!(matches!(&refused, Err(Failure::Refused(it)) if it == said), "{refused:?}");
     }
 
+    /// zellij numbers terminals and plugins apart, so a plugin's pane listed
+    /// by a terminal's id is no terminal.
+    #[test]
+    fn a_plugin_s_pane_is_read_apart_from_a_terminal_of_its_id() {
+        let listed = |id: u32, is_plugin: bool| {
+            serde_json::json!({
+                "id": id, "is_plugin": is_plugin, "is_selectable": true,
+                "is_suppressed": false, "is_floating": false, "tab_id": 0,
+                "pane_command": null,
+            })
+        };
+        let said = serde_json::json!([listed(2, true), listed(2, false)]).to_string();
+        let laid: Vec<Laid> = serde_json::from_str(&said).unwrap();
+        let panes: Vec<PaneId> = laid.iter().map(|laid| laid.pane).collect();
+        assert_eq!(panes, [PaneId::Plugin(2), PaneId::Terminal(2)]);
+        assert_eq!(terminal_of(&laid, TabId(0)), Some(2));
+    }
+
     /// luneta goes to the terminal of a tab it opened, of that tab.
     #[test]
     fn a_tab_opened_is_gone_to_on_its_terminal() {
@@ -823,7 +844,7 @@ mod tests {
     /// are every tab it lists, those that hold a plugin's pane alone as well.
     #[test]
     fn a_made_session_s_tabs_are_all_it_lists_a_plugin_s_too() {
-        let bar = Laid { is_plugin: true, ..laid(0, 2) };
+        let bar = Laid { pane: PaneId::Plugin(0), ..laid(0, 2) };
         let panes = [laid(0, 0), laid(1, 1), laid(2, 1), bar];
         assert_eq!(tabs(&panes), BTreeSet::from([TabId(0), TabId(1), TabId(2)]));
     }
