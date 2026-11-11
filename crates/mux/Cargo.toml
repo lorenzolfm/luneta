@@ -1,0 +1,14 @@
+[package]
+name = "luneta-mux"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+description = "luneta's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each pane's program as Ghostty does"
+
+[dependencies]
+libghostty-vt = "=0.2.2"
+libghostty-vt-sys = { version = "=0.2.2", features = ["pkg-config"] }
+
+[lints]
+workspace = true
