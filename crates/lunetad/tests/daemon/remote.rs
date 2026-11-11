@@ -51,6 +51,7 @@ use crate::host::{
     answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars, DROPPED,
     LUNETA, LUNETAD,
 };
+use crate::sessions::listed;
 use crate::worktree::{cloned_as_wt, git};
 
 /// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
@@ -756,29 +757,17 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     // A claude there that lists no plugins, whatever this machine has.
     script(&far.zellij.bin().join("claude"), "echo '[]'\n");
     let _work = far.serve("work");
-    let tab = serde_json::json!({
-        "id": 4, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
-        "is_floating": false, "tab_id": 3,
-    });
+    let tab = listed(4, "", (3, ""), None);
     far.zellij.list("work", &serde_json::json!([tab]));
     far.zellij.clients("work", &[(1, "terminal_3")]);
     far.zellij.list("idle", &serde_json::json!([tab]));
-    let beside = serde_json::json!({
-        "id": 5, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
-        "is_floating": false, "tab_id": 6,
-    });
+    let beside = listed(5, "", (6, ""), None);
     far.zellij.list("two", &serde_json::json!([tab, beside]));
-    let holds = serde_json::json!({
-        "id": 8, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
-        "is_floating": false, "tab_id": 3,
-    });
+    let holds = listed(8, "", (3, ""), None);
     far.zellij.list("held", &serde_json::json!([tab, holds, beside]));
     far.zellij.list("turning", &serde_json::json!([tab, beside]));
     far.zellij.clients("turning", &[(1, "terminal_4")]);
-    let there = serde_json::json!({
-        "id": 4, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
-        "is_floating": false, "tab_id": 6,
-    });
+    let there = listed(4, "", (6, ""), None);
     far.zellij.stacks_into("turning", 1, &serde_json::json!([there, beside]));
     far.zellij.dumps("work", "~> cargo test\nerror[E0308]\n~>\n");
     let job = "https://github.com/o/n/actions/runs/42/job/7";
@@ -2774,10 +2763,7 @@ fn a_tab_there_opens_alone_in_a_session_made_since() {
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
     let _work = far.serve("work");
     let laid = |id: u32, tab_id: u32| {
-        serde_json::json!({
-            "id": id, "is_plugin": false, "is_selectable": true, "is_suppressed": false,
-            "is_floating": false, "tab_id": tab_id,
-        })
+        listed(id, "", (tab_id, ""), None)
     };
     far.zellij.list("work", &serde_json::json!([laid(10, 1), laid(11, 2)]));
     far.zellij.clients("work", &[(1, "terminal_10")]);

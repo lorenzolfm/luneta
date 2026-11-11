@@ -198,24 +198,17 @@ pub struct Laid {
     pub is_suppressed: bool,
     pub is_floating: bool,
     /// Whether a client has the focus on it in its tab, or the last one had.
-    /// Only the preview of a session goes by it, and by `tab_position`: a
-    /// list without them still says what closing a pane closes.
-    #[serde(default)]
     pub is_focused: bool,
     /// Whether it is shown over the other panes of its tab. Only a turn goes by
     /// it, to show it so again, as a pane leaving the tab or coming into it ends
     /// that.
-    #[serde(default)]
     pub is_fullscreen: bool,
     /// What its frame calls it, by which a turn finds a stand-in of its own.
-    #[serde(default)]
     pub title: String,
     pub tab_id: TabId,
     /// Where its tab stands among the session's, from the first.
-    #[serde(default)]
     pub tab_position: u32,
     /// What its tab is called, as you pick a tab for another's panes by it.
-    #[serde(default)]
     pub tab_name: String,
     /// What runs in its foreground: none where zellij took too long to say,
     /// which does not mean nothing runs.
@@ -822,8 +815,9 @@ mod tests {
         let listed = |id: u32, is_plugin: bool| {
             serde_json::json!({
                 "id": id, "is_plugin": is_plugin, "is_selectable": true,
-                "is_suppressed": false, "is_floating": false, "tab_id": 0,
-                "pane_command": null,
+                "is_suppressed": false, "is_floating": false, "is_focused": false,
+                "is_fullscreen": false, "title": "", "tab_id": 0, "tab_position": 0,
+                "tab_name": "",
             })
         };
         let said = serde_json::json!([listed(2, true), listed(2, false)]).to_string();
