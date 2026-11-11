@@ -98,7 +98,7 @@ impl Sayings {
 /// the sessions that have held a name apart. What it was asked with has no say.
 fn placed(mut utterance: api::Utterance, sessions: &Sessions) -> api::Utterance {
     if let Some(speaker) = &mut utterance.speaker {
-        speaker.session = sessions.lead(&speaker.named, None).map(str::to_owned);
+        speaker.session = sessions.lead(&speaker.named, None).map(ToString::to_string);
     }
     utterance
 }

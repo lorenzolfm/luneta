@@ -323,7 +323,7 @@ impl Agent {
             waiting_for,
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
-                session: sessions.lead(&named.session, self.started_at).map(str::to_owned),
+                session: sessions.lead(&named.session, self.started_at).map(ToString::to_string),
                 pane: named.pane,
             }),
             topic: topic.map(String::from),
@@ -343,7 +343,7 @@ impl Unread {
             zellij: self.pane.as_ref().map(|named| api::Zellij {
                 named: named.session.clone(),
                 session: self.started.and_then(|started| {
-                    sessions.lead(&named.session, Some(started)).map(str::to_owned)
+                    sessions.lead(&named.session, Some(started)).map(ToString::to_string)
                 }),
                 pane: named.pane,
             }),

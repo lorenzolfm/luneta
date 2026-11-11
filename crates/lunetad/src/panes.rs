@@ -263,7 +263,7 @@ pub fn follow(
 
 /// What zellij last wrote of the session `name` in `folder`. One that cannot
 /// be read, `troubles` says, and it says nothing.
-fn written(folder: &CacheFolder, name: &str, troubles: &mut Troubles) -> Option<Metadata> {
+fn written(folder: &CacheFolder, name: &SessionName, troubles: &mut Troubles) -> Option<Metadata> {
     Mux::Zellij.metadata(folder, name).unwrap_or_else(|error| {
         troubles.say(format!("the metadata of {name}: {error}"));
         None
@@ -295,16 +295,12 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
-    let Ok(session) = SessionName::running(name) else {
-        troubles.say(format!("the panes of {name}: zellij would take no session by that name"));
-        return Some(());
-    };
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
-    if let Ok(panes) = list(&session).inspect_err(said) {
+    if let Ok(panes) = list(name).inspect_err(said) {
         core.send(core::Command::Panes { session: *id, name: name.clone(), panes }).ok()?;
     }
     let said = |why: &Failure| troubles.say(format!("the clients of {name}: {why}"));
-    if let Ok(clients) = Mux::Zellij.clients(&session).inspect_err(said) {
+    if let Ok(clients) = Mux::Zellij.clients(name).inspect_err(said) {
         for client in clients.set_aside() {
             let (client, pane) = (client.id, client.pane);
             troubles.say(format!("the clients of {name}: set aside client {client} on {pane}"));

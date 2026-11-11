@@ -41,7 +41,7 @@ pub fn visited() -> Result<Vec<Dir>, String> {
 pub fn visited_free() -> Result<Vec<Dir>, String> {
     let visited = visited()?;
     let sessions = names::named()?;
-    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+    let names: Vec<&str> = sessions.iter().map(SessionName::as_str).collect();
     let free = |dir: Dir| Dir { name: dir.name.free(&names), path: dir.path };
     Ok(visited.into_iter().map(free).collect())
 }

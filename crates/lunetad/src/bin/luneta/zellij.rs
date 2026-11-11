@@ -281,7 +281,7 @@ pub fn ended(seats: &[SessionName]) -> Ended {
 /// that does not answer. Its name in the pane's environment would not do, as a
 /// rename leaves it behind.
 fn clients_of_refuge(session: &SessionName) -> Option<Vec<Client>> {
-    if may_hold_terminal(session.as_str()) {
+    if may_hold_terminal(session) {
         return None;
     }
     moves::before(session)
@@ -319,15 +319,14 @@ pub fn within() -> Within {
 /// alone will not do: a rename leaves it behind in the pane, and another
 /// session can take it. Nor can the list tell the pane of a script that runs
 /// luneta, which it lists as that script.
-pub fn may_hold_terminal(session: &str) -> bool {
-    if env::var(SESSION_VAR).is_ok_and(|named| named == session) {
+pub fn may_hold_terminal(session: &SessionName) -> bool {
+    if env::var(SESSION_VAR).is_ok_and(|named| named == session.as_str()) {
         return true;
     }
     let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
         return false;
     };
-    let laid = |session: SessionName| Mux::Zellij.laid(&session).ok();
-    let Some(laid) = SessionName::running(session).ok().and_then(laid) else {
+    let Ok(laid) = Mux::Zellij.laid(session) else {
         return true;
     };
     laid.iter().filter(|listed| listed.pane == PaneId::Terminal(pane)).any(|listed| {
@@ -341,7 +340,7 @@ pub fn may_hold_terminal(session: &str) -> bool {
 /// call of zellij's CLI would kill, as `Before::Made` says. Another luneta can
 /// be making one as this one starts. None where not all of zellij's folder
 /// reads.
-pub fn settled() -> Option<Vec<(String, SocketId)>> {
+pub fn settled() -> Option<Vec<(SessionName, SocketId)>> {
     let folder = Mux::Zellij.socket_folder();
     loop {
         let running = Mux::Zellij.sockets(&folder)?;
@@ -628,7 +627,7 @@ fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     let deadline = Instant::now() + patience;
     loop {
         let running = Mux::Zellij.running(&folder).unwrap_or_default();
-        let found = running.into_iter().find(|(name, _)| name == session.as_str());
+        let found = running.into_iter().find(|(name, _)| name == session);
         if let Some((_, started)) = found {
             return Some(started);
         }
@@ -872,7 +871,7 @@ pub fn kill(
 }
 
 /// The sessions that run, as `running_in` says of zellij's folder.
-pub fn running() -> Result<Vec<(String, SystemTime)>, String> {
+pub fn running() -> Result<Vec<(SessionName, SystemTime)>, String> {
     running_in(&Mux::Zellij.socket_folder())
 }
 
@@ -1041,7 +1040,7 @@ pub fn before_away(destination: &Destination, session: &SessionName) -> Before {
 /// could be in what it cannot.
 fn runs(session: &SessionName) -> Option<bool> {
     let running = Mux::Zellij.running(&Mux::Zellij.socket_folder())?;
-    Some(running.iter().any(|(name, _)| name == session.as_str()))
+    Some(running.iter().any(|(name, _)| name == session))
 }
 
 /// `to`, as a name zellij on this machine would make a session of now, or

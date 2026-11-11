@@ -153,14 +153,17 @@ impl Seated {
 /// that name still. lunetad's agents have no say in it. Their names are
 /// those their sessions had as their panes opened, and an agent in a pane of
 /// that id, of another session that had that name then, would say that one.
-fn seat(agents: Option<&[Agent]>, running: &[(String, SystemTime)]) -> Result<Seated, String> {
+fn seat(
+    agents: Option<&[Agent]>,
+    running: &[(SessionName, SystemTime)],
+) -> Result<Seated, String> {
     let (named, pane) = match zellij::here()? {
         None => return Ok(Seated::Nowhere),
         Some(Seat::Asked { user: User::Away, .. }) => return Ok(Seated::Away),
         Some(Seat::Asked { user: User::Untold, .. }) => return Ok(Seated::Untold),
         Some(Seat::Asked { user: User::Pane { session, pane }, .. }) => {
             let asked = Pane { session: session.to_string(), pane };
-            if running.iter().any(|(name, _)| *name == asked.session) {
+            if running.iter().any(|(name, _)| name.as_str() == asked.session) {
                 return Ok(Seated::In(asked));
             }
             return Err(format!(
@@ -185,7 +188,7 @@ fn seat(agents: Option<&[Agent]>, running: &[(String, SystemTime)]) -> Result<Se
         [Some(now)] => (*now).to_owned(),
         _ => return Err(lost("and lunetad cannot tell which session that is now".to_owned())),
     };
-    if running.iter().any(|(name, _)| *name == session) {
+    if running.iter().any(|(name, _)| name.as_str() == session) {
         return Ok(Seated::In(Pane { session, pane }));
     }
     Err(lost(if session == named {
@@ -425,7 +428,7 @@ const UNSEATED: &str = "this runs in no pane of zellij, and zellij moves the cli
 /// among `agents`.
 fn seated(
     agents: Option<&[Agent]>,
-    running: &[(String, SystemTime)],
+    running: &[(SessionName, SystemTime)],
 ) -> Result<SessionName, String> {
     session_named(&seat(agents, running)?.pane()?.ok_or(UNSEATED)?.session)
 }
@@ -938,8 +941,8 @@ fn session_named(session: &str) -> Result<SessionName, String> {
 
 /// When `session` started, of the sessions `running`, or that none runs by
 /// that name.
-fn started(session: &str, running: &[(String, SystemTime)]) -> Result<SystemTime, String> {
-    let found = running.iter().find(|(name, _)| name == session);
+fn started(session: &str, running: &[(SessionName, SystemTime)]) -> Result<SystemTime, String> {
+    let found = running.iter().find(|(name, _)| name.as_str() == session);
     found.map(|(_, started)| *started).ok_or_else(|| format!("no session {session} runs"))
 }
 

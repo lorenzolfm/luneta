@@ -151,8 +151,8 @@ impl Metadata {
 
 /// What zellij last wrote of the session `name`, in `folder`: none before it
 /// has, or where it writes none.
-pub fn read(folder: &CacheFolder, name: &str) -> io::Result<Option<Metadata>> {
-    let file = match File::open(folder.0.join(name).join(FILE)) {
+pub fn read(folder: &CacheFolder, name: &SessionName) -> io::Result<Option<Metadata>> {
+    let file = match File::open(folder.0.join(name.as_str()).join(FILE)) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -186,7 +186,7 @@ impl fmt::Display for Unknown {
 /// bring them back from: those that ended, and those that run. Or why luneta
 /// cannot read the folder they are in. A zellij of another contract keeps
 /// them elsewhere, and none is kept here.
-pub fn kept() -> Result<Vec<String>, Unknown> {
+pub fn kept() -> Result<Vec<SessionName>, Unknown> {
     let CacheFolder(folder) = folder().ok_or(Unknown::NoHome)?;
     let unread = |error| Unknown::Unread { folder: folder.clone(), error };
     let entries = match fs::read_dir(&folder) {
@@ -197,8 +197,9 @@ pub fn kept() -> Result<Vec<String>, Unknown> {
     let mut kept = Vec::new();
     for entry in entries {
         let entry = entry.map_err(unread)?;
-        // A name that is no UTF-8 is of no session luneta names.
-        if let Ok(name) = entry.file_name().into_string()
+        // A name that is no UTF-8, or no name zellij takes, is of no session.
+        let file_name = entry.file_name();
+        if let Some(name) = file_name.to_str().and_then(|name| SessionName::running(name).ok())
             && entry.path().join(LAYOUT).is_file()
         {
             kept.push(name);

@@ -169,7 +169,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
 /// read all of zellij's folder, which could hold it.
 fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
     let running = Mux::Zellij.running(&Mux::Zellij.socket_folder())?;
-    let (_, started) = running.into_iter().find(|(name, _)| name == session.as_str())?;
+    let (_, started) = running.into_iter().find(|(name, _)| name == session)?;
     Some(started >= since)
 }
 

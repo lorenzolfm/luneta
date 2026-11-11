@@ -142,7 +142,7 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
 /// zellij.
 pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result<(), String> {
     let running = running_in(&Mux::Zellij.socket_folder())?;
-    if running.iter().any(|(name, at)| name == session.as_str() && *at != started) {
+    if running.iter().any(|(name, at)| name == session && *at != started) {
         return Err(format!("\"{session}\" is a session made since, which stays"));
     }
     Ok(())
@@ -233,7 +233,7 @@ fn settled(
     folder: &SocketFolder,
 ) -> Result<(), String> {
     let deadline = Instant::now() + GOING;
-    while running_in(folder)?.iter().any(|(name, at)| name == session.as_str() && *at == started) {
+    while running_in(folder)?.iter().any(|(name, at)| name == session && *at == started) {
         if Instant::now() >= deadline {
             return Err(format!("zellij did not kill \"{session}\""));
         }
@@ -243,7 +243,7 @@ fn settled(
     let unknown =
         |why| format!("luneta cannot tell whether zellij keeps \"{session}\" in its cache: {why}");
     let cached = Mux::Zellij.cached(session).map_err(unknown)?;
-    if cached && running_in(folder)?.iter().all(|(name, _)| name != session.as_str()) {
+    if cached && running_in(folder)?.iter().all(|(name, _)| name != session) {
         return deleted(session);
     }
     Ok(())
@@ -252,7 +252,7 @@ fn settled(
 /// The sessions that run, each by its name and when it started, as their
 /// sockets in `folder` say now; or why luneta cannot tell them, as a
 /// session's socket could be in what it cannot read.
-pub fn running_in(folder: &SocketFolder) -> Result<Vec<(String, SystemTime)>, String> {
+pub fn running_in(folder: &SocketFolder) -> Result<Vec<(SessionName, SystemTime)>, String> {
     Mux::Zellij.running(folder).ok_or_else(|| {
         let folder = folder.path().display();
         format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")

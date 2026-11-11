@@ -353,7 +353,7 @@ impl Mux {
     /// its name and when it started. None where any of the folder could not
     /// be read.
     #[must_use]
-    pub fn running(self, folder: &SocketFolder) -> Option<Vec<(String, SystemTime)>> {
+    pub fn running(self, folder: &SocketFolder) -> Option<Vec<(SessionName, SystemTime)>> {
         match self {
             Mux::Zellij => zellij::running(folder),
         }
@@ -362,7 +362,7 @@ impl Mux {
     /// `running`, each by its name and which session it is, as it stays
     /// through a rename.
     #[must_use]
-    pub fn sockets(self, folder: &SocketFolder) -> Option<Vec<(String, Id)>> {
+    pub fn sockets(self, folder: &SocketFolder) -> Option<Vec<(SessionName, Id)>> {
         match self {
             Mux::Zellij => zellij::sockets(folder),
         }
@@ -401,7 +401,11 @@ impl Mux {
 
     /// What the multiplexer last wrote of the session `name` in `folder`: none
     /// before it has.
-    pub fn metadata(self, folder: &CacheFolder, name: &str) -> io::Result<Option<Metadata>> {
+    pub fn metadata(
+        self,
+        folder: &CacheFolder,
+        name: &SessionName,
+    ) -> io::Result<Option<Metadata>> {
         match self {
             Mux::Zellij => zellij::metadata::read(folder, name),
         }
@@ -409,7 +413,7 @@ impl Mux {
 
     /// The sessions the multiplexer keeps to bring back from, those that
     /// ended and those that run, by name.
-    pub fn kept(self) -> Result<Vec<String>, Unknown> {
+    pub fn kept(self) -> Result<Vec<SessionName>, Unknown> {
         match self {
             Mux::Zellij => zellij::metadata::kept(),
         }

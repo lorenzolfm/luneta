@@ -60,9 +60,9 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 /// than make one: of the sessions that run, by zellij's sockets, and of those
 /// that ended, which zellij keeps to bring back. Or why luneta cannot tell
 /// them, as it cannot read where zellij keeps either.
-pub fn named() -> Result<Vec<String>, String> {
+pub fn named() -> Result<Vec<SessionName>, String> {
     let running = running_in(&Mux::Zellij.socket_folder())?;
-    let mut named: Vec<String> = running.into_iter().map(|(name, _)| name).collect();
+    let mut named: Vec<SessionName> = running.into_iter().map(|(name, _)| name).collect();
     let unknown = |why| format!("luneta cannot tell which sessions zellij keeps: {why}");
     named.extend(Mux::Zellij.kept().map_err(unknown)?);
     Ok(named)
@@ -79,7 +79,7 @@ pub fn free_for(dir: &Directory) -> Result<(SessionName, SystemTime), String> {
     let name = session_for(Path::new(dir.as_str())).ok_or_else(unnamed)?;
     let since = SystemTime::now();
     let sessions = named()?;
-    let names: Vec<&str> = sessions.iter().map(String::as_str).collect();
+    let names: Vec<&str> = sessions.iter().map(SessionName::as_str).collect();
     Ok((name.free(&names), since))
 }
 
@@ -130,11 +130,11 @@ fn home() -> Result<Directory, String> {
 pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
     let since = SystemTime::now();
     let running = running_in(&Mux::Zellij.socket_folder())?;
-    if running.iter().any(|(name, _)| name == to.as_str()) {
+    if running.iter().any(|(name, _)| name == to) {
         return Err(format!("{to} runs already"));
     }
     let unknown = |why| format!("luneta cannot tell whether zellij keeps {to}: {why}");
-    if Mux::Zellij.kept().map_err(unknown)?.iter().any(|kept| kept == to.as_str()) {
+    if Mux::Zellij.kept().map_err(unknown)?.contains(to) {
         return Err(format!("zellij keeps {to}, which ended, to bring back"));
     }
     Ok(since)
