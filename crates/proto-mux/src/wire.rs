@@ -82,6 +82,8 @@ pub enum ToServer {
     Scroll(i32),
     List,
     Kill(String),
+    /// Bytes for a session's program, as typed, from no client.
+    Send(String, Vec<u8>),
 }
 
 pub enum ToClient {
@@ -216,6 +218,7 @@ impl ToServer {
             ToServer::Scroll(d) => { o.i32(*d); 3 },
             ToServer::List => 4,
             ToServer::Kill(s) => { o.str(s); 5 },
+            ToServer::Send(s, b) => { o.str(s); o.bytes(b); 6 },
         };
         send(to, tag, o)
     }
@@ -235,6 +238,7 @@ impl ToServer {
             3 => ToServer::Scroll(i.i32()?),
             4 => ToServer::List,
             5 => ToServer::Kill(i.str()?),
+            6 => ToServer::Send(i.str()?, i.bytes()?),
             _ => return Err(short()),
         })
     }

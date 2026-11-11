@@ -98,6 +98,12 @@ pub fn attach(socket: &Path, log: &Path, name: &str, command: Vec<String>) -> io
     let (fg, bg) = ask_colours();
     let kitty = terminal::supports_keyboard_enhancement().unwrap_or(false);
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)?;
+    // The server's emulator counts widths a code point at a time, as no
+    // grapheme clustering (mode 2027): a terminal that clusters would join a
+    // cell to the one before it, and leave the cell it skipped as it was.
+    if std::env::var_os("PROTO_MUX_KEEP_2027").is_none() {
+        io::stdout().write_all(b"\x1b[?2027l")?;
+    }
     if kitty {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
         execute!(io::stdout(), PushKeyboardEnhancementFlags(flags))?;
@@ -115,6 +121,9 @@ pub fn attach(socket: &Path, log: &Path, name: &str, command: Vec<String>) -> io
         SetCursorStyle::DefaultUserShape,
         crossterm::cursor::Show
     );
+    if std::env::var_os("PROTO_MUX_KEEP_2027").is_none() {
+        let _ = io::stdout().write_all(b"\x1b[?2027h");
+    }
     let _ = terminal::disable_raw_mode();
     println!("{}", ended?);
     Ok(())

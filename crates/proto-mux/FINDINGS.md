@@ -68,7 +68,35 @@ Each is from the server's log of what alacritty_terminal 0.26 left unhandled:
 - The last client's size wins for everyone. Clients of different sizes need a
   rule, such as the smallest wins, as tmux and zellij do.
 
-## Not tested here
+## In a real Ghostty (1.4.0, Hyprland 0.57, `drive/gh.py`)
 
-A real terminal (Ghostty) as the outer one: real colours, kitty keys from a
-real keyboard, the mouse in nvim, image protocols, and long Claude Code turns.
+A floating Ghostty ran the client. Keys went in through Hyprland's
+`send_shortcut`, so Ghostty encoded them itself, and `grim` took the
+screenshots.
+
+- **Works:** the user's own fish, with the starship prompt, git and ls
+  colours. nvim with the user's config: gruvbox, Nerd Font icons in the winbar,
+  lualine's powerline glyphs, a split, a search and a V-LINE selection. A long
+  Claude Code turn (Haiku): the thinking spinner, a streamed markdown answer
+  with syntax-highlighted Rust and lists, and the usage bars. Ghostty answered
+  OSC 11, and the server passed the answer on to the panes. `Ctrl ]` `d`
+  detaches, and attaching again brings the screen back. A paste reaches the
+  pane bracketed (fish inserts two lines without running them). OSC 52 from a
+  pane reaches the Wayland clipboard. Italic, strikethrough, dim, reverse and
+  RGB colours are right.
+- **A bug that pyte could not show:** Ghostty clusters graphemes, and the
+  server's emulator does not. For 👍🏽, ratatui writes the skin tone after a
+  cursor move into the second cell. Ghostty joins it to the 👍 before it, never
+  writes that cell, and the old text stays there ("👍🏽er"). ZWJ sequences
+  break the same way. The fix in the client is to reset mode 2027 on its
+  terminal as it starts (and set it again as it ends), so that both sides count
+  widths a code point at a time. After that, nothing was left behind. The real
+  design must pick one model: either the server clusters (an emulator that does,
+  as libghostty-vt or wezterm-term), or every client turns off 2027.
+- **Ghostty eats `Shift PageUp`** (its own `scroll_page_up`), so the client
+  never sees it. The scrollback keys have to be ones the outer terminal leaves
+  alone, or the wheel.
+- **Untested:** the mouse and the wheel. Hyprland can send keys to a window,
+  but no clicks, and no pointer tool (ydotool, wlrctl) is installed. A clipboard
+  paste needs the window focused, as Wayland gives the clipboard only to the
+  focused window, so the probe focused it for about a second.

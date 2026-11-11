@@ -225,6 +225,14 @@ fn serve(server: &Arc<Server>, mut stream: UnixStream) -> io::Result<()> {
             ToClient::Sessions(Vec::new()).send(&mut stream)?;
             return Ok(());
         },
+        ToServer::Send(name, bytes) => {
+            let session = server.sessions.lock().unwrap().get(&name).cloned();
+            if let Some(pty) = session.as_ref().and_then(|s| s.shared.pty.get()) {
+                let _ = pty.send(Msg::Input(bytes.into()));
+            }
+            ToClient::Sessions(Vec::new()).send(&mut stream)?;
+            return Ok(());
+        },
         ToServer::Hello { session, command, dir, size, fg, bg } => (session, command, dir, size, fg, bg),
         _ => return Err(io::Error::other("no hello")),
     };

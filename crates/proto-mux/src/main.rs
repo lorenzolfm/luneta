@@ -30,6 +30,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("server") => server::run(&socket, &log),
         Some("ls") => list(&socket, wire::ToServer::List),
+        Some("send") => list(&socket, wire::ToServer::Send(args.get(1).cloned().unwrap_or_default(), unescape(args.get(2).map_or("", String::as_str)))),
         Some("kill") => list(&socket, wire::ToServer::Kill(args.get(1).cloned().unwrap_or_default())),
         name => client::attach(&socket, &log, name.unwrap_or("proto"), command),
     };
@@ -54,4 +55,29 @@ fn list(socket: &std::path::Path, ask: wire::ToServer) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `\e`, `\r`, `\n`, `\t`, `\\` and `\xHH` in what `send` types.
+fn unescape(text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut bytes = text.bytes();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match bytes.next() {
+            Some(b'e') => out.push(0x1b),
+            Some(b'r') => out.push(b'\r'),
+            Some(b'n') => out.push(b'\n'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'x') => {
+                let hex: String = bytes.by_ref().take(2).map(char::from).collect();
+                out.push(u8::from_str_radix(&hex, 16).unwrap_or(b'?'));
+            },
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+    }
+    out
 }
