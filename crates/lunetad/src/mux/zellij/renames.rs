@@ -5,11 +5,10 @@
 
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::time::Instant;
 
-use crate::cli::{session_renamed, ANSWER};
-use crate::zellij::{self, SessionName};
+use super::cli::{session_renamed, ANSWER};
+use super::{SessionName, SocketFolder};
 
 /// What zellij's web client says to its server to have it read again which
 /// sessions run and which ended, framed as zellij frames a message: four
@@ -31,7 +30,7 @@ const CONNECTED: [u8; 2] = [0x22, 0];
 /// Renames `session` to `to`, or says why zellij did not. A session with no
 /// client takes the name as well as one with.
 pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
-    relisted_in(&zellij::folder(), session)?;
+    relisted_in(&super::folder(), session)?;
     Ok(session_renamed(session, to)?)
 }
 
@@ -49,8 +48,8 @@ pub fn renamed(session: &SessionName, to: &SessionName) -> Result<(), String> {
 /// so, as it did before luneta asked this. Where no session of the contract
 /// `RELIST` is of has the name, the rename is left to say why, as zellij's
 /// CLI speaks its own.
-fn relisted_in(folder: &Path, session: &SessionName) -> Result<(), String> {
-    let socket = zellij::socket_at(folder, session);
+fn relisted_in(folder: &SocketFolder, session: &SessionName) -> Result<(), String> {
+    let socket = folder.socket_of(session);
     let failed = |error: io::Error| format!("zellij did not list its sessions again: {error}");
     let mut stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
@@ -116,8 +115,8 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
+    use super::super::SPOKEN;
     use super::*;
-    use crate::zellij::SPOKEN;
 
     /// Where no socket of zellij 0.45's contract has the name of the session
     /// a rename is of, the rename is left to say why: the session is of a
@@ -131,11 +130,11 @@ mod tests {
         let Ok(session) = SessionName::running("work") else {
             panic!("a name zellij takes");
         };
-        assert_eq!(relisted_in(scratch.path(), &session), Ok(()));
+        assert_eq!(relisted_in(&SocketFolder::at(scratch.path()), &session), Ok(()));
         let contract = scratch.path().join(SPOKEN);
         assert!(fs::create_dir(&contract).is_ok());
         assert!(UnixListener::bind(contract.join("work")).is_ok());
-        let refused = relisted_in(scratch.path(), &session);
+        let refused = relisted_in(&SocketFolder::at(scratch.path()), &session);
         assert!(refused.as_ref().is_err_and(|why| why.contains("did not list")), "{refused:?}");
     }
 
@@ -173,8 +172,8 @@ mod tests {
                 }
             }
         });
-        assert_eq!(relisted_in(scratch.path(), &session), Ok(()));
-        let hung_up = relisted_in(scratch.path(), &session);
+        assert_eq!(relisted_in(&SocketFolder::at(scratch.path()), &session), Ok(()));
+        let hung_up = relisted_in(&SocketFolder::at(scratch.path()), &session);
         assert!(hung_up.as_ref().is_err_and(|why| why.contains("it hung up")), "{hung_up:?}");
         assert!(server.join().is_ok());
     }

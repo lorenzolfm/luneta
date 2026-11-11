@@ -48,7 +48,7 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
-use lunetad::cli::{Client, PaneId};
+use lunetad::mux::{Client, PaneId};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};

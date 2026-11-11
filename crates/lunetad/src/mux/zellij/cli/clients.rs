@@ -11,7 +11,7 @@ use std::ops::Deref;
 
 use super::{laid, Failure, Laid, PaneId};
 use crate::api;
-use crate::zellij::SessionName;
+use crate::mux::SessionName;
 
 /// The line zellij 0.45 starts its list with, which names its columns.
 const HEADER: &str = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";

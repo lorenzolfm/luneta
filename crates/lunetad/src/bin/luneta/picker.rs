@@ -37,6 +37,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use lunetad::mux::{Exited, Mux};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
@@ -53,7 +54,7 @@ use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
-use crate::zellij::{self, Closes, Exited, SessionName};
+use crate::zellij::{self, Closes, SessionName};
 
 /// What the rule over the box names it.
 const TITLE: &str = "luneta";
@@ -314,7 +315,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
         let heard = match ask {
             Ask::Exited { on, ask } => {
                 let exited = match &on {
-                    Machine::Local => zellij::exited(),
+                    Machine::Local => Mux::Zellij.exited(),
                     // The notes over the list say why, of each machine.
                     Machine::Remote(destination) => reach(destination)
                         .and_then(|mut away| away.exited()),
@@ -341,7 +342,7 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Rename { on, from, to } => {
                 let renamed = match &on {
-                    Machine::Local => zellij::renamed(&from, &to),
+                    Machine::Local => Mux::Zellij.renamed(&from, &to),
                     Machine::Remote(destination) => {
                         reach(destination).and_then(|mut away| away.rename(&from, &to))
                     },

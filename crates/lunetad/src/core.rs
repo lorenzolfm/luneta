@@ -17,14 +17,13 @@ use tokio::sync::oneshot;
 use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
-use crate::cli::{Client, Listed};
 use crate::github::Found;
 use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::Shell;
 use crate::transcripts::SessionId;
-use crate::zellij::{Id, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, Sessions, Socket};
 
 /// A branch, by the directory that holds its repository, and its name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

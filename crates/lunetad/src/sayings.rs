@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::api;
 use crate::api::say::Does;
-use crate::zellij::{SessionName, Sessions};
+use crate::mux::{SessionName, Sessions};
 
 /// The longest text the daemon takes, with the name of the session it comes
 /// from, as that is said too: seventeen minutes of speech or so, and what each

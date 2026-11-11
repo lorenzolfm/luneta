@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::SessionName;
+use crate::mux::ClientWords;
 use crate::program::{self, Ran};
-use crate::zellij::SessionName;
 use crate::Directory;
 
 mod clients;
@@ -630,19 +631,16 @@ pub fn session_deleted(session: &SessionName) -> Result<(), Failure> {
 }
 
 /// The command that takes the client that last typed in the session `at` to
-/// the pane `pane` of `to`, or to `to` alone, on the pane it last had the
-/// focus on. None where the client is there already: in `at`, with no pane to
-/// go to.
-fn go(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Option<Command> {
-    if at == to {
-        return pane.map(|id| focus(at, PaneId::Terminal(id)));
-    }
+/// the pane `pane` of `to`, another session, or to `to` alone, on the pane it
+/// last had the focus on.
+fn go(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Command {
+    assert_ne!(at, to);
     let pane = pane.map(|id| PaneId::Terminal(id).to_string());
     let mut command = action(at);
     command.arg("switch-session");
     command.args(pane.iter().flat_map(|pane| ["--pane-id", pane.as_str()]));
     command.args(["--", to.as_str()]);
-    Some(command)
+    command
 }
 
 /// The command that takes the client that last typed in `session` to its
@@ -664,12 +662,14 @@ pub fn pane_focused(session: &SessionName, pane: PaneId) -> Result<(), Failure> 
 }
 
 /// Has zellij take the client that last typed in `at` where `go` says, or
-/// says why it did not. A pane already focused is where it was to go.
+/// says why it did not. In `at` itself, it goes to the pane as
+/// `pane_focused` does, and with no pane to go to, it is there already. A
+/// pane already focused is where it was to go.
 pub fn went(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<(), Failure> {
-    let Some(mut command) = go(at, to, pane) else {
-        return Ok(());
-    };
-    match answer_of(ran(&mut command)?) {
+    if at == to {
+        return pane.map_or(Ok(()), |pane| pane_focused(at, PaneId::Terminal(pane)));
+    }
+    match answer_of(ran(&mut go(at, to, pane))?) {
         Ok(_) | Err(Failure::Focused(_)) => Ok(()),
         Err(failure) => Err(failure),
     }
@@ -695,7 +695,14 @@ pub fn started(at: &SessionName, to: &SessionName, cwd: Option<&Directory>) -> R
 }
 
 /// The program of zellij's CLI and its client.
-pub const PROGRAM: &str = "zellij";
+const PROGRAM: &str = "zellij";
+
+/// The words that start zellij's client with `args`, as `client` and those
+/// after it give them, without what `LEFT_OUT` names.
+#[must_use]
+pub fn words(args: Vec<String>) -> ClientWords {
+    ClientWords { program: PROGRAM, args, unset: &LEFT_OUT }
+}
 
 /// The arguments of zellij's client, after `PROGRAM`: attached to `session`,
 /// which it makes where none runs, or without one, in a session of a name
@@ -778,7 +785,7 @@ mod tests {
         let at = SessionName::running("-at").unwrap();
         let to = SessionName::running("-to").unwrap();
         let switch = ["--session=-at", "action", "switch-session"];
-        let went = go(&at, &to, Some(2)).unwrap();
+        let went = go(&at, &to, Some(2));
         assert_eq!(args(&went), [&switch[..], &["--pane-id", "terminal_2", "--", "-to"]].concat());
         let w = Directory::parse("/w".to_owned()).unwrap();
         let started = start(&at, &to, Some(&w));

@@ -15,7 +15,7 @@ use crate::api;
 use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::process;
-use crate::zellij::Sessions;
+use crate::mux::Sessions;
 
 /// The most an agent's file holds that an adapter reads. Each holds a few hundred
 /// bytes: a file past this is no agent's.

@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use crate::zellij::SessionName;
-use crate::{cli, log};
+use super::{cli, SessionName};
+use crate::log;
 
 /// What follows the name of a session `list-sessions` lists that ended, and
 /// that zellij keeps to bring back.

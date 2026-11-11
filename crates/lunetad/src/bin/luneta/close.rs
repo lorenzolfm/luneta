@@ -17,7 +17,7 @@ use std::time::SystemTime;
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
-use lunetad::cli::TabId;
+use lunetad::mux::TabId;
 
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};

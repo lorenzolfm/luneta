@@ -3333,7 +3333,7 @@ mod tests {
     use std::num::NonZeroU32;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use lunetad::cli::TabId;
+    use lunetad::mux::TabId;
     use lunetad::Directory;
     use ratatui::layout::Position;
 

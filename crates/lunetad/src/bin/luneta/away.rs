@@ -24,9 +24,8 @@ use lunetad::api::{
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
-use lunetad::cli::TabId;
 use lunetad::closes::{Close, Closes};
-use lunetad::ended::Exited;
+use lunetad::mux::{Exited, TabId};
 use lunetad::images::{self, Png};
 use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
 use lunetad::links::{Pasted, Ready, Unready};
@@ -383,9 +382,8 @@ impl Away {
     }
 
     /// The sessions zellij keeps to bring back there, which ended, as
-    /// `lunetad::ended::exited` lists them there, as `exited_of` reads them;
-    /// or why it did not list them. How many `exited_of` left out goes in the
-    /// log.
+    /// `Mux::exited` lists them there, as `exited_of` reads them; or why it
+    /// did not list them. How many `exited_of` left out goes in the log.
     pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
         let request = ListExitedRequest { on: Some(self.on()) };
         let listed = self.ask(|mut daemon| async move { daemon.list_exited(request).await })?;
@@ -406,7 +404,7 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.delete_exited(request).await })
     }
 
-    /// Has zellij there call `session` `to`, as `lunetad::renames::renamed`
+    /// Has zellij there call `session` `to`, as `Mux::renamed`
     /// does there, or says why it did not.
     pub fn rename(&mut self, session: &SessionName, to: &SessionName) -> Result<(), String> {
         let (session, to) = (session.to_string(), to.to_string());

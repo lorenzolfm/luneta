@@ -56,6 +56,7 @@ use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
+use lunetad::mux::Mux;
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Directory};
@@ -544,7 +545,7 @@ impl Joins<'_> {
 /// Why luneta started no client in the place of zellij's.
 enum Unstarted {
     /// zellij's client does not attach to the session, for this reason, as
-    /// `lunetad::cli::attaches_to` says: one sent there would fail.
+    /// `Mux::attaches_to` says: one sent there would fail.
     Refused(String),
     /// Its program did not start.
     Failed(io::Error),
@@ -585,8 +586,8 @@ enum Next {
     After(After),
 }
 
-/// A key zellij's client typed in `session`, at `at`: one of yours, or
-/// `zellij::NUDGE`. zellij moves the client that last typed in a session on
+/// A key zellij's client typed in `session`, at `at`: one of yours, or the
+/// nudge `Mux::nudge` gives. zellij moves the client that last typed in a session on
 /// an action asked of it there, unless that client left it since. luneta
 /// hears it left only from zellij's title or from a go of its own: one that
 /// zellij's keys took out and back, with no title, leaves the key standing,
@@ -657,7 +658,7 @@ impl Client {
     fn dropped(&self) -> bool {
         self.exited.is_some_and(|status| status.success())
             && !self.hosted.mode().contains(TermMode::ALT_SCREEN)
-            && zellij::dropped(&self.hosted.text())
+            && Mux::Zellij.dropped(&self.hosted.text())
     }
 
     /// Whether it may be on its way into a server zellij makes, which has yet
@@ -678,7 +679,7 @@ impl Client {
         self.typed.as_ref().filter(|typed| typed.session == session).map(|typed| typed.at)
     }
 
-    /// Types `zellij::NUDGE` in `session`, the one it is in, where zellij
+    /// Types the nudge `Mux::nudge` gives in `session`, the one it is in, where zellij
     /// reads it as a key.
     fn nudge_in(&mut self, session: String) {
         if let Some(nudge) = zellij::nudge(self.hosted.mode()) {
@@ -687,7 +688,7 @@ impl Client {
         }
     }
 
-    /// Types `zellij::NUDGE` in `here`, the session it is in, for an action
+    /// Types the nudge `Mux::nudge` gives in `here`, the session it is in, for an action
     /// asked of zellij there to move it, which can go once zellij has taken
     /// in the key it typed there last before, or this one, where it typed
     /// none there since it came. The nudge takes the client's turn back from
@@ -699,7 +700,7 @@ impl Client {
         // Where it typed nothing there, as zellij reads no nudge, no wait
         // makes zellij move it.
         let typed = before.or_else(|| self.typed_at(here.as_str()));
-        let until = typed.map_or_else(Instant::now, |typed| typed + zellij::NUDGED);
+        let until = typed.map_or_else(Instant::now, |typed| typed + Mux::Zellij.nudged());
         Nudged { on, session: here, until }
     }
 }
@@ -3005,7 +3006,7 @@ impl App {
         SessionName::running(here).map_err(|why| format!("zellij is in \"{here}\": {why}"))
     }
 
-    /// Types `zellij::NUDGE` into zellij's client, for an action asked of
+    /// Types the nudge `Mux::nudge` gives into zellij's client, for an action asked of
     /// zellij in the session it is in to move it, or says why it is in none.
     fn nudge(&mut self) -> Option<Nudged> {
         match self.seat() {
@@ -3017,7 +3018,7 @@ impl App {
         }
     }
 
-    /// Types `zellij::NUDGE` into zellij's client as the keys or a press of
+    /// Types the nudge `Mux::nudge` gives into zellij's client as the keys or a press of
     /// the mouse come to luneta, ahead of the action they may ask for, which
     /// then waits for zellij to take it in for less, if at all. A client that
     /// typed in the session since it came gets none: zellij moves it already,

@@ -29,7 +29,7 @@ use crate::api::ask_request::{self, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::zellij::SessionName;
+use crate::mux::SessionName;
 use crate::{claude, git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and

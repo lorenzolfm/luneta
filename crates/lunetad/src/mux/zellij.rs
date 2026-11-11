@@ -1,6 +1,7 @@
-//! The zellij sessions that run, and the names they had, as zellij keeps them
-//! on the machine luneta runs on: by their sockets, and in `metadata`, by what
-//! zellij writes of each in its cache.
+//! zellij, as `Mux` has it: its CLI in `cli`, its client's ways in `client`,
+//! and here the sessions that run, and the names they had, as zellij keeps
+//! them on the machine luneta runs on: by their sockets, and in `metadata`, by
+//! what zellij writes of each in its cache.
 //!
 //! Each session is a server that listens on a socket named for the session, in
 //! zellij's socket folder. A rename moves the socket to its new name with
@@ -29,11 +30,18 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::watch::{self, Troubles};
 
+pub mod cli;
+pub mod client;
+mod ended;
 pub mod metadata;
+mod renames;
+
+pub use ended::{exited, Exited};
+pub use renames::renamed;
 
 /// The socket in the folder that is zellij's web server's, and no session's.
 const WEB_SERVER: &str = "web_server_bus";
@@ -46,7 +54,7 @@ const CONTRACT: &str = "contract_version_";
 /// The folder of the contract zellij 0.45 speaks, which luneta speaks: of its
 /// sessions' sockets in this folder, and of their metadata in zellij's cache
 /// folder.
-pub const SPOKEN: &str = "contract_version_1";
+const SPOKEN: &str = "contract_version_1";
 
 /// The longest name zellij makes a session of on any host, in bytes: what
 /// its socket's path leaves where the user's id has ten digits. Where it has
@@ -138,25 +146,43 @@ impl fmt::Display for SessionName {
 /// temporary folder, which is where macOS has them. zellij-utils' `consts.rs`
 /// says so.
 #[must_use]
-pub fn folder() -> PathBuf {
+pub fn folder() -> SocketFolder {
     let set = |name| std::env::var_os(name).filter(|value| !value.is_empty());
     if let Some(dir) = set("ZELLIJ_SOCKET_DIR") {
-        return PathBuf::from(dir);
+        return SocketFolder(PathBuf::from(dir));
     }
     if cfg!(target_os = "linux")
         && let Some(runtime) = set("XDG_RUNTIME_DIR")
     {
-        return PathBuf::from(runtime).join("zellij");
+        return SocketFolder(PathBuf::from(runtime).join("zellij"));
     }
     let uid = rustix::process::getuid().as_raw();
-    std::env::temp_dir().join(format!("zellij-{uid}"))
+    SocketFolder(std::env::temp_dir().join(format!("zellij-{uid}")))
 }
 
-/// Where the socket of `session` is in `folder`, zellij's, as a zellij of the
-/// contract luneta speaks makes it.
-#[must_use]
-pub fn socket_at(folder: &Path, session: &SessionName) -> PathBuf {
-    folder.join(SPOKEN).join(session.as_str())
+/// zellij's folder of the folders its sessions' sockets are in, as `folder`
+/// finds it: apart from its cache folder, which `metadata::CacheFolder` is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SocketFolder(PathBuf);
+
+impl SocketFolder {
+    /// The folder at `path`, for a test to read sockets of its own in.
+    #[cfg(test)]
+    #[must_use]
+    pub fn at(path: &Path) -> Self {
+        SocketFolder(path.to_owned())
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Where the socket of `session` is in it, as a zellij of the contract
+    /// luneta speaks makes it.
+    fn socket_of(&self, session: &SessionName) -> PathBuf {
+        self.0.join(SPOKEN).join(session.as_str())
+    }
 }
 
 /// Whether a change at `path`, in the folder, can be a session's: one at a
@@ -223,8 +249,8 @@ impl Scan {
 
 /// The sessions whose sockets are in `folder` now. What goes wrong in reading
 /// it, `troubles` says.
-pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
-    let scan = read(folder, &mut |what| troubles.say(what));
+pub fn scan(folder: &SocketFolder, troubles: &mut Troubles) -> Scan {
+    let scan = read(folder.path(), &mut |what| troubles.say(what));
     troubles.done();
     scan
 }
@@ -234,7 +260,7 @@ pub fn scan(folder: &Path, troubles: &mut Troubles) -> Scan {
 /// read, as a session's socket could be in what was not. For luneta, which
 /// says nothing of what went wrong: its screen is zellij's.
 #[must_use]
-pub fn running(folder: &Path) -> Option<Vec<(String, SystemTime)>> {
+pub fn running(folder: &SocketFolder) -> Option<Vec<(String, SystemTime)>> {
     let sockets = sockets(folder)?.into_iter();
     Some(sockets.map(|(name, id)| (name, id.started())).collect())
 }
@@ -242,10 +268,30 @@ pub fn running(folder: &Path) -> Option<Vec<(String, SystemTime)>> {
 /// `running`, each by its name and which session it is, as its socket keeps
 /// through a rename.
 #[must_use]
-pub fn sockets(folder: &Path) -> Option<Vec<(String, Id)>> {
-    let scan = read(folder, &mut |_| {});
+pub fn sockets(folder: &SocketFolder) -> Option<Vec<(String, Id)>> {
+    let scan = read(folder.path(), &mut |_| {});
     let sockets = scan.sockets.into_iter().map(|socket| (socket.name, socket.id));
     (scan.unread == 0).then(|| sockets.collect())
+}
+
+/// How long luneta and its daemon leave a session's server be once it made
+/// its socket, before they ask zellij anything: every call of zellij's CLI
+/// asks the server of every session whether it runs, and zellij-server 0.45.1
+/// panics where such a call hangs up before the server took its first client
+/// (`lib.rs:1462`, fixed after 0.45.1 in zellij's 81f56e1), and the session
+/// ends with it. The client that started the server comes a few milliseconds
+/// after the socket, and the socket wakes the sweep as soon as `watch` lets
+/// the folder settle.
+const NEWBORN: Duration = Duration::from_millis(500);
+
+/// How long until the youngest of the sessions that `started` so is no longer
+/// `NEWBORN`, at `now`, where one is. One that started after `now`, by a clock
+/// set back since, is taken for old: it would hold the sweep up for as long
+/// as the clock went back.
+#[must_use]
+pub fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
+    let left = |started| NEWBORN.checked_sub(now.duration_since(started).ok()?);
+    started.filter_map(left).filter(|left| !left.is_zero()).max()
 }
 
 /// `scan`, with what goes wrong told to `say`.
@@ -415,7 +461,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
 
-    use super::{running, scan, SessionName, CONTRACT, NAME_BYTES_MAX, WEB_SERVER};
+    use std::time::{Duration, SystemTime};
+
+    use super::{newborn, running, scan, SessionName, SocketFolder, CONTRACT, NAME_BYTES_MAX};
+    use super::{NEWBORN, WEB_SERVER};
     use crate::watch::Troubles;
 
     /// zellij is alone only as far as a scan can tell: a folder of its
@@ -426,10 +475,10 @@ mod tests {
         let contract = folder.path().join(format!("{CONTRACT}1"));
         fs::create_dir(&contract).unwrap();
         let mut troubles = Troubles::default();
-        assert!(scan(folder.path(), &mut troubles).alone());
+        assert!(scan(&SocketFolder::at(folder.path()), &mut troubles).alone());
 
         fs::set_permissions(&contract, Permissions::from_mode(0o000)).unwrap();
-        let unread = scan(folder.path(), &mut troubles);
+        let unread = scan(&SocketFolder::at(folder.path()), &mut troubles);
         fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
         assert!(!unread.alone());
     }
@@ -445,10 +494,11 @@ mod tests {
         let _web = UnixListener::bind(contract.join(WEB_SERVER)).unwrap();
         fs::write(contract.join("notes"), "").unwrap();
         let made = fs::metadata(contract.join("work")).unwrap().modified().unwrap();
-        assert_eq!(running(folder.path()), Some(vec![("work".to_owned(), made)]));
+        let at = SocketFolder::at(folder.path());
+        assert_eq!(running(&at), Some(vec![("work".to_owned(), made)]));
 
         fs::set_permissions(&contract, Permissions::from_mode(0o000)).unwrap();
-        let unread = running(folder.path());
+        let unread = running(&at);
         fs::set_permissions(&contract, Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unread, None);
     }
@@ -484,5 +534,21 @@ mod tests {
     fn a_name_that_starts_with_a_dash_is_made_by_no_one_but_zellij() {
         assert!(SessionName::parse("-c").is_err());
         assert!(SessionName::running("-c").is_ok());
+    }
+
+    /// The sweep waits out the youngest session that is newborn, and none
+    /// that is not. One that started after now, as by a clock set back since,
+    /// holds nothing up: the sweep would wait for as long as the clock went
+    /// back.
+    #[test]
+    fn the_sweep_waits_out_the_youngest_newborn_session() {
+        let now = SystemTime::now();
+        let ago = |age: Duration| now - age;
+        let quarter = NEWBORN / 4;
+        let started = [ago(quarter), ago(quarter * 3), ago(NEWBORN * 4)];
+        assert_eq!(newborn(started.into_iter(), now), Some(quarter * 3));
+        assert_eq!(newborn([ago(NEWBORN), ago(NEWBORN * 4)].into_iter(), now), None);
+        assert_eq!(newborn([now + Duration::from_mins(1)].into_iter(), now), None);
+        assert_eq!(newborn(std::iter::empty(), now), None);
     }
 }

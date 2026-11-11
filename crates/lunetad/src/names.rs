@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::closes::running_in;
-use crate::zellij::{self, SessionName};
+use crate::mux::{Mux, SessionName};
 use crate::Directory;
 
 /// The session a directory is for, as the picker's directories name it: for
@@ -61,10 +61,10 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
 /// that ended, which zellij keeps to bring back. Or why luneta cannot tell
 /// them, as it cannot read where zellij keeps either.
 pub fn named() -> Result<Vec<String>, String> {
-    let running = running_in(&zellij::folder())?;
+    let running = running_in(&Mux::Zellij.socket_folder())?;
     let mut named: Vec<String> = running.into_iter().map(|(name, _)| name).collect();
     let unknown = |why| format!("luneta cannot tell which sessions zellij keeps: {why}");
-    named.extend(zellij::metadata::kept().map_err(unknown)?);
+    named.extend(Mux::Zellij.kept().map_err(unknown)?);
     Ok(named)
 }
 
@@ -129,12 +129,12 @@ fn home() -> Result<Directory, String> {
 /// make none.
 pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
     let since = SystemTime::now();
-    let running = running_in(&zellij::folder())?;
+    let running = running_in(&Mux::Zellij.socket_folder())?;
     if running.iter().any(|(name, _)| name == to.as_str()) {
         return Err(format!("{to} runs already"));
     }
     let unknown = |why| format!("luneta cannot tell whether zellij keeps {to}: {why}");
-    if zellij::metadata::kept().map_err(unknown)?.iter().any(|kept| kept == to.as_str()) {
+    if Mux::Zellij.kept().map_err(unknown)?.iter().any(|kept| kept == to.as_str()) {
         return Err(format!("zellij keeps {to}, which ended, to bring back"));
     }
     Ok(since)
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(named("/w/infra.git/master", "/w/infra.git"), Some("infra-master".to_owned()));
         assert_eq!(named("/w/app-hotfix", "/w/app/.git"), None);
         assert_eq!(named("/w/application", "/w/app/.git"), Some("app-application".to_owned()));
-        let long = "x".repeat(zellij::NAME_BYTES_MAX);
+        let long = "x".repeat(crate::mux::NAME_BYTES_MAX);
         assert_eq!(named(&format!("/w/{long}"), "/w/repo/.git"), None);
     }
 

@@ -13,8 +13,7 @@ use std::time::SystemTime;
 
 use luneta_protocol::said::Said;
 
-use crate::cli::text_dumped;
-use crate::zellij::SessionName;
+use crate::mux::{Mux, SessionName};
 use crate::{folder, keeps};
 
 /// The most lines a file keeps: the last a command printed, which say how it
@@ -85,7 +84,7 @@ impl Printed {
 /// printed after the line `typed` was last typed on, in luneta's runtime
 /// folder, or says why it kept nothing.
 pub fn kept_after(session: &SessionName, pane: u32, typed: &Said) -> Result<Printed, String> {
-    let dump = text_dumped(session, pane)?;
+    let dump = Mux::Zellij.text_dumped(session, pane)?;
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
     keep(&runtime, cut(&dump, typed.as_str()), SystemTime::now())
 }

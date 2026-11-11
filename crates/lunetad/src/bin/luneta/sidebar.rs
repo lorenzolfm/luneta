@@ -6320,7 +6320,7 @@ mod tests {
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, Clients, NameSource, Pane, Panes, UnreadFile, Version, Zellij};
-    use lunetad::cli::TabId;
+    use lunetad::mux::TabId;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
 

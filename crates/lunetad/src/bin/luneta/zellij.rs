@@ -1,8 +1,8 @@
 //! What luneta asks of zellij: a client to run beside the sidebar, to take
 //! that client to a pane, the clients of a session, and what the menu opens
-//! and closes. All luneta knows of zellij's ways is here and in `own`, which
-//! finds luneta's client among those, so that a multiplexer of luneta's own
-//! can take zellij's place behind it.
+//! and closes, through `lunetad::mux::Mux`. What luneta knows of zellij's ways
+//! that `Mux` does not say is here and in `own`, which finds luneta's client
+//! among those.
 
 use std::env;
 use std::ffi::OsString;
@@ -15,18 +15,16 @@ use std::time::{Duration, Instant, SystemTime};
 use alacritty_terminal::term::TermMode;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::cli::{laid, PaneId, LEFT_OUT, PANE_VAR, SESSION_VAR};
+use lunetad::mux::{self, ClientWords, Mux, PaneId, PANE_VAR, SESSION_VAR};
 pub use lunetad::closes::{
     closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
 };
-pub use lunetad::ended::{exited, Exited};
-pub use lunetad::renames::renamed;
 use lunetad::closes::running_in;
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{cli, moves, Destination, Directory, SocketId};
+use lunetad::{moves, Destination, Directory, SocketId};
 pub use lunetad::SessionName;
 
 use crate::away::{self, Away};
@@ -159,7 +157,7 @@ fn refused(session: &SessionName, current: Option<&str>) -> Option<String> {
 /// client, attached to `session` and making it if none runs, or without one
 /// in a session of a name zellij makes up; or why it cannot attach.
 pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), String> {
-    cli::client(session).map(client_with)
+    Mux::Zellij.client(session).map(client_with)
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -169,7 +167,7 @@ pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), St
 /// since luneta found it unused, where `attach --create` would take the
 /// client to that session, as though it had made it.
 pub fn make(session: &SessionName) -> (String, Vec<String>) {
-    client_with(cli::client_making(session))
+    client_with(Mux::Zellij.client_making(session))
 }
 
 /// The program luneta runs beside the sidebar in place of a client that
@@ -177,15 +175,16 @@ pub fn make(session: &SessionName) -> (String, Vec<String>) {
 /// runs. Without `--create`, which would make one gone since anew, empty.
 /// Or why it cannot attach.
 pub fn rejoin(session: &SessionName) -> Result<(String, Vec<String>), String> {
-    cli::client_rejoining(session).map(client_with)
+    Mux::Zellij.client_rejoining(session).map(client_with)
 }
 
-/// zellij's client, with `args`. It runs through `env`, to leave out what
-/// `LEFT_OUT` names, which luneta cannot take out of its own variables.
-fn client_with(args: Vec<String>) -> (String, Vec<String>) {
+/// The client `words` say. It runs through `env`, to leave out what they say
+/// to, which luneta cannot take out of its own variables.
+fn client_with(words: ClientWords) -> (String, Vec<String>) {
+    let ClientWords { program, args, unset } = words;
     let mut through: Vec<String> =
-        LEFT_OUT.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
-    through.push(cli::PROGRAM.to_owned());
+        unset.iter().flat_map(|name| ["-u".to_owned(), (*name).to_owned()]).collect();
+    through.push(program.to_owned());
     through.extend(args);
     ("env".to_owned(), through)
 }
@@ -200,7 +199,7 @@ pub fn attach_away(
     destination: &Destination,
     session: &SessionName,
 ) -> Result<(String, Vec<String>), String> {
-    Ok(away(destination, spelled(&cli::client_rejoining(session)?)))
+    Ok(away(destination, spelled(&Mux::Zellij.client_rejoining(session)?)))
 }
 
 /// The program luneta runs beside the sidebar for a client that makes
@@ -213,7 +212,7 @@ pub fn make_away(
     cwd: Option<&Directory>,
 ) -> (String, Vec<String>) {
     let cd = cwd.map_or_default(|cwd| format!("cd {} && ", quoted(cwd.as_str())));
-    away(destination, format!("{cd}{}", spelled(&cli::client_making(session))))
+    away(destination, format!("{cd}{}", spelled(&Mux::Zellij.client_making(session))))
 }
 
 /// ssh, to run `command` on `destination`, in a terminal it asks for there,
@@ -236,12 +235,12 @@ fn away(destination: &Destination, command: String) -> (String, Vec<String>) {
     ("ssh".to_owned(), args)
 }
 
-/// zellij's client with `args`, as a shell there reads them back: each
-/// argument as `quoted` says, and the program bare, as some shells take a
-/// quoted first word for a string.
-fn spelled(args: &[String]) -> String {
-    let mut spelled = vec![cli::PROGRAM.to_owned()];
-    spelled.extend(args.iter().map(|arg| quoted(arg)));
+/// The client `words` say, as a shell there reads them back: each argument
+/// as `quoted` says, and the program bare, as some shells take a quoted first
+/// word for a string.
+fn spelled(words: &ClientWords) -> String {
+    let mut spelled = vec![words.program.to_owned()];
+    spelled.extend(words.args.iter().map(|arg| quoted(arg)));
     spelled.join(" ")
 }
 
@@ -271,29 +270,8 @@ fn quoted(word: &str) -> String {
 /// may hold luneta's terminal, as `clients_of_refuge` says.
 pub fn ended(seats: &[SessionName]) -> Ended {
     let current = env::var(SESSION_VAR).ok();
-    let folder = lunetad::zellij_folder();
+    let folder = Mux::Zellij.socket_folder();
     moves::refuge(&folder, seats, current.as_deref(), clients_of_refuge)
-}
-
-/// What zellij's client writes as its server drops it, with no white space: on
-/// a terminal as narrow as luneta's zellij's, a line wraps at any character.
-/// One of its first lines, and one of its last, for a terminal too short to
-/// hold them all, which scrolls the first away.
-const DROPPED: [&str; 2] = ["lostconnectiontothezellijserver", "Reattachtoyourprevioussession"];
-
-/// Whether `said`, what zellij's client left on its terminal as it ended well,
-/// is what it writes as its server drops it, as the server does one that falls
-/// behind, and the session runs on. Nothing else tells that from a client that
-/// detached: zellij 0.45.1's ends well for both, measured, and takes its screen
-/// down. Where a later zellij words it otherwise, the client counts as one that
-/// detached, and ends luneta, whose log has what it said: better that than that
-/// luneta takes back a client you detached. It can still err that way, by a
-/// hair: zellij's own word to a client goes unsent where its queue is full, so
-/// that one you detach, or whose session is killed, just as that fills hears
-/// this. A second detach then ends luneta.
-pub fn dropped(said: &str) -> bool {
-    let said: String = said.split_whitespace().collect();
-    DROPPED.iter().any(|words| said.contains(words))
 }
 
 /// The clients `session` has before luneta's zellij goes on in it, as
@@ -348,8 +326,8 @@ pub fn may_hold_terminal(session: &str) -> bool {
     let Some(pane) = env::var(PANE_VAR).ok().and_then(|pane| pane.parse::<u32>().ok()) else {
         return false;
     };
-    let Some(laid) = SessionName::running(session).ok().and_then(|session| laid(&session).ok())
-    else {
+    let laid = |session: SessionName| Mux::Zellij.laid(&session).ok();
+    let Some(laid) = SessionName::running(session).ok().and_then(laid) else {
         return true;
     };
     laid.iter().filter(|listed| !listed.is_plugin && listed.id == pane).any(|listed| {
@@ -364,11 +342,11 @@ pub fn may_hold_terminal(session: &str) -> bool {
 /// be making one as this one starts. None where not all of zellij's folder
 /// reads.
 pub fn settled() -> Option<Vec<(String, SocketId)>> {
-    let folder = lunetad::zellij_folder();
+    let folder = Mux::Zellij.socket_folder();
     loop {
-        let running = lunetad::zellij_sockets(&folder)?;
+        let running = Mux::Zellij.sockets(&folder)?;
         let started = running.iter().map(|(_, id)| id.started());
-        match lunetad::newborn(started, SystemTime::now()) {
+        match Mux::Zellij.newborn(started, SystemTime::now()) {
             Some(left) => thread::sleep(left),
             None => return Some(running),
         }
@@ -387,7 +365,7 @@ pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
 /// says.
 pub fn newest() -> Option<Refuge> {
     let current = env::var(SESSION_VAR).ok();
-    moves::newest(&lunetad::zellij_folder(), current.as_deref(), clients_of_refuge)
+    moves::newest(&Mux::Zellij.socket_folder(), current.as_deref(), clients_of_refuge)
 }
 
 /// The first of `sessions` of `destination` whose clients its daemon lists,
@@ -429,37 +407,12 @@ pub fn ended_away(destination: &Destination, seats: &[SessionName]) -> Result<En
     }
 }
 
-/// What luneta types into zellij's client before it asks zellij to move it,
-/// and ahead of that, as the keys or a press of the mouse come to luneta,
-/// where the client typed nothing in its session yet: `ScrollLock` let go,
-/// as the kitty keyboard protocol spells it, with no modifiers and the event
-/// of a release, `1:3`. zellij moves the client of a session that last sent
-/// it a key, and a client that has sent none since it came to the session,
-/// as luneta's has not once the sidebar took it there, moves for no action.
-/// The client counts a key let go as a key. No one binds `ScrollLock`, and
-/// zellij writes nothing of it to a pane that does not read keys as kitty
-/// spells them. One that does gets it as it came, a release it
-/// never asked to hear of, and passes it over: nvim does, where the key
-/// pressed would have it insert a character of the protocol's own in the
-/// text. The client reads it as kitty spells it unless its config turns the
-/// protocol off: then zellij takes it for no key, and hands the pane
-/// nothing. So `nudge` gives it only to a client that asks its terminal for
-/// kitty's keys, and zellij moves one that does not only once you type in
-/// it. As you rename a tab or a pane, zellij takes a key it binds nothing to
-/// for text, and writes the nudge's, `[57359;1:3u`, into the name: only a
-/// client that typed in its session can be renaming there.
-const NUDGE: &[u8] = b"\x1b[57359;1:3u";
-
-/// `NUDGE`, where zellij's client reads it as a key: in `mode`, it asked its
-/// terminal, luneta's, for keys as kitty spells them.
+/// What luneta types into its client before it asks the multiplexer to move
+/// it, as `Mux::nudge` says, where in `mode` the client asked its terminal,
+/// luneta's, for keys as kitty spells them.
 pub fn nudge(mode: TermMode) -> Option<&'static [u8]> {
-    mode.contains(TermMode::DISAMBIGUATE_ESC_CODES).then_some(NUDGE)
+    Mux::Zellij.nudge(mode.contains(TermMode::DISAMBIGUATE_ESC_CODES))
 }
-
-/// How long an action waits, after the client typed `NUDGE` or another key,
-/// for zellij to take it in, as it goes to zellij through its client while
-/// the action goes straight to its server.
-pub const NUDGED: Duration = Duration::from_millis(30);
 
 /// How long luneta waits for its client to come to a session it sent it to
 /// from another, from zellij's first answer after it took the action, before it
@@ -600,8 +553,8 @@ pub fn taken(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<()
         return pane.map_or(Ok(()), |pane| focused(at, PaneId::Terminal(pane)));
     }
     let before = clients_on_panes(to)?;
-    cli::went(at, to, pane)?;
-    let new = |client: &cli::Client| before.iter().all(|was| was.id != client.id);
+    Mux::Zellij.went(at, to, pane)?;
+    let new = |client: &mux::Client| before.iter().all(|was| was.id != client.id);
     let came = seen(to, |clients| clients.iter().copied().find(new));
     let came = came.ok_or_else(|| UNMOVED.to_owned())?;
     match pane {
@@ -617,8 +570,8 @@ pub fn taken(at: &SessionName, to: &SessionName, pane: Option<u32>) -> Result<()
 /// `UNMOVED` says, or as zellij said. It is asked again where a pane closing kept
 /// it from asking, as a turn's stand-ins do just before it takes a client back.
 pub fn focused(session: &SessionName, pane: PaneId) -> Result<(), String> {
-    cli::pane_focused(session, pane)?;
-    let on = |clients: &[cli::Client]| clients.iter().any(|client| client.pane == pane);
+    Mux::Zellij.pane_focused(session, pane)?;
+    let on = |clients: &[mux::Client]| clients.iter().any(|client| client.pane == pane);
     seen(session, |clients| on(clients).then_some(())).ok_or_else(|| UNMOVED.to_owned())
 }
 
@@ -633,7 +586,7 @@ pub fn focused(session: &SessionName, pane: PaneId) -> Result<(), String> {
 /// is on, can fail.
 pub fn made(at: &SessionName, to: &SessionName, cwd: &Directory) -> Result<(), String> {
     let asked = SystemTime::now();
-    cli::started(at, to, Some(cwd))?;
+    Mux::Zellij.started(at, to, Some(cwd))?;
     match made_since(to, asked, START) {
         Some(true) => Ok(()),
         Some(false) => Err(format!("{to} ran already, so zellij made none")),
@@ -654,7 +607,7 @@ fn made_since(session: &SessionName, asked: SystemTime, patience: Duration) -> O
 /// What `seen` makes of the clients of `session`, once it makes anything of
 /// them, asking zellij every `ARRIVING` for as long as `ARRIVAL`: zellij
 /// takes an action a moment after it answers it.
-fn seen<T>(session: &SessionName, seen: impl Fn(&[cli::Client]) -> Option<T>) -> Option<T> {
+fn seen<T>(session: &SessionName, seen: impl Fn(&[mux::Client]) -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + ARRIVAL;
     loop {
         if let Some(seen) = clients_on_panes(session).ok().and_then(|clients| seen(&clients)) {
@@ -671,10 +624,10 @@ fn seen<T>(session: &SessionName, seen: impl Fn(&[cli::Client]) -> Option<T>) ->
 /// within `patience`. A folder it cannot read yet is one it has yet to see the
 /// socket in.
 fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
-    let folder = lunetad::zellij_folder();
+    let folder = Mux::Zellij.socket_folder();
     let deadline = Instant::now() + patience;
     loop {
-        let running = lunetad::zellij_sessions(&folder).unwrap_or_default();
+        let running = Mux::Zellij.running(&folder).unwrap_or_default();
         let found = running.into_iter().find(|(name, _)| name == session.as_str());
         if let Some((_, started)) = found {
             return Some(started);
@@ -920,7 +873,7 @@ pub fn kill(
 
 /// The sessions that run, as `running_in` says of zellij's folder.
 pub fn running() -> Result<Vec<(String, SystemTime)>, String> {
-    running_in(&lunetad::zellij_folder())
+    running_in(&Mux::Zellij.socket_folder())
 }
 
 /// Asks zellij on `on`, the machine luneta's client runs on, for the
@@ -1087,7 +1040,7 @@ pub fn before_away(destination: &Destination, session: &SessionName) -> Before {
 /// now: none where luneta cannot read all of zellij's folder, as the socket
 /// could be in what it cannot.
 fn runs(session: &SessionName) -> Option<bool> {
-    let running = lunetad::zellij_sessions(&lunetad::zellij_folder())?;
+    let running = Mux::Zellij.running(&Mux::Zellij.socket_folder())?;
     Some(running.iter().any(|(name, _)| name == session.as_str()))
 }
 
@@ -1139,13 +1092,13 @@ pub fn makes_away(
 /// up for good.
 pub fn clients(session: &SessionName) -> Result<Vec<Client>, String> {
     let clients = clients_on_panes(session)?;
-    Ok(clients.iter().copied().map(cli::Client::to_api).collect())
+    Ok(clients.iter().copied().map(mux::Client::to_api).collect())
 }
 
 /// The clients of `session`, as `clients` lists them, each by the pane it is on,
 /// a plugin's too.
-pub fn clients_on_panes(session: &SessionName) -> Result<cli::Listed, String> {
-    Ok(cli::clients(session)?)
+pub fn clients_on_panes(session: &SessionName) -> Result<mux::Listed, String> {
+    Ok(Mux::Zellij.clients(session)?)
 }
 
 /// What luneta asks of zellij once an action has run.
@@ -1183,9 +1136,9 @@ impl Then {
 
 /// An action luneta has zellij take.
 enum Action {
-    /// A go, as `cli::went` says, on `on`.
+    /// A go, as `Mux::went` says, on `on`.
     Go { on: Machine, at: SessionName, to: SessionName, pane: Option<u32> },
-    /// A start, as `cli::started` says, on this machine. `switch-session`
+    /// A start, as `Mux::started` says, on this machine. `switch-session`
     /// takes the client to whatever has the name by the time zellij takes
     /// it, which `start` looks for just before only here: on another
     /// machine, luneta makes a session by a client that makes it there, as
@@ -1327,9 +1280,9 @@ impl There {
         match action {
             Action::Go { at, to, pane, .. } => match self {
                 There::Away(away) => away.go(&at, &to, pane),
-                There::Here => Ok(cli::went(&at, &to, pane)?),
+                There::Here => Ok(Mux::Zellij.went(&at, &to, pane)?),
             },
-            Action::Start { at, to, cwd } => Ok(cli::started(&at, &to, cwd.as_ref())?),
+            Action::Start { at, to, cwd } => Ok(Mux::Zellij.started(&at, &to, cwd.as_ref())?),
         }
     }
 }
@@ -1570,58 +1523,6 @@ mod tests {
         assert!(asks <= 60, "it asks {asks} times");
     }
 
-    /// What zellij's client writes as its server drops it reads however its
-    /// terminal cuts it: one as narrow as luneta's zellij's can be wraps its
-    /// lines at any character, and one too short to hold them scrolls the first
-    /// away. Nothing else a client of zellij's says as it ends well does, with
-    /// a session running on.
-    #[test]
-    fn a_dropped_client_is_told_by_what_it_says_however_its_terminal_cuts_it() {
-        const DROPPED_SAYS: &str = "
-Your zellij client lost connection to the zellij server.
-
-As a safety measure, you have been disconnected from the current zellij session.
-However, the session should still exist and none of your data should be lost.
-
-This usually means that your terminal didn't process server messages quick
-enough. Maybe your system is currently under high load, or your terminal
-isn't performant enough.
-
-There are a few things you can try now:
-    - Reattach to your previous session and see if it works out better this
-      time: `zellij attach luneta`
-    - Try using a faster (maybe GPU-accelerated) terminal emulator
-    ";
-        let on_terminal = |columns: usize, rows: usize| {
-            let chars = |line: &str| line.chars().collect::<Vec<_>>();
-            let cut: Vec<String> = DROPPED_SAYS
-                .lines()
-                .flat_map(|line| {
-                    let line = chars(line);
-                    if line.is_empty() {
-                        return vec![String::new()];
-                    }
-                    line.chunks(columns).map(|row| row.iter().collect()).collect()
-                })
-                .collect();
-            cut[cut.len().saturating_sub(rows)..].join("\n")
-        };
-        for (columns, rows) in [(120, 40), (90, 40), (50, 24), (20, 40), (90, 8), (40, 8)] {
-            let said = on_terminal(columns, rows);
-            assert!(dropped(&said), "not told on {columns}x{rows}: {said}");
-        }
-        let others = [
-            "Bye from Zellij!",
-            "Session detached",
-            "Session was detached from this client (possibly because another client connected)",
-            "Disconnected by host",
-            "",
-        ];
-        for said in others {
-            assert!(!dropped(said), "told of {said}");
-        }
-    }
-
     /// A command runs in the pane zellij's variables name, by the name its
     /// session had as the pane opened, and the agent of luneta's ask box, in
     /// none, goes by the turn the box names, for you where it says. Where
@@ -1647,12 +1548,12 @@ There are a few things you can try now:
         }
     }
 
-    /// zellij's client reads `NUDGE` as a key let go once it asked its
+    /// zellij's client reads the nudge as a key let go once it asked its
     /// terminal for kitty's keys. One its config keeps from asking reads it
     /// as no key, which luneta would take for one, and gets none.
     #[test]
     fn only_a_client_that_reads_kitty_s_keys_is_nudged() {
-        assert_eq!(nudge(TermMode::DISAMBIGUATE_ESC_CODES), Some(NUDGE));
+        assert!(nudge(TermMode::DISAMBIGUATE_ESC_CODES).is_some());
         assert_eq!(nudge(TermMode::empty()), None);
     }
 
