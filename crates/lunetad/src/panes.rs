@@ -264,7 +264,7 @@ pub fn follow(
 /// What zellij last wrote of the session `name` in `folder`. One that cannot
 /// be read, `troubles` says, and it says nothing.
 fn written(folder: &CacheFolder, name: &SessionName, troubles: &mut Troubles) -> Option<Metadata> {
-    Mux::Zellij.metadata(folder, name).unwrap_or_else(|error| {
+    folder.metadata(name).unwrap_or_else(|error| {
         troubles.say(format!("the metadata of {name}: {error}"));
         None
     })

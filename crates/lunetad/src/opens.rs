@@ -168,7 +168,7 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
 /// tick to make a session. None where none runs, or where luneta cannot
 /// read all of zellij's folder, which could hold it.
 fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
-    let running = Mux::Zellij.running(&Mux::Zellij.socket_folder())?;
+    let running = Mux::Zellij.socket_folder().running()?;
     let (_, started) = running.into_iter().find(|(name, _)| name == session)?;
     Some(started >= since)
 }

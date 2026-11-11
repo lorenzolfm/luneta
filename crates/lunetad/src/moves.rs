@@ -60,7 +60,7 @@ pub fn refuge(
 ) -> Ended {
     let deadline = Instant::now() + ENDING;
     loop {
-        let Some(running) = Mux::Zellij.running(folder) else {
+        let Some(running) = folder.running() else {
             return Ended::Kept;
         };
         if gone(seats, &running) {
@@ -82,7 +82,7 @@ pub fn newest(
     current: Option<&str>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    sought(Mux::Zellij.running(folder)?, current, &mut clients)
+    sought(folder.running()?, current, &mut clients)
 }
 
 /// The first of `running` of a name luneta can hand zellij that `clients`

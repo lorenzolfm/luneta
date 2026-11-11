@@ -343,7 +343,7 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
 pub fn settled() -> Option<Vec<(SessionName, SocketId)>> {
     let folder = Mux::Zellij.socket_folder();
     loop {
-        let running = Mux::Zellij.sockets(&folder)?;
+        let running = folder.sockets()?;
         let started = running.iter().map(|(_, id)| id.started());
         match Mux::Zellij.newborn(started, SystemTime::now()) {
             Some(left) => thread::sleep(left),
@@ -626,7 +626,7 @@ fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     let folder = Mux::Zellij.socket_folder();
     let deadline = Instant::now() + patience;
     loop {
-        let running = Mux::Zellij.running(&folder).unwrap_or_default();
+        let running = folder.running().unwrap_or_default();
         let found = running.into_iter().find(|(name, _)| name == session);
         if let Some((_, started)) = found {
             return Some(started);
@@ -1039,7 +1039,7 @@ pub fn before_away(destination: &Destination, session: &SessionName) -> Before {
 /// now: none where luneta cannot read all of zellij's folder, as the socket
 /// could be in what it cannot.
 fn runs(session: &SessionName) -> Option<bool> {
-    let running = Mux::Zellij.running(&Mux::Zellij.socket_folder())?;
+    let running = Mux::Zellij.socket_folder().running()?;
     Some(running.iter().any(|(name, _)| name == session))
 }
 

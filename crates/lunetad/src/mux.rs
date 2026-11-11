@@ -1,7 +1,8 @@
 //! The multiplexer that holds the sessions of the machine luneta and its
 //! daemon run on: what they have it do, what they read of its sessions, and
 //! the words that start its client. zellij is the only one, and what luneta
-//! does with it goes through `Mux`, as `zellij` is private.
+//! does with it goes through `Mux`, and the folders it finds, as `zellij` is
+//! private.
 //!
 //! Not all luneta knows of zellij's ways is behind it yet. The interface
 //! speaks zellij's own types, `Laid`, `PaneId`, `Asks` and `Failure`, and
@@ -341,33 +342,6 @@ impl Mux {
         }
     }
 
-    /// The sessions whose sockets are in `folder` now. What goes wrong in
-    /// reading it, `troubles` says.
-    pub fn scan(self, folder: &SocketFolder, troubles: &mut Troubles) -> Scan {
-        match self {
-            Mux::Zellij => zellij::scan(folder, troubles),
-        }
-    }
-
-    /// The sessions that run, as their sockets in `folder` say now, each by
-    /// its name and when it started. None where any of the folder could not
-    /// be read.
-    #[must_use]
-    pub fn running(self, folder: &SocketFolder) -> Option<Vec<(SessionName, SystemTime)>> {
-        match self {
-            Mux::Zellij => zellij::running(folder),
-        }
-    }
-
-    /// `running`, each by its name and which session it is, as it stays
-    /// through a rename.
-    #[must_use]
-    pub fn sockets(self, folder: &SocketFolder) -> Option<Vec<(SessionName, Id)>> {
-        match self {
-            Mux::Zellij => zellij::sockets(folder),
-        }
-    }
-
     /// How long until the youngest of the sessions that `started` so is old
     /// enough to be asked anything, at `now`, where one is too young.
     #[must_use]
@@ -399,18 +373,6 @@ impl Mux {
         }
     }
 
-    /// What the multiplexer last wrote of the session `name` in `folder`: none
-    /// before it has.
-    pub fn metadata(
-        self,
-        folder: &CacheFolder,
-        name: &SessionName,
-    ) -> io::Result<Option<Metadata>> {
-        match self {
-            Mux::Zellij => zellij::metadata::read(folder, name),
-        }
-    }
-
     /// The sessions the multiplexer keeps to bring back from, those that
     /// ended and those that run, by name.
     pub fn kept(self) -> Result<Vec<SessionName>, Unknown> {
@@ -424,5 +386,35 @@ impl Mux {
         match self {
             Mux::Zellij => zellij::metadata::cached(session),
         }
+    }
+}
+
+impl SocketFolder {
+    /// The sessions whose sockets are in it now. What goes wrong in reading
+    /// it, `troubles` says.
+    pub fn scan(&self, troubles: &mut Troubles) -> Scan {
+        zellij::scan(self, troubles)
+    }
+
+    /// The sessions that run, as their sockets in it say now, each by its
+    /// name and when it started. None where any of it could not be read.
+    #[must_use]
+    pub fn running(&self) -> Option<Vec<(SessionName, SystemTime)>> {
+        zellij::running(self)
+    }
+
+    /// `running`, each by its name and which session it is, as it stays
+    /// through a rename.
+    #[must_use]
+    pub fn sockets(&self) -> Option<Vec<(SessionName, Id)>> {
+        zellij::sockets(self)
+    }
+}
+
+impl CacheFolder {
+    /// What the multiplexer last wrote in it of the session `name`: none
+    /// before it has.
+    pub fn metadata(&self, name: &SessionName) -> io::Result<Option<Metadata>> {
+        zellij::metadata::read(self, name)
     }
 }

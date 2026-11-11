@@ -397,7 +397,7 @@ fn follow(
     let read = {
         let sockets = sockets.clone();
         let mut troubles = Troubles::default();
-        move || Mux::Zellij.scan(&sockets, &mut troubles)
+        move || sockets.scan(&mut troubles)
     };
     let mut alone = Alone::default();
     let mut end = Some(end);

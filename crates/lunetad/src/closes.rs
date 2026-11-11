@@ -253,7 +253,7 @@ fn settled(
 /// sockets in `folder` say now; or why luneta cannot tell them, as a
 /// session's socket could be in what it cannot read.
 pub fn running_in(folder: &SocketFolder) -> Result<Vec<(SessionName, SystemTime)>, String> {
-    Mux::Zellij.running(folder).ok_or_else(|| {
+    folder.running().ok_or_else(|| {
         let folder = folder.path().display();
         format!("luneta cannot read all of {folder}, where zellij keeps its sessions' sockets")
     })
