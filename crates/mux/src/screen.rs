@@ -13,6 +13,9 @@ use libghostty_vt::{Error, RenderState, Terminal, TerminalOptions};
 /// and version (XTVERSION).
 const NAME: &str = concat!("luneta-mux ", env!("CARGO_PKG_VERSION"));
 
+/// The most scrollback a screen keeps, in bytes: Ghostty's own default.
+pub const SCROLLBACK_BYTES_MAX: usize = 50_000_000;
+
 /// A cell of the screen: the grapheme it shows, as UTF-8, and how wide it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -30,6 +33,9 @@ pub enum Width {
     /// The second column of the wide cell before it, which shows nothing of
     /// its own.
     Spacer,
+    /// The last column of a line that a wide cell did not fit in, which went on
+    /// to the next line instead. It shows nothing.
+    Padding,
 }
 
 /// A screen, and what the program asked of its terminal that it answers.
@@ -38,18 +44,20 @@ pub struct Screen {
     render: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
-    /// What the screen answered the program since it was last taken: the
+    /// What the screen answered the program during the write it reads, the
     /// bytes its terminal writes back to it.
     answers: Rc<RefCell<Vec<u8>>>,
 }
 
 impl Screen {
-    /// A blank screen of `columns` by `lines`, which keeps `scrollback` lines
-    /// that scroll off its top. It joins graphemes, as Ghostty does (mode
-    /// 2027), which a program may turn off.
-    pub fn new(columns: u16, lines: u16, scrollback: usize) -> Result<Screen, Error> {
-        assert!(columns > 0 && lines > 0, "a screen of {columns} by {lines}");
-        let options = TerminalOptions { cols: columns, rows: lines, max_scrollback: scrollback };
+    /// A blank screen of `columns` by `rows`, which keeps up to
+    /// `scrollback_bytes` of the lines that scroll off its top. It joins
+    /// graphemes, as Ghostty does (mode 2027), which a program may turn off.
+    pub fn new(columns: u16, rows: u16, scrollback_bytes: usize) -> Result<Screen, Error> {
+        assert!(columns > 0, "a screen of no columns");
+        assert!(rows > 0, "a screen of no rows");
+        assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
+        let options = TerminalOptions { cols: columns, rows, max_scrollback: scrollback_bytes };
         let mut terminal = Terminal::new(options)?;
         let answers = Rc::new(RefCell::new(Vec::new()));
         let written = Rc::clone(&answers);
@@ -66,39 +74,64 @@ impl Screen {
         })
     }
 
-    /// Reads `bytes`, as the program wrote them.
-    pub fn write(&mut self, bytes: &[u8]) {
-        self.terminal.vt_write(bytes);
-    }
-
-    /// What the screen answered the program since this was last asked, to be
-    /// written back to it.
+    /// Reads `bytes`, as the program wrote them, and gives back what the
+    /// screen answered it, to be written back to it.
     #[must_use]
-    pub fn answers(&self) -> Vec<u8> {
+    pub fn write(&mut self, bytes: &[u8]) -> Vec<u8> {
+        assert!(self.answers.borrow().is_empty(), "an answer outside a write");
+        self.terminal.vt_write(bytes);
         self.answers.take()
     }
 
     /// The lines the screen shows, each cell by cell.
     pub fn lines(&mut self) -> Result<Vec<Vec<Cell>>, Error> {
+        let column_count = usize::from(self.terminal.cols()?);
+        let row_count = usize::from(self.terminal.rows()?);
         let snapshot = self.render.update(&self.terminal)?;
         let mut rows = self.rows.update(&snapshot)?;
-        let mut lines = Vec::new();
+        let mut lines = Vec::with_capacity(row_count);
         while let Some(row) = rows.next() {
+            assert!(lines.len() < row_count, "more lines than the screen's {row_count}");
             let mut cells = self.cells.update(row)?;
-            let mut line = Vec::new();
+            let mut line = Vec::with_capacity(column_count);
             while let Some(cell) = cells.next() {
+                assert!(line.len() < column_count, "more cells than {column_count}");
                 let mut text = String::new();
                 cell.graphemes_utf8(&mut text)?;
                 let width = match cell.raw_cell()?.wide()? {
-                    CellWide::Wide => Width::Wide,
-                    CellWide::SpacerTail | CellWide::SpacerHead => Width::Spacer,
                     CellWide::Narrow => Width::Narrow,
+                    CellWide::Wide => Width::Wide,
+                    CellWide::SpacerTail => Width::Spacer,
+                    CellWide::SpacerHead => Width::Padding,
                 };
                 line.push(Cell { text, width });
             }
+            assert_eq!(line.len(), column_count);
+            lines_assert_spacers(&line);
             lines.push(line);
         }
+        assert_eq!(lines.len(), row_count);
         Ok(lines)
+    }
+}
+
+/// What Ghostty holds of the cells of a line: a spacer is right after the
+/// wide cell it is the second column of, padding is only in the last column,
+/// and neither shows anything.
+fn lines_assert_spacers(line: &[Cell]) {
+    for (column, cell) in line.iter().enumerate() {
+        match cell.width {
+            Width::Narrow | Width::Wide => {}
+            Width::Spacer => {
+                assert!(column > 0, "a spacer in the first column");
+                assert_eq!(line[column - 1].width, Width::Wide, "a spacer in column {column}");
+                assert!(cell.text.is_empty(), "a spacer that shows {:?}", cell.text);
+            }
+            Width::Padding => {
+                assert_eq!(column + 1, line.len(), "padding in column {column}");
+                assert!(cell.text.is_empty(), "padding that shows {:?}", cell.text);
+            }
+        }
     }
 }
 
@@ -106,13 +139,18 @@ impl Screen {
 mod tests {
     use super::*;
 
+    /// The lines of a screen of 10 by 2 that read `bytes`, which ask it
+    /// nothing.
+    fn read(bytes: &str) -> Vec<Vec<Cell>> {
+        let mut screen = Screen::new(10, 2, 0).unwrap();
+        assert_eq!(screen.write(bytes.as_bytes()), b"");
+        screen.lines().unwrap()
+    }
+
     /// The first cells of the first line of a screen of 10 by 2 that read
     /// `bytes`.
     fn first(bytes: &str, cells: usize) -> Vec<Cell> {
-        let mut screen = Screen::new(10, 2, 0).unwrap();
-        screen.write(bytes.as_bytes());
-        let mut lines = screen.lines().unwrap();
-        lines.swap_remove(0).into_iter().take(cells).collect()
+        read(bytes).swap_remove(0).into_iter().take(cells).collect()
     }
 
     fn cell(text: &str, width: Width) -> Cell {
@@ -146,16 +184,28 @@ mod tests {
     /// A combining mark goes on the letter before it.
     #[test]
     fn a_combining_mark_is_in_the_cell_of_its_letter() {
-        assert_eq!(first("e\u{301}x", 2), [cell("e\u{301}", Width::Narrow), cell("x", Width::Narrow)]);
+        assert_eq!(
+            first("e\u{301}x", 2),
+            [cell("e\u{301}", Width::Narrow), cell("x", Width::Narrow)],
+        );
     }
 
-    /// A program that asks its terminal's name is told luneta's server's.
+    /// A wide cell that reaches the last column goes on to the next line,
+    /// and leaves that column as padding.
+    #[test]
+    fn a_wide_cell_too_long_for_its_line_leaves_padding() {
+        let lines = read("123456789👍");
+        assert_eq!(lines[0][9], cell("", Width::Padding));
+        assert_eq!(lines[1][..2], [cell("👍", Width::Wide), cell("", Width::Spacer)]);
+    }
+
+    /// A program that asks its terminal's name is told luneta's server's, by
+    /// the write that asked it, and by no later one.
     #[test]
     fn a_program_that_asks_the_terminals_name_is_answered() {
         let mut screen = Screen::new(10, 2, 0).unwrap();
-        screen.write(b"\x1b[>q");
-        let answer = String::from_utf8(screen.answers()).unwrap();
+        let answer = String::from_utf8(screen.write(b"\x1b[>q")).unwrap();
         assert_eq!(answer, format!("\x1bP>|{NAME}\x1b\\"));
-        assert!(screen.answers().is_empty(), "an answer is taken once");
+        assert!(screen.write(b"x").is_empty(), "an answer is given once");
     }
 }
