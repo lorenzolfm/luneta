@@ -1,0 +1,505 @@
+// What luneta-mux, luneta's own multiplexer, answers. One server holds every
+// own session of a user. It listens on `mux.sock` in luneta's runtime folder,
+// and on nothing else.
+//
+// A server runs until its last session ends, so a client may be newer or older
+// than the server it reaches. Fields and messages are only ever added: none is
+// renumbered, given another type or taken away.
+syntax = "proto3";
+
+package luneta.mux.v1;
+
+service Mux {
+  // Makes a session of one tab.
+  rpc NewSession(NewSessionRequest) returns (NewSessionResponse);
+  // Opens a tab at the end of a session's.
+  rpc NewTab(NewTabRequest) returns (NewTabResponse);
+  // Closes a tab, and hangs up what runs in it. A session whose last tab
+  // closes ends.
+  rpc CloseTab(CloseTabRequest) returns (CloseTabResponse);
+  // Ends a session, and hangs up what runs in each of its tabs.
+  rpc Kill(KillRequest) returns (KillResponse);
+  // Renames a session. Its id stays as it was.
+  rpc Rename(RenameRequest) returns (RenameResponse);
+  // Takes a client to a session or a tab.
+  rpc Go(GoRequest) returns (GoResponse);
+  // What a pane shows, or all it was written.
+  rpc Dump(DumpRequest) returns (DumpResponse);
+  // The sessions and clients as they stand now.
+  rpc List(ListRequest) returns (Listing);
+  // The sessions and clients as they stand now, and again each time they
+  // change. The stream ends as the server does.
+  rpc Watch(WatchRequest) returns (stream Listing);
+  // A client: its first event is a `Hello`, then what its user does. The
+  // server says where the client is, and sends frames of the pane it is on.
+  rpc Attach(stream ToServer) returns (stream ToClient);
+}
+
+message NewSessionRequest {
+  // Not empty, and no other session's. At most 255 bytes, with no control
+  // characters.
+  string name = 1;
+  Opens opens = 2;
+}
+
+message NewSessionResponse {
+  uint64 session = 1;
+  uint32 tab = 2;
+  uint32 pane = 3;
+}
+
+message NewTabRequest {
+  uint64 session = 1;
+  // As a session's name is held to. None for `Tab #<n>`, where n is the tab's
+  // place among the session's as it opens.
+  optional string name = 2;
+  Opens opens = 3;
+}
+
+message NewTabResponse {
+  uint32 tab = 1;
+  uint32 pane = 2;
+}
+
+// What a new tab's pane runs, and where.
+message Opens {
+  // An absolute path.
+  string cwd = 1;
+  oneof runs {
+    // The user's shell: `SHELL`, or `/bin/sh`.
+    Shell shell = 2;
+    Program program = 3;
+  }
+  Ends ends = 4;
+}
+
+message Shell {}
+
+message Program {
+  // The program, then its arguments. Not empty.
+  repeated string argv = 1;
+}
+
+// What becomes of a tab as what its pane runs ends.
+enum Ends {
+  ENDS_UNSPECIFIED = 0;
+  // The tab closes.
+  ENDS_CLOSES = 1;
+  // The pane stays, with what it showed and how its program ended.
+  ENDS_HOLDS = 2;
+}
+
+message CloseTabRequest {
+  uint32 tab = 1;
+}
+
+message CloseTabResponse {}
+
+message KillRequest {
+  uint64 session = 1;
+}
+
+message KillResponse {}
+
+message RenameRequest {
+  uint64 session = 1;
+  // As a new session's name is held to.
+  string name = 2;
+}
+
+message RenameResponse {}
+
+message GoRequest {
+  oneof who {
+    uint64 client = 1;
+    // The client that last typed in this session, or else the one that came to
+    // it last.
+    uint64 last_typed_in = 2;
+  }
+  Place to = 3;
+}
+
+message GoResponse {
+  uint64 client = 1;
+}
+
+// A session, on the tab a client coming there goes to, or a tab.
+message Place {
+  oneof is {
+    uint64 session = 1;
+    uint32 tab = 2;
+  }
+}
+
+message DumpRequest {
+  uint32 pane = 1;
+  Dumped dumped = 2;
+}
+
+enum Dumped {
+  DUMPED_UNSPECIFIED = 0;
+  // The lines it shows, in the colours it shows them in, as escape sequences.
+  DUMPED_SCREEN = 1;
+  // All it was written that it keeps, its scrollback with it: a line for each
+  // line written, however many rows it wraps over, with no styles and no
+  // spaces at its end.
+  DUMPED_TEXT = 2;
+}
+
+message DumpResponse {
+  string text = 1;
+}
+
+message ListRequest {}
+
+message WatchRequest {}
+
+message Listing {
+  // In the order they were made.
+  repeated Session sessions = 1;
+}
+
+message Session {
+  uint64 id = 1;
+  string name = 2;
+  // In their order, never none.
+  repeated Tab tabs = 3;
+  // The tab a client coming to the session goes to: the one a client was last
+  // on, or else the first.
+  uint32 current_tab = 4;
+}
+
+message Tab {
+  uint32 id = 1;
+  string name = 2;
+  // Never none. One in each tab, as yet.
+  repeated Pane panes = 3;
+}
+
+message Pane {
+  uint32 id = 1;
+  // As the program last set it, or empty.
+  string title = 2;
+  // As the program last said it works in (OSC 7), or empty.
+  string cwd = 3;
+  // The process the pane started.
+  uint32 pid = 4;
+  // How it ended, in a tab that `ENDS_HOLDS`. None while it runs.
+  Exit ended = 5;
+  // The clients on it, in the order they came to it.
+  repeated Client clients = 6;
+}
+
+message Exit {
+  oneof how {
+    int32 code = 1;
+    int32 signal = 2;
+  }
+}
+
+message Client {
+  uint64 id = 1;
+  Size size = 2;
+}
+
+// A size in cells. Each of 1 to 65535.
+message Size {
+  uint32 columns = 1;
+  uint32 rows = 2;
+}
+
+message ToServer {
+  oneof event {
+    Hello hello = 1;
+    Key key = 2;
+    Mouse mouse = 3;
+    Paste paste = 4;
+    Focus focus = 5;
+    Size resize = 6;
+    Scroll scroll = 7;
+    Place go = 8;
+  }
+}
+
+// What a client says first, and only then.
+message Hello {
+  Place to = 1;
+  Size size = 2;
+  // The colours of the client's terminal, which the panes it goes to answer
+  // their programs with.
+  Colours colours = 3;
+}
+
+message Colours {
+  Rgb foreground = 1;
+  Rgb background = 2;
+}
+
+// Each of 0 to 255.
+message Rgb {
+  uint32 red = 1;
+  uint32 green = 2;
+  uint32 blue = 3;
+}
+
+message Key {
+  Press press = 1;
+  Modifiers modifiers = 2;
+  oneof key {
+    Named named = 3;
+    // The key that types a character, by the one it types with no modifier
+    // held: `a` for `Shift a`. A Unicode scalar value.
+    uint32 character = 4;
+  }
+  // What the key types, Shift applied and no other modifier: `A` for
+  // `Shift a`, `a` for `Ctrl a`. Empty where it types nothing.
+  string text = 5;
+}
+
+enum Press {
+  PRESS_UNSPECIFIED = 0;
+  PRESS_DOWN = 1;
+  PRESS_REPEAT = 2;
+  PRESS_UP = 3;
+}
+
+message Modifiers {
+  bool shift = 1;
+  bool alt = 2;
+  bool ctrl = 3;
+  bool super_key = 4;
+}
+
+enum Named {
+  NAMED_UNSPECIFIED = 0;
+  NAMED_ENTER = 1;
+  NAMED_TAB = 2;
+  NAMED_BACKSPACE = 3;
+  NAMED_ESCAPE = 4;
+  NAMED_INSERT = 5;
+  NAMED_DELETE = 6;
+  NAMED_HOME = 7;
+  NAMED_END = 8;
+  NAMED_PAGE_UP = 9;
+  NAMED_PAGE_DOWN = 10;
+  NAMED_UP = 11;
+  NAMED_DOWN = 12;
+  NAMED_LEFT = 13;
+  NAMED_RIGHT = 14;
+  NAMED_F1 = 15;
+  NAMED_F2 = 16;
+  NAMED_F3 = 17;
+  NAMED_F4 = 18;
+  NAMED_F5 = 19;
+  NAMED_F6 = 20;
+  NAMED_F7 = 21;
+  NAMED_F8 = 22;
+  NAMED_F9 = 23;
+  NAMED_F10 = 24;
+  NAMED_F11 = 25;
+  NAMED_F12 = 26;
+  NAMED_CAPS_LOCK = 27;
+  NAMED_NUM_LOCK = 28;
+  NAMED_SCROLL_LOCK = 29;
+  NAMED_PRINT_SCREEN = 30;
+  NAMED_PAUSE = 31;
+  NAMED_MENU = 32;
+  NAMED_SHIFT_LEFT = 33;
+  NAMED_SHIFT_RIGHT = 34;
+  NAMED_CTRL_LEFT = 35;
+  NAMED_CTRL_RIGHT = 36;
+  NAMED_ALT_LEFT = 37;
+  NAMED_ALT_RIGHT = 38;
+  NAMED_SUPER_LEFT = 39;
+  NAMED_SUPER_RIGHT = 40;
+}
+
+message Mouse {
+  Modifiers modifiers = 1;
+  // In the pane, from 0.
+  uint32 column = 2;
+  uint32 row = 3;
+  oneof does {
+    Button press = 4;
+    Button release = 5;
+    Motion motion = 6;
+    Wheel wheel = 7;
+  }
+}
+
+enum Button {
+  BUTTON_UNSPECIFIED = 0;
+  BUTTON_LEFT = 1;
+  BUTTON_MIDDLE = 2;
+  BUTTON_RIGHT = 3;
+}
+
+message Motion {
+  // None where no button is held.
+  optional Button held = 1;
+}
+
+enum Wheel {
+  WHEEL_UNSPECIFIED = 0;
+  WHEEL_UP = 1;
+  WHEEL_DOWN = 2;
+  WHEEL_LEFT = 3;
+  WHEEL_RIGHT = 4;
+}
+
+message Paste {
+  string text = 1;
+}
+
+message Focus {
+  bool focused = 1;
+}
+
+// Moves this client's view of the pane into its scrollback. Anything else the
+// client sends the pane takes the view back to the bottom.
+message Scroll {
+  // Rows to go back by, or forward by where it is less than 0.
+  sint32 back = 1;
+}
+
+message ToClient {
+  oneof event {
+    Attached attached = 1;
+    Went went = 2;
+    Frame frame = 3;
+    Ended ended = 4;
+  }
+}
+
+// The server's first word to a client.
+message Attached {
+  uint64 client = 1;
+}
+
+// Where the client is now: after `Attached`, and each time it moves.
+message Went {
+  uint64 session = 1;
+  uint32 tab = 2;
+  uint32 pane = 3;
+}
+
+// The client's session ended. The stream ends after it.
+message Ended {}
+
+// What a pane shows, to one client.
+message Frame {
+  // A frame of a pane the client is no longer on is to be dropped.
+  uint32 pane = 1;
+  Size size = 2;
+  oneof rows {
+    // Each row of the pane, from the top.
+    Whole whole = 3;
+    // The rows that changed since the last frame of this pane to this client.
+    Changed changed = 4;
+  }
+  // None where it is hidden, or out of the view.
+  Cursor cursor = 5;
+  // Whether the pane joins graphemes (mode 2027), as the widths of its glyphs
+  // do: for the client to set its own terminal so.
+  bool clusters = 6;
+  // Whether the pane's program takes the mouse.
+  bool mouse_tracking = 7;
+  // How many rows back into the scrollback this client looks, and how many
+  // rows of scrollback there are.
+  uint32 scrolled_back = 8;
+  uint32 scrollback = 9;
+}
+
+message Whole {
+  repeated Line lines = 1;
+}
+
+message Changed {
+  repeated Row rows = 1;
+}
+
+message Row {
+  uint32 index = 1;
+  Line line = 2;
+}
+
+// A row's glyphs, from its first column. Their columns add up to the row's,
+// less one where it `wraps_wide`.
+message Line {
+  repeated Glyph glyphs = 1;
+  // Whether the last column shows nothing, as the wide glyph that did not fit
+  // in it went on to the next row.
+  bool wraps_wide = 2;
+}
+
+message Glyph {
+  oneof shows {
+    // A column that nothing was written to.
+    Blank blank = 1;
+    // A grapheme of one column.
+    Narrow narrow = 2;
+    // A grapheme of two columns, its own and the one after it.
+    Wide wide = 3;
+  }
+  // None for the default style.
+  Style style = 4;
+}
+
+message Blank {}
+
+message Narrow {
+  string grapheme = 1;
+}
+
+message Wide {
+  string grapheme = 1;
+}
+
+message Style {
+  // None for the terminal's own.
+  Colour foreground = 1;
+  Colour background = 2;
+  Colour underline_colour = 3;
+  bool bold = 4;
+  bool italic = 5;
+  bool faint = 6;
+  bool blink = 7;
+  bool inverse = 8;
+  bool invisible = 9;
+  bool strikethrough = 10;
+  bool overline = 11;
+  Underline underline = 12;
+}
+
+message Colour {
+  oneof is {
+    // Of the 256 of the palette.
+    uint32 palette = 1;
+    Rgb rgb = 2;
+  }
+}
+
+enum Underline {
+  UNDERLINE_UNSPECIFIED = 0;
+  UNDERLINE_NONE = 1;
+  UNDERLINE_SINGLE = 2;
+  UNDERLINE_DOUBLE = 3;
+  UNDERLINE_CURLY = 4;
+  UNDERLINE_DOTTED = 5;
+  UNDERLINE_DASHED = 6;
+}
+
+message Cursor {
+  uint32 row = 1;
+  uint32 column = 2;
+  CursorShape shape = 3;
+  bool blinking = 4;
+}
+
+enum CursorShape {
+  CURSOR_SHAPE_UNSPECIFIED = 0;
+  CURSOR_SHAPE_BLOCK = 1;
+  CURSOR_SHAPE_BAR = 2;
+  CURSOR_SHAPE_UNDERLINE = 3;
+  CURSOR_SHAPE_BLOCK_HOLLOW = 4;
+}

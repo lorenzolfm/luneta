@@ -1,0 +1,615 @@
+//! The server's sessions, their tabs and the pane of each, and the clients on
+//! them: one model behind one lock, which every change goes through, and which
+//! tells the watchers of each.
+//!
+//! Ids are counted up from 1 and never given again, so a session, a tab or a
+//! pane keeps its id until it ends, and a rename changes only its name.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use tokio::sync::{oneshot, watch};
+use tonic::Status;
+
+use crate::api;
+use crate::asked::{Colours, Dumped, Ends, Hello, Input, Name, Opens, Place, Size, Who};
+use crate::pane::{self, Exit, Handle, Out, ToPane, Viewer};
+use crate::pty::{self, Pty};
+
+/// The size a pane starts at, until a client comes to it.
+const FIRST_SIZE: Size = Size {
+    columns: std::num::NonZeroU16::new(80).unwrap(),
+    rows: std::num::NonZeroU16::new(24).unwrap(),
+};
+
+/// The model, and the watchers of it.
+pub struct Mux {
+    model: Mutex<Model>,
+    /// The sessions as they stand, for the watchers: none once the last ended,
+    /// and the server with it.
+    listing: watch::Sender<Option<api::Listing>>,
+}
+
+#[derive(Default)]
+struct Model {
+    last: Ids,
+    sessions: Vec<Session>,
+    clients: BTreeMap<u64, Seat>,
+    /// Whether the last session ended, which ends the server: it makes none
+    /// after.
+    ended: bool,
+}
+
+/// The last id given of each kind.
+#[derive(Default)]
+struct Ids {
+    session: u64,
+    tab: u32,
+    pane: u32,
+    client: u64,
+    came: u64,
+}
+
+struct Session {
+    id: u64,
+    name: Name,
+    /// Never none: a session whose last tab closes ends.
+    tabs: Vec<Tab>,
+    current: u32,
+    last_typed: Option<u64>,
+}
+
+struct Tab {
+    id: u32,
+    name: Name,
+    ends: Ends,
+    pane: Pane,
+}
+
+struct Pane {
+    id: u32,
+    pid: u32,
+    title: String,
+    cwd: String,
+    ended: Option<Exit>,
+    handle: Handle,
+}
+
+/// Where a client is, and what it is.
+struct Seat {
+    pane: u32,
+    size: Size,
+    colours: Colours,
+    out: Out,
+    /// When it came to its pane, by the count of the comings.
+    came: u64,
+}
+
+impl Mux {
+    #[must_use]
+    pub fn new() -> Arc<Mux> {
+        let (listing, _) = watch::channel(Some(api::Listing::default()));
+        Arc::new(Mux { model: Mutex::new(Model::default()), listing })
+    }
+
+    /// The sessions as they stand, then each time they change, then none as
+    /// the server ends.
+    pub fn watched(&self) -> watch::Receiver<Option<api::Listing>> {
+        self.listing.subscribe()
+    }
+
+    /// Ends the server where no session was ever made in it.
+    pub fn end_if_unused(&self) {
+        self.change(|model| {
+            if model.sessions.is_empty() {
+                model.ended = true;
+            }
+        });
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Model> {
+        self.model.lock().expect("a thread panicked while it held the model")
+    }
+
+    /// Runs `change` on the model, and tells the watchers what it changed.
+    fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
+        let mut model = self.lock();
+        let changed = change(&mut model);
+        let listing = (!model.ended).then(|| model.listing());
+        self.listing.send_if_modified(|said| {
+            let modified = *said != listing;
+            *said = listing;
+            modified
+        });
+        changed
+    }
+
+    pub fn new_session(
+        self: &Arc<Mux>,
+        name: Name,
+        opens: &Opens,
+    ) -> Result<(u64, u32, u32), Status> {
+        self.change(|model| {
+            model.refuse_if_ended()?;
+            model.refuse_if_taken(&name, None)?;
+            model.last.session += 1;
+            let session = model.last.session;
+            let tab = model.tab(self, session, Name::numbered(1), opens)?;
+            let ids = (session, tab.id, tab.pane.id);
+            model.sessions.push(Session {
+                id: session,
+                name,
+                current: tab.id,
+                tabs: vec![tab],
+                last_typed: None,
+            });
+            Ok(ids)
+        })
+    }
+
+    pub fn new_tab(
+        self: &Arc<Mux>,
+        session: u64,
+        name: Option<Name>,
+        opens: &Opens,
+    ) -> Result<(u32, u32), Status> {
+        self.change(|model| {
+            let place = model.session(session)?.tabs.len() + 1;
+            let tab =
+                model.tab(self, session, name.unwrap_or_else(|| Name::numbered(place)), opens)?;
+            let ids = (tab.id, tab.pane.id);
+            model.session_mut(session)?.tabs.push(tab);
+            Ok(ids)
+        })
+    }
+
+    pub fn close_tab(&self, tab: u32) -> Result<(), Status> {
+        self.change(|model| {
+            let (session, _) = model.tab_at(tab)?;
+            model.close(session, tab);
+            Ok(())
+        })
+    }
+
+    pub fn kill(&self, session: u64) -> Result<(), Status> {
+        self.change(|model| {
+            model.session(session)?;
+            model.end(session);
+            Ok(())
+        })
+    }
+
+    pub fn rename(&self, session: u64, name: Name) -> Result<(), Status> {
+        self.change(|model| {
+            model.session(session)?;
+            model.refuse_if_taken(&name, Some(session))?;
+            model.session_mut(session)?.name = name;
+            Ok(())
+        })
+    }
+
+    /// Takes the client `who` names to `to`, and says which it took.
+    pub fn go(&self, who: Who, to: Place) -> Result<u64, Status> {
+        self.change(|model| {
+            let client = match who {
+                Who::Client(client) => client,
+                Who::LastTypedIn(session) => model.last_typed_in(session)?,
+            };
+            model.take(client, to)?;
+            Ok(client)
+        })
+    }
+
+    /// Asks pane `pane` for a dump of `dumped`, and gives back where its
+    /// answer comes.
+    pub fn dump(
+        &self,
+        pane: u32,
+        dumped: Dumped,
+    ) -> Result<oneshot::Receiver<Result<String, Status>>, Status> {
+        let model = self.lock();
+        let (_, tab) = model.pane_at(pane)?;
+        let (answer, answered) = oneshot::channel();
+        tab.pane.handle.send(ToPane::Dump(dumped, answer));
+        Ok(answered)
+    }
+
+    pub fn listing(&self) -> api::Listing {
+        self.lock().listing()
+    }
+
+    /// Takes a client in, as `hello` says, with `out` for what goes to it,
+    /// and says its id.
+    pub fn attach(&self, hello: Hello, out: Out) -> Result<u64, Status> {
+        self.change(|model| {
+            let pane = model.pane_of_place(hello.to)?;
+            model.last.client += 1;
+            let client = model.last.client;
+            let attached = api::ToClient {
+                event: Some(api::to_client::Event::Attached(api::Attached { client })),
+            };
+            if out.try_send(Ok(attached)).is_err() {
+                return Err(Status::resource_exhausted("the client takes no message"));
+            }
+            let seat = Seat { pane, size: hello.size, colours: hello.colours, out, came: 0 };
+            model.clients.insert(client, seat);
+            model.seat_on(client, pane);
+            Ok(client)
+        })
+    }
+
+    /// Lets go of a client that went.
+    pub fn detach(&self, client: u64) {
+        self.change(|model| model.drop_client(client));
+    }
+
+    /// Has the pane `client` is on take `input`.
+    pub fn input(&self, client: u64, input: Input) {
+        let mut model = self.lock();
+        let Ok(seat) = model.seat(client) else {
+            return;
+        };
+        let pane = seat.pane;
+        let types = input.types();
+        let Ok((session, tab)) = model.pane_at(pane) else {
+            return;
+        };
+        tab.pane.handle.send(ToPane::Input(client, input));
+        if types {
+            let session = session.id;
+            if let Ok(session) = model.session_mut(session) {
+                session.last_typed = Some(client);
+            }
+        }
+    }
+
+    pub fn resize(&self, client: u64, size: Size) {
+        self.change(|model| {
+            let Ok(seat) = model.seat_mut(client) else {
+                return;
+            };
+            seat.size = size;
+            let pane = seat.pane;
+            if let Ok((_, tab)) = model.pane_at(pane) {
+                tab.pane.handle.send(ToPane::Resize(client, size));
+            }
+        });
+    }
+
+    /// Closes the tab of pane `pane`, whose thread failed, whatever it was
+    /// opened to do as its program ends.
+    pub fn lost(&self, pane: u32) {
+        self.change(|model| {
+            if let Ok((session, tab)) = model.pane_at(pane) {
+                let (session, tab) = (session.id, tab.id);
+                model.close(session, tab);
+            }
+        });
+    }
+
+    /// Notes what pane `pane`'s program last titled it, and where it said it
+    /// works.
+    pub fn titled(&self, pane: u32, title: String, cwd: String) {
+        self.change(|model| {
+            if let Some(pane) = model.pane_mut(pane) {
+                pane.title = title;
+                pane.cwd = cwd;
+            }
+        });
+    }
+
+    /// Notes that pane `pane`'s program ended, as `exit` says, and says
+    /// whether the pane went with it.
+    pub fn ended(&self, pane: u32, exit: Exit) -> bool {
+        self.change(|model| {
+            let Ok((session, tab)) = model.pane_at(pane) else {
+                return true;
+            };
+            let (session, tab, ends) = (session.id, tab.id, tab.ends);
+            match ends {
+                Ends::Closes => {
+                    model.close(session, tab);
+                    true
+                },
+                Ends::Holds => {
+                    if let Some(pane) = model.pane_mut(pane) {
+                        pane.ended = Some(exit);
+                    }
+                    false
+                },
+            }
+        })
+    }
+}
+
+impl Model {
+    fn refuse_if_ended(&self) -> Result<(), Status> {
+        if self.ended {
+            return Err(Status::unavailable("luneta-mux is ending, as its last session did"));
+        }
+        Ok(())
+    }
+
+    fn refuse_if_taken(&self, name: &Name, renamed: Option<u64>) -> Result<(), Status> {
+        let taken = self
+            .sessions
+            .iter()
+            .any(|session| &session.name == name && Some(session.id) != renamed);
+        if taken {
+            return Err(Status::already_exists(format!("a session is named {}", name.as_str())));
+        }
+        Ok(())
+    }
+
+    /// A tab named `name` in session `session`, whose pane runs what `opens`
+    /// says. Its pseudoterminal is opened and its program started under the
+    /// model's lock, so no other pane's program starts meanwhile and takes the
+    /// pseudoterminal's end along before it is closed on exec.
+    fn tab(
+        &mut self,
+        mux: &Arc<Mux>,
+        session: u64,
+        name: Name,
+        opens: &Opens,
+    ) -> Result<Tab, Status> {
+        self.last.tab += 1;
+        self.last.pane += 1;
+        let (tab, pane) = (self.last.tab, self.last.pane);
+        let failed =
+            |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
+        let pty =
+            Pty::opened(FIRST_SIZE).map_err(|error| failed("no pseudoterminal opened", error))?;
+        let vars = [(pty::SESSION_VAR, session.to_string()), (pty::PANE_VAR, pane.to_string())];
+        let child = pty.spawned(opens, &vars).map_err(|error| {
+            Status::failed_precondition(format!("opens did not start: {error}"))
+        })?;
+        let started = pane::start(Arc::clone(mux), pane, pty, child, FIRST_SIZE)
+            .map_err(|error| failed("the pane did not start", error))?;
+        Ok(Tab {
+            id: tab,
+            name,
+            ends: opens.ends,
+            pane: Pane {
+                id: pane,
+                pid: started.pid,
+                title: String::new(),
+                cwd: String::new(),
+                ended: None,
+                handle: started.handle,
+            },
+        })
+    }
+
+    fn session(&self, session: u64) -> Result<&Session, Status> {
+        self.sessions
+            .iter()
+            .find(|found| found.id == session)
+            .ok_or_else(|| Status::not_found(format!("no session {session}")))
+    }
+
+    fn session_mut(&mut self, session: u64) -> Result<&mut Session, Status> {
+        self.sessions
+            .iter_mut()
+            .find(|found| found.id == session)
+            .ok_or_else(|| Status::not_found(format!("no session {session}")))
+    }
+
+    fn tab_at(&self, tab: u32) -> Result<(u64, &Tab), Status> {
+        self.sessions
+            .iter()
+            .find_map(|session| {
+                session.tabs.iter().find(|found| found.id == tab).map(|found| (session.id, found))
+            })
+            .ok_or_else(|| Status::not_found(format!("no tab {tab}")))
+    }
+
+    fn pane_at(&self, pane: u32) -> Result<(&Session, &Tab), Status> {
+        self.sessions
+            .iter()
+            .find_map(|session| {
+                session.tabs.iter().find(|tab| tab.pane.id == pane).map(|tab| (session, tab))
+            })
+            .ok_or_else(|| Status::not_found(format!("no pane {pane}")))
+    }
+
+    fn pane_mut(&mut self, pane: u32) -> Option<&mut Pane> {
+        self.sessions
+            .iter_mut()
+            .flat_map(|session| session.tabs.iter_mut())
+            .map(|tab| &mut tab.pane)
+            .find(|found| found.id == pane)
+    }
+
+    /// The pane a client going to `place` goes to.
+    fn pane_of_place(&self, place: Place) -> Result<u32, Status> {
+        match place {
+            Place::Tab(tab) => Ok(self.tab_at(tab)?.1.pane.id),
+            Place::Session(session) => {
+                let session = self.session(session)?;
+                let tab = session.tabs.iter().find(|tab| tab.id == session.current);
+                Ok(tab.unwrap_or(&session.tabs[0]).pane.id)
+            },
+        }
+    }
+
+    fn seat(&self, client: u64) -> Result<&Seat, Status> {
+        self.clients.get(&client).ok_or_else(|| Status::not_found(format!("no client {client}")))
+    }
+
+    fn seat_mut(&mut self, client: u64) -> Result<&mut Seat, Status> {
+        self.clients
+            .get_mut(&client)
+            .ok_or_else(|| Status::not_found(format!("no client {client}")))
+    }
+
+    /// The client that last typed in `session`, or else the one that came to
+    /// it last.
+    fn last_typed_in(&self, session: u64) -> Result<u64, Status> {
+        let found = self.session(session)?;
+        let on = |client: &u64| {
+            self.clients
+                .get(client)
+                .is_some_and(|seat| found.tabs.iter().any(|tab| tab.pane.id == seat.pane))
+        };
+        if let Some(client) = found.last_typed.filter(on) {
+            return Ok(client);
+        }
+        self.clients
+            .iter()
+            .filter(|(client, _)| on(client))
+            .max_by_key(|(_, seat)| seat.came)
+            .map(|(client, _)| *client)
+            .ok_or_else(|| {
+                Status::failed_precondition(format!("no client is on session {session}"))
+            })
+    }
+
+    /// Takes `client` to the pane of `to`.
+    fn take(&mut self, client: u64, to: Place) -> Result<(), Status> {
+        self.seat(client)?;
+        let pane = self.pane_of_place(to)?;
+        self.seat_on(client, pane);
+        Ok(())
+    }
+
+    /// Puts `client` on pane `pane`, and tells it so. A client that takes no
+    /// more messages is let go of.
+    fn seat_on(&mut self, client: u64, pane: u32) {
+        let Ok((session, tab)) = self.pane_at(pane) else {
+            return;
+        };
+        let (session, tab, handle) = (session.id, tab.id, tab.pane.handle.clone());
+        self.last.came += 1;
+        let came = self.last.came;
+        let Some(seat) = self.clients.get_mut(&client) else {
+            return;
+        };
+        let left = std::mem::replace(&mut seat.pane, pane);
+        seat.came = came;
+        let went = api::ToClient {
+            event: Some(api::to_client::Event::Went(api::Went { session, tab, pane })),
+        };
+        if seat.out.try_send(Ok(went)).is_err() {
+            seat.pane = left;
+            self.drop_client(client);
+            return;
+        }
+        let viewer = Viewer { client, out: seat.out.clone(), size: seat.size };
+        let colours = seat.colours;
+        if left != pane
+            && let Ok((_, tab)) = self.pane_at(left)
+        {
+            tab.pane.handle.send(ToPane::Unwatch(client));
+        }
+        if colours != Colours::default() {
+            handle.send(ToPane::Colours(colours));
+        }
+        handle.send(ToPane::Watch(viewer));
+        if let Ok(session) = self.session_mut(session) {
+            session.current = tab;
+        }
+    }
+
+    fn drop_client(&mut self, client: u64) {
+        let Some(seat) = self.clients.remove(&client) else {
+            return;
+        };
+        if let Ok((_, tab)) = self.pane_at(seat.pane) {
+            tab.pane.handle.send(ToPane::Unwatch(client));
+        }
+    }
+
+    /// Closes tab `tab` of session `session`, hangs up its pane, and takes the
+    /// clients on it to the tab before it, or the one after. A session whose
+    /// last tab it was ends.
+    fn close(&mut self, session: u64, tab: u32) {
+        let Ok(found) = self.session_mut(session) else {
+            return;
+        };
+        let Some(place) = found.tabs.iter().position(|found| found.id == tab) else {
+            return;
+        };
+        if found.tabs.len() == 1 {
+            self.end(session);
+            return;
+        }
+        let closed = found.tabs.remove(place);
+        closed.pane.handle.send(ToPane::Close);
+        let next = &found.tabs[place.saturating_sub(1)];
+        let (next_tab, next_pane) = (next.id, next.pane.id);
+        if found.current == tab {
+            found.current = next_tab;
+        }
+        let moved: Vec<u64> = self
+            .clients
+            .iter()
+            .filter(|(_, seat)| seat.pane == closed.pane.id)
+            .map(|(client, _)| *client)
+            .collect();
+        for client in moved {
+            self.seat_on(client, next_pane);
+        }
+    }
+
+    /// Ends session `session`: hangs up its panes, tells its clients and lets
+    /// go of them. The server ends with its last session.
+    fn end(&mut self, session: u64) {
+        let Some(place) = self.sessions.iter().position(|found| found.id == session) else {
+            return;
+        };
+        let ended = self.sessions.remove(place);
+        let panes: Vec<u32> = ended.tabs.iter().map(|tab| tab.pane.id).collect();
+        for tab in &ended.tabs {
+            tab.pane.handle.send(ToPane::Close);
+        }
+        let gone: Vec<u64> = self
+            .clients
+            .iter()
+            .filter(|(_, seat)| panes.contains(&seat.pane))
+            .map(|(client, _)| *client)
+            .collect();
+        for client in gone {
+            if let Some(seat) = self.clients.remove(&client) {
+                let word =
+                    api::ToClient { event: Some(api::to_client::Event::Ended(api::Ended {})) };
+                let _ = seat.out.try_send(Ok(word));
+            }
+        }
+        if self.sessions.is_empty() {
+            self.ended = true;
+        }
+    }
+
+    fn listing(&self) -> api::Listing {
+        let sessions = self.sessions.iter().map(|session| api::Session {
+            id: session.id,
+            name: session.name.as_str().to_owned(),
+            tabs: session.tabs.iter().map(|tab| self.tab_said(tab)).collect(),
+            current_tab: session.current,
+        });
+        api::Listing { sessions: sessions.collect() }
+    }
+
+    fn tab_said(&self, tab: &Tab) -> api::Tab {
+        let pane = &tab.pane;
+        let mut clients: Vec<(u64, &Seat)> = self
+            .clients
+            .iter()
+            .filter(|(_, seat)| seat.pane == pane.id)
+            .map(|(client, seat)| (*client, seat))
+            .collect();
+        clients.sort_by_key(|(_, seat)| seat.came);
+        let pane = api::Pane {
+            id: pane.id,
+            title: pane.title.clone(),
+            cwd: pane.cwd.clone(),
+            pid: pane.pid,
+            ended: pane.ended.map(Exit::said),
+            clients: clients
+                .into_iter()
+                .map(|(id, seat)| api::Client { id, size: Some(seat.size.said()) })
+                .collect(),
+        };
+        api::Tab { id: tab.id, name: tab.name.as_str().to_owned(), panes: vec![pane] }
+    }
+}
