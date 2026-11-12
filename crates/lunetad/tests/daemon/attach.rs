@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions as _;
@@ -16,15 +17,22 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
 use crate::host::{eventually, Host, Running};
-use crate::own::Owned;
+use crate::own::{own, Owned};
 use crate::sessions::session;
-use crate::starts::{directory, luneta, runs, spawn_on, terminal, Directory};
+use crate::starts::{directory, luneta, on_terminal, runs, spawn_on, terminal, Directory};
+
+/// What a shell is typed, in any shell: it prints `own-42`, which what is
+/// typed does not show.
+const TYPED: &str = "printf 'own-%s\\n' 42\r";
+
+/// What it prints.
+const PRINTED: &str = "own-42";
 
 /// A luneta on a terminal of the test's, and all it wrote there.
 struct Window {
     typed: File,
     said: Arc<Mutex<Vec<u8>>>,
-    _luneta: Running,
+    luneta: Running,
 }
 
 impl Window {
@@ -49,7 +57,7 @@ impl Window {
         command.args(args);
         let luneta = spawn_on(&tty, &mut command);
         drop(tty);
-        let window = Window { typed, said, _luneta: luneta };
+        let window = Window { typed, said, luneta };
         eventually("luneta draws its sidebar", || window.shows("─ luneta").then_some(()));
         window
     }
@@ -76,11 +84,57 @@ impl Window {
         self.screen().iter().any(|line| line.contains(text))
     }
 
+    /// Where `text` shows on the screen, as its row and the column it starts
+    /// at, both from 0, once it does.
+    fn spot_of(&self, text: &str) -> (usize, usize) {
+        eventually(&format!("luneta shows {text:?}"), || {
+            let screen = self.screen();
+            screen.iter().enumerate().find_map(|(row, line)| {
+                let at = line.find(text)?;
+                Some((row, line[..at].chars().count()))
+            })
+        })
+    }
+
 }
 
 /// How many clients the own session `name` has, as the host lists it.
 fn clients(owned: &Owned, name: &str) -> Option<usize> {
     Some(session(&owned.host.host(), name)?.clients.clone()?.clients.len())
+}
+
+/// `luneta --own` makes the session named for its directory, by the daemon,
+/// and attaches to it beside the sidebar, which lists it: what is typed goes
+/// to the pane's shell, and what the shell prints shows.
+#[test]
+fn luneta_own_makes_its_session_and_shows_what_its_shell_prints() {
+    let owned = Owned::new();
+    let dir = directory("work");
+    let mut window = Window::open(&owned.host, &dir, &["--own"]);
+    eventually("luneta is the session's client", || (clients(&owned, "work")? == 1).then_some(()));
+    assert!(own(&owned.listed("work")).is_some());
+    eventually("the sidebar lists it", || {
+        let screen = window.screen();
+        screen.iter().any(|line| line.contains(" work ") && line.contains('◇')).then_some(())
+    });
+
+    window.send(TYPED);
+    window.spot_of(PRINTED);
+}
+
+/// A session of zellij's has the name `luneta --own` would take, and luneta
+/// makes no own session of it: the two kinds share their names.
+#[test]
+fn luneta_own_refuses_a_name_a_session_of_zellij_s_has() {
+    let owned = Owned::new();
+    let _project = runs(&owned.host, "project");
+    let dir = directory("project");
+    let mut command = luneta(owned.host.vars(), &dir.path);
+    command.arg("--own");
+    let ended = on_terminal(command);
+    assert!(!ended.status.success(), "{}", ended.said);
+    assert!(ended.said.contains("project is a session of zellij's"), "{}", ended.said);
+    assert_eq!(clients(&owned, "project"), None);
 }
 
 /// luneta goes from a session of zellij's to an own one, as the picker picks
@@ -104,4 +158,23 @@ fn luneta_goes_from_zellij_s_session_to_an_own_one_and_back() {
         (owned.host.zellij.attached() == ["attach project", "attach project"]).then_some(())
     });
     eventually("mine lets go of luneta", || (clients(&owned, "mine")? == 0).then_some(()));
+}
+
+/// `d s` on the own session luneta is in takes luneta to the newest other
+/// session, an own one here, on the stream it has, and kills the session once
+/// luneta is there.
+#[test]
+fn a_delete_of_the_own_session_luneta_is_in_goes_on_in_the_newest_and_kills_it() {
+    let owned = Owned::new();
+    owned.make("first").unwrap();
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["--own", "first"]);
+    eventually("luneta is in first", || (clients(&owned, "first")? == 1).then_some(()));
+    owned.make("newer").unwrap();
+    eventually("the sidebar lists newer", || window.shows("newer").then_some(()));
+    // `Ctrl a`, which gives the sidebar the keys, on the row of luneta's pane.
+    window.send("\x1b[97;5uds");
+    eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
+    eventually("first is gone", || session(&owned.host.host(), "first").is_none().then_some(()));
+    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
 }

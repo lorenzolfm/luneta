@@ -86,6 +86,12 @@ struct Cli {
     /// or, with none on this machine, another machine's. It makes the one
     /// named for this directory only where none runs anywhere.
     session: Option<String>,
+    /// Attach to an own session of luneta's own multiplexer, made if none
+    /// runs by the name, rather than zellij's: the one named for this
+    /// directory, where none is named. A name a session of zellij's has is
+    /// refused.
+    #[arg(long)]
+    own: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -152,7 +158,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        return host::run(session, folder);
+        return host::run(session, cli.own, folder);
     };
     let command = match command {
         // It asks no lunetad, and so needs no folder to find one in.

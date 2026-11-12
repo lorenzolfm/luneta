@@ -920,14 +920,15 @@ struct App {
 }
 
 /// Runs zellij beside the sidebar, attached to `session`, or to the session
-/// `starts` finds where none is named, until zellij ends: its client detaches
+/// `starts` finds where none is named, or with `own` luneta's client of an own
+/// session in zellij's place, until zellij ends: its client detaches
 /// or fails, or its session ends and no other runs, on any machine lunetad
 /// reaches. Where another does, a client of the newest takes the place of the
 /// one that ended, of its machine's first. One that zellij drops is taken back.
 /// The sidebar is of what the daemon in `folder` says, which is started if none
 /// runs. The log says why luneta ended, but for a second signal, or one it
 /// does not handle.
-pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
+pub fn run(session: Option<SessionName>, own: bool, folder: Result<PathBuf, String>) -> ExitCode {
     // Before all else, for the log to say why luneta ended however early. Why
     // there is none is for the sidebar to say, once it has its notes.
     let unkept = log::start(Process::Luneta).err();
@@ -940,9 +941,13 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         Ok(runtime) => News::within(runtime),
         Err(why) => News::unshared(why),
     };
-    let start = match session {
-        Some(session) => starts::named(session),
-        None => starts::bare(zellij::session_for(&dir), &news),
+    let start = match (own, session) {
+        (true, session) => match session.or_else(|| zellij::session_for(&dir)) {
+            Some(session) => starts::own(&session, &dir),
+            None => Err(format!("{} names no own session: name one", dir.display())),
+        },
+        (false, Some(session)) => starts::named(session),
+        (false, None) => starts::bare(zellij::session_for(&dir), &news),
     };
     let start = match start {
         Ok(start) => start,
@@ -1161,7 +1166,7 @@ fn run_in(
             }
         },
     };
-    let ((program, args), fails, arrival) = match first_client(first, &mut sidebar) {
+    let first = match first_client(first, &mut sidebar) {
         Ok(first) => first,
         Err(refusal) => {
             say_ends(&refusal);
@@ -1170,8 +1175,20 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
-    let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
-    let right = Right::Zellij(Client::new(hosted, fails, arrival, None));
+    let right = match first {
+        FirstClient::Zellij((program, args), fails, arrival) => {
+            let size = window(areas.1);
+            let hosted = Hosted::start(program, args, dir, size, started, events.clone())?;
+            Right::Zellij(Client::new(hosted, fails, arrival, None))
+        },
+        FirstClient::Own(session) => {
+            sidebar.attaching(session);
+            let hello = hello(To::Session(session), areas.1, colours);
+            let attached = Attached::start(started, hello, &events);
+            Right::Own(Own { attached, after: None, fails: Fails::End, came: false })
+        },
+    };
+    let own = matches!(right, Right::Own(_));
     let desktop = Desktop::start(&events);
     // Until the terminal says otherwise. One that never tells a program of its
     // window's focus has you in it all along.
@@ -1221,6 +1238,11 @@ fn run_in(
         alerts: Alerts::new(focused),
         desktop,
     };
+    // A daemon that luneta starts troubles no own session, as it would a
+    // zellij server yet to take its first client.
+    if own {
+        app.ask(None);
+    }
     let ran = run_loop(terminal, &mut app, inbox);
     for deleting in app.deleting.drain(..) {
         // What a thread that panicked left undone stays so.
@@ -1297,10 +1319,14 @@ fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: 
     }
 }
 
-/// The program of luneta's first client, and its arguments, where luneta's
-/// zellij goes where it fails, and the look for its arrival, if luneta looks
-/// for it.
-type FirstClient = ((String, Vec<String>), Fails, Option<Arrival>);
+/// luneta's first client: zellij's, by its program and its arguments, where
+/// luneta's zellij goes where it fails, and the look for its arrival, if
+/// luneta looks for it; or its own client of the own session of this id.
+#[expect(clippy::large_enum_variant, reason = "it lasts as luneta starts")]
+enum FirstClient {
+    Zellij((String, Vec<String>), Fails, Option<Arrival>),
+    Own(OwnId),
+}
 
 /// What a client of the own sessions that goes `to` says first: how big
 /// zellij's `area` is, for it is in its place, and the `colours` of luneta's
@@ -1321,7 +1347,7 @@ fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, Stri
                 let look = sidebar.sending(session)?;
                 Some(Arrival::new(Machine::Local, look, before, None))
             });
-            Ok((zellij::client(session.as_ref())?, Fails::End, arrival))
+            Ok(FirstClient::Zellij(zellij::client(session.as_ref())?, Fails::End, arrival))
         },
         First::Here(session) => {
             // Just before the client starts, as `own` goes by: luneta may
@@ -1329,15 +1355,16 @@ fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, Stri
             let before = zellij::before(&session);
             let look = sidebar.sending(&session);
             let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
-            Ok((zellij::rejoin(&session)?, Fails::End, arrival))
+            Ok(FirstClient::Zellij(zellij::rejoin(&session)?, Fails::End, arrival))
         },
         First::Away(destination, Refuge { session, before }) => {
             let program = zellij::attach_away(&destination, &session)?;
             let machine = Machine::Remote(destination);
             let look = sidebar.swapping(&machine, &session);
             let arrival = Arrival::new(machine, look, Before::Listed(before), None);
-            Ok((program, Fails::Onward(Vec::new()), Some(arrival)))
+            Ok(FirstClient::Zellij(program, Fails::Onward(Vec::new()), Some(arrival)))
         },
+        First::Own(session) => Ok(FirstClient::Own(session)),
     }
 }
 
