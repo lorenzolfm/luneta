@@ -181,12 +181,15 @@ message Pane {
   uint32 id = 1;
   // As the program last set it, or empty.
   string title = 2;
-  // As the program last said it works in (OSC 7), or empty.
+  // An absolute path on the server's machine: where the program last said it
+  // works (OSC 7, naming this machine), or else where the pane opened.
   string cwd = 3;
-  // The process the pane started.
-  uint32 pid = 4;
-  // How it ended, in a tab that `ENDS_HOLDS`. None while it runs.
-  Exit ended = 5;
+  oneof program {
+    // The process the pane started, while it runs.
+    uint32 pid = 4;
+    // How it ended, in a tab that `ENDS_HOLDS`.
+    Exit ended = 5;
+  }
   // The clients on it, in the order they came to it.
   repeated Client clients = 6;
 }

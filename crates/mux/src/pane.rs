@@ -8,6 +8,7 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
+use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +26,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size};
 use crate::frame::{self, Flags};
+use crate::id::{ClientId, PaneId};
 use crate::mux::Mux;
 use crate::pty::Pty;
 use crate::screen::{Screen, View, Wheel};
@@ -108,7 +110,7 @@ impl Exit {
 /// A client on a pane: where its frames go, its size and its terminal's
 /// colours.
 pub struct Viewer {
-    pub client: u64,
+    pub client: ClientId,
     pub out: Out,
     pub size: Size,
     pub colours: Colours,
@@ -118,9 +120,9 @@ pub struct Viewer {
 /// for its clients, and by the clients.
 pub enum ToPane {
     Watch(Viewer),
-    Unwatch(u64),
-    Input(u64, Input),
-    Resize(u64, Size),
+    Unwatch(ClientId),
+    Input(ClientId, Input),
+    Resize(ClientId, Size),
     Dump(Dumped, oneshot::Sender<Result<String, Status>>),
 }
 
@@ -201,7 +203,7 @@ pub struct Started {
 /// `child` runs, of `size`.
 pub fn start(
     mux: Arc<Mux>,
-    pane: u32,
+    pane: PaneId,
     pty: Pty,
     mut child: Child,
     size: Size,
@@ -236,19 +238,19 @@ pub fn start(
             closed,
             woken,
             screen,
-            pty: Some(pty),
+            program: Program::Runs { pty, unread: Vec::new() },
             buffer: vec![0; READ_BYTES].into_boxed_slice(),
-            unread: Vec::new(),
             watchers: Vec::new(),
             dirty: false,
             framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
             synced: None,
             title: String::new(),
             pwd: String::new(),
+            host: host(),
         };
         if let Err(error) = thread.run() {
             eprintln!("luneta-mux: pane {pane} failed: {error}");
-            thread.pty = None;
+            thread.program = Program::Gone;
             thread.mux.lost(pane);
         }
     })?;
@@ -256,7 +258,7 @@ pub fn start(
 }
 
 /// Waits for pane `pane`'s program to end, and tells the pane how it did.
-fn waits(pane: u32, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
+fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
     match child.wait() {
         Ok(status) => {
             if exited.try_send(Exit::of(status)).is_ok() {
@@ -271,7 +273,7 @@ fn waits(pane: u32, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
 
 /// What a client last got of a pane.
 struct Shown {
-    size: (u16, u16),
+    size: Size,
     view: View,
     flags: Flags,
 }
@@ -290,27 +292,41 @@ enum Does {
     Nothing,
 }
 
+/// The program, as the pane reaches it: by its pseudoterminal, with what it
+/// has yet to read, the clients' input and the screen's answers, until it
+/// ends or is hung up.
+enum Program {
+    Runs { pty: Pty, unread: Vec<u8> },
+    Gone,
+}
+
+impl Program {
+    /// Whether the program has something to read.
+    fn owed(&self) -> bool {
+        matches!(self, Program::Runs { unread, .. } if !unread.is_empty())
+    }
+}
+
 struct Thread {
-    pane: u32,
+    pane: PaneId,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
     exits: Receiver<Exit>,
     closed: Arc<AtomicBool>,
     woken: UnixStream,
     screen: Screen,
-    /// None once the program ended or was hung up.
-    pty: Option<Pty>,
+    program: Program,
     buffer: Box<[u8]>,
-    /// What the program has yet to read: the clients' input, and the screen's
-    /// answers.
-    unread: Vec<u8>,
     watchers: Vec<Watcher>,
     dirty: bool,
     framed: Instant,
     /// Since when the program has held its frames, if it does.
     synced: Option<Instant>,
     title: String,
+    /// What the program last said in OSC 7.
     pwd: String,
+    /// This machine's name, as an OSC 7 names it.
+    host: String,
 }
 
 impl Thread {
@@ -323,13 +339,12 @@ impl Thread {
                 while matches!((&self.woken).read(&mut drained), Ok(read) if read > 0) {}
             }
             if self.closed.load(Ordering::Acquire) {
-                self.pty = None;
+                self.program = Program::Gone;
                 return Ok(());
             }
             if let Ok(exit) = self.exits.try_recv()
                 && self.exited(exit)?
             {
-                self.pty = None;
                 return Ok(());
             }
             for _ in 0..MESSAGES_PER_TURN {
@@ -342,7 +357,7 @@ impl Thread {
             if readable {
                 self.read(READS_PER_TURN * READ_BYTES)?;
             }
-            if writable || !self.unread.is_empty() {
+            if writable || self.program.owed() {
                 self.write()?;
             }
             self.frame()?;
@@ -373,17 +388,21 @@ impl Thread {
             tv_sec: timeout.as_secs().try_into().unwrap_or(i64::MAX),
             tv_nsec: timeout.subsec_nanos().into(),
         });
-        let reads = self.unread.len() < UNREAD_BYTES_MAX;
-        let mut flags = PollFlags::empty();
-        if reads {
-            flags |= PollFlags::IN;
-        }
-        if !self.unread.is_empty() {
-            flags |= PollFlags::OUT;
-        }
-        let mut fds = [PollFd::new(&self.woken, PollFlags::IN), PollFd::new(&self.woken, flags)];
+        let mut reads = false;
+        let mut fds = [
+            PollFd::new(&self.woken, PollFlags::IN),
+            PollFd::new(&self.woken, PollFlags::empty()),
+        ];
         let mut count = 1;
-        if let Some(pty) = &self.pty {
+        if let Program::Runs { pty, unread } = &self.program {
+            reads = unread.len() < UNREAD_BYTES_MAX;
+            let mut flags = PollFlags::empty();
+            if reads {
+                flags |= PollFlags::IN;
+            }
+            if !unread.is_empty() {
+                flags |= PollFlags::OUT;
+            }
             fds[1] = PollFd::from_borrowed_fd(pty.near.as_fd(), flags);
             count = 2;
         }
@@ -436,24 +455,23 @@ impl Thread {
     /// Reads what the program wrote as it ended, shows it, and says whether
     /// the pane went with the program.
     fn exited(&mut self, exit: Exit) -> io::Result<bool> {
-        self.unread.clear();
-        if self.pty.is_some() {
-            self.read(LAST_WORDS_BYTES_MAX)?;
+        if let Program::Runs { unread, .. } = &mut self.program {
+            unread.clear();
         }
-        self.pty = None;
-        self.unread.clear();
+        self.read(LAST_WORDS_BYTES_MAX)?;
+        self.program = Program::Gone;
         self.dirty = true;
         self.frame()?;
         Ok(self.mux.ended(self.pane, exit))
     }
 
-    fn watcher(&mut self, client: u64) -> Option<&mut Watcher> {
+    fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
         self.watchers.iter_mut().find(|watcher| watcher.viewer.client == client)
     }
 
     /// Makes the pane the size of `client`, the latest to come to it, resize
     /// or do anything in it, as tmux's `window-size latest` does.
-    fn follow(&mut self, client: u64) -> io::Result<()> {
+    fn follow(&mut self, client: ClientId) -> io::Result<()> {
         let Some(size) = self.watcher(client).map(|watcher| watcher.viewer.size) else {
             return Ok(());
         };
@@ -461,9 +479,9 @@ impl Thread {
             return Ok(());
         }
         let answers = self.screen.resize(size.columns, size.rows).map_err(io::Error::other)?;
-        if let Some(pty) = &self.pty {
+        if let Program::Runs { pty, unread } = &mut self.program {
             pty.resize(size)?;
-            self.unread.extend_from_slice(&answers);
+            unread.extend_from_slice(&answers);
         }
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
@@ -476,7 +494,7 @@ impl Thread {
     /// Takes `client`'s input, which reaches the program, or scrolls the
     /// client's view. A client that has left the pane may still type in it,
     /// where it typed before it left.
-    fn input(&mut self, client: u64, input: Input) -> io::Result<()> {
+    fn input(&mut self, client: ClientId, input: Input) -> io::Result<()> {
         self.follow(client)?;
         if input.types() {
             self.back(client, None);
@@ -515,23 +533,23 @@ impl Thread {
 
     /// Gives the program `bytes` to read, where it runs and has room.
     fn unread_push(&mut self, bytes: &[u8]) {
-        if self.pty.is_none() {
+        let Program::Runs { unread, .. } = &mut self.program else {
             return;
-        }
-        if self.unread.len() + bytes.len() <= UNREAD_BYTES_MAX {
-            self.unread.extend_from_slice(bytes);
+        };
+        if unread.len() + bytes.len() <= UNREAD_BYTES_MAX {
+            unread.extend_from_slice(bytes);
         } else {
             eprintln!(
                 "luneta-mux: pane {} has {} unread bytes: input dropped",
                 self.pane,
-                self.unread.len()
+                unread.len()
             );
         }
     }
 
     /// Moves `client`'s view `by` rows back into the scrollback, or to the
     /// bottom where `by` is none.
-    fn back(&mut self, client: u64, by: Option<isize>) {
+    fn back(&mut self, client: ClientId, by: Option<isize>) {
         let scrollback = self.screen.scrollback();
         let Some(watcher) = self.watcher(client) else {
             return;
@@ -550,18 +568,18 @@ impl Thread {
     /// Reads up to `most` bytes of what the program wrote, as far as it
     /// wrote, and while it has less than `UNREAD_BYTES_MAX` to read itself.
     fn read(&mut self, most: usize) -> io::Result<()> {
-        let Some(pty) = &mut self.pty else {
+        let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
         let before = self.screen.scrollback();
         let mut total = 0;
-        while total < most && self.unread.len() < UNREAD_BYTES_MAX {
+        while total < most && unread.len() < UNREAD_BYTES_MAX {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
                     let answers = self.screen.write(&self.buffer[..read]);
-                    self.unread.extend_from_slice(&answers);
+                    unread.extend_from_slice(&answers);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -592,31 +610,31 @@ impl Thread {
         let title = self.screen.title().unwrap_or_else(|| self.title.clone());
         let pwd = self.screen.pwd().unwrap_or_else(|| self.pwd.clone());
         if title != self.title || pwd != self.pwd {
+            let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
             self.title.clone_from(&title);
-            self.pwd.clone_from(&pwd);
-            self.mux.titled(self.pane, title, pwd);
+            self.pwd = pwd;
+            self.mux.titled(self.pane, title, cwd);
         }
         Ok(())
     }
 
     /// Writes what the program has yet to read, as much as it takes now.
     fn write(&mut self) -> io::Result<()> {
-        let Some(pty) = &mut self.pty else {
-            self.unread.clear();
+        let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        while !self.unread.is_empty() {
-            match pty.near.write(&self.unread) {
+        while !unread.is_empty() {
+            match pty.near.write(unread) {
                 Ok(written) => {
-                    assert!(written > 0, "the program took none of {} bytes", self.unread.len());
-                    self.unread.drain(..written);
+                    assert!(written > 0, "the program took none of {} bytes", unread.len());
+                    unread.drain(..written);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
                 Err(error)
                     if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
                 {
-                    self.unread.clear();
+                    unread.clear();
                 },
                 Err(error) => return Err(error),
             }
@@ -645,7 +663,7 @@ impl Thread {
         self.dirty = false;
         let views = self.views().map_err(io::Error::other)?;
         let (columns, rows) = self.screen.size();
-        let size = (columns.get(), rows.get());
+        let size = Size { columns, rows };
         let (clusters, tracks) = (self.screen.clusters(), self.screen.tracks_mouse());
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
@@ -696,6 +714,29 @@ impl Thread {
     }
 }
 
+/// This machine's name.
+fn host() -> String {
+    rustix::system::uname().nodename().to_string_lossy().into_owned()
+}
+
+/// The path on this machine, named `host`, that an OSC 7 `said`: none where
+/// it names another machine, or no absolute path in UTF-8.
+fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
+    let after = said.strip_prefix("file://")?;
+    let (named, path) = after.split_at(after.find('/')?);
+    let local = named.is_empty()
+        || named.eq_ignore_ascii_case("localhost")
+        || named.eq_ignore_ascii_case(host);
+    if !local {
+        return None;
+    }
+    let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
+    if path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(path.as_ref())).filter(|path| path.is_absolute())
+}
+
 /// What the program does with a turn of the wheel: a click, where it takes
 /// the mouse, arrow keys, where it asked for them, and else a scroll of the
 /// client's view.
@@ -732,4 +773,25 @@ fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
         bytes.extend(screen.key(Action::Press, key, Mods::empty(), None, None)?);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An OSC 7 names a folder of this machine's, which it may spell in
+    /// escapes, or a folder of another's, which is none of this one's.
+    #[test]
+    fn a_cwd_is_one_this_machine_has() {
+        let cwd = |said: &str| local_cwd(said, "here");
+        assert_eq!(cwd("file://here/home/a%20b"), Some(PathBuf::from("/home/a b")));
+        assert_eq!(cwd("file://HERE/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(cwd("file:///tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(cwd("file://localhost/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(cwd("file://there/tmp"), None);
+        assert_eq!(cwd("/tmp"), None);
+        assert_eq!(cwd("file://here"), None);
+        assert_eq!(cwd("file://here/%FE"), None);
+        assert_eq!(cwd("file://here/a%00b"), None);
+    }
 }

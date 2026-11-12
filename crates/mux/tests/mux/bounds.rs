@@ -6,7 +6,9 @@ use std::time::Duration;
 use luneta_mux::api;
 use tokio::time::Instant;
 
-use crate::host::{Attached, Server, new_session, run, script, session, size, tabs, watched_until};
+use crate::host::{
+    Attached, Server, ended, new_session, run, script, session, size, tabs, watched_until,
+};
 
 /// A program that asks its terminal what it is, over and over, and never
 /// reads the answers, is held back: the server keeps no more of them than
@@ -43,10 +45,10 @@ fn a_folder_named_in_no_utf_8_breaks_no_pane() {
         attached.until_row("after").await;
         let listing =
             watched_until(&mut watch, "the tab", |listing| !tabs(listing).is_empty()).await;
-        assert_eq!(tabs(&listing)[0].panes[0].ended, None);
+        assert_eq!(ended(&tabs(&listing)[0].panes[0]), None);
         attached.type_line("").await;
         watched_until(&mut watch, "the program ended", |listing| {
-            tabs(listing).first().is_some_and(|tab| tab.panes[0].ended.is_some())
+            tabs(listing).first().is_some_and(|tab| ended(&tab.panes[0]).is_some())
         })
         .await;
     });

@@ -11,13 +11,14 @@ use libghostty_vt::mouse;
 use tonic::Status;
 
 use crate::api;
+use crate::id::{ClientId, SessionId, TabId};
 use crate::screen::{Click, RgbColor, Wheel};
 
 /// The most bytes a name has.
 pub const NAME_BYTES_MAX: usize = 255;
 
 /// A refusal of what `field` said, and why.
-fn refused(field: &str, why: impl fmt::Display) -> Status {
+pub(crate) fn refused(field: &str, why: impl fmt::Display) -> Status {
     Status::invalid_argument(format!("{field} {why}"))
 }
 
@@ -106,6 +107,9 @@ pub enum Ends {
 impl Opens {
     pub fn parse(field: &str, opens: Option<api::Opens>) -> Result<Opens, Status> {
         let opens = present(field, opens)?;
+        if opens.cwd.contains('\0') {
+            return Err(refused(&format!("{field}.cwd"), "has a NUL"));
+        }
         let cwd = PathBuf::from(opens.cwd);
         if !cwd.is_absolute() {
             return Err(refused(&format!("{field}.cwd"), "is not an absolute path"));
@@ -113,8 +117,15 @@ impl Opens {
         let runs = match present(&format!("{field}.runs"), opens.runs)? {
             api::opens::Runs::Shell(api::Shell {}) => Runs::Shell,
             api::opens::Runs::Program(api::Program { mut argv }) => {
+                let argv_field = format!("{field}.program.argv");
                 if argv.is_empty() {
-                    return Err(refused(&format!("{field}.program.argv"), "is empty"));
+                    return Err(refused(&argv_field, "is empty"));
+                }
+                if argv[0].is_empty() {
+                    return Err(refused(&argv_field, "names no program"));
+                }
+                if argv.iter().any(|arg| arg.contains('\0')) {
+                    return Err(refused(&argv_field, "has a NUL"));
                 }
                 let program = argv.remove(0);
                 Runs::Program { program, args: argv }
@@ -134,15 +145,17 @@ impl Opens {
 /// A session, on the tab a client coming there goes to, or a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
-    Session(u64),
-    Tab(u32),
+    Session(SessionId),
+    Tab(TabId),
 }
 
 impl Place {
     pub fn parse(field: &str, place: Option<api::Place>) -> Result<Place, Status> {
         match present(&format!("{field}.is"), present(field, place)?.is)? {
-            api::place::Is::Session(session) => Ok(Place::Session(session)),
-            api::place::Is::Tab(tab) => Ok(Place::Tab(tab)),
+            api::place::Is::Session(session) => {
+                Ok(Place::Session(SessionId::parse(&format!("{field}.session"), session)?))
+            },
+            api::place::Is::Tab(tab) => Ok(Place::Tab(TabId::parse(&format!("{field}.tab"), tab)?)),
         }
     }
 }
@@ -150,16 +163,20 @@ impl Place {
 /// The client a `Go` takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Who {
-    Client(u64),
-    LastTypedIn(u64),
+    Client(ClientId),
+    LastTypedIn(SessionId),
 }
 
 impl Who {
     pub fn parse(field: &str, who: Option<api::go_request::Who>) -> Result<Who, Status> {
-        match present(field, who)? {
-            api::go_request::Who::Client(client) => Ok(Who::Client(client)),
-            api::go_request::Who::LastTypedIn(session) => Ok(Who::LastTypedIn(session)),
-        }
+        Ok(match present(field, who)? {
+            api::go_request::Who::Client(client) => {
+                Who::Client(ClientId::parse(&format!("{field}.client"), client)?)
+            },
+            api::go_request::Who::LastTypedIn(session) => {
+                Who::LastTypedIn(SessionId::parse(&format!("{field}.last_typed_in"), session)?)
+            },
+        })
     }
 }
 
@@ -526,12 +543,18 @@ mod tests {
             Opens::parse("opens", Some(api::Opens { cwd: cwd.to_owned(), runs, ends: ends.into() }))
         };
         let shell = Some(api::opens::Runs::Shell(api::Shell {}));
-        let empty = Some(api::opens::Runs::Program(api::Program { argv: Vec::new() }));
+        let program = |argv: &[&str]| {
+            let argv = argv.iter().map(|arg| (*arg).to_owned()).collect();
+            Some(api::opens::Runs::Program(api::Program { argv }))
+        };
         assert_eq!(opens("/", shell.clone(), api::Ends::Holds).unwrap().runs, Runs::Shell);
         let refused = [
             (opens("tmp", shell.clone(), api::Ends::Holds), "opens.cwd is not an absolute path"),
             (opens("/", None, api::Ends::Holds), "opens.runs is missing"),
-            (opens("/", empty, api::Ends::Holds), "opens.program.argv is empty"),
+            (opens("/", program(&[]), api::Ends::Holds), "opens.program.argv is empty"),
+            (opens("/", program(&[""]), api::Ends::Holds), "opens.program.argv names no program"),
+            (opens("/", program(&["ls", "a\0"]), api::Ends::Holds), "opens.program.argv has a NUL"),
+            (opens("/\0", shell.clone(), api::Ends::Holds), "opens.cwd has a NUL"),
             (opens("/", shell, api::Ends::Unspecified), "opens.ends is not one of CLOSES or HOLDS"),
         ];
         for (opens, message) in refused {
@@ -589,7 +612,8 @@ mod tests {
         let focus = api::ToServer {
             event: Some(api::to_server::Event::Focus(api::Focus { focused: true })),
         };
-        assert_eq!(hello(hello_said.clone()).unwrap().to, Place::Session(1));
+        let first = SessionId::parse("session", 1).unwrap();
+        assert_eq!(hello(hello_said.clone()).unwrap().to, Place::Session(first));
         assert_eq!(
             hello(focus.clone()).unwrap_err().message(),
             "event is not hello, as the first must be"

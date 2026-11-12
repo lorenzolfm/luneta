@@ -2,6 +2,8 @@
 //! the modes a client mirrors.
 
 use crate::api;
+use crate::asked::Size;
+use crate::id::PaneId;
 use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
 
 /// What a frame says of the pane besides its rows.
@@ -18,10 +20,10 @@ pub struct Flags {
 /// got none of this size.
 #[must_use]
 pub fn said(
-    pane: u32,
+    pane: PaneId,
     view: &View,
-    before: Option<((u16, u16), &View)>,
-    size: (u16, u16),
+    before: Option<(Size, &View)>,
+    size: Size,
     flags: Flags,
 ) -> api::Frame {
     let rows = match before {
@@ -44,15 +46,17 @@ pub fn said(
             lines: view.lines.iter().map(line_said).collect(),
         }),
     };
+    let count =
+        |count: usize| u32::try_from(count).expect("a pane's scrollback is counted in a u32");
     api::Frame {
-        pane,
-        size: Some(api::Size { columns: size.0.into(), rows: size.1.into() }),
+        pane: pane.said(),
+        size: Some(size.said()),
         rows: Some(rows),
         cursor: view.cursor.map(cursor_said),
         clusters: flags.clusters,
         mouse_tracking: flags.tracks,
-        scrolled_back: u32::try_from(flags.back).unwrap_or(u32::MAX),
-        scrollback: u32::try_from(flags.scrollback).unwrap_or(u32::MAX),
+        scrolled_back: count(flags.back),
+        scrollback: count(flags.scrollback),
     }
 }
 

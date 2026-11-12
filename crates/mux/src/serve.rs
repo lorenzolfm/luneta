@@ -19,6 +19,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Heard, Name, Opens, Place, Who};
 use crate::folder::Claim;
+use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::mux::Mux;
 use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
 
@@ -54,33 +55,39 @@ impl mux_server::Mux for Service {
         let name = Name::parse("name", request.name)?;
         let opens = Opens::parse("opens", request.opens)?;
         let (session, tab, pane) = self.mux.new_session(name, &opens)?;
-        Ok(Response::new(api::NewSessionResponse { session, tab, pane }))
+        Ok(Response::new(api::NewSessionResponse {
+            session: session.said(),
+            tab: tab.said(),
+            pane: pane.said(),
+        }))
     }
 
     async fn new_tab(&self, request: Request<api::NewTabRequest>) -> Answer<api::NewTabResponse> {
         let request = request.into_inner();
+        let session = SessionId::parse("session", request.session)?;
         let name = request.name.map(|name| Name::parse("name", name)).transpose()?;
         let opens = Opens::parse("opens", request.opens)?;
-        let (tab, pane) = self.mux.new_tab(request.session, name, &opens)?;
-        Ok(Response::new(api::NewTabResponse { tab, pane }))
+        let (tab, pane) = self.mux.new_tab(session, name, &opens)?;
+        Ok(Response::new(api::NewTabResponse { tab: tab.said(), pane: pane.said() }))
     }
 
     async fn close_tab(
         &self,
         request: Request<api::CloseTabRequest>,
     ) -> Answer<api::CloseTabResponse> {
-        self.mux.close_tab(request.into_inner().tab)?;
+        self.mux.close_tab(TabId::parse("tab", request.into_inner().tab)?)?;
         Ok(Response::new(api::CloseTabResponse {}))
     }
 
     async fn kill(&self, request: Request<api::KillRequest>) -> Answer<api::KillResponse> {
-        self.mux.kill(request.into_inner().session)?;
+        self.mux.kill(SessionId::parse("session", request.into_inner().session)?)?;
         Ok(Response::new(api::KillResponse {}))
     }
 
     async fn rename(&self, request: Request<api::RenameRequest>) -> Answer<api::RenameResponse> {
         let request = request.into_inner();
-        self.mux.rename(request.session, Name::parse("name", request.name)?)?;
+        let session = SessionId::parse("session", request.session)?;
+        self.mux.rename(session, Name::parse("name", request.name)?)?;
         Ok(Response::new(api::RenameResponse {}))
     }
 
@@ -88,16 +95,17 @@ impl mux_server::Mux for Service {
         let request = request.into_inner();
         let who = Who::parse("who", request.who)?;
         let to = Place::parse("to", request.to)?;
-        Ok(Response::new(api::GoResponse { client: self.mux.go(who, to)? }))
+        Ok(Response::new(api::GoResponse { client: self.mux.go(who, to)?.said() }))
     }
 
     async fn dump(&self, request: Request<api::DumpRequest>) -> Answer<api::DumpResponse> {
         let request = request.into_inner();
+        let pane = PaneId::parse("pane", request.pane)?;
         let dumped = Dumped::parse("dumped", request.dumped)?;
-        let handle = self.mux.pane(request.pane)?;
+        let handle = self.mux.pane(pane)?;
         let (answer, answered) = oneshot::channel();
         handle.send(ToPane::Dump(dumped, answer)).await;
-        let gone = || Status::not_found(format!("pane {} ended", request.pane));
+        let gone = || Status::not_found(format!("pane {pane} ended"));
         let text = answered.await.map_err(|_| gone())??;
         Ok(Response::new(api::DumpResponse { text }))
     }
@@ -134,7 +142,7 @@ impl mux_server::Mux for Service {
 
 /// Takes what client `client` says after its `Hello`, until it goes or says
 /// what is refused, and then lets go of it.
-async fn listen(mux: Arc<Mux>, client: u64, mut heard: Streaming<api::ToServer>, out: Out) {
+async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToServer>, out: Out) {
     let refused = loop {
         let message = match heard.message().await {
             Ok(Some(message)) => message,
@@ -157,7 +165,7 @@ async fn listen(mux: Arc<Mux>, client: u64, mut heard: Streaming<api::ToServer>,
 /// Has `client` do what it said: its input and its size go to the pane it is
 /// on, as soon as the pane has room for them, and a `Go` that is refused is
 /// told to it.
-async fn take(mux: &Mux, client: u64, said: Heard, out: &Out) {
+async fn take(mux: &Mux, client: ClientId, said: Heard, out: &Out) {
     match said {
         Heard::Input(input) => {
             if let Some(handle) = mux.input(client, input.types()) {

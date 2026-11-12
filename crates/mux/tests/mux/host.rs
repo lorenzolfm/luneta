@@ -184,9 +184,22 @@ pub async fn watched_until(
     }
 }
 
+/// The sessions as they stand.
+pub async fn listed(mux: &mut MuxClient<Channel>) -> api::Listing {
+    mux.list(api::ListRequest {}).await.unwrap().into_inner()
+}
+
 /// The tabs of the first session `listing` has, none where it has none.
 pub fn tabs(listing: &api::Listing) -> &[api::Tab] {
     listing.sessions.first().map_or(&[], |session| &session.tabs)
+}
+
+/// How the program of `pane` ended, none while it runs.
+pub fn ended(pane: &api::Pane) -> Option<api::Exit> {
+    match &pane.program {
+        Some(api::pane::Program::Ended(exit)) => Some(*exit),
+        Some(api::pane::Program::Pid(_)) | None => None,
+    }
 }
 
 /// A client attached to a pane, and the text of the rows it was sent.

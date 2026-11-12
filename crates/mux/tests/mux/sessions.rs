@@ -5,8 +5,8 @@ use luneta_mux::api;
 use tonic::Code;
 
 use crate::host::{
-    Attached, Server, gone, new_session, new_tab, run, script, session, shell, size, tabs,
-    watched_until,
+    Attached, Server, ended, gone, listed, new_session, new_tab, run, script, session, shell, size,
+    tabs, watched_until,
 };
 
 /// A session's shell runs on the pane's terminal: what a client types there
@@ -37,7 +37,7 @@ fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let made = new_session(&mut mux, "env", script("export -p", api::Ends::Holds)).await;
         watched_until(&mut watch, "the program ended", |listing| {
-            tabs(listing).first().is_some_and(|tab| tab.panes[0].ended.is_some())
+            tabs(listing).first().is_some_and(|tab| ended(&tab.panes[0]).is_some())
         })
         .await;
         let dumped = api::DumpRequest { pane: made.pane, dumped: api::Dumped::Text.into() };
@@ -102,12 +102,36 @@ fn a_tab_closes_or_holds_as_its_program_ends() {
                 let tabs = tabs(listing);
                 !tabs.is_empty()
                     && tabs.iter().all(|tab| tab.id != closed.tab)
-                    && tabs.iter().any(|tab| tab.id == held.tab && tab.panes[0].ended.is_some())
+                    && tabs.iter().any(|tab| tab.id == held.tab && ended(&tab.panes[0]).is_some())
             })
             .await;
-        let ended =
-            listing.sessions[0].tabs.iter().find(|tab| tab.id == held.tab).unwrap().panes[0].ended;
-        assert_eq!(ended, Some(api::Exit { how: Some(api::exit::How::Code(3)) }));
+        let held = &tabs(&listing).iter().find(|tab| tab.id == held.tab).unwrap().panes[0];
+        assert_eq!(
+            held.program,
+            Some(api::pane::Program::Ended(api::Exit { how: Some(api::exit::How::Code(3)) })),
+        );
+        let runs = &tabs(&listing)[0].panes[0];
+        assert!(matches!(runs.program, Some(api::pane::Program::Pid(pid)) if pid > 0), "{runs:?}");
+    });
+}
+
+/// A pane works where it opened, until its program says it works in another
+/// folder of this machine's: a folder of another machine's is not where it
+/// works.
+#[test]
+fn a_pane_works_where_it_says_on_this_machine() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let says = "printf '\\033]7;file://elsewhere/tmp\\007'; echo one; read x; \
+            printf '\\033]7;file:///tmp\\007'; echo two; read x";
+        let made = new_session(&mut mux, "cwd", script(says, api::Ends::Holds)).await;
+        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        attached.until_row("one").await;
+        assert_eq!(tabs(&listed(&mut mux).await)[0].panes[0].cwd, "/");
+        attached.type_line("").await;
+        attached.until_row("two").await;
+        assert_eq!(tabs(&listed(&mut mux).await)[0].panes[0].cwd, "/tmp");
     });
 }
 

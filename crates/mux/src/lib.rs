@@ -15,6 +15,7 @@ pub mod serve;
 
 mod asked;
 mod frame;
+mod id;
 mod mux;
 mod pane;
 mod pty;

@@ -1393,6 +1393,7 @@ dependencies = [
  "hyper-util",
  "libghostty-vt",
  "libghostty-vt-sys",
+ "percent-encoding",
  "prost",
  "rustix",
  "tempfile",
