@@ -573,18 +573,66 @@ enum Right {
     Own(Own),
 }
 
-/// luneta's client of an own session, and what luneta does once the server
-/// first says where it is.
+/// luneta's client of an own session, and how far it came.
 struct Own {
     attached: Attached,
-    /// What luneta does as the client comes to the session it goes to, as
-    /// once zellij's client comes: what a delete asked of the session it
-    /// leaves. A `Go` refused leaves it undone.
+    phase: Phase,
+}
+
+/// How far luneta's client of an own session came.
+enum Phase {
+    /// It has yet to come to any session: where it is lost first, as where
+    /// no server runs, or it is refused, luneta goes where `fails` says.
+    Coming { fails: Fails, going: Going },
+    /// It came to a session, and goes to another where `going` is some.
+    In { going: Option<Going> },
+}
+
+/// Where luneta's client of an own session goes, and what luneta does once
+/// it is there, as once zellij's client comes: what a delete asked of the
+/// session it leaves. A `Go` refused leaves it undone.
+struct Going {
+    to: To,
     after: Option<After>,
-    /// Where luneta goes where the client is lost before it comes to any
-    /// session, as where no server runs, or it is refused: none once the
-    /// server said where it is.
-    fails: Option<Fails>,
+}
+
+impl Phase {
+    /// The client goes as `going` says now: what the go before it was to do
+    /// once there is left to the caller, undone.
+    fn going(&mut self, going: Going) -> Option<After> {
+        let before = match self {
+            Phase::Coming { going: was, .. } => Some(std::mem::replace(was, going)),
+            Phase::In { going: was } => was.replace(going),
+        };
+        before.and_then(|before| before.after)
+    }
+
+    /// The client `went` somewhere: it came, and what its go was to do once
+    /// there is the caller's to do, where it is where the go took it. It
+    /// goes on where the server took it elsewhere, as where a tab it was on
+    /// closed, or another luneta took it.
+    fn went(&mut self, went: &own_attach::Went) -> Option<After> {
+        let going = match std::mem::replace(self, Phase::In { going: None }) {
+            Phase::Coming { going, .. } => Some(going),
+            Phase::In { going } => going,
+        };
+        match going {
+            Some(going) if going.to.reached(went) => going.after,
+            going => {
+                *self = Phase::In { going };
+                None
+            },
+        }
+    }
+
+    /// The server refused the client's go: what it was to do once there is
+    /// left to the caller, undone.
+    fn stayed(&mut self) -> Option<After> {
+        match self {
+            Phase::Coming { going, .. } => going.after.take(),
+            Phase::In { going } => going.take().and_then(|going| going.after),
+        }
+    }
 }
 
 /// How a client luneta starts comes to its session.
@@ -1194,7 +1242,8 @@ fn run_in(
             sidebar.attaching(session);
             let hello = hello(To::Session(session), areas.1, colours);
             let attached = Attached::start(started, hello, &events);
-            Right::Own(Own { attached, after: None, fails: Some(Fails::End) })
+            let going = Going { to: To::Session(session), after: None };
+            Right::Own(Own { attached, phase: Phase::Coming { fails: Fails::End, going } })
         },
     };
     let own = matches!(right, Right::Own(_));
@@ -3049,7 +3098,7 @@ impl App {
             return true;
         };
         own.attached.go(to);
-        if let Some(before) = std::mem::replace(&mut own.after, after) {
+        if let Some(before) = own.phase.going(Going { to, after }) {
             before.untold(&self.events);
         }
         true
@@ -3068,7 +3117,8 @@ impl App {
         if let Right::Zellij(client) = &self.right {
             self.drops.gave_way(client.started.elapsed());
         }
-        self.right = Right::Own(Own { attached, after, fails: Some(fails) });
+        let going = Going { to, after };
+        self.right = Right::Own(Own { attached, phase: Phase::Coming { fails, going } });
         self.sidebar.attaching(to.session());
         // The client that takes its place heard no button go down over it.
         if matches!(self.held, Held::Zellij | Held::Selecting) {
@@ -3083,8 +3133,9 @@ impl App {
 
     /// Takes in what luneta-mux said to luneta's client of an own session:
     /// where it is, which the sidebar has it at, and does what waited on its
-    /// coming there; what its pane shows; a go it refused, which leaves what
-    /// waited on it undone; and its end, as `own_ended` says.
+    /// coming there, where it is where it went, as `Phase::went` says; what
+    /// its pane shows; a go it refused, which leaves what waited on it undone;
+    /// and its end, as `own_ended` says.
     fn own_heard(&mut self, heard: Heard) -> io::Result<()> {
         let Right::Own(own) = &mut self.right else {
             unreachable!("only an own client hears its server");
@@ -3093,15 +3144,14 @@ impl App {
         match heard {
             Heard::Attached | Heard::Frame(_) => {},
             Heard::Went(went) => {
-                own.fails = None;
-                let after = own.after.take();
+                let after = own.phase.went(&went);
                 self.sidebar.went_own(went.session, went.pane);
                 if let Some(after) = after {
                     zellij::came_here(after, &self.events);
                 }
             },
             Heard::Stayed(reason) => {
-                let after = own.after.take();
+                let after = own.phase.stayed();
                 let note = format!("luneta-mux did not take luneta's client there: {reason}");
                 self.sidebar.notify(note);
                 if let Some(after) = after {
@@ -3123,8 +3173,11 @@ impl App {
         let Right::Own(own) = &mut self.right else {
             unreachable!("only an own client ends so");
         };
-        let fails = own.fails.take();
-        if let Some(after) = own.after.take() {
+        let (fails, going) = match std::mem::replace(&mut own.phase, Phase::In { going: None }) {
+            Phase::Coming { fails, going } => (Some(fails), Some(going)),
+            Phase::In { going } => (None, going),
+        };
+        if let Some(after) = going.and_then(|going| going.after) {
             after.untold(&self.events);
         }
         let Some(why) = lost else {
@@ -3434,6 +3487,9 @@ impl App {
             return;
         };
         own.attached.go(to);
+        if let Some(before) = own.phase.going(Going { to, after: None }) {
+            before.untold(&self.events);
+        }
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of
@@ -4324,6 +4380,39 @@ mod tests {
         assert_eq!(went(Some(refuge(None)), None), zellij);
         assert_eq!(went(None, Some(own(0))), Some(Ok(id)));
         assert_eq!(went(None, None), None);
+    }
+
+    /// What a go to an own session does once there waits for the client to
+    /// be where it went: a Went elsewhere, as where a tab of the session it
+    /// leaves closes, leaves it waiting, though the client came. A go after
+    /// it, or a refusal, hands it back undone.
+    #[test]
+    fn a_go_s_after_waits_for_the_client_to_be_where_it_went() {
+        let key = |id, made| OwnKey {
+            id: lunetad::mux::own::OwnId::new(id).unwrap(),
+            made: SystemTime::UNIX_EPOCH + Duration::from_secs(made),
+        };
+        let (here, there) = (key(1, 10), key(2, 20));
+        let kill = || {
+            let whose = lunetad::closes::Whose::Own(here);
+            Some(After::Kill { session: SessionName::running("here").unwrap(), whose })
+        };
+        let went = |session, tab| own_attach::Went { session, tab, pane: 9 };
+        let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
+        let going = Going { to: To::Session(there), after: kill() };
+        let mut phase = Phase::Coming { fails: Fails::End, going };
+        assert!(phase.went(&went(here, 3)).is_none());
+        assert!(matches!(phase, Phase::In { going: Some(_) }), "it came, and still goes");
+        assert!(is_kill(phase.went(&went(there, 4))));
+        assert!(matches!(phase, Phase::In { going: None }));
+        let to = To::Tab { session: there, tab: 5 };
+        assert!(phase.going(Going { to, after: kill() }).is_none());
+        assert!(phase.went(&went(there, 4)).is_none(), "another tab of the session");
+        assert!(is_kill(phase.going(Going { to: To::Session(here), after: None })));
+        assert!(phase.stayed().is_none());
+        assert!(phase.going(Going { to: To::Session(here), after: kill() }).is_none());
+        assert!(is_kill(phase.stayed()));
+        assert!(matches!(phase, Phase::In { going: None }));
     }
 
     /// A terminal takes what it is to copy as base64, on the clipboard or the
