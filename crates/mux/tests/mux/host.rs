@@ -38,8 +38,20 @@ pub struct Server {
 
 impl Server {
     pub fn start() -> Server {
+        Server::started(Command::new(LUNETA_MUX))
+    }
+
+    /// A server that starts with a limit of `files` open files, as a shell
+    /// that set it starts it.
+    pub fn start_with_files(files: u32) -> Server {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\"", LUNETA_MUX]);
+        command.arg(files.to_string());
+        Server::started(command)
+    }
+
+    fn started(mut command: Command) -> Server {
         let runtime = tempfile::tempdir().unwrap();
-        let mut command = Command::new(LUNETA_MUX);
         command
             .env("XDG_RUNTIME_DIR", runtime.path())
             .env("SHELL", "/bin/sh")

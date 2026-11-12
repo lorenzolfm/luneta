@@ -22,6 +22,7 @@ use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::mux::Mux;
 use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
+use crate::pty;
 
 /// How long a server with no session waits for one, as it starts.
 pub const FIRST_SESSION: Duration = Duration::from_secs(30);
@@ -231,6 +232,9 @@ impl Stream for UntilEnded {
 /// had none for `FIRST_SESSION` as it starts. It says on stderr that it
 /// listens once it does.
 pub async fn serve(claim: Claim) -> io::Result<()> {
+    if let Err(error) = pty::raise_files_limit() {
+        eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
+    }
     let listener = UnixListener::bind(claim.socket())?;
     let mux = Mux::new();
     let mut watched = mux.watched();

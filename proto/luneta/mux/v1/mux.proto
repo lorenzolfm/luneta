@@ -206,7 +206,7 @@ message Client {
   Size size = 2;
 }
 
-// A size in cells. Each of 1 to 65535.
+// A size in cells. Each of 1 to 1000: more is refused.
 message Size {
   uint32 columns = 1;
   uint32 rows = 2;

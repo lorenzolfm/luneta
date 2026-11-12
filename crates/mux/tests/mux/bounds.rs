@@ -7,7 +7,8 @@ use luneta_mux::api;
 use tokio::time::Instant;
 
 use crate::host::{
-    Attached, Server, ended, new_session, run, script, session, size, tabs, watched_until,
+    Attached, Server, ended, new_session, new_tab, run, script, session, size, tabs,
+    watched_until,
 };
 
 /// A program that asks its terminal what it is, over and over, and never
@@ -51,5 +52,23 @@ fn a_folder_named_in_no_utf_8_breaks_no_pane() {
             tabs(listing).first().is_some_and(|tab| ended(&tab.panes[0]).is_some())
         })
         .await;
+    });
+}
+
+/// A server started with a limit of 64 open files holds more tabs than they
+/// would, as each pane holds four, and the programs of its panes get the
+/// limit it was started with.
+#[test]
+fn a_server_holds_more_files_than_it_started_with_and_its_programs_get_that_back() {
+    run(async {
+        let server = Server::start_with_files(64);
+        let mut mux = server.client().await;
+        let says = script("ulimit -Sn; read x", api::Ends::Holds);
+        let made = new_session(&mut mux, "many", says).await;
+        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        attached.until_row("64").await;
+        for _ in 0..20 {
+            new_tab(&mut mux, made.session, script("read x", api::Ends::Holds)).await;
+        }
     });
 }

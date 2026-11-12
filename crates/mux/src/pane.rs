@@ -8,6 +8,7 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
@@ -39,7 +40,8 @@ const SCROLLBACK_BYTES: usize = 10_000_000;
 const FRAME_GAP: Duration = Duration::from_millis(4);
 
 /// The longest a pane holds its frames while its program draws in one go
-/// (mode 2026), as Ghostty holds them.
+/// (mode 2026), as Ghostty holds them: past it, the pane turns the mode off,
+/// as Ghostty does, and frames again.
 const SYNC_HOLD: Duration = Duration::from_secs(1);
 
 /// How soon a pane tries again to send a frame to a client that had no room.
@@ -248,8 +250,13 @@ pub fn start(
             pwd: String::new(),
             host: host(),
         };
-        if let Err(error) = thread.run() {
-            eprintln!("luneta-mux: pane {pane} failed: {error}");
+        let failed = match panic::catch_unwind(AssertUnwindSafe(|| thread.run())) {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some("it panicked".to_owned()),
+        };
+        if let Some(failed) = failed {
+            eprintln!("luneta-mux: pane {pane} failed: {failed}");
             thread.program = Program::Gone;
             thread.mux.lost(pane);
         }
@@ -655,26 +662,33 @@ impl Thread {
         if !due {
             return Ok(());
         }
-        let held = self.synced.is_some_and(|since| since.elapsed() < SYNC_HOLD);
-        if held || self.framed.elapsed() < FRAME_GAP {
+        if self.synced.is_some_and(|since| since.elapsed() >= SYNC_HOLD) {
+            self.screen.unsync().map_err(io::Error::other)?;
+            self.synced = None;
+        }
+        if self.synced.is_some() || self.framed.elapsed() < FRAME_GAP {
             return Ok(());
         }
         self.framed = Instant::now();
         self.dirty = false;
-        let views = self.views().map_err(io::Error::other)?;
         let (columns, rows) = self.screen.size();
         let size = Size { columns, rows };
         let (clusters, tracks) = (self.screen.clusters(), self.screen.tracks_mouse());
         let scrollback = self.screen.scrollback();
+        let mut views: Vec<(usize, View)> = Vec::new();
         for watcher in &mut self.watchers {
             if watcher.viewer.out.capacity() <= FOR_WORDS {
                 watcher.owed = true;
                 continue;
             }
+            if !views.iter().any(|(back, _)| *back == watcher.back) {
+                let view = self.screen.view(watcher.back).map_err(io::Error::other)?;
+                views.push((watcher.back, view));
+            }
             let view = &views
                 .iter()
                 .find(|(back, _)| *back == watcher.back)
-                .expect("a view from where each client looks")
+                .expect("a view from where the client looks, drawn above")
                 .1;
             let flags = Flags { clusters, tracks, back: watcher.back, scrollback };
             let unchanged = watcher.shown.as_ref().is_some_and(|shown| {
@@ -696,21 +710,8 @@ impl Thread {
                 Err(TrySendError::Closed(_)) => watcher.owed = false,
             }
         }
-        Ok(())
-    }
-
-    /// The screen as seen from where each client with room for a frame
-    /// looks: one view for each place in the scrollback.
-    fn views(&mut self) -> Result<Vec<(usize, View)>, Error> {
-        let mut views: Vec<(usize, View)> = Vec::new();
-        for watcher in &self.watchers {
-            if views.iter().any(|(back, _)| *back == watcher.back) {
-                continue;
-            }
-            views.push((watcher.back, self.screen.view(watcher.back)?));
-        }
         assert!(views.len() <= self.watchers.len());
-        Ok(views)
+        Ok(())
     }
 }
 

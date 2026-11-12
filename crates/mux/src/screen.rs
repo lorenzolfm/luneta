@@ -228,6 +228,16 @@ impl Screen {
         self.mode(Mode::SYNC_OUTPUT)
     }
 
+    /// Has the screen stop holding what its program draws (mode 2026), as a
+    /// terminal does once the program held it too long.
+    pub fn unsync(&mut self) -> Result<(), Error> {
+        let (set, answers) = self
+            .answering
+            .drive(|terminal| terminal.set_mode(Mode::SYNC_OUTPUT, false).map(|_| ()));
+        assert!(answers.is_empty(), "turning off mode 2026 answered {answers:?}");
+        set
+    }
+
     fn mode(&self, mode: Mode) -> bool {
         self.answering.terminal().mode(mode).expect("a terminal says its modes")
     }
@@ -473,6 +483,16 @@ mod tests {
         let answer = String::from_utf8(screen.write(b"\x1b[>q")).unwrap();
         assert_eq!(answer, format!("\x1bP>|{NAME}\x1b\\"));
         assert!(screen.write(b"x").is_empty(), "an answer is given once");
+    }
+
+    /// A screen that held what its program drew stops, as told.
+    #[test]
+    fn a_screen_stops_holding_what_its_program_draws_as_told() {
+        let mut screen = screen(10, 2);
+        assert_eq!(screen.write(b"\x1b[?2026h"), b"");
+        assert!(screen.syncs());
+        screen.unsync().unwrap();
+        assert!(!screen.syncs());
     }
 
     /// A program that asks what its terminal is (DA1) is told, as fish asks

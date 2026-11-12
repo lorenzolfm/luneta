@@ -8,8 +8,10 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command};
+use std::sync::OnceLock;
 
 use rustix::fs::{Mode, OFlags};
+use rustix::process::{Resource, Rlimit};
 use rustix::pty::OpenptFlags;
 use rustix::termios::{self, InputModes, OptionalActions, Winsize};
 
@@ -29,6 +31,36 @@ pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PAN
 
 /// The terminal the server says it is, to what runs in its panes.
 const TERM: &str = "xterm-256color";
+
+/// The most files macOS lets a process say it may open (`OPEN_MAX`), where
+/// it refuses a limit of no bound.
+const OPEN_MAX: u64 = 10_240;
+
+/// The limit of open files the server started with, where it raised it: what
+/// the programs of its panes get back.
+static FILES_FOUND: OnceLock<Rlimit> = OnceLock::new();
+
+/// Raises the server's limit of open files as far as it may go, as each pane
+/// holds four.
+pub fn raise_files_limit() -> io::Result<()> {
+    let found = rustix::process::getrlimit(Resource::Nofile);
+    let most = if cfg!(target_os = "macos") {
+        Some(found.maximum.map_or(OPEN_MAX, |maximum| maximum.min(OPEN_MAX)))
+    } else {
+        found.maximum
+    };
+    let higher = match (found.current, most) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(current), Some(most)) => most > current,
+    };
+    if !higher {
+        return Ok(());
+    }
+    rustix::process::setrlimit(Resource::Nofile, Rlimit { current: most, maximum: found.maximum })?;
+    assert!(FILES_FOUND.set(found).is_ok(), "the limit of open files was raised twice");
+    Ok(())
+}
 
 /// A pseudoterminal: the end the server reads and writes, and the end the
 /// program has, which the server holds open too, so that what the program
@@ -98,17 +130,22 @@ impl Pty {
     }
 }
 
-/// Has `command` lead a session of its own, whose terminal is its stdin.
+/// Has `command` lead a session of its own, whose terminal is its stdin,
+/// with the limit of open files the server started with.
 #[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
 fn leads(command: &mut Command) -> &mut Command {
+    let files = FILES_FOUND.get().copied();
     // SAFETY: the closure runs in the child, between its fork and its exec,
-    // where only what a signal handler may do is safe: `setsid` and the ioctl
-    // are system calls alone, and their errors hold no memory. Stdin is open
-    // there, as std set it up before the closure runs.
+    // where only what a signal handler may do is safe: `setsid`, the ioctl
+    // and `setrlimit` are system calls alone, and their errors hold no
+    // memory. Stdin is open there, as std set it up before the closure runs.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             rustix::process::setsid()?;
             rustix::process::ioctl_tiocsctty(BorrowedFd::borrow_raw(0))?;
+            if let Some(files) = files {
+                rustix::process::setrlimit(Resource::Nofile, files)?;
+            }
             Ok(())
         });
     }

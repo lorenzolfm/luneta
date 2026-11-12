@@ -17,6 +17,10 @@ use crate::screen::{Click, RgbColor, Wheel};
 /// The most bytes a name has.
 pub const NAME_BYTES_MAX: usize = 255;
 
+/// The most columns a size has, and the most rows: more than any screen
+/// shows.
+pub const SIDE_MAX: u16 = 1000;
+
 /// A refusal of what `field` said, and why.
 pub(crate) fn refused(field: &str, why: impl fmt::Display) -> Status {
     Status::invalid_argument(format!("{field} {why}"))
@@ -27,7 +31,7 @@ fn present<T>(field: &str, value: Option<T>) -> Result<T, Status> {
     value.ok_or_else(|| refused(field, "is missing"))
 }
 
-/// A size in cells.
+/// A size in cells, of 1 to `SIDE_MAX` each way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
     pub columns: NonZeroU16,
@@ -39,7 +43,10 @@ impl Size {
         let size = present(field, size)?;
         let count = |name: &str, count: u32| {
             let field = format!("{field}.{name}");
-            let count = u16::try_from(count).map_err(|_| refused(&field, "is over 65535"))?;
+            let count = u16::try_from(count)
+                .ok()
+                .filter(|count| *count <= SIDE_MAX)
+                .ok_or_else(|| refused(&field, format_args!("is over {SIDE_MAX}")))?;
             NonZeroU16::new(count).ok_or_else(|| refused(&field, "is 0"))
         };
         Ok(Size { columns: count("columns", size.columns)?, rows: count("rows", size.rows)? })
@@ -514,13 +521,15 @@ mod tests {
         Size::parse("resize", Some(api::Size { columns, rows }))
     }
 
-    /// A size of no columns or rows, or of more than a u16 holds, is refused,
+    /// A size of no columns or rows, or of more than `SIDE_MAX`, is refused,
     /// and the refusal names the field.
     #[test]
-    fn a_size_is_of_1_to_65535_and_a_refusal_names_the_field() {
+    fn a_size_is_of_1_to_1000_and_a_refusal_names_the_field() {
         assert_eq!(size(80, 24).unwrap().columns.get(), 80);
+        assert_eq!(size(1000, 1000).unwrap().rows.get(), 1000);
         assert_eq!(size(80, 0).unwrap_err().message(), "resize.rows is 0");
-        assert_eq!(size(65536, 1).unwrap_err().message(), "resize.columns is over 65535");
+        assert_eq!(size(1001, 1).unwrap_err().message(), "resize.columns is over 1000");
+        assert_eq!(size(1, 65536).unwrap_err().message(), "resize.rows is over 1000");
         let missing = Size::parse("hello.size", None).unwrap_err();
         assert_eq!(missing.message(), "hello.size is missing");
     }
