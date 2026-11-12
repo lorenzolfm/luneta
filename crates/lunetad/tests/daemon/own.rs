@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use std::{fs, mem};
 
 use hyper_util::rt::TokioIo;
 use lunetad::api::close_request::Closes as Closed;
@@ -14,8 +15,8 @@ use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::{
     self, agent, close_request, kill_request, session as kind, CheckNameRequest, CloseRequest,
-    ClosesRequest, DumpScreenRequest, KillRequest, NewOwnRequest, NewOwnResponse, OpenRequest,
-    RenameSessionRequest, TurnIntoTabRequest,
+    ClosesRequest, DumpScreenRequest, GoRequest, KillRequest, NewOwnRequest, NewOwnResponse,
+    OpenRequest, RenameSessionRequest, TurnIntoTabRequest,
 };
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{pane::Program, ListRequest};
@@ -31,6 +32,49 @@ use crate::sessions::session;
 /// its tab open, and that the server hangs up as its session goes.
 const WAITS: [&str; 2] = ["sleep", "600"];
 
+/// The own sessions' server, beside the daemon, where the daemon starts it
+/// from: built since each file it is built of last changed, as the dep-info
+/// cargo writes beside it lists them. `dev test` builds it, but a `cargo test
+/// -p lunetad` builds the daemon alone, and would leave the tests a server
+/// built before, or none.
+fn built_server() -> PathBuf {
+    let program = Path::new(LUNETAD).with_file_name("luneta-mux");
+    let shown = program.display();
+    let rebuild = "dev test builds it, and so does cargo build -p luneta-mux";
+    let built = fs::metadata(&program).and_then(|it| it.modified());
+    let built = built.unwrap_or_else(|error| panic!("{shown}: {error}: {rebuild}"));
+    let listed = program.with_extension("d");
+    let listed = fs::read_to_string(&listed)
+        .unwrap_or_else(|error| panic!("{}: {error}: {rebuild}", listed.display()));
+    let (_, sources) = listed.split_once(": ").expect("a dep-info line names its target first");
+    for source in listed_paths(sources) {
+        let changed = fs::metadata(&source).and_then(|it| it.modified());
+        let fresh = changed.is_ok_and(|changed| changed <= built);
+        assert!(fresh, "{} changed since {shown} was built: {rebuild}", source.display());
+    }
+    program
+}
+
+/// The paths a dep-info line lists, apart by spaces, but those a backslash
+/// escapes, which are of the path.
+fn listed_paths(line: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut path = String::new();
+    let mut chars = line.trim_end().chars();
+    while let Some(char) = chars.next() {
+        match char {
+            '\\' => path.extend(chars.next()),
+            ' ' if path.is_empty() => {},
+            ' ' => paths.push(PathBuf::from(mem::take(&mut path))),
+            char => path.push(char),
+        }
+    }
+    if !path.is_empty() {
+        paths.push(PathBuf::from(path));
+    }
+    paths
+}
+
 /// A host whose daemon runs, and the server of own sessions the daemon starts
 /// for it, which goes with the test, whatever becomes of its sessions.
 struct Owned {
@@ -41,8 +85,7 @@ struct Owned {
 
 impl Owned {
     fn new() -> Self {
-        let server = Path::new(LUNETAD).with_file_name("luneta-mux");
-        assert!(server.is_file(), "{} is not built: dev test builds it", server.display());
+        built_server();
         let host = Host::new();
         let daemon = start(host.vars()).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -236,7 +279,7 @@ fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
 #[test]
 fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     let host = Host::new();
-    let program = Path::new(LUNETAD).with_file_name("luneta-mux");
+    let program = built_server();
     let program = program.to_str().unwrap();
     let mut first = host.vars().command(program);
     let _first = Running::spawn(first.stdin(Stdio::null()));
@@ -359,6 +402,30 @@ fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let refused = owned.ask(|mut daemon| async move { daemon.kill(zero).await }).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
     assert_eq!(owned.listed("own").mux, Some(kind::Mux::Own(made.session)));
+}
+
+/// A client in an own session goes to no name that no own session has, and
+/// the refusal says why: zellij has it, which the client cannot cross to yet,
+/// or no session has it.
+#[test]
+fn a_client_in_an_own_session_goes_to_no_other_kind_s_name_or_none() {
+    let owned = Owned::new();
+    owned.make("own").unwrap();
+    owned.listed("own");
+    let _work = owned.host.serve("work");
+    eventually("work runs", || session(&owned.host.host(), "work").map(drop));
+
+    let go = |to: &str| {
+        let (at, to) = ("own".to_owned(), to.to_owned());
+        let request = GoRequest { on: None, at, to, pane: None };
+        owned.ask(|mut daemon| async move { daemon.go(request).await }).unwrap_err()
+    };
+    let across = go("work");
+    assert_eq!(across.code(), Code::FailedPrecondition, "{across:?}");
+    assert!(across.message().contains("cannot take a client between"), "{across:?}");
+    let none = go("nowhere");
+    assert_eq!(none.code(), Code::FailedPrecondition, "{none:?}");
+    assert!(none.message().contains("no session is named nowhere"), "{none:?}");
 }
 
 /// The screen of an own pane dumps as a zellij pane's does, by the session's

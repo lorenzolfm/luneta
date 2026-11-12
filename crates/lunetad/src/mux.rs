@@ -357,7 +357,9 @@ impl Mux<'_> {
             },
             Mux::Zellij(at) => zellij::cli::went(at, to, pane),
             Mux::Own(at) => {
-                let to = at.named(to)?.ok_or(Failure::Unsupported(ACROSS))?;
+                let Some(to) = at.named(to)? else {
+                    return Err(unowned(to)?);
+                };
                 let place = pane.map_or(own::server::Place::Session(to), |pane| {
                     own::server::Place::Pane { session: to, pane }
                 });
@@ -387,6 +389,20 @@ const BESIDE: &str = "open a pane beside another";
 
 /// What luneta's client does itself, between an own session and zellij's.
 const ACROSS: &str = "take a client between one of zellij's sessions and an own one";
+
+/// Why a client in an own session does not go to `to`, which no own session
+/// has: zellij has it, one that runs or one it keeps to bring back, which the
+/// client cannot cross to yet; or no session has it. Or why luneta cannot
+/// tell, as it cannot read where zellij keeps either.
+fn unowned(to: &SessionName) -> Result<Failure, Failure> {
+    let running = crate::closes::running_in(&Zellij::socket_folder()).map_err(Failure::Unread)?;
+    let unknown = |why| format!("luneta cannot tell whether zellij keeps {to}: {why}");
+    let kept = Zellij::kept().map_err(|why| Failure::Unread(unknown(why)))?;
+    if running.iter().any(|(name, _)| name == to) || kept.contains(to) {
+        return Ok(Failure::Unsupported(ACROSS));
+    }
+    Ok(Failure::Own(format!("no session is named {to}, of its own or of zellij's")))
+}
 
 /// What luneta finds and runs of zellij's alone, which no other multiplexer
 /// has: the folders it keeps its sessions in, what it keeps of those that
