@@ -17,7 +17,7 @@ use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_checks_response::{failed, Failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    close_request, closes_response, list_exited_response, other_tabs_response,
+    close_request, closes_response, kill_request, list_exited_response, other_tabs_response,
     turn_into_panes_response, turn_into_tab_response,
 };
 use lunetad::api::list_skills_response::Skill;
@@ -1012,8 +1012,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         // What it closes goes while zellij lists it as the close says: a pane
         // another holds its tab open beside, and a tab with its terminals.
         let close = |session: &str, closes| {
-            let (session, started_at) = (session.to_owned(), Some(SystemTime::UNIX_EPOCH.into()));
-            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
+            let started_at = close_request::Whose::StartedAt(SystemTime::UNIX_EPOCH.into());
+            let session = session.to_owned();
+            CloseRequest { on: on("far"), session, closes: Some(closes), whose: Some(started_at) }
         };
         let pane = close_request::Closes::Pane;
         let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
@@ -1069,16 +1070,17 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
 
         // A session there is killed by when it started, as its daemon lists
         // it, and deleted.
-        let kill = |started_at| {
-            KillRequest { on: on("far"), session: "work".to_owned(), started_at }
+        let kill = |started_at: Option<_>| {
+            let started_at = started_at.map(kill_request::Whose::StartedAt);
+            KillRequest { on: on("far"), session: "work".to_owned(), whose: started_at }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
         // What closes in a session there goes by when it started too.
-        let held = |started_at| CloseRequest {
+        let held = |started_at: Option<_>| CloseRequest {
             on: on("far"),
             session: "work".to_owned(),
             closes: Some(pane(4)),
-            started_at,
+            whose: started_at.map(close_request::Whose::StartedAt),
         };
         invalid(daemon.close(held(None)).await.unwrap_err());
         let since = Some(SystemTime::UNIX_EPOCH.into());

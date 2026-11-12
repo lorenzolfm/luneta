@@ -376,7 +376,7 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
 async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
     let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seat(agent.zellij.as_ref()), agent)).collect();
+        listed.agents.iter().map(|agent| (seat(agent.zellij()), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {

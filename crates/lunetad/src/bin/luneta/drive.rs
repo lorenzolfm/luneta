@@ -174,7 +174,7 @@ fn seat(
         Some(Seat::Opened(ZellijPane { session, pane })) => (session, pane),
     };
     let in_pane = |zellij: &&Zellij| zellij.named == named && zellij.pane == pane;
-    let zellij = agents.unwrap_or_default().iter().filter_map(|agent| agent.zellij.as_ref());
+    let zellij = agents.unwrap_or_default().iter().filter_map(|agent| agent.zellij());
     let told: BTreeSet<Option<&str>> =
         zellij.filter(in_pane).map(|zellij| zellij.session.as_deref()).collect();
     let lost = |why: String| {
@@ -841,7 +841,7 @@ fn plans_in(
         },
     };
     let in_session = |agent: &Agent| {
-        let zellij = agent.zellij.as_ref()?;
+        let zellij = agent.zellij()?;
         (zellij.session.as_deref() == Some(session)).then(|| (zellij.pane, Doing::from(agent)))
     };
     let agents: Result<Vec<_>, Untold> = match told {
@@ -892,7 +892,7 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
     let seated = |zellij: Option<&Zellij>| ends(zellij).then(|| commands::seat(zellij));
     let agents: Vec<(String, &Agent)> = agents
         .iter()
-        .filter_map(|agent| Some((seated(agent.zellij.as_ref())?, agent)))
+        .filter_map(|agent| Some((seated(agent.zellij())?, agent)))
         .collect();
     let unread: Vec<(String, &UnreadFile)> =
         unread.iter().filter_map(|file| Some((seated(file.zellij.as_ref())?, file))).collect();
@@ -907,7 +907,7 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
         if is_here(zellij) { format!("{line}  (this runs here)") } else { line }
     };
     let agents = agents.into_iter().map(|(seat, agent)| {
-        let line = mark(commands::line(&seat, width, agent), agent.zellij.as_ref());
+        let line = mark(commands::line(&seat, width, agent), agent.zellij());
         (seat, line)
     });
     let unread = unread.into_iter().map(|(seat, file)| {

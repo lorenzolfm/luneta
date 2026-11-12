@@ -233,7 +233,7 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     assert_eq!((idle.session_id.as_str(), idle.cwd.as_str()), ("first", "/home/you/work"));
     assert_eq!(idle.entrypoint.as_deref(), Some("tui"));
     assert!(idle.at_a_prompt());
-    let zellij = idle.zellij.clone().unwrap();
+    let zellij = idle.zellij().cloned().unwrap();
     assert_eq!((zellij.named.as_str(), zellij.pane), ("work", 3));
     let since: SystemTime = idle.status_since.unwrap().try_into().unwrap();
     assert!(before - Duration::from_millis(1) <= since, "dated {since:?}, after {before:?}");

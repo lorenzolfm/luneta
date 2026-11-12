@@ -22,8 +22,9 @@ use crate::panes::{self, Pane};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::Shell;
+use crate::log;
 use crate::transcripts::SessionId;
-use crate::mux::{Client, Id, Listed, SessionName, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, OwnId, SessionName, Sessions, Socket};
 
 /// Which session the core keeps something of, and of which multiplexer's: as
 /// it stays through a rename.
@@ -32,25 +33,25 @@ pub enum SessionKey {
     /// A zellij session, by its socket.
     Zellij(Id),
     /// An own session, by the id its server gave it, which it gives no other.
-    Own(u64),
+    Own(OwnId),
 }
 
-/// A session its multiplexer was asked about, as it was asked: a zellij one by
-/// the name it had then, which a rename moves to another.
+/// A zellij session zellij was asked about, as it was asked: by the name it
+/// had then, which a rename moves to another.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Asked {
-    Zellij { id: Id, name: SessionName },
-    #[expect(dead_code, reason = "the daemon follows own sessions from #331's step 2, PR 3")]
-    Own(u64),
+pub struct Asked {
+    pub id: Id,
+    pub name: SessionName,
 }
 
-impl Asked {
-    fn key(&self) -> SessionKey {
-        match self {
-            Asked::Zellij { id, .. } => SessionKey::Zellij(*id),
-            Asked::Own(id) => SessionKey::Own(*id),
-        }
-    }
+/// An own session, as its server lists it: whole, as it lists every session
+/// each time one changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Own {
+    pub id: OwnId,
+    pub name: SessionName,
+    pub panes: Vec<Pane>,
+    pub clients: Listed,
 }
 
 /// A branch, by the directory that holds its repository, and its name.
@@ -68,12 +69,13 @@ pub enum Command {
     /// The zellij sessions that run now, and how many of zellij's folders and
     /// sockets could not be read, any of which could be another's.
     Sockets { sockets: Vec<Socket>, unread: u32 },
-    /// What the multiplexer listed of the panes of the session it was `asked`
-    /// about.
+    /// What zellij listed of the panes of the session it was `asked` about.
     Panes { asked: Asked, panes: Vec<Pane> },
-    /// What the multiplexer listed of the clients of the session it was
-    /// `asked` about.
+    /// What zellij listed of the clients of the session it was `asked` about.
     Clients { asked: Asked, clients: Listed },
+    /// The own sessions that run now, as their server lists them, in the order
+    /// it made them: none where none runs.
+    Owns(Vec<Own>),
     /// What git said of the work tree in `dir`.
     WorkTree { dir: String, tree: WorkTree },
     /// The pull request gh found last of the branch in each directory, by
@@ -172,11 +174,14 @@ struct Known {
     sessions: Sessions,
     /// How many of zellij's folders and sockets the last scan could not read.
     unread_sockets: u32,
-    /// What its multiplexer last listed of each session's panes.
-    panes: HashMap<SessionKey, Vec<Pane>>,
-    /// What its multiplexer last listed of each session's clients, by their
-    /// ids.
-    clients: HashMap<SessionKey, Listed>,
+    /// The own sessions that run, whole, in the order their server made them.
+    owns: Vec<Own>,
+    /// The names a zellij session and an own one both have, as was last said.
+    shared: BTreeSet<SessionName>,
+    /// What zellij last listed of each of its sessions' panes.
+    panes: HashMap<Id, Vec<Pane>>,
+    /// What zellij last listed of each of its sessions' clients, by their ids.
+    clients: HashMap<Id, Listed>,
     /// What git last said of each directory a pane works in.
     trees: BTreeMap<String, WorkTree>,
     /// What gh last found of the branch in each directory a pane works in.
@@ -197,7 +202,7 @@ struct Known {
     /// says a new line, or goes.
     words: u64,
     /// The last word said of each session that zellij can be asked about.
-    told: HashMap<SessionKey, u64>,
+    told: HashMap<Id, u64>,
     /// The host as the API gives it, its version with it.
     host: api::Host,
     /// How many times the host has changed.
@@ -214,6 +219,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         pi: Vec::new(),
         sessions: Sessions::default(),
         unread_sockets: 0,
+        owns: Vec::new(),
+        shared: BTreeSet::new(),
         panes: HashMap::new(),
         clients: HashMap::new(),
         trees: BTreeMap::new(),
@@ -249,6 +256,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if known.saw(sockets) {
                     wake(&wakes.panes);
                 }
+                known.say_shared();
             },
             Command::Panes { asked, panes } => {
                 // One that went, took another name, or now shares it, since
@@ -256,7 +264,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if !known.answers(&asked) {
                     continue;
                 }
-                if known.listed(asked.key(), panes) {
+                if known.listed(asked.id, panes) {
                     wake(&wakes.git);
                 }
             },
@@ -264,7 +272,13 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if !known.answers(&asked) {
                     continue;
                 }
-                known.clients.insert(asked.key(), clients);
+                known.clients.insert(asked.id, clients);
+            },
+            Command::Owns(now) => {
+                if known.owned(now) {
+                    wake(&wakes.git);
+                }
+                known.say_shared();
             },
             Command::WorkTree { dir, tree } => {
                 // One that no pane works in since git was asked.
@@ -299,9 +313,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Sessions(answer) => {
                 let sessions = known.addressed().into_iter().map(|(id, name)| {
-                    let key = SessionKey::Zellij(id);
-                    let told = known.told.get(&key).expect("a word is said of each as it comes");
-                    Addressed { id, name, told: *told, listed: known.panes.contains_key(&key) }
+                    let told = known.told.get(&id).expect("a word is said of each as it comes");
+                    Addressed { id, name, told: *told, listed: known.panes.contains_key(&id) }
                 });
                 // One who stopped waiting has no use for the answer.
                 let _ = answer.send(sessions.collect());
@@ -338,6 +351,32 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     }
 }
 
+/// A session as `built` lists it, of either multiplexer.
+#[derive(Clone, Copy)]
+enum Row<'a> {
+    Zellij(Id, &'a SessionName),
+    Own(&'a Own),
+}
+
+impl<'a> Row<'a> {
+    fn name(self) -> &'a SessionName {
+        match self {
+            Row::Zellij(_, name) => name,
+            Row::Own(own) => &own.name,
+        }
+    }
+
+    /// Where it goes among the sessions of the host: by its name, zellij's
+    /// first where one of each shares it, and zellij's that share one by when
+    /// each started.
+    fn ranked(self) -> (&'a SessionName, Option<OwnId>, Option<SystemTime>) {
+        match self {
+            Row::Zellij(id, name) => (name, None, Some(id.started())),
+            Row::Own(own) => (&own.name, Some(own.id), None),
+        }
+    }
+}
+
 /// Wakes a thread that asks something on a sweep. One that is woken already
 /// has nothing to gain from a second word, and one that has ended hears none.
 fn wake(thread: &SyncSender<()>) {
@@ -349,10 +388,7 @@ fn wake(thread: &SyncSender<()>) {
 impl Known {
     /// Whether the session `asked` is still the one it was asked as.
     fn answers(&self, asked: &Asked) -> bool {
-        match asked {
-            Asked::Zellij { id, name } => self.sessions.addressed(name) == Some(*id),
-            Asked::Own(_) => self.runs(asked.key()),
-        }
+        self.sessions.addressed(&asked.name) == Some(asked.id)
     }
 
     /// The sessions zellij can be asked about by name: each that runs under a
@@ -375,22 +411,51 @@ impl Known {
         let before = self.addressed();
         self.sessions.saw(sockets);
         let now = self.addressed();
-        let addressed = |session: &SessionKey| match session {
-            SessionKey::Zellij(session) => now.iter().any(|(id, _)| id == session),
-            // zellij's sockets say nothing of an own session, which only
-            // its server can say has ended. Until the core hears that from
-            // it, `runs` says no own session runs, and `answers` takes in
-            // nothing of one, so none is kept here.
-            SessionKey::Own(_) => true,
-        };
+        let addressed = |session: &Id| now.iter().any(|(id, _)| id == session);
         self.panes.retain(|session, _| addressed(session));
         self.clients.retain(|session, _| addressed(session));
         self.told.retain(|session, _| addressed(session));
         let came: Vec<Id> = now.difference(&before).map(|(id, _)| *id).collect();
         for session in &came {
-            self.say(SessionKey::Zellij(*session));
+            self.say(*session);
         }
         !came.is_empty()
+    }
+
+    /// Takes in the own sessions that run now, as their server lists them,
+    /// with their panes and clients. A session it no longer lists takes them
+    /// with it: it ended, or its server did. True when a pane works in a
+    /// directory that none did.
+    fn owned(&mut self, now: Vec<Own>) -> bool {
+        let ids: HashSet<OwnId> = now.iter().map(|own| own.id).collect();
+        assert_eq!(ids.len(), now.len(), "an own session's id comes twice");
+        let names: HashSet<&SessionName> = now.iter().map(|own| &own.name).collect();
+        assert_eq!(names.len(), now.len(), "an own session's name comes twice");
+        for own in &now {
+            let ids: HashSet<u32> = own.panes.iter().map(|pane| pane.id).collect();
+            assert_eq!(ids.len(), own.panes.len(), "a pane's id comes twice");
+        }
+        let before = self.dirs();
+        self.owns = now;
+        !self.dirs().is_subset(&before)
+    }
+
+    /// Says each name that a zellij session and an own one have both come to
+    /// have, once: a question by that name goes to neither, as `Called::named`
+    /// refuses it, and zellij makes sessions by names it alone checks.
+    fn say_shared(&mut self) {
+        let zellij: BTreeSet<&SessionName> =
+            self.sessions.running().map(|(_, name)| name).collect();
+        let shared: BTreeSet<SessionName> = self
+            .owns
+            .iter()
+            .filter(|own| zellij.contains(&own.name))
+            .map(|own| own.name.clone())
+            .collect();
+        for name in shared.difference(&self.shared) {
+            log::say(&format!("a zellij session and an own one are both named {name}"));
+        }
+        self.shared = shared;
     }
 
     /// Takes in what the shells say now. A shell that says what it did not,
@@ -400,10 +465,18 @@ impl Known {
         let unsaid = |shell: &&Shell, among: &[Shell]| !among.iter().any(|was| was.says_as(shell));
         let new = now.iter().filter(|shell| unsaid(shell, &self.shells));
         let gone = self.shells.iter().filter(|shell| unsaid(shell, &now));
-        // A word was said of each session as zellij could be asked about it.
-        let can_ask = |session: &SessionKey| self.told.contains_key(session);
-        let told: HashSet<SessionKey> =
-            new.chain(gone).filter_map(|shell| self.house(shell)).filter(can_ask).collect();
+        // A word was said of each session as zellij could be asked about it,
+        // and an own session needs none, as its server says each change.
+        let zellij = |session| match session {
+            SessionKey::Zellij(id) => Some(id),
+            SessionKey::Own(_) => None,
+        };
+        let can_ask = |session: &Id| self.told.contains_key(session);
+        let told: HashSet<Id> = new
+            .chain(gone)
+            .filter_map(|shell| zellij(self.house(shell)?))
+            .filter(can_ask)
+            .collect();
         for session in &told {
             self.say(*session);
         }
@@ -430,7 +503,7 @@ impl Known {
     }
 
     /// Says a word of `session`, which zellij can be asked about.
-    fn say(&mut self, session: SessionKey) {
+    fn say(&mut self, session: Id) {
         self.words = self.words.checked_add(1).expect("fewer than 2^64 words are said");
         self.told.insert(session, self.words);
     }
@@ -445,8 +518,8 @@ impl Known {
     /// Takes in what zellij listed of the panes of `session`, which runs, and
     /// keeps what it said before where it says nothing now. True when a pane
     /// works in a directory that none did.
-    fn listed(&mut self, session: SessionKey, mut panes: Vec<Pane>) -> bool {
-        assert!(self.runs(session));
+    fn listed(&mut self, session: Id, mut panes: Vec<Pane>) -> bool {
+        assert!(self.runs(SessionKey::Zellij(session)));
         // `keep` finds the pane each was by its id: zellij gives each terminal
         // of a session one of its own, which `panes::terminals` checks.
         let ids: HashSet<u32> = panes.iter().map(|pane| pane.id).collect();
@@ -459,17 +532,18 @@ impl Known {
         !self.dirs().is_subset(&before)
     }
 
-    /// Whether `session` runs, as the core knows: it knows no own session yet.
+    /// Whether `session` runs, as the core knows.
     fn runs(&self, session: SessionKey) -> bool {
         match session {
             SessionKey::Zellij(id) => self.sessions.name_of(id).is_some(),
-            SessionKey::Own(_) => false,
+            SessionKey::Own(id) => self.owns.iter().any(|own| own.id == id),
         }
     }
 
     /// The directories the panes work in.
     fn dirs(&self) -> BTreeSet<String> {
-        let cwds = self.panes.values().flatten().filter_map(|pane| pane.cwd.as_ref());
+        let owns = self.owns.iter().flat_map(|own| &own.panes);
+        let cwds = self.panes.values().flatten().chain(owns).filter_map(|pane| pane.cwd.as_ref());
         cwds.map(|cwd| cwd.as_str().to_owned()).collect()
     }
 
@@ -556,53 +630,65 @@ impl Known {
         shells
     }
 
+    /// Asserts that what the core keeps of zellij's sessions holds together:
+    /// the panes and clients of a session zellij cannot be asked about would
+    /// be left out, or go stale, without a word. `saw` lets them go as it ends
+    /// or comes to share its name, and `run` takes in none for it. `saw` says
+    /// a word of each as zellij can be asked about it, and lets the word go as
+    /// it no longer can be. An own session needs none, as its server says each
+    /// change.
+    fn assert_listed(&self) {
+        for id in self.panes.keys().chain(self.clients.keys()) {
+            let name = self.sessions.name_of(*id).expect("a session zellij listed runs");
+            assert_eq!(self.sessions.addressed(name), Some(*id));
+        }
+        let addressed = self.addressed();
+        assert_eq!(self.told.len(), addressed.len());
+        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(id)));
+    }
+
     /// The host as the API gives it, all but its version, which `update`
     /// counts. Each list is in an order of its own, so that a host that has
     /// not changed is built the same.
     fn built(&self) -> api::Host {
-        // The panes and clients of a session zellij cannot be asked about
-        // would be left out, or go stale, without a word: `saw` lets them go
-        // as it ends or comes to share its name, and `run` takes in none for
-        // it.
-        for session in self.panes.keys().chain(self.clients.keys()) {
-            assert!(self.runs(*session), "a session its multiplexer listed runs");
-            match session {
-                SessionKey::Zellij(id) => {
-                    let name =
-                        self.sessions.name_of(*id).expect("a zellij session that runs has a name");
-                    assert_eq!(self.sessions.addressed(name), Some(*id));
-                },
-                // `runs` says none runs, so the assertion above holds of none.
-                SessionKey::Own(_) => unreachable!("the core knows no own session yet"),
-            }
-        }
-        // `saw` says a word of each session as zellij can be asked about it,
-        // and lets the word go as it no longer can be.
-        let addressed = self.addressed();
-        assert_eq!(self.told.len(), addressed.len());
-        assert!(addressed.iter().all(|(id, _)| self.told.contains_key(&SessionKey::Zellij(*id))));
-        // By name, and those that share one, as sessions of zellij versions
-        // with contracts of their own can, by when each started.
-        let mut running: Vec<(Id, &SessionName)> = self.sessions.running().collect();
-        running.sort_unstable_by_key(|&(id, name)| (name, id.started()));
+        self.assert_listed();
+        let zellij = self.sessions.running().map(|(id, name)| Row::Zellij(id, name));
+        let mut running: Vec<Row> = zellij.chain(self.owns.iter().map(Row::Own)).collect();
+        running.sort_unstable_by_key(|row| row.ranked());
         let shells = self.shells();
+        let panes_of = |key: SessionKey, panes: &[Pane]| {
+            let pane = |pane: &Pane| pane.to_api(shells.get(&(key, pane.id)).copied());
+            api::Panes { panes: panes.iter().map(pane).collect() }
+        };
+        let clients_of = |clients: &Listed| api::Clients {
+            clients: clients.iter().copied().map(Client::to_api).collect(),
+        };
         let sessions = running
             .into_iter()
-            .map(|(id, name)| {
-                let key = SessionKey::Zellij(id);
-                api::Session {
-                    name: name.to_string(),
-                    started_at: Some(id.started().into()),
-                    socket: id.socket(),
-                    panes: self.panes.get(&key).map(|panes| api::Panes {
-                        panes: panes
-                            .iter()
-                            .map(|pane| pane.to_api(shells.get(&(key, pane.id)).copied()))
-                            .collect(),
-                    }),
-                    clients: self.clients.get(&key).map(|clients| api::Clients {
-                        clients: clients.iter().copied().map(Client::to_api).collect(),
-                    }),
+            .map(|row| {
+                let name = row.name().to_string();
+                match row {
+                    Row::Zellij(id, _) => {
+                        let started_at = Some(id.started().into());
+                        let zellij = api::ZellijSession { started_at, socket: id.socket() };
+                        let key = SessionKey::Zellij(id);
+                        api::Session {
+                            name,
+                            started_at,
+                            socket: id.socket(),
+                            panes: self.panes.get(&id).map(|panes| panes_of(key, panes)),
+                            clients: self.clients.get(&id).map(clients_of),
+                            mux: Some(api::session::Mux::Zellij(zellij)),
+                        }
+                    },
+                    Row::Own(own) => api::Session {
+                        name,
+                        started_at: None,
+                        socket: 0,
+                        panes: Some(panes_of(SessionKey::Own(own.id), &own.panes)),
+                        clients: Some(clients_of(&own.clients)),
+                        mux: Some(api::session::Mux::Own(own.id.get())),
+                    },
                 }
             })
             .collect();

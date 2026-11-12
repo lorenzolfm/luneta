@@ -51,6 +51,15 @@ impl v1::Agent {
         let word = self.runs_in().prompt_word();
         word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
     }
+
+    /// Where it runs in zellij, absent when it runs in a pane of no zellij's.
+    #[must_use]
+    pub fn zellij(&self) -> Option<&v1::Zellij> {
+        match &self.pane {
+            Some(v1::agent::Pane::Zellij(zellij)) => Some(zellij),
+            Some(v1::agent::Pane::Own(_)) | None => None,
+        }
+    }
 }
 
 impl v1::Harness {
