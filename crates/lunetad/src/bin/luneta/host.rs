@@ -114,16 +114,17 @@ use crate::zellij::{
     self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Turned, Unused,
 };
 
-/// A session luneta makes, named, or why it makes none: one of zellij's, by
-/// the name it takes and the directory it starts in, if any, or an own one,
-/// which the daemon made already.
-pub enum Made {
-    Zellij(Unused, Option<Directory>),
-    Own(OwnKey),
-}
+/// The name of a session of zellij's luneta makes, and the directory it
+/// starts in, if any, or why it makes none.
+type Named = Result<(Unused, Option<Directory>), String>;
 
-/// A session luneta makes, as `Made` says, or why it makes none.
-type Named = Result<Made, String>;
+/// What came of a session luneta makes: of zellij's, its name, as `Named`
+/// says, with the tab luneta opens there for a menu, if any; or an own one,
+/// which the daemon made, or why it made none.
+pub enum Made {
+    Zellij(Named, Option<MenuTab>),
+    Own(Result<OwnKey, String>),
+}
 
 /// A tab luneta opens in a session it makes, for the menu numbered `menu`.
 pub struct MenuTab {
@@ -187,9 +188,8 @@ pub enum Event {
     /// What zellij opened for the menu numbered `menu`: the terminal, or why
     /// none.
     Opened { menu: u64, opened: Result<u32, String> },
-    /// The name of a session luneta makes, and the tab it opens there for
-    /// the menu numbered so, if any.
-    Named { named: Named, tab: Option<MenuTab> },
+    /// What came of a session luneta makes, as `Made` says.
+    Named(Made),
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },
@@ -1423,6 +1423,12 @@ fn seat_of(client: &Client, sidebar: &Sidebar) -> Result<SessionName, String> {
     SessionName::running(here).map_err(|why| format!("zellij is in \"{here}\": {why}"))
 }
 
+/// What `named` hands back, or why it handed back nothing: it panicked, which
+/// hands back why, rather than leave luneta naming no session again.
+fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(named)).unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()))
+}
+
 /// Where luneta goes on in this machine, of its newest sessions that answer.
 enum Onward {
     Zellij(Refuge),
@@ -1691,7 +1697,7 @@ impl App {
                 None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
-            Event::Named { named, tab } => self.named(named, tab),
+            Event::Named(made) => self.named(made),
             Event::Pulled { menu, found } => {
                 let asked = self.sidebar.pulled(menu, found);
                 self.follow(asked);
@@ -2680,17 +2686,16 @@ impl App {
             },
             Asked::Start { on, starts } => {
                 self.name(None, move || match zellij::unused_at(&on, starts) {
-                    Ok((unused, dir)) => Ok(Made::Zellij(unused, Some(dir))),
+                    Ok((unused, dir)) => Ok((unused, Some(dir))),
                     Err(why) => Err(format!("menu: {why}")),
                 });
                 self.leave();
             },
             Asked::StartOwn { starts } => {
-                self.name(None, move || {
-                    let (name, _, dir) = lunetad::names::free_at(starts)
-                        .map_err(|why| format!("menu: no own session made: {why}"))?;
-                    let made = own_sessions::made(&name, &dir);
-                    Ok(Made::Own(made.map_err(|why| format!("menu: no own session made: {why}"))?))
+                self.name_own(move || {
+                    let unmade = |why| format!("menu: no own session made: {why}");
+                    let (name, _, dir) = lunetad::names::free_at(starts).map_err(unmade)?;
+                    own_sessions::made(&name, &dir).map_err(unmade)
                 });
                 self.leave();
             },
@@ -2705,7 +2710,7 @@ impl App {
                             zellij::makes_away(destination, &session, &cwd)
                         },
                     };
-                    Ok(Made::Zellij(unused?, Some(cwd)))
+                    Ok((unused?, Some(cwd)))
                 });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
@@ -2782,7 +2787,7 @@ impl App {
                         Machine::Local => zellij::makes(session),
                         Machine::Remote(destination) => zellij::makes_there(destination, session),
                     };
-                    Ok(Made::Zellij(unused?, None))
+                    Ok((unused?, None))
                 });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -2798,7 +2803,7 @@ impl App {
                             zellij::makes_away(destination, &session, &cwd)
                         },
                     };
-                    Ok(Made::Zellij(unused?, Some(cwd)))
+                    Ok((unused?, Some(cwd)))
                 });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -3461,40 +3466,59 @@ impl App {
     /// before either made its session, and the second would go to the first's.
     /// So while one is named, another is refused, and its menu let go of.
     fn name(&mut self, tab: Option<MenuTab>, named: impl FnOnce() -> Named + Send + 'static) {
-        if self.naming == Naming::Busy {
-            self.sidebar.notify(NAMING.to_owned());
-            if let Some(MenuTab { menu, .. }) = tab {
-                self.sidebar.drop_menu(menu);
-            }
+        if self.refuse_naming(tab.as_ref().map(|tab| tab.menu)) {
             return;
         }
-        self.naming = Naming::Busy;
-        let events = self.events.clone();
-        thread::spawn(move || {
-            // A naming that panics hands back why, rather than leave luneta
-            // naming no session again.
-            let named = panic::catch_unwind(AssertUnwindSafe(named))
-                .unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()));
-            // luneta is on its way out.
-            let _ = events.send(Event::Named { named, tab });
-        });
+        self.naming_on(move || Made::Zellij(caught(named), tab));
     }
 
-    /// Makes the session `named` names, once it has, as `make` does, and
-    /// opens `tab` there for its menu, if any, or has the menu let go of
-    /// what it waits on.
-    fn named(&mut self, named: Named, tab: Option<MenuTab>) {
+    /// Has the daemon make an own session, as `made` does, on a thread of its
+    /// own, one at a time with the sessions of zellij's `name` names, as
+    /// either takes a name that is free of both kinds.
+    fn name_own(&mut self, made: impl FnOnce() -> Result<OwnKey, String> + Send + 'static) {
+        if self.refuse_naming(None) {
+            return;
+        }
+        self.naming_on(move || Made::Own(caught(made)));
+    }
+
+    /// Whether luneta names a session already, which refuses another, and
+    /// lets go of the menu numbered `menu`, if any, that waited on it.
+    fn refuse_naming(&mut self, menu: Option<u64>) -> bool {
+        if self.naming == Naming::Idle {
+            return false;
+        }
+        self.sidebar.notify(NAMING.to_owned());
+        if let Some(menu) = menu {
+            self.sidebar.drop_menu(menu);
+        }
+        true
+    }
+
+    /// Names a session, as `made` does, on a thread of its own, which
+    /// `Event::Named` hands back.
+    fn naming_on(&mut self, made: impl FnOnce() -> Made + Send + 'static) {
+        self.naming = Naming::Busy;
+        let events = self.events.clone();
+        // luneta is on its way out.
+        thread::spawn(move || drop(events.send(Event::Named(made()))));
+    }
+
+    /// Makes the session luneta named, once it has: one of zellij's as `make`
+    /// does, which opens its menu's tab there, if any, or has the menu let go
+    /// of what it waits on; or goes to the own session the daemon made.
+    fn named(&mut self, made: Made) {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
+        let (named, tab) = match made {
+            Made::Zellij(named, tab) => (named, tab),
+            Made::Own(Ok(made)) => return self.go_made_own(made),
+            Made::Own(Err(why)) => return self.sidebar.notify(why),
+        };
         let menu = tab.as_ref().map(|tab| tab.menu);
         let tab = tab.map(|MenuTab { menu, tab }| (zellij::owed(menu, &self.events), tab));
         let (unused, cwd) = match named {
-            Ok(Made::Zellij(unused, cwd)) => (Ok(unused), cwd),
-            Ok(Made::Own(id)) => {
-                assert!(tab.is_none(), "a menu's tab opens in a session of zellij's it makes");
-                self.go_made_own(id);
-                return;
-            },
+            Ok((unused, cwd)) => (Ok(unused), cwd),
             Err(why) => (Err(why), None),
         };
         if !self.make(unused, cwd.as_ref(), tab)
