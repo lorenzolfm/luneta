@@ -51,12 +51,12 @@ pub fn follow(
                 watching.done();
             }
             let followed = server::followed(|listed, unread| {
+                running.store(!listed.is_empty() || !unread.is_empty(), Ordering::Relaxed);
                 for why in unread {
                     troubles.say(format!("the own sessions: {why}"));
                 }
                 let owns = owns(listed, &mut troubles);
                 troubles.done();
-                running.store(!owns.is_empty(), Ordering::Relaxed);
                 core.send(Command::Owns(owns)).is_ok()
             });
             if let Err(failure) = followed {

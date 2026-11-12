@@ -54,9 +54,18 @@ pub enum Called<'a> {
 impl<'a> Called<'a> {
     /// The session named `name`: an own session, where one has the name, or
     /// else zellij's. Or why luneta cannot tell, as a server that does not
-    /// answer could have one by the name.
+    /// answer could have one by the name, or zellij runs one by it too, which
+    /// it makes by names it alone checks.
     pub fn named(name: &'a SessionName) -> Result<Called<'a>, Failure> {
-        Ok(own::server::named(name)?.map_or(Called::Zellij(name), |own| Called::Own(Box::new(own))))
+        let Some(own) = own::server::named(name)? else {
+            return Ok(Called::Zellij(name));
+        };
+        let zellij = crate::closes::running_in(&Zellij::socket_folder()).map_err(Failure::Unread)?;
+        if zellij.iter().any(|(running, _)| running == name) {
+            let two = format!("two sessions are named {name}: one of zellij's and an own one");
+            return Err(Failure::Unread(two));
+        }
+        Ok(Called::Own(Box::new(own)))
     }
 
     /// The session, to ask its multiplexer of.

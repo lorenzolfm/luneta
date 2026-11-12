@@ -24,7 +24,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
-use lunetad::closes::{Close, Closes};
+use lunetad::closes::{Close, Closes, Whose};
 use lunetad::mux::{Exited, TabId};
 use lunetad::images::{self, Png};
 use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
@@ -301,7 +301,7 @@ impl Away {
         started: SystemTime,
         close: &Close,
     ) -> Result<(), String> {
-        let request = close.asked(Some(self.on()), session, started);
+        let request = close.asked(Some(self.on()), session, Whose::Zellij(started));
         self.ask(|mut daemon| async move { daemon.close(request).await })
     }
 
@@ -376,8 +376,8 @@ impl Away {
     /// and delete it, as `lunetad::closes::killed` does there, or says why
     /// it did not.
     pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
-        let (session, started_at) = (session.to_string(), Some(started.into()));
-        let request = KillRequest { on: Some(self.on()), session, started_at, own: None };
+        let (session, whose) = (session.to_string(), Some(Whose::Zellij(started).into()));
+        let request = KillRequest { on: Some(self.on()), session, whose };
         self.ask(|mut daemon| async move { daemon.kill(request).await })
     }
 

@@ -13,8 +13,9 @@ use lunetad::api::closes_response::Closes;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::open_request::{self, Opens};
 use lunetad::api::{
-    self, CheckNameRequest, CloseRequest, ClosesRequest, DumpScreenRequest, KillRequest,
-    NewOwnRequest, NewOwnResponse, OpenRequest, RenameSessionRequest, TurnIntoTabRequest,
+    self, agent, close_request, kill_request, session as kind, CheckNameRequest, CloseRequest,
+    ClosesRequest, DumpScreenRequest, KillRequest, NewOwnRequest, NewOwnResponse, OpenRequest,
+    RenameSessionRequest, TurnIntoTabRequest,
 };
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{pane::Program, ListRequest};
@@ -129,7 +130,8 @@ impl Drop for Owned {
 /// The question that closes `closes` of the own session `own`, named `name`.
 fn close(name: &str, own: u64, closes: Closed) -> CloseRequest {
     let session = name.to_owned();
-    CloseRequest { on: None, session, closes: Some(closes), started_at: None, own: Some(own) }
+    let whose = Some(close_request::Whose::Own(own));
+    CloseRequest { on: None, session, closes: Some(closes), whose }
 }
 
 /// The question that opens a tab in `name` that runs `WAITS`.
@@ -149,7 +151,7 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let made = owned.make("own").unwrap();
 
     let listed = owned.listed("own");
-    assert_eq!(listed.own, Some(made.session));
+    assert_eq!(listed.mux, Some(kind::Mux::Own(made.session)));
     assert_eq!((listed.socket, listed.started_at), (0, None));
     let pane = api::Pane {
         id: made.pane,
@@ -213,11 +215,12 @@ fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
     let session = "own".to_owned();
     let request = RenameSessionRequest { on: None, session, to: "renamed".to_owned() };
     owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
-    assert_eq!(owned.listed("renamed").own, Some(made.session));
+    assert_eq!(owned.listed("renamed").mux, Some(kind::Mux::Own(made.session)));
 
     let kill = |session: &str| {
         let session = session.to_owned();
-        let request = KillRequest { on: None, session, started_at: None, own: Some(made.session) };
+        let whose = Some(kill_request::Whose::Own(made.session));
+        let request = KillRequest { on: None, session, whose };
         owned.ask(|mut daemon| async move { daemon.kill(request).await })
     };
     let stays = kill("own").unwrap_err();
@@ -252,11 +255,12 @@ fn a_session_made_as_the_server_ends_is_made_by_the_next() {
     let first = owned.make("first").unwrap();
     owned.listed("first");
     let session = "first".to_owned();
-    let request = KillRequest { on: None, session, started_at: None, own: Some(first.session) };
+    let whose = Some(kill_request::Whose::Own(first.session));
+    let request = KillRequest { on: None, session, whose };
     owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
 
     let next = owned.make("next").unwrap();
-    assert_eq!(owned.listed("next").own, Some(next.session));
+    assert_eq!(owned.listed("next").mux, Some(kind::Mux::Own(next.session)));
 }
 
 /// zellij's sessions and the own ones share their names: neither makes, nor
@@ -289,9 +293,44 @@ fn zellij_s_sessions_and_own_ones_share_their_names() {
     assert_eq!(owned.host.zellij.renamed(), [] as [String; 0]);
 }
 
+/// A zellij session made by a name an own session has, as zellij checks only
+/// its own, takes the name from both: a question by it goes to neither.
+#[test]
+fn a_name_a_zellij_session_and_an_own_one_share_is_neither_s() {
+    let owned = Owned::new();
+    owned.make("work").unwrap();
+    owned.listed("work");
+    let _work = owned.host.serve("work");
+    eventually("both are on the host", || {
+        let host = owned.host.host();
+        let named = host.sessions.iter().filter(|session| session.name == "work").count();
+        (named == 2).then_some(())
+    });
+
+    let request = DumpScreenRequest { on: None, session: "work".to_owned(), pane: None };
+    let refused = owned.ask(|mut daemon| async move { daemon.dump_screen(request).await });
+    let message = refused.unwrap_err().message().to_owned();
+    assert!(message.contains("two sessions are named work"), "{message}");
+}
+
+/// The server numbers panes across its sessions, so a pane of one own session
+/// is none of another's, and its screen does not dump by the other's name.
+#[test]
+fn a_pane_of_another_own_session_does_not_dump_by_this_one_s_name() {
+    let owned = Owned::new();
+    owned.make("one").unwrap();
+    let other = owned.make("other").unwrap();
+    owned.listed("one");
+
+    let session = "one".to_owned();
+    let request = DumpScreenRequest { on: None, session, pane: Some(other.pane) };
+    let refused = owned.ask(|mut daemon| async move { daemon.dump_screen(request).await });
+    let message = refused.unwrap_err().message().to_owned();
+    assert!(message.contains(&format!("has no pane {}", other.pane)), "{message}");
+}
+
 /// What an own session has no way to do yet is refused as such, and a
-/// question that names it both by a time it started at and its id is no
-/// question.
+/// question that names it by the id 0, which no session has, is no question.
 #[test]
 fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let owned = Owned::new();
@@ -316,10 +355,10 @@ fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     assert!(refused.unwrap_err().message().contains("cannot turn a pane into a tab"));
 
     let session = "own".to_owned();
-    let both = KillRequest { on: None, session, started_at, own: Some(made.session) };
-    let refused = owned.ask(|mut daemon| async move { daemon.kill(both).await }).unwrap_err();
+    let zero = KillRequest { on: None, session, whose: Some(kill_request::Whose::Own(0)) };
+    let refused = owned.ask(|mut daemon| async move { daemon.kill(zero).await }).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
-    assert!(owned.listed("own").own.is_some());
+    assert_eq!(owned.listed("own").mux, Some(kind::Mux::Own(made.session)));
 }
 
 /// The screen of an own pane dumps as a zellij pane's does, by the session's
@@ -360,8 +399,9 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
         let host = owned.host.host();
         host.agents.into_iter().find(|agent| agent.pid == pid)
     });
-    assert_eq!(agent.own, Some(api::Own { session: made.session, pane: made.pane }));
-    assert_eq!(agent.zellij, None);
+    let own = api::Own { session: made.session, pane: made.pane };
+    assert_eq!(agent.pane, Some(agent::Pane::Own(own)));
+    assert_eq!(agent.zellij(), None);
 }
 
 /// The daemon runs on while an own session does, however long zellij has had

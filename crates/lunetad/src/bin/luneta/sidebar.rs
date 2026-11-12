@@ -6355,7 +6355,7 @@ mod tests {
             panes: Some(Panes { panes }),
             clients: None,
             socket: started as u64,
-            own: None,
+            mux: None,
         }
     }
 
@@ -6426,14 +6426,13 @@ mod tests {
             started_at: Some(Timestamp { seconds: 50, nanos: 0 }),
             name: name.map(|text| api::Name { text: text.to_owned(), source: None }),
             entrypoint: Some("cli".to_owned()),
-            zellij: Some(Zellij {
+            pane: Some(api::agent::Pane::Zellij(Zellij {
                 named: session.to_owned(),
                 session: Some(session.to_owned()),
                 pane,
-            }),
+            })),
             waiting_for: None,
             topic: None,
-            own: None,
         }
     }
 
@@ -6780,7 +6779,7 @@ mod tests {
     fn the_top_rule_counts_the_agents_the_rows_hold() {
         let mut sidebar = fresh();
         let mut outside = agent("s", 4, Status::Waiting, None);
-        outside.zellij = None;
+        outside.pane = None;
         let panes = (1..=3).map(|id| pane(id, 0, "/w/a", "claude")).collect();
         sidebar.heard(host(
             vec![session("s", 10, panes)],
@@ -7679,7 +7678,8 @@ mod tests {
     #[test]
     fn an_agent_the_daemon_cannot_follow_sits_where_its_pane_works() {
         let mut lost = agent("gone", 1, Status::Waiting, Some("fold"));
-        lost.zellij = Some(Zellij { named: "gone".to_owned(), session: None, pane: 1 });
+        let gone = Zellij { named: "gone".to_owned(), session: None, pane: 1 };
+        lost.pane = Some(api::agent::Pane::Zellij(gone));
         let sessions = [
             session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]),
             session("other", 20, vec![pane(1, 0, "/w/elsewhere", "fish")]),
@@ -7714,7 +7714,11 @@ mod tests {
     fn a_pi_agent_the_daemon_cannot_follow_takes_no_claude_code_pane() {
         let lost = Agent {
             harness: Some(Harness::Pi.into()),
-            zellij: Some(Zellij { named: "gone".to_owned(), session: None, pane: 1 }),
+            pane: Some(api::agent::Pane::Zellij(Zellij {
+                named: "gone".to_owned(),
+                session: None,
+                pane: 1,
+            })),
             ..agent("gone", 1, Status::Idle, Some("pi"))
         };
         let sessions = [

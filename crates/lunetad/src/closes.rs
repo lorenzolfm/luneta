@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::api::{close_request, closes_response, CloseRequest, On};
+use crate::api::{close_request, closes_response, kill_request, CloseRequest, On};
 use crate::mux::own;
 use crate::mux::{tabs, Asks, Called, Laid, Mux, OwnId, PaneId, SessionName, SocketFolder, TabId};
 use crate::mux::Zellij;
@@ -109,29 +109,10 @@ impl Close {
         Close::Tab { id, panes: terminals(laid, id) }
     }
 
-    /// The question that has zellij close it of `session` on the machine
-    /// `on` names, or on the daemon's own, where it names none.
+    /// The question that closes it of `session`, the one `whose` says, on the
+    /// machine `on` names, or on the daemon's own, where it names none.
     #[must_use]
-    pub fn asked(
-        &self,
-        on: Option<On>,
-        session: &SessionName,
-        started: SystemTime,
-    ) -> CloseRequest {
-        let started_at = Some(started.into());
-        CloseRequest { started_at, ..self.asked_of(on, session) }
-    }
-
-    /// The question that has luneta's own multiplexer close it of `session`,
-    /// the own session `id`, on the machine `on` names, or on the daemon's own,
-    /// where it names none.
-    #[must_use]
-    pub fn asked_own(&self, on: Option<On>, session: &SessionName, id: OwnId) -> CloseRequest {
-        CloseRequest { own: Some(id.get()), ..self.asked_of(on, session) }
-    }
-
-    /// The question that closes it of `session`, with nothing that tells which.
-    fn asked_of(&self, on: Option<On>, session: &SessionName) -> CloseRequest {
+    pub fn asked(&self, on: Option<On>, session: &SessionName, whose: Whose) -> CloseRequest {
         let closes = match self {
             Close::Pane(pane) => close_request::Closes::Pane(*pane),
             Close::Tab { id, panes } => {
@@ -139,9 +120,71 @@ impl Close {
             },
         };
         let session = session.to_string();
-        CloseRequest { on, session, closes: Some(closes), started_at: None, own: None }
+        CloseRequest { on, session, closes: Some(closes), whose: Some(whose.into()) }
     }
 }
+
+/// Which session a question is of, past its name, which another can take: a
+/// zellij session by when it started, and an own one by its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Whose {
+    Zellij(SystemTime),
+    Own(OwnId),
+}
+
+impl Whose {
+    /// The zellij session that started `at`, or why that is no time.
+    fn started(at: impl TryInto<SystemTime>) -> Result<Whose, String> {
+        let unread = |_| "started_at: it says no time the session started at".to_owned();
+        at.try_into().map(Whose::Zellij).map_err(unread)
+    }
+
+    /// The own session `id`, or why that is no session's id.
+    fn own(id: u64) -> Result<Whose, String> {
+        OwnId::new(id).map(Whose::Own).ok_or_else(|| "own: 0 is no session's id".to_owned())
+    }
+}
+
+impl TryFrom<close_request::Whose> for Whose {
+    type Error = String;
+
+    fn try_from(whose: close_request::Whose) -> Result<Whose, String> {
+        match whose {
+            close_request::Whose::StartedAt(at) => Whose::started(at),
+            close_request::Whose::Own(id) => Whose::own(id),
+        }
+    }
+}
+
+impl TryFrom<kill_request::Whose> for Whose {
+    type Error = String;
+
+    fn try_from(whose: kill_request::Whose) -> Result<Whose, String> {
+        match whose {
+            kill_request::Whose::StartedAt(at) => Whose::started(at),
+            kill_request::Whose::Own(id) => Whose::own(id),
+        }
+    }
+}
+
+impl From<Whose> for close_request::Whose {
+    fn from(whose: Whose) -> Self {
+        match whose {
+            Whose::Zellij(started) => close_request::Whose::StartedAt(started.into()),
+            Whose::Own(id) => close_request::Whose::Own(id.get()),
+        }
+    }
+}
+
+impl From<Whose> for kill_request::Whose {
+    fn from(whose: Whose) -> Self {
+        match whose {
+            Whose::Zellij(started) => kill_request::Whose::StartedAt(started.into()),
+            Whose::Own(id) => kill_request::Whose::Own(id.get()),
+        }
+    }
+}
+
 
 /// Closes `close` of `session`, the one that started at `started`, as
 /// `closed_as_listed` does, or says why it closed nothing: one that took the

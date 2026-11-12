@@ -53,7 +53,8 @@ const PANE_VARS: [&str; 2] = [SESSION_VAR, PANE_VAR];
 pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
     let session = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
-    Some(Named::Own { session, pane: text(PANE_VAR)?.parse().ok()? })
+    let pane = text(PANE_VAR)?.parse().ok().filter(|pane| *pane != 0)?;
+    Some(Named::Own { session, pane })
 }
 
 /// Has `command` run without the variables luneta's own multiplexer gives
@@ -68,8 +69,8 @@ pub(crate) fn in_no_pane(command: &mut Command) {
 mod tests {
     use super::*;
 
-    /// The variables name an own pane by both its ids, each a number, the
-    /// session's not 0, and by neither alone.
+    /// The variables name an own pane by both its ids, each a number and
+    /// not 0, and by neither alone.
     #[test]
     fn the_variables_name_an_own_pane_by_both_its_ids() {
         let environ = |entries: &[&str]| -> Vec<OsString> {
@@ -85,6 +86,7 @@ mod tests {
             environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE="]),
             environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=4294967296"]),
             environ(&["LUNETA_MUX_SESSION=0", "LUNETA_MUX_PANE=12"]),
+            environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=0"]),
             environ(&["LUNETA_MUX_SESSIONS=3", "LUNETA_MUX_PANE=12"]),
         ];
         for environ in unnamed {

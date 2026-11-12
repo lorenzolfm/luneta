@@ -295,13 +295,19 @@ impl Agent {
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
-            zellij: self.pane.as_ref().and_then(zellij_of).map(|(named, pane)| api::Zellij {
-                named: named.to_owned(),
-                session: sessions.lead(named, self.started_at).map(ToString::to_string),
-                pane,
+            pane: self.pane.as_ref().map(|named| match named {
+                Named::Zellij(ZellijPane { session: named, pane }) => {
+                    api::agent::Pane::Zellij(api::Zellij {
+                        named: named.clone(),
+                        session: sessions.lead(named, self.started_at).map(ToString::to_string),
+                        pane: *pane,
+                    })
+                },
+                Named::Own { session, pane } => {
+                    api::agent::Pane::Own(api::Own { session: session.get(), pane: *pane })
+                },
             }),
             topic: topic.map(String::from),
-            own: self.pane.as_ref().and_then(own_of),
         }
     }
 }
@@ -332,14 +338,6 @@ fn zellij_of(named: &Named) -> Option<(&str, u32)> {
     match named {
         Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
         Named::Own { .. } => None,
-    }
-}
-
-/// The own pane `named` is, as the API gives one: none of a pane of zellij's.
-fn own_of(named: &Named) -> Option<api::Own> {
-    match named {
-        Named::Zellij(_) => None,
-        Named::Own { session, pane } => Some(api::Own { session: session.get(), pane: *pane }),
     }
 }
 

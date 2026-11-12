@@ -17,7 +17,7 @@ pub fn seated<'a>(
 ) -> HashMap<(&'a str, u32), &'a Agent> {
     let mut seated: HashMap<(&str, u32), &Agent> = HashMap::new();
     for agent in agents {
-        let Some(zellij) = &agent.zellij else {
+        let Some(zellij) = agent.zellij() else {
             continue;
         };
         let Some(session) = zellij.session.as_deref().or_else(|| found(agent, zellij, sessions))

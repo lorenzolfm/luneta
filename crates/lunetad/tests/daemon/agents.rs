@@ -194,7 +194,7 @@ fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {
 
 /// The session the daemon says an agent's pane is in now, if it says one.
 pub fn now_in(agent: &Agent) -> Option<&str> {
-    agent.zellij.as_ref().and_then(|zellij| zellij.session.as_deref())
+    agent.zellij().and_then(|zellij| zellij.session.as_deref())
 }
 
 /// A status the daemon knows, as it lists it.
@@ -238,7 +238,7 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
         .iter()
         .map(|agent| {
             let status = agent.status.clone();
-            (agent.session_id.as_str(), agent.pid, status, agent.zellij.clone())
+            (agent.session_id.as_str(), agent.pid, status, agent.zellij().cloned())
         })
         .collect();
     assert_eq!(
@@ -549,13 +549,13 @@ fn a_renamed_session_takes_its_agents_with_it() {
     let agent = process(Some(("work", 2)));
     host.write(agent.pid(), &file_for("agent", &agent, "idle"));
     let _daemon = start(host.vars()).unwrap();
-    assert_eq!(host.agent("agent").unwrap().zellij, Some(zellij("work", Some("work"), 2)));
+    assert_eq!(host.agent("agent").unwrap().zellij(), Some(&zellij("work", Some("work"), 2)));
 
     fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
     let moved = eventually("the agent is in play", || {
         host.agent("agent").filter(|agent| now_in(agent) == Some("play"))
     });
-    assert_eq!(moved.zellij, Some(zellij("work", Some("play"), 2)));
+    assert_eq!(moved.zellij(), Some(&zellij("work", Some("play"), 2)));
 }
 
 /// A session made under the name another was renamed from does not take that
@@ -578,11 +578,11 @@ fn a_session_that_takes_a_name_does_not_take_the_agents_it_had() {
     let newer = process(Some(("work", 5)));
     host.write(newer.pid(), &file_for("newer", &newer, "idle"));
     let either = eventually("the newer agent could be in either", || {
-        let untold = |agent: &Agent| agent.zellij.as_ref().is_some_and(|z| z.session.is_none());
+        let untold = |agent: &Agent| agent.zellij().is_some_and(|z| z.session.is_none());
         host.agent("newer").filter(untold)
     });
-    assert_eq!(either.zellij, Some(zellij("work", None, 5)));
-    assert_eq!(host.agent("older").unwrap().zellij, Some(zellij("work", Some("play"), 2)));
+    assert_eq!(either.zellij(), Some(&zellij("work", None, 5)));
+    assert_eq!(host.agent("older").unwrap().zellij(), Some(&zellij("work", Some("play"), 2)));
 }
 
 /// A rename from before the daemon started, it never saw: the name the agent's
@@ -602,5 +602,5 @@ fn a_name_taken_before_the_daemon_started_leads_nowhere() {
     let _taken = UnixListener::bind(host.contract().join("work")).unwrap();
     let _daemon = start(host.vars()).unwrap();
 
-    assert_eq!(host.agent("agent").unwrap().zellij, Some(zellij("work", None, 2)));
+    assert_eq!(host.agent("agent").unwrap().zellij(), Some(&zellij("work", None, 2)));
 }

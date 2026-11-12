@@ -557,14 +557,16 @@ message CloseRequest {
     // no terminal is invalid.
     ClosesResponse.Tab tab = 4;
   }
-  // When the session started, as its `Session.started_at` says: a session by
-  // its name that started at another time took the name since, and what is in
-  // it stays. A question of a zellij session without it is invalid, and so is
-  // one of an own session with it.
-  google.protobuf.Timestamp started_at = 5;
-  // The own session's id, as its `Session.own` says, for one of luneta's own
-  // multiplexer's: absent for zellij's.
-  optional uint64 own = 6;
+  // Which session it is, past its name: one of these, always. A question with
+  // neither is invalid.
+  oneof whose {
+    // When a zellij session started, as its `Session.started_at` says: a
+    // session by its name that started at another time took the name since,
+    // and what is in it stays.
+    google.protobuf.Timestamp started_at = 5;
+    // An own session's id, as its `Session.own` says.
+    uint64 own = 6;
+  }
 }
 
 message OtherTabsRequest {
@@ -645,15 +647,17 @@ message TurnIntoPanesResponse {
 message KillRequest {
   On on = 1;
   string session = 2;
-  // When the session started, as its `Session.started_at` says: a session
-  // by its name that started at another time took the name since, and
-  // stays. A question of a zellij session without it is invalid, and so is
-  // one of an own session with it.
-  google.protobuf.Timestamp started_at = 3;
-  // The own session's id, as its `Session.own` says, for one of luneta's own
-  // multiplexer's: absent for zellij's. Its server gives no other session the
-  // id, so the name does not tell it.
-  optional uint64 own = 4;
+  // Which session it is, past its name: one of these, always. A question with
+  // neither is invalid.
+  oneof whose {
+    // When a zellij session started, as its `Session.started_at` says: a
+    // session by its name that started at another time took the name since,
+    // and stays.
+    google.protobuf.Timestamp started_at = 3;
+    // An own session's id, as its `Session.own` says. Its server gives no
+    // other session the id, so the name does not tell it.
+    uint64 own = 4;
+  }
 }
 
 message ListExitedRequest {
@@ -1070,8 +1074,8 @@ message Remote {
 // A zellij session that runs: its server listens on a socket named for it.
 message Session {
   string name = 1;
-  // When its server started: when it made its socket, which a rename keeps.
-  // Always there for zellij's, and never for an own session.
+  // As `ZellijSession.started_at` says, for a zellij session, and absent for
+  // an own one: for a client older than `mux`.
   google.protobuf.Timestamp started_at = 2;
   // Its panes, as zellij last listed them. Absent until zellij has, and while
   // another session runs under its name: zellij is asked for them by name, and
@@ -1080,18 +1084,33 @@ message Session {
   Panes panes = 3;
   // Its clients, as zellij last listed them. Absent as `panes` is.
   Clients clients = 4;
+  // As `ZellijSession.socket` says, for a zellij session, and 0 for an own
+  // one: for a client older than `mux`.
+  uint64 socket = 5;
+  // Which multiplexer runs it: one of these, always, but from a daemon older
+  // than this field, whose sessions are all zellij's, and say so in
+  // `started_at` and `socket`.
+  oneof mux {
+    ZellijSession zellij = 7;
+    // The id luneta's own multiplexer gave it, which a rename keeps, and
+    // which its server gives no other. Never 0. Its panes' ids are unique
+    // across the own sessions, and so are its tabs', and neither is given
+    // again. Its clients' are as `Client.id` says of zellij's, but never given
+    // again.
+    uint64 own = 6;
+  }
+}
+
+// A session of zellij's, past its name.
+message ZellijSession {
+  // When its server started: when it made its socket, which a rename keeps.
+  // Always there.
+  google.protobuf.Timestamp started_at = 1;
   // The inode of its socket, which a rename keeps too. With `started_at` it
   // tells every session from every other: two servers can make their sockets
   // in one tick of the clock that dates them, and a socket made later can
-  // take the inode of one gone, but not both. Never 0 for zellij's, and 0 for
-  // an own session.
-  uint64 socket = 5;
-  // The id luneta's own multiplexer gave it, for an own session, which a
-  // rename keeps, and which its server gives no other: absent for zellij's.
-  // Never 0. Its panes' ids are unique across the own sessions, and so are
-  // its tabs', and neither is given again. Its clients' are as `Client.id`
-  // says of zellij's, but never given again.
-  optional uint64 own = 6;
+  // take the inode of one gone, but not both. Never 0.
+  uint64 socket = 2;
 }
 
 message Panes {
@@ -1434,8 +1453,15 @@ message Agent {
   // and a word of its own for each of the many other ways, which it adds to; pi
   // has `print`, `json` and `rpc`. Absent when it does not say.
   optional string entrypoint = 8;
-  // Where it runs in zellij, absent when it runs outside zellij.
-  Zellij zellij = 9;
+  // The pane it runs in, absent when it runs in none. A zellij server started
+  // in an own pane gives the panes it has the variables of both, and the
+  // agent is zellij's.
+  oneof pane {
+    // Where it runs in zellij.
+    Zellij zellij = 9;
+    // Where it runs in an own session.
+    Own own = 16;
+  }
   // What it waits for, as Claude Code says while its status is waiting.
   // Neither while it does not wait, nor where it does not say, as pi does not.
   oneof waiting_for {
@@ -1459,10 +1485,6 @@ message Agent {
   // no pane. It is kept in no file, and a daemon started again has none until
   // the next prompt.
   optional string topic = 15;
-  // Where it runs in an own session, absent when it runs in none, and when
-  // `zellij` is there: a zellij server started in an own pane gives the panes
-  // it has the variables of both.
-  Own own = 16;
 }
 
 // A harness an agent runs in.
@@ -1526,7 +1548,7 @@ enum NameSource {
   NAME_SOURCE_OTHER = 7;
 }
 
-// The pane an agent runs in.
+// The own pane an agent runs in.
 message Own {
   // The own session's id, as its `Session.own` says.
   uint64 session = 1;
@@ -1534,6 +1556,7 @@ message Own {
   uint32 pane = 2;
 }
 
+// The zellij pane an agent runs in.
 message Zellij {
   // The session its environment names: what the session was called when the
   // pane opened. A rename leaves it behind.

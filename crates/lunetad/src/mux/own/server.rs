@@ -118,6 +118,16 @@ impl Server {
         let listed = self.listing()?.into_iter().find(|session| session.id == id.get());
         listed.ok_or_else(|| gone(id))
     }
+
+    /// The tab of the session `id` that holds the pane `pane`, as the server
+    /// lists it now, or why none does: the server numbers panes across its
+    /// sessions, so a pane of another is none of this one's.
+    fn tab_of(&self, id: OwnId, pane: u32) -> Result<u32, Failure> {
+        let tabs = self.session(id)?.tabs;
+        let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane));
+        let none = || Failure::Own(format!("own session {id} has no pane {pane}"));
+        Ok(tab.ok_or_else(none)?.id)
+    }
 }
 
 /// A runtime of one thread, for the questions of one question to the daemon.
@@ -448,8 +458,9 @@ impl Own {
     }
 
     /// What the pane `pane` of the session shows, or all it was written, as
-    /// `dumped` says.
+    /// `dumped` says, or why not: one of another session is none of its.
     pub fn dumped(&self, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
+        self.server.tab_of(self.id, pane)?;
         let request = api::DumpRequest { pane, dumped: dumped.into() };
         let dump = self.server.ask(|mut client| async move { client.dump(request).await });
         Ok(dump.map_err(|status| refused(&status))?.text)
@@ -467,10 +478,7 @@ impl Own {
         let is = match to {
             Place::Session(session) => api::place::Is::Session(session.get()),
             Place::Pane { session, pane } => {
-                let tabs = self.server.session(session)?.tabs;
-                let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane));
-                let gone = || Failure::Own(format!("own session {session} has no pane {pane}"));
-                api::place::Is::Tab(tab.ok_or_else(gone)?.id)
+                api::place::Is::Tab(self.server.tab_of(session, pane)?)
             },
         };
         let request = api::GoRequest {

@@ -78,7 +78,7 @@ use crate::api::{
     TurnIntoTabRequest, TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
-use crate::closes::{Close, Closes};
+use crate::closes::{Close, Closes, Whose};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::prunes::{self, Occupied};
@@ -91,7 +91,7 @@ use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
 use crate::mux::own::server;
-use crate::mux::{self, Called, OwnId, Runs, SessionName, SocketFolder, Zellij};
+use crate::mux::{self, Called, Runs, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -855,9 +855,9 @@ impl Daemon for Host {
     }
 
     async fn close(&self, request: Request<CloseRequest>) -> Result<Response<()>, Status> {
-        let CloseRequest { on, session, closes, started_at, own } = request.into_inner();
+        let CloseRequest { on, session, closes, whose } = request.into_inner();
         let session = named("session", &session)?;
-        let whose = whose(started_at, own)?;
+        let whose = whose_of(whose)?;
         let close = match closes {
             Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
             Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
@@ -869,11 +869,7 @@ impl Daemon for Host {
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
         if let Some(mut daemon) = self.bridged(on)? {
-            let asked = match whose {
-                Whose::Zellij(started) => close.asked(None, &session, started),
-                Whose::Own(id) => close.asked_own(None, &session, id),
-            };
-            return daemon.close(asked).await;
+            return daemon.close(close.asked(None, &session, whose)).await;
         }
         let closed = task::spawn_blocking(move || match whose {
             Whose::Zellij(started) => closes::closed(&session, started, &close),
@@ -949,16 +945,12 @@ impl Daemon for Host {
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
-        let KillRequest { on, session, started_at, own } = request.into_inner();
+        let KillRequest { on, session, whose } = request.into_inner();
         let session = named("session", &session)?;
-        let whose = whose(started_at, own)?;
+        let whose = whose_of(whose)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let session = session.to_string();
-            let (started_at, own) = match whose {
-                Whose::Zellij(started) => (Some(started.into()), None),
-                Whose::Own(id) => (None, Some(id.get())),
-            };
-            return daemon.kill(KillRequest { on: None, session, started_at, own }).await;
+            let (session, whose) = (session.to_string(), Some(whose.into()));
+            return daemon.kill(KillRequest { on: None, session, whose }).await;
         }
         let killed = task::spawn_blocking(move || match whose {
             Whose::Zellij(started) => closes::killed(&session, started),
@@ -1349,29 +1341,11 @@ fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 
-/// Which session a question is of, past its name, which another can take: a
-/// zellij session by when it started, and an own one by its id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Whose {
-    Zellij(SystemTime),
-    Own(OwnId),
-}
-
-/// Which session a question is of, as its `started_at` and `own` say, or why
-/// it is invalid: it says both, or neither, or an own session of id 0.
-fn whose<At: TryInto<SystemTime>>(
-    started_at: Option<At>,
-    own: Option<u64>,
-) -> Result<Whose, Status> {
-    match (started_at, own) {
-        (None, Some(id)) => OwnId::new(id)
-            .map(Whose::Own)
-            .ok_or_else(|| Status::invalid_argument("own: 0 is no session's id")),
-        (Some(_), Some(_)) => {
-            Err(Status::invalid_argument("started_at: an own session has no time it started at"))
-        },
-        (started_at, None) => started_of(started_at).map(Whose::Zellij),
-    }
+/// Which session a question is of, as its `whose` says, or why it is
+/// invalid: it says neither, or a time that is none, or an own session of id 0.
+fn whose_of<W: TryInto<Whose, Error = String>>(whose: Option<W>) -> Result<Whose, Status> {
+    let neither = || Status::invalid_argument("whose: neither started_at nor own");
+    whose.ok_or_else(neither)?.try_into().map_err(Status::invalid_argument)
 }
 
 /// When a session started, as a question says it, or why it is invalid: it
