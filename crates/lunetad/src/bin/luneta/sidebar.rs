@@ -874,7 +874,7 @@ pub type Refuges = Result<Vec<SessionName>, NoRefuge>;
 /// Why luneta's zellij goes on in none of another machine's sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoRefuge {
-    /// lunetad listed none of them when it last said.
+    /// lunetad listed none of them when it last said, but own ones.
     NoneListed,
     /// Each of them may hold luneta's own terminal, as `may_hold` says.
     Held,
@@ -887,7 +887,7 @@ pub enum NoRefuge {
 impl fmt::Display for NoRefuge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NoRefuge::NoneListed => f.write_str("lunetad lists none of its sessions"),
+            NoRefuge::NoneListed => f.write_str("lunetad lists none of its zellij sessions"),
             NoRefuge::Held => f.write_str("each of its sessions may hold luneta's own terminal"),
             NoRefuge::Reaching => f.write_str("lunetad is reaching it"),
             NoRefuge::Unreached(word) => write!(f, "lunetad does not reach it: {word}"),
@@ -2266,7 +2266,8 @@ impl Sidebar {
     /// The sessions of the other machines but those `tried`, where luneta's
     /// zellij goes on once the machine it was on has none left: each
     /// machine's newest first, as the picker lists them, the machines as
-    /// their headers are. Where luneta's own terminal may be `within`
+    /// their headers are, and none of them own, as zellij's client attaches
+    /// to none of those. Where luneta's own terminal may be `within`
     /// another machine's zellij, a session that may hold it is left out, as
     /// `may_hold` says: a client of it would show luneta in itself, and each
     /// key typed in it would go round again. Or why it goes on in none of
@@ -2291,7 +2292,8 @@ impl Sidebar {
         let refuges = others.into_iter().map(|(_, destination, seen)| {
             let refuges = match seen {
                 Ok(seen) => {
-                    let (sessions, _) = oldest_first(seen.sessions);
+                    let (mut sessions, _) = oldest_first(seen.sessions);
+                    sessions.retain(|(listed, _)| !listed.own());
                     if sessions.is_empty() {
                         Err(NoRefuge::NoneListed)
                     } else {
@@ -4332,6 +4334,7 @@ impl Sidebar {
             // In a session of another machine's, which this one's go on
             // without.
             (None, _) if self.on != *on => Seat::Elsewhere,
+            _ if listed.own() => Seat::Elsewhere,
             (None, here @ Some(_)) if listed.is_here(here) => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
             (Some(_), _) | (None, None) => Seat::Moving,
@@ -6065,8 +6068,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let bold = chip.add_modifier(Modifier::BOLD);
             let (name, named) = lit(session.name.as_str(), room, Keep::Start, hits, bold);
             let cuts = cut_at(0, 3, session.name.as_str(), room).into_iter().collect();
-            assert!(named <= room, "{:?} was cut to {named} of {room}", session.name);
-            let rule = room - named;
+            let rule = room.saturating_sub(named);
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
@@ -8554,8 +8556,8 @@ mod tests {
         assert_eq!(tail("日本語", 4), "…語");
     }
 
-    /// A name lit for a room is never wider than the room, at any room, which
-    /// a session's row asserts as its rule takes what the name leaves: with
+    /// A name lit for a room is never wider than the room, at any room, as a
+    /// session's row has its rule take what the name leaves: with
     /// wide characters, joined ones, a selector, a ligature, halfwidth sound
     /// marks, combining ones and control characters.
     #[test]
@@ -9793,21 +9795,28 @@ mod tests {
     }
 
     /// A delete key on an own session's row kills it by its id: a session made
-    /// since that took its name stays.
+    /// since that took its name stays. luneta's zellij is in no own session,
+    /// so it kills it while luneta cannot tell which session its zellij is in
+    /// too.
     #[test]
     fn an_own_session_is_deleted_by_its_id() {
         let mut sidebar = fresh();
         let own = own_session("own", 1, 20, Vec::new());
         let sessions = vec![session("here", 10, Vec::new()), own];
         sidebar.heard(host(sessions, Vec::new()));
-        sidebar.titled("here | ~/w".to_owned());
-        let own = Listed::new_own("own", moment(20_000), 1);
-        sidebar.cursor = Some(Spot::Local(Place::Session(own)));
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "d");
+        let delete = |sidebar: &mut Sidebar| {
+            let own = Listed::new_own("own", moment(20_000), 1);
+            sidebar.cursor = Some(Spot::Local(Place::Session(own)));
+            type_in(sidebar, "d");
+            sidebar.key(&char('s'), moment(160_000))
+        };
         let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made: moment(20_000) });
         let kill = Act::Kill { session: session_name("own"), whose };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
+        assert_eq!(sidebar.here(), None);
+        assert_eq!(delete(&mut sidebar), delete_here(kill.clone()));
+        sidebar.titled("here | ~/w".to_owned());
+        assert_eq!(delete(&mut sidebar), delete_here(kill));
     }
 
     /// An own session of the name of the zellij session luneta's zellij is in
@@ -12219,8 +12228,9 @@ mod tests {
 
     /// Where the machine luneta's zellij is on has no session left, it goes
     /// on in another's: as their headers are, but those it tried, each
-    /// machine's newest first. One lunetad does not reach, or is reaching,
-    /// or that has no session, says why it is passed over. Where luneta's
+    /// machine's newest first, of zellij's, as zellij's client attaches to
+    /// no own session. One lunetad does not reach, or is reaching, or that
+    /// has no session of zellij's, says why it is passed over. Where luneta's
     /// own terminal may be in a pane of another machine's zellij, a session
     /// that may hold it is passed over: one with a pane that runs ssh, or a
     /// luneta, or whose panes zellij there has yet to list.
@@ -12231,8 +12241,9 @@ mod tests {
         let main = session("main", 20, vec![pane(1, 0, "/w/a", "fish")]);
         let work = session("work", 30, vec![pane(1, 0, "/w/b", "ssh -t mac")]);
         let new = Session { panes: None, ..session("new", 40, Vec::new()) };
-        host.remotes[0] = remote("nixos", up(vec![main, work, new], Vec::new()));
-        host.remotes.insert(0, remote("empty", up(Vec::new(), Vec::new())));
+        let own = || own_session("own", 1, 50, vec![pane(1, 0, "/w/c", "fish")]);
+        host.remotes[0] = remote("nixos", up(vec![main, work, new, own()], Vec::new()));
+        host.remotes.insert(0, remote("empty", up(vec![own()], Vec::new())));
         let luneta = pane(2, 0, "/w", "/run/current-system/sw/bin/luneta");
         host.remotes[3] = remote("pi", up(vec![session("pi", 10, vec![luneta])], Vec::new()));
         host.remotes.push(remote("far", Reached::Reaching(())));
