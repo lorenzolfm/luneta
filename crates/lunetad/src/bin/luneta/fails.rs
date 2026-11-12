@@ -5,8 +5,11 @@
 //! itself, but never to one whose client failed since luneta's zellij was
 //! last in a session. Each failure adds its machine, so the tries end; once a
 //! client is in, those that failed before are tried again where it fails, as
-//! what failed then may not fail now, however long it was in.
+//! what failed then may not fail now, however long it was in. A client of
+//! zellij's that took the place of luneta's client of an own session goes
+//! back to that session.
 
+use lunetad::mux::own::OwnId;
 use lunetad::Destination;
 
 use crate::machines::Machine;
@@ -26,6 +29,8 @@ pub enum Fails {
     End,
     /// Back to the session it was in before, on another machine.
     Back(Back),
+    /// Back to the own session luneta's client was in before.
+    Own(OwnId),
     /// On to the newest session of another machine's but those `tried`, as
     /// `App::newest_here` finds it: of a client of a session luneta's zellij
     /// goes on in on another machine, which luneta picked itself. Those tried
@@ -41,6 +46,8 @@ pub enum Failed {
     End,
     /// It goes back to the session it was in before.
     Back(Back),
+    /// It goes back to the own session it was in before.
+    Own(OwnId),
     /// It goes on in this machine's newest session, or else another
     /// machine's but those it holds, as `App::newest_here` finds it.
     Onward(Vec<Destination>),
@@ -54,6 +61,7 @@ impl Fails {
         match self {
             Fails::End => Failed::End,
             Fails::Back(back) => Failed::Back(back),
+            Fails::Own(id) => Failed::Own(id),
             Fails::Onward(mut tried) => {
                 if let Machine::Remote(destination) = on {
                     tried.push(destination.clone());

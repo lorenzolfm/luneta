@@ -131,14 +131,14 @@ impl Server {
 }
 
 /// A runtime of one thread, for the questions of one question to the daemon.
-fn runtime() -> Result<Runtime, Failure> {
+pub(super) fn runtime() -> Result<Runtime, Failure> {
     let runtime = runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
 }
 
 /// Why luneta-mux did not answer, as it said it, or the code it answered with
 /// where it said nothing.
-fn refused(status: &Status) -> Failure {
+pub(super) fn refused(status: &Status) -> Failure {
     match status.message() {
         "" => Failure::Own(status.code().description().to_owned()),
         said => Failure::Own(said.to_owned()),
@@ -161,7 +161,7 @@ pub fn socket() -> Result<PathBuf, Failure> {
 /// server left as it ended without taking it away. The client keeps to the
 /// one connection, and asks nothing once that is gone: the socket could have
 /// another server by then, which counts its ids from 1 again.
-async fn connect(
+pub(super) async fn connect(
     socket: &Path,
     answer: Option<Duration>,
 ) -> io::Result<Option<MuxClient<Channel>>> {

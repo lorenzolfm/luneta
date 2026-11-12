@@ -891,6 +891,13 @@ pub fn running() -> Result<Vec<(SessionName, SystemTime)>, String> {
     running_in(&Zellij::socket_folder())
 }
 
+/// Does `after` on a thread of its own, now that luneta's client of an own
+/// session came to the session it went to, on this machine.
+pub fn came_here(after: After, events: &Sender<Event>) {
+    let events = events.clone();
+    thread::spawn(move || after.came(&mut There::Here, &events));
+}
+
 /// Asks zellij on `on`, the machine luneta's client runs on, for the
 /// clients of the session `look` is of, on a thread of its own, and hands
 /// back what it answers.

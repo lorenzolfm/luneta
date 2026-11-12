@@ -68,7 +68,8 @@ use lunetad::asks::User;
 use lunetad::closes::Whose;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
-use lunetad::mux::own::OwnKey;
+use lunetad::mux::own::attach::To;
+use lunetad::mux::own::{OwnId, OwnKey};
 use lunetad::prunes;
 use lunetad::seats::{seated, Where};
 use lunetad::transcripts::SessionId;
@@ -294,6 +295,11 @@ impl Listed {
         self.own_key().is_some()
     }
 
+    /// The id its server gave it, where it is an own session.
+    pub fn own_id(&self) -> Option<OwnId> {
+        self.own_key().map(|key| key.id)
+    }
+
     /// Whether luneta's zellij is in it, where it is in the session named
     /// `here`: in no own session, whose name a zellij session can have too.
     pub fn is_here(&self, here: Option<&str>) -> bool {
@@ -398,6 +404,16 @@ impl Place {
 pub struct PanePlace {
     pub session: Listed,
     pub pane: u32,
+}
+
+/// luneta's client of an own session, as its server says where it is: in the
+/// session of this id, which while the client is attached is the one server's
+/// that the daemon lists, as one server alone runs at a time; and on this
+/// pane, once the server has said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnSeat {
+    pub session: OwnId,
+    pub pane: Option<u32>,
 }
 
 /// The agent in the pane luneta's zellij is on, that you can name a skill to:
@@ -1284,6 +1300,9 @@ pub struct Sidebar {
     unlisted_machines: usize,
     /// Which client of its session is luneta's zellij, and the pane it is on.
     own: OwnClient,
+    /// Where luneta's client of an own session is, in the place of zellij's:
+    /// while it is, `title`, `sent` and `own` know nothing.
+    own_seat: Option<OwnSeat>,
     keys: Keys,
     /// The row of the pane luneta's zellij is on, or of its session, while
     /// that one is folded, or of this machine, while that one is. The
@@ -1713,6 +1732,9 @@ impl Sidebar {
     /// a session it went to with no go of luneta's, or that it left the one
     /// it was in for one luneta cannot tell. Whether either.
     fn hear_own(&mut self, at: Instant) -> bool {
+        if self.own_seat.is_some() {
+            return false;
+        }
         let rosters: Vec<Roster> = (self.on_sessions().iter())
             .map(|session| Roster {
                 session: session.name.clone(),
@@ -2157,9 +2179,84 @@ impl Sidebar {
     /// answer once it is there.
     pub fn swapping(&mut self, machine: &Machine, session: &SessionName) -> Look {
         self.on = machine.clone();
+        self.own_seat = None;
         self.title = None;
         self.own.anew();
         self.rejoining(session)
+    }
+
+    /// A client of the own session `session` takes the place of luneta's
+    /// zellij's, or of its client of another own session: it is on this
+    /// machine, and in that session, which unfolds, once its server says it
+    /// is. What luneta knew of zellij's client, and its title, are another's.
+    pub fn attaching(&mut self, session: OwnId) {
+        self.on = Machine::Local;
+        self.title = None;
+        self.sent = None;
+        self.own.anew();
+        self.own_seat = Some(OwnSeat { session, pane: None });
+        self.unfold_own(session);
+        self.rebuild();
+    }
+
+    /// luneta's client of an own session is in `session` now, on `pane`, as
+    /// its server says, which unfolds where it went to another.
+    pub fn went_own(&mut self, session: OwnId, pane: u32) {
+        let before = self.own_seat.replace(OwnSeat { session, pane: Some(pane) });
+        assert!(before.is_some(), "only a client of an own session goes among them");
+        if before.is_some_and(|before| before.session != session) {
+            self.unfold_own(session);
+        }
+        self.rebuild();
+    }
+
+    /// Where luneta's client of an own session is, while it is one.
+    pub fn own_seat(&self) -> Option<OwnSeat> {
+        self.own_seat
+    }
+
+    /// The own session of this machine's whose id is `id`, as the daemon
+    /// lists it, if it does.
+    pub fn own_listed(&self, id: OwnId) -> Option<Listed> {
+        let (sessions, _) = oldest_first(self.local_sessions());
+        sessions.into_iter().map(|(listed, _)| listed).find(|listed| listed.own_id() == Some(id))
+    }
+
+    /// The sessions the daemon lists of this machine, as it last said.
+    fn local_sessions(&self) -> &[Session] {
+        self.host.as_ref().map_or(&[], |host| &host.sessions)
+    }
+
+    /// Unfolds the own session `id`, and this machine, as `unfold` does,
+    /// where the daemon lists it.
+    fn unfold_own(&mut self, id: OwnId) {
+        if let Some(listed) = self.own_listed(id) {
+            self.folds.set(Fold::Machine(&Machine::Local), false);
+            self.folds.set(Fold::Session(&Machine::Local, &listed.name), false);
+        }
+    }
+
+    /// Where a client of the own sessions goes to be at `place`, an own
+    /// session's or one of its panes, by their ids: to its tab, as the daemon
+    /// lists it, for a pane. Or why luneta does not know which that is.
+    pub fn own_target(&self, place: &Place) -> Result<(OwnId, To), String> {
+        let listed = place.listed();
+        let id = listed.own_id().ok_or_else(|| format!("{} is no own session", listed.name))?;
+        let Some(pane) = place.pane() else {
+            return Ok((id, To::Session(id)));
+        };
+        let tab = self.pane_of(&Machine::Local, listed, pane).and_then(|pane| pane.tab_id);
+        let tab = tab.ok_or_else(|| format!("lunetad lists no tab of {}:{pane}", listed.name))?;
+        Ok((id, To::Tab(tab)))
+    }
+
+    /// Whether luneta's client is in `listed`, of the machine it is on, where
+    /// zellij's is in the session named `here`: by its id, for an own client.
+    fn seats_here(own_seat: Option<OwnSeat>, listed: &Listed, here: Option<&str>) -> bool {
+        match own_seat {
+            Some(seat) => listed.own_id() == Some(seat.session),
+            None => listed.is_here(here),
+        }
     }
 
     /// luneta's zellij came to `session`, or is back in it, as zellij did not
@@ -2213,6 +2310,9 @@ impl Sidebar {
     /// session's name can hold one too. Until the daemon says, what comes
     /// before the first.
     pub fn here(&self) -> Option<&str> {
+        if self.own_seat.is_some() {
+            return None;
+        }
         if let Some(sent) = &self.sent {
             return Some(sent.session());
         }
@@ -2327,6 +2427,11 @@ impl Sidebar {
     /// of that session's, whose ids another session has too. Or else why the
     /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
+        if let Some(seat) = self.own_seat {
+            let pane = seat.pane.ok_or(NO_HERE_PANE)?;
+            let session = self.own_listed(seat.session).ok_or(NO_HERE_PANE)?;
+            return Ok(PanePlace { session, pane });
+        }
         let (here, pane) = self.own.place().map_err(|unplaced| match unplaced {
             Unplaced::Waiting => NO_HERE_PANE,
             Unplaced::Unsure => UNSURE_PANE,
@@ -2421,6 +2526,14 @@ impl Sidebar {
     /// its client runs on, in the session `here` says, and on its pane there
     /// while that is of the session it is in, as `user` takes it too.
     pub fn whereabouts(&self) -> Option<Here> {
+        if let Some(seat) = self.own_seat {
+            let on = Machine::Local;
+            if let Ok(place) = self.here_place() {
+                return Some(Here::Pane { on, place });
+            }
+            let session = self.own_listed(seat.session)?.name.to_string();
+            return Some(Here::Session { on, session });
+        }
         let session = self.here()?;
         let on = self.on.clone();
         Some(match self.here_place() {
@@ -2619,6 +2732,7 @@ impl Sidebar {
             return;
         };
         let here = self.here().map(str::to_owned);
+        let own_seat = self.own_seat;
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
         // Each machine, and the sessions of each lunetad lists, in the order
@@ -2762,7 +2876,7 @@ impl Sidebar {
                 machine_waiting += waiting;
                 machine_dot |= dots > 0;
                 machine_busy |= busy > 0;
-                let session_here = on && listed.is_here(here.as_deref());
+                let session_here = on && Self::seats_here(own_seat, listed, here.as_deref());
                 machine_here |= session_here;
                 if !listing_sessions {
                     continue;
@@ -4276,7 +4390,7 @@ impl Sidebar {
                     continue;
                 };
                 let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
-                let here = listed.is_here(here);
+                let here = self.on == *on && Self::seats_here(self.own_seat, &listed, here);
                 let it = links::Worked { dir: dir.to_owned(), pull, here };
                 worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
             }
@@ -4330,14 +4444,19 @@ impl Sidebar {
     /// machine `on`, where luneta's zellij is, and what it `deletes`.
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
         let session = listed.name().as_str();
-        let seat = match (self.going(), self.here()) {
+        let seat = match (self.own_seat, self.going(), self.here()) {
             // In a session of another machine's, which this one's go on
             // without.
-            (None, _) if self.on != *on => Seat::Elsewhere,
+            (_, None, _) if self.on != *on => Seat::Elsewhere,
+            // An own client is where its server says.
+            (Some(seat), ..) if listed.own_id() == Some(seat.session) => Seat::In,
+            (Some(_), ..) => Seat::Elsewhere,
+            // zellij's is in no own session, whose name a zellij session can
+            // have too.
             _ if listed.own() => Seat::Elsewhere,
-            (None, here @ Some(_)) if listed.is_here(here) => Seat::In,
-            (None, Some(_)) => Seat::Elsewhere,
-            (Some(_), _) | (None, None) => Seat::Moving,
+            (None, None, here @ Some(_)) if listed.is_here(here) => Seat::In,
+            (None, None, Some(_)) => Seat::Elsewhere,
+            (None, Some(_), _) | (None, None, None) => Seat::Moving,
         };
         let mut agents = Err(Untold::Away);
         let mut refuge: Option<Listed> = None;
@@ -4355,10 +4474,18 @@ impl Sidebar {
                 });
             }
             // The newest of the machine's other sessions, which the picker
-            // lists first, of zellij's: luneta goes to no own session yet.
+            // lists first: of either kind on this one, and of zellij's on
+            // another, as luneta goes to no own session there. zellij goes to
+            // a session by its name, so none of zellij's of this one's.
             let (sessions, _) = oldest_first(seen.sessions);
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
-            refuge = others.rfind(|other| other.name.as_str() != session && !other.own());
+            let local = *on == Machine::Local;
+            let namesake = |other: &Listed| {
+                !listed.own() && !other.own() && other.name.as_str() == session
+            };
+            refuge = others.rfind(|other| {
+                other != listed && (local || !other.own()) && !namesake(other)
+            });
         }
         Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
@@ -4488,8 +4615,7 @@ impl Sidebar {
     /// still what you are on: the menu over zellij still waits on it, or the
     /// menu closed, and what a key started went on, which opens what it opens
     /// where it would have, but takes luneta's client nowhere from what you
-    /// went on to, nor to an own session, which it does not go to yet. A
-    /// session zellij made for it is the one the daemon lists by its name, as
+    /// went on to. A session zellij made for it is the one the daemon lists by its name, as
     /// it does by the time zellij opens a tab of it.
     pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
         let Some((waiting, held, opening)) = self.take_seen(menu, Menu::opening) else {
@@ -4524,7 +4650,7 @@ impl Sidebar {
                 Place::Pane(PanePlace { session, pane })
             },
         };
-        if held == Held::Open && !place.listed().own() {
+        if held == Held::Open {
             return Asked::Go { on, place };
         }
         let said = Self::opened_said(&place);
@@ -6465,6 +6591,13 @@ mod tests {
     /// The pane `pane` of the session `name` that started at `started`.
     fn pane_of(name: &str, started: u64, pane: u32) -> Place {
         Place::Pane(PanePlace { session: listed(name, started), pane })
+    }
+
+    /// The pane `pane` of the own session `name`, of id `id`, which its
+    /// server made at `made`.
+    fn own_pane_of(name: &str, id: u64, made: u64, pane: u32) -> Place {
+        let made = SystemTime::UNIX_EPOCH + Duration::from_secs(made);
+        Place::Pane(PanePlace { session: Listed::new_own(name, made, id), pane })
     }
 
     fn session_name(name: &str) -> SessionName {
@@ -9774,10 +9907,11 @@ mod tests {
     }
 
     /// An own session's server opens a tab with no client there, so a key of
-    /// the menu opens one at once, from any session, and the notes say where:
-    /// luneta's zellij goes to no own session.
+    /// the menu opens one at once, from any session, and luneta goes there, as
+    /// it goes where the menu opens anything; one that opened once the menu
+    /// closed takes luneta nowhere, and the notes say where it is.
     #[test]
-    fn a_tab_of_an_own_session_opens_at_once_and_takes_luneta_nowhere() {
+    fn a_tab_of_an_own_session_opens_at_once_and_luneta_goes_there() {
         let mut sidebar = fresh();
         let panes = vec![pane(7, 0, "/w/luneta/main", "fish")];
         let sessions = vec![session("here", 10, Vec::new()), own_session("own", 1, 20, panes)];
@@ -9789,9 +9923,18 @@ mod tests {
         let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
         let asked = Asked::Open { menu: 1, on: Machine::Local, open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
-        assert_eq!(sidebar.opened(1, Ok(8)), Asked::Nothing);
+        let own = own_pane_of("own", 1, 20, 8);
+        assert_eq!(sidebar.opened(1, Ok(8)), Asked::Go { on: Machine::Local, place: own });
+        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), {
+            let tab = Tab { cwd: directory("/w/luneta/main"), name: None, command: Vec::new() };
+            let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
+            Asked::Open { menu: 2, on: Machine::Local, open: tab }
+        });
+        sidebar.focus(Keys::Zellij);
+        assert_eq!(sidebar.opened(2, Ok(9)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 60, 12);
-        assert!(lines.iter().any(|line| line.contains("menu: opened own:8")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("menu: opened own:9")), "{lines:?}");
     }
 
     /// A delete key on an own session's row kills it by its id: a session made
@@ -9846,6 +9989,41 @@ mod tests {
         let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made: moment(20_000) });
         let kill = Act::Kill { session: session_name("twin"), whose };
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(kill));
+    }
+
+    /// luneta's client of an own session is where its server says, and in
+    /// no zellij session of that name. A delete of its session leaves for the
+    /// newest other session of this machine, of either kind, and deletes it
+    /// once luneta is there; one of the zellij session of the name goes at
+    /// once.
+    #[test]
+    fn an_own_client_is_where_its_server_says_and_leaves_its_session_to_delete_it() {
+        let mut sidebar = fresh();
+        let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
+        let sessions = vec![
+            session("older", 5, Vec::new()),
+            session("twin", 10, panes()),
+            own_session("twin", 1, 20, panes()),
+            own_session("newest", 2, 30, Vec::new()),
+        ];
+        sidebar.heard(host(sessions, Vec::new()));
+        let id = OwnId::new(1).unwrap();
+        sidebar.attaching(id);
+        assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
+        sidebar.went_own(id, 1);
+        let twin = Listed::new_own("twin", moment(20_000), 1);
+        assert_eq!(sidebar.here(), None);
+        assert_eq!(sidebar.here_place(), Ok(PanePlace { session: twin.clone(), pane: 1 }));
+        let zellij = sidebar.plan(&Machine::Local, &listed("twin", 10), Deletes::Session);
+        let whose = Whose::Zellij(moment(10_000));
+        assert_eq!(zellij.unwrap().act, Act::Kill { session: session_name("twin"), whose });
+        sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "d");
+        let newest = Place::Session(Listed::new_own("newest", moment(30_000), 2));
+        let whose = Whose::Own(OwnKey { id, made: moment(20_000) });
+        let leave = Act::Leave { session: session_name("twin"), whose, to: newest };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
     }
 
     /// A key of the Turn group is for the highlighted row, of whatever session,

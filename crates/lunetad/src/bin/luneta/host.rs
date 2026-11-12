@@ -57,6 +57,8 @@ use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
+use lunetad::mux::own::attach::{self as own_attach, Heard, Hello, To};
+use lunetad::mux::own::OwnId;
 use lunetad::mux::Zellij;
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
@@ -70,7 +72,8 @@ use ratatui::{DefaultTerminal, Terminal};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
-use crate::ask::{Ask, Heard, Keyed};
+use crate::ask::{self, Ask, Keyed};
+use crate::attached::{self, Attached};
 use crate::away;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
@@ -96,6 +99,7 @@ use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::prune;
 use crate::own::{Before, Look, Looked};
+use crate::owns;
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -146,6 +150,10 @@ pub enum Event {
     /// number, of those luneta started, which is zellij's client while it is
     /// the last.
     Hosted(u64, Said),
+    /// What luneta-mux said to the client of an own session luneta started as
+    /// the one of this number, of those it started beside the sidebar, which
+    /// is luneta's while it is the last.
+    Own(u64, Heard),
     /// luneta reached a daemon, which reads Claude Code's sessions in
     /// `claude_folder`, where the transcripts of the agents it lists are.
     Reached { claude_folder: Option<PathBuf> },
@@ -208,7 +216,7 @@ pub enum Event {
     /// What came of the brief numbered `number`.
     Briefed { number: u64, written: Written },
     /// What the turn of the ask box numbered `number` heard its agent do.
-    Heard { number: u64, heard: Heard },
+    Heard { number: u64, heard: ask::Heard },
     /// The remotes on GitHub git listed for the issue box numbered `number`,
     /// or why it did not.
     Remotes { number: u64, remotes: Result<Vec<Remote>, String> },
@@ -451,6 +459,7 @@ enum Held {
     /// which the sidebar holds itself.
     Nothing,
     /// zellij, as a button went down over it: what it drags goes to zellij.
+    /// Or luneta's client of an own session, in zellij's place.
     Zellij,
     /// The sidebar's edge, as the left button went down on it, and whether
     /// it was dragged since. One let go undragged keeps no width, so that
@@ -544,6 +553,29 @@ struct Client {
     /// When it started, for how long it lasted, where zellij drops it.
     started: Instant,
     alive: Arc<()>,
+}
+
+/// What luneta runs beside the sidebar: zellij's client, or its own client of
+/// an own session, in zellij's place.
+#[expect(clippy::large_enum_variant, reason = "the app holds one, for as long as luneta runs")]
+enum Right {
+    Zellij(Client),
+    Own(Own),
+}
+
+/// luneta's client of an own session, and what luneta does once the server
+/// first says where it is.
+struct Own {
+    attached: Attached,
+    /// What luneta does as the client comes to the session it goes to, as
+    /// once zellij's client comes: what a delete asked of the session it
+    /// leaves. A `Go` refused leaves it undone.
+    after: Option<After>,
+    /// Where luneta goes where the client is lost before it comes to any
+    /// session, as where no server runs, or it is refused.
+    fails: Fails,
+    /// Whether the server said where it is.
+    came: bool,
 }
 
 /// How a client luneta starts comes to its session.
@@ -776,9 +808,9 @@ impl Inbox {
 }
 
 struct App {
-    client: Client,
+    right: Right,
     /// How many programs luneta started beside the sidebar, each zellij's
-    /// client in its turn.
+    /// client or its own client of an own session in its turn.
     started: u64,
     sidebar: Sidebar,
     /// Where the sidebar and zellij were last drawn, which the mouse goes by.
@@ -1139,13 +1171,13 @@ fn run_in(
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
     let hosted = Hosted::start(program, args, dir, window(areas.1), started, events.clone())?;
-    let client = Client::new(hosted, fails, arrival, None);
+    let right = Right::Zellij(Client::new(hosted, fails, arrival, None));
     let desktop = Desktop::start(&events);
     // Until the terminal says otherwise. One that never tells a program of its
     // window's focus has you in it all along.
     let focused = true;
     let mut app = App {
-        client,
+        right,
         started,
         sidebar,
         areas,
@@ -1270,6 +1302,15 @@ fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: 
 /// for it.
 type FirstClient = ((String, Vec<String>), Fails, Option<Arrival>);
 
+/// What a client of the own sessions that goes `to` says first: how big
+/// zellij's `area` is, for it is in its place, and the `colours` of luneta's
+/// terminal, where it said them.
+fn hello(to: To, area: Rect, colours: Colours) -> Hello {
+    let size = window(area);
+    let (foreground, background) = colours.both();
+    Hello { to, size: own_attach::Size::within(size.columns, size.lines), foreground, background }
+}
+
 /// luneta's first client, as `first` says, of which the sidebar hears; or
 /// why zellij's client cannot attach.
 fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, String> {
@@ -1308,7 +1349,8 @@ fn run_loop(
     inbox: &mut Inbox,
 ) -> io::Result<()> {
     loop {
-        let wait = if matches!(app.client.coming, Some(Coming::Held(_))) {
+        let held = |client: &Client| matches!(client.coming, Some(Coming::Held(_)));
+        let wait = if app.zellij().is_some_and(held) {
             WAITING_LOOK
         } else if app.sidebar.scrolling() {
             sidebar::SCROLL
@@ -1384,19 +1426,30 @@ impl App {
                 | Event::Stayed(_)
                 | Event::Unfound(_)
                 | Event::Hosted(_, Said::Titled(_))
+                | Event::Own(_, Heard::Went(_))
         );
         match event {
-            Event::Input(input) => match &mut self.client.coming {
-                Some(Coming::Held(waiting)) => waiting.input.push(input),
-                _ => self.input(input),
+            Event::Input(input) => match &mut self.right {
+                Right::Zellij(client) => match &mut client.coming {
+                    Some(Coming::Held(waiting)) => waiting.input.push(input),
+                    Some(Coming::Overdue(_)) | None => self.input(input),
+                },
+                Right::Own(_) => self.input(input),
             },
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             // What a client that luneta put another in the place of says is
             // of a terminal no longer shown.
             Event::Hosted(number, said) => {
-                if number == self.client.hosted.number() {
+                if self.zellij().is_some_and(|client| client.hosted.number() == number) {
                     self.hosted_said(said, terminal)?;
+                }
+            },
+            // And what a client of an own session luneta let go of says is of
+            // none it has.
+            Event::Own(number, heard) => {
+                if matches!(&self.right, Right::Own(own) if own.attached.number() == number) {
+                    self.own_heard(heard)?;
                 }
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
@@ -1413,14 +1466,17 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Looked(looked) => {
-                if self.sidebar.looked(looked) {
-                    self.client.fails.came_in();
+                if self.sidebar.looked(looked)
+                    && let Some(client) = self.zellij_mut()
+                {
+                    client.fails.came_in();
                 }
                 self.on_to_pane();
             },
             Event::Stayed(look) => {
-                let stayed = |making: &Making| making.arrival.look.number == look;
-                if let Some(making) = self.client.making.take_if(|making| stayed(making)) {
+                let stayed = |making: &mut Making| making.arrival.look.number == look;
+                let making = self.zellij_mut().and_then(|client| client.making.take_if(stayed));
+                if let Some(making) = making {
                     making.arrival.stayed(&self.events);
                 }
                 let look = self.sidebar.stayed(look);
@@ -1526,7 +1582,7 @@ impl App {
                 }
             },
             Event::Heard { number, heard } => {
-                let ended = matches!(heard, Heard::Ended(_));
+                let ended = matches!(heard, ask::Heard::Ended(_));
                 if let Some(Over::Ask(ask)) = &mut self.focus.over
                     && ask.number() == number
                 {
@@ -1609,6 +1665,27 @@ impl App {
         }
         self.settle();
         Ok(())
+    }
+
+    /// zellij's client, where it runs beside the sidebar.
+    fn zellij(&self) -> Option<&Client> {
+        match &self.right {
+            Right::Zellij(client) => Some(client),
+            Right::Own(_) => None,
+        }
+    }
+
+    fn zellij_mut(&mut self) -> Option<&mut Client> {
+        match &mut self.right {
+            Right::Zellij(client) => Some(client),
+            Right::Own(_) => None,
+        }
+    }
+
+    /// zellij's client, where what calls this is of zellij's alone: what its
+    /// terminal said, as none of an own client's is, or what zellij moved.
+    fn zellij_client(&mut self) -> &mut Client {
+        self.zellij_mut().expect("zellij's client runs beside the sidebar")
     }
 
     /// Hands the picker, while it is open, what the sidebar knows now.
@@ -1712,7 +1789,7 @@ impl App {
     /// Asks zellij what the picker has yet to ask, while it is open, once
     /// zellij's client is in: until then, what it asks waits.
     fn ask_zellij(&mut self) {
-        if self.client.arriving() {
+        if self.zellij().is_some_and(Client::arriving) {
             return;
         }
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
@@ -1740,12 +1817,18 @@ impl App {
     /// to a session zellij makes for it is taken for one that stayed, once
     /// luneta waited long enough for zellij to title its terminal there.
     fn wait_on(&mut self, now: Instant) {
-        match self.client.coming.take() {
-            coming @ Some(_) if !self.client.hosted.blank() => self.came_in(coming),
+        let Right::Zellij(client) = &mut self.right else {
+            return;
+        };
+        let blank = client.hosted.blank();
+        match client.coming.take() {
+            coming @ Some(_) if !blank => self.came_in(coming),
             Some(Coming::Held(waiting)) if now >= waiting.until => self.overdue(waiting),
-            coming => self.client.coming = coming,
+            coming => client.coming = coming,
         }
-        if let Some(making) = self.client.making.take_if(|making| now >= making.until) {
+        let due = |making: &mut Making| now >= making.until;
+        let making = self.zellij_mut().and_then(|client| client.making.take_if(due));
+        if let Some(making) = making {
             self.sidebar.notify("zellij did not take its client there".to_owned());
             let look = self.sidebar.stayed(making.arrival.look.number);
             making.arrival.stayed(&self.events);
@@ -1774,7 +1857,7 @@ impl App {
         let fresh = waiting.fresh();
         self.hand(waiting.input);
         if fresh {
-            self.client.coming = Some(Coming::Overdue(waiting.arrival));
+            self.zellij_client().coming = Some(Coming::Overdue(waiting.arrival));
         } else {
             self.ask(waiting.arrival);
         }
@@ -1784,8 +1867,8 @@ impl App {
     /// for it, and watches the daemon, if luneta does not yet: a daemon that
     /// luneta starts asks zellij about every session at once.
     fn ask(&mut self, arrival: Option<Arrival>) {
-        if let Some(arrival) = arrival {
-            zellij::arrive(arrival, &self.client.alive, &self.events);
+        if let (Some(arrival), Right::Zellij(client)) = (arrival, &self.right) {
+            zellij::arrive(arrival, &client.alive, &self.events);
         }
         if let Some(folder) = self.daemon.take() {
             crate::watch::start(folder, self.events.clone());
@@ -1797,10 +1880,8 @@ impl App {
     /// as it knows: it hears first where it does not, as the sidebar has them,
     /// or another window.
     fn hand(&mut self, input: Vec<Input>) {
-        if !(self.focused && self.focus.zellij_told())
-            && let Some(bytes) = keys::focus(false, self.client.hosted.mode())
-        {
-            self.client.hosted.send(bytes);
+        if !(self.focused && self.focus.zellij_told()) {
+            self.tell_focus(false);
         }
         for input in input {
             self.input(input);
@@ -1824,7 +1905,7 @@ impl App {
                 Some(Over::Menu) => self.sidebar.paste(&text),
                 Some(Over::Brief(_) | Over::Note(_) | Over::Dictation(..)) => {},
                 None if self.focus.side == Side::Sidebar => self.sidebar.paste(&text),
-                None => self.client.hosted.send(keys::paste(&text, self.client.hosted.mode())),
+                None => self.paste(&text),
             },
             Input::FocusGained => self.focus_window(true),
             Input::FocusLost => self.focus_window(false),
@@ -1993,9 +2074,49 @@ impl App {
 
     /// Hands `key` to zellij's client, as what you typed.
     fn key_to_zellij(&mut self, key: &KeyEvent) {
-        if let Some(bytes) = keys::key(key, self.client.hosted.mode()) {
-            self.client.hosted.send(bytes);
-            self.typed();
+        match &mut self.right {
+            Right::Zellij(client) => {
+                if let Some(bytes) = keys::key(key, client.hosted.mode()) {
+                    client.hosted.send(bytes);
+                    self.typed();
+                }
+            },
+            Right::Own(own) => {
+                if let Err(why) = own.attached.key(key) {
+                    self.sidebar.notify(why);
+                }
+            },
+        }
+    }
+
+    /// Pastes `text` where zellij's client is, or luneta's own in its place,
+    /// as you pasted it.
+    fn paste(&mut self, text: &str) {
+        match &mut self.right {
+            Right::Zellij(client) => client.hosted.send(keys::paste(text, client.hosted.mode())),
+            Right::Own(own) => {
+                if let Err(why) = own.attached.paste(text) {
+                    self.sidebar.notify(why);
+                }
+            },
+        }
+    }
+
+    /// Tells zellij's client, or luneta's own in its place, whether it has
+    /// the keys in a window that has the focus, where its program asked to be
+    /// told.
+    fn tell_focus(&mut self, has: bool) {
+        match &mut self.right {
+            Right::Zellij(client) => {
+                if let Some(bytes) = keys::focus(has, client.hosted.mode()) {
+                    client.hosted.send(bytes);
+                }
+            },
+            Right::Own(own) => {
+                if let Err(why) = own.attached.focus(has) {
+                    self.sidebar.notify(why);
+                }
+            },
         }
     }
 
@@ -2035,7 +2156,7 @@ impl App {
             },
             Went::Kept { on, path } => {
                 if matches!(self.sidebar.on(), Machine::Remote(there) if *there == on) {
-                    self.client.hosted.send(keys::paste(&path, self.client.hosted.mode()));
+                    self.paste(&path);
                     self.typed();
                 } else {
                     self.image_not_pasted(&format!("zellij left {on}, where it is at {path}"));
@@ -2276,12 +2397,27 @@ impl App {
     /// Hands zellij what the mouse does, at the cell of zellij's nearest to
     /// it.
     fn zellij_mouse(&mut self, mouse: MouseEvent) {
+        let at = self.zellij_cell(mouse);
+        match &mut self.right {
+            Right::Zellij(client) => {
+                if let Some(bytes) = keys::mouse(mouse, at.column, at.row, client.hosted.mode()) {
+                    client.hosted.send(bytes);
+                }
+            },
+            Right::Own(own) => {
+                if let Err(why) = own.attached.mouse(mouse, at) {
+                    self.sidebar.notify(why);
+                }
+            },
+        }
+    }
+
+    /// The cell of zellij's nearest to where `mouse` is.
+    fn zellij_cell(&self, mouse: MouseEvent) -> attached::Spot {
         let (_, zellij) = self.areas;
         let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
-        let row = mouse.row.saturating_sub(zellij.y);
-        if let Some(bytes) = keys::mouse(mouse, column, row, self.client.hosted.mode()) {
-            self.client.hosted.send(bytes);
-        }
+        let row = mouse.row.saturating_sub(zellij.y).min(zellij.height.saturating_sub(1));
+        attached::Spot { row, column }
     }
 
     /// Takes what the mouse does while the sidebar's edge is held, and says
@@ -2517,7 +2653,7 @@ impl App {
         if matches!(user, User::Pane { .. })
             && let Ok(seat) = self.seat()
         {
-            self.client.nudge_in(seat.to_string());
+            self.zellij_client().nudge_in(seat.to_string());
         }
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
             ask.send(user, self.sidebar.agent(), &self.events);
@@ -2667,14 +2803,12 @@ impl App {
                 let here = self.sidebar.here_agent() == agent;
                 let dictated = if here { dictated } else { dictated.moved() };
                 let Dictated { written, sends, .. } = dictated;
-                let mode = self.client.hosted.mode();
                 let harness = agent.map_or(agents::Harness::ClaudeCode, |agent| agent.harness);
-                for paste in pastes(&written, harness, mode) {
-                    self.client.hosted.send(paste);
+                for paste in pastes(&written, harness) {
+                    self.paste(&paste);
                 }
-                let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-                if sends && let Some(bytes) = keys::key(&enter, mode) {
-                    self.client.hosted.send(bytes);
+                if sends {
+                    self.key_to_zellij(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 }
                 self.typed();
             },
@@ -2741,13 +2875,15 @@ impl App {
     /// is there, in another session. On another machine than the one the
     /// client runs on, or where luneta cannot tell which session the client
     /// is in, a client there takes its place, as `swap` says, and opens what
-    /// `after` opens once it is in. It goes to no own session yet. Whether it
-    /// went.
+    /// `after` opens once it is in; and so does one of zellij's here, in the
+    /// place of luneta's client of an own session. To an own session, it goes
+    /// as `go_own` says. Whether it went.
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
         if place.listed().own() {
-            let session = place.listed().name();
-            self.sidebar.notify(format!("luneta cannot go to {session}, an own session, yet"));
-            return false;
+            return self.go_own(machine, place, after);
+        }
+        if matches!(self.right, Right::Own(_)) {
+            return self.swap(machine, place, after);
         }
         if machine != self.sidebar.on() || self.sidebar.astray().is_some() {
             // The session a kill is of is the one the client leaves, of the
@@ -2772,6 +2908,152 @@ impl App {
         };
         zellij::go(&nudged, place.listed().name(), place.pane(), then, after, &self.events);
         true
+    }
+
+    /// Takes luneta's client to `place`, an own session's or one of its
+    /// panes, on `machine`, and does `after` once it is there: on its stream,
+    /// where luneta's client is of the own sessions already, or else as one
+    /// of them takes the place of zellij's, as `attach` says. Never to another
+    /// machine's, nor to the session luneta runs in. Whether it went.
+    fn go_own(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
+        let session = place.listed().name();
+        let refusal = match machine {
+            Machine::Local => None,
+            Machine::Remote(destination) => Some(format!(
+                "luneta cannot go to {session}, an own session of {destination}'s, yet"
+            )),
+        };
+        let target = match refusal {
+            Some(why) => Err(why),
+            None => self.sidebar.own_target(place),
+        };
+        let target = target.and_then(|(id, to)| match owns::refusal(id, session) {
+            Some(why) => Err(why),
+            None => Ok((id, to)),
+        });
+        let (id, to) = match target {
+            Ok(target) => target,
+            Err(why) => {
+                self.sidebar.notify(why);
+                if let Some(after) = after {
+                    after.untold(&self.events);
+                }
+                return false;
+            },
+        };
+        let Right::Own(own) = &mut self.right else {
+            let fails = self.back();
+            self.attach(id, to, after, fails);
+            return true;
+        };
+        if let Err(why) = own.attached.go(to) {
+            self.sidebar.notify(why);
+            if let Some(after) = after {
+                after.untold(&self.events);
+            }
+            return false;
+        }
+        if let Some(before) = std::mem::replace(&mut own.after, after) {
+            before.untold(&self.events);
+        }
+        true
+    }
+
+    /// Has a client of the own sessions take the place of what runs beside
+    /// the sidebar, the next luneta starts, which goes `to` a session of
+    /// them, `session`, or a tab of it, and does `after` once it is there,
+    /// going where it `fails` where it is lost before. It hears first where
+    /// it has not the keys, or the window has not the focus.
+    fn attach(&mut self, session: OwnId, to: To, after: Option<After>, fails: Fails) {
+        let number = self.started + 1;
+        let hello = hello(to, self.areas.1, self.colours);
+        let attached = Attached::start(number, hello, &self.events);
+        self.started = number;
+        if let Right::Zellij(client) = &self.right {
+            self.drops.gave_way(client.started.elapsed());
+        }
+        self.right = Right::Own(Own { attached, after, fails, came: false });
+        self.sidebar.attaching(session);
+        // The client that takes its place heard no button go down over it.
+        if self.held == Held::Zellij {
+            self.held = Held::Nothing;
+        }
+        if !(self.focused && self.focus.zellij_told()) {
+            self.tell_focus(false);
+        }
+        // No server of zellij's is new for the daemon to trouble.
+        self.ask(None);
+    }
+
+    /// Takes in what luneta-mux said to luneta's client of an own session:
+    /// where it is, which the sidebar has it at, and does what waited on its
+    /// coming there; what its pane shows; a go it refused, which leaves what
+    /// waited on it undone; and its end, as `own_ended` says.
+    fn own_heard(&mut self, heard: Heard) -> io::Result<()> {
+        let Right::Own(own) = &mut self.right else {
+            unreachable!("only an own client hears its server");
+        };
+        own.attached.heard(&heard);
+        match heard {
+            Heard::Attached | Heard::Frame(_) => {},
+            Heard::Went(went) => {
+                own.came = true;
+                let after = own.after.take();
+                self.sidebar.went_own(went.session, went.pane);
+                if let Some(after) = after {
+                    zellij::came_here(after, &self.events);
+                }
+            },
+            Heard::Stayed(reason) => {
+                let after = own.after.take();
+                let note = format!("luneta-mux did not take luneta's client there: {reason}");
+                self.sidebar.notify(note);
+                if let Some(after) = after {
+                    after.untold(&self.events);
+                }
+            },
+            Heard::Ended => return self.own_ended(None),
+            Heard::Lost(why) => return self.own_ended(Some(why)),
+        }
+        Ok(())
+    }
+
+    /// luneta's client of an own session ended: as its session ended, or lost,
+    /// as `lost` says why. What waited on its coming is left undone. One lost
+    /// before it came to any session goes where it `fails`; and otherwise the
+    /// newest session that answers takes its place, as `newest_here` says.
+    fn own_ended(&mut self, lost: Option<String>) -> io::Result<()> {
+        let Right::Own(own) = &mut self.right else {
+            unreachable!("only an own client ends so");
+        };
+        let (came, fails) = (own.came, own.fails.clone());
+        if let Some(after) = own.after.take() {
+            after.untold(&self.events);
+        }
+        let Some(why) = lost else {
+            return self.newest_here(&[]);
+        };
+        let note = format!("luneta's client of an own session: {why}");
+        if came {
+            self.sidebar.notify(note);
+            return self.newest_here(&[]);
+        }
+        match fails.failed(&Machine::Local) {
+            Failed::Back(back) => {
+                self.sidebar.notify(note);
+                self.go_back(&Machine::Local, back, Fails::End)
+            },
+            Failed::Own(id) => {
+                self.sidebar.notify(note);
+                self.attach(id, To::Session(id), None, Fails::End);
+                Ok(())
+            },
+            Failed::End | Failed::Onward(_) => {
+                self.end(&note);
+                self.gave_up = Some(why);
+                Ok(())
+            },
+        }
     }
 
     /// Takes zellij's client to `place` on `machine`, another than the one it
@@ -2855,6 +3137,9 @@ impl App {
     /// another machine fails: back to the session it is in, of the machine it
     /// is on now; or nowhere, where luneta does not know which that is.
     fn back(&self) -> Fails {
+        if let Some(seat) = self.sidebar.own_seat() {
+            return Fails::Own(seat.session);
+        }
         self.here_back().map_or(Fails::End, Fails::Back)
     }
 
@@ -2898,7 +3183,7 @@ impl App {
             Joins::Make(..) => {
                 self.put(hosted, fails, None, then_pane);
                 let until = Instant::now() + zellij::START;
-                self.client.making = Some(Making { arrival, until });
+                self.zellij_client().making = Some(Making { arrival, until });
             },
         }
         Ok(())
@@ -2939,8 +3224,10 @@ impl App {
         arrival: Option<Arrival>,
         then_pane: Option<Place>,
     ) {
-        self.drops.gave_way(self.client.started.elapsed());
-        self.client = Client::new(hosted, fails, arrival, then_pane);
+        if let Right::Zellij(client) = &self.right {
+            self.drops.gave_way(client.started.elapsed());
+        }
+        self.right = Right::Zellij(Client::new(hosted, fails, arrival, then_pane));
         // The client that takes its place heard no button go down over it.
         if self.held == Held::Zellij {
             self.held = Held::Nothing;
@@ -2950,7 +3237,7 @@ impl App {
     /// Takes zellij's client on to the pane luneta started it to go to, once
     /// it is in that pane's session, as far as luneta knows.
     fn on_to_pane(&mut self) {
-        let Some(place) = &self.client.then_pane else {
+        let Some(place) = self.zellij().and_then(|client| client.then_pane.as_ref()) else {
             return;
         };
         let seat = self.seat().ok();
@@ -2959,7 +3246,7 @@ impl App {
         {
             return;
         }
-        if let Some(place) = self.client.then_pane.take() {
+        if let Some(place) = self.zellij_mut().and_then(|client| client.then_pane.take()) {
             let machine = self.sidebar.on().clone();
             self.go(&machine, &place, None);
         }
@@ -2985,7 +3272,7 @@ impl App {
         let then = self.sidebar.sending(session);
         let made = zellij::start(&nudged, session, cwd, then, alone, &self.events);
         let until = Instant::now() + zellij::START;
-        self.client.making = made.map(|arrival| Making { arrival, until });
+        self.zellij_client().making = made.map(|arrival| Making { arrival, until });
         true
     }
 
@@ -3056,8 +3343,10 @@ impl App {
                 // by the time zellij takes it, and luneta looks just before
                 // only here, as `zellij::start` says: elsewhere, a client
                 // that makes the session is refused a name taken since.
-                match (unused.on(), self.sidebar.on()) {
-                    (Machine::Local, Machine::Local) => self.start(unused.name(), cwd, alone),
+                match (unused.on(), self.sidebar.on(), &self.right) {
+                    (Machine::Local, Machine::Local, Right::Zellij(_)) => {
+                        self.start(unused.name(), cwd, alone)
+                    },
                     _ => self.swap_making(&unused, cwd, alone),
                 }
             },
@@ -3073,7 +3362,11 @@ impl App {
     /// zellij has yet to have it in one, or to say which, or it is on its way
     /// to another, which the key or the action may reach first.
     fn seat(&self) -> Result<SessionName, String> {
-        if self.client.coming.is_some() {
+        let coming = match &self.right {
+            Right::Zellij(client) => client.coming.is_some(),
+            Right::Own(_) => return Err("luneta's client is in an own session".to_owned()),
+        };
+        if coming {
             return Err("zellij has yet to come to its session".to_owned());
         }
         if let Some(left) = self.sidebar.astray() {
@@ -3096,7 +3389,10 @@ impl App {
     /// zellij in the session it is in to move it, or says why it is in none.
     fn nudge(&mut self) -> Option<Nudged> {
         match self.seat() {
-            Ok(here) => Some(self.client.nudge(self.sidebar.on().clone(), here)),
+            Ok(here) => {
+                let on = self.sidebar.on().clone();
+                Some(self.zellij_client().nudge(on, here))
+            },
             Err(why) => {
                 self.sidebar.notify(why);
                 None
@@ -3113,16 +3409,16 @@ impl App {
     /// whose name zellij would write the nudge into.
     fn nudge_ahead(&mut self) {
         if let Ok(here) = self.seat()
-            && self.client.typed_at(here.as_str()).is_none()
+            && self.zellij_client().typed_at(here.as_str()).is_none()
         {
-            self.client.nudge_in(here.to_string());
+            self.zellij_client().nudge_in(here.to_string());
         }
     }
 
     /// zellij's client typed a key for you just now.
     fn typed(&mut self) {
         if let Ok(here) = self.seat() {
-            self.client.typed_in(here.to_string());
+            self.zellij_client().typed_in(here.to_string());
         }
     }
 
@@ -3138,8 +3434,10 @@ impl App {
     /// typed elsewhere: zellij forgets the keys of a client that leaves, of
     /// one that comes back too.
     fn arrived(&mut self, look: Option<Look>) {
-        if look.is_some() {
-            self.client.typed = None;
+        if look.is_some()
+            && let Some(client) = self.zellij_mut()
+        {
+            client.typed = None;
         }
         self.look(look);
     }
@@ -3199,11 +3497,8 @@ impl App {
         });
         self.focus = focus;
         self.hold_aloud();
-        if self.focused
-            && has != had
-            && let Some(bytes) = keys::focus(has, self.client.hosted.mode())
-        {
-            self.client.hosted.send(bytes);
+        if self.focused && has != had {
+            self.tell_focus(has);
         }
         // What has the keys now may take zellij's client to a pane.
         if had && !has {
@@ -3246,10 +3541,8 @@ impl App {
             self.pointer = None;
             self.sidebar.let_go();
         }
-        if self.focus.zellij_told()
-            && let Some(bytes) = keys::focus(focused, self.client.hosted.mode())
-        {
-            self.client.hosted.send(bytes);
+        if self.focus.zellij_told() {
+            self.tell_focus(focused);
         }
     }
 
@@ -3263,12 +3556,14 @@ impl App {
                     let there = |making: &mut Making| {
                         sidebar::in_session(&title, &making.arrival.look.session)
                     };
-                    if let Some(making) = self.client.making.take_if(there) {
-                        zellij::arrive(making.arrival, &self.client.alive, &self.events);
+                    if let Right::Zellij(client) = &mut self.right
+                        && let Some(making) = client.making.take_if(there)
+                    {
+                        zellij::arrive(making.arrival, &client.alive, &self.events);
                     }
                     let look = self.sidebar.titled(title);
                     self.arrived(look);
-                    let coming = self.client.coming.take();
+                    let coming = self.zellij_client().coming.take();
                     self.came_in(coming);
                 }
             },
@@ -3276,15 +3571,16 @@ impl App {
                 clip(terminal, clipboard, &text)?;
                 self.copied = Some(text);
             },
-            Said::Answer(answer) => self.client.hosted.answer(answer.into_bytes()),
+            Said::Answer(answer) => self.zellij_client().hosted.answer(answer.into_bytes()),
             Said::AskedSize(answer) => {
-                self.client.hosted.answer(answer(self.client.hosted.size().into()).into_bytes());
+                let hosted = &self.zellij_client().hosted;
+                hosted.answer(answer(hosted.size().into()).into_bytes());
             },
             // A colour luneta's terminal did not say, or one of the rest, as
             // the sixteen and the cursor's, goes without an answer.
             Said::AskedColour(index, spell) => {
                 if let Some(answer) = self.colours.answer(index, &*spell) {
-                    self.client.hosted.answer(answer.into_bytes());
+                    self.zellij_client().hosted.answer(answer.into_bytes());
                 }
             },
             Said::Rang => {
@@ -3292,7 +3588,7 @@ impl App {
                 backend.write_all(b"\x07")?;
                 backend.flush()?;
             },
-            Said::Exited(status) => self.client.exited = Some(status),
+            Said::Exited(status) => self.zellij_client().exited = Some(status),
             Said::Ended => self.client_ended()?,
         }
         Ok(())
@@ -3310,21 +3606,27 @@ impl App {
     /// there, is taken back to its session, as `take_back` says. The log says
     /// why, of each that ends luneta.
     fn client_ended(&mut self) -> io::Result<()> {
-        if self.client.dropped() {
+        if self.zellij_client().dropped() {
             return self.take_back();
         }
         if let Machine::Remote(destination) = self.sidebar.on() {
             let destination = destination.clone();
             return self.ended_away(&destination);
         }
-        if self.client.exited.is_none_or(|status| !status.success()) {
+        let client = self.zellij_client();
+        if client.exited.is_none_or(|status| !status.success()) {
             // A client here goes back where it fails, if anywhere: one of a
             // session luneta went on in here ends luneta, as `Fails::Onward`
             // is of another machine's.
-            return match self.client.fails.clone().failed(&Machine::Local) {
+            return match client.fails.clone().failed(&Machine::Local) {
                 Failed::Back(back) => {
                     self.failed(&Machine::Local);
                     self.go_back(&Machine::Local, back, Fails::End)
+                },
+                Failed::Own(id) => {
+                    self.failed(&Machine::Local);
+                    self.attach(id, To::Session(id), None, Fails::End);
+                    Ok(())
                 },
                 Failed::End | Failed::Onward(_) => {
                     self.end_with_client(FAILED, &Machine::Local);
@@ -3372,9 +3674,10 @@ impl App {
     /// to the newest session of a machine it has yet to try. luneta ends
     /// where the client detached, and where it failed with nowhere to go.
     fn ended_away(&mut self, destination: &Destination) -> io::Result<()> {
-        let mut fails = self.client.fails.clone();
+        let client = self.zellij_client();
+        let mut fails = client.fails.clone();
         let on = Machine::Remote(destination.clone());
-        if self.client.exited.is_none_or(|status| !status.success()) {
+        if client.exited.is_none_or(|status| !status.success()) {
             return match fails.failed(&on) {
                 Failed::End => {
                     self.end_with_client(FAILED, &on);
@@ -3383,6 +3686,11 @@ impl App {
                 Failed::Back(back) => {
                     self.failed(&on);
                     self.go_back(&on, back, Fails::End)
+                },
+                Failed::Own(id) => {
+                    self.failed(&on);
+                    self.attach(id, To::Session(id), None, Fails::End);
+                    Ok(())
                 },
                 Failed::Onward(tried) => {
                     self.failed(&on);
@@ -3424,11 +3732,12 @@ impl App {
     /// machine, or of one whose session ended, failed: the notes say what it
     /// said, and how it ended, and so does what waits on its arrival.
     fn failed(&mut self, on: &Machine) {
-        let note = self.client.said(on);
+        let client = self.zellij_client();
+        let note = client.said(on);
         // What waits on its arrival, as a menu waits on a session made for
         // it, hears why it did not come, not that it ended with no answer.
-        let coming = self.client.coming.take().and_then(Coming::arrival);
-        let making = self.client.making.take().map(|making| making.arrival);
+        let coming = client.coming.take().and_then(Coming::arrival);
+        let making = client.making.take().map(|making| making.arrival);
         for arrival in coming.into_iter().chain(making) {
             arrival.failed(note.clone(), &self.events);
         }
@@ -3452,11 +3761,12 @@ impl App {
             return Ok(());
         };
         let session = &back.session;
-        match self.drops.dropped(self.client.started.elapsed()) {
+        let lasted = self.zellij_client().started.elapsed();
+        match self.drops.dropped(lasted) {
             Dropped::TakeBack => {
                 let note = format!("{who} dropped its client: taking it back to {session}");
                 self.sidebar.notify(note);
-                let mut fails = self.client.fails.clone();
+                let mut fails = self.zellij_client().fails.clone();
                 fails.came_in();
                 self.go_back(&on, back, fails)
             },
@@ -3481,7 +3791,7 @@ impl App {
     /// luneta ends, as `how` says of zellij's client on `on`, with what that
     /// said as it ended.
     fn end_with_client(&mut self, how: &str, on: &Machine) {
-        let said = self.client.said(on);
+        let said = self.zellij_client().said(on);
         self.end(&format!("{how}: {said}"));
     }
 
@@ -3570,6 +3880,11 @@ impl App {
                 self.sidebar.notify(why.to_owned());
                 self.go_back(on, back, Fails::End)
             },
+            (_, Failed::Own(id)) => {
+                self.sidebar.notify(why.to_owned());
+                self.attach(id, To::Session(id), None, Fails::End);
+                Ok(())
+            },
             (Machine::Remote(_), Failed::Onward(tried)) => {
                 self.sidebar.notify(why.to_owned());
                 self.newest_here(&tried)
@@ -3597,8 +3912,10 @@ impl App {
             // What it is, the last of what it was asked: the colours it turned
             // to, if it turned, are in.
             Answer::Device => {
-                if let Some(theme) = self.turned.take() {
-                    self.client.hosted.send(theme.report());
+                if let Some(theme) = self.turned.take()
+                    && let Some(client) = self.zellij()
+                {
+                    client.hosted.send(theme.report());
                 }
             },
             // Too late to count, as luneta started.
@@ -3617,20 +3934,21 @@ impl App {
         if let Some(why) = &self.gave_up {
             return Some(format!("luneta: {why}"));
         }
-        let status = self.client.exited.filter(|status| !status.success())?;
+        let client = self.zellij()?;
+        let status = client.exited.filter(|status| !status.success())?;
         let ended = match self.sidebar.on() {
             Machine::Local => format!("luneta: zellij ended ({status})"),
             Machine::Remote(destination) => {
                 format!("luneta: zellij on {destination} ended ({status})")
             },
         };
-        let ended = match self.client.fails {
+        let ended = match client.fails {
             Fails::Onward(_) => format!(
                 "{ended}\nluneta: name a session to start there, made if none runs: luneta <name>"
             ),
-            Fails::End | Fails::Back(_) => ended,
+            Fails::End | Fails::Back(_) | Fails::Own(_) => ended,
         };
-        let said = self.client.hosted.text();
+        let said = client.hosted.text();
         Some(if said.is_empty() { ended } else { format!("{said}\n{ended}") })
     }
 
@@ -3649,9 +3967,19 @@ impl App {
             let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
             let (sidebar, zellij) = areas(frame.area(), own);
             self.areas = (sidebar, zellij);
-            let size = self.client.hosted.size();
-            if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
-                self.client.hosted.resize(window(zellij));
+            match &mut self.right {
+                Right::Zellij(client) => {
+                    let size = client.hosted.size();
+                    if (zellij.width, zellij.height) != (size.columns.get(), size.lines.get()) {
+                        client.hosted.resize(window(zellij));
+                    }
+                },
+                Right::Own(own) => {
+                    let size = window(zellij);
+                    if let Err(why) = own.attached.resize(size.columns, size.lines) {
+                        self.sidebar.notify(why);
+                    }
+                },
             }
             let buffer = frame.buffer_mut();
             let beside = if collapsed {
@@ -3661,7 +3989,10 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let cursor = self.client.hosted.draw(buffer, zellij);
+            let cursor = match &self.right {
+                Right::Zellij(client) => client.hosted.draw(buffer, zellij),
+                Right::Own(own) => own.attached.draw(buffer, zellij),
+            };
             // What has the mouse is the box over zellij, where one is, or else
             // the sidebar.
             let drawn = match &self.focus.over {
@@ -3709,7 +4040,10 @@ impl App {
             }
             self.drawn = drawn;
         })?;
-        let cursor = self.client.hosted.cursor_style();
+        let cursor = match &self.right {
+            Right::Zellij(client) => client.hosted.cursor_style(),
+            Right::Own(own) => own.attached.cursor_style(),
+        };
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
@@ -3759,11 +4093,11 @@ fn whole<W: io::Write>(
 /// them: an `x` in its tab mode closes the tab. Nor are they one paste, as
 /// Claude Code folds a long one to `[Pasted text #1]`, and takes a prompt that
 /// is only that for words, whatever the paste starts with.
-fn pastes(written: &named::Written, harness: agents::Harness, mode: TermMode) -> Vec<Vec<u8>> {
+fn pastes(written: &named::Written, harness: agents::Harness) -> Vec<String> {
     let spelled = |command: &skills::Name| agents::spelled(harness, command.as_str());
     let command = written.command.iter().map(|command| format!("{} ", spelled(command)));
     let text = (!written.text.is_empty()).then(|| format!("{} ", written.text));
-    command.chain(text).map(|paste| keys::paste(&paste, mode)).collect()
+    command.chain(text).collect()
 }
 
 /// Why luneta ends where zellij's client failed with nowhere to go.
@@ -3893,22 +4227,16 @@ mod tests {
             named::Written { command, text: text.to_owned(), only_first: Vec::new() }
         };
         let pasted = |command: Option<&str>, text: &str| {
-            let claude = agents::Harness::ClaudeCode;
-            pastes(&written(command, text), claude, TermMode::BRACKETED_PASTE)
+            pastes(&written(command, text), agents::Harness::ClaudeCode)
         };
-        let pi = agents::Harness::Pi;
-        let pi = pastes(&written(Some("handoff"), "now"), pi, TermMode::BRACKETED_PASTE);
-        let (command, text) = (b"\x1b[200~/skill:handoff \x1b[201~", b"\x1b[200~now \x1b[201~");
-        assert_eq!(pi, [command.to_vec(), text.to_vec()]);
+        let pi = pastes(&written(Some("handoff"), "now"), agents::Harness::Pi);
+        assert_eq!(pi, ["/skill:handoff ", "now "]);
         assert_eq!(
             pasted(Some("handoff"), "the next session fixes CI"),
-            [
-                b"\x1b[200~/handoff \x1b[201~".to_vec(),
-                b"\x1b[200~the next session fixes CI \x1b[201~".to_vec(),
-            ],
+            ["/handoff ", "the next session fixes CI "]
         );
-        assert_eq!(pasted(Some("handoff"), ""), [b"\x1b[200~/handoff \x1b[201~".to_vec()]);
-        assert_eq!(pasted(None, "hand this off"), [b"\x1b[200~hand this off \x1b[201~".to_vec()]);
+        assert_eq!(pasted(Some("handoff"), ""), ["/handoff "]);
+        assert_eq!(pasted(None, "hand this off"), ["hand this off "]);
     }
 
     /// Where `screen` shows its cursor, if it shows one.

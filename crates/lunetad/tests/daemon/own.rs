@@ -38,7 +38,7 @@ const WAITS: [&str; 2] = ["sleep", "600"];
 /// lunetad` builds the daemon alone, and would leave the tests a server built
 /// before, or none. A file cargo does not build it of, in its folders, takes
 /// it to be built again all the same, and a test says which.
-fn built_server() -> PathBuf {
+pub fn built_server() -> PathBuf {
     let program = Path::new(LUNETAD).with_file_name("luneta-mux");
     let shown = program.display();
     let rebuild = "dev test builds it, and so does cargo build -p luneta-mux";
@@ -72,14 +72,14 @@ fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
 
 /// A host whose daemon runs, and the server of own sessions the daemon starts
 /// for it, which goes with the test, whatever becomes of its sessions.
-struct Owned {
-    host: Host,
+pub struct Owned {
+    pub host: Host,
     daemon: Daemon,
     runtime: tokio::runtime::Runtime,
 }
 
 impl Owned {
-    fn new() -> Self {
+    pub fn new() -> Self {
         built_server();
         let host = Host::new();
         let daemon = start(host.vars()).unwrap();
@@ -88,7 +88,7 @@ impl Owned {
     }
 
     /// Asks the daemon, as a client does.
-    fn ask<T, F>(&self, asking: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, Status>
+    pub fn ask<T, F>(&self, asking: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, Status>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
     {
@@ -101,7 +101,7 @@ impl Owned {
 
     /// Has the daemon make the own session `name`, in the home, that runs
     /// `WAITS`.
-    fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
+    pub fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
         let request = NewOwnRequest {
             on: None,
             name: name.to_owned(),
@@ -111,17 +111,17 @@ impl Owned {
         self.ask(|mut daemon| async move { daemon.new_own(request).await })
     }
 
-    fn home(&self) -> String {
+    pub fn home(&self) -> String {
         self.host.home.path().to_str().unwrap().to_owned()
     }
 
     /// The own session `name`, once the host has it.
-    fn listed(&self, name: &str) -> api::Session {
+    pub fn listed(&self, name: &str) -> api::Session {
         eventually(&format!("{name} is on the host"), || session(&self.host.host(), name).cloned())
     }
 
     /// Where the server listens.
-    fn socket(&self) -> PathBuf {
+    pub fn socket(&self) -> PathBuf {
         self.host.folder().join(server::SOCKET)
     }
 
@@ -152,7 +152,7 @@ impl Owned {
 
 /// The own session `session` is, by its id and when its server made it: none
 /// for zellij's.
-fn own(session: &api::Session) -> Option<api::OwnSession> {
+pub fn own(session: &api::Session) -> Option<api::OwnSession> {
     match &session.mux {
         Some(kind::Mux::Own(own)) => {
             assert!(own.made_at.is_some(), "an own session was made");
