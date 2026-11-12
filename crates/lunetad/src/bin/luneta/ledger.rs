@@ -34,28 +34,28 @@ pub enum Session {
     /// its inode. Two sockets can be made in one tick of the clock that dates
     /// them, and a socket made later can take the inode of one gone, but not
     /// both.
-    Zellij { started: u64, socket: NonZeroU64 },
+    Zellij { started_ns: u64, socket: NonZeroU64 },
     /// luneta's own multiplexer's: when its server made it, in nanoseconds
     /// since the epoch, and its id. The next server counts its ids from 1
     /// again, but makes none of them in the tick the last made its own.
-    Own { made: u64, id: OwnId },
+    Own { made_ns: u64, id: OwnId },
 }
 
 /// What the name of an own session starts with, which no zellij session's
 /// does: a zellij session's starts with a digit.
-const OWN: &str = "own-";
+const OWN_PREFIX: &str = "own-";
 
 impl Session {
     /// The zellij session whose socket was made at `started`, or none for one
     /// made before 1970 or after 2554, which no file can be named for.
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
-        Some(Session::Zellij { started: nanos(started)?, socket })
+        Some(Session::Zellij { started_ns: nanos(started)?, socket })
     }
 
     /// The own session `id`, which its server made at `made`, or none as
     /// `new` says.
     pub fn own(made: SystemTime, id: OwnId) -> Option<Self> {
-        Some(Session::Own { made: nanos(made)?, id })
+        Some(Session::Own { made_ns: nanos(made)?, id })
     }
 
     /// The session of the socket `id`, or none as `new` says, or for a socket
@@ -67,28 +67,29 @@ impl Session {
     /// When it started: when its socket was made, or its server made it.
     pub fn started(self) -> SystemTime {
         match self {
-            Session::Zellij { started, .. } => moment(started),
-            Session::Own { made, .. } => moment(made),
+            Session::Zellij { started_ns, .. } => moment(started_ns),
+            Session::Own { made_ns, .. } => moment(made_ns),
         }
     }
 
     /// Its name: when it started, in nanoseconds since the epoch, and its
-    /// socket's inode, or `OWN` before when it was made and its id.
+    /// socket's inode, or `OWN_PREFIX` before when it was made and its id.
     fn name(self) -> String {
         match self {
-            Session::Zellij { started, socket } => format!("{started}-{socket}"),
-            Session::Own { made, id } => format!("{OWN}{made}-{id}"),
+            Session::Zellij { started_ns, socket } => format!("{started_ns}-{socket}"),
+            Session::Own { made_ns, id } => format!("{OWN_PREFIX}{made_ns}-{id}"),
         }
     }
 
     /// The session `name` is the name of, spelled as `name` spells it.
     fn read(name: &str) -> Option<Self> {
-        let session = if let Some(own) = name.strip_prefix(OWN) {
-            let (made, id) = own.split_once('-')?;
-            Session::Own { made: made.parse().ok()?, id: OwnId::new(id.parse().ok()?)? }
+        let session = if let Some(own) = name.strip_prefix(OWN_PREFIX) {
+            let (made_ns, id) = own.split_once('-')?;
+            Session::Own { made_ns: made_ns.parse().ok()?, id: OwnId::new(id.parse().ok()?)? }
         } else {
-            let (started, socket) = name.split_once('-')?;
-            Session::Zellij { started: started.parse().ok()?, socket: socket.parse().ok()? }
+            let (started_ns, socket) = name.split_once('-')?;
+            let (started_ns, socket) = (started_ns.parse().ok()?, socket.parse().ok()?);
+            Session::Zellij { started_ns, socket }
         };
         (session.name() == name).then_some(session)
     }
@@ -411,7 +412,7 @@ mod tests {
         other(format!("+{}", name(5)));
         other(format!("0{}", name(6)));
         other(format!("{}-7", nanos(at(10)).unwrap()));
-        other(format!("{OWN}{}-0-8", nanos(at(10)).unwrap()));
+        other(format!("{OWN_PREFIX}{}-0-8", nanos(at(10)).unwrap()));
         ledger.reload();
         assert_eq!(keys(&ledger), [key(10, 1)]);
     }

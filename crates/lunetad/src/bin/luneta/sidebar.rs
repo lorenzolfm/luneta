@@ -161,7 +161,7 @@ const FOLDED: &str = "▸";
 const RULE: &str = "─";
 /// What follows the name of an own session, in its row, with a space either
 /// side.
-const OWN: &str = " ◇ ";
+const OWN_MARK: &str = " ◇ ";
 /// What runs along a machine's header, where a session's row has `RULE`.
 const MACHINE_RULE: &str = "═";
 /// Nerd Fonts' `fa-desktop`, before a machine's name on its header, one
@@ -250,24 +250,19 @@ impl Listed {
     /// `session`, or none for one with no start or no socket, or an own one
     /// with no id or no time it was made, as a daemon of another build's lists,
     /// or with a start no file of the news can be named for, before 1970, or
-    /// with a name zellij refuses, which luneta can neither go to nor fold. A
-    /// daemon older than `mux` says a zellij session's start and socket
+    /// with a name zellij refuses, which luneta can neither go to nor fold. Its
+    /// start is the one `Session::started` reads, as `luneta sessions` sorts
+    /// by. A daemon older than `mux` says a zellij session's start and socket
     /// beside it.
     fn of(session: &Session) -> Option<Self> {
         let name = SessionName::running(&session.name).ok()?;
-        let zellij_kept = |started_at, socket| {
-            let started = SystemTime::try_from(started_at?).ok()?;
-            ledger::Session::new(started, NonZeroU64::new(socket)?)
-        };
+        let started = session.started()?;
         let kept = match &session.mux {
-            Some(Mux::Zellij(zellij_session)) => {
-                zellij_kept(zellij_session.started_at, zellij_session.socket)?
+            Some(Mux::Zellij(zellij)) => {
+                ledger::Session::new(started, NonZeroU64::new(zellij.socket)?)?
             },
-            Some(Mux::Own(own)) => {
-                let made = SystemTime::try_from(own.made_at?).ok()?;
-                ledger::Session::own(made, OwnId::new(own.id)?)?
-            },
-            None => zellij_kept(session.started_at, session.socket)?,
+            Some(Mux::Own(own)) => ledger::Session::own(started, OwnId::new(own.id)?)?,
+            None => ledger::Session::new(started, NonZeroU64::new(session.socket)?)?,
         };
         Some(Listed { name, kept })
     }
@@ -4077,7 +4072,13 @@ impl Sidebar {
                 let tab = Tab { cwd, name, command };
                 let opened = Open::Tab { session: session.clone(), tab, alone_since: None };
                 let here = self.going().is_none() && self.on == on;
-                if place.listed().own() || here && self.here() == Some(session.as_str()) {
+                // An own session's server opens a tab with no client there.
+                let opens_now = if place.listed().own() {
+                    true
+                } else {
+                    here && self.here() == Some(session.as_str())
+                };
+                if opens_now {
                     Asked::Open { menu: number, on, open: opened }
                 } else if held == Held::Open {
                     Asked::OpenThere { menu: number, on, place, open: opened }
@@ -6030,12 +6031,18 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             // The name sits on the session's colour, with a space either side,
             // as a browser draws the name of a group of tabs.
             let chip = Style::new().fg(gruvbox::BG0).bg(*colour);
-            let own = if session.own() { OWN.width() } else { 0 };
-            let room = width.saturating_sub(4 + own + reserve + 1);
+            let own = session.own();
+            let own_width = if own { OWN_MARK.width() } else { 0 };
+            // What the row has past the name and the rule: the margin, the
+            // fold, the chip's two spaces, the mark, the badge and the last
+            // column. The rule takes what the name leaves of the room.
+            let fixed = 4 + own_width + reserve + 1;
+            let room = width.saturating_sub(fixed);
             let bold = chip.add_modifier(Modifier::BOLD);
             let (name, named) = lit(session.name.as_str(), room, Keep::Start, hits, bold);
             let cuts = cut_at(0, 3, session.name.as_str(), room).into_iter().collect();
-            let rule = width.saturating_sub(3 + named + 1 + own + reserve + 1);
+            assert!(named <= room, "{:?} was cut to {named} of {room}", session.name);
+            let rule = room - named;
             let rule_style = if *here { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
@@ -6044,8 +6051,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             ];
             spans.extend(name);
             spans.push(Span::styled(" ", chip));
-            if own > 0 {
-                spans.push(Span::styled(OWN, dim));
+            if own {
+                spans.push(Span::styled(OWN_MARK, dim));
             }
             spans.push(Span::styled(RULE.repeat(rule), rule_style));
             if let Some(badge) = badge {
@@ -8508,6 +8515,32 @@ mod tests {
         assert_eq!(tail("handoff-eng-11259", 8), "…g-11259");
         assert_eq!(tail("short", 8), "short");
         assert_eq!(tail("日本語", 4), "…語");
+    }
+
+    /// A name lit for a room is never wider than the room, at any room, which
+    /// a session's row asserts as its rule takes what the name leaves: with
+    /// wide characters, joined ones, a selector, a ligature, halfwidth sound
+    /// marks, combining ones and control characters.
+    #[test]
+    fn a_lit_name_fits_its_room() {
+        let family = "👩\u{200d}👩\u{200d}👧";
+        let texts = [
+            "handoff-eng-11259".to_owned(),
+            "日本語".to_owned(),
+            format!("{family} team"),
+            "⚠️ fix".to_owned(),
+            "لا لا لا".to_owned(),
+            "ｶﾞｷﾞｸﾞ".to_owned(),
+            "e\u{301}e\u{301}e\u{301}".to_owned(),
+            "a\u{7}b\u{1b}c".to_owned(),
+            "x\u{200d}".to_owned(),
+        ];
+        for text in &texts {
+            for room in 0..=20 {
+                let (_, width) = lit(text, room, Keep::Start, &[0, 1, 2], Style::new());
+                assert!(width <= room, "{text:?} was cut to {width} of {room}");
+            }
+        }
     }
 
     /// What shows as one stays whole, and counts as wide as it shows, in the

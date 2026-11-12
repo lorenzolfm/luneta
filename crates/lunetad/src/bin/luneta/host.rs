@@ -33,6 +33,7 @@ use std::env;
 use std::fmt;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -113,6 +114,25 @@ use crate::zellij::{
 /// any, or why it makes none.
 type Named = Result<(Unused, Option<Directory>), String>;
 
+/// A tab luneta opens in a session it makes, for the menu numbered `menu`.
+pub struct MenuTab {
+    menu: u64,
+    tab: Tab,
+}
+
+/// Whether luneta names a session it makes, on a thread of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Naming {
+    Idle,
+    Busy,
+}
+
+/// Why luneta makes no session while it names another.
+const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
+
+/// Why luneta made no session whose naming panicked.
+const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
+
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
     /// A key, the mouse, a paste or a resize of luneta's terminal.
@@ -154,7 +174,7 @@ pub enum Event {
     Opened { menu: u64, opened: Result<u32, String> },
     /// The name of a session luneta makes, and the tab it opens there for
     /// the menu numbered so, if any.
-    Named { named: Named, tab: Option<(u64, Tab)> },
+    Named { named: Named, tab: Option<MenuTab> },
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },
@@ -857,6 +877,9 @@ struct App {
     /// ended. And what deletes the merged worktrees of this machine's `d m`,
     /// which nothing else would finish.
     deleting: Vec<JoinHandle<()>>,
+    /// Whether a session luneta makes is being named, which `name` does one
+    /// at a time.
+    naming: Naming,
     /// The agents that want you, of every machine, and their notifications.
     alerts: Alerts,
     /// What puts the notifications up, which takes them down as luneta
@@ -1162,6 +1185,7 @@ fn run_in(
         drops: Drops::default(),
         gave_up: None,
         deleting: Vec::new(),
+        naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
     };
@@ -2359,7 +2383,7 @@ impl App {
             // there with it.
             Asked::Make { menu, on, session, cwd, tab_cwd, name, command } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                self.name(Some((menu, tab)), move || {
+                self.name(Some(MenuTab { menu, tab }), move || {
                     let unused = match &on {
                         Machine::Local => zellij::makes(session),
                         Machine::Remote(destination) => {
@@ -2968,19 +2992,37 @@ impl App {
     /// Names a session luneta makes, as `named` does, on a thread of its own,
     /// as it waits on the multiplexers that hold names, and on the daemon of
     /// another machine: `Event::Named` hands it back, with `tab`, for `make`.
-    fn name(&self, tab: Option<(u64, Tab)>, named: impl FnOnce() -> Named + Send + 'static) {
+    /// One at a time: two named at once could both take a name that was free
+    /// before either made its session, and the second would go to the first's.
+    /// So while one is named, another is refused, and its menu let go of.
+    fn name(&mut self, tab: Option<MenuTab>, named: impl FnOnce() -> Named + Send + 'static) {
+        if self.naming == Naming::Busy {
+            self.sidebar.notify(NAMING.to_owned());
+            if let Some(MenuTab { menu, .. }) = tab {
+                self.sidebar.drop_menu(menu);
+            }
+            return;
+        }
+        self.naming = Naming::Busy;
         let events = self.events.clone();
         thread::spawn(move || {
-            let _ = events.send(Event::Named { named: named(), tab });
+            // A naming that panics hands back why, rather than leave luneta
+            // naming no session again.
+            let named = panic::catch_unwind(AssertUnwindSafe(named))
+                .unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()));
+            // luneta is on its way out.
+            let _ = events.send(Event::Named { named, tab });
         });
     }
 
     /// Makes the session `named` names, once it has, as `make` does, and
     /// opens `tab` there for its menu, if any, or has the menu let go of
     /// what it waits on.
-    fn named(&mut self, named: Named, tab: Option<(u64, Tab)>) {
-        let menu = tab.as_ref().map(|(menu, _)| *menu);
-        let tab = tab.map(|(menu, tab)| (zellij::owed(menu, &self.events), tab));
+    fn named(&mut self, named: Named, tab: Option<MenuTab>) {
+        assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
+        self.naming = Naming::Idle;
+        let menu = tab.as_ref().map(|tab| tab.menu);
+        let tab = tab.map(|MenuTab { menu, tab }| (zellij::owed(menu, &self.events), tab));
         let (unused, cwd) = match named {
             Ok((unused, cwd)) => (Ok(unused), cwd),
             Err(why) => (Err(why), None),
