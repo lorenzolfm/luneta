@@ -4,6 +4,7 @@
 //! start the real `luneta-mux`, which the same build puts beside it.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -17,11 +18,12 @@ use lunetad::api::{
 };
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{pane::Program, ListRequest};
+use lunetad::mux::own::server;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Status};
 
 use crate::agents;
-use crate::host::{eventually, folder_in, start, Daemon, Host, LUNETAD};
+use crate::host::{eventually, folder_in, start, Daemon, Host, Running, LUNETAD};
 use crate::sessions::session;
 
 /// What an own pane runs in these tests: a program that waits, and so holds
@@ -81,7 +83,7 @@ impl Owned {
 
     /// Where the server listens.
     fn socket(&self) -> PathBuf {
-        self.host.folder().join("mux.sock")
+        self.host.folder().join(server::SOCKET)
     }
 
     /// The pid of what the pane `pane` runs, as its server lists it.
@@ -223,6 +225,23 @@ fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
     kill("renamed").unwrap();
     eventually("the session is gone", || owned.host.host().sessions.is_empty().then_some(()));
     eventually("the server has ended", || (!owned.socket().exists()).then_some(()));
+}
+
+/// The server listens where the daemon reaches it, and one started while
+/// another holds the folder ends as the daemon waits on it to: the server
+/// keeps its own copy of both, as it does not depend on the daemon.
+#[test]
+fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
+    let host = Host::new();
+    let program = Path::new(LUNETAD).with_file_name("luneta-mux");
+    let program = program.to_str().unwrap();
+    let mut first = host.vars().command(program);
+    let _first = Running::spawn(first.stdin(Stdio::null()));
+    let socket = host.folder().join(server::SOCKET);
+    eventually("the first server listens", || socket.exists().then_some(()));
+    let mut second = host.vars().command(program);
+    let second = second.stdin(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    assert_eq!(second.code(), Some(i32::from(server::ANOTHER_RUNS)));
 }
 
 /// A session made as the server ends, its last session killed, is made all

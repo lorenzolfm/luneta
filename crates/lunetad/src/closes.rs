@@ -11,7 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, CloseRequest, On};
 use crate::mux::own;
-use crate::mux::{tabs, Asks, Laid, Mux, OwnId, PaneId, SessionName, SocketFolder, TabId, Zellij};
+use crate::mux::{tabs, Asks, Called, Laid, Mux, OwnId, PaneId, SessionName, SocketFolder, TabId};
+use crate::mux::Zellij;
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub enum Closes {
 /// What closing the terminal `pane` of `session` closes, as zellij lists the
 /// session's panes now, or why it closes nothing.
 pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
-    closing(&Mux::named(session)?.laid()?, pane)
+    closing(&Called::named(session)?.mux().laid()?, pane)
 }
 
 /// What closing the terminal `pane` closes among `laid`, the panes of its
@@ -58,7 +59,7 @@ pub enum Closing {
 /// What closing the terminals `panes` of `session` closes, together, as
 /// zellij lists the session's panes now, or why it closes nothing.
 pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    together(&Mux::named(session)?.laid()?, panes)
+    together(&Called::named(session)?.mux().laid()?, panes)
 }
 
 /// What closing the terminals `panes` closes among `laid`, the panes of their
@@ -156,18 +157,18 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
 /// the id and another name, or that took the name since, stays, as
 /// `same_own` says.
 pub fn closed_own(session: &SessionName, id: OwnId, close: &Close) -> Result<(), String> {
-    same_own(session, id)?;
-    closed_as_listed(Mux::Own(id), close)
+    closed_as_listed(Mux::Own(&same_own(session, id)?), close)
 }
 
 /// Whether the own session named `session` is the one of id `id`, or why
 /// not. A server gives no other session an id while it runs, and so no tab
 /// or pane either, but the next server counts them from 1 again: a session
 /// of the id that has another name is one made since, or renamed, which a
-/// question asked of the name before it does not know.
-pub(crate) fn same_own(session: &SessionName, id: OwnId) -> Result<(), String> {
+/// question asked of the name before it does not know. The session, on the
+/// server that says so, which alone is asked of it after.
+pub(crate) fn same_own(session: &SessionName, id: OwnId) -> Result<own::server::Own, String> {
     match own::server::named(session)? {
-        Some(named) if named == id => Ok(()),
+        Some(named) if named.id() == id => Ok(named),
         Some(_) => Err(format!("\"{session}\" is a session made since, which stays")),
         None => Err(format!("\"{session}\" is no own session that runs")),
     }
@@ -289,8 +290,7 @@ fn settled(
 /// name, or that took the name since, stays, as `same_own` says. Its server
 /// keeps nothing of a session that ended.
 pub fn killed_own(session: &SessionName, id: OwnId) -> Result<(), String> {
-    same_own(session, id)?;
-    Ok(Mux::Own(id).session_killed()?)
+    Ok(Mux::Own(&same_own(session, id)?).session_killed()?)
 }
 
 /// The sessions that run, each by its name and when it started, as their

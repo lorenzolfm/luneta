@@ -623,7 +623,8 @@ impl Known {
                 },
                 SessionKey::Own(id) => {
                     let key = SessionKey::Own(*id);
-                    assert!(self.panes.contains_key(&key) && self.clients.contains_key(&key));
+                    assert!(self.panes.contains_key(&key));
+                    assert!(self.clients.contains_key(&key));
                 },
             }
         }

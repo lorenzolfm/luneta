@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId, Zellij};
+use crate::mux::{tabs, terminal_of, Called, Laid, Mux, Runs, SessionName, TabId, Zellij};
 use crate::closes::{self, Close};
 use crate::Directory;
 
@@ -96,10 +96,11 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     match open {
         Open::Pane { session, beside, cwd, command } => {
             let runs = Runs::of(command, Runs::ZellijShell);
-            Ok(terminal(Mux::named(session)?.pane_opened(*beside, cwd, runs)?))
+            Ok(terminal(Called::named(session)?.mux().pane_opened(*beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if let own @ Mux::Own(_) = Mux::named(session)? {
+            if let Called::Own(own) = Called::named(session)? {
+                let own = Mux::Own(&own);
                 let (opened, laid) = tab_opened(own, tab)?;
                 return terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned());
             }

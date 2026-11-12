@@ -91,7 +91,7 @@ use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
 use crate::mux::own::server;
-use crate::mux::{self, Mux, OwnId, Runs, SessionName, SocketFolder, Zellij};
+use crate::mux::{self, Called, OwnId, Runs, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -596,7 +596,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || Mux::named(&at)?.went(&to, pane)).await;
+        let went = task::spawn_blocking(move || Called::named(&at)?.mux().went(&to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -825,7 +825,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || Mux::named(&at)?.started(&to, cwd.as_ref());
+        let start = move || Called::named(&at)?.mux().started(&to, cwd.as_ref());
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -1024,7 +1024,8 @@ impl Daemon for Host {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
-        let renamed = task::spawn_blocking(move || Mux::named(&session)?.renamed(&to)).await;
+        let renamed = move || Called::named(&session)?.mux().renamed(&to);
+        let renamed = task::spawn_blocking(renamed).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -1344,7 +1345,7 @@ where
 
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = Mux::named(session)?.clients()?;
+    let listed = Called::named(session)?.mux().clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 

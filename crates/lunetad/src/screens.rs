@@ -3,14 +3,15 @@
 //! its own machine, and a daemon of its machine for a luneta on another,
 //! whose picker shows a session or an agent of this one.
 
-use crate::mux::{Laid, Mux, SessionName};
+use crate::mux::{Called, Laid, Mux, SessionName};
 
 /// The screen of the terminal `pane` of `session`, or of the one a client
 /// coming there would be on, where it asks of none, as `focused` says: the
 /// terminal, and its lines, in the colours it shows them in, as zellij
 /// dumps them; or why zellij did not.
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
-    let mux = Mux::named(session)?;
+    let called = Called::named(session)?;
+    let mux = called.mux();
     let pane = pane.map_or_else(|| focused(mux, session), Ok)?;
     Ok((pane, mux.screen_dumped(pane)?))
 }

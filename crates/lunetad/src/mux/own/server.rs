@@ -8,10 +8,12 @@
 //! starting: either way, luneta waits for it to go, and starts another.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,18 +29,19 @@ use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
 use super::OwnId;
-use crate::folder;
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
-use crate::Directory;
+use crate::{folder, log, Directory};
 
-/// The socket the server listens on, in luneta's runtime folder.
+/// The socket the server listens on, in luneta's runtime folder, as
+/// `luneta-mux`'s `folder::SOCKET` names it.
 pub const SOCKET: &str = "mux.sock";
 
 /// The server's program, as the same build installs it beside luneta's.
 const PROGRAM: &str = "luneta-mux";
 
-/// How the server ends where another holds its folder.
-const ANOTHER_RUNS: i32 = 3;
+/// How the server ends where another holds its folder, as `luneta-mux`'s
+/// `folder::ANOTHER_RUNS` says.
+pub const ANOTHER_RUNS: u8 = 3;
 
 /// How long a client waits for the socket to take it: a server on the same
 /// machine takes it at once, or not at all.
@@ -48,7 +51,8 @@ const CONNECT: Duration = Duration::from_secs(1);
 const ANSWER: Duration = Duration::from_secs(5);
 
 /// How long a session waits to be made, from the first word to the server:
-/// for one that ends to go, and another to start and listen.
+/// for one that ends to go, and another to start and listen. A question
+/// asked by then can take `ANSWER` past it.
 const MAKING: Duration = Duration::from_secs(10);
 
 /// How often luneta looks meanwhile, for the socket to listen, or the server
@@ -60,7 +64,7 @@ const LOOK: Duration = Duration::from_millis(10);
 /// clients first, and a start each `LOOK` meanwhile would be hundreds.
 const AGAIN: Duration = Duration::from_millis(100);
 
-/// The server that listens, reached.
+/// The server that listens, reached, on one connection.
 struct Server {
     runtime: Runtime,
     client: MuxClient<Channel>,
@@ -70,20 +74,29 @@ impl Server {
     /// The server that listens in luneta's runtime folder, or none where none
     /// does.
     fn reached() -> Result<Option<Server>, Failure> {
-        Server::reached_with(Some(ANSWER))
+        Ok(Server::reached_on(runtime()?, Some(ANSWER))?.ok())
     }
 
-    /// `reached`, with questions that wait `answer` at most, or as long as
-    /// the server takes.
-    fn reached_with(answer: Option<Duration>) -> Result<Option<Server>, Failure> {
+    /// The server that listens, reached on `runtime`, with questions that
+    /// wait `answer` at most, or as long as the server takes; or `runtime`
+    /// back, where none listens.
+    fn reached_on(
+        runtime: Runtime,
+        answer: Option<Duration>,
+    ) -> Result<Result<Server, Runtime>, Failure> {
         let socket = socket()?;
-        let runtime = runtime::Builder::new_current_thread().enable_all().build();
-        let runtime = runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))?;
-        match runtime.block_on(connect(socket.clone(), answer)) {
-            Ok(Some(client)) => Ok(Some(Server { runtime, client })),
-            Ok(None) => Ok(None),
+        match runtime.block_on(connect(&socket, answer)) {
+            Ok(Some(client)) => Ok(Ok(Server { runtime, client })),
+            Ok(None) => Ok(Err(runtime)),
             Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
         }
+    }
+
+    /// The runtime, to reach a server on again.
+    fn into_runtime(self) -> Runtime {
+        let Server { runtime, client } = self;
+        drop(client);
+        runtime
     }
 
     /// What the server answers `asking`, or why it did not.
@@ -107,6 +120,12 @@ impl Server {
     }
 }
 
+/// A runtime of one thread, for the questions of one question to the daemon.
+fn runtime() -> Result<Runtime, Failure> {
+    let runtime = runtime::Builder::new_current_thread().enable_all().build();
+    runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
+}
+
 /// Why luneta-mux did not answer, as it said it, or the code it answered with
 /// where it said nothing.
 fn refused(status: &Status) -> Failure {
@@ -121,12 +140,6 @@ fn gone(id: OwnId) -> Failure {
     Failure::Own(format!("own session {id} no longer runs"))
 }
 
-/// The server that runs, or why not: where none runs, the own session `id`
-/// ended with the last one.
-fn running(id: OwnId) -> Result<Server, Failure> {
-    Server::reached()?.ok_or_else(|| gone(id))
-}
-
 /// Where the server listens, by this process's variables.
 pub fn socket() -> Result<PathBuf, Failure> {
     let unset = || Failure::Own("neither XDG_RUNTIME_DIR nor TMPDIR is set".to_owned());
@@ -135,12 +148,14 @@ pub fn socket() -> Result<PathBuf, Failure> {
 
 /// A client of the server that listens on `socket`, whose questions wait
 /// `answer` at most, or none where none listens there: no socket, or one a
-/// server left as it ended without taking it away.
+/// server left as it ended without taking it away. The client keeps to the
+/// one connection, and asks nothing once that is gone: the socket could have
+/// another server by then, which counts its ids from 1 again.
 async fn connect(
-    socket: PathBuf,
+    socket: &Path,
     answer: Option<Duration>,
 ) -> io::Result<Option<MuxClient<Channel>>> {
-    let first = match UnixStream::connect(&socket).await {
+    let first = match UnixStream::connect(socket).await {
         Ok(stream) => mine(stream)?,
         Err(error)
             if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
@@ -157,13 +172,9 @@ async fn connect(
     let channel = endpoint
         .connect_with_connector(service_fn(move |_: Uri| {
             let first = first.lock().unwrap_or_else(PoisonError::into_inner).take();
-            let socket = socket.clone();
             async move {
-                let stream = match first {
-                    Some(stream) => stream,
-                    None => mine(UnixStream::connect(socket).await?)?,
-                };
-                io::Result::Ok(TokioIo::new(stream))
+                let gone = || io::Error::new(ErrorKind::NotConnected, "the server reached went");
+                io::Result::Ok(TokioIo::new(first.ok_or_else(gone)?))
             }
         }))
         .await
@@ -185,6 +196,7 @@ fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
     let program = |argv: Vec<String>| api::opens::Runs::Program(api::Program { argv });
     let (runs, ends) = match runs {
         Runs::Shell(shell) => {
+            assert!(!shell.is_empty());
             let unread = || Failure::Own(format!("the shell {} is not UTF-8", shell.display()));
             (program(vec![shell.to_str().ok_or_else(unread)?.to_owned()]), api::Ends::Closes)
         },
@@ -282,11 +294,12 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
 /// Follows the own sessions: has `told` hear them as the server lists them
 /// now, and each time they change, with why each it left out does not read,
 /// until the server ends, or `told` says to stop, which it says as `false`.
-/// None where no server listens.
+/// It waits as long as the server takes: one that is stopped still holds its
+/// sessions. None where no server listens.
 pub fn followed(
     mut told: impl FnMut(Vec<Listing>, Vec<String>) -> bool,
 ) -> Result<Option<()>, Failure> {
-    let Some(server) = Server::reached_with(None)? else {
+    let Ok(server) = Server::reached_on(runtime()?, None)? else {
         return Ok(None);
     };
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
@@ -303,14 +316,28 @@ pub fn followed(
     }
 }
 
-/// The own session named `name`, where one runs by it.
-pub fn named(name: &SessionName) -> Result<Option<OwnId>, Failure> {
+/// The id of the session named `name` among `listing`, where one has it, or
+/// why the listing does not read: two have it, or it has the id 0.
+fn found(listing: &[api::Session], name: &SessionName) -> Result<Option<OwnId>, Failure> {
+    let mut named = listing.iter().filter(|session| session.name == name.as_str());
+    let Some(session) = named.next() else {
+        return Ok(None);
+    };
+    if named.next().is_some() {
+        return Err(Failure::Unread(format!("luneta-mux lists two sessions named {name}")));
+    }
+    let zero = || Failure::Unread(format!("luneta-mux lists {name} with the id 0"));
+    Ok(Some(OwnId::new(session.id).ok_or_else(zero)?))
+}
+
+/// The own session named `name`, with its server reached, where one runs by
+/// it.
+pub fn named(name: &SessionName) -> Result<Option<Own>, Failure> {
     let Some(server) = Server::reached()? else {
         return Ok(None);
     };
-    let listing = server.listing()?;
-    let listed = listing.iter().find(|session| session.name == name.as_str());
-    Ok(listed.and_then(|session| OwnId::new(session.id)))
+    let id = found(&server.listing()?, name)?;
+    Ok(id.map(|id| Own { server, id }))
 }
 
 /// The names of the own sessions that run: none where no server does.
@@ -319,86 +346,6 @@ pub fn names() -> Result<Vec<String>, Failure> {
         return Ok(Vec::new());
     };
     Ok(server.listing()?.into_iter().map(|session| session.name).collect())
-}
-
-/// The panes of the session `id`, as luneta lays them out.
-pub fn laid_of(id: OwnId) -> Result<Vec<Laid>, Failure> {
-    Ok(laid(&running(id)?.session(id)?))
-}
-
-/// The clients of the session `id`.
-pub fn clients_of(id: OwnId) -> Result<Listed, Failure> {
-    clients(&running(id)?.session(id)?).map_err(Failure::Unread)
-}
-
-/// Opens a tab at the end of the session `id`, in `cwd`, named `name` or as
-/// the server numbers it, that runs `runs`, and says its id.
-pub fn tab_opened(
-    id: OwnId,
-    cwd: &Directory,
-    name: Option<&str>,
-    runs: Runs<'_>,
-) -> Result<TabId, Failure> {
-    let request = api::NewTabRequest {
-        session: id.get(),
-        name: name.map(str::to_owned),
-        opens: Some(opens(cwd, runs)?),
-    };
-    let opened = running(id)?.ask(|mut client| async move { client.new_tab(request).await });
-    Ok(TabId(opened.map_err(|status| refused(&status))?.tab))
-}
-
-/// Opens a tab at the end of the session `id`, where its current tab works,
-/// named `name` or as the server numbers it, that runs `runs` and closes as
-/// it ends, and says its id.
-pub fn tab_opened_once_heard(
-    id: OwnId,
-    name: Option<&str>,
-    runs: &[&str],
-) -> Result<TabId, Failure> {
-    let server = running(id)?;
-    let session = server.session(id)?;
-    let current = session.tabs.iter().find(|tab| tab.id == session.current_tab);
-    let pane = current.and_then(|tab| tab.panes.first());
-    let unknown = || Failure::Own(format!("own session {id} lists no current tab"));
-    let cwd = pane.ok_or_else(unknown)?.cwd.clone();
-    let argv = runs.iter().map(|word| (*word).to_owned()).collect();
-    let runs = api::opens::Runs::Program(api::Program { argv });
-    let opens = api::Opens { cwd, runs: Some(runs), ends: api::Ends::Closes.into() };
-    let request =
-        api::NewTabRequest { session: id.get(), name: name.map(str::to_owned), opens: Some(opens) };
-    let opened = server.ask(|mut client| async move { client.new_tab(request).await });
-    Ok(TabId(opened.map_err(|status| refused(&status))?.tab))
-}
-
-/// Closes the tab `tab` of the session `id`, which hangs up what runs in it.
-pub fn tab_closed(id: OwnId, tab: TabId) -> Result<(), Failure> {
-    let request = api::CloseTabRequest { tab: tab.0 };
-    let closed = running(id)?.ask(|mut client| async move { client.close_tab(request).await });
-    closed.map(drop).map_err(|status| refused(&status))
-}
-
-/// Renames the session `id` to `to`, which the server holds unique among its
-/// sessions alone.
-pub fn renamed(id: OwnId, to: &SessionName) -> Result<(), Failure> {
-    let request = api::RenameRequest { session: id.get(), name: to.as_str().to_owned() };
-    let renamed = running(id)?.ask(|mut client| async move { client.rename(request).await });
-    renamed.map(drop).map_err(|status| refused(&status))
-}
-
-/// What the pane `pane` of the session `id` shows, or all it was written, as
-/// `dumped` says.
-pub fn dumped(id: OwnId, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
-    let request = api::DumpRequest { pane, dumped: dumped.into() };
-    let dump = running(id)?.ask(|mut client| async move { client.dump(request).await });
-    Ok(dump.map_err(|status| refused(&status))?.text)
-}
-
-/// Ends the session `id`, which hangs up what runs in each of its tabs.
-pub fn killed(id: OwnId) -> Result<(), Failure> {
-    let request = api::KillRequest { session: id.get() };
-    let killed = running(id)?.ask(|mut client| async move { client.kill(request).await });
-    killed.map(drop).map_err(|status| refused(&status))
 }
 
 /// Where a client goes among the own sessions.
@@ -410,24 +357,129 @@ pub enum Place {
     Pane { session: OwnId, pane: u32 },
 }
 
-/// Takes the client that last typed in the session `at` to `to`.
-pub fn went(at: OwnId, to: Place) -> Result<(), Failure> {
-    let server = running(at)?;
-    let is = match to {
-        Place::Session(session) => api::place::Is::Session(session.get()),
-        Place::Pane { session, pane } => {
-            let tabs = server.session(session)?.tabs;
-            let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane));
-            let gone = || Failure::Own(format!("own session {session} has no pane {pane}"));
-            api::place::Is::Tab(tab.ok_or_else(gone)?.id)
-        },
-    };
-    let request = api::GoRequest {
-        who: Some(api::go_request::Who::LastTypedIn(at.get())),
-        to: Some(api::Place { is: Some(is) }),
-    };
-    let went = server.ask(|mut client| async move { client.go(request).await });
-    went.map(drop).map_err(|status| refused(&status))
+/// An own session, by its id, with the server that runs it reached: what
+/// luneta asks of it goes to that server alone, on one connection, and never
+/// to one started since, which counts its ids from 1 again.
+pub struct Own {
+    server: Server,
+    id: OwnId,
+}
+
+impl fmt::Debug for Own {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Own").field("id", &self.id).finish_non_exhaustive()
+    }
+}
+
+impl Own {
+    #[must_use]
+    pub fn id(&self) -> OwnId {
+        self.id
+    }
+
+    /// The own session named `name`, on the same server, where one runs by it.
+    pub fn named(&self, name: &SessionName) -> Result<Option<OwnId>, Failure> {
+        found(&self.server.listing()?, name)
+    }
+
+    /// The session's panes, as luneta lays them out.
+    pub fn laid(&self) -> Result<Vec<Laid>, Failure> {
+        Ok(laid(&self.server.session(self.id)?))
+    }
+
+    /// The session's clients.
+    pub fn clients(&self) -> Result<Listed, Failure> {
+        clients(&self.server.session(self.id)?).map_err(Failure::Unread)
+    }
+
+    /// Opens a tab at the end of the session, in `cwd`, named `name` or as the
+    /// server numbers it, that runs `runs`, and says its id.
+    pub fn tab_opened(
+        &self,
+        cwd: &Directory,
+        name: Option<&str>,
+        runs: Runs<'_>,
+    ) -> Result<TabId, Failure> {
+        self.tab_opened_as(name, opens(cwd, runs)?)
+    }
+
+    /// Opens a tab at the end of the session, where its current tab works,
+    /// named `name` or as the server numbers it, that runs `runs` and closes
+    /// as it ends, and says its id.
+    pub fn tab_opened_once_heard(
+        &self,
+        name: Option<&str>,
+        runs: &[&str],
+    ) -> Result<TabId, Failure> {
+        assert_ne!(runs.len(), 0);
+        let session = self.server.session(self.id)?;
+        let current = session.tabs.iter().find(|tab| tab.id == session.current_tab);
+        let pane = current.and_then(|tab| tab.panes.first());
+        let unknown = || Failure::Own(format!("own session {} lists no current tab", self.id));
+        let cwd = pane.ok_or_else(unknown)?.cwd.clone();
+        let argv = runs.iter().map(|word| (*word).to_owned()).collect();
+        let runs = api::opens::Runs::Program(api::Program { argv });
+        let opens = api::Opens { cwd, runs: Some(runs), ends: api::Ends::Closes.into() };
+        self.tab_opened_as(name, opens)
+    }
+
+    /// Opens a tab at the end of the session, named `name` or as the server
+    /// numbers it, as `opens` says, and says its id.
+    fn tab_opened_as(&self, name: Option<&str>, opens: api::Opens) -> Result<TabId, Failure> {
+        let name = name.map(str::to_owned);
+        let request = api::NewTabRequest { session: self.id.get(), name, opens: Some(opens) };
+        let opened = self.server.ask(|mut client| async move { client.new_tab(request).await });
+        Ok(TabId(opened.map_err(|status| refused(&status))?.tab))
+    }
+
+    /// Closes the tab `tab` of the session, which hangs up what runs in it.
+    pub fn tab_closed(&self, tab: TabId) -> Result<(), Failure> {
+        let request = api::CloseTabRequest { tab: tab.0 };
+        let closed = self.server.ask(|mut client| async move { client.close_tab(request).await });
+        closed.map(drop).map_err(|status| refused(&status))
+    }
+
+    /// Renames the session to `to`, which the server holds unique among its
+    /// sessions alone.
+    pub fn renamed(&self, to: &SessionName) -> Result<(), Failure> {
+        let request = api::RenameRequest { session: self.id.get(), name: to.as_str().to_owned() };
+        let renamed = self.server.ask(|mut client| async move { client.rename(request).await });
+        renamed.map(drop).map_err(|status| refused(&status))
+    }
+
+    /// What the pane `pane` of the session shows, or all it was written, as
+    /// `dumped` says.
+    pub fn dumped(&self, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
+        let request = api::DumpRequest { pane, dumped: dumped.into() };
+        let dump = self.server.ask(|mut client| async move { client.dump(request).await });
+        Ok(dump.map_err(|status| refused(&status))?.text)
+    }
+
+    /// Ends the session, which hangs up what runs in each of its tabs.
+    pub fn killed(&self) -> Result<(), Failure> {
+        let request = api::KillRequest { session: self.id.get() };
+        let killed = self.server.ask(|mut client| async move { client.kill(request).await });
+        killed.map(drop).map_err(|status| refused(&status))
+    }
+
+    /// Takes the client that last typed in the session to `to`.
+    pub fn went(&self, to: Place) -> Result<(), Failure> {
+        let is = match to {
+            Place::Session(session) => api::place::Is::Session(session.get()),
+            Place::Pane { session, pane } => {
+                let tabs = self.server.session(session)?.tabs;
+                let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane));
+                let gone = || Failure::Own(format!("own session {session} has no pane {pane}"));
+                api::place::Is::Tab(tab.ok_or_else(gone)?.id)
+            },
+        };
+        let request = api::GoRequest {
+            who: Some(api::go_request::Who::LastTypedIn(self.id.get())),
+            to: Some(api::Place { is: Some(is) }),
+        };
+        let went = self.server.ask(|mut client| async move { client.go(request).await });
+        went.map(drop).map_err(|status| refused(&status))
+    }
 }
 
 /// An own session made: its id, and its first tab's and pane's.
@@ -447,10 +499,14 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
         name: name.as_str().to_owned(),
         opens: Some(opens(cwd, runs)?),
     };
+    let mut runtime = runtime()?;
     loop {
-        let server = match Server::reached()? {
-            Some(server) => server,
-            None => started(deadline)?,
+        if Instant::now() >= deadline {
+            return Err(Failure::Own("no server made the session in time".to_owned()));
+        }
+        let server = match Server::reached_on(runtime, Some(ANSWER))? {
+            Ok(server) => server,
+            Err(runtime) => started(runtime, deadline)?,
         };
         let request = request.clone();
         match server.ask(|mut client| async move { client.new_session(request).await }) {
@@ -460,7 +516,10 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
                 let session = session.ok_or_else(unread)?;
                 return Ok(Made { session, tab: TabId(made.tab), pane: made.pane });
             },
-            Err(status) if status.code() == Code::Unavailable => gone_by(&server, deadline)?,
+            Err(status) if status.code() == Code::Unavailable => {
+                gone_by(&server, deadline)?;
+                runtime = server.into_runtime();
+            },
             Err(status) => return Err(refused(&status)),
         }
     }
@@ -477,38 +536,30 @@ fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Starts the server, and reaches it once it listens, until `deadline`: or the
-/// one that holds the folder, where that one listens by then. One that
-/// held it and went meanwhile leaves the folder to the next, which this
-/// starts.
-fn started(deadline: Instant) -> Result<Server, Failure> {
+/// Starts the server, and reaches it on `runtime` once it listens, until
+/// `deadline`: or the one that holds the folder, where that one listens by
+/// then. One that held it and went meanwhile leaves the folder to the next,
+/// which this starts.
+fn started(mut runtime: Runtime, deadline: Instant) -> Result<Server, Failure> {
     loop {
-        let mut child = spawned()?;
-        loop {
-            if let Some(server) = Server::reached()? {
-                reap(child);
+        let mut started = Started::spawned()?;
+        runtime = match listened(&mut started, runtime, deadline) {
+            Ok(Ok(server)) => {
+                started.reaped();
                 return Ok(server);
-            }
-            let ended = child.try_wait().map_err(|error| Failure::Own(error.to_string()))?;
-            match ended {
-                None => {},
-                Some(status) if status.code() == Some(ANOTHER_RUNS) => break,
-                Some(status) => {
-                    return Err(Failure::Own(format!("it ended as it started, with {status}")));
-                },
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                reap(child);
-                return Err(Failure::Own("it did not listen in time".to_owned()));
-            }
-            thread::sleep(LOOK);
-        }
+            },
+            Ok(Err(runtime)) => {
+                started.reaped();
+                runtime
+            },
+            Err(why) => return Err(started.given_up(why)),
+        };
         let again = Instant::now() + AGAIN;
         while Instant::now() < again {
-            if let Some(server) = Server::reached()? {
-                return Ok(server);
-            }
+            runtime = match Server::reached_on(runtime, Some(ANSWER))? {
+                Ok(server) => return Ok(server),
+                Err(runtime) => runtime,
+            };
             thread::sleep(LOOK);
         }
         if Instant::now() >= deadline {
@@ -517,21 +568,80 @@ fn started(deadline: Instant) -> Result<Server, Failure> {
     }
 }
 
-/// The server, spawned: in no pane, with nothing on its stdin and stdout, and
-/// on the stderr luneta or the daemon has, which the daemon's is its log.
-fn spawned() -> Result<Child, Failure> {
-    let program = program();
-    let mut command = Command::new(&program);
-    in_no_pane(&mut command);
-    command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
-    command.spawn().map_err(|error| Failure::Own(format!("{}: {error}", program.display())))
+/// Reaches the server once it listens, on `runtime`, until `deadline`: the
+/// one `started`, or the one that holds the folder. Or `runtime` back, where
+/// `started` ended as another held the folder; or why neither listens.
+fn listened(
+    started: &mut Started,
+    mut runtime: Runtime,
+    deadline: Instant,
+) -> Result<Result<Server, Runtime>, Failure> {
+    loop {
+        runtime = match Server::reached_on(runtime, Some(ANSWER))? {
+            Ok(server) => return Ok(Ok(server)),
+            Err(runtime) => runtime,
+        };
+        let ended = started.child.try_wait().map_err(|error| Failure::Own(error.to_string()))?;
+        match ended {
+            None => {},
+            Some(status) if status.code() == Some(i32::from(ANOTHER_RUNS)) => {
+                return Ok(Err(runtime));
+            },
+            Some(status) => {
+                return Err(Failure::Own(format!("it ended as it started, with {status}")));
+            },
+        }
+        if Instant::now() >= deadline {
+            return Err(Failure::Own("it did not listen in time".to_owned()));
+        }
+        thread::sleep(LOOK);
+    }
 }
 
-/// Waits for `child` to end, in a thread of its own, so that it leaves no
-/// zombie: a server runs as long as its sessions.
-fn reap(mut child: Child) {
-    let reaping = thread::Builder::new().name("luneta-mux".to_owned()).spawn(move || child.wait());
-    drop(reaping);
+/// A server luneta started, and the thread that waits for it to end, so that
+/// it leaves no zombie: a server runs as long as its sessions.
+struct Started {
+    child: Child,
+    reaper: SyncSender<Child>,
+}
+
+impl Started {
+    /// The server, spawned once a thread waits to reap it: in no pane, with
+    /// nothing on its stdin and stdout, and on the stderr luneta or the daemon
+    /// has, which the daemon's is its log.
+    fn spawned() -> Result<Started, Failure> {
+        let (reaper, handed) = mpsc::sync_channel::<Child>(1);
+        let reaping = move || {
+            if let Ok(mut child) = handed.recv()
+                && let Err(error) = child.wait()
+            {
+                log::say(&format!("luneta-mux was not reaped: {error}"));
+            }
+        };
+        let thread = thread::Builder::new().name("luneta-mux".to_owned()).spawn(reaping);
+        thread.map_err(|error| Failure::Own(format!("no thread to reap it: {error}")))?;
+        let program = program();
+        let mut command = Command::new(&program);
+        in_no_pane(&mut command);
+        command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
+        let spawned = command.spawn();
+        let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));
+        Ok(Started { child: spawned.map_err(unstarted)?, reaper })
+    }
+
+    /// Leaves the server to run, and the thread to reap it as it ends.
+    fn reaped(self) {
+        self.reaper.send(self.child).expect("the thread waits for the server to reap");
+    }
+
+    /// Kills the server, which luneta gives up on for `why`, and reaps it.
+    fn given_up(mut self, why: Failure) -> Failure {
+        if let Err(error) = self.child.kill() {
+            log::say(&format!("luneta-mux, given up on as {why}, was not killed: {error}"));
+        }
+        self.reaped();
+        why
+    }
 }
 
 /// The server that luneta starts: the one beside this process's file, which
