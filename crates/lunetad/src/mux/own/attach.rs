@@ -178,16 +178,39 @@ pub struct Went {
     pub pane: u32,
 }
 
+/// A grapheme a glyph shows: never none, and with no control character in
+/// it, which would write more than itself to a terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grapheme(String);
+
+impl Grapheme {
+    /// `grapheme`, or why it is none a glyph shows.
+    pub fn new(grapheme: String) -> Result<Grapheme, String> {
+        if grapheme.is_empty() {
+            return Err("a glyph has no grapheme".to_owned());
+        }
+        if grapheme.chars().any(char::is_control) {
+            return Err(format!("the glyph {grapheme:?} has a control character"));
+        }
+        Ok(Grapheme(grapheme))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// What a column of a row shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shows {
     /// Nothing was written to it.
     Blank,
     /// A grapheme of one column.
-    Narrow(String),
+    Narrow(Grapheme),
     /// A grapheme of two columns, this one and the next, which shows nothing
     /// of its own.
-    Wide(String),
+    Wide(Grapheme),
 }
 
 impl Shows {
@@ -201,11 +224,41 @@ impl Shows {
     }
 }
 
-/// A glyph, and the style it shows in: none for the terminal's own.
+/// A glyph, and the style it shows in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Glyph {
     pub shows: Shows,
-    pub style: Option<api::Style>,
+    pub style: Style,
+}
+
+/// A colour a terminal has: of the 256 of its palette, or of red, green and
+/// blue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Colour {
+    Palette(u8),
+    Rgb([u8; 3]),
+}
+
+/// How a glyph shows: in the terminal's own colours where they are none, and
+/// as the terminal's own text where all is none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an attribute a terminal sets apart from the rest, in any combination"
+)]
+pub struct Style {
+    pub foreground: Option<Colour>,
+    pub background: Option<Colour>,
+    pub underline_colour: Option<Colour>,
+    pub bold: bool,
+    pub faint: bool,
+    pub italic: bool,
+    /// In any of the ways a terminal underlines.
+    pub underlined: bool,
+    pub blink: bool,
+    pub inverse: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
 }
 
 /// A row's glyphs, from its first column, whose columns add up to the row's,
@@ -231,12 +284,19 @@ impl Line {
     /// `glyphs`, a row of `columns` that `wraps_wide` or not, or why they
     /// are none: they do not add up to the row's columns.
     pub fn new(glyphs: Vec<Glyph>, wraps_wide: bool, columns: NonZeroU16) -> Result<Line, String> {
-        let taken: u32 = glyphs.iter().map(|glyph| u32::from(glyph.shows.columns())).sum();
-        let taken = taken + u32::from(wraps_wide);
+        let line = Line { glyphs, wraps_wide };
+        let taken = line.columns();
         if taken != u32::from(columns.get()) {
             return Err(format!("a row of {columns} columns has glyphs of {taken}"));
         }
-        Ok(Line { glyphs, wraps_wide })
+        Ok(line)
+    }
+
+    /// The columns of the row it is: its glyphs', and the one it leaves
+    /// blank where it `wraps_wide`.
+    fn columns(&self) -> u32 {
+        let taken: u32 = self.glyphs.iter().map(|glyph| u32::from(glyph.shows.columns())).sum();
+        taken + u32::from(self.wraps_wide)
     }
 
     /// `line`, for a row of `columns`, or why it does not read: its glyphs
@@ -253,42 +313,58 @@ impl Line {
 /// `glyph`, or why it does not read: no grapheme, one that writes more than
 /// itself, or a style of a colour no terminal has.
 fn glyph(glyph: api::Glyph) -> Result<Glyph, String> {
-    let grapheme = |grapheme: String| {
-        if grapheme.is_empty() {
-            return Err("a glyph has no grapheme".to_owned());
-        }
-        if grapheme.chars().any(char::is_control) {
-            return Err(format!("the glyph {grapheme:?} has a control character"));
-        }
-        Ok(grapheme)
-    };
     let shows = match glyph.shows.ok_or("a glyph shows nothing")? {
         api::glyph::Shows::Blank(api::Blank {}) => Shows::Blank,
-        api::glyph::Shows::Narrow(api::Narrow { grapheme: it }) => Shows::Narrow(grapheme(it)?),
-        api::glyph::Shows::Wide(api::Wide { grapheme: it }) => Shows::Wide(grapheme(it)?),
+        api::glyph::Shows::Narrow(api::Narrow { grapheme }) => {
+            Shows::Narrow(Grapheme::new(grapheme)?)
+        },
+        api::glyph::Shows::Wide(api::Wide { grapheme }) => Shows::Wide(Grapheme::new(grapheme)?),
     };
-    if let Some(style) = &glyph.style {
-        let colours = [&style.foreground, &style.background, &style.underline_colour];
-        for colour in colours.into_iter().flatten() {
-            colour_heard(colour)?;
-        }
-    }
-    Ok(Glyph { shows, style: glyph.style })
+    Ok(Glyph { shows, style: style_heard(glyph.style)? })
 }
 
-/// Why `colour` does not read, if it does not: it is none, or of a palette
-/// entry past the 256 a terminal has, or of a part past 255.
-fn colour_heard(colour: &api::Colour) -> Result<(), String> {
-    let byte = |value: u32| u8::try_from(value).is_ok();
-    let reads = match colour.is.as_ref().ok_or("a colour is none")? {
-        api::colour::Is::Palette(index) => byte(*index),
-        api::colour::Is::Rgb(rgb) => byte(rgb.red) && byte(rgb.green) && byte(rgb.blue),
+/// `style`, or why it does not read: of a colour no terminal has. None is the
+/// terminal's own, as one of no colours and nothing set is. An underline of
+/// a kind this luneta does not know of is none.
+fn style_heard(style: Option<api::Style>) -> Result<Style, String> {
+    let Some(style) = style else {
+        return Ok(Style::default());
     };
-    if reads {
-        Ok(())
-    } else {
-        Err(format!("the colour {colour:?} is of none a terminal has"))
-    }
+    let underlined = !matches!(
+        api::Underline::try_from(style.underline),
+        Ok(api::Underline::None | api::Underline::Unspecified) | Err(_)
+    );
+    Ok(Style {
+        foreground: colour_heard(style.foreground)?,
+        background: colour_heard(style.background)?,
+        underline_colour: colour_heard(style.underline_colour)?,
+        bold: style.bold,
+        faint: style.faint,
+        italic: style.italic,
+        underlined,
+        blink: style.blink,
+        inverse: style.inverse,
+        invisible: style.invisible,
+        strikethrough: style.strikethrough,
+    })
+}
+
+/// `colour`, where there is one, or why it does not read: it is of nothing,
+/// or of a palette entry past the 256 a terminal has, or of a part past 255.
+fn colour_heard(colour: Option<api::Colour>) -> Result<Option<Colour>, String> {
+    let Some(colour) = colour else {
+        return Ok(None);
+    };
+    let byte = |value: u32| u8::try_from(value).ok();
+    let read = match colour.is.as_ref().ok_or("a colour is none")? {
+        api::colour::Is::Palette(index) => byte(*index).map(Colour::Palette),
+        api::colour::Is::Rgb(rgb) => match (byte(rgb.red), byte(rgb.green), byte(rgb.blue)) {
+            (Some(red), Some(green), Some(blue)) => Some(Colour::Rgb([red, green, blue])),
+            _ => None,
+        },
+    };
+    let none = || format!("the colour {colour:?} is of none a terminal has");
+    read.map(Some).ok_or_else(none)
 }
 
 /// The rows a frame has.
@@ -319,20 +395,91 @@ pub struct Cursor {
     pub blinking: bool,
 }
 
-/// What a pane shows, to this client.
+/// What a pane shows, to this client: rows of its size, each of its columns,
+/// and a cursor on them, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    /// The pane: a frame of one the client is no longer on is to be dropped.
-    pub pane: u32,
-    pub size: Size,
-    pub rows: Rows,
-    /// None where it is hidden, or out of the view.
-    pub cursor: Option<Cursor>,
-    /// Whether the pane's program takes the mouse.
-    pub tracks_mouse: bool,
+    pane: u32,
+    size: Size,
+    rows: Rows,
+    cursor: Option<Cursor>,
+    tracks_mouse: bool,
 }
 
 impl Frame {
+    /// A frame of `pane`, of `rows` of `size`, with `cursor` on them, and
+    /// whether the pane's program `tracks_mouse`; or why it is none: all its
+    /// rows are not the size's, or a row is of other columns, or it changes
+    /// a row past its last or twice, or the cursor is off it.
+    pub fn new(
+        pane: u32,
+        size: Size,
+        rows: Rows,
+        cursor: Option<Cursor>,
+        tracks_mouse: bool,
+    ) -> Result<Frame, String> {
+        let columns = u32::from(size.columns.get());
+        let lines: Vec<&Line> = match &rows {
+            Rows::Whole(lines) => {
+                if lines.len() != usize::from(size.rows.get()) {
+                    return Err(format!("a frame of {} rows has {}", size.rows, lines.len()));
+                }
+                lines.iter().collect()
+            },
+            Rows::Changed(rows) => {
+                let mut changed = vec![false; usize::from(size.rows.get())];
+                for (index, _) in rows {
+                    let Some(seen) = changed.get_mut(usize::from(*index)) else {
+                        return Err(format!("a frame has no row {index}"));
+                    };
+                    if std::mem::replace(seen, true) {
+                        return Err(format!("a frame changes row {index} twice"));
+                    }
+                }
+                rows.iter().map(|(_, line)| line).collect()
+            },
+        };
+        if let Some(line) = lines.into_iter().find(|line| line.columns() != columns) {
+            let taken = line.columns();
+            return Err(format!("a row of {columns} columns has glyphs of {taken}"));
+        }
+        if let Some(cursor) = cursor
+            && (cursor.row >= size.rows.get() || cursor.column >= size.columns.get())
+        {
+            let at = format!("{}:{}", cursor.row, cursor.column);
+            return Err(format!("the cursor is off the frame, at {at}"));
+        }
+        Ok(Frame { pane, size, rows, cursor, tracks_mouse })
+    }
+
+    /// The pane: a frame of one the client is no longer on is to be dropped.
+    #[must_use]
+    pub fn pane(&self) -> u32 {
+        self.pane
+    }
+
+    #[must_use]
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    #[must_use]
+    pub fn rows(&self) -> &Rows {
+        &self.rows
+    }
+
+    /// None where it is hidden, or out of the view.
+    #[must_use]
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+    }
+
+    /// Whether the pane's program takes the mouse.
+    #[must_use]
+    pub fn tracks_mouse(&self) -> bool {
+        self.tracks_mouse
+    }
+
     /// `frame`, or why it does not read: a size out of bounds, rows that are
     /// not the size's, a row changed twice, or a cursor off them.
     fn heard(frame: api::Frame) -> Result<Frame, String> {
@@ -346,29 +493,25 @@ impl Frame {
                 Rows::Whole(lines.collect::<Result<_, _>>()?)
             },
             api::frame::Rows::Changed(api::Changed { rows }) => {
-                let mut changed = vec![false; usize::from(size.rows.get())];
                 let row = |row: api::Row| {
                     let index = u16::try_from(row.index).ok().filter(|it| *it < size.rows.get());
                     let index = index.ok_or_else(|| format!("a frame has no row {}", row.index))?;
-                    if std::mem::replace(&mut changed[usize::from(index)], true) {
-                        return Err(format!("a frame changes row {index} twice"));
-                    }
                     Ok((index, Line::heard(row.line, size.columns)?))
                 };
                 Rows::Changed(rows.into_iter().map(row).collect::<Result<_, String>>()?)
             },
         };
-        let cursor = frame.cursor.map(|cursor| cursor_heard(cursor, size)).transpose()?;
-        Ok(Frame { pane: frame.pane, size, rows, cursor, tracks_mouse: frame.mouse_tracking })
+        let cursor = frame.cursor.map(|cursor| cursor_heard(&cursor)).transpose()?;
+        Frame::new(frame.pane, size, rows, cursor, frame.mouse_tracking)
     }
 }
 
-/// `cursor`, on a frame of `size`, or why it does not read.
-fn cursor_heard(cursor: api::Cursor, size: Size) -> Result<Cursor, String> {
-    let on = |at: u32, side: NonZeroU16| u16::try_from(at).ok().filter(|at| *at < side.get());
+/// `cursor`, or why it does not read: at a row or a column past any a frame
+/// has. `Frame::new` holds it to its frame.
+fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
     let off = || format!("the cursor is off the frame, at {}:{}", cursor.row, cursor.column);
-    let row = on(cursor.row, size.rows).ok_or_else(off)?;
-    let column = on(cursor.column, size.columns).ok_or_else(off)?;
+    let row = u16::try_from(cursor.row).map_err(|_| off())?;
+    let column = u16::try_from(cursor.column).map_err(|_| off())?;
     let shape = match api::CursorShape::try_from(cursor.shape) {
         Ok(api::CursorShape::Bar) => CursorShape::Bar,
         Ok(api::CursorShape::Underline) => CursorShape::Underline,
@@ -598,7 +741,8 @@ mod tests {
         ))
         .unwrap();
         let Rows::Whole(lines) = &read.rows else { panic!("whole rows") };
-        assert_eq!(lines[0].glyphs()[1].shows, Shows::Wide("日".to_owned()));
+        let two = Shows::Wide(Grapheme::new("日".to_owned()).unwrap());
+        assert_eq!(lines[0].glyphs()[1].shows, two);
         assert!(lines[1].wraps_wide());
         let short = Frame::heard(frame(3, vec![line(vec![narrow("a")], false)]));
         assert_eq!(short.unwrap_err(), "a row of 3 columns has glyphs of 1");
@@ -638,7 +782,8 @@ mod tests {
     }
 
     /// A glyph's colours are of a palette entry of the 256, or of red, green
-    /// and blue of a byte each: any other does not read.
+    /// and blue of a byte each: any other does not read. A glyph of no style
+    /// shows as one of no colours and nothing set does.
     #[test]
     fn a_glyph_of_a_colour_no_terminal_has_does_not_read() {
         let coloured = |is| {
@@ -646,12 +791,47 @@ mod tests {
             let style = Some(api::Style { foreground, ..api::Style::default() });
             glyph(api::Glyph { style, ..narrow("a") })
         };
+        let foreground = |glyph: Result<Glyph, String>| glyph.unwrap().style.foreground;
         let rgb = |red| Some(api::colour::Is::Rgb(api::Rgb { red, green: 0, blue: 255 }));
-        assert!(coloured(Some(api::colour::Is::Palette(255))).is_ok());
-        assert!(coloured(rgb(255)).is_ok());
+        let palette = foreground(coloured(Some(api::colour::Is::Palette(255))));
+        assert_eq!(palette, Some(Colour::Palette(255)));
+        assert_eq!(foreground(coloured(rgb(255))), Some(Colour::Rgb([255, 0, 255])));
         assert!(coloured(Some(api::colour::Is::Palette(256))).unwrap_err().contains("none a"));
         assert!(coloured(rgb(256)).unwrap_err().contains("is of none a terminal has"));
         assert_eq!(coloured(None).unwrap_err(), "a colour is none");
+        let plain = glyph(api::Glyph { style: Some(api::Style::default()), ..narrow("a") });
+        assert_eq!(plain, glyph(narrow("a")));
+        assert_eq!(glyph(narrow("a")).unwrap().style, Style::default());
+    }
+
+    /// A frame is made only of rows of its size, each of its columns, each
+    /// changed once, and a cursor on them, however it is made.
+    #[test]
+    fn a_frame_is_made_only_of_its_size() {
+        let size = Size { columns: NonZeroU16::new(2).unwrap(), rows: NonZeroU16::MIN };
+        let line = |columns: u16| {
+            let glyph = Glyph { shows: Shows::Blank, style: Style::default() };
+            let glyphs = vec![glyph; usize::from(columns)];
+            Line::new(glyphs, false, NonZeroU16::new(columns).unwrap()).unwrap()
+        };
+        let two = line(2);
+        let cursor = |column| {
+            Some(Cursor { row: 0, column, shape: CursorShape::Bar, blinking: false })
+        };
+        let made = |rows, cursor| Frame::new(1, size, rows, cursor, false);
+        assert!(made(Rows::Whole(vec![two.clone()]), cursor(1)).is_ok());
+        let none = made(Rows::Whole(Vec::new()), None);
+        assert_eq!(none.unwrap_err(), "a frame of 1 rows has 0");
+        let past = made(Rows::Changed(vec![(1, two.clone())]), None);
+        assert_eq!(past.unwrap_err(), "a frame has no row 1");
+        let twice = made(Rows::Changed(vec![(0, two.clone()), (0, two.clone())]), None);
+        assert_eq!(twice.unwrap_err(), "a frame changes row 0 twice");
+        let off = made(Rows::Whole(vec![two]), cursor(2));
+        assert_eq!(off.unwrap_err(), "the cursor is off the frame, at 0:2");
+        let narrow = made(Rows::Whole(vec![line(1)]), None);
+        assert_eq!(narrow.unwrap_err(), "a row of 2 columns has glyphs of 1");
+        assert!(Grapheme::new("\u{1b}[2J".to_owned()).unwrap_err().contains("control character"));
+        assert_eq!(Grapheme::new(String::new()).unwrap_err(), "a glyph has no grapheme");
     }
 
     fn key(id: u64, made: u64) -> OwnKey {

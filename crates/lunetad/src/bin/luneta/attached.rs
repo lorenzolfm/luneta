@@ -108,14 +108,16 @@ impl View {
     /// a size new to it, and the rows that changed of the last frame sent.
     /// What was selected of a frame of another size goes.
     fn framed(&mut self, frame: &Frame) -> Result<(), String> {
-        if self.went.is_none_or(|went| went.pane != frame.pane) {
+        if self.went.is_none_or(|went| went.pane != frame.pane()) {
             return Ok(());
         }
         let before = self.screen.take();
         let size = before.as_ref().map(|screen| screen.size);
-        let lines = match (&frame.rows, before) {
+        // A frame's rows are of its size, as `Frame::new` holds them, so the
+        // rows that changed of a frame of the size the last was are of it.
+        let lines = match (frame.rows(), before) {
             (Rows::Whole(lines), _) => lines.clone(),
-            (Rows::Changed(rows), Some(screen)) if screen.size == frame.size => {
+            (Rows::Changed(rows), Some(screen)) if screen.size == frame.size() => {
                 let mut lines = screen.lines;
                 for (index, line) in rows {
                     lines[usize::from(*index)] = line.clone();
@@ -126,20 +128,19 @@ impl View {
                 let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
                 let had = before.as_ref().map_or_else(|| "none".to_owned(), |it| sides(it.size));
                 self.screen = before;
-                let sides = sides(frame.size);
+                let sides = sides(frame.size());
                 return Err(format!("a frame of {sides} changes the rows of {had}"));
             },
         };
-        assert_eq!(lines.len(), usize::from(frame.size.rows.get()));
-        if size != Some(frame.size) {
+        if size != Some(frame.size()) {
             self.unselect();
         }
         self.screen = Some(Screen {
-            pane: frame.pane,
-            size: frame.size,
+            pane: frame.pane(),
+            size: frame.size(),
             lines,
-            cursor: frame.cursor,
-            tracks_mouse: frame.tracks_mouse,
+            cursor: frame.cursor(),
+            tracks_mouse: frame.tracks_mouse(),
         });
         Ok(())
     }
@@ -374,18 +375,18 @@ fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: bool) {
     let Some(cell) = buffer.cell_mut((x, y)) else {
         return;
     };
-    let mut style = glyph.style.as_ref().map_or_else(Style::new, styled);
+    let mut style = styled(&glyph.style);
     if lit {
         style = style.add_modifier(Modifier::REVERSED);
     }
     cell.set_style(style);
     match &glyph.shows {
         Shows::Narrow(grapheme) => {
-            cell.set_symbol(grapheme);
+            cell.set_symbol(grapheme.as_str());
             cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
         },
         Shows::Wide(grapheme) if fits => {
-            cell.set_symbol(grapheme);
+            cell.set_symbol(grapheme.as_str());
             let two = NonZeroU16::new(2).expect("2 is not 0");
             cell.set_diff_option(CellDiffOption::ForcedWidth(two));
             if let Some(spacer) = buffer.cell_mut((x + 1, y)) {
@@ -419,7 +420,9 @@ fn text(screen: &Screen, selection: Selection) -> String {
             if end >= from && column <= to {
                 match &glyph.shows {
                     Shows::Blank => said.push(' '),
-                    Shows::Narrow(grapheme) | Shows::Wide(grapheme) => said.push_str(grapheme),
+                    Shows::Narrow(grapheme) | Shows::Wide(grapheme) => {
+                        said.push_str(grapheme.as_str());
+                    },
                 }
             }
             column = end + 1;
@@ -431,31 +434,21 @@ fn text(screen: &Screen, selection: Selection) -> String {
 
 /// The style a glyph is drawn in: the colours a terminal names are left for
 /// luneta's terminal to choose, as its theme does, as `hosted` leaves them.
-/// Each colour is one a terminal has, as `attach` read it at the edge.
-fn styled(style: &api::Style) -> Style {
-    let colour = |colour: &Option<api::Colour>| {
-        let byte = |value: u32| u8::try_from(value).expect("a colour's bytes read at the edge");
-        match colour.as_ref().and_then(|it| it.is.as_ref()) {
-            Some(api::colour::Is::Palette(index)) => Color::Indexed(byte(*index)),
-            Some(api::colour::Is::Rgb(rgb)) => {
-                Color::Rgb(byte(rgb.red), byte(rgb.green), byte(rgb.blue))
-            },
-            None => Color::Reset,
-        }
+fn styled(style: &attach::Style) -> Style {
+    let colour = |colour: Option<attach::Colour>| match colour {
+        Some(attach::Colour::Palette(index)) => Color::Indexed(index),
+        Some(attach::Colour::Rgb([red, green, blue])) => Color::Rgb(red, green, blue),
+        None => Color::Reset,
     };
-    let mut drawn = Style::new().fg(colour(&style.foreground)).bg(colour(&style.background));
-    if style.underline_colour.is_some() {
-        drawn = drawn.underline_color(colour(&style.underline_colour));
+    let mut drawn = Style::new().fg(colour(style.foreground)).bg(colour(style.background));
+    if let Some(underline) = style.underline_colour {
+        drawn = drawn.underline_color(colour(Some(underline)));
     }
-    let underlined = !matches!(
-        api::Underline::try_from(style.underline),
-        Ok(api::Underline::None | api::Underline::Unspecified) | Err(_)
-    );
     let modifiers = [
         (style.bold, Modifier::BOLD),
         (style.faint, Modifier::DIM),
         (style.italic, Modifier::ITALIC),
-        (underlined, Modifier::UNDERLINED),
+        (style.underlined, Modifier::UNDERLINED),
         (style.blink, Modifier::SLOW_BLINK),
         (style.inverse, Modifier::REVERSED),
         (style.invisible, Modifier::HIDDEN),
@@ -603,16 +596,21 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 mod tests {
     use std::time::SystemTime;
 
+    use lunetad::mux::own::attach::Grapheme;
     use lunetad::mux::own::{OwnId, OwnKey};
 
     use super::*;
 
     fn glyph(shows: Shows) -> Glyph {
-        Glyph { shows, style: None }
+        Glyph { shows, style: attach::Style::default() }
     }
 
-    fn narrow(grapheme: &str) -> Glyph {
-        glyph(Shows::Narrow(grapheme.to_owned()))
+    fn grapheme(grapheme: &str) -> Grapheme {
+        Grapheme::new(grapheme.to_owned()).unwrap()
+    }
+
+    fn narrow(it: &str) -> Glyph {
+        glyph(Shows::Narrow(grapheme(it)))
     }
 
     fn side(count: u16) -> NonZeroU16 {
@@ -644,7 +642,7 @@ mod tests {
     fn a_selection_reads_as_the_text_from_its_first_cell_to_its_last() {
         let blank = || glyph(Shows::Blank);
         let view = view(vec![
-            vec![narrow("a"), narrow("b"), glyph(Shows::Wide("日".to_owned())), blank()],
+            vec![narrow("a"), narrow("b"), glyph(Shows::Wide(grapheme("日"))), blank()],
             vec![narrow("c"), blank(), blank(), blank(), blank()],
         ]);
         let screen = view.screen.as_ref().unwrap();
@@ -660,7 +658,7 @@ mod tests {
     /// nothing at all, and the area past the frame is blank.
     #[test]
     fn a_glyph_is_drawn_as_wide_as_the_server_says() {
-        let wide = glyph(Shows::Wide("👍🏽".to_owned()));
+        let wide = glyph(Shows::Wide(grapheme("👍🏽")));
         let view = view(vec![vec![narrow("a"), wide, narrow("b")]]);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 2));
         buffer[(5, 1)].set_symbol("x");
@@ -720,7 +718,7 @@ mod tests {
         let line = Line::new(vec![narrow("a"), narrow("b")], false, side(2)).unwrap();
         let rows = Rows::Whole(vec![line]);
         let size = Size { columns: side(2), rows: side(1) };
-        let frame = Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false };
+        let frame = Frame::new(1, size, rows, None, false).unwrap();
         view.heard(&Heard::Frame(frame)).unwrap();
         assert_eq!(view.selection, None);
     }
@@ -734,7 +732,7 @@ mod tests {
         let line = Line::new(vec![narrow("c")], false, side(1)).unwrap();
         let rows = Rows::Changed(vec![(0, line.clone())]);
         let size = Size { columns: side(1), rows: side(1) };
-        let frame = Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false };
+        let frame = Frame::new(1, size, rows, None, false).unwrap();
         let why = view.heard(&Heard::Frame(frame.clone())).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 2x1");
         assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("a"));
