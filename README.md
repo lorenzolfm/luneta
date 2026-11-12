@@ -334,7 +334,9 @@ session, which you go to. The session is named as the picker's directories
 name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
 when a session has that name. On a machine's header, which has no pane, `n s`
 makes the session in your home on that machine, named for it too, as
-`lorenzo`; on a session's row, the group has only `n m`.
+`lorenzo`; on a session's row, the group has only `n m`. On this machine's
+rows, `n o` makes an [own session](#luneta-in-your-terminal) in the same place, named the same
+way.
 
 ```text
 ╭─ New ─── luneta/sidebar ─╮
@@ -488,6 +490,18 @@ anywhere. It starts in the first of these that exists:
 
 `luneta <name>` attaches to that one, and makes it if none runs: naming a
 session is asking for it. Inside luneta, `n s` or the picker makes one.
+
+`luneta --own` attaches to a session of luneta's own multiplexer instead,
+`luneta-mux`, in zellij's place: the one named for the directory, made if none
+runs, and `luneta --own <name>` to that one. A name a session of zellij's has
+is refused, as the two kinds share their names. Own sessions are new, and of
+this machine alone. The sidebar marks each with a dim `◇`; going to one, as
+`Enter` on its row does, takes luneta there, and going to zellij's takes it
+back; `n o` makes one. A drag over an own pane selects its text and copies
+it, as a drag over the sidebar does; where the pane's program takes the
+mouse, hold `Shift`. When the own session luneta is in ends, the newest
+session of this machine takes its place, of either kind, and so it does
+when zellij's ends.
 
 Run in a pane of zellij, luneta will not attach to the session that pane is
 in, as zellij will not. Where it chooses a session itself, as a bare `luneta`
@@ -2014,6 +2028,7 @@ the highlighted row, which lists only the keys that work on that row:
 | `n p` | open your shell in a pane beside the pane | a pane |
 | `n t` | open a tab of the pane's session | a pane |
 | `n s` | start a session where the pane works, or in your home on a machine's header, and go there | a pane, a machine's header |
+| `n o` | start an own session where `n s` would start one, and go there | this machine's pane or header |
 | `n m` | add a machine, by what you type ssh to it | any row |
 | `t t` | turn the pane into a tab of its own | a pane |
 | `t p` | turn the pane's tab into panes of another tab, which you pick where it has several | a pane |
