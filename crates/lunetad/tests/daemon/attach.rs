@@ -16,7 +16,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
-use lunetad::api::{kill_request, KillRequest};
+use lunetad::api::{kill_request, KillRequest, NewOwnRequest};
 
 use crate::host::{eventually, Host, Running};
 use crate::own::{own, Owned};
@@ -123,13 +123,21 @@ fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
     format!("\x1b[<{code};{};{}{last}", column + 1, row + 1)
 }
 
-/// `luneta --own` makes the session named for its directory, by the daemon,
-/// and attaches to it beside the sidebar, which lists it: what is typed goes
-/// to the pane's shell, and what the shell prints shows. A drag over it
-/// copies it, as the shell takes no mouse.
+/// `luneta --own` attaches to the own session named for its directory,
+/// beside the sidebar, which lists it: what is typed goes to the pane's
+/// shell, and what the shell prints shows. A drag over it copies it, as the
+/// shell takes no mouse. The pane runs `sh`: a build's sandbox has no login
+/// shell of its user's to make one with.
 #[test]
-fn luneta_own_makes_its_session_and_shows_what_its_shell_prints() {
+fn luneta_own_attaches_to_its_session_and_shows_what_its_shell_prints() {
     let owned = Owned::new();
+    let request = NewOwnRequest {
+        on: None,
+        name: "work".to_owned(),
+        cwd: owned.home(),
+        command: vec!["sh".to_owned()],
+    };
+    owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let dir = directory("work");
     let mut window = Window::open(&owned.host, &dir, &["--own"]);
     eventually("luneta is the session's client", || (clients(&owned, "work")? == 1).then_some(()));
