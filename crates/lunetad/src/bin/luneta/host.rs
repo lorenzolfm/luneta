@@ -468,6 +468,9 @@ enum Held {
     /// zellij, as a button went down over it: what it drags goes to zellij.
     /// Or luneta's client of an own session, in zellij's place.
     Zellij,
+    /// What the left button selects of an own pane, as it went down over it:
+    /// what it drags selects, wherever it goes, and its release copies.
+    Selecting,
     /// The sidebar's edge, as the left button went down on it, and whether
     /// it was dragged since. One let go undragged keeps no width, so that
     /// what another luneta dragged meanwhile stays.
@@ -2220,11 +2223,14 @@ impl App {
         // A button that went down on zellij before a box opened over it
         // drags there, and lets go there, as it would with no box.
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        if self.focus.over.is_some() && self.held == Held::Zellij && !down {
-            if let MouseEventKind::Up(_) = mouse.kind {
-                self.held = Held::Nothing;
+        let under = matches!(self.held, Held::Zellij | Held::Selecting);
+        if self.focus.over.is_some() && under && !down {
+            if !self.select(mouse) {
+                if let MouseEventKind::Up(_) = mouse.kind {
+                    self.held = Held::Nothing;
+                }
+                self.zellij_mouse(mouse);
             }
-            self.zellij_mouse(mouse);
             return;
         }
         // A click of a burst on one cell, or next to it, is no click on what
@@ -2343,13 +2349,17 @@ impl App {
             return;
         }
         let over_zellij = mouse.column >= zellij.x;
-        if self.held == Held::Zellij || (over_zellij && !self.sidebar.pressed()) {
+        let held = matches!(self.held, Held::Zellij | Held::Selecting);
+        if held || (over_zellij && !self.sidebar.pressed()) {
             // A button zellij did not hear go down is none of its own: it takes
             // the first drag of one for a press, and would click, focus or
             // select there. A press the sidebar let go of as the button stays
             // down, with `Esc`, ends so.
             let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
             if of_a_press && self.last_press != LastPress::Zellij {
+                return;
+            }
+            if self.select(mouse) {
                 return;
             }
             match mouse.kind {
@@ -2452,6 +2462,47 @@ impl App {
         let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
         let row = mouse.row.saturating_sub(zellij.y).min(zellij.height.saturating_sub(1));
         attached::Spot { row, column }
+    }
+
+    /// Takes what the mouse does over an own pane, in zellij's place, where it
+    /// selects, as `Attached::selects` says, and says whether it did: the
+    /// left button going down to select, and its drags and its release once
+    /// it did, which copies what it selected. Any other press there lets go
+    /// of what was selected.
+    fn select(&mut self, mouse: MouseEvent) -> bool {
+        let at = self.zellij_cell(mouse);
+        let Right::Own(own) = &mut self.right else {
+            return false;
+        };
+        match (mouse.kind, self.held) {
+            (MouseEventKind::Down(_), _) if own.attached.selects(mouse) => {
+                own.attached.select_from(at);
+                self.held = Held::Selecting;
+                self.last_press = LastPress::Zellij;
+                self.leave();
+                true
+            },
+            (MouseEventKind::Down(_), _) => {
+                own.attached.unselect();
+                false
+            },
+            (MouseEventKind::Drag(_), Held::Selecting) => {
+                own.attached.select_to(at);
+                true
+            },
+            (MouseEventKind::Up(_), Held::Selecting) => {
+                self.held = Held::Nothing;
+                if let Some(text) = own.attached.selected() {
+                    // Only the loop has luneta's terminal to write to.
+                    let _ = self.events.send(Event::CopyText(text));
+                }
+                true
+            },
+            (
+                _,
+                Held::Nothing | Held::Zellij | Held::Selecting | Held::Edge { .. } | Held::Taken,
+            ) => false,
+        }
     }
 
     /// Takes what the mouse does while the sidebar's edge is held, and says
@@ -3018,7 +3069,7 @@ impl App {
         self.right = Right::Own(Own { attached, after, fails, came: false });
         self.sidebar.attaching(session);
         // The client that takes its place heard no button go down over it.
-        if self.held == Held::Zellij {
+        if matches!(self.held, Held::Zellij | Held::Selecting) {
             self.held = Held::Nothing;
         }
         if !(self.focused && self.focus.zellij_told()) {
@@ -3272,7 +3323,7 @@ impl App {
         }
         self.right = Right::Zellij(Client::new(hosted, fails, arrival, then_pane));
         // The client that takes its place heard no button go down over it.
-        if self.held == Held::Zellij {
+        if matches!(self.held, Held::Zellij | Held::Selecting) {
             self.held = Held::Nothing;
         }
     }

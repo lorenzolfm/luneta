@@ -15,6 +15,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+use base64::Engine as _;
 
 use crate::host::{eventually, Host, Running};
 use crate::own::{own, Owned};
@@ -96,6 +97,17 @@ impl Window {
         })
     }
 
+    /// What luneta has asked its terminal to copy, each in its turn.
+    fn copied(&self) -> Vec<String> {
+        let said = String::from_utf8_lossy(&self.said.lock().unwrap()).into_owned();
+        let copies = said.split("\x1b]52;c;").skip(1);
+        let decoded = copies.map(|copy| {
+            let end = copy.find('\x07').unwrap();
+            let text = base64::engine::general_purpose::STANDARD.decode(&copy[..end]).unwrap();
+            String::from_utf8(text).unwrap()
+        });
+        decoded.collect()
+    }
 }
 
 /// How many clients the own session `name` has, as the host lists it.
@@ -103,9 +115,17 @@ fn clients(owned: &Owned, name: &str) -> Option<usize> {
     Some(session(&owned.host.host(), name)?.clients.clone()?.clients.len())
 }
 
+/// What a terminal sends for the left button at the cell at `row` and
+/// `column`, from 0: `M` and 0 for a press, 32 for a drag, and `m` for a
+/// release.
+fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
+    format!("\x1b[<{code};{};{}{last}", column + 1, row + 1)
+}
+
 /// `luneta --own` makes the session named for its directory, by the daemon,
 /// and attaches to it beside the sidebar, which lists it: what is typed goes
-/// to the pane's shell, and what the shell prints shows.
+/// to the pane's shell, and what the shell prints shows. A drag over it
+/// copies it, as the shell takes no mouse.
 #[test]
 fn luneta_own_makes_its_session_and_shows_what_its_shell_prints() {
     let owned = Owned::new();
@@ -119,7 +139,13 @@ fn luneta_own_makes_its_session_and_shows_what_its_shell_prints() {
     });
 
     window.send(TYPED);
-    window.spot_of(PRINTED);
+    let (row, column) = window.spot_of(PRINTED);
+    let end = (row, column + PRINTED.len() - 1);
+    let swept = [mouse(0, (row, column), 'M'), mouse(32, end, 'M'), mouse(0, end, 'm')];
+    window.send(&swept.concat());
+    eventually("the drag copies what it went over", || {
+        window.copied().contains(&PRINTED.to_owned()).then_some(())
+    });
 }
 
 /// A session of zellij's has the name `luneta --own` would take, and luneta

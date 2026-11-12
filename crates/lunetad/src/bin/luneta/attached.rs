@@ -2,8 +2,11 @@
 //! what it does goes to luneta-mux as events, which the server encodes for
 //! the pane's program as it last asked, and luneta draws the frames the
 //! server sends of the pane the client is on. The server says where the
-//! client is, as it comes and each time it moves. The client keeps the last
-//! frame's glyphs, each as wide as the server says.
+//! client is, as it comes and each time it moves.
+//!
+//! The client keeps the last frame's glyphs, each as wide as the server says,
+//! and a drag over them selects their text, as a terminal's does: where the
+//! pane's program takes the mouse, a drag selects only with `Shift` held.
 
 use std::num::NonZeroU16;
 use std::sync::mpsc::Sender;
@@ -24,26 +27,58 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::host::Event;
 
 /// What the client last had of the pane it is on: its frame's rows, and
-/// where its cursor is.
+/// where its cursor is, and whether its program takes the mouse.
 struct Screen {
+    pane: u32,
     size: Size,
     lines: Vec<Line>,
     cursor: Option<Cursor>,
+    tracks_mouse: bool,
 }
 
 /// A cell of the pane, by its row and its column, from 0.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Spot {
     pub row: u16,
     pub column: u16,
 }
 
+/// What a drag over the pane selects: from the cell it went down on to the
+/// one it is over, which it shows lit, and copies as it lets go, once it
+/// has moved off the first. A selection of a pane the client left goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    pane: u32,
+    from: Spot,
+    to: Spot,
+}
+
+impl Selection {
+    /// Its first cell and its last, in the order the text reads.
+    fn ends(self) -> (Spot, Spot) {
+        if self.to < self.from {
+            (self.to, self.from)
+        } else {
+            (self.from, self.to)
+        }
+    }
+
+    /// Whether it holds `spot`.
+    fn holds(self, spot: Spot) -> bool {
+        let (first, last) = self.ends();
+        first <= spot && spot <= last
+    }
+}
+
 /// What luneta's client has of the pane it is on, as the server last said:
-/// where it is, and the pane's last frame.
+/// where it is, the pane's last frame, and what is selected of it.
 #[derive(Default)]
 struct View {
     went: Option<Went>,
     screen: Option<Screen>,
+    selection: Option<Selection>,
+    /// Whether the left button is down on the selection, which follows it.
+    selecting: bool,
 }
 
 impl View {
@@ -54,6 +89,7 @@ impl View {
             Heard::Went(went) => {
                 if self.went.is_none_or(|before| before.pane != went.pane) {
                     self.screen = None;
+                    self.unselect();
                 }
                 self.went = Some(*went);
             },
@@ -65,12 +101,14 @@ impl View {
     /// Takes in `frame`, where it is of the pane the client is on: the rows
     /// that changed of a frame of the size the last was, or all of them. One
     /// of another pane, which the client left, is dropped, and so is one that
-    /// changes rows of none it had, which the server never sends.
+    /// changes rows of none it had, which the server never sends. What was
+    /// selected of a frame of another size goes.
     fn framed(&mut self, frame: &Frame) {
         if self.went.is_none_or(|went| went.pane != frame.pane) {
             return;
         }
         let before = self.screen.take();
+        let size = before.as_ref().map(|screen| screen.size);
         let lines = match (&frame.rows, before) {
             (Rows::Whole(lines), _) => lines.clone(),
             (Rows::Changed(rows), Some(screen)) if screen.size == frame.size => {
@@ -86,7 +124,57 @@ impl View {
             },
         };
         assert_eq!(lines.len(), usize::from(frame.size.rows.get()));
-        self.screen = Some(Screen { size: frame.size, lines, cursor: frame.cursor });
+        if size != Some(frame.size) {
+            self.unselect();
+        }
+        self.screen = Some(Screen {
+            pane: frame.pane,
+            size: frame.size,
+            lines,
+            cursor: frame.cursor,
+            tracks_mouse: frame.tracks_mouse,
+        });
+    }
+
+    fn tracks_mouse(&self) -> bool {
+        self.screen.as_ref().is_some_and(|screen| screen.tracks_mouse)
+    }
+
+    fn select_from(&mut self, at: Spot) {
+        self.unselect();
+        let Some(screen) = &self.screen else {
+            return;
+        };
+        let at = within(at, screen.size);
+        self.selection = Some(Selection { pane: screen.pane, from: at, to: at });
+        self.selecting = true;
+    }
+
+    fn select_to(&mut self, at: Spot) {
+        let (Some(screen), Some(selection), true) =
+            (&self.screen, &mut self.selection, self.selecting)
+        else {
+            return;
+        };
+        selection.to = within(at, screen.size);
+    }
+
+    fn selected(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.selecting) {
+            return None;
+        }
+        let selection = self.selection.filter(|selection| selection.from != selection.to);
+        let text = selection.and_then(|selection| Some(text(self.screen.as_ref()?, selection)));
+        let text = text.filter(|text| !text.is_empty());
+        if text.is_none() {
+            self.selection = None;
+        }
+        text
+    }
+
+    fn unselect(&mut self) {
+        self.selection = None;
+        self.selecting = false;
     }
 
     fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
@@ -98,13 +186,16 @@ impl View {
             }
         }
         let screen = self.screen.as_ref()?;
+        let selection = self.selection.filter(|selection| selection.pane == screen.pane);
         for (row, line) in (0..area.height).zip(&screen.lines) {
             let mut column = 0;
             for glyph in line.glyphs() {
                 if column >= area.width {
                     break;
                 }
-                paint(buffer, area, Spot { row, column }, glyph);
+                let at = Spot { row, column };
+                let lit = selection.is_some_and(|selection| selection.holds(at));
+                paint(buffer, area, at, glyph, lit);
                 column += glyph.shows.columns();
             }
         }
@@ -173,16 +264,18 @@ impl Attached {
     }
 
     /// Sends the pane `key`, as you typed it: none of a key the server has no
-    /// name for.
-    pub fn key(&self, key: &KeyEvent) -> Result<(), String> {
+    /// name for. What was selected goes.
+    pub fn key(&mut self, key: &KeyEvent) -> Result<(), String> {
+        self.view.unselect();
         match key_said(key) {
             Some(key) => self.send(to_server::Event::Key(key)),
             None => Ok(()),
         }
     }
 
-    /// Pastes `text` in the pane.
-    pub fn paste(&self, text: &str) -> Result<(), String> {
+    /// Pastes `text` in the pane. What was selected goes.
+    pub fn paste(&mut self, text: &str) -> Result<(), String> {
+        self.view.unselect();
         self.send(to_server::Event::Paste(api::Paste { text: text.to_owned() }))
     }
 
@@ -210,8 +303,37 @@ impl Attached {
         self.attach.send(event)
     }
 
+    /// Whether a press of `mouse` selects, rather than goes to the pane: the
+    /// left button, on a pane whose program does not take the mouse, or with
+    /// `Shift` held.
+    pub fn selects(&self, mouse: MouseEvent) -> bool {
+        selects(self.view.tracks_mouse(), mouse)
+    }
+
+    /// The left button went down at `at`, to select: what was selected goes.
+    pub fn select_from(&mut self, at: Spot) {
+        self.view.select_from(at);
+    }
+
+    /// The button is dragged to `at`, as it selects.
+    pub fn select_to(&mut self, at: Spot) {
+        self.view.select_to(at);
+    }
+
+    /// The button is let go of: the text it selected, which stays lit, where
+    /// it moved off the cell it went down on; or none, and nothing is.
+    pub fn selected(&mut self) -> Option<String> {
+        self.view.selected()
+    }
+
+    /// Lets go of what is selected, and of a selection under way.
+    pub fn unselect(&mut self) {
+        self.view.unselect();
+    }
+
     /// Draws the pane's last frame into `area` of `buffer`, as much of it as
-    /// `area` holds, and says where the cursor is on it, if it shows. What `area` holds past the frame shows nothing.
+    /// `area` holds, with what is selected lit, and says where the cursor is
+    /// on it, if it shows. What `area` holds past the frame shows nothing.
     pub fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
         self.view.draw(buffer, area)
     }
@@ -224,16 +346,33 @@ impl Attached {
     }
 }
 
-/// Draws `glyph` at `at` of a frame drawn into `area` of `buffer`: as wide as
-/// the server says, and as nothing where it is wide and `area` cuts it.
-fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph) {
+/// Whether a press of `mouse` selects, on a pane whose program `tracks` the
+/// mouse or not, as `Attached::selects` says.
+fn selects(tracks: bool, mouse: MouseEvent) -> bool {
+    mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        && (!tracks || mouse.modifiers.contains(KeyModifiers::SHIFT))
+}
+
+/// `at`, made a cell of a frame of `size` where it is past its last row or
+/// column.
+fn within(at: Spot, size: Size) -> Spot {
+    Spot { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
+}
+
+/// Draws `glyph` at `at` of a frame drawn into `area` of `buffer`, lit where
+/// it is selected: as wide as the server says, and as nothing where it is
+/// wide and `area` cuts it.
+fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: bool) {
     let columns = glyph.shows.columns();
     let fits = at.column + columns <= area.width;
     let (x, y) = (area.x + at.column, area.y + at.row);
     let Some(cell) = buffer.cell_mut((x, y)) else {
         return;
     };
-    let style = glyph.style.as_ref().map_or_else(Style::new, styled);
+    let mut style = glyph.style.as_ref().map_or_else(Style::new, styled);
+    if lit {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
     cell.set_style(style);
     match &glyph.shows {
         Shows::Narrow(grapheme) => {
@@ -254,6 +393,35 @@ fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph) {
             cell.set_symbol(" ");
         },
     }
+}
+
+/// The text `selection` holds of `screen`: each row's, from the first cell to
+/// the last, with no blanks at the end of a row, and a line break between
+/// rows. A wide glyph is in it where either of its columns is.
+fn text(screen: &Screen, selection: Selection) -> String {
+    let (first, last) = selection.ends();
+    let mut rows = Vec::new();
+    for row in first.row..=last.row {
+        let Some(line) = screen.lines.get(usize::from(row)) else {
+            break;
+        };
+        let from = if row == first.row { first.column } else { 0 };
+        let to = if row == last.row { last.column } else { u16::MAX };
+        let mut said = String::new();
+        let mut column: u16 = 0;
+        for glyph in line.glyphs() {
+            let end = column + glyph.shows.columns() - 1;
+            if end >= from && column <= to {
+                match &glyph.shows {
+                    Shows::Blank => said.push(' '),
+                    Shows::Narrow(grapheme) | Shows::Wide(grapheme) => said.push_str(grapheme),
+                }
+            }
+            column = end + 1;
+        }
+        rows.push(said.trim_end().to_owned());
+    }
+    rows.join("\n")
 }
 
 /// The style a glyph is drawn in: the colours a terminal names are left for
@@ -453,9 +621,31 @@ mod tests {
             .map(|glyphs| Line::new(glyphs, false, side(columns)).unwrap())
             .collect();
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
-        let screen = Screen { size, lines, cursor: None };
+        let screen = Screen { pane: 1, size, lines, cursor: None, tracks_mouse: false };
         let went = Went { session: OwnId::new(1).unwrap(), tab: 1, pane: 1 };
         View { went: Some(went), screen: Some(screen), ..View::default() }
+    }
+
+    fn spot(row: u16, column: u16) -> Spot {
+        Spot { row, column }
+    }
+
+    /// A selection reads as the text it holds: from its first cell to its
+    /// last, whichever way it was dragged, a wide glyph with either of its
+    /// columns in it, and each row less the blanks it ends in.
+    #[test]
+    fn a_selection_reads_as_the_text_from_its_first_cell_to_its_last() {
+        let blank = || glyph(Shows::Blank);
+        let view = view(vec![
+            vec![narrow("a"), narrow("b"), glyph(Shows::Wide("日".to_owned())), blank()],
+            vec![narrow("c"), blank(), blank(), blank(), blank()],
+        ]);
+        let screen = view.screen.as_ref().unwrap();
+        let selection = |from, to| Selection { pane: 1, from, to };
+        assert_eq!(text(screen, selection(spot(0, 1), spot(1, 0))), "b日\nc");
+        assert_eq!(text(screen, selection(spot(1, 0), spot(0, 1))), "b日\nc");
+        assert_eq!(text(screen, selection(spot(0, 3), spot(0, 3))), "日");
+        assert_eq!(text(screen, selection(spot(0, 0), spot(0, 1))), "ab");
     }
 
     /// A wide glyph takes two columns of the frame drawn, as the server says,
@@ -496,5 +686,34 @@ mod tests {
         assert_eq!(said(KeyCode::F(12), KeyModifiers::NONE).unwrap().key, named(api::Named::F12));
         assert_eq!(said(KeyCode::F(13), KeyModifiers::NONE), None);
         assert_eq!(said(KeyCode::Char('\u{7}'), KeyModifiers::NONE), None);
+    }
+
+    /// The left button selects where the program does not take the mouse, and
+    /// with `Shift` held where it does; a selection copies only once it moved
+    /// off the cell it went down on, and a frame of another size takes it
+    /// away.
+    #[test]
+    fn a_drag_selects_where_the_program_does_not_take_the_mouse() {
+        let press = |modifiers| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers,
+        };
+        assert!(selects(false, press(KeyModifiers::NONE)));
+        assert!(!selects(true, press(KeyModifiers::NONE)));
+        assert!(selects(true, press(KeyModifiers::SHIFT)));
+        let mut view = view(vec![vec![narrow("a"), narrow("b"), narrow("c")]]);
+        view.select_from(spot(0, 1));
+        assert_eq!(view.selected(), None);
+        view.select_from(spot(0, 0));
+        view.select_to(spot(0, 9));
+        assert_eq!(view.selected().as_deref(), Some("abc"));
+        assert!(view.selection.is_some());
+        let line = Line::new(vec![narrow("a"), narrow("b")], false, side(2)).unwrap();
+        let rows = Rows::Whole(vec![line]);
+        let size = Size { columns: side(2), rows: side(1) };
+        view.heard(&Heard::Frame(Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false }));
+        assert_eq!(view.selection, None);
     }
 }
