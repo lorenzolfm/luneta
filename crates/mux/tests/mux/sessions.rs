@@ -28,7 +28,8 @@ fn a_session_runs_a_shell_that_a_client_types_in() {
 }
 
 /// A server started in a pane of zellij's gives its panes none of zellij's
-/// variables, and names each pane by its own ids.
+/// variables, and names each pane by its own ids, and by when its session was
+/// made, in nanoseconds since the epoch, as the server lists it.
 #[test]
 fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
     run(async {
@@ -36,7 +37,7 @@ fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let made = new_session(&mut mux, "env", script("export -p", api::Ends::Holds)).await;
-        watched_until(&mut watch, "the program ended", |listing| {
+        let listing = watched_until(&mut watch, "the program ended", |listing| {
             tabs(listing).first().is_some_and(|tab| ended(&tab.panes[0]).is_some())
         })
         .await;
@@ -48,6 +49,9 @@ fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
         };
         assert!(named("LUNETA_MUX_SESSION=", made.session.to_string()), "{text}");
         assert!(named("LUNETA_MUX_PANE=", made.pane.to_string()), "{text}");
+        let made_at = listing.sessions[0].made_at.unwrap();
+        let nanos = i128::from(made_at.seconds) * 1_000_000_000 + i128::from(made_at.nanos);
+        assert!(named("LUNETA_MUX_MADE=", nanos.to_string()), "{text}");
     });
 }
 

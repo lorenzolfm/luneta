@@ -33,11 +33,12 @@ use std::env;
 use std::fmt;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::term::{ClipboardType, TermMode};
@@ -99,15 +100,38 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
 use crate::zellij::{
-    self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused,
+    self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Turned, Unused,
 };
+
+/// The name of a session luneta makes, and the directory it starts in, if
+/// any, or why it makes none.
+type Named = Result<(Unused, Option<Directory>), String>;
+
+/// A tab luneta opens in a session it makes, for the menu numbered `menu`.
+pub struct MenuTab {
+    menu: u64,
+    tab: Tab,
+}
+
+/// Whether luneta names a session it makes, on a thread of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Naming {
+    Idle,
+    Busy,
+}
+
+/// Why luneta makes no session while it names another.
+const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
+
+/// Why luneta made no session whose naming panicked.
+const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
 /// What luneta's loop acts on, from the threads that wait on each source.
 pub enum Event {
@@ -148,6 +172,9 @@ pub enum Event {
     /// What zellij opened for the menu numbered `menu`: the terminal, or why
     /// none.
     Opened { menu: u64, opened: Result<u32, String> },
+    /// The name of a session luneta makes, and the tab it opens there for
+    /// the menu numbered so, if any.
+    Named { named: Named, tab: Option<MenuTab> },
     /// What closing the pane of the menu numbered `menu` closes, as zellij
     /// lists its session, or why it does not say.
     Closes { menu: u64, closes: Result<Closes, String> },
@@ -159,7 +186,7 @@ pub enum Event {
     IntoPanes { menu: u64, pane: u32, came: Result<IntoPanes, String> },
     /// A pane of a session no client is in stays, for the menu numbered `menu`
     /// owed it, until a client there makes room for its tab.
-    NoClient { menu: u64, owed: Due<u32>, on: Machine, place: PanePlace },
+    NoClient { menu: u64, owed: Due<u32>, on: Machine, turned: Turned },
     /// The skills the directory of the menu numbered `menu` can run in
     /// `agent`, or why the finder found none.
     Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
@@ -850,6 +877,9 @@ struct App {
     /// ended. And what deletes the merged worktrees of this machine's `d m`,
     /// which nothing else would finish.
     deleting: Vec<JoinHandle<()>>,
+    /// Whether a session luneta makes is being named, which `name` does one
+    /// at a time.
+    naming: Naming,
     /// The agents that want you, of every machine, and their notifications.
     alerts: Alerts,
     /// What puts the notifications up, which takes them down as luneta
@@ -1155,6 +1185,7 @@ fn run_in(
         drops: Drops::default(),
         gave_up: None,
         deleting: Vec::new(),
+        naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
     };
@@ -1453,19 +1484,20 @@ impl App {
             },
             // A menu closed since is no longer what you are on, and takes
             // luneta's client nowhere.
-            Event::NoClient { menu, owed, on, place } => match self.sidebar.waits_on(menu) {
+            Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
                 Some(sidebar::Held::Open) => {
-                    let after = After::IntoTab(owed, place.clone());
-                    if !self.go(&on, &Place::Pane(place), Some(after)) {
+                    let place = Place::Pane(turned.place().clone());
+                    if !self.go(&on, &place, Some(After::IntoTab(owed, turned))) {
                         self.sidebar.drop_menu(menu);
                     }
                 },
                 Some(sidebar::Held::Kept) => {
-                    owed.pay(Err(lunetad::opens::no_client(place.session.name())));
+                    owed.pay(Err(lunetad::opens::no_client(turned.place().session.name())));
                 },
                 None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
+            Event::Named { named, tab } => self.named(named, tab),
             Event::Pulled { menu, found } => {
                 let asked = self.sidebar.pulled(menu, found);
                 self.follow(asked);
@@ -2310,21 +2342,21 @@ impl App {
                 zellij::closes(menu, &on, session, pane, &self.events);
             },
             Asked::Delete { on, act } => match act {
-                Act::Pane { session, started, pane } => {
-                    zellij::close(&on, session, started, Close::Pane(pane), &self.events);
+                Act::Pane { session, whose, pane } => {
+                    zellij::close(&on, session, whose, Close::Pane(pane), &self.events);
                 },
-                Act::Tab { session, started, tab, panes } => {
+                Act::Tab { session, whose, tab, panes } => {
                     let close = Close::Tab { id: tab, panes };
-                    zellij::close(&on, session, started, close, &self.events);
+                    zellij::close(&on, session, whose, close, &self.events);
                 },
-                Act::Kill { session, started } => {
+                Act::Kill { session, whose } => {
                     self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(zellij::kill(&on, session, started, &self.events));
+                    self.deleting.push(zellij::kill(&on, session, whose, &self.events));
                 },
                 // The plan found zellij's client in `session`, on `on`, and on
                 // its way nowhere, as the key was pressed: where it goes from.
-                Act::Leave { session, started, to } => {
-                    self.go(&on, &to, Some(After::Kill { session, started }));
+                Act::Leave { session, whose, to } => {
+                    self.go(&on, &to, Some(After::Kill { session, whose }));
                 },
             },
             Asked::Open { menu, on, open } => zellij::open(menu, &on, open, &self.events),
@@ -2337,30 +2369,29 @@ impl App {
             Asked::Tabs { menu, on, session, pane } => {
                 zellij::other_tabs(menu, &on, session, pane, &self.events);
             },
-            Asked::Turn { menu, on, place, turn } => {
-                zellij::turn(menu, &on, place, turn, &self.events);
+            Asked::Turn { menu, on, turned, turn } => {
+                zellij::turn(menu, &on, turned, turn, &self.events);
             },
             Asked::Start { on, starts } => {
-                match zellij::unused_at(&on, starts) {
-                    Ok((unused, dir)) => {
-                        self.make(Ok(unused), Some(&dir), None);
-                    },
-                    Err(why) => self.sidebar.notify(format!("menu: {why}")),
-                }
+                self.name(None, move || match zellij::unused_at(&on, starts) {
+                    Ok((unused, dir)) => Ok((unused, Some(dir))),
+                    Err(why) => Err(format!("menu: {why}")),
+                });
                 self.leave();
             },
             // The menu waits until zellij has opened it, and takes the keys
             // there with it.
             Asked::Make { menu, on, session, cwd, tab_cwd, name, command } => {
                 let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                let unused = match &on {
-                    Machine::Local => zellij::makes(session),
-                    Machine::Remote(destination) => zellij::makes_away(destination, &session, &cwd),
-                };
-                let owed = zellij::owed(menu, &self.events);
-                if !self.make(unused, Some(&cwd), Some((owed, tab))) {
-                    self.sidebar.drop_menu(menu);
-                }
+                self.name(Some(MenuTab { menu, tab }), move || {
+                    let unused = match &on {
+                        Machine::Local => zellij::makes(session),
+                        Machine::Remote(destination) => {
+                            zellij::makes_away(destination, &session, &cwd)
+                        },
+                    };
+                    Ok((unused?, Some(cwd)))
+                });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
                 pull::prepare(menu, on, work, wanted, worked, others, &self.events);
@@ -2431,11 +2462,13 @@ impl App {
                 // From another machine, a client that makes it refuses a name
                 // zellij keeps, which `makes` says first, as the daemon of
                 // the machine it makes it on says there.
-                let unused = match &on {
-                    Machine::Local => zellij::makes(session),
-                    Machine::Remote(destination) => zellij::makes_there(destination, session),
-                };
-                self.make(unused, None, None);
+                self.name(None, move || {
+                    let unused = match &on {
+                        Machine::Local => zellij::makes(session),
+                        Machine::Remote(destination) => zellij::makes_there(destination, session),
+                    };
+                    Ok((unused?, None))
+                });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::BringBack { on, session } => {
@@ -2443,13 +2476,15 @@ impl App {
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Make { on, session, cwd } => {
-                let unused = match &on {
-                    Machine::Local => zellij::makes(session),
-                    Machine::Remote(destination) => {
-                        zellij::makes_away(destination, &session, &cwd)
-                    },
-                };
-                self.make(unused, Some(&cwd), None);
+                self.name(None, move || {
+                    let unused = match &on {
+                        Machine::Local => zellij::makes(session),
+                        Machine::Remote(destination) => {
+                            zellij::makes_away(destination, &session, &cwd)
+                        },
+                    };
+                    Ok((unused?, Some(cwd)))
+                });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -2459,8 +2494,8 @@ impl App {
                     self.picked(did);
                 }
             },
-            Picked::Delete { on, act: Act::Leave { session, started, to } } => {
-                self.go(&on, &to, Some(After::Kill { session, started }));
+            Picked::Delete { on, act: Act::Leave { session, whose, to } } => {
+                self.go(&on, &to, Some(After::Kill { session, whose }));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
@@ -2706,8 +2741,14 @@ impl App {
     /// is there, in another session. On another machine than the one the
     /// client runs on, or where luneta cannot tell which session the client
     /// is in, a client there takes its place, as `swap` says, and opens what
-    /// `after` opens once it is in. Whether it went.
+    /// `after` opens once it is in. It goes to no own session yet. Whether it
+    /// went.
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
+        if place.listed().own() {
+            let session = place.listed().name();
+            self.sidebar.notify(format!("luneta cannot go to {session}, an own session, yet"));
+            return false;
+        }
         if machine != self.sidebar.on() || self.sidebar.astray().is_some() {
             // The session a kill is of is the one the client leaves, of the
             // machine it leaves, which the sidebar asks for only as the
@@ -2946,6 +2987,51 @@ impl App {
         let until = Instant::now() + zellij::START;
         self.client.making = made.map(|arrival| Making { arrival, until });
         true
+    }
+
+    /// Names a session luneta makes, as `named` does, on a thread of its own,
+    /// as it waits on the multiplexers that hold names, and on the daemon of
+    /// another machine: `Event::Named` hands it back, with `tab`, for `make`.
+    /// One at a time: two named at once could both take a name that was free
+    /// before either made its session, and the second would go to the first's.
+    /// So while one is named, another is refused, and its menu let go of.
+    fn name(&mut self, tab: Option<MenuTab>, named: impl FnOnce() -> Named + Send + 'static) {
+        if self.naming == Naming::Busy {
+            self.sidebar.notify(NAMING.to_owned());
+            if let Some(MenuTab { menu, .. }) = tab {
+                self.sidebar.drop_menu(menu);
+            }
+            return;
+        }
+        self.naming = Naming::Busy;
+        let events = self.events.clone();
+        thread::spawn(move || {
+            // A naming that panics hands back why, rather than leave luneta
+            // naming no session again.
+            let named = panic::catch_unwind(AssertUnwindSafe(named))
+                .unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()));
+            // luneta is on its way out.
+            let _ = events.send(Event::Named { named, tab });
+        });
+    }
+
+    /// Makes the session `named` names, once it has, as `make` does, and
+    /// opens `tab` there for its menu, if any, or has the menu let go of
+    /// what it waits on.
+    fn named(&mut self, named: Named, tab: Option<MenuTab>) {
+        assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
+        self.naming = Naming::Idle;
+        let menu = tab.as_ref().map(|tab| tab.menu);
+        let tab = tab.map(|MenuTab { menu, tab }| (zellij::owed(menu, &self.events), tab));
+        let (unused, cwd) = match named {
+            Ok((unused, cwd)) => (Ok(unused), cwd),
+            Err(why) => (Err(why), None),
+        };
+        if !self.make(unused, cwd.as_ref(), tab)
+            && let Some(menu) = menu
+        {
+            self.sidebar.drop_menu(menu);
+        }
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of

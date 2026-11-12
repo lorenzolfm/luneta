@@ -500,7 +500,7 @@ message NewOwnRequest {
 }
 
 message NewOwnResponse {
-  // The id its server gave it, as its `Session.own` says.
+  // The id its server gave it, as its `OwnSession.id` says.
   uint64 session = 1;
   // Its tab's id, and its pane's.
   uint32 tab = 2;
@@ -564,9 +564,11 @@ message CloseRequest {
     // session by its name that started at another time took the name since,
     // and what is in it stays.
     google.protobuf.Timestamp started_at = 5;
-    // An own session's id, as its `Session.own` says.
-    uint64 own = 6;
+    // An own session, as its `Session.own` says.
+    OwnSession own = 7;
   }
+  // An own session's id alone, which no release has sent.
+  reserved 6;
 }
 
 message OtherTabsRequest {
@@ -654,10 +656,12 @@ message KillRequest {
     // session by its name that started at another time took the name since,
     // and stays.
     google.protobuf.Timestamp started_at = 3;
-    // An own session's id, as its `Session.own` says. Its server gives no
-    // other session the id, so the name does not tell it.
-    uint64 own = 4;
+    // An own session, as its `Session.own` says: a session by its name of
+    // another id, or made at another time, took the name since, and stays.
+    OwnSession own = 5;
   }
+  // An own session's id alone, which no release has sent.
+  reserved 4;
 }
 
 message ListExitedRequest {
@@ -1092,13 +1096,23 @@ message Session {
   // `started_at` and `socket`.
   oneof mux {
     ZellijSession zellij = 7;
-    // The id luneta's own multiplexer gave it, which a rename keeps, and
-    // which its server gives no other. Never 0. Its panes' ids are unique
-    // across the own sessions, and so are its tabs', and neither is given
-    // again. Its clients' are as `Client.id` says of zellij's, but never given
-    // again.
-    uint64 own = 6;
+    OwnSession own = 8;
   }
+  // An own session's id alone, which no build has read.
+  reserved 6;
+}
+
+// A session of luneta's own multiplexer, past its name.
+message OwnSession {
+  // The id its server gave it, which a rename keeps, and which its server
+  // gives no other. Never 0. Its panes' ids are unique across the own
+  // sessions, and so are its tabs', and neither is given again. Its clients'
+  // are as `Client.id` says of zellij's, but never given again. The next
+  // server counts them from 1 again.
+  uint64 id = 1;
+  // When its server made it, which a rename keeps. With `id` it tells every
+  // own session from every other, of this server or another. Always there.
+  google.protobuf.Timestamp made_at = 2;
 }
 
 // A session of zellij's, past its name.
@@ -1550,10 +1564,13 @@ enum NameSource {
 
 // The own pane an agent runs in.
 message Own {
-  // The own session's id, as its `Session.own` says.
-  uint64 session = 1;
+  // The own session, as its `Session.own` says, which its pane's variables
+  // name. Always there.
+  OwnSession session = 3;
   // The pane's id.
   uint32 pane = 2;
+  // The own session's id alone, which no release has sent.
+  reserved 1;
 }
 
 // The zellij pane an agent runs in.

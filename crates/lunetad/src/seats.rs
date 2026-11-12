@@ -4,24 +4,43 @@
 
 use std::collections::HashMap;
 
-use crate::api::{Agent, Harness, Pane, Session, Zellij};
+use crate::api::session::Mux;
+use crate::api::{agent, Agent, Harness, Pane, Session, Zellij};
+use crate::mux::OwnKey;
+
+/// A session, as a seat is in it: a zellij session by its name, and an own
+/// one as no other is. An own session can have the name of a zellij one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Where<'a> {
+    Zellij(&'a str),
+    Own(OwnKey),
+}
 
 /// The agent in each pane, by its session and the pane's id. A pane holds one:
 /// the agent started at a prompt, or else the one that started first. An
-/// agent is in the session the daemon follows its pane to, or, where the
-/// daemon cannot tell, the one `found` finds.
+/// agent is in the zellij session the daemon follows its pane to, or, where
+/// the daemon cannot tell, the one `found` finds; or in an own pane, in the
+/// own session its pane's variables name.
 #[must_use]
 pub fn seated<'a>(
     agents: &'a [Agent],
     sessions: &'a [Session],
-) -> HashMap<(&'a str, u32), &'a Agent> {
-    let mut seated: HashMap<(&str, u32), &Agent> = HashMap::new();
+) -> HashMap<(Where<'a>, u32), &'a Agent> {
+    let mut seated: HashMap<(Where, u32), &Agent> = HashMap::new();
     for agent in agents {
-        let Some(zellij) = agent.zellij() else {
-            continue;
+        let seat = match &agent.pane {
+            Some(agent::Pane::Zellij(zellij)) => zellij
+                .session
+                .as_deref()
+                .or_else(|| found(agent, zellij, sessions))
+                .map(|session| (Where::Zellij(session), zellij.pane)),
+            Some(agent::Pane::Own(own)) => {
+                let key = own.session.as_ref().and_then(|session| OwnKey::of(session).ok());
+                key.map(|key| (Where::Own(key), own.pane))
+            },
+            None => None,
         };
-        let Some(session) = zellij.session.as_deref().or_else(|| found(agent, zellij, sessions))
-        else {
+        let Some(seat) = seat else {
             continue;
         };
         let rank = |agent: &Agent| {
@@ -29,7 +48,7 @@ pub fn seated<'a>(
             (!agent.at_a_prompt(), started)
         };
         seated
-            .entry((session, zellij.pane))
+            .entry(seat)
             .and_modify(|seat| {
                 if rank(agent) < rank(seat) {
                     *seat = agent;
@@ -41,9 +60,9 @@ pub fn seated<'a>(
 }
 
 /// The session of an agent the daemon cannot follow to one, as it cannot one
-/// renamed before it started, found by where it works: the one session that
-/// lists a pane of the agent's id that works where the agent does. Of more
-/// than one, the session the agent's environment names, or else, for Claude
+/// renamed before it started, found by where it works: the one zellij session
+/// that lists a pane of the agent's id that works where the agent does. Of
+/// more than one, the session the agent's environment names, or else, for Claude
 /// Code's, the one whose pane runs `claude` or an agent titled, if one alone
 /// does: what a pane runs tells of no other harness's agent.
 fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
@@ -57,7 +76,8 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
         })?;
         Some((session.name.as_str(), pane))
     };
-    let holders: Vec<(&str, &Pane)> = sessions.iter().filter_map(pane).collect();
+    let of_zellij = |session: &&Session| matches!(session.multiplexer(), Mux::Zellij(_));
+    let holders: Vec<(&str, &Pane)> = sessions.iter().filter(of_zellij).filter_map(pane).collect();
     if let [(only, _)] = holders.as_slice() {
         return Some(only);
     }

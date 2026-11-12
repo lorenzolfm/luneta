@@ -2969,7 +2969,7 @@ mod tests {
         assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
         assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
         let c = listed("c", 30);
-        let kill = Act::Kill { session: c.name().clone(), started: c.started() };
+        let kill = Act::Kill { session: c.name().clone(), whose: c.whose() };
         let plan = Plan::of(kill, Ok(&[(0, Doing::Busy)]));
         assert_eq!(picker.planned(Ok(plan)), Picked::Nothing);
         let (rows, yes) = clicks(&picker, "<y>");
@@ -3054,7 +3054,7 @@ mod tests {
         let c = listed("c", 30);
         let deletes = Deletes::Session;
         let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes };
-        let kill = || Act::Kill { session: c.name().clone(), started: c.started() };
+        let kill = || Act::Kill { session: c.name().clone(), whose: c.whose() };
         let plan = |doing: Doing| Plan::of(kill(), Ok(&[(0, doing)]));
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);

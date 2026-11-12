@@ -304,7 +304,8 @@ impl Agent {
                     })
                 },
                 Named::Own { session, pane } => {
-                    api::agent::Pane::Own(api::Own { session: session.get(), pane: *pane })
+                    let session = Some((*session).into());
+                    api::agent::Pane::Own(api::Own { session, pane: *pane })
                 },
             }),
             topic: topic.map(String::from),

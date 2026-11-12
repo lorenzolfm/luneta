@@ -17,10 +17,8 @@ use luneta_protocol::said::Said;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
 use lunetad::mux::{self, ClientWords, Mux, PaneId, PaneVars, Zellij, ZellijPane};
-pub use lunetad::closes::{
-    closed, closes_now, closes_together, deleted, killed, Close, Closes, Closing,
-};
-use lunetad::closes::running_in;
+pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
+use lunetad::closes::{running_in, Whose};
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
@@ -642,10 +640,10 @@ pub enum After {
     /// Turn the pane `place` into a tab, for the menu owed the pane, now that a
     /// client is there to make room for it: told once done, or else as it is
     /// dropped undone.
-    IntoTab(Due<u32>, PanePlace),
-    /// Kill the session the client left, which it was in, the one that
-    /// started at `started`, and delete it.
-    Kill { session: SessionName, started: SystemTime },
+    IntoTab(Due<u32>, Turned),
+    /// Kill the session the client left, which it was in, the one `whose`
+    /// says, and delete it.
+    Kill { session: SessionName, whose: Whose },
 }
 
 impl After {
@@ -676,22 +674,22 @@ impl After {
             (After::Open(owed, open), there) => {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
             },
-            (After::IntoTab(owed, place), there) => {
-                let (session, started) = (place.session.name(), place.session.started());
-                let came = there.turn_into_tab(session, started, place.pane);
+            (After::IntoTab(owed, turned), there) => {
+                let (session, pane) = (turned.place.session.name(), turned.place.pane);
+                let came = there.turn_into_tab(session, turned.started, pane);
                 owed.pay(came.and_then(|came| match came {
-                    IntoTab::Done => Ok(place.pane),
+                    IntoTab::Done => Ok(pane),
                     IntoTab::NoClient => Err(lunetad::opens::no_client(session)),
                 }));
             },
             // A zellij of its own kills it: one run as the client's would
             // wait on the session it ends.
-            (After::Kill { session, started }, There::Here) => {
-                kill(&Machine::Local, session, started, events);
+            (After::Kill { session, whose }, There::Here) => {
+                kill(&Machine::Local, session, whose, events);
             },
             // The daemon there kills it, which waits on no client.
-            (After::Kill { session, started }, There::Away(away)) => {
-                if let Err(why) = away.kill(&session, started) {
+            (After::Kill { session, whose }, There::Away(away)) => {
+                if let Err(why) = away.kill(&session, whose) {
                     // luneta is on its way out.
                     let _ = events.send(Event::Notice(why));
                 }
@@ -769,48 +767,71 @@ pub fn other_tabs(
     });
 }
 
-/// Has zellij on the machine `on` turn the pane `place` as `turn` says, on a
-/// thread of its own, for the menu numbered `menu`, and hands back what came of
-/// it. What stays moves nothing, luneta's client neither.
-pub fn turn(menu: u64, on: &Machine, place: PanePlace, turn: turns::Turn, events: &Sender<Event>) {
-    match turn {
-        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, place, events),
-        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &place, beside, events),
+/// A pane luneta turns, of a zellij session, with when that started, which a
+/// turn is asked by: an own session turns no pane yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Turned {
+    place: PanePlace,
+    started: SystemTime,
+}
+
+impl Turned {
+    /// The pane `place`, or none for one of an own session's.
+    pub fn of(place: PanePlace) -> Option<Self> {
+        match place.session.whose() {
+            Whose::Zellij(started) => Some(Turned { place, started }),
+            Whose::Own(_) => None,
+        }
+    }
+
+    pub fn place(&self) -> &PanePlace {
+        &self.place
     }
 }
 
-/// Turns the pane `place` into a tab, and hands back its terminal, for luneta
+/// Why an own session's pane does not turn, which its menu does not offer.
+pub const OWN_TURNS: &str = "luneta's own sessions cannot turn a pane yet";
+
+/// Has zellij on the machine `on` turn the pane `turned` as `turn` says, on a
+/// thread of its own, for the menu numbered `menu`, and hands back what came of
+/// it. What stays moves nothing, luneta's client neither.
+pub fn turn(menu: u64, on: &Machine, turned: Turned, turn: turns::Turn, events: &Sender<Event>) {
+    match turn {
+        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, turned, events),
+        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &turned, beside, events),
+    }
+}
+
+/// Turns the pane `turned` into a tab, and hands back its terminal, for luneta
 /// to take its client to, or why it did not, as `owed` does. Where its session
 /// has no client to make room for the tab, the menu is owed that yet, once
 /// luneta's client has come, as `Event::NoClient` says.
-fn pane_into_tab(menu: u64, on: &Machine, place: PanePlace, events: &Sender<Event>) {
+fn pane_into_tab(menu: u64, on: &Machine, turned: Turned, events: &Sender<Event>) {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
-        let (session, started, pane) =
-            (place.session.name(), place.session.started(), place.pane);
+        let (session, pane) = (turned.place.session.name(), turned.place.pane);
+        let started = turned.started;
         match There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane)) {
             Ok(IntoTab::Done) => owed.pay(Ok(pane)),
             Ok(IntoTab::NoClient) => {
                 // luneta is on its way out.
-                let _ = events.send(Event::NoClient { menu, owed, on, place });
+                let _ = events.send(Event::NoClient { menu, owed, on, turned });
             },
             Err(why) => owed.pay(Err(why)),
         }
     });
 }
 
-/// Turns the tab of the pane `place` into panes of the tab of the terminal
+/// Turns the tab of the pane `turned` into panes of the tab of the terminal
 /// `beside`, and hands back what came of it where any moved, or why none did,
 /// with `Event::IntoPanes`.
-fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, events: &Sender<Event>) {
-    let (session, started, pane) =
-        (place.session.name().clone(), place.session.started(), place.pane);
+fn tab_into_panes(menu: u64, on: &Machine, turned: &Turned, beside: u32, events: &Sender<Event>) {
+    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane);
     let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
-    let on = on.clone();
+    let (on, started) = (on.clone(), turned.started);
     thread::spawn(move || {
-        let came = There::on(&on).and_then(|mut there| {
-            there.turn_into_panes(&session, started, pane, beside)
-        });
+        let came = There::on(&on)
+            .and_then(|mut there| there.turn_into_panes(&session, started, pane, beside));
         owed.pay(came);
     });
 }
@@ -833,13 +854,13 @@ pub fn closes(menu: u64, on: &Machine, session: SessionName, pane: u32, events: 
 pub fn close(
     on: &Machine,
     session: SessionName,
-    started: SystemTime,
+    whose: Whose,
     close: Close,
     events: &Sender<Event>,
 ) {
     let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
-        let closed = There::on(&on).and_then(|mut there| there.close(&session, started, &close));
+        let closed = There::on(&on).and_then(|mut there| there.close(&session, whose, &close));
         if let Err(why) = closed {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
@@ -847,18 +868,18 @@ pub fn close(
     });
 }
 
-/// Has zellij on the machine `on` kill `session`, the one that started at
-/// `started`, and delete it, on a thread of its own, as `killed` does: the
-/// thread, for luneta to wait for as it ends.
+/// Has the machine `on` kill `session`, the one `whose` says, and delete it,
+/// on a thread of its own, as `Whose::killed` does: the thread, for luneta to
+/// wait for as it ends.
 pub fn kill(
     on: &Machine,
     session: SessionName,
-    started: SystemTime,
+    whose: Whose,
     events: &Sender<Event>,
 ) -> JoinHandle<()> {
     let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
-        if let Err(why) = There::on(&on).and_then(|mut there| there.kill(&session, started)) {
+        if let Err(why) = There::on(&on).and_then(|mut there| there.kill(&session, whose)) {
             // luneta is on its way out.
             let _ = events.send(Event::Notice(why));
         }
@@ -999,9 +1020,8 @@ impl Unused {
 }
 
 /// The name a session luneta makes on `destination` takes, that starts as
-/// `starts` says, as its daemon there names it within `away::QUICK`, as
-/// luneta's screen waits on it, and the directory it named it for; or why it
-/// takes none.
+/// `starts` says, as its daemon there names it within `away::QUICK`, and the
+/// directory it named it for; or why it takes none.
 fn name_away(destination: &Destination, starts: &Starts) -> Result<(Unused, Directory), String> {
     let named = Away::reach(destination, away::QUICK).and_then(|mut away| away.name(starts));
     let (name, since, dir) = named?;
@@ -1050,8 +1070,7 @@ pub fn makes(to: SessionName) -> Result<Unused, String> {
 
 /// `to`, as a name zellij on `destination` would make a session of now, as
 /// `makes` says of this machine's, as its daemon there says within
-/// `away::QUICK`, as luneta's screen waits on it; or why zellij there would
-/// make none.
+/// `away::QUICK`; or why zellij there would make none.
 pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused, String> {
     let checked = Away::reach(destination, away::QUICK).and_then(|mut away| away.check(&to));
     let since = checked.map_err(|why| format!("no session made: {why}"))?;
@@ -1060,10 +1079,9 @@ pub fn makes_there(destination: &Destination, to: SessionName) -> Result<Unused,
 
 /// `to`, as a name zellij on `destination` would make a session of now, for
 /// `cwd`, as `makes` says of this machine's: the name its daemon there gives
-/// a session for `cwd` within `away::QUICK`, as luneta's screen waits on
-/// it, which is `to` while no session there has it, nor one that ended, as
-/// the daemon named it before. Or why zellij there would take the client to
-/// one that has it.
+/// a session for `cwd` within `away::QUICK`, which is `to` while no session
+/// there has it, nor one that ended, as the daemon named it before. Or why
+/// zellij there would take the client to one that has it.
 pub fn makes_away(
     destination: &Destination,
     to: &SessionName,
@@ -1245,25 +1263,21 @@ impl There {
         }
     }
 
-    /// Has zellij close `close` of `session`, or says why it did not.
-    fn close(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        close: &Close,
-    ) -> Result<(), String> {
+    /// Has its multiplexer close `close` of `session`, the one `whose` says,
+    /// or says why it did not.
+    fn close(&mut self, session: &SessionName, whose: Whose, close: &Close) -> Result<(), String> {
         match self {
-            There::Here => closed(session, started, close),
-            There::Away(away) => away.close(session, started, close),
+            There::Here => whose.closed(session, close),
+            There::Away(away) => away.close(session, whose, close),
         }
     }
 
-    /// Has zellij kill `session`, the one that started at `started`, and
-    /// delete it, as `lunetad::closes::killed` does, or says why it did not.
-    fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
+    /// Has its multiplexer kill `session`, the one `whose` says, and delete
+    /// it, as `lunetad::closes::Whose::killed` does, or says why it did not.
+    fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
         match self {
-            There::Here => killed(session, started),
-            There::Away(away) => away.kill(session, started),
+            There::Here => whose.killed(session),
+            There::Away(away) => away.kill(session, whose),
         }
     }
 

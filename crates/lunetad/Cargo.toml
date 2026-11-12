@@ -46,6 +46,7 @@ luneta-protocol = { path = "../protocol" }
 # FSEvents on macOS.
 notify = "8.2.0"
 prost = "0.14.4"
+prost-types = "0.14.4"
 # Runs the voice that reads aloud, on this machine: Phonon, in Rust, on the CPU.
 # `hf` reads its tokenizer. Exact, as it went from 0.4 to 0.6 in ten days, and
 # as `xn`, which it runs on, is named here too for the size of its pool of
@@ -117,7 +118,6 @@ zbus ={ version = "6.2.1", default-features = false, features = ["proxy", "tokio
 tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
-prost-types = "0.14.4"
 # Terminals of the tests' own, for a command going on one, set to take keys as
 # the test has them.
 rustix = { version = "1.1.4", features = ["fs", "pty", "termios"] }

@@ -62,6 +62,28 @@ impl v1::Agent {
     }
 }
 
+impl v1::Session {
+    /// Which multiplexer runs it, as its daemon says in `mux`; or, from a
+    /// daemon older than `mux`, whose sessions are all zellij's, as it says in
+    /// `started_at` and `socket`. What else reads those reads them here.
+    #[must_use]
+    pub fn multiplexer(&self) -> v1::session::Mux {
+        let (started_at, socket) = (self.started_at, self.socket);
+        self.mux.unwrap_or(v1::session::Mux::Zellij(v1::ZellijSession { started_at, socket }))
+    }
+
+    /// When it started, by its multiplexer: when zellij's server made its
+    /// socket, or the own server made it. None where its daemon says neither.
+    #[must_use]
+    pub fn started(&self) -> Option<std::time::SystemTime> {
+        let at = match self.multiplexer() {
+            v1::session::Mux::Zellij(zellij) => zellij.started_at,
+            v1::session::Mux::Own(own) => own.made_at,
+        };
+        std::time::SystemTime::try_from(at?).ok()
+    }
+}
+
 impl v1::Harness {
     /// Its word for the agent a person talks to at a prompt.
     #[must_use]

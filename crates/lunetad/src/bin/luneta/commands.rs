@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use clap::Subcommand;
 use luneta_protocol::github::{self, State, Verdict};
 use luneta_protocol::unread::Unread;
-use lunetad::api::agent::Status as Reported;
+use lunetad::api::agent::{self, Status as Reported};
 use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
@@ -376,7 +376,7 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
 async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
     let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seat(agent.zellij()), agent)).collect();
+        listed.agents.iter().map(|agent| (seat_of(agent), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {
@@ -386,6 +386,18 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
         eprintln!("luneta: {}", unread(count));
     }
     Ok(())
+}
+
+/// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
+/// `own <session id>:<pane>`, with `?` for an id its daemon does not say.
+fn seat_of(agent: &Agent) -> String {
+    match &agent.pane {
+        Some(agent::Pane::Own(own)) => {
+            let id = own.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
+            format!("own {id}:{}", own.pane)
+        },
+        Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
+    }
 }
 
 /// Where an agent runs in `zellij`, as `<session>:<pane>`: `-` outside
@@ -488,7 +500,7 @@ fn as_rows<'a>(
 ) -> Vec<&'a Session> {
     let mut rows: Vec<&Session> = sessions.iter().collect();
     rows.sort_by_cached_key(|session| {
-        let started = session.started_at.and_then(|at| SystemTime::try_from(at).ok());
+        let started = session.started();
         (started.is_none(), started, session.name.clone())
     });
     if let Some(machine) = machine {

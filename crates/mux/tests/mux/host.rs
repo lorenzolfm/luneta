@@ -59,6 +59,7 @@ impl Server {
             .env("ZELLIJ_SESSION_NAME", "theirs")
             .env("ZELLIJ_PANE_ID", "7")
             .env_remove("LUNETA_MUX_SESSION")
+            .env_remove("LUNETA_MUX_MADE")
             .env_remove("LUNETA_MUX_PANE")
             .stdin(Stdio::null())
             .stderr(Stdio::piped());

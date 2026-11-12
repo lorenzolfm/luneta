@@ -1,11 +1,12 @@
 //! A moment for each pane of each session, the same in every luneta that
 //! shares the ledger's folder, and kept for the next.
 //!
-//! A pane goes by its session, which its socket tells: when the socket was
-//! made and its inode, both of which a rename keeps and a session made again
-//! under its name does not; and by its id, which zellij gives no other pane of
-//! the session. Its moment is a file in the ledger's folder, named for the
-//! three. A file is written whole, under a name of its writer's own, before
+//! A pane goes by its session, which a zellij session's socket tells: when the
+//! socket was made and its inode, both of which a rename keeps and a session
+//! made again under its name does not; or an own session's server, by when it
+//! made the session and the id it gave it. And by its id, which neither gives
+//! another pane of the session. Its moment is a file in the ledger's folder,
+//! named for the three. A file is written whole, under a name of its writer's own, before
 //! it takes its pane's, so that no luneta reads one halfway written, and two
 //! that write one pane at once each write a file of their own: the last to
 //! take the pane's name holds it.
@@ -17,29 +18,44 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lunetad::mux::own::OwnId;
 use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
 
 use crate::state;
 
-/// A session, as a ledger keeps it: when its socket was made, in nanoseconds
-/// since the epoch, and its inode. Two sockets can be made in one tick of the
-/// clock that dates them, and a socket made later can take the inode of one
-/// gone, but not both. Only `new` makes one of a moment, so a ledger can
-/// name every session it has. It is written as its name, as the order keeps
-/// the colour of each by it.
+/// A session, as a ledger keeps it. Only `new` and `own` make one of a
+/// moment, so a ledger can name every session it has. It is written as its
+/// name, as the order keeps the colour of each by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
-pub struct Session {
-    started: u64,
-    socket: NonZeroU64,
+pub enum Session {
+    /// zellij's: when its socket was made, in nanoseconds since the epoch, and
+    /// its inode. Two sockets can be made in one tick of the clock that dates
+    /// them, and a socket made later can take the inode of one gone, but not
+    /// both.
+    Zellij { started_ns: u64, socket: NonZeroU64 },
+    /// luneta's own multiplexer's: when its server made it, in nanoseconds
+    /// since the epoch, and its id. The next server counts its ids from 1
+    /// again, but makes none of them in the tick the last made its own.
+    Own { made_ns: u64, id: OwnId },
 }
 
+/// What the name of an own session starts with, which no zellij session's
+/// does: a zellij session's starts with a digit.
+const OWN_PREFIX: &str = "own-";
+
 impl Session {
-    /// The session whose socket was made at `started`, or none for one made
-    /// before 1970 or after 2554, which no file can be named for.
+    /// The zellij session whose socket was made at `started`, or none for one
+    /// made before 1970 or after 2554, which no file can be named for.
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
-        Some(Session { started: nanos(started)?, socket })
+        Some(Session::Zellij { started_ns: nanos(started)?, socket })
+    }
+
+    /// The own session `id`, which its server made at `made`, or none as
+    /// `new` says.
+    pub fn own(made: SystemTime, id: OwnId) -> Option<Self> {
+        Some(Session::Own { made_ns: nanos(made)?, id })
     }
 
     /// The session of the socket `id`, or none as `new` says, or for a socket
@@ -48,21 +64,33 @@ impl Session {
         Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
 
-    /// When its socket was made.
+    /// When it started: when its socket was made, or its server made it.
     pub fn started(self) -> SystemTime {
-        moment(self.started)
+        match self {
+            Session::Zellij { started_ns, .. } => moment(started_ns),
+            Session::Own { made_ns, .. } => moment(made_ns),
+        }
     }
 
-    /// Its name: when its socket was made, in nanoseconds since the epoch,
-    /// and its inode.
+    /// Its name: when it started, in nanoseconds since the epoch, and its
+    /// socket's inode, or `OWN_PREFIX` before when it was made and its id.
     fn name(self) -> String {
-        format!("{}-{}", self.started, self.socket)
+        match self {
+            Session::Zellij { started_ns, socket } => format!("{started_ns}-{socket}"),
+            Session::Own { made_ns, id } => format!("{OWN_PREFIX}{made_ns}-{id}"),
+        }
     }
 
     /// The session `name` is the name of, spelled as `name` spells it.
     fn read(name: &str) -> Option<Self> {
-        let (started, socket) = name.split_once('-')?;
-        let session = Session { started: started.parse().ok()?, socket: socket.parse().ok()? };
+        let session = if let Some(own) = name.strip_prefix(OWN_PREFIX) {
+            let (made_ns, id) = own.split_once('-')?;
+            Session::Own { made_ns: made_ns.parse().ok()?, id: OwnId::new(id.parse().ok()?)? }
+        } else {
+            let (started_ns, socket) = name.split_once('-')?;
+            let (started_ns, socket) = (started_ns.parse().ok()?, socket.parse().ok()?);
+            Session::Zellij { started_ns, socket }
+        };
         (session.name() == name).then_some(session)
     }
 }
@@ -384,8 +412,30 @@ mod tests {
         other(format!("+{}", name(5)));
         other(format!("0{}", name(6)));
         other(format!("{}-7", nanos(at(10)).unwrap()));
+        other(format!("{OWN_PREFIX}{}-0-8", nanos(at(10)).unwrap()));
         ledger.reload();
         assert_eq!(keys(&ledger), [key(10, 1)]);
+    }
+
+    /// An own session's panes are kept as zellij's are, and apart from those
+    /// of a zellij session of the same numbers, and from the next server's
+    /// session of its id.
+    #[test]
+    fn an_own_session_s_panes_are_kept_apart_from_others() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::within(scratch.path().to_owned());
+        let id = OwnId::new(1).unwrap();
+        let own = Session::own(at(10), id).unwrap();
+        let next = Session::own(at(20), id).unwrap();
+        let zellij = session(10, 1);
+        ledger.set(Key { session: own, pane: 3 }, Some(at(5)));
+        ledger.set(Key { session: next, pane: 3 }, Some(at(6)));
+        ledger.set(Key { session: zellij, pane: 3 }, Some(at(7)));
+        let again = Ledger::within(scratch.path().to_owned());
+        assert_eq!(again.latest(own), Some(at(5)));
+        assert_eq!(again.latest(next), Some(at(6)));
+        assert_eq!(again.latest(zellij), Some(at(7)));
+        assert_eq!(own.started(), at(10));
     }
 
     /// Two lunetas that write one pane's moment at the same time, as two do
