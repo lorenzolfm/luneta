@@ -3115,7 +3115,8 @@ impl App {
     /// luneta's client of an own session ended: as its session ended, or lost,
     /// as `lost` says why. What waited on its coming is left undone. One lost
     /// before it came to any session goes where it `fails`; and otherwise the
-    /// newest session that answers takes its place, as `newest_here` says.
+    /// newest session of this machine that answers takes its place, of either
+    /// kind, or of another machine's, as `newest_here` says.
     fn own_ended(&mut self, lost: Option<String>) -> io::Result<()> {
         let Right::Own(own) = &mut self.right else {
             unreachable!("only an own client ends so");
@@ -3711,8 +3712,8 @@ impl App {
     /// zellij's client ended. Where it ended well, and its session with it, as
     /// zellij quits, the session's last pane exits, or the session is killed,
     /// a client of the newest session that answers takes its place, and
-    /// luneta goes on: of another machine's, as `newest_away` finds it, where
-    /// none of this one's does. luneta ends where none does, and where the
+    /// luneta goes on: of an own session newer than zellij's, or of another
+    /// machine's, as `newest_away` finds it, where none of this one's does. luneta ends where none does, and where the
     /// client detached, or failed, as where zellij cannot attach; but one
     /// that took the place of a client on another machine goes back there
     /// where it failed, and the notes say what it said. A client on another
@@ -3761,8 +3762,22 @@ impl App {
                 return Ok(());
             },
         };
-        let Some(Refuge { session: to, before }) = refuge else {
-            return self.newest_away(&[]);
+        let own = owns::newest();
+        let newer = |own: &(OwnId, SystemTime, SessionName), refuge: &Refuge| {
+            zellij::running_since(&refuge.session).is_none_or(|started| own.1 > started)
+        };
+        let refuge = match (refuge, own) {
+            (Some(refuge), Some(own)) if newer(&own, &refuge) => Err(own.0),
+            (Some(refuge), _) => Ok(refuge),
+            (None, Some(own)) => Err(own.0),
+            (None, None) => return self.newest_away(&[]),
+        };
+        let Refuge { session: to, before } = match refuge {
+            Ok(refuge) => refuge,
+            Err(id) => {
+                self.attach(id, To::Session(id), None, Fails::End);
+                return Ok(());
+            },
         };
         let hosted = match self.start_of(&Machine::Local, Joins::Attach(&to)) {
             Ok(hosted) => hosted,
@@ -3932,15 +3947,31 @@ impl App {
     }
 
     /// Has a client of this machine's newest session that answers take the
-    /// place of zellij's client, as one of another machine's that ended: or
-    /// of another machine's but those `tried`, as `newest_away` says, where
-    /// none does.
+    /// place of the client that ended, as one of another machine's: of the
+    /// newer of zellij's newest and the newest own session, which never
+    /// holds luneta, as `owns::newest` says; or of another machine's but
+    /// those `tried`, as `newest_away` says, where none does.
     fn newest_here(&mut self, tried: &[Destination]) -> io::Result<()> {
-        let Some(Refuge { session, before }) = zellij::newest() else {
-            return self.newest_away(tried);
+        let own = owns::newest();
+        let refuge = zellij::newest();
+        let zellij_newer = |refuge: &Refuge, (_, made, _): &(OwnId, SystemTime, SessionName)| {
+            zellij::running_since(&refuge.session).is_some_and(|started| started >= *made)
         };
-        let joins = Joins::Attach(&session);
-        self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
+        match (refuge, own) {
+            (Some(refuge), Some(own)) if !zellij_newer(&refuge, &own) => {
+                self.attach(own.0, To::Session(own.0), None, Fails::End);
+                Ok(())
+            },
+            (Some(Refuge { session, before }), _) => {
+                let joins = Joins::Attach(&session);
+                self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
+            },
+            (None, Some((id, ..))) => {
+                self.attach(id, To::Session(id), None, Fails::End);
+                Ok(())
+            },
+            (None, None) => self.newest_away(tried),
+        }
     }
 
     /// Has a client of the newest session that answers of another machine's

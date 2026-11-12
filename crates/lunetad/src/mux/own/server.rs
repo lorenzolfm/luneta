@@ -370,6 +370,17 @@ pub fn names() -> Result<Vec<String>, Failure> {
     Ok(server.listing()?.into_iter().map(|session| session.name).collect())
 }
 
+/// The own sessions that run, as the server lists them, by when it made
+/// each, its id and its name: none where no server runs. One that does not
+/// read is left out, as `followed` leaves it out.
+pub fn sessions() -> Result<Vec<Listing>, Failure> {
+    let Some(server) = Server::reached()? else {
+        return Ok(Vec::new());
+    };
+    let (listed, _) = read(server.listing()?);
+    Ok(listed)
+}
+
 /// Where a client goes among the own sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {

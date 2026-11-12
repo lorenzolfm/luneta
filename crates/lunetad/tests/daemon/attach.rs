@@ -16,6 +16,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
+use lunetad::api::{kill_request, KillRequest};
 
 use crate::host::{eventually, Host, Running};
 use crate::own::{own, Owned};
@@ -161,6 +162,29 @@ fn luneta_own_refuses_a_name_a_session_of_zellij_s_has() {
     assert!(!ended.status.success(), "{}", ended.said);
     assert!(ended.said.contains("project is a session of zellij's"), "{}", ended.said);
     assert_eq!(clients(&owned, "project"), None);
+}
+
+/// As the own session luneta is in ends, the newest session of this machine
+/// takes its place, of either kind: an own one newer than zellij's.
+#[test]
+fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
+    let owned = Owned::new();
+    let _zellij = runs(&owned.host, "older");
+    owned.make("first").unwrap();
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["--own", "first"]);
+    eventually("luneta is in first", || (clients(&owned, "first")? == 1).then_some(()));
+    owned.make("newer").unwrap();
+    let first = own(&owned.listed("first")).unwrap();
+    let request = KillRequest {
+        on: None,
+        session: "first".to_owned(),
+        whose: Some(kill_request::Whose::Own(first)),
+    };
+    owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
+    eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
+    assert!(owned.host.zellij.attached().is_empty(), "{:?}", owned.host.zellij.attached());
+    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
 }
 
 /// luneta goes from a session of zellij's to an own one, as the picker picks

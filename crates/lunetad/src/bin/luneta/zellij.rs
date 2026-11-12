@@ -891,6 +891,13 @@ pub fn running() -> Result<Vec<(SessionName, SystemTime)>, String> {
     running_in(&Zellij::socket_folder())
 }
 
+/// When `session`, of this machine's, started, as zellij's sockets say now:
+/// none where none runs by its name, or not all of zellij's folder reads.
+pub fn running_since(session: &SessionName) -> Option<SystemTime> {
+    let running = running().ok()?;
+    running.into_iter().find(|(name, _)| name == session).map(|(_, started)| started)
+}
+
 /// Does `after` on a thread of its own, now that luneta's client of an own
 /// session came to the session it went to, on this machine.
 pub fn came_here(after: After, events: &Sender<Event>) {
