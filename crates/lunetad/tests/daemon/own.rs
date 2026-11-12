@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use std::{fs, mem};
+use std::fs;
 
 use hyper_util::rt::TokioIo;
 use lunetad::api::close_request::Closes as Closed;
@@ -33,21 +33,24 @@ use crate::sessions::session;
 const WAITS: [&str; 2] = ["sleep", "600"];
 
 /// The own sessions' server, beside the daemon, where the daemon starts it
-/// from: built since each file it is built of last changed, as the dep-info
-/// cargo writes beside it lists them. `dev test` builds it, but a `cargo test
-/// -p lunetad` builds the daemon alone, and would leave the tests a server
-/// built before, or none.
+/// from: built since each file of its crate and its protocol last changed,
+/// which cargo builds it again for. `dev test` builds it, but a `cargo test -p
+/// lunetad` builds the daemon alone, and would leave the tests a server built
+/// before, or none. A file cargo does not build it of, in its folders, takes
+/// it to be built again all the same, and a test says which.
 fn built_server() -> PathBuf {
     let program = Path::new(LUNETAD).with_file_name("luneta-mux");
     let shown = program.display();
     let rebuild = "dev test builds it, and so does cargo build -p luneta-mux";
     let built = fs::metadata(&program).and_then(|it| it.modified());
     let built = built.unwrap_or_else(|error| panic!("{shown}: {error}: {rebuild}"));
-    let listed = program.with_extension("d");
-    let listed = fs::read_to_string(&listed)
-        .unwrap_or_else(|error| panic!("{}: {error}: {rebuild}", listed.display()));
-    let (_, sources) = listed.split_once(": ").expect("a dep-info line names its target first");
-    for source in listed_paths(sources) {
+    let root = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+    let mut sources = Vec::new();
+    for source in ["crates/mux/src", "crates/mux/build.rs", "proto/luneta/mux"] {
+        files_in(&root.join(source), &mut sources);
+    }
+    assert!(sources.len() > 2, "luneta-mux's sources are not in {}", root.display());
+    for source in sources {
         let changed = fs::metadata(&source).and_then(|it| it.modified());
         let fresh = changed.is_ok_and(|changed| changed <= built);
         assert!(fresh, "{} changed since {shown} was built: {rebuild}", source.display());
@@ -55,24 +58,16 @@ fn built_server() -> PathBuf {
     program
 }
 
-/// The paths a dep-info line lists, apart by spaces, but those a backslash
-/// escapes, which are of the path.
-fn listed_paths(line: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut path = String::new();
-    let mut chars = line.trim_end().chars();
-    while let Some(char) = chars.next() {
-        match char {
-            '\\' => path.extend(chars.next()),
-            ' ' if path.is_empty() => {},
-            ' ' => paths.push(PathBuf::from(mem::take(&mut path))),
-            char => path.push(char),
-        }
+/// Adds `path` to `files`, or each file in it and its folders, where it is a
+/// folder.
+fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(path) else {
+        files.push(path.to_owned());
+        return;
+    };
+    for entry in entries {
+        files_in(&entry.unwrap().path(), files);
     }
-    if !path.is_empty() {
-        paths.push(PathBuf::from(path));
-    }
-    paths
 }
 
 /// A host whose daemon runs, and the server of own sessions the daemon starts
