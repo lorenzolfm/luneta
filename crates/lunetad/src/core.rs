@@ -24,7 +24,7 @@ use crate::sayings::{Sayings, ToSay};
 use crate::shells::Shell;
 use crate::log;
 use crate::transcripts::SessionId;
-use crate::mux::{Client, Id, Listed, OwnId, SessionName, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, OwnId, OwnKey, SessionName, Sessions, Socket};
 
 /// Which session the core keeps something of, and of which multiplexer's: as
 /// it stays through a rename.
@@ -677,8 +677,8 @@ impl Known {
                         let key = SessionKey::Zellij(id);
                         api::Session {
                             name,
-                            started_at,
-                            socket: id.socket(),
+                            started_at: zellij.started_at,
+                            socket: zellij.socket,
                             panes: self.panes.get(&id).map(|panes| panes_of(key, panes)),
                             clients: self.clients.get(&id).map(clients_of),
                             mux: Some(api::session::Mux::Zellij(zellij)),
@@ -690,10 +690,9 @@ impl Known {
                         socket: 0,
                         panes: Some(panes_of(SessionKey::Own(own.id), &own.panes)),
                         clients: Some(clients_of(&own.clients)),
-                        mux: Some(api::session::Mux::Own(api::OwnSession {
-                            id: own.id.get(),
-                            made_at: Some(own.made.into()),
-                        })),
+                        mux: Some(api::session::Mux::Own(
+                            OwnKey { id: own.id, made: own.made }.into(),
+                        )),
                     },
                 }
             })

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, kill_request, CloseRequest, On};
 use crate::mux::own;
-use crate::mux::{tabs, Asks, Called, Laid, Mux, OwnId, PaneId, SessionName, SocketFolder, TabId};
+use crate::mux::{tabs, Asks, Called, Laid, Mux, OwnKey, PaneId, SessionName, SocketFolder, TabId};
 use crate::mux::Zellij;
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
@@ -125,11 +125,12 @@ impl Close {
 }
 
 /// Which session a question is of, past its name, which another can take: a
-/// zellij session by when it started, and an own one by its id.
+/// zellij session by when it started, and an own one by its id and when its
+/// server made it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Whose {
     Zellij(SystemTime),
-    Own(OwnId),
+    Own(OwnKey),
 }
 
 impl Whose {
@@ -139,16 +140,16 @@ impl Whose {
         at.try_into().map(Whose::Zellij).map_err(unread)
     }
 
-    /// The own session `id`, or why that is no session's id.
-    fn own(id: u64) -> Result<Whose, String> {
-        OwnId::new(id).map(Whose::Own).ok_or_else(|| "own: 0 is no session's id".to_owned())
+    /// The own session `own` says, or why it says none.
+    fn own(own: &crate::api::OwnSession) -> Result<Whose, String> {
+        OwnKey::of(own).map(Whose::Own)
     }
 
     /// Closes `close` of `session`, this one, as `closed` or `closed_own` do.
     pub fn closed(self, session: &SessionName, close: &Close) -> Result<(), String> {
         match self {
             Whose::Zellij(started) => closed(session, started, close),
-            Whose::Own(id) => closed_own(session, id, close),
+            Whose::Own(key) => closed_own(session, key, close),
         }
     }
 
@@ -156,7 +157,7 @@ impl Whose {
     pub fn killed(self, session: &SessionName) -> Result<(), String> {
         match self {
             Whose::Zellij(started) => killed(session, started),
-            Whose::Own(id) => killed_own(session, id),
+            Whose::Own(key) => killed_own(session, key),
         }
     }
 }
@@ -167,7 +168,7 @@ impl TryFrom<close_request::Whose> for Whose {
     fn try_from(whose: close_request::Whose) -> Result<Whose, String> {
         match whose {
             close_request::Whose::StartedAt(at) => Whose::started(at),
-            close_request::Whose::Own(id) => Whose::own(id),
+            close_request::Whose::Own(own) => Whose::own(&own),
         }
     }
 }
@@ -178,7 +179,7 @@ impl TryFrom<kill_request::Whose> for Whose {
     fn try_from(whose: kill_request::Whose) -> Result<Whose, String> {
         match whose {
             kill_request::Whose::StartedAt(at) => Whose::started(at),
-            kill_request::Whose::Own(id) => Whose::own(id),
+            kill_request::Whose::Own(own) => Whose::own(&own),
         }
     }
 }
@@ -187,7 +188,7 @@ impl From<Whose> for close_request::Whose {
     fn from(whose: Whose) -> Self {
         match whose {
             Whose::Zellij(started) => close_request::Whose::StartedAt(started.into()),
-            Whose::Own(id) => close_request::Whose::Own(id.get()),
+            Whose::Own(key) => close_request::Whose::Own(key.into()),
         }
     }
 }
@@ -196,7 +197,7 @@ impl From<Whose> for kill_request::Whose {
     fn from(whose: Whose) -> Self {
         match whose {
             Whose::Zellij(started) => kill_request::Whose::StartedAt(started.into()),
-            Whose::Own(id) => kill_request::Whose::Own(id.get()),
+            Whose::Own(key) => kill_request::Whose::Own(key.into()),
         }
     }
 }
@@ -211,23 +212,24 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
     closed_as_listed(Mux::Zellij(session), close)
 }
 
-/// Closes `close` of the own session `id`, named `session`, as
+/// Closes `close` of the own session `key`, named `session`, as
 /// `closed_as_listed` does, or says why it closed nothing: a session that has
 /// the id and another name, or that took the name since, stays, as
 /// `same_own` says.
-pub fn closed_own(session: &SessionName, id: OwnId, close: &Close) -> Result<(), String> {
-    closed_as_listed(Mux::Own(&same_own(session, id)?), close)
+pub fn closed_own(session: &SessionName, key: OwnKey, close: &Close) -> Result<(), String> {
+    closed_as_listed(Mux::Own(&same_own(session, key)?), close)
 }
 
-/// Whether the own session named `session` is the one of id `id`, or why
+/// Whether the own session named `session` is the one `key` says, or why
 /// not. A server gives no other session an id while it runs, and so no tab
 /// or pane either, but the next server counts them from 1 again: a session
-/// of the id that has another name is one made since, or renamed, which a
-/// question asked of the name before it does not know. The session, on the
-/// server that says so, which alone is asked of it after.
-pub(crate) fn same_own(session: &SessionName, id: OwnId) -> Result<own::server::Own, String> {
+/// of the id that has another name, or that was made at another time, is one
+/// made since, or renamed, which a question asked of the name before it does
+/// not know. The session, on the server that says so, which alone is asked of
+/// it after.
+pub(crate) fn same_own(session: &SessionName, key: OwnKey) -> Result<own::server::Own, String> {
     match own::server::named(session)? {
-        Some(named) if named.id() == id => Ok(named),
+        Some(named) if named.key() == key => Ok(named),
         Some(_) => Err(format!("\"{session}\" is a session made since, which stays")),
         None => Err(format!("\"{session}\" is no own session that runs")),
     }
@@ -344,12 +346,12 @@ fn settled(
     Ok(())
 }
 
-/// Kills the own session `id`, named `session`, which takes what runs in it
+/// Kills the own session `key`, named `session`, which takes what runs in it
 /// along, and says why not when it did not: one that has the id and another
 /// name, or that took the name since, stays, as `same_own` says. Its server
 /// keeps nothing of a session that ended.
-pub fn killed_own(session: &SessionName, id: OwnId) -> Result<(), String> {
-    Ok(Mux::Own(&same_own(session, id)?).session_killed()?)
+pub fn killed_own(session: &SessionName, key: OwnKey) -> Result<(), String> {
+    Ok(Mux::Own(&same_own(session, key)?).session_killed()?)
 }
 
 /// The sessions that run, each by its name and when it started, as their

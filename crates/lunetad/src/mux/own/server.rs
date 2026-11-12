@@ -28,7 +28,7 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
-use super::OwnId;
+use super::{OwnId, OwnKey};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
 use crate::{folder, log, Directory};
 
@@ -299,9 +299,7 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
     if before.iter().any(|listed| listed.id == id || listed.name == name) {
         return Err(format!("own session {id}, {name}, has the id or the name of another"));
     }
-    let made = session.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
-    let made = SystemTime::try_from(made)
-        .map_err(|why| format!("own session {id}'s made_at: {why}"))?;
+    let made = made_of(session, id)?;
     let clients = clients(session).map_err(|why| format!("own session {id}'s clients: {why}"))?;
     Ok(Listing { id, made, name, laid: laid(session), clients })
 }
@@ -331,9 +329,16 @@ pub fn followed(
     }
 }
 
-/// The id of the session named `name` among `listing`, where one has it, or
-/// why the listing does not read: two have it, or it has the id 0.
-fn found(listing: &[api::Session], name: &SessionName) -> Result<Option<OwnId>, Failure> {
+/// When the server made `session`, of id `id`, or why it does not say.
+fn made_of(session: &api::Session, id: OwnId) -> Result<SystemTime, String> {
+    let made = session.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
+    SystemTime::try_from(made).map_err(|why| format!("own session {id}'s made_at: {why}"))
+}
+
+/// The session named `name` among `listing`, where one has it, or why the
+/// listing does not read: two have it, or it has the id 0, or no time it was
+/// made.
+fn found(listing: &[api::Session], name: &SessionName) -> Result<Option<OwnKey>, Failure> {
     let mut named = listing.iter().filter(|session| session.name == name.as_str());
     let Some(session) = named.next() else {
         return Ok(None);
@@ -342,7 +347,9 @@ fn found(listing: &[api::Session], name: &SessionName) -> Result<Option<OwnId>, 
         return Err(Failure::Unread(format!("luneta-mux lists two sessions named {name}")));
     }
     let zero = || Failure::Unread(format!("luneta-mux lists {name} with the id 0"));
-    Ok(Some(OwnId::new(session.id).ok_or_else(zero)?))
+    let id = OwnId::new(session.id).ok_or_else(zero)?;
+    let made = made_of(session, id).map_err(Failure::Unread)?;
+    Ok(Some(OwnKey { id, made }))
 }
 
 /// The own session named `name`, with its server reached, where one runs by
@@ -351,8 +358,8 @@ pub fn named(name: &SessionName) -> Result<Option<Own>, Failure> {
     let Some(server) = Server::reached()? else {
         return Ok(None);
     };
-    let id = found(&server.listing()?, name)?;
-    Ok(id.map(|id| Own { server, id }))
+    let key = found(&server.listing()?, name)?;
+    Ok(key.map(|key| Own { server, key }))
 }
 
 /// The names of the own sessions that run: none where no server does.
@@ -377,34 +384,40 @@ pub enum Place {
 /// to one started since, which counts its ids from 1 again.
 pub struct Own {
     server: Server,
-    id: OwnId,
+    key: OwnKey,
 }
 
 impl fmt::Debug for Own {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Own").field("id", &self.id).finish_non_exhaustive()
+        f.debug_struct("Own").field("key", &self.key).finish_non_exhaustive()
     }
 }
 
 impl Own {
     #[must_use]
     pub fn id(&self) -> OwnId {
-        self.id
+        self.key.id
+    }
+
+    /// The session as no other is, of this server or another.
+    #[must_use]
+    pub fn key(&self) -> OwnKey {
+        self.key
     }
 
     /// The own session named `name`, on the same server, where one runs by it.
     pub fn named(&self, name: &SessionName) -> Result<Option<OwnId>, Failure> {
-        found(&self.server.listing()?, name)
+        Ok(found(&self.server.listing()?, name)?.map(|key| key.id))
     }
 
     /// The session's panes, as luneta lays them out.
     pub fn laid(&self) -> Result<Vec<Laid>, Failure> {
-        Ok(laid(&self.server.session(self.id)?))
+        Ok(laid(&self.server.session(self.id())?))
     }
 
     /// The session's clients.
     pub fn clients(&self) -> Result<Listed, Failure> {
-        clients(&self.server.session(self.id)?).map_err(Failure::Unread)
+        clients(&self.server.session(self.id())?).map_err(Failure::Unread)
     }
 
     /// Opens a tab at the end of the session, in `cwd`, named `name` or as the
@@ -427,10 +440,10 @@ impl Own {
         runs: &[&str],
     ) -> Result<TabId, Failure> {
         assert_ne!(runs.len(), 0);
-        let session = self.server.session(self.id)?;
+        let session = self.server.session(self.id())?;
         let current = session.tabs.iter().find(|tab| tab.id == session.current_tab);
         let pane = current.and_then(|tab| tab.panes.first());
-        let unknown = || Failure::Own(format!("own session {} lists no current tab", self.id));
+        let unknown = || Failure::Own(format!("own session {} lists no current tab", self.id()));
         let cwd = pane.ok_or_else(unknown)?.cwd.clone();
         let argv = runs.iter().map(|word| (*word).to_owned()).collect();
         let runs = api::opens::Runs::Program(api::Program { argv });
@@ -442,7 +455,7 @@ impl Own {
     /// numbers it, as `opens` says, and says its id.
     fn tab_opened_as(&self, name: Option<&str>, opens: api::Opens) -> Result<TabId, Failure> {
         let name = name.map(str::to_owned);
-        let request = api::NewTabRequest { session: self.id.get(), name, opens: Some(opens) };
+        let request = api::NewTabRequest { session: self.id().get(), name, opens: Some(opens) };
         let opened = self.server.ask(|mut client| async move { client.new_tab(request).await });
         Ok(TabId(opened.map_err(|status| refused(&status))?.tab))
     }
@@ -457,7 +470,7 @@ impl Own {
     /// Renames the session to `to`, which the server holds unique among its
     /// sessions alone.
     pub fn renamed(&self, to: &SessionName) -> Result<(), Failure> {
-        let request = api::RenameRequest { session: self.id.get(), name: to.as_str().to_owned() };
+        let request = api::RenameRequest { session: self.id().get(), name: to.as_str().to_owned() };
         let renamed = self.server.ask(|mut client| async move { client.rename(request).await });
         renamed.map(drop).map_err(|status| refused(&status))
     }
@@ -465,7 +478,7 @@ impl Own {
     /// What the pane `pane` of the session shows, or all it was written, as
     /// `dumped` says, or why not: one of another session is none of its.
     pub fn dumped(&self, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
-        self.server.tab_of(self.id, pane)?;
+        self.server.tab_of(self.id(), pane)?;
         let request = api::DumpRequest { pane, dumped: dumped.into() };
         let dump = self.server.ask(|mut client| async move { client.dump(request).await });
         Ok(dump.map_err(|status| refused(&status))?.text)
@@ -473,7 +486,7 @@ impl Own {
 
     /// Ends the session, which hangs up what runs in each of its tabs.
     pub fn killed(&self) -> Result<(), Failure> {
-        let request = api::KillRequest { session: self.id.get() };
+        let request = api::KillRequest { session: self.id().get() };
         let killed = self.server.ask(|mut client| async move { client.kill(request).await });
         killed.map(drop).map_err(|status| refused(&status))
     }
@@ -487,7 +500,7 @@ impl Own {
             },
         };
         let request = api::GoRequest {
-            who: Some(api::go_request::Who::LastTypedIn(self.id.get())),
+            who: Some(api::go_request::Who::LastTypedIn(self.id().get())),
             to: Some(api::Place { is: Some(is) }),
         };
         let went = self.server.ask(|mut client| async move { client.go(request).await });

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -178,10 +178,10 @@ impl Mux {
             model.refuse_if_taken(&name, None)?;
             refuse_if_full(model.sessions.len(), SESSIONS_MAX, "sessions")?;
             let session = SessionId::next(&mut model.last.session);
-            let tab = model.tab(self, session, Name::numbered(1), opens)?;
+            let made = SystemTime::now();
+            let tab = model.tab(self, (session, made), Name::numbered(1), opens)?;
             let ids = (session, tab.id, tab.pane.id);
             let tabs = Tabs::one(tab);
-            let made = SystemTime::now();
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
             Ok(ids)
         })
@@ -194,9 +194,12 @@ impl Mux {
         opens: &Opens,
     ) -> Result<(TabId, PaneId), Status> {
         self.change(|model| {
-            let place = model.session(session)?.tabs.len() + 1;
-            let tab =
-                model.tab(self, session, name.unwrap_or_else(|| Name::numbered(place)), opens)?;
+            let (place, made) = {
+                let session = model.session(session)?;
+                (session.tabs.len() + 1, session.made)
+            };
+            let name = name.unwrap_or_else(|| Name::numbered(place));
+            let tab = model.tab(self, (session, made), name, opens)?;
             let ids = (tab.id, tab.pane.id);
             model.session_mut(session)?.tabs.push(tab);
             Ok(ids)
@@ -375,25 +378,34 @@ impl Model {
         Ok(())
     }
 
-    /// A tab named `name` in session `session`, whose pane runs what `opens`
-    /// says. Its pseudoterminal is opened and its program started under the
-    /// model's lock, so no other pane's program starts meanwhile and takes the
-    /// pseudoterminal's end along before it is closed on exec.
+    /// A tab named `name` in session `session`, made at the time it says,
+    /// whose pane runs what `opens` says. Its pseudoterminal is opened and its
+    /// program started under the model's lock, so no other pane's program
+    /// starts meanwhile and takes the pseudoterminal's end along before it is
+    /// closed on exec.
     fn tab(
         &mut self,
         mux: &Arc<Mux>,
-        session: SessionId,
+        (session, made): (SessionId, SystemTime),
         name: Name,
         opens: &Opens,
     ) -> Result<Tab, Status> {
         let tabs = self.sessions.iter().map(|session| session.tabs.len()).sum();
         refuse_if_full(tabs, TABS_MAX, "tabs")?;
+        let made = made.duration_since(UNIX_EPOCH).ok();
+        let made = made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
+            Status::failed_precondition("the clock says a time before 1970, or after 2554")
+        })?;
         let (tab, pane) = (TabId::next(&mut self.last.tab), PaneId::next(&mut self.last.pane));
         let failed =
             |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
         let pty =
             Pty::opened(FIRST_SIZE).map_err(|error| failed("no pseudoterminal opened", error))?;
-        let vars = [(pty::SESSION_VAR, session.to_string()), (pty::PANE_VAR, pane.to_string())];
+        let vars = [
+            (pty::SESSION_VAR, session.to_string()),
+            (pty::MADE_VAR, made.to_string()),
+            (pty::PANE_VAR, pane.to_string()),
+        ];
         let child = pty.spawned(opens, &vars).map_err(|error| {
             Status::failed_precondition(format!("opens did not start: {error}"))
         })?;

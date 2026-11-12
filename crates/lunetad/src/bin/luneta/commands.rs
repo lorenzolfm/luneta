@@ -389,10 +389,13 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
 }
 
 /// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
-/// `own <session id>:<pane>`.
+/// `own <session id>:<pane>`, with `?` for an id its daemon does not say.
 fn seat_of(agent: &Agent) -> String {
     match &agent.pane {
-        Some(agent::Pane::Own(own)) => format!("own {}:{}", own.session, own.pane),
+        Some(agent::Pane::Own(own)) => {
+            let id = own.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
+            format!("own {id}:{}", own.pane)
+        },
         Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
     }
 }

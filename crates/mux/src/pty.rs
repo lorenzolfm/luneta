@@ -21,6 +21,10 @@ use crate::asked::{Opens, Runs, Size};
 /// in it: as `lunetad`'s `mux::own` reads it.
 pub const SESSION_VAR: &str = "LUNETA_MUX_SESSION";
 
+/// What says when the session of a pane was made, in nanoseconds since the
+/// epoch, in the variables of what runs in it.
+pub const MADE_VAR: &str = "LUNETA_MUX_MADE";
+
 /// What names a pane, by its id, in the variables of what runs in it.
 pub const PANE_VAR: &str = "LUNETA_MUX_PANE";
 

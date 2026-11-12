@@ -100,14 +100,14 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, PanePlace, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::starts::{self, First, Sought, Start};
 use crate::width::Width;
 use crate::zellij::{
-    self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Unused,
+    self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Turned, Unused,
 };
 
 /// The name of a session luneta makes, and the directory it starts in, if
@@ -186,7 +186,7 @@ pub enum Event {
     IntoPanes { menu: u64, pane: u32, came: Result<IntoPanes, String> },
     /// A pane of a session no client is in stays, for the menu numbered `menu`
     /// owed it, until a client there makes room for its tab.
-    NoClient { menu: u64, owed: Due<u32>, on: Machine, place: PanePlace },
+    NoClient { menu: u64, owed: Due<u32>, on: Machine, turned: Turned },
     /// The skills the directory of the menu numbered `menu` can run in
     /// `agent`, or why the finder found none.
     Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
@@ -1484,15 +1484,15 @@ impl App {
             },
             // A menu closed since is no longer what you are on, and takes
             // luneta's client nowhere.
-            Event::NoClient { menu, owed, on, place } => match self.sidebar.waits_on(menu) {
+            Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
                 Some(sidebar::Held::Open) => {
-                    let after = After::IntoTab(owed, place.clone());
-                    if !self.go(&on, &Place::Pane(place), Some(after)) {
+                    let place = Place::Pane(turned.place().clone());
+                    if !self.go(&on, &place, Some(After::IntoTab(owed, turned))) {
                         self.sidebar.drop_menu(menu);
                     }
                 },
                 Some(sidebar::Held::Kept) => {
-                    owed.pay(Err(lunetad::opens::no_client(place.session.name())));
+                    owed.pay(Err(lunetad::opens::no_client(turned.place().session.name())));
                 },
                 None => {},
             },
@@ -2369,8 +2369,8 @@ impl App {
             Asked::Tabs { menu, on, session, pane } => {
                 zellij::other_tabs(menu, &on, session, pane, &self.events);
             },
-            Asked::Turn { menu, on, place, turn } => {
-                zellij::turn(menu, &on, place, turn, &self.events);
+            Asked::Turn { menu, on, turned, turn } => {
+                zellij::turn(menu, &on, turned, turn, &self.events);
             },
             Asked::Start { on, starts } => {
                 self.name(None, move || match zellij::unused_at(&on, starts) {

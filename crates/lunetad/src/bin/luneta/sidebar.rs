@@ -68,9 +68,9 @@ use lunetad::asks::User;
 use lunetad::closes::Whose;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
-use lunetad::mux::own::OwnId;
+use lunetad::mux::own::OwnKey;
 use lunetad::prunes;
-use lunetad::seats::seated;
+use lunetad::seats::{seated, Where};
 use lunetad::transcripts::SessionId;
 use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
@@ -108,7 +108,7 @@ use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
-use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Within};
+use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Turned, Within, OWN_TURNS};
 
 /// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
@@ -252,17 +252,16 @@ impl Listed {
     /// or with a start no file of the news can be named for, before 1970, or
     /// with a name zellij refuses, which luneta can neither go to nor fold. Its
     /// start is the one `Session::started` reads, as `luneta sessions` sorts
-    /// by. A daemon older than `mux` says a zellij session's start and socket
-    /// beside it.
+    /// by, of the multiplexer `Session::multiplexer` says.
     fn of(session: &Session) -> Option<Self> {
         let name = SessionName::running(&session.name).ok()?;
         let started = session.started()?;
-        let kept = match &session.mux {
-            Some(Mux::Zellij(zellij)) => {
-                ledger::Session::new(started, NonZeroU64::new(zellij.socket)?)?
+        let kept = match session.multiplexer() {
+            Mux::Zellij(zellij) => ledger::Session::new(started, NonZeroU64::new(zellij.socket)?)?,
+            Mux::Own(own) => {
+                let key = OwnKey::of(&own).ok()?;
+                ledger::Session::own(key.made, key.id)?
             },
-            Some(Mux::Own(own)) => ledger::Session::own(started, OwnId::new(own.id)?)?,
-            None => ledger::Session::new(started, NonZeroU64::new(session.socket)?)?,
         };
         Some(Listed { name, kept })
     }
@@ -271,18 +270,34 @@ impl Listed {
         &self.name
     }
 
+    /// The own session it is, as no other is, or none for one of zellij's.
+    fn own_key(&self) -> Option<OwnKey> {
+        match self.kept {
+            ledger::Session::Zellij { .. } => None,
+            ledger::Session::Own { id, .. } => Some(OwnKey { id, made: self.kept.started() }),
+        }
+    }
+
     /// Which session it is past its name, as a question to close or kill
     /// it says.
     pub fn whose(&self) -> Whose {
-        match self.kept {
-            ledger::Session::Zellij { .. } => Whose::Zellij(self.kept.started()),
-            ledger::Session::Own { id, .. } => Whose::Own(id),
-        }
+        self.own_key().map_or_else(|| Whose::Zellij(self.kept.started()), Whose::Own)
+    }
+
+    /// Which session it is, as an agent is seated in it.
+    pub fn at(&self) -> Where<'_> {
+        self.own_key().map_or_else(|| Where::Zellij(self.name.as_str()), Where::Own)
     }
 
     /// Whether luneta's own multiplexer runs it.
     pub fn own(&self) -> bool {
-        matches!(self.kept, ledger::Session::Own { .. })
+        self.own_key().is_some()
+    }
+
+    /// Whether luneta's zellij is in it, where it is in the session named
+    /// `here`: in no own session, whose name a zellij session can have too.
+    pub fn is_here(&self, here: Option<&str>) -> bool {
+        !self.own() && here == Some(self.name.as_str())
     }
 
     /// Its pane `pane`, as the news keeps it.
@@ -300,7 +315,8 @@ impl Listed {
     /// An own session of the tests', of id `id`, made at `made`.
     #[cfg(test)]
     pub fn new_own(name: &str, made: SystemTime, id: u64) -> Self {
-        let kept = ledger::Session::own(made, OwnId::new(id).unwrap()).unwrap();
+        let id = lunetad::mux::own::OwnId::new(id).unwrap();
+        let kept = ledger::Session::own(made, id).unwrap();
         Listed { name: SessionName::parse(name).unwrap(), kept }
     }
 }
@@ -1088,11 +1104,11 @@ pub enum Asked {
     /// Ask zellij on `on` which tabs of `session` are not that of its pane
     /// `pane`, for the menu numbered `menu` to turn that tab into.
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
-    /// Have zellij on `on` turn the pane `place` as `turn` says, for the menu
+    /// Have zellij on `on` turn the pane `turned` as `turn` says, for the menu
     /// numbered `menu`, which takes its client there once zellij says it did.
     /// A session with no client to make room for a tab has it come there
     /// first, while what stays takes it nowhere.
-    Turn { menu: u64, on: Machine, place: PanePlace, turn: Turn },
+    Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
     /// Take zellij's client to a session it makes on `on`, that starts where
     /// `starts` says, named for that directory as the picker's directories
     /// name it, with a `-2` where a session has that name: one that runs, or
@@ -2192,10 +2208,10 @@ impl Sidebar {
 
     /// The session zellij's client is in: the one luneta sent it to, or found
     /// it in, until zellij titles luneta's terminal after; none while it is
-    /// astray; or else by its title: the longest name of a session the daemon
-    /// knows that the title is, or starts with before a ` | `, as a session's
-    /// name can hold one too. Until the daemon says, what comes before the
-    /// first.
+    /// astray; or else by its title: the longest name of a zellij session the
+    /// daemon knows that the title is, or starts with before a ` | `, as a
+    /// session's name can hold one too. Until the daemon says, what comes
+    /// before the first.
     pub fn here(&self) -> Option<&str> {
         if let Some(sent) = &self.sent {
             return Some(sent.session());
@@ -2207,6 +2223,7 @@ impl Sidebar {
         let named = |name: &&str| in_session(title, name);
         let sessions = self.on_sessions().iter();
         sessions
+            .filter(|session| matches!(session.multiplexer(), Mux::Zellij(_)))
             .map(|session| session.name.as_str())
             .filter(named)
             .max_by_key(|name| name.len())
@@ -2314,7 +2331,7 @@ impl Sidebar {
             Unplaced::Plugin => PLUGIN_PANE,
         })?;
         let (sessions, _) = oldest_first(self.on_sessions());
-        let mut named = sessions.into_iter().filter(|(listed, _)| listed.name.as_str() == here);
+        let mut named = sessions.into_iter().filter(|(listed, _)| listed.is_here(Some(here)));
         match (named.next(), named.next()) {
             (Some((listed, _)), None) => Ok(PanePlace { session: listed, pane }),
             (None, _) => Err(NO_HERE_PANE),
@@ -2330,7 +2347,7 @@ impl Sidebar {
         let place = self.here_place().ok()?;
         let seen = self.seen(&self.on)?;
         let seated = seated(seen.agents, seen.sessions);
-        let agent = seated.get(&(place.session.name().as_str(), place.pane))?;
+        let agent = seated.get(&(place.session.at(), place.pane))?;
         let pane = self.pane_of(&self.on, &place.session, place.pane)?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
         Some(HereAgent {
@@ -2422,7 +2439,7 @@ impl Sidebar {
             return None;
         };
         let seen = self.seen(&self.on)?;
-        let seat = (place.session.name().as_str(), place.pane);
+        let seat = (place.session.at(), place.pane);
         seated(seen.agents, seen.sessions).contains_key(&seat).then_some(on)
     }
 
@@ -2442,7 +2459,7 @@ impl Sidebar {
             panes.sort_by_key(|pane| pane.id);
             let mut waiting = 0;
             for pane in &panes {
-                let Some(agent) = seated.get(&(session.name.as_str(), pane.id)) else {
+                let Some(agent) = seated.get(&(listed.at(), pane.id)) else {
                     continue;
                 };
                 let key = listed.key(pane.id);
@@ -2464,7 +2481,7 @@ impl Sidebar {
             let shown = |pane: &&Pane| Shown {
                 id: pane.id,
                 tab: pane.tab_name.clone(),
-                label: label(seated.get(&(session.name.as_str(), pane.id)).copied(), pane),
+                label: label(seated.get(&(listed.at(), pane.id)).copied(), pane),
             };
             let mut clients = session.clients.iter().flat_map(|clients| &clients.clients);
             runs.sessions.push(Live {
@@ -2679,7 +2696,7 @@ impl Sidebar {
             let hues: Vec<Color> = (&mut colours).take(sessions.len()).map(hue).collect();
             let placed = placed(&self.order, &sessions);
             let agent = |owner: usize, pane: u32| {
-                agents.get(&(sessions[owner].1.name.as_str(), pane)).copied()
+                agents.get(&(sessions[owner].0.at(), pane)).copied()
             };
             let mut headed = Vec::with_capacity(sessions.len());
             for (session_at, ((listed, _), panes)) in sessions.iter().zip(placed).enumerate() {
@@ -2743,7 +2760,7 @@ impl Sidebar {
                 machine_waiting += waiting;
                 machine_dot |= dots > 0;
                 machine_busy |= busy > 0;
-                let session_here = on && here.as_deref() == Some(listed.name.as_str());
+                let session_here = on && listed.is_here(here.as_deref());
                 machine_here |= session_here;
                 if !listing_sessions {
                     continue;
@@ -3760,7 +3777,7 @@ impl Sidebar {
         let seen = self.seen(machine)?;
         let shown = self.pane_of(machine, &row.session, row.pane)?;
         let seats = seated(seen.agents, seen.sessions);
-        seats.get(&(row.session.name.as_str(), shown.id)).and_then(|agent| agents::of(agent))
+        seats.get(&(row.session.at(), shown.id)).and_then(|agent| agents::of(agent))
     }
 
     /// What the menu is for, as it opens on the highlighted row.
@@ -3789,7 +3806,7 @@ impl Sidebar {
         let shown = self.pane_of(machine, &session, pane);
         let agents = seen.as_ref().map(|seen| seated(seen.agents, seen.sessions));
         let cwd = shown.and_then(|shown| {
-            match agents.as_ref()?.get(&(session.name.as_str(), shown.id)) {
+            match agents.as_ref()?.get(&(session.at(), shown.id)) {
                 Some(agent) => Some(agent_dir(agent, shown).to_owned()),
                 None => shown.cwd.clone(),
             }
@@ -4094,7 +4111,13 @@ impl Sidebar {
                 Asked::Tabs { menu: number, on, session: session.name, pane }
             },
             Wants::Turn { session, pane, turn } => {
-                Asked::Turn { menu: number, on, place: PanePlace { session, pane }, turn }
+                if let Some(turned) = Turned::of(PanePlace { session, pane }) {
+                    Asked::Turn { menu: number, on, turned, turn }
+                } else {
+                    self.drop_menu(number);
+                    self.notify(format!("menu: {OWN_TURNS}"));
+                    Asked::Nothing
+                }
             },
             Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
@@ -4243,7 +4266,7 @@ impl Sidebar {
                 session.panes.iter().flat_map(|panes| &panes.panes).collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
             for pane in panes {
-                let dir = match agents.get(&(session.name.as_str(), pane.id)) {
+                let dir = match agents.get(&(listed.at(), pane.id)) {
                     Some(agent) => Some(agent_dir(agent, pane)),
                     None => pane.cwd.as_deref(),
                 };
@@ -4251,7 +4274,7 @@ impl Sidebar {
                     continue;
                 };
                 let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
-                let here = here == Some(session.name.as_str());
+                let here = listed.is_here(here);
                 let it = links::Worked { dir: dir.to_owned(), pull, here };
                 worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
             }
@@ -4309,7 +4332,7 @@ impl Sidebar {
             // In a session of another machine's, which this one's go on
             // without.
             (None, _) if self.on != *on => Seat::Elsewhere,
-            (None, Some(here)) if here == session => Seat::In,
+            (None, here @ Some(_)) if listed.is_here(here) => Seat::In,
             (None, Some(_)) => Seat::Elsewhere,
             (Some(_), _) | (None, None) => Seat::Moving,
         };
@@ -4321,17 +4344,18 @@ impl Sidebar {
             if self.away.is_none() {
                 agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread| {
                     let seated = seated(seen.agents, seen.sessions);
-                    let doing = seated.iter().filter(|((at, _), _)| *at == session);
+                    let doing = seated.iter().filter(|((at, _), _)| *at == listed.at());
                     let doing =
                         doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
+                    let unread = if listed.own() { Vec::new() } else { unread };
                     doing.chain(close::unread_in(&unread, session)).collect()
                 });
             }
             // The newest of the machine's other sessions, which the picker
-            // lists first.
+            // lists first, of zellij's: luneta goes to no own session yet.
             let (sessions, _) = oldest_first(seen.sessions);
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
-            refuge = others.rfind(|listed| listed.name.as_str() != session);
+            refuge = others.rfind(|other| other.name.as_str() != session && !other.own());
         }
         Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
@@ -4375,7 +4399,7 @@ impl Sidebar {
                     session.panes.iter().flat_map(|panes| &panes.panes).collect();
                 panes.sort_by_key(|pane| (pane.tab, pane.id));
                 for pane in panes {
-                    let Some(agent) = agents.get(&(session.name.as_str(), pane.id)) else {
+                    let Some(agent) = agents.get(&(listed.at(), pane.id)) else {
                         continue;
                     };
                     let cwd = agent_dir(agent, pane);
@@ -6369,6 +6393,7 @@ mod tests {
 
     use lunetad::api::shell::{ended, Ended, Going, Stopped};
     use lunetad::api::{self, Clients, NameSource, Pane, Panes, UnreadFile, Version, Zellij};
+    use lunetad::mux::own::OwnId;
     use lunetad::mux::TabId;
     use prost_types::Timestamp;
     use ratatui::buffer::Cell;
@@ -6421,9 +6446,12 @@ mod tests {
         }
     }
 
-    /// The agent `agent` says, in the pane `pane` of the own session `id`.
-    fn in_own(agent: Agent, id: u64, pane: u32) -> Agent {
-        Agent { pane: Some(api::agent::Pane::Own(api::Own { session: id, pane })), ..agent }
+    /// The agent `agent` says, in the pane `pane` of the own session `id`,
+    /// which its server made at `made`.
+    fn in_own(agent: Agent, id: u64, made: i64, pane: u32) -> Agent {
+        let made_at = Some(Timestamp { seconds: made, nanos: 0 });
+        let session = Some(api::OwnSession { id, made_at });
+        Agent { pane: Some(api::agent::Pane::Own(api::Own { session, pane })), ..agent }
     }
 
     fn listed(name: &str, started: u64) -> Listed {
@@ -7001,9 +7029,10 @@ mod tests {
 
     /// An own session is listed beside zellij's, by when its server made it,
     /// with `◇` after its name, and an agent in one of its panes in that
-    /// pane. One with no id, or no time it was made, is left out as one of
-    /// zellij's with no start is. A zellij session's `mux` says its start
-    /// over the fields beside it.
+    /// pane, but not one of the session of its id that a server before made.
+    /// One with no id, or no time it was made, is left out as one of zellij's
+    /// with no start is. A zellij session's `mux` says its start over the
+    /// fields beside it.
     #[test]
     fn an_own_session_is_listed_with_its_mark_and_its_agents() {
         let mut sidebar = fresh();
@@ -7014,10 +7043,13 @@ mod tests {
         let mut zellij = session("z", 50, Vec::new());
         let started_at = Some(Timestamp { seconds: 10, nanos: 0 });
         zellij.mux = Some(Mux::Zellij(api::ZellijSession { started_at, socket: 10 }));
-        let waits = in_own(agent("own", 7, Status::Waiting, Some("fix it")), 1, 7);
+        let waits = in_own(agent("own", 7, Status::Waiting, Some("fix it")), 1, 30, 7);
+        let before = in_own(agent("own", 7, Status::Busy, Some("gone")), 1, 29, 7);
+        let before = Agent { pid: 8, ..before };
         let sessions = vec![own, unmade, unnumbered, zellij, session("y", 20, Vec::new())];
-        sidebar.heard(host(sessions, vec![waits]));
+        sidebar.heard(host(sessions, vec![waits, before]));
         let lines = screen(&mut sidebar, false, 60, 10);
+        assert!(lines.iter().all(|line| !line.contains("gone")), "{lines:?}");
         assert_eq!(lines[4], format!(" ▾ z {}", "─".repeat(53)));
         assert_eq!(lines[5], format!(" ▾ y {}", "─".repeat(53)));
         assert_eq!(lines[6], format!(" ▾ own  ◇ {} ●1", "─".repeat(45)));
@@ -7770,7 +7802,8 @@ mod tests {
 
     /// The daemon cannot follow an agent to the session it is in when the
     /// session was renamed before the daemon started. Its row is the pane of
-    /// its id that works where it does, in the one session that lists one.
+    /// its id that works where it does, in the one zellij session that lists
+    /// one: an own session's pane holds no zellij agent.
     #[test]
     fn an_agent_the_daemon_cannot_follow_sits_where_its_pane_works() {
         let mut lost = agent("gone", 1, Status::Waiting, Some("fold"));
@@ -7782,7 +7815,11 @@ mod tests {
         ];
         let agents = [lost];
         let held = seated(&agents, &sessions);
-        assert_eq!(held.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
+        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
+        let own = own_session("own", 1, 30, vec![pane(1, 0, "/w/luneta/main", "claude")]);
+        let with_own = [session("renamed", 10, vec![pane(1, 0, "/w/luneta/main", "fish")]), own];
+        let held = seated(&agents, &with_own);
+        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
 
         let mut sidebar = fresh();
         sidebar.heard(host(sessions.to_vec(), agents.to_vec()));
@@ -7800,7 +7837,7 @@ mod tests {
             session("other", 20, vec![pane(1, 0, "/w/luneta/main", "fish")]),
         ];
         let held = seated(&agents, &sessions);
-        assert_eq!(held.keys().collect::<Vec<_>>(), [&("renamed", 1)]);
+        assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
     }
 
     /// What a pane runs tells of Claude Code's agents alone. So a pi agent the
@@ -7834,7 +7871,7 @@ mod tests {
         let seated = seated(&agents, &[]);
         assert_eq!(
             seated
-                .get(&("s", 1))
+                .get(&(Where::Zellij("s"), 1))
                 .and_then(|agent| agent.name.as_ref())
                 .map(|name| name.text.as_str()),
             Some("prompt")
@@ -7853,7 +7890,7 @@ mod tests {
         };
         let agents = [of("on its own", "print", 10), of("prompt", "tui", 90)];
         let seated = seated(&agents, &[]);
-        let name = seated.get(&("s", 1)).and_then(|agent| agent.name.as_ref());
+        let name = seated.get(&(Where::Zellij("s"), 1)).and_then(|agent| agent.name.as_ref());
         assert_eq!(name.map(|name| name.text.as_str()), Some("prompt"));
     }
 
@@ -9768,9 +9805,38 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(own)));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let whose = Whose::Own(OwnId::new(1).unwrap());
+        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made: moment(20_000) });
         let kill = Act::Kill { session: session_name("own"), whose };
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
+    }
+
+    /// An own session of the name of the zellij session luneta's zellij is in
+    /// is another: luneta's zellij is not in it, and a delete key on its row
+    /// kills it where it is, and asks of its own agent alone, not of the
+    /// zellij one's.
+    #[test]
+    fn an_own_session_named_as_the_zellij_one_here_is_another() {
+        let mut sidebar = fresh();
+        let panes = || vec![pane(1, 0, "/w/luneta/main", "fish"), pane(2, 0, "/w/b", "fish")];
+        let own = own_session("twin", 1, 20, panes());
+        let sessions = vec![session("other", 5, Vec::new()), session("twin", 10, panes()), own];
+        let zellij = agent("twin", 2, Status::Busy, Some("zellij's"));
+        let own = in_own(agent("twin", 1, Status::Busy, Some("own's")), 1, 20, 1);
+        let own = Agent { pid: 3, ..own };
+        sidebar.heard(host(sessions, vec![zellij, own]));
+        sidebar.titled("twin | fish".to_owned());
+        assert_eq!(sidebar.here(), Some("twin"));
+        let own = Listed::new_own("twin", moment(20_000), 1);
+        sidebar.cursor = Some(Spot::Local(Place::Session(own)));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 60, 16);
+        let asks = " Delete session twin? 1 agent, 1 busy";
+        assert!(lines.iter().any(|line| line.trim_end() == asks), "{lines:?}");
+        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made: moment(20_000) });
+        let kill = Act::Kill { session: session_name("twin"), whose };
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(kill));
     }
 
     /// A key of the Turn group is for the highlighted row, of whatever session,
@@ -9781,9 +9847,9 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         let on = Machine::Local;
-        let older = PanePlace { session: listed("older", 10), pane: 1 };
+        let older = Turned::of(PanePlace { session: listed("older", 10), pane: 1 }).unwrap();
         let turn = Turn::PaneIntoTab;
-        let turned = Asked::Turn { menu: 1, on: on.clone(), place: older, turn };
+        let turned = Asked::Turn { menu: 1, on: on.clone(), turned: older, turn };
         type_in(&mut sidebar, "t");
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), turned);
         assert_eq!(sidebar.waits_on(1), Some(Held::Open));
@@ -9793,13 +9859,13 @@ mod tests {
 
         sidebar.step(2);
         type_in(&mut sidebar, "t");
-        let newer = || PanePlace { session: listed("newer", 20), pane: 1 };
+        let newer = || Turned::of(PanePlace { session: listed("newer", 20), pane: 1 }).unwrap();
         let tabs = Asked::Tabs { menu: 2, on: on.clone(), session: session_name("newer"), pane: 1 };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), tabs);
         let other = || OtherTab { pane: 5, name: "Tab #2".to_owned() };
         assert_eq!(sidebar.tabs(1, Ok(vec![other()])), Asked::Nothing);
         let turn = Turn::TabIntoPanes { beside: 5 };
-        let turned = Asked::Turn { menu: 2, on, place: newer(), turn };
+        let turned = Asked::Turn { menu: 2, on, turned: newer(), turn };
         assert_eq!(sidebar.tabs(2, Ok(vec![other()])), turned);
         let none = Err("zellij found no room".to_owned());
         assert_eq!(sidebar.turned_into_panes(2, 1, none), Asked::Nothing);

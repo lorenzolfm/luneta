@@ -640,7 +640,7 @@ pub enum After {
     /// Turn the pane `place` into a tab, for the menu owed the pane, now that a
     /// client is there to make room for it: told once done, or else as it is
     /// dropped undone.
-    IntoTab(Due<u32>, PanePlace),
+    IntoTab(Due<u32>, Turned),
     /// Kill the session the client left, which it was in, the one `whose`
     /// says, and delete it.
     Kill { session: SessionName, whose: Whose },
@@ -674,12 +674,11 @@ impl After {
             (After::Open(owed, open), there) => {
                 owed.pay(there.open(&open).map(|opened| told(opened, events)));
             },
-            (After::IntoTab(owed, place), there) => {
-                let session = place.session.name();
-                let came = turned_zellij(&place)
-                    .and_then(|started| there.turn_into_tab(session, started, place.pane));
+            (After::IntoTab(owed, turned), there) => {
+                let (session, pane) = (turned.place.session.name(), turned.place.pane);
+                let came = there.turn_into_tab(session, turned.started, pane);
                 owed.pay(came.and_then(|came| match came {
-                    IntoTab::Done => Ok(place.pane),
+                    IntoTab::Done => Ok(pane),
                     IntoTab::NoClient => Err(lunetad::opens::no_client(session)),
                 }));
             },
@@ -768,62 +767,71 @@ pub fn other_tabs(
     });
 }
 
-/// Has zellij on the machine `on` turn the pane `place` as `turn` says, on a
-/// thread of its own, for the menu numbered `menu`, and hands back what came of
-/// it. What stays moves nothing, luneta's client neither.
-pub fn turn(menu: u64, on: &Machine, place: PanePlace, turn: turns::Turn, events: &Sender<Event>) {
-    match turn {
-        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, place, events),
-        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &place, beside, events),
-    }
+/// A pane luneta turns, of a zellij session, with when that started, which a
+/// turn is asked by: an own session turns no pane yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Turned {
+    place: PanePlace,
+    started: SystemTime,
 }
 
-/// When the zellij session of `place` started, which a turn is asked by, or
-/// why it has none: an own session turns no pane yet.
-fn turned_zellij(place: &PanePlace) -> Result<SystemTime, String> {
-    match place.session.whose() {
-        Whose::Zellij(started) => Ok(started),
-        Whose::Own(_) => Err(OWN_TURNS.to_owned()),
+impl Turned {
+    /// The pane `place`, or none for one of an own session's.
+    pub fn of(place: PanePlace) -> Option<Self> {
+        match place.session.whose() {
+            Whose::Zellij(started) => Some(Turned { place, started }),
+            Whose::Own(_) => None,
+        }
+    }
+
+    pub fn place(&self) -> &PanePlace {
+        &self.place
     }
 }
 
 /// Why an own session's pane does not turn, which its menu does not offer.
-const OWN_TURNS: &str = "luneta's own sessions cannot turn a pane yet";
+pub const OWN_TURNS: &str = "luneta's own sessions cannot turn a pane yet";
 
-/// Turns the pane `place` into a tab, and hands back its terminal, for luneta
+/// Has zellij on the machine `on` turn the pane `turned` as `turn` says, on a
+/// thread of its own, for the menu numbered `menu`, and hands back what came of
+/// it. What stays moves nothing, luneta's client neither.
+pub fn turn(menu: u64, on: &Machine, turned: Turned, turn: turns::Turn, events: &Sender<Event>) {
+    match turn {
+        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, turned, events),
+        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &turned, beside, events),
+    }
+}
+
+/// Turns the pane `turned` into a tab, and hands back its terminal, for luneta
 /// to take its client to, or why it did not, as `owed` does. Where its session
 /// has no client to make room for the tab, the menu is owed that yet, once
 /// luneta's client has come, as `Event::NoClient` says.
-fn pane_into_tab(menu: u64, on: &Machine, place: PanePlace, events: &Sender<Event>) {
+fn pane_into_tab(menu: u64, on: &Machine, turned: Turned, events: &Sender<Event>) {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
-        let (session, pane) = (place.session.name(), place.pane);
-        let turned = turned_zellij(&place).and_then(|started| {
-            There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane))
-        });
-        match turned {
+        let (session, pane) = (turned.place.session.name(), turned.place.pane);
+        let started = turned.started;
+        match There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane)) {
             Ok(IntoTab::Done) => owed.pay(Ok(pane)),
             Ok(IntoTab::NoClient) => {
                 // luneta is on its way out.
-                let _ = events.send(Event::NoClient { menu, owed, on, place });
+                let _ = events.send(Event::NoClient { menu, owed, on, turned });
             },
             Err(why) => owed.pay(Err(why)),
         }
     });
 }
 
-/// Turns the tab of the pane `place` into panes of the tab of the terminal
+/// Turns the tab of the pane `turned` into panes of the tab of the terminal
 /// `beside`, and hands back what came of it where any moved, or why none did,
 /// with `Event::IntoPanes`.
-fn tab_into_panes(menu: u64, on: &Machine, place: &PanePlace, beside: u32, events: &Sender<Event>) {
-    let (session, pane) = (place.session.name().clone(), place.pane);
+fn tab_into_panes(menu: u64, on: &Machine, turned: &Turned, beside: u32, events: &Sender<Event>) {
+    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane);
     let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
-    let (on, started) = (on.clone(), turned_zellij(place));
+    let (on, started) = (on.clone(), turned.started);
     thread::spawn(move || {
-        let came = started.and_then(|started| {
-            There::on(&on)
-                .and_then(|mut there| there.turn_into_panes(&session, started, pane, beside))
-        });
+        let came = There::on(&on)
+            .and_then(|mut there| there.turn_into_panes(&session, started, pane, beside));
         owed.pay(came);
     });
 }

@@ -152,9 +152,12 @@ impl Owned {
 
 /// The own session `session` is, by its id and when its server made it: none
 /// for zellij's.
-fn own(session: &api::Session) -> Option<(u64, prost_types::Timestamp)> {
+fn own(session: &api::Session) -> Option<api::OwnSession> {
     match &session.mux {
-        Some(kind::Mux::Own(own)) => Some((own.id, own.made_at.expect("an own session was made"))),
+        Some(kind::Mux::Own(own)) => {
+            assert!(own.made_at.is_some(), "an own session was made");
+            Some(*own)
+        },
         Some(kind::Mux::Zellij(_)) | None => None,
     }
 }
@@ -175,7 +178,7 @@ impl Drop for Owned {
 }
 
 /// The question that closes `closes` of the own session `own`, named `name`.
-fn close(name: &str, own: u64, closes: Closed) -> CloseRequest {
+fn close(name: &str, own: api::OwnSession, closes: Closed) -> CloseRequest {
     let session = name.to_owned();
     let whose = Some(close_request::Whose::Own(own));
     CloseRequest { on: None, session, closes: Some(closes), whose }
@@ -198,7 +201,7 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let made = owned.make("own").unwrap();
 
     let listed = owned.listed("own");
-    assert_eq!(own(&listed).map(|(id, _)| id), Some(made.session));
+    assert_eq!(own(&listed).map(|own| own.id), Some(made.session));
     assert_eq!((listed.socket, listed.started_at), (0, None));
     let pane = api::Pane {
         id: made.pane,
@@ -240,7 +243,7 @@ fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
     let tab_id = tabs[1].tab_id.unwrap();
     let tab = api::closes_response::Tab { id: tab_id, panes: vec![opened.terminal] };
     assert_eq!(closes(opened.terminal), Some(Closes::Tab(tab.clone())));
-    let request = close("own", made.session, Closed::Tab(tab));
+    let request = close("own", own(&owned.listed("own")).unwrap(), Closed::Tab(tab));
     owned.ask(|mut daemon| async move { daemon.close(request).await }).unwrap();
     eventually("the tab is gone", || {
         let panes = session(&owned.host.host(), "own")?.panes.clone()?.panes;
@@ -251,30 +254,36 @@ fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
 }
 
 /// A rename keeps an own session's id and when it was made, and a kill by its
-/// name and its id ends it: the host lets it go, and so does its server, which
-/// held no other. A kill by the name it had stays, as the next server gives
-/// its ids again.
+/// name, its id and when it was made ends it: the host lets it go, and so does
+/// its server, which held no other. A kill by the name it had stays, and so
+/// does one of another time it was made, as the next server gives its ids
+/// again.
 #[test]
-fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
+fn an_own_session_is_renamed_and_killed_by_its_name_id_and_making() {
     let owned = Owned::new();
     let made = owned.make("own").unwrap();
-    let before = own(&owned.listed("own"));
-    assert_eq!(before.as_ref().map(|(id, _)| *id), Some(made.session));
+    let before = own(&owned.listed("own")).unwrap();
+    assert_eq!(before.id, made.session);
 
     let session = "own".to_owned();
     let request = RenameSessionRequest { on: None, session, to: "renamed".to_owned() };
     owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
-    assert_eq!(own(&owned.listed("renamed")), before);
+    assert_eq!(own(&owned.listed("renamed")), Some(before));
 
-    let kill = |session: &str| {
+    let kill = |session: &str, own: api::OwnSession| {
         let session = session.to_owned();
-        let whose = Some(kill_request::Whose::Own(made.session));
+        let whose = Some(kill_request::Whose::Own(own));
         let request = KillRequest { on: None, session, whose };
         owned.ask(|mut daemon| async move { daemon.kill(request).await })
     };
-    let stays = kill("own").unwrap_err();
+    let stays = kill("own", before).unwrap_err();
     assert!(stays.message().contains("no own session that runs"), "{stays:?}");
-    kill("renamed").unwrap();
+    let mut other = before.made_at.unwrap();
+    other.nanos = (other.nanos + 1) % 1_000_000_000;
+    let other = api::OwnSession { made_at: Some(other), ..before };
+    let stays = kill("renamed", other).unwrap_err();
+    assert!(stays.message().contains("made since, which stays"), "{stays:?}");
+    kill("renamed", before).unwrap();
     eventually("the session is gone", || owned.host.host().sessions.is_empty().then_some(()));
     eventually("the server has ended", || (!owned.socket().exists()).then_some(()));
 }
@@ -305,16 +314,17 @@ fn a_session_made_as_the_server_ends_is_made_by_the_next() {
     let owned = Owned::new();
     let first = owned.make("first").unwrap();
     let was = own(&owned.listed("first")).unwrap();
+    assert_eq!(was.id, first.session);
     let session = "first".to_owned();
-    let whose = Some(kill_request::Whose::Own(first.session));
+    let whose = Some(kill_request::Whose::Own(was));
     let request = KillRequest { on: None, session, whose };
     owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
 
     let next = owned.make("next").unwrap();
-    let (id, made_at) = own(&owned.listed("next")).unwrap();
-    assert_eq!(id, next.session);
-    assert_eq!(id, first.session, "the next server counts from 1 again");
-    assert_ne!(made_at, was.1);
+    let now = own(&owned.listed("next")).unwrap();
+    assert_eq!(now.id, next.session);
+    assert_eq!(now.id, first.session, "the next server counts from 1 again");
+    assert_ne!(now.made_at, was.made_at);
 }
 
 /// zellij's sessions and the own ones share their names: neither makes, nor
@@ -384,7 +394,8 @@ fn a_pane_of_another_own_session_does_not_dump_by_this_one_s_name() {
 }
 
 /// What an own session has no way to do yet is refused as such, and a
-/// question that names it by the id 0, which no session has, is no question.
+/// question that names it by the id 0, which no session has, or by no time it
+/// was made, is no question.
 #[test]
 fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let owned = Owned::new();
@@ -408,11 +419,17 @@ fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let refused = owned.ask(|mut daemon| async move { daemon.turn_into_tab(request).await });
     assert!(refused.unwrap_err().message().contains("cannot turn a pane into a tab"));
 
-    let session = "own".to_owned();
-    let zero = KillRequest { on: None, session, whose: Some(kill_request::Whose::Own(0)) };
-    let refused = owned.ask(|mut daemon| async move { daemon.kill(zero).await }).unwrap_err();
-    assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
-    assert_eq!(own(&owned.listed("own")).map(|(id, _)| id), Some(made.session));
+    let listed = own(&owned.listed("own")).unwrap();
+    let unread = [api::OwnSession { id: 0, ..listed }, api::OwnSession { made_at: None, ..listed }];
+    for unread in unread {
+        let session = "own".to_owned();
+        let whose = Some(kill_request::Whose::Own(unread));
+        let request = KillRequest { on: None, session, whose };
+        let refused = owned.ask(|mut daemon| async move { daemon.kill(request).await });
+        let refused = refused.unwrap_err();
+        assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
+    }
+    assert_eq!(own(&owned.listed("own")).map(|own| own.id), Some(made.session));
 }
 
 /// A client in an own session goes to no name that no own session has, and
@@ -477,7 +494,7 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
         let host = owned.host.host();
         host.agents.into_iter().find(|agent| agent.pid == pid)
     });
-    let own = api::Own { session: made.session, pane: made.pane };
+    let own = api::Own { session: own(&owned.listed("own")), pane: made.pane };
     assert_eq!(agent.pane, Some(agent::Pane::Own(own)));
     assert_eq!(agent.zellij(), None);
 }
