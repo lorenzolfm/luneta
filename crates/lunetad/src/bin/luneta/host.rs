@@ -1395,6 +1395,34 @@ fn hello(to: To, area: Rect, colours: Colours) -> Hello {
     Hello { to, size: own_attach::Size::within(size.columns, size.lines), foreground, background }
 }
 
+/// Why luneta's zellij is in no session, while luneta's own client of an own
+/// session is in its place.
+const IN_OWN: &str = "luneta's client is in an own session";
+
+/// The session zellij's `client` is in, as far as `sidebar` knows, for an
+/// action of zellij's there to go by: or why luneta cannot tell, as where
+/// zellij has yet to have it in one, or to say which, or it is on its way to
+/// another, which the key or the action may reach first.
+fn seat_of(client: &Client, sidebar: &Sidebar) -> Result<SessionName, String> {
+    if client.coming.is_some() {
+        return Err("zellij has yet to come to its session".to_owned());
+    }
+    if let Some(left) = sidebar.astray() {
+        return Err(format!(
+            "zellij's client left {left} for a session luneta cannot tell: go to one"
+        ));
+    }
+    let Some(here) = sidebar.here() else {
+        return Err("zellij has yet to say which session it is in".to_owned());
+    };
+    // An action would move the client that last typed in a session that
+    // luneta's has yet to come to.
+    if let Some(going) = sidebar.going() {
+        return Err(format!("zellij has yet to take its client to {going}"));
+    }
+    SessionName::running(here).map_err(|why| format!("zellij is in \"{here}\": {why}"))
+}
+
 /// Where luneta goes on in this machine, of its newest sessions that answer.
 enum Onward {
     Zellij(Refuge),
@@ -2802,9 +2830,9 @@ impl App {
         // Whether it typed there before or not: another client may have
         // since, and the agent acts well after the nudge.
         if matches!(user, User::Pane { .. })
-            && let Ok(seat) = self.seat()
+            && let Ok((client, seat)) = self.seated()
         {
-            self.zellij_client().nudge_in(seat.to_string());
+            client.nudge_in(seat.to_string());
         }
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
             ask.send(user, self.sidebar.agent(), &self.events);
@@ -3533,37 +3561,29 @@ impl App {
     /// zellij has yet to have it in one, or to say which, or it is on its way
     /// to another, which the key or the action may reach first.
     fn seat(&self) -> Result<SessionName, String> {
-        let coming = match &self.right {
-            Right::Zellij(client) => client.coming.is_some(),
-            Right::Own(_) => return Err("luneta's client is in an own session".to_owned()),
-        };
-        if coming {
-            return Err("zellij has yet to come to its session".to_owned());
+        match &self.right {
+            Right::Zellij(client) => seat_of(client, &self.sidebar),
+            Right::Own(_) => Err(IN_OWN.to_owned()),
         }
-        if let Some(left) = self.sidebar.astray() {
-            return Err(format!(
-                "zellij's client left {left} for a session luneta cannot tell: go to one"
-            ));
+    }
+
+    /// zellij's client, with the session it is in, as `seat` says.
+    fn seated(&mut self) -> Result<(&mut Client, SessionName), String> {
+        match &mut self.right {
+            Right::Zellij(client) => {
+                let here = seat_of(client, &self.sidebar)?;
+                Ok((client, here))
+            },
+            Right::Own(_) => Err(IN_OWN.to_owned()),
         }
-        let Some(here) = self.sidebar.here() else {
-            return Err("zellij has yet to say which session it is in".to_owned());
-        };
-        // An action would move the client that last typed in a session that
-        // luneta's has yet to come to.
-        if let Some(going) = self.sidebar.going() {
-            return Err(format!("zellij has yet to take its client to {going}"));
-        }
-        SessionName::running(here).map_err(|why| format!("zellij is in \"{here}\": {why}"))
     }
 
     /// Types the nudge `Zellij::nudge` gives into zellij's client, for an action asked of
     /// zellij in the session it is in to move it, or says why it is in none.
     fn nudge(&mut self) -> Option<Nudged> {
-        match self.seat() {
-            Ok(here) => {
-                let on = self.sidebar.on().clone();
-                Some(self.zellij_client().nudge(on, here))
-            },
+        let on = self.sidebar.on().clone();
+        match self.seated() {
+            Ok((client, here)) => Some(client.nudge(on, here)),
             Err(why) => {
                 self.sidebar.notify(why);
                 None
@@ -3579,17 +3599,17 @@ impl App {
     /// takes the turn back from, and it may be renaming a tab or a pane,
     /// whose name zellij would write the nudge into.
     fn nudge_ahead(&mut self) {
-        if let Ok(here) = self.seat()
-            && self.zellij_client().typed_at(here.as_str()).is_none()
+        if let Ok((client, here)) = self.seated()
+            && client.typed_at(here.as_str()).is_none()
         {
-            self.zellij_client().nudge_in(here.to_string());
+            client.nudge_in(here.to_string());
         }
     }
 
     /// zellij's client typed a key for you just now.
     fn typed(&mut self) {
-        if let Ok(here) = self.seat() {
-            self.zellij_client().typed_in(here.to_string());
+        if let Ok((client, here)) = self.seated() {
+            client.typed_in(here.to_string());
         }
     }
 

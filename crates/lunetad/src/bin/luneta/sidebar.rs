@@ -409,6 +409,32 @@ pub struct OwnSeat {
     pub pane: Option<u32>,
 }
 
+/// What luneta runs beside the sidebar, as the sidebar follows it.
+#[derive(Debug)]
+enum Beside {
+    Zellij(ZellijSide),
+    /// luneta's client of an own session, in zellij's place.
+    Own(OwnSeat),
+}
+
+impl Default for Beside {
+    fn default() -> Self {
+        Beside::Zellij(ZellijSide::default())
+    }
+}
+
+/// What the sidebar has of luneta's zellij, as zellij's client is beside it.
+#[derive(Debug, Default)]
+struct ZellijSide {
+    /// The title zellij gives luneta's terminal: the name of the session it
+    /// is in, and then ` | ` and the title of the pane it has the focus on,
+    /// when that has one.
+    title: Option<String>,
+    /// The session luneta sent its zellij to, until zellij titles luneta's
+    /// terminal after.
+    sent: Option<Sent>,
+}
+
 /// The agent in the pane luneta's zellij is on, that you can name a skill to:
 /// where it is, the directory its skills are found for, and the harness it
 /// runs in, which finds them and spells them.
@@ -1264,15 +1290,11 @@ pub struct Sidebar {
     this: String,
     /// Why the daemon does not answer, while it does not.
     away: Option<String>,
-    /// The title zellij gives luneta's terminal: the name of the session it
-    /// is in, and then ` | ` and the title of the pane it has the focus on,
-    /// when that has one.
-    title: Option<String>,
-    /// The session luneta sent its zellij to, until zellij titles luneta's
-    /// terminal after.
-    sent: Option<Sent>,
-    /// The machine luneta's zellij's client runs on, whose sessions `title`,
-    /// `sent` and `own` are of.
+    /// What runs beside the sidebar: zellij's client, with what the sidebar
+    /// has of it, or luneta's own client of an own session.
+    beside: Beside,
+    /// The machine luneta's zellij's client runs on, whose sessions `beside`
+    /// and `own` are of.
     on: Machine,
     /// The sessions folded, by name.
     folds: Folds,
@@ -1295,11 +1317,10 @@ pub struct Sidebar {
     /// How many machines the daemon says of that the rows leave out, as
     /// `machines` does.
     unlisted_machines: usize,
-    /// Which client of its session is luneta's zellij, and the pane it is on.
+    /// Which client of its session is luneta's zellij, and the pane it is on,
+    /// as of when it last ran beside the sidebar: it knows nothing while an
+    /// own client is in its place.
     own: OwnClient,
-    /// Where luneta's client of an own session is, in the place of zellij's:
-    /// while it is, `title`, `sent` and `own` know nothing.
-    own_seat: Option<OwnSeat>,
     keys: Keys,
     /// The row of the pane luneta's zellij is on, or of its session, while
     /// that one is folded, or of this machine, while that one is. The
@@ -1729,7 +1750,7 @@ impl Sidebar {
     /// a session it went to with no go of luneta's, or that it left the one
     /// it was in for one luneta cannot tell. Whether either.
     fn hear_own(&mut self, at: Instant) -> bool {
-        if self.own_seat.is_some() {
+        if matches!(self.beside, Beside::Own(_)) {
             return false;
         }
         let rosters: Vec<Roster> = (self.on_sessions().iter())
@@ -1747,8 +1768,12 @@ impl Sidebar {
     /// titles luneta's terminal, or it is astray, and in no session the
     /// sidebar knows of. Whether it found it.
     fn followed(&mut self, found: Option<String>) -> bool {
-        if self.own.astray().is_some() && matches!(self.sent, Some(Sent::Landed { .. })) {
-            self.sent = None;
+        let astray = self.own.astray().is_some();
+        let Beside::Zellij(seen) = &mut self.beside else {
+            return false;
+        };
+        if astray && matches!(seen.sent, Some(Sent::Landed { .. })) {
+            seen.sent = None;
         }
         let Some(session) = found else {
             return false;
@@ -1757,7 +1782,9 @@ impl Sidebar {
         if let Ok(name) = SessionName::running(&session) {
             self.unfold(&name);
         }
-        self.sent = Some(Sent::Landed { session });
+        if let Some(seen) = self.zellij_mut() {
+            seen.sent = Some(Sent::Landed { session });
+        }
         true
     }
 
@@ -1834,17 +1861,20 @@ impl Sidebar {
     /// before a ` | `: zellij's own switch to `odd | name`, which the daemon
     /// has yet to list, reads as one to `odd`, which unfolds instead.
     pub fn titled(&mut self, title: String) -> Option<Look> {
-        if self.title.as_ref() == Some(&title) {
+        let Beside::Zellij(seen) = &mut self.beside else {
+            return None;
+        };
+        if seen.title.as_ref() == Some(&title) {
             return None;
         }
-        self.own.titled();
         // Of the session luneta sent its zellij to, which unfolded as it was
         // sent.
-        let sent_there = self.sent.as_ref().is_some_and(|sent| in_session(&title, sent.session()));
-        if sent_there || !matches!(self.sent, Some(Sent::Going { .. })) {
-            self.sent = None;
+        let sent_there = seen.sent.as_ref().is_some_and(|sent| in_session(&title, sent.session()));
+        if sent_there || !matches!(seen.sent, Some(Sent::Going { .. })) {
+            seen.sent = None;
         }
-        self.title = Some(title);
+        seen.title = Some(title);
+        self.own.titled();
         let look = self.arrived();
         if let Some(look) = &look
             && !sent_there
@@ -1870,9 +1900,12 @@ impl Sidebar {
         let session = session.as_str();
         let from = self.here().filter(|here| *here != session);
         let from = from.map(|here| Leaving { session: here.to_owned(), ends });
-        self.sent = Some(Sent::Going { session: session.to_owned(), from, look: None });
+        let sent = Some(Sent::Going { session: session.to_owned(), from, look: None });
+        let title = self.zellij_mut().and_then(|seen| seen.title.take());
+        self.beside = Beside::Zellij(ZellijSide { title, sent });
         let look = self.arrived();
-        if let Some(Sent::Going { look: number, .. }) = &mut self.sent {
+        let sent = self.zellij_mut().and_then(|seen| seen.sent.as_mut());
+        if let Some(Sent::Going { look: number, .. }) = sent {
             *number = look.as_ref().map(|look| look.number);
         }
         self.rebuild();
@@ -1889,7 +1922,9 @@ impl Sidebar {
         let session = session.as_str();
         let look = self.came(session);
         let number = Some(look.number);
-        self.sent = Some(Sent::Going { session: session.to_owned(), from: None, look: number });
+        let sent = Some(Sent::Going { session: session.to_owned(), from: None, look: number });
+        let title = self.zellij_mut().and_then(|seen| seen.title.take());
+        self.beside = Beside::Zellij(ZellijSide { title, sent });
         self.rebuild();
         look
     }
@@ -1897,21 +1932,25 @@ impl Sidebar {
     /// The session luneta sent its zellij to, while zellij has yet to take
     /// its client there.
     pub fn going(&self) -> Option<&str> {
-        match self.sent.as_ref()? {
+        match self.sent()? {
             Sent::Going { session, .. } => Some(session),
             Sent::Landed { .. } => None,
         }
     }
 
     fn sent_on(&self, number: u64) -> bool {
-        matches!(&self.sent, Some(Sent::Going { look, .. }) if *look == Some(number))
+        matches!(self.sent(), Some(Sent::Going { look, .. }) if *look == Some(number))
     }
 
     fn land(&mut self, number: u64) -> bool {
-        let (true, Some(sent)) = (self.sent_on(number), &self.sent) else {
+        if !self.sent_on(number) {
+            return false;
+        }
+        let Some(seen) = self.zellij_mut() else {
             return false;
         };
-        self.sent = Some(Sent::Landed { session: sent.session().to_owned() });
+        let session = seen.sent.as_ref().map(|sent| sent.session().to_owned());
+        seen.sent = session.map(|session| Sent::Landed { session });
         true
     }
 
@@ -1931,11 +1970,12 @@ impl Sidebar {
         if !self.sent_on(look) {
             return None;
         }
-        let from = match self.sent.take() {
+        let seen = self.zellij_mut()?;
+        let from = match seen.sent.take() {
             Some(Sent::Going { from, .. }) => from,
             _ => None,
         };
-        self.sent = from.map(|Leaving { session, .. }| Sent::Landed { session });
+        seen.sent = from.map(|Leaving { session, .. }| Sent::Landed { session });
         let look = self.arrived();
         self.rebuild();
         look
@@ -2176,8 +2216,7 @@ impl Sidebar {
     /// answer once it is there.
     pub fn swapping(&mut self, machine: &Machine, session: &SessionName) -> Look {
         self.on = machine.clone();
-        self.own_seat = None;
-        self.title = None;
+        self.beside = Beside::Zellij(ZellijSide::default());
         self.own.anew();
         self.rejoining(session)
     }
@@ -2188,10 +2227,8 @@ impl Sidebar {
     /// is. What luneta knew of zellij's client, and its title, are another's.
     pub fn attaching(&mut self, session: OwnKey) {
         self.on = Machine::Local;
-        self.title = None;
-        self.sent = None;
+        self.beside = Beside::Own(OwnSeat { session, pane: None });
         self.own.anew();
-        self.own_seat = Some(OwnSeat { session, pane: None });
         self.unfold_own(session);
         self.rebuild();
     }
@@ -2199,8 +2236,9 @@ impl Sidebar {
     /// luneta's client of an own session is in `session` now, on `pane`, as
     /// its server says, which unfolds where it went to another.
     pub fn went_own(&mut self, session: OwnKey, pane: u32) {
-        let before = self.own_seat.replace(OwnSeat { session, pane: Some(pane) });
+        let before = self.own_seat();
         assert!(before.is_some(), "only a client of an own session goes among them");
+        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane) });
         if before.is_some_and(|before| before.session != session) {
             self.unfold_own(session);
         }
@@ -2209,7 +2247,30 @@ impl Sidebar {
 
     /// Where luneta's client of an own session is, while it is one.
     pub fn own_seat(&self) -> Option<OwnSeat> {
-        self.own_seat
+        match self.beside {
+            Beside::Zellij(_) => None,
+            Beside::Own(seat) => Some(seat),
+        }
+    }
+
+    /// What the sidebar has of luneta's zellij, while its client is beside it.
+    fn zellij(&self) -> Option<&ZellijSide> {
+        match &self.beside {
+            Beside::Zellij(seen) => Some(seen),
+            Beside::Own(_) => None,
+        }
+    }
+
+    fn zellij_mut(&mut self) -> Option<&mut ZellijSide> {
+        match &mut self.beside {
+            Beside::Zellij(seen) => Some(seen),
+            Beside::Own(_) => None,
+        }
+    }
+
+    /// The session luneta sent its zellij to, as `ZellijSide::sent` says.
+    fn sent(&self) -> Option<&Sent> {
+        self.zellij()?.sent.as_ref()
     }
 
     /// The own session `key` of this machine's, as the daemon lists it, if
@@ -2277,7 +2338,7 @@ impl Sidebar {
 
     /// What zellij last titled luneta's terminal, which titles its window.
     pub fn terminal_title(&self) -> Option<&str> {
-        self.title.as_deref()
+        self.zellij()?.title.as_deref()
     }
 
     /// The machine luneta's zellij's client runs on: this one until a client
@@ -2310,16 +2371,14 @@ impl Sidebar {
     /// session's name can hold one too. Until the daemon says, what comes
     /// before the first.
     pub fn here(&self) -> Option<&str> {
-        if self.own_seat.is_some() {
-            return None;
-        }
-        if let Some(sent) = &self.sent {
+        let seen = self.zellij()?;
+        if let Some(sent) = &seen.sent {
             return Some(sent.session());
         }
         if self.own.astray().is_some() {
             return None;
         }
-        let title = self.title.as_deref()?;
+        let title = seen.title.as_deref()?;
         let named = |name: &&str| in_session(title, name);
         let sessions = self.on_sessions().iter();
         sessions
@@ -2354,7 +2413,7 @@ impl Sidebar {
     /// `here` says. A name zellij makes no session of, as of a title that
     /// names none, is of none it is in.
     pub fn seats(&self) -> Vec<SessionName> {
-        let seats: Vec<&str> = match &self.sent {
+        let seats: Vec<&str> = match self.sent() {
             Some(Sent::Going { session, from, .. }) => {
                 from.iter().map(|from| &from.session).chain([session]).map(String::as_str).collect()
             },
@@ -2427,7 +2486,7 @@ impl Sidebar {
     /// of that session's, whose ids another session has too. Or else why the
     /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
-        if let Some(seat) = self.own_seat {
+        if let Some(seat) = self.own_seat() {
             let pane = seat.pane.ok_or(NO_HERE_PANE)?;
             let session = self.own_listed(seat.session).ok_or(NO_HERE_PANE)?;
             return Ok(PanePlace { session, pane });
@@ -2526,7 +2585,7 @@ impl Sidebar {
     /// its client runs on, in the session `here` says, and on its pane there
     /// while that is of the session it is in, as `user` takes it too.
     pub fn whereabouts(&self) -> Option<Here> {
-        if let Some(seat) = self.own_seat {
+        if let Some(seat) = self.own_seat() {
             let on = Machine::Local;
             if let Ok(place) = self.here_place() {
                 return Some(Here::Pane { on, place });
@@ -2732,7 +2791,7 @@ impl Sidebar {
             return;
         };
         let here = self.here().map(str::to_owned);
-        let own_seat = self.own_seat;
+        let own_seat = self.own_seat();
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
         // Each machine, and the sessions of each lunetad lists, in the order
@@ -4391,7 +4450,7 @@ impl Sidebar {
                     continue;
                 };
                 let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
-                let here = self.on == *on && Self::seats_here(self.own_seat, &listed, here);
+                let here = self.on == *on && Self::seats_here(self.own_seat(), &listed, here);
                 let it = links::Worked { dir: dir.to_owned(), pull, here };
                 worked.push(Worked { session: listed.clone(), pane: pane.id, works: it });
             }
@@ -4445,7 +4504,7 @@ impl Sidebar {
     /// machine `on`, where luneta's zellij is, and what it `deletes`.
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
         let session = listed.name().as_str();
-        let seat = match (self.own_seat, self.going(), self.here()) {
+        let seat = match (self.own_seat(), self.going(), self.here()) {
             // In a session of another machine's, which this one's go on
             // without.
             (_, None, _) if self.on != *on => Seat::Elsewhere,
@@ -5461,7 +5520,7 @@ impl Sidebar {
             notes.say(&going, width, Style::new().fg(NAME));
         }
         if let Some(Sent::Going { session, from: Some(Leaving { ends: true, .. }), .. }) =
-            &self.sent
+            self.sent()
         {
             let going = format!("Going to {session}; this session ends once you are there");
             notes.say(&going, width, Style::new().fg(NAME));
@@ -7720,7 +7779,7 @@ mod tests {
     #[test]
     fn a_go_zellij_does_not_take_leaves_an_untitled_client_where_it_came() {
         let mut sidebar = two_sessions();
-        sidebar.title = None;
+        sidebar.zellij_mut().unwrap().title = None;
         let came = sidebar.rejoining(&session_name("older"));
         sidebar.unfound(came.number);
         let look = sidebar.went(&pane_of("newer", 20, 1)).unwrap();
