@@ -104,7 +104,10 @@ pub fn claim(path: &Path) -> Result<Claim, Refusal> {
 fn check(folder: &Path) -> Result<(), Refusal> {
     let found = fs::symlink_metadata(folder);
     let found = found.map_err(|error| Refusal::Io(folder.to_owned(), error))?;
-    if !found.is_dir() || found.uid() != rustix::process::getuid().as_raw() {
+    if !found.is_dir() {
+        return Err(Refusal::NotYours(folder.to_owned()));
+    }
+    if found.uid() != rustix::process::getuid().as_raw() {
         return Err(Refusal::NotYours(folder.to_owned()));
     }
     if found.mode() & 0o077 != 0 {

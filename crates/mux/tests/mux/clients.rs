@@ -41,6 +41,32 @@ fn a_client_goes_between_tabs_and_is_told_where_it_is() {
     });
 }
 
+/// A client that goes over its stream to a tab that closed is told it
+/// stays, and why, and stays on its pane, where it goes on typing.
+#[test]
+fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let made = new_session(&mut mux, "work", shell()).await;
+        let gone = new_tab(&mut mux, made.session, shell()).await;
+        mux.close_tab(api::CloseTabRequest { tab: gone.tab }).await.unwrap();
+        let mut attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        attached.send(api::to_server::Event::Go(tab(gone.tab))).await;
+        let reason = loop {
+            match attached.next().await {
+                Some(api::to_client::Event::Stayed(stayed)) => break stayed.reason,
+                Some(_) => {},
+                None => panic!("the stream ended before it said the client stayed"),
+            }
+        };
+        assert_eq!(reason, format!("no tab {}", gone.tab));
+        assert_eq!(attached.went.tab, made.tab);
+        attached.type_line("echo $((6 * 7))").await;
+        attached.until_row("42").await;
+    });
+}
+
 /// Two clients on a pane each look at it from where they scrolled to: one
 /// back in the scrollback, the other at the bottom.
 #[test]

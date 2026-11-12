@@ -71,6 +71,13 @@ impl Server {
         Server { child, runtime }
     }
 
+    /// The server's resident memory, in KiB, as `ps` says.
+    pub fn resident_kib(&self) -> u64 {
+        let pid = self.child.id().to_string();
+        let listed = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
+        String::from_utf8(listed.stdout).unwrap().trim().parse().unwrap()
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.runtime.path().join("luneta/mux.sock")
     }

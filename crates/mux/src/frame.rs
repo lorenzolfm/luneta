@@ -5,7 +5,7 @@ use crate::api;
 use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
 
 /// What a frame says of the pane besides its rows.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
     pub clusters: bool,
     pub tracks: bool,
@@ -26,6 +26,7 @@ pub fn said(
 ) -> api::Frame {
     let rows = match before {
         Some((before_size, before)) if before_size == size => {
+            assert_eq!(view.lines.len(), before.lines.len(), "two views of {size:?}");
             let rows = view
                 .lines
                 .iter()
@@ -33,7 +34,7 @@ pub fn said(
                 .enumerate()
                 .filter(|(_, (line, before))| line != before)
                 .map(|(index, (line, _))| api::Row {
-                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    index: u32::try_from(index).expect("a pane's rows are counted in a u16"),
                     line: Some(line_said(line)),
                 })
                 .collect();

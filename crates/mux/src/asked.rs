@@ -225,7 +225,7 @@ pub struct Hello {
 
 /// What a client says after its `Hello`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Said {
+pub enum Heard {
     Input(Input),
     Resize(Size),
     Go(Place),
@@ -280,17 +280,17 @@ pub fn hello(api::ToServer { event }: api::ToServer) -> Result<Hello, Status> {
 }
 
 /// A client's message after its first.
-pub fn said(message: api::ToServer) -> Result<Said, Status> {
+pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
     use api::to_server::Event;
     Ok(match present("event", message.event)? {
         Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
-        Event::Key(key) => Said::Input(key_said(key)?),
-        Event::Mouse(mouse) => Said::Input(mouse_said(mouse)?),
-        Event::Paste(api::Paste { text }) => Said::Input(Input::Paste(text)),
-        Event::Focus(api::Focus { focused }) => Said::Input(Input::Focus(focused)),
-        Event::Scroll(api::Scroll { back }) => Said::Input(Input::Scroll(back)),
-        Event::Resize(size) => Said::Resize(Size::parse("resize", Some(size))?),
-        Event::Go(place) => Said::Go(Place::parse("go", Some(place))?),
+        Event::Key(key) => Heard::Input(key_heard(key)?),
+        Event::Mouse(mouse) => Heard::Input(mouse_heard(mouse)?),
+        Event::Paste(api::Paste { text }) => Heard::Input(Input::Paste(text)),
+        Event::Focus(api::Focus { focused }) => Heard::Input(Input::Focus(focused)),
+        Event::Scroll(api::Scroll { back }) => Heard::Input(Input::Scroll(back)),
+        Event::Resize(size) => Heard::Resize(Size::parse("resize", Some(size))?),
+        Event::Go(place) => Heard::Go(Place::parse("go", Some(place))?),
     })
 }
 
@@ -304,7 +304,7 @@ fn mods(modifiers: Option<api::Modifiers>) -> Mods {
     mods
 }
 
-fn key_said(key: api::Key) -> Result<Input, Status> {
+fn key_heard(key: api::Key) -> Result<Input, Status> {
     let action = match api::Press::try_from(key.press) {
         Ok(api::Press::Down) => keys::Action::Press,
         Ok(api::Press::Repeat) => keys::Action::Repeat,
@@ -453,14 +453,14 @@ fn button(field: &str, button: i32) -> Result<mouse::Button, Status> {
     }
 }
 
-fn mouse_said(said: api::Mouse) -> Result<Input, Status> {
+fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
     use api::mouse::Does;
     let at = |field: &str, cell: u32| {
         u16::try_from(cell).map_err(|_| refused(&format!("mouse.{field}"), "is over 65535"))
     };
-    let (column, row) = (at("column", said.column)?, at("row", said.row)?);
-    let mods = mods(said.modifiers);
-    Ok(match present("mouse.does", said.does)? {
+    let (column, row) = (at("column", heard.column)?, at("row", heard.row)?);
+    let mods = mods(heard.modifiers);
+    Ok(match present("mouse.does", heard.does)? {
         Does::Press(pressed) => {
             Input::Mouse { click: Click::Press(button("mouse.press", pressed)?), mods, column, row }
         },
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn a_key_is_parsed_into_the_encoders_words() {
         let key = |press: api::Press, key, text: &str| {
-            key_said(api::Key {
+            key_heard(api::Key {
                 press: press.into(),
                 modifiers: Some(api::Modifiers { ctrl: true, ..api::Modifiers::default() }),
                 key,
@@ -594,9 +594,9 @@ mod tests {
             hello(focus.clone()).unwrap_err().message(),
             "event is not hello, as the first must be"
         );
-        assert_eq!(said(focus).unwrap(), Said::Input(Input::Focus(true)));
+        assert_eq!(heard(focus).unwrap(), Heard::Input(Input::Focus(true)));
         assert_eq!(
-            said(hello_said).unwrap_err().message(),
+            heard(hello_said).unwrap_err().message(),
             "event is hello, which only the first may be"
         );
     }
@@ -604,7 +604,7 @@ mod tests {
     /// A wheel only turns, and a button is one of the three.
     #[test]
     fn the_mouse_says_what_it_did() {
-        let mouse = |does| mouse_said(api::Mouse { modifiers: None, column: 3, row: 4, does });
+        let mouse = |does| mouse_heard(api::Mouse { modifiers: None, column: 3, row: 4, does });
         let wheel = mouse(Some(api::mouse::Does::Wheel(api::Wheel::Up.into()))).unwrap();
         assert_eq!(
             wheel,

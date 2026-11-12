@@ -116,11 +116,10 @@ impl Screen {
     /// Whether a turn of the wheel is for the program as the arrow keys: it
     /// asked for that (mode 1007), on the alternate screen, and does not take
     /// the mouse.
-    pub fn wheel_is_arrows(&self) -> Result<bool, Error> {
-        let terminal = self.answering.terminal();
-        Ok(terminal.mode(Mode::ALT_SCROLL)?
-            && terminal.mode(Mode::ALT_SCREEN_SAVE)? | terminal.mode(Mode::ALT_SCREEN)?
-            && !terminal.is_mouse_tracking()?)
+    #[must_use]
+    pub fn wheel_is_arrows(&self) -> bool {
+        let alternate = self.mode(Mode::ALT_SCREEN_SAVE) || self.mode(Mode::ALT_SCREEN);
+        self.mode(Mode::ALT_SCROLL) && alternate && !self.tracks_mouse()
     }
 
     fn encoded(

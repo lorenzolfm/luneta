@@ -9,17 +9,18 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::{oneshot, watch};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream, WatchStream};
 use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
-use crate::asked::{self, Dumped, Name, Opens, Place, Said, Who};
+use crate::asked::{self, Dumped, Heard, Name, Opens, Place, Who};
 use crate::folder::Claim;
 use crate::mux::Mux;
-use crate::pane::CLIENT_MESSAGES;
+use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
 
 /// How long a server with no session waits for one, as it starts.
 pub const FIRST_SESSION: Duration = Duration::from_secs(30);
@@ -29,6 +30,13 @@ const DRAIN: Duration = Duration::from_secs(5);
 
 /// The most streams a connection has at once.
 const STREAMS_MAX: u32 = 256;
+
+/// How long a client that attaches has to say its `Hello`.
+const HELLO_WAIT: Duration = Duration::from_secs(5);
+
+/// The most bytes a message to the server has: as many as a pane holds for
+/// its program to read.
+const MESSAGE_BYTES_MAX: usize = UNREAD_BYTES_MAX;
 
 struct Service {
     mux: Arc<Mux>,
@@ -86,7 +94,9 @@ impl mux_server::Mux for Service {
     async fn dump(&self, request: Request<api::DumpRequest>) -> Answer<api::DumpResponse> {
         let request = request.into_inner();
         let dumped = Dumped::parse("dumped", request.dumped)?;
-        let answered = self.mux.dump(request.pane, dumped)?;
+        let handle = self.mux.pane(request.pane)?;
+        let (answer, answered) = oneshot::channel();
+        handle.send(ToPane::Dump(dumped, answer)).await;
         let gone = || Status::not_found(format!("pane {} ended", request.pane));
         let text = answered.await.map_err(|_| gone())??;
         Ok(Response::new(api::DumpResponse { text }))
@@ -109,50 +119,74 @@ impl mux_server::Mux for Service {
         &self,
         request: Request<Streaming<api::ToServer>>,
     ) -> Answer<Self::AttachStream> {
-        let mut said = request.into_inner();
-        let first =
-            said.message().await?.ok_or_else(|| Status::invalid_argument("no hello came"))?;
-        let hello = asked::hello(first)?;
+        let mut heard = request.into_inner();
+        let first = tokio::time::timeout(HELLO_WAIT, heard.message()).await;
+        let first = first.map_err(|_| Status::deadline_exceeded("no hello came in time"))??;
+        let hello = asked::hello(first.ok_or_else(|| Status::invalid_argument("no hello came"))?)?;
         let (out, going) = mpsc::channel(CLIENT_MESSAGES);
-        let client = self.mux.attach(hello, out.clone())?;
-        let mux = Arc::clone(&self.mux);
-        tokio::spawn(async move {
-            let refused = loop {
-                let Ok(Some(message)) = said.message().await else {
-                    break None;
-                };
-                let taken = match asked::said(message) {
-                    Ok(Said::Input(input)) => {
-                        mux.input(client, input);
-                        Ok(())
-                    },
-                    Ok(Said::Resize(size)) => {
-                        mux.resize(client, size);
-                        Ok(())
-                    },
-                    Ok(Said::Go(to)) => {
-                        let _ = mux.go(Who::Client(client), to);
-                        Ok(())
-                    },
-                    Err(refusal) => Err(refusal),
-                };
-                if let Err(refusal) = taken {
-                    break Some(refusal);
-                }
-            };
-            mux.detach(client);
-            if let Some(refusal) = refused {
-                let _ = out.send(Err(refusal)).await;
+        let (gone, let_go) = oneshot::channel();
+        let client = self.mux.attach(hello, out.clone(), gone)?;
+        tokio::spawn(listen(Arc::clone(&self.mux), client, heard, out));
+        let going = ReceiverStream::new(going);
+        Ok(Response::new(UntilEnded { going, let_go, ended: false }))
+    }
+}
+
+/// Takes what client `client` says after its `Hello`, until it goes or says
+/// what is refused, and then lets go of it.
+async fn listen(mux: Arc<Mux>, client: u64, mut heard: Streaming<api::ToServer>, out: Out) {
+    let refused = loop {
+        let message = match heard.message().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break None,
+            Err(refusal) => break Some(refusal),
+        };
+        match asked::heard(message) {
+            Ok(said) => take(&mux, client, said, &out).await,
+            Err(refusal) => break Some(refusal),
+        }
+    };
+    if let Some(refusal) = refused
+        && let Err(TrySendError::Full(_)) = out.try_send(Err(refusal))
+    {
+        eprintln!("luneta-mux: client {client} had no room for its refusal");
+    }
+    mux.detach(client);
+}
+
+/// Has `client` do what it said: its input and its size go to the pane it is
+/// on, as soon as the pane has room for them, and a `Go` that is refused is
+/// told to it.
+async fn take(mux: &Mux, client: u64, said: Heard, out: &Out) {
+    match said {
+        Heard::Input(input) => {
+            if let Some(handle) = mux.input(client, input.types()) {
+                handle.send(ToPane::Input(client, input)).await;
             }
-        });
-        Ok(Response::new(UntilEnded { going: ReceiverStream::new(going), ended: false }))
+        },
+        Heard::Resize(size) => {
+            if let Some(handle) = mux.resize(client, size) {
+                handle.send(ToPane::Resize(client, size)).await;
+            }
+        },
+        Heard::Go(to) => {
+            if let Err(refusal) = mux.go(Who::Client(client), to) {
+                let reason = refusal.message().to_owned();
+                let stayed = api::to_client::Event::Stayed(api::Stayed { reason });
+                if out.send(Ok(api::ToClient { event: Some(stayed) })).await.is_err() {
+                    eprintln!("luneta-mux: client {client} went before it heard it stayed");
+                }
+            }
+        },
     }
 }
 
 /// What goes to a client, up to the word that its session ended, or a
-/// refusal of what it said, after which the stream ends.
+/// refusal of what it said, after which the stream ends. It ends too once the
+/// client is let go of, after what was sent to it before.
 pub struct UntilEnded {
     going: ReceiverStream<Result<api::ToClient, Status>>,
+    let_go: oneshot::Receiver<()>,
     ended: bool,
 }
 
@@ -164,12 +198,24 @@ impl Stream for UntilEnded {
             return Poll::Ready(None);
         }
         let next = Pin::new(&mut self.going).poll_next(context);
-        if let Poll::Ready(Some(said)) = &next {
-            let ended =
-                matches!(said, Ok(api::ToClient { event: Some(api::to_client::Event::Ended(_)) }));
-            self.ended = ended || said.is_err();
+        match &next {
+            Poll::Ready(Some(said)) => {
+                let ended = matches!(
+                    said,
+                    Ok(api::ToClient { event: Some(api::to_client::Event::Ended(_)) })
+                );
+                self.ended = ended || said.is_err();
+                next
+            },
+            Poll::Ready(None) => next,
+            Poll::Pending => {
+                if Pin::new(&mut self.let_go).poll(context).is_ready() {
+                    self.ended = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Pending
+            },
         }
-        next
     }
 }
 
@@ -204,7 +250,10 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let served = tokio::spawn(
         Server::builder()
             .max_concurrent_streams(STREAMS_MAX)
-            .add_service(mux_server::MuxServer::new(Service { mux: Arc::clone(&mux) }))
+            .add_service(
+                mux_server::MuxServer::new(Service { mux: Arc::clone(&mux) })
+                    .max_decoding_message_size(MESSAGE_BYTES_MAX),
+            )
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     let _ = beginning.wait_for(|begun| *begun).await;

@@ -30,8 +30,9 @@ service Mux {
   // The sessions and clients as they stand now, and again each time they
   // change. The stream ends as the server does.
   rpc Watch(WatchRequest) returns (stream Listing);
-  // A client: its first event is a `Hello`, then what its user does. The
-  // server says where the client is, and sends frames of the pane it is on.
+  // A client: its first event is a `Hello`, within 5 seconds, then what its
+  // user does. The server says where the client is, and sends frames of the
+  // pane it is on. A message to the server is of 1 MiB at most.
   rpc Attach(stream ToServer) returns (stream ToClient);
 }
 
@@ -368,6 +369,7 @@ message ToClient {
     Went went = 2;
     Frame frame = 3;
     Ended ended = 4;
+    Stayed stayed = 5;
   }
 }
 
@@ -385,6 +387,12 @@ message Went {
 
 // The client's session ended. The stream ends after it.
 message Ended {}
+
+// A `Go` the client sent on its stream was refused, and it stays where it is.
+message Stayed {
+  // Why, as the unary `Go` would say.
+  string reason = 1;
+}
 
 // What a pane shows, to one client.
 message Frame {

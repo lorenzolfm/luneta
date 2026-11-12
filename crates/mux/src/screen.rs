@@ -196,48 +196,67 @@ impl Screen {
     }
 
     /// The screen's size: its columns, then its rows.
-    pub fn size(&self) -> Result<(NonZeroU16, NonZeroU16), Error> {
+    #[must_use]
+    pub fn size(&self) -> (NonZeroU16, NonZeroU16) {
         let terminal = self.answering.terminal();
-        let nonzero = |count| NonZeroU16::new(count).ok_or(Error::InvalidValue);
-        Ok((nonzero(terminal.cols()?)?, nonzero(terminal.rows()?)?))
+        let columns = terminal.cols().expect("a terminal says its columns");
+        let rows = terminal.rows().expect("a terminal says its rows");
+        (
+            NonZeroU16::new(columns).expect("a terminal has columns"),
+            NonZeroU16::new(rows).expect("a terminal has rows"),
+        )
     }
 
     /// Whether the screen joins graphemes (mode 2027), which the widths of
     /// its glyphs follow.
-    pub fn clusters(&self) -> Result<bool, Error> {
-        self.answering.terminal().mode(Mode::GRAPHEME_CLUSTER)
+    #[must_use]
+    pub fn clusters(&self) -> bool {
+        self.mode(Mode::GRAPHEME_CLUSTER)
     }
 
     /// Whether the program takes the mouse.
-    pub fn tracks_mouse(&self) -> Result<bool, Error> {
-        self.answering.terminal().is_mouse_tracking()
+    #[must_use]
+    pub fn tracks_mouse(&self) -> bool {
+        let terminal = self.answering.terminal();
+        terminal.is_mouse_tracking().expect("a terminal says whether it tracks the mouse")
     }
 
     /// Whether the program has the screen hold what it draws until it is done
     /// (mode 2026).
-    pub fn syncs(&self) -> Result<bool, Error> {
-        self.answering.terminal().mode(Mode::SYNC_OUTPUT)
+    #[must_use]
+    pub fn syncs(&self) -> bool {
+        self.mode(Mode::SYNC_OUTPUT)
+    }
+
+    fn mode(&self, mode: Mode) -> bool {
+        self.answering.terminal().mode(mode).expect("a terminal says its modes")
     }
 
     /// How many rows the scrollback has.
-    pub fn scrollback(&self) -> Result<usize, Error> {
-        self.answering.terminal().scrollback_rows()
+    #[must_use]
+    pub fn scrollback(&self) -> usize {
+        let terminal = self.answering.terminal();
+        terminal.scrollback_rows().expect("a terminal says its scrollback")
     }
 
-    /// The title the program last set, or nothing.
-    pub fn title(&self) -> Result<String, Error> {
-        self.answering.terminal().title().map(str::to_owned)
+    /// The title the program last set, or nothing: none where it is not
+    /// UTF-8.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        self.answering.terminal().title().ok().map(str::to_owned)
     }
 
-    /// Where the program last said it works (OSC 7), or nothing.
-    pub fn pwd(&self) -> Result<String, Error> {
-        self.answering.terminal().pwd().map(str::to_owned)
+    /// Where the program last said it works (OSC 7), or nothing: none where
+    /// it is not UTF-8.
+    #[must_use]
+    pub fn pwd(&self) -> Option<String> {
+        self.answering.terminal().pwd().ok().map(str::to_owned)
     }
 
     /// What the screen shows, looked at from `back` rows back in its
     /// scrollback, which has at least as many.
     pub fn view(&mut self, back: usize) -> Result<View, Error> {
-        assert!(back <= self.scrollback()?, "{back} rows back");
+        assert!(back <= self.scrollback(), "{back} rows back");
         if back == 0 {
             return self.shown();
         }
@@ -440,9 +459,9 @@ mod tests {
     #[test]
     fn a_program_may_turn_off_joining_graphemes() {
         let mut screen = screen(10, 2);
-        assert!(screen.clusters().unwrap());
+        assert!(screen.clusters());
         assert_eq!(screen.write("\x1b[?2027l👍🏽".as_bytes()), b"");
-        assert!(!screen.clusters().unwrap());
+        assert!(!screen.clusters());
         assert_eq!(glyphs(&screen.view(0).unwrap().lines[0])[..2], [wide("👍"), wide("🏽")]);
     }
 
@@ -485,7 +504,7 @@ mod tests {
     fn a_view_back_in_the_scrollback_shows_older_lines() {
         let mut screen = scrolling(4, 2);
         assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4"), b"");
-        assert_eq!(screen.scrollback().unwrap(), 2);
+        assert_eq!(screen.scrollback(), 2);
         let live = screen.view(0).unwrap();
         assert_eq!(glyphs(&live.lines[0])[0], narrow("3"));
         assert_eq!(live.cursor.map(|cursor| (cursor.row, cursor.column)), Some((1, 1)));
@@ -504,8 +523,18 @@ mod tests {
         assert_eq!(screen.write(b"\x1b[?2048h"), b"");
         let answer = screen.resize(NonZeroU16::new(20).unwrap(), NonZeroU16::new(5).unwrap());
         assert_eq!(String::from_utf8(answer.unwrap()).unwrap(), "\x1b[48;5;20;0;0t");
-        let size = screen.size().unwrap();
+        let size = screen.size();
         assert_eq!((size.0.get(), size.1.get()), (20, 5));
+    }
+
+    /// A folder named in what is not UTF-8 is no folder, and the title
+    /// stays.
+    #[test]
+    fn a_pwd_that_is_not_utf_8_is_none() {
+        let mut screen = screen(10, 2);
+        assert_eq!(screen.write(b"\x1b]0;top\x07\x1b]7;file://h/\xfe\x07"), b"");
+        assert_eq!(screen.title().as_deref(), Some("top"));
+        assert_eq!(screen.pwd(), None);
     }
 
     /// The text dump has every line written, the scrollback's too, and none of
