@@ -58,7 +58,7 @@ use lunetad::asks::User;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::attach::{self as own_attach, Heard, Hello, To};
-use lunetad::mux::own::OwnId;
+use lunetad::mux::own::OwnKey;
 use lunetad::mux::Zellij;
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
@@ -116,10 +116,10 @@ use crate::zellij::{
 
 /// A session luneta makes, named, or why it makes none: one of zellij's, by
 /// the name it takes and the directory it starts in, if any, or an own one,
-/// which the daemon made already, by its id.
+/// which the daemon made already.
 pub enum Made {
     Zellij(Unused, Option<Directory>),
-    Own(OwnId),
+    Own(OwnKey),
 }
 
 /// A session luneta makes, as `Made` says, or why it makes none.
@@ -1330,11 +1330,11 @@ fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: 
 
 /// luneta's first client: zellij's, by its program and its arguments, where
 /// luneta's zellij goes where it fails, and the look for its arrival, if
-/// luneta looks for it; or its own client of the own session of this id.
+/// luneta looks for it; or its own client of this own session.
 #[expect(clippy::large_enum_variant, reason = "it lasts as luneta starts")]
 enum FirstClient {
     Zellij((String, Vec<String>), Fails, Option<Arrival>),
-    Own(OwnId),
+    Own(OwnKey),
 }
 
 /// What a client of the own sessions that goes `to` says first: how big
@@ -1349,24 +1349,24 @@ fn hello(to: To, area: Rect, colours: Colours) -> Hello {
 /// Where luneta goes on in this machine, of its newest sessions that answer.
 enum Onward {
     Zellij(Refuge),
-    Own(OwnId),
+    Own(OwnKey),
 }
 
 /// Where luneta goes on in this machine: in the newer of zellij's `refuge`
 /// and the newest own session, `own`, and in zellij's where both started at
 /// once. A zellij session of no start luneta read is taken for the older.
 /// None where neither runs.
-fn onward(refuge: Option<Refuge>, own: Option<own_sessions::Newest>) -> Option<Onward> {
+fn onward(refuge: Option<Refuge>, own: Option<OwnKey>) -> Option<Onward> {
     match (refuge, own) {
         (Some(refuge), Some(own)) => {
             if refuge.started.is_some_and(|started| started >= own.made) {
                 Some(Onward::Zellij(refuge))
             } else {
-                Some(Onward::Own(own.id))
+                Some(Onward::Own(own))
             }
         },
         (Some(refuge), None) => Some(Onward::Zellij(refuge)),
-        (None, Some(own)) => Some(Onward::Own(own.id)),
+        (None, Some(own)) => Some(Onward::Own(own)),
         (None, None) => None,
     }
 }
@@ -3029,11 +3029,11 @@ impl App {
             Some(why) => Err(why),
             None => self.sidebar.own_target(place),
         };
-        let target = target.and_then(|(id, to)| match own_sessions::refusal(id, session) {
+        let target = target.and_then(|to| match own_sessions::refusal(to.session(), session) {
             Some(why) => Err(why),
-            None => Ok((id, to)),
+            None => Ok(to),
         });
-        let (id, to) = match target {
+        let to = match target {
             Ok(target) => target,
             Err(why) => {
                 self.sidebar.notify(why);
@@ -3045,7 +3045,7 @@ impl App {
         };
         let Right::Own(own) = &mut self.right else {
             let fails = self.back();
-            self.attach(id, to, after, fails);
+            self.attach(to, after, fails);
             return true;
         };
         own.attached.go(to);
@@ -3057,10 +3057,10 @@ impl App {
 
     /// Has a client of the own sessions take the place of what runs beside
     /// the sidebar, the next luneta starts, which goes `to` a session of
-    /// them, `session`, or a tab of it, and does `after` once it is there,
-    /// going where it `fails` where it is lost before. It hears first where
-    /// it has not the keys, or the window has not the focus.
-    fn attach(&mut self, session: OwnId, to: To, after: Option<After>, fails: Fails) {
+    /// them, or a tab of it, and does `after` once it is there, going where
+    /// it `fails` where it is lost before. It hears first where it has not
+    /// the keys, or the window has not the focus.
+    fn attach(&mut self, to: To, after: Option<After>, fails: Fails) {
         let number = self.started + 1;
         let hello = hello(to, self.areas.1, self.colours);
         let attached = Attached::start(number, hello, &self.events);
@@ -3069,7 +3069,7 @@ impl App {
             self.drops.gave_way(client.started.elapsed());
         }
         self.right = Right::Own(Own { attached, after, fails: Some(fails) });
-        self.sidebar.attaching(session);
+        self.sidebar.attaching(to.session());
         // The client that takes its place heard no button go down over it.
         if matches!(self.held, Held::Zellij | Held::Selecting) {
             self.held = Held::Nothing;
@@ -3142,7 +3142,7 @@ impl App {
             },
             Failed::Own(id) => {
                 self.sidebar.notify(note);
-                self.attach(id, To::Session(id), None, Fails::End);
+                self.attach(To::Session(id), None, Fails::End);
                 Ok(())
             },
             Failed::End | Failed::Onward(_) => {
@@ -3423,14 +3423,14 @@ impl App {
         }
     }
 
-    /// Takes luneta's client to the own session the daemon made just now, of
-    /// id `id`, which the sidebar may not list yet: on the stream of its own,
-    /// or as one takes the place of zellij's.
-    fn go_made_own(&mut self, id: OwnId) {
-        let to = To::Session(id);
+    /// Takes luneta's client to `made`, the own session the daemon made just
+    /// now, which the sidebar may not list yet: on the stream of its own, or
+    /// as one takes the place of zellij's.
+    fn go_made_own(&mut self, made: OwnKey) {
+        let to = To::Session(made);
         let Right::Own(own) = &mut self.right else {
             let fails = self.back();
-            self.attach(id, to, None, fails);
+            self.attach(to, None, fails);
             return;
         };
         own.attached.go(to);
@@ -3741,7 +3741,7 @@ impl App {
                 },
                 Failed::Own(id) => {
                     self.failed(&Machine::Local);
-                    self.attach(id, To::Session(id), None, Fails::End);
+                    self.attach(To::Session(id), None, Fails::End);
                     Ok(())
                 },
                 Failed::End | Failed::Onward(_) => {
@@ -3766,7 +3766,7 @@ impl App {
         let Refuge { session: to, before, .. } = match onward(refuge, own_sessions::newest()) {
             Some(Onward::Zellij(refuge)) => refuge,
             Some(Onward::Own(id)) => {
-                self.attach(id, To::Session(id), None, Fails::End);
+                self.attach(To::Session(id), None, Fails::End);
                 return Ok(());
             },
             None => return self.newest_away(&[]),
@@ -3810,7 +3810,7 @@ impl App {
                 },
                 Failed::Own(id) => {
                     self.failed(&on);
-                    self.attach(id, To::Session(id), None, Fails::End);
+                    self.attach(To::Session(id), None, Fails::End);
                     Ok(())
                 },
                 Failed::Onward(tried) => {
@@ -3950,7 +3950,7 @@ impl App {
                 self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
             },
             Some(Onward::Own(id)) => {
-                self.attach(id, To::Session(id), None, Fails::End);
+                self.attach(To::Session(id), None, Fails::End);
                 Ok(())
             },
             None => self.newest_away(tried),
@@ -4010,7 +4010,7 @@ impl App {
             },
             (_, Failed::Own(id)) => {
                 self.sidebar.notify(why.to_owned());
-                self.attach(id, To::Session(id), None, Fails::End);
+                self.attach(To::Session(id), None, Fails::End);
                 Ok(())
             },
             (Machine::Remote(_), Failed::Onward(tried)) => {
@@ -4309,11 +4309,11 @@ mod tests {
             before: Vec::new(),
             started: started.map(at),
         };
-        let id = OwnId::new(4).unwrap();
-        let own = |made| own_sessions::Newest { id, made: at(made) };
+        let id = lunetad::mux::own::OwnId::new(4).unwrap();
+        let own = |made| OwnKey { id, made: at(made) };
         let went = |refuge, own| match onward(refuge, own) {
             Some(Onward::Zellij(refuge)) => Some(Err(refuge.session.to_string())),
-            Some(Onward::Own(id)) => Some(Ok(id)),
+            Some(Onward::Own(own)) => Some(Ok(own.id)),
             None => None,
         };
         let zellij = Some(Err("work".to_owned()));

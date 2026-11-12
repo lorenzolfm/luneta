@@ -276,6 +276,14 @@ pub struct Listing {
     pub clients: Listed,
 }
 
+impl Listing {
+    /// The session as no other is.
+    #[must_use]
+    pub fn key(&self) -> OwnKey {
+        OwnKey { id: self.id, made: self.made }
+    }
+}
+
 /// The own sessions among `sessions`, as the server lists them, and why each
 /// that it leaves out does not read: one whose id or name another before it
 /// has is left out too, as the server gives each its own.
@@ -519,10 +527,10 @@ impl Own {
     }
 }
 
-/// An own session made: its id, and its first tab's and pane's.
+/// An own session made: as no other is, and its first tab's and pane's ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Made {
-    pub session: OwnId,
+    pub session: OwnKey,
     pub tab: TabId,
     pub pane: u32,
 }
@@ -530,6 +538,8 @@ pub struct Made {
 /// Makes an own session named `name` of one tab, in `cwd`, that runs `runs`,
 /// and starts the server for it where none listens; or says why not. A
 /// server that ends as it is asked is waited for to go, and another started.
+/// When it made the session, that server says on the connection that made
+/// it, as the next would give its id to another.
 pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made, Failure> {
     let deadline = Instant::now() + MAKING;
     let request = api::NewSessionRequest {
@@ -550,7 +560,9 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
             Ok(made) => {
                 let session = OwnId::new(made.session);
                 let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
-                let session = session.ok_or_else(unread)?;
+                let id = session.ok_or_else(unread)?;
+                let made_at = made_of(&server.session(id)?, id).map_err(Failure::Unread)?;
+                let session = OwnKey { id, made: made_at };
                 return Ok(Made { session, tab: TabId(made.tab), pane: made.pane });
             },
             Err(status) if status.code() == Code::Unavailable => {

@@ -601,7 +601,9 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use lunetad::mux::own::OwnId;
+    use std::time::SystemTime;
+
+    use lunetad::mux::own::{OwnId, OwnKey};
 
     use super::*;
 
@@ -626,7 +628,8 @@ mod tests {
             .collect();
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
         let screen = Screen { pane: 1, size, lines, cursor: None, tracks_mouse: false };
-        let went = Went { session: OwnId::new(1).unwrap(), tab: 1, pane: 1 };
+        let session = OwnKey { id: OwnId::new(1).unwrap(), made: SystemTime::UNIX_EPOCH };
+        let went = Went { session, tab: 1, pane: 1 };
         View { went: Some(went), screen: Some(screen), ..View::default() }
     }
 

@@ -9,7 +9,7 @@
 //! zellij's that took the place of luneta's client of an own session goes
 //! back to that session.
 
-use lunetad::mux::own::OwnId;
+use lunetad::mux::own::OwnKey;
 use lunetad::Destination;
 
 use crate::machines::Machine;
@@ -30,7 +30,7 @@ pub enum Fails {
     /// Back to the session it was in before, on another machine.
     Back(Back),
     /// Back to the own session luneta's client was in before.
-    Own(OwnId),
+    Own(OwnKey),
     /// On to the newest session of another machine's but those `tried`, as
     /// `App::newest_here` finds it: of a client of a session luneta's zellij
     /// goes on in on another machine, which luneta picked itself. Those tried
@@ -47,7 +47,7 @@ pub enum Failed {
     /// It goes back to the session it was in before.
     Back(Back),
     /// It goes back to the own session it was in before.
-    Own(OwnId),
+    Own(OwnKey),
     /// It goes on in this machine's newest session, or else another
     /// machine's but those it holds, as `App::newest_here` finds it.
     Onward(Vec<Destination>),

@@ -505,6 +505,9 @@ message NewOwnResponse {
   // Its tab's id, and its pane's.
   uint32 tab = 2;
   uint32 pane = 3;
+  // When its server made it, as its `OwnSession.made_at` says. Absent from a
+  // daemon older than this field.
+  google.protobuf.Timestamp made_at = 4;
 }
 
 message StartRequest {

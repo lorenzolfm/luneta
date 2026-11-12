@@ -201,7 +201,9 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let made = owned.make("own").unwrap();
 
     let listed = owned.listed("own");
-    assert_eq!(own(&listed).map(|own| own.id), Some(made.session));
+    let key = own(&listed).map(|own| (own.id, own.made_at));
+    assert_eq!(key, Some((made.session, made.made_at)));
+    assert!(made.made_at.is_some(), "the daemon says when it made the session");
     assert_eq!((listed.socket, listed.started_at), (0, None));
     let pane = api::Pane {
         id: made.pane,

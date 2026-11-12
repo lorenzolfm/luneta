@@ -7,19 +7,26 @@
 //! add up to its size, a colour no terminal has, or a word that names no
 //! session or pane, ends the client, as a server that says them is not one
 //! luneta can follow. The client hears one last word, however it ends.
+//!
+//! A client goes to an own session as no other is, by its id and when its
+//! server made it, as the next server counts its ids from 1 again: it asks the
+//! server it reached for its sessions first, on the one connection it keeps,
+//! and goes only where that server holds the session it names.
 
 use std::num::NonZeroU16;
 use std::pin::pin;
 use std::thread;
+use std::time::SystemTime;
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tonic::transport::Channel;
 use tonic::Status;
 
-use super::api::{self, to_client, to_server};
+use super::api::{self, mux_client::MuxClient, to_client, to_server};
 use super::server::{connect, refused, runtime, socket};
-use super::OwnId;
+use super::{OwnId, OwnKey};
 
 /// The most the server lets a side of a pane be, in cells: more is refused.
 pub const SIDE_MAX: u16 = 1000;
@@ -29,24 +36,74 @@ pub const SIDE_MAX: u16 = 1000;
 /// second, and the server takes each at once.
 const SAID_MAX: usize = 1024;
 
-/// Where a client goes among the own sessions, by the ids its server gave.
+/// Where a client goes among the own sessions: to a session as no other is,
+/// and to a tab of it by the id its server gave.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum To {
     /// A session, on the tab a client coming there goes to.
-    Session(OwnId),
+    Session(OwnKey),
     /// A tab of a session.
-    Tab(u32),
+    Tab { session: OwnKey, tab: u32 },
 }
 
 impl To {
+    /// The session it goes to.
+    #[must_use]
+    pub fn session(self) -> OwnKey {
+        match self {
+            To::Session(session) | To::Tab { session, .. } => session,
+        }
+    }
+
+    /// Whether `went` is there.
+    #[must_use]
+    pub fn reached(self, went: &Went) -> bool {
+        match self {
+            To::Session(session) => went.session == session,
+            To::Tab { session, tab } => went.session == session && went.tab == tab,
+        }
+    }
+
+    /// It, by the ids alone, as the server takes it: the server it goes to
+    /// is the one `found_in` found it held by.
     #[must_use]
     pub fn said(self) -> api::Place {
         let is = match self {
-            To::Session(session) => api::place::Is::Session(session.get()),
-            To::Tab(tab) => api::place::Is::Tab(tab),
+            To::Session(session) => api::place::Is::Session(session.id.get()),
+            To::Tab { tab, .. } => api::place::Is::Tab(tab),
         };
         api::Place { is: Some(is) }
     }
+
+    /// Why `sessions`, as a server lists them, do not hold where it goes, if
+    /// they do not: no session of its id, or one of its id that this server
+    /// made at another time, or none of its tab.
+    fn found_in(self, sessions: &[OwnKey], listing: &[api::Session]) -> Result<(), String> {
+        let session = self.session();
+        if !sessions.contains(&session) {
+            return Err(format!("own session {} no longer runs", session.id));
+        }
+        let To::Tab { tab, .. } = self else {
+            return Ok(());
+        };
+        let listed = listing.iter().find(|listed| listed.id == session.id.get());
+        if listed.is_some_and(|listed| listed.tabs.iter().any(|it| it.id == tab)) {
+            Ok(())
+        } else {
+            Err(format!("own session {} has no tab {tab}", session.id))
+        }
+    }
+}
+
+/// The sessions of `listing`, as no other is: one whose id is 0, or that says
+/// no time it was made, is left out, as none can go there.
+fn keys(listing: &[api::Session]) -> Vec<OwnKey> {
+    let key = |session: &api::Session| {
+        let id = OwnId::new(session.id)?;
+        let made = SystemTime::try_from(session.made_at?).ok()?;
+        Some(OwnKey { id, made })
+    };
+    listing.iter().filter_map(key).collect()
 }
 
 /// A size in cells, of 1 to `SIDE_MAX` each way.
@@ -112,10 +169,11 @@ impl Hello {
     }
 }
 
-/// Where the client is now, as the server says each time it moves.
+/// Where the client is now, as the server says each time it moves: in a
+/// session as no other is, by the server the client keeps to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Went {
-    pub session: OwnId,
+    pub session: OwnKey,
     pub tab: u32,
     pub pane: u32,
 }
@@ -337,12 +395,19 @@ pub enum Heard {
     Lost(String),
 }
 
-/// `said`, the server's word to a client, or why it does not read.
-fn heard(said: api::ToClient) -> Result<Heard, String> {
+/// `said`, the server's word to a client, with `sessions` the sessions it
+/// lists, or why it does not read.
+fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
     Ok(match said.event.ok_or("the server said nothing")? {
         to_client::Event::Attached(_) => Heard::Attached,
         to_client::Event::Went(api::Went { session, tab, pane }) => {
-            let session = OwnId::new(session).ok_or("the client went to session 0")?;
+            let id = OwnId::new(session).ok_or("the client went to session 0")?;
+            let session = sessions.iter().find(|key| key.id == id);
+            let unlisted = || format!("the client went to session {id}, which it does not list");
+            let session = *session.ok_or_else(unlisted)?;
+            if tab == 0 {
+                return Err("the client went to tab 0".to_owned());
+            }
             if pane == 0 {
                 return Err("the client went to pane 0".to_owned());
             }
@@ -420,7 +485,10 @@ enum Next {
 
 /// The client: `hello`, then what comes on `saying`, to the server, and what
 /// the server says to `told`, but the last, which it gives back, until the
-/// server says no more or a why comes on `given_up`.
+/// server says no more or a why comes on `given_up`. It goes only where the
+/// server it reached holds the session `hello` goes to; and it asks that
+/// server for its sessions again where the client went to one it did not
+/// list before.
 async fn stream(
     hello: Hello,
     saying: mpsc::Receiver<api::ToServer>,
@@ -435,6 +503,13 @@ async fn stream(
         Ok(Some(client)) => client,
         Ok(None) => return Heard::Lost("luneta-mux does not run, nor any own session".to_owned()),
         Err(error) => return Heard::Lost(format!("{}: {error}", socket.display())),
+    };
+    let mut sessions = match listed(&mut client).await {
+        Ok((sessions, listing)) => match hello.to.found_in(&sessions, &listing) {
+            Ok(()) => sessions,
+            Err(why) => return Heard::Lost(why),
+        },
+        Err(lost) => return lost,
     };
     let said = tokio_stream::once(hello.said()).chain(ReceiverStream::new(saying));
     let hearing = match client.attach(said).await {
@@ -452,13 +527,35 @@ async fn stream(
             },
             Some(Next::GaveUp(why)) => return Heard::Lost(why),
         };
-        match heard(said) {
+        if let Some(to_client::Event::Went(went)) = &said.event
+            && !sessions.iter().any(|key| key.id.get() == went.session)
+        {
+            sessions = match listed(&mut client).await {
+                Ok((sessions, _)) => sessions,
+                Err(lost) => return lost,
+            };
+        }
+        match heard(said, &sessions) {
             Ok(Heard::Ended) => return Heard::Ended,
             Ok(heard) => told(heard),
             Err(why) => {
                 return Heard::Lost(format!("luneta-mux said what luneta cannot read: {why}"));
             },
         }
+    }
+}
+
+/// The sessions the server `client` reached lists now, as no other is, and
+/// as it lists them; or the client lost, where it does not answer.
+async fn listed(
+    client: &mut MuxClient<Channel>,
+) -> Result<(Vec<OwnKey>, Vec<api::Session>), Heard> {
+    match client.list(api::ListRequest {}).await {
+        Ok(listing) => {
+            let listing = listing.into_inner().sessions;
+            Ok((keys(&listing), listing))
+        },
+        Err(status) => Err(Heard::Lost(refused(&status).to_string())),
     }
 }
 
@@ -557,17 +654,49 @@ mod tests {
         assert_eq!(coloured(None).unwrap_err(), "a colour is none");
     }
 
-    /// A client is never told it went to session 0 or pane 0, which name none.
+    fn key(id: u64, made: u64) -> OwnKey {
+        let made = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(made);
+        OwnKey { id: OwnId::new(id).unwrap(), made }
+    }
+
+    /// A client went to a session as no other is, of those its server
+    /// lists, and never to session 0, tab 0 or pane 0, which name none.
     #[test]
-    fn a_went_names_a_session_and_a_pane() {
-        let went = |session, pane| {
-            let event = to_client::Event::Went(api::Went { session, tab: 1, pane });
-            heard(api::ToClient { event: Some(event) })
+    fn a_went_names_a_listed_session_a_tab_and_a_pane() {
+        let sessions = [key(3, 20)];
+        let went = |session, tab, pane| {
+            let event = to_client::Event::Went(api::Went { session, tab, pane });
+            heard(api::ToClient { event: Some(event) }, &sessions)
         };
-        let session = OwnId::new(3).unwrap();
-        assert_eq!(went(3, 4), Ok(Heard::Went(Went { session, tab: 1, pane: 4 })));
-        assert_eq!(went(0, 4).unwrap_err(), "the client went to session 0");
-        assert_eq!(went(3, 0).unwrap_err(), "the client went to pane 0");
+        assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { session: key(3, 20), tab: 1, pane: 4 })));
+        assert_eq!(went(0, 1, 4).unwrap_err(), "the client went to session 0");
+        let unlisted = "the client went to session 5, which it does not list";
+        assert_eq!(went(5, 1, 4).unwrap_err(), unlisted);
+        assert_eq!(went(3, 0, 4).unwrap_err(), "the client went to tab 0");
+        assert_eq!(went(3, 1, 0).unwrap_err(), "the client went to pane 0");
+    }
+
+    /// A client goes only where the server lists its session, of the id it
+    /// names and made when it says: a server started since gives the id to
+    /// another. A tab is one of that session's.
+    #[test]
+    fn a_client_goes_only_to_a_session_its_server_holds() {
+        let tab = |id| api::Tab { id, ..api::Tab::default() };
+        let listed = |id, made: u64, tabs| api::Session {
+            id,
+            tabs,
+            made_at: Some((SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(made)).into()),
+            ..api::Session::default()
+        };
+        let listing = [listed(1, 30, vec![tab(7)]), listed(0, 10, Vec::new())];
+        let sessions = keys(&listing);
+        assert_eq!(sessions, [key(1, 30)]);
+        assert_eq!(To::Session(key(1, 30)).found_in(&sessions, &listing), Ok(()));
+        let since = To::Session(key(1, 10)).found_in(&sessions, &listing);
+        assert_eq!(since.unwrap_err(), "own session 1 no longer runs");
+        let tab = |tab| To::Tab { session: key(1, 30), tab };
+        assert_eq!(tab(7).found_in(&sessions, &listing), Ok(()));
+        assert_eq!(tab(8).found_in(&sessions, &listing).unwrap_err(), "own session 1 has no tab 8");
     }
 
     /// A side past what the server takes is made what it takes.

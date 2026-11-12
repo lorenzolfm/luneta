@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime};
 
 use std::path::Path;
 
-use lunetad::mux::own::OwnId;
+use lunetad::mux::own::OwnKey;
 use lunetad::{log, Destination, Directory};
 
 use crate::away::ANSWER;
@@ -49,8 +49,8 @@ pub enum First {
     /// One attached to this session, made if none runs by its name, or with
     /// none named in a session of a name zellij makes up.
     Make(Option<SessionName>),
-    /// luneta's own client of the own session of this id.
-    Own(OwnId),
+    /// luneta's own client of this own session.
+    Own(OwnKey),
 }
 
 /// How luneta comes to its first client.
