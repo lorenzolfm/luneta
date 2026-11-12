@@ -114,9 +114,16 @@ use crate::zellij::{
     self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Turned, Unused,
 };
 
-/// The name of a session luneta makes, and the directory it starts in, if
-/// any, or why it makes none.
-type Named = Result<(Unused, Option<Directory>), String>;
+/// A session luneta makes, named, or why it makes none: one of zellij's, by
+/// the name it takes and the directory it starts in, if any, or an own one,
+/// which the daemon made already, by its id.
+pub enum Made {
+    Zellij(Unused, Option<Directory>),
+    Own(OwnId),
+}
+
+/// A session luneta makes, as `Made` says, or why it makes none.
+type Named = Result<Made, String>;
 
 /// A tab luneta opens in a session it makes, for the menu numbered `menu`.
 pub struct MenuTab {
@@ -2537,8 +2544,17 @@ impl App {
             },
             Asked::Start { on, starts } => {
                 self.name(None, move || match zellij::unused_at(&on, starts) {
-                    Ok((unused, dir)) => Ok((unused, Some(dir))),
+                    Ok((unused, dir)) => Ok(Made::Zellij(unused, Some(dir))),
                     Err(why) => Err(format!("menu: {why}")),
+                });
+                self.leave();
+            },
+            Asked::StartOwn { starts } => {
+                self.name(None, move || {
+                    let (name, _, dir) = lunetad::names::free_at(starts)
+                        .map_err(|why| format!("menu: no own session made: {why}"))?;
+                    let made = owns::made(&name, &dir);
+                    Ok(Made::Own(made.map_err(|why| format!("menu: no own session made: {why}"))?))
                 });
                 self.leave();
             },
@@ -2553,7 +2569,7 @@ impl App {
                             zellij::makes_away(destination, &session, &cwd)
                         },
                     };
-                    Ok((unused?, Some(cwd)))
+                    Ok(Made::Zellij(unused?, Some(cwd)))
                 });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
@@ -2630,7 +2646,7 @@ impl App {
                         Machine::Local => zellij::makes(session),
                         Machine::Remote(destination) => zellij::makes_there(destination, session),
                     };
-                    Ok((unused?, None))
+                    Ok(Made::Zellij(unused?, None))
                 });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -2646,7 +2662,7 @@ impl App {
                             zellij::makes_away(destination, &session, &cwd)
                         },
                     };
-                    Ok((unused?, Some(cwd)))
+                    Ok(Made::Zellij(unused?, Some(cwd)))
                 });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -3338,13 +3354,33 @@ impl App {
         let menu = tab.as_ref().map(|tab| tab.menu);
         let tab = tab.map(|MenuTab { menu, tab }| (zellij::owed(menu, &self.events), tab));
         let (unused, cwd) = match named {
-            Ok((unused, cwd)) => (Ok(unused), cwd),
+            Ok(Made::Zellij(unused, cwd)) => (Ok(unused), cwd),
+            Ok(Made::Own(id)) => {
+                assert!(tab.is_none(), "a menu's tab opens in a session of zellij's it makes");
+                self.go_made_own(id);
+                return;
+            },
             Err(why) => (Err(why), None),
         };
         if !self.make(unused, cwd.as_ref(), tab)
             && let Some(menu) = menu
         {
             self.sidebar.drop_menu(menu);
+        }
+    }
+
+    /// Takes luneta's client to the own session the daemon made just now, of
+    /// id `id`, which the sidebar may not list yet: on the stream of its own,
+    /// or as one takes the place of zellij's.
+    fn go_made_own(&mut self, id: OwnId) {
+        let to = To::Session(id);
+        let Right::Own(own) = &mut self.right else {
+            let fails = self.back();
+            self.attach(id, to, None, fails);
+            return;
+        };
+        if let Err(why) = own.attached.go(to) {
+            self.sidebar.notify(why);
         }
     }
 

@@ -1131,6 +1131,9 @@ pub enum Asked {
     /// one that ended, which zellij keeps to bring back, as zellij there says
     /// then.
     Start { on: Machine, starts: Starts },
+    /// Take luneta's client to an own session it makes on this machine, that
+    /// starts as `starts` says, named as `Start` names one.
+    StartOwn { starts: Starts },
     /// Take zellij's client to a session it makes on `on`, `session`, that
     /// starts in `cwd`, and have zellij open a tab of it once it is there, in
     /// `tab_cwd`, named `name`, with `command` in it, or your shell for none,
@@ -1198,6 +1201,7 @@ impl Asked {
             | Asked::Leave
             | Asked::Delete { .. }
             | Asked::Start { .. }
+            | Asked::StartOwn { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
             | Asked::Issue(_)
@@ -4142,6 +4146,7 @@ impl Sidebar {
                         },
                         None => Asked::Start { on, starts },
                     },
+                    Done::Own(starts) => Asked::StartOwn { starts },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
                     // You went to work elsewhere as it ran: the notes say
                     // where it is, and it takes you nowhere from where you
@@ -9508,7 +9513,7 @@ mod tests {
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
         sidebar.keys_clicked(Keyed::Legend, &char('n'), moment(160_000));
-        let clicked = clicks(&mut sidebar, 14);
+        let clicked = clicks(&mut sidebar, 13);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         assert_eq!(menu, [
@@ -9516,6 +9521,7 @@ mod tests {
             (" p  new pane", Some(on_menu(KeyCode::Char('p')))),
             (" t  new tab", Some(on_menu(KeyCode::Char('t')))),
             (" s  new session", Some(on_menu(KeyCode::Char('s')))),
+            (" o  new own session", Some(on_menu(KeyCode::Char('o')))),
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
@@ -9871,12 +9877,13 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        let (lines, _) = seen_at(&mut sidebar, true, 32, 16, moment(160_000) + PAUSE);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
         assert_eq!(lines[10..], [
             "─ New ─────────── luneta/main ─",
             " p  new pane",
             " t  new tab",
             " s  new session",
+            " o  new own session",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
@@ -10557,7 +10564,7 @@ mod tests {
         type_in(&mut sidebar, "j");
         assert_eq!(cursor(&sidebar), Some(pane_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        let (lines, _) = seen_at(&mut sidebar, true, 32, 12, moment(160_000) + PAUSE);
+        let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
         assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
