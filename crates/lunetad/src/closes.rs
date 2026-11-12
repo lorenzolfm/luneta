@@ -143,6 +143,22 @@ impl Whose {
     fn own(id: u64) -> Result<Whose, String> {
         OwnId::new(id).map(Whose::Own).ok_or_else(|| "own: 0 is no session's id".to_owned())
     }
+
+    /// Closes `close` of `session`, this one, as `closed` or `closed_own` do.
+    pub fn closed(self, session: &SessionName, close: &Close) -> Result<(), String> {
+        match self {
+            Whose::Zellij(started) => closed(session, started, close),
+            Whose::Own(id) => closed_own(session, id, close),
+        }
+    }
+
+    /// Kills `session`, this one, as `killed` or `killed_own` do.
+    pub fn killed(self, session: &SessionName) -> Result<(), String> {
+        match self {
+            Whose::Zellij(started) => killed(session, started),
+            Whose::Own(id) => killed_own(session, id),
+        }
+    }
 }
 
 impl TryFrom<close_request::Whose> for Whose {

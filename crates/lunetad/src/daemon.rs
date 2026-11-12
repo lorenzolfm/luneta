@@ -871,10 +871,7 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on)? {
             return daemon.close(close.asked(None, &session, whose)).await;
         }
-        let closed = task::spawn_blocking(move || match whose {
-            Whose::Zellij(started) => closes::closed(&session, started, &close),
-            Whose::Own(id) => closes::closed_own(&session, id, &close),
-        });
+        let closed = task::spawn_blocking(move || whose.closed(&session, &close));
         let closed = closed.await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
@@ -952,10 +949,7 @@ impl Daemon for Host {
             let (session, whose) = (session.to_string(), Some(whose.into()));
             return daemon.kill(KillRequest { on: None, session, whose }).await;
         }
-        let killed = task::spawn_blocking(move || match whose {
-            Whose::Zellij(started) => closes::killed(&session, started),
-            Whose::Own(id) => closes::killed_own(&session, id),
-        });
+        let killed = task::spawn_blocking(move || whose.killed(&session));
         let killed = killed.await;
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;

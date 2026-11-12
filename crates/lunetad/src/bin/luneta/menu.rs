@@ -678,7 +678,7 @@ enum Entry {
 
 impl Entry {
     /// The entry as the menu for `target` lists it: a key that works on its
-    /// kind of row, or a group with those of its keys that do; or none, for
+    /// kind of row and of session, or a group with those of its keys that do; or none, for
     /// a key that does not, or a group left with none. A key built for the
     /// row, as the Delete group's are, works on it.
     fn on(self, target: &Target) -> Option<Entry> {
@@ -694,8 +694,8 @@ impl Entry {
             | Entry::Start { .. }
             | Entry::Last(_)
             | Entry::Checks
-            | Entry::New(New::Pane | New::Tab)
-            | Entry::Turn(_) => pane.then_some(self),
+            | Entry::New(New::Tab) => pane.then_some(self),
+            Entry::New(New::Pane) | Entry::Turn(_) => (pane && !target.own()).then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
             Entry::Issue => target.repository().is_some().then_some(self),
             Entry::New(New::Machine)
@@ -1225,6 +1225,16 @@ impl Target {
         }
     }
 
+    /// Whether it is of an own session, which opens no pane beside another,
+    /// and turns none.
+    fn own(&self) -> bool {
+        match self {
+            Target::Session(_, session) => session.own(),
+            Target::Pane(_, row) => row.session.own(),
+            Target::Machine(_) => false,
+        }
+    }
+
     /// The directory its pane works in, where the daemon has said it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
@@ -1404,6 +1414,19 @@ pub enum Opens {
     /// A tab of the pane's session, named `name` or as zellij numbers it,
     /// with `command` in it, or your shell for none.
     Tab { name: Option<String>, command: Vec<String> },
+}
+
+impl Opens {
+    /// An agent that runs `command`, beside the pane `beside` of `session`:
+    /// in a tab of its own, in an own session, which opens no pane beside
+    /// another.
+    fn agent(session: &Listed, beside: u32, command: Vec<String>) -> Opens {
+        if session.own() {
+            Opens::Tab { name: None, command }
+        } else {
+            Opens::Pane { beside, command }
+        }
+    }
 }
 
 /// What a key of the menu leaves the sidebar to do: the menu open still,
@@ -1909,7 +1932,7 @@ impl Menu {
                 (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
                         let command = agents::on_skill(keys.agent.harness(), &skill, None);
-                        let opens = Opens::Pane { beside: pane, command };
+                        let opens = Opens::agent(&session, pane, command);
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
@@ -2228,7 +2251,8 @@ impl Menu {
                 Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
             },
             (At::There((session, pane)), Pull::Agent) => {
-                opening(session, pane, Opens::Pane { beside: pane, command })
+                let opens = Opens::agent(&session, pane, command);
+                opening(session, pane, opens)
             },
             (At::Session((session, pane)), _) => {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
@@ -2293,7 +2317,7 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::Pane { beside: pane, command };
+        let opens = Opens::agent(&session, pane, command);
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -2327,7 +2351,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::Pane { beside: pane, command };
+        let opens = Opens::agent(&session, pane, command);
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)
@@ -3593,6 +3617,29 @@ mod tests {
         assert!(Menu::open(1, pane_row(), Some('x'), PICKED).is_none());
     }
 
+    /// An own session opens no pane beside another, and turns none: its
+    /// pane's menu has no `n p` and no Turn group, and an agent a key starts
+    /// opens in a tab of the session, in the pane's directory.
+    #[test]
+    fn an_own_session_s_pane_opens_its_agents_in_a_tab_and_turns_none() {
+        let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
+        let own_row = || Target::Pane(Machine::Local, PaneRow { session: own.clone(), ..row() });
+        let (menu, _) = stays(opened(own_row(), None));
+        let lines = text(&menu.lines(31, 10, 0).0);
+        assert!(lines.iter().all(|line| !line.contains("Turn")), "{lines:?}");
+        let (menu, _) = stays(opened(own_row(), Some('n')));
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
+            " t  new tab",
+            " s  new session",
+            " m  new machine",
+        ]);
+        let (_, wants) = stays(stays(opened(own_row(), Some('c'))).0.key(&char('t')));
+        let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
+        let opens = Opens::Tab { name: None, command };
+        assert_eq!(wants, Wants::Open { session: own.clone(), pane: 4, cwd: main_dir(), opens });
+        assert!(Menu::open(1, own_row(), Some('t'), PICKED).is_none());
+    }
+
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups() {
         assert_eq!(
@@ -4067,7 +4114,7 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
         let name = || listed().name().clone();
-        let act = Act::Pane { session: name(), started: listed().started(), pane: 4 };
+        let act = Act::Pane { session: name(), whose: listed().whose(), pane: 4 };
         assert_eq!(done, Done::Act(vps(), act));
         for (row, highlighted) in [
             (pane, Briefed::Agent(vps(), name(), 4)),
@@ -4562,8 +4609,8 @@ mod tests {
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         assert_eq!(menu.planning(), Some((&listed(), 4)));
         let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
-        let (session, started) = (listed().name().clone(), listed().started());
-        let act = Act::Pane { session, started, pane: 4 };
+        let (session, whose) = (listed().name().clone(), listed().whose());
+        let act = Act::Pane { session, whose, pane: 4 };
         assert_eq!(done, Done::Act(Machine::Local, act));
         // On a session's row, `d d` deletes the session, which zellij need not
         // say anything of first.
@@ -4612,8 +4659,8 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let (session, started) = (listed().name().clone(), listed().started());
-        let act = Act::Tab { session, started, tab: TabId(2), panes: vec![4, 5] };
+        let (session, whose) = (listed().name().clone(), listed().whose());
+        let act = Act::Tab { session, whose, tab: TabId(2), panes: vec![4, 5] };
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 
@@ -4632,8 +4679,8 @@ mod tests {
             agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
-        let started = session.started();
-        let leave = Act::Leave { session: listed().name().clone(), started, to: elo };
+        let whose = session.whose();
+        let leave = Act::Leave { session: listed().name().clone(), whose, to: elo };
         let done = closed(menu.planned(close::plan(&subject)));
         assert_eq!(done, Done::Act(Machine::Local, leave));
     }

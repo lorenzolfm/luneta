@@ -150,6 +150,15 @@ impl Owned {
     }
 }
 
+/// The own session `session` is, by its id and when its server made it: none
+/// for zellij's.
+fn own(session: &api::Session) -> Option<(u64, prost_types::Timestamp)> {
+    match &session.mux {
+        Some(kind::Mux::Own(own)) => Some((own.id, own.made_at.expect("an own session was made"))),
+        Some(kind::Mux::Zellij(_)) | None => None,
+    }
+}
+
 impl Drop for Owned {
     /// Ends the server, which hangs up what runs in its panes, where the test
     /// left it running.
@@ -189,7 +198,7 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let made = owned.make("own").unwrap();
 
     let listed = owned.listed("own");
-    assert_eq!(listed.mux, Some(kind::Mux::Own(made.session)));
+    assert_eq!(own(&listed).map(|(id, _)| id), Some(made.session));
     assert_eq!((listed.socket, listed.started_at), (0, None));
     let pane = api::Pane {
         id: made.pane,
@@ -241,19 +250,21 @@ fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
     assert_eq!(closes(made.pane), Some(Closes::Session(())));
 }
 
-/// A rename keeps an own session's id, and a kill by its name and its id ends
-/// it: the host lets it go, and so does its server, which held no other. A
-/// kill by the name it had stays, as the next server gives its ids again.
+/// A rename keeps an own session's id and when it was made, and a kill by its
+/// name and its id ends it: the host lets it go, and so does its server, which
+/// held no other. A kill by the name it had stays, as the next server gives
+/// its ids again.
 #[test]
 fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
     let owned = Owned::new();
     let made = owned.make("own").unwrap();
-    owned.listed("own");
+    let before = own(&owned.listed("own"));
+    assert_eq!(before.as_ref().map(|(id, _)| *id), Some(made.session));
 
     let session = "own".to_owned();
     let request = RenameSessionRequest { on: None, session, to: "renamed".to_owned() };
     owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
-    assert_eq!(owned.listed("renamed").mux, Some(kind::Mux::Own(made.session)));
+    assert_eq!(own(&owned.listed("renamed")), before);
 
     let kill = |session: &str| {
         let session = session.to_owned();
@@ -286,19 +297,24 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
 }
 
 /// A session made as the server ends, its last session killed, is made all
-/// the same: the daemon waits for that server to go, and starts another.
+/// the same: the daemon waits for that server to go, and starts another. That
+/// one counts its ids from 1 again, and the time it made it tells its session
+/// from the first.
 #[test]
 fn a_session_made_as_the_server_ends_is_made_by_the_next() {
     let owned = Owned::new();
     let first = owned.make("first").unwrap();
-    owned.listed("first");
+    let was = own(&owned.listed("first")).unwrap();
     let session = "first".to_owned();
     let whose = Some(kill_request::Whose::Own(first.session));
     let request = KillRequest { on: None, session, whose };
     owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
 
     let next = owned.make("next").unwrap();
-    assert_eq!(owned.listed("next").mux, Some(kind::Mux::Own(next.session)));
+    let (id, made_at) = own(&owned.listed("next")).unwrap();
+    assert_eq!(id, next.session);
+    assert_eq!(id, first.session, "the next server counts from 1 again");
+    assert_ne!(made_at, was.1);
 }
 
 /// zellij's sessions and the own ones share their names: neither makes, nor
@@ -396,7 +412,7 @@ fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let zero = KillRequest { on: None, session, whose: Some(kill_request::Whose::Own(0)) };
     let refused = owned.ask(|mut daemon| async move { daemon.kill(zero).await }).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
-    assert_eq!(owned.listed("own").mux, Some(kind::Mux::Own(made.session)));
+    assert_eq!(own(&owned.listed("own")).map(|(id, _)| id), Some(made.session));
 }
 
 /// A client in an own session goes to no name that no own session has, and

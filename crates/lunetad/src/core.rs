@@ -49,6 +49,9 @@ pub struct Asked {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Own {
     pub id: OwnId,
+    /// When its server made it, which tells it from the sessions of another
+    /// server with its id.
+    pub made: SystemTime,
     pub name: SessionName,
     pub panes: Vec<Pane>,
     pub clients: Listed,
@@ -687,7 +690,10 @@ impl Known {
                         socket: 0,
                         panes: Some(panes_of(SessionKey::Own(own.id), &own.panes)),
                         clients: Some(clients_of(&own.clients)),
-                        mux: Some(api::session::Mux::Own(own.id.get())),
+                        mux: Some(api::session::Mux::Own(api::OwnSession {
+                            id: own.id.get(),
+                            made_at: Some(own.made.into()),
+                        })),
                     },
                 }
             })

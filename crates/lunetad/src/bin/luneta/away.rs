@@ -298,10 +298,10 @@ impl Away {
     pub fn close(
         &mut self,
         session: &SessionName,
-        started: SystemTime,
+        whose: Whose,
         close: &Close,
     ) -> Result<(), String> {
-        let request = close.asked(Some(self.on()), session, Whose::Zellij(started));
+        let request = close.asked(Some(self.on()), session, whose);
         self.ask(|mut daemon| async move { daemon.close(request).await })
     }
 
@@ -372,11 +372,11 @@ impl Away {
         )
     }
 
-    /// Has zellij there kill `session`, the one that started at `started`,
-    /// and delete it, as `lunetad::closes::killed` does there, or says why
+    /// Has the multiplexer there kill `session`, the one `whose` says, and
+    /// delete it, as `lunetad::closes::Whose::killed` does there, or says why
     /// it did not.
-    pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
-        let (session, whose) = (session.to_string(), Some(Whose::Zellij(started).into()));
+    pub fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
+        let (session, whose) = (session.to_string(), Some(whose.into()));
         let request = KillRequest { on: Some(self.on()), session, whose };
         self.ask(|mut daemon| async move { daemon.kill(request).await })
     }

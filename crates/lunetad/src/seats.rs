@@ -4,12 +4,14 @@
 
 use std::collections::HashMap;
 
-use crate::api::{Agent, Harness, Pane, Session, Zellij};
+use crate::api::session::Mux;
+use crate::api::{agent, Agent, Harness, Pane, Session, Zellij};
 
 /// The agent in each pane, by its session and the pane's id. A pane holds one:
 /// the agent started at a prompt, or else the one that started first. An
 /// agent is in the session the daemon follows its pane to, or, where the
-/// daemon cannot tell, the one `found` finds.
+/// daemon cannot tell, the one `found` finds; or in an own pane, in the own
+/// session of its id.
 #[must_use]
 pub fn seated<'a>(
     agents: &'a [Agent],
@@ -17,11 +19,16 @@ pub fn seated<'a>(
 ) -> HashMap<(&'a str, u32), &'a Agent> {
     let mut seated: HashMap<(&str, u32), &Agent> = HashMap::new();
     for agent in agents {
-        let Some(zellij) = agent.zellij() else {
-            continue;
+        let seat = match &agent.pane {
+            Some(agent::Pane::Zellij(zellij)) => zellij
+                .session
+                .as_deref()
+                .or_else(|| found(agent, zellij, sessions))
+                .map(|session| (session, zellij.pane)),
+            Some(agent::Pane::Own(own)) => owned(own.session, sessions).map(|at| (at, own.pane)),
+            None => None,
         };
-        let Some(session) = zellij.session.as_deref().or_else(|| found(agent, zellij, sessions))
-        else {
+        let Some((session, pane)) = seat else {
             continue;
         };
         let rank = |agent: &Agent| {
@@ -29,7 +36,7 @@ pub fn seated<'a>(
             (!agent.at_a_prompt(), started)
         };
         seated
-            .entry((session, zellij.pane))
+            .entry((session, pane))
             .and_modify(|seat| {
                 if rank(agent) < rank(seat) {
                     *seat = agent;
@@ -38,6 +45,12 @@ pub fn seated<'a>(
             .or_insert(agent);
     }
     seated
+}
+
+/// The name of the own session of id `id`, where one runs.
+fn owned(id: u64, sessions: &[Session]) -> Option<&str> {
+    let own = |session: &&Session| matches!(&session.mux, Some(Mux::Own(own)) if own.id == id);
+    sessions.iter().find(own).map(|session| session.name.as_str())
 }
 
 /// The session of an agent the daemon cannot follow to one, as it cannot one

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::SystemTime;
 
 use tokio::sync::{oneshot, watch};
 use tonic::Status;
@@ -64,6 +65,9 @@ struct Ids {
 
 struct Session {
     id: SessionId,
+    /// When the server made it, which `id` tells it from the sessions of
+    /// every other server by.
+    made: SystemTime,
     name: Name,
     tabs: Tabs,
     last_typed: Option<ClientId>,
@@ -177,7 +181,8 @@ impl Mux {
             let tab = model.tab(self, session, Name::numbered(1), opens)?;
             let ids = (session, tab.id, tab.pane.id);
             let tabs = Tabs::one(tab);
-            model.sessions.push(Session { id: session, name, tabs, last_typed: None });
+            let made = SystemTime::now();
+            model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
             Ok(ids)
         })
     }
@@ -610,6 +615,7 @@ impl Model {
             name: session.name.as_str().to_owned(),
             tabs: session.tabs.iter().map(|tab| self.tab_said(tab)).collect(),
             current_tab: session.tabs.current().id.said(),
+            made_at: Some(session.made.into()),
         });
         api::Listing { sessions: sessions.collect() }
     }

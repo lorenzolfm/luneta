@@ -9,6 +9,8 @@ syntax = "proto3";
 
 package luneta.mux.v1;
 
+import "google/protobuf/timestamp.proto";
+
 service Mux {
   // Makes a session of one tab.
   rpc NewSession(NewSessionRequest) returns (NewSessionResponse);
@@ -168,6 +170,10 @@ message Session {
   // The tab a client coming to the session goes to: the one a client was last
   // on, or else the first.
   uint32 current_tab = 4;
+  // When the server made it, by its machine's clock. With `id`, it tells the
+  // session from those of every other server, which count their ids from 1
+  // again. Always there.
+  google.protobuf.Timestamp made_at = 5;
 }
 
 message Tab {

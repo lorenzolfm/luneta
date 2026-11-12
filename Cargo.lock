@@ -1395,6 +1395,7 @@ dependencies = [
  "libghostty-vt-sys",
  "percent-encoding",
  "prost",
+ "prost-types",
  "rustix",
  "tempfile",
  "tokio",

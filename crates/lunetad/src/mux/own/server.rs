@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
@@ -268,6 +268,8 @@ fn clients(session: &api::Session) -> Result<Listed, String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listing {
     pub id: OwnId,
+    /// When its server made it.
+    pub made: SystemTime,
     pub name: SessionName,
     /// Its panes, as luneta lays a session's out.
     pub laid: Vec<Laid>,
@@ -297,8 +299,11 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
     if before.iter().any(|listed| listed.id == id || listed.name == name) {
         return Err(format!("own session {id}, {name}, has the id or the name of another"));
     }
+    let made = session.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
+    let made = SystemTime::try_from(made)
+        .map_err(|why| format!("own session {id}'s made_at: {why}"))?;
     let clients = clients(session).map_err(|why| format!("own session {id}'s clients: {why}"))?;
-    Ok(Listing { id, name, laid: laid(session), clients })
+    Ok(Listing { id, made, name, laid: laid(session), clients })
 }
 
 /// Follows the own sessions: has `told` hear them as the server lists them
@@ -677,13 +682,14 @@ mod tests {
             clients,
         };
         let tab = api::Tab { id: 4, name: "Tab #1".to_owned(), panes: vec![pane] };
-        api::Session { id, name: name.to_owned(), tabs: vec![tab], current_tab: 4 }
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        api::Session { id, name: name.to_owned(), tabs: vec![tab], current_tab: 4, made_at }
     }
 
     /// What the server lists that does not read is left out, a session at a
     /// time, with why: an id of 0, a name no session takes, an id or a name
-    /// another has, and a client numbered past luneta's clients or on two
-    /// panes. The rest reads.
+    /// another has, no time it was made, and a client numbered past luneta's
+    /// clients or on two panes. The rest reads.
     #[test]
     fn a_session_listed_that_does_not_read_is_left_out_alone() {
         let mut twice = session(6, "twice", &[1]);
@@ -696,6 +702,7 @@ mod tests {
             session(1, "again", &[]),
             session(3, "work", &[]),
             session(4, "past", &[u64::from(u32::MAX) + 1]),
+            api::Session { made_at: None, ..session(7, "unmade", &[]) },
             twice,
             session(5, "fine", &[]),
         ];
@@ -703,8 +710,9 @@ mod tests {
         let read: Vec<(u64, &str)> =
             listed.iter().map(|listed| (listed.id.get(), listed.name.as_str())).collect();
         assert_eq!(read, [(1, "work"), (5, "fine")]);
-        assert_eq!(unread.len(), 6, "{unread:?}");
+        assert_eq!(unread.len(), 7, "{unread:?}");
         let work = &listed[0];
+        assert_eq!(work.made, SystemTime::UNIX_EPOCH + Duration::from_secs(60));
         assert_eq!(work.clients.to_vec(), [Client { id: 2, pane: PaneId::Terminal(7) }]);
         assert_eq!(work.laid[0].tab_id, TabId(4));
         assert_eq!(work.laid[0].cwd.as_ref().map(Said::as_str), Some("/w"));

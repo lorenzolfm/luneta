@@ -48,6 +48,7 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
+use lunetad::closes::Whose;
 use lunetad::mux::{Client, PaneId, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
@@ -826,16 +827,17 @@ fn plans_in(
 ) -> Result<Vec<Plan>, String> {
     let named = session_named(session)?;
     let owned = || named.clone();
+    let whose = Whose::Zellij(started);
     let acts = match wanted {
-        Wanted::Session => vec![Act::Kill { session: owned(), started }],
+        Wanted::Session => vec![Act::Kill { session: owned(), whose }],
         Wanted::Panes(panes) => match zellij::closes_together(&named, panes)? {
-            Closing::Session => vec![Act::Kill { session: owned(), started }],
+            Closing::Session => vec![Act::Kill { session: owned(), whose }],
             Closing::Parts { tabs, panes } => {
                 let tabs = tabs
                     .into_iter()
-                    .map(|(tab, panes)| Act::Tab { session: owned(), started, tab, panes });
+                    .map(|(tab, panes)| Act::Tab { session: owned(), whose, tab, panes });
                 let panes =
-                    panes.into_iter().map(|pane| Act::Pane { session: owned(), started, pane });
+                    panes.into_iter().map(|pane| Act::Pane { session: owned(), whose, pane });
                 tabs.chain(panes).collect()
             },
         },
@@ -922,14 +924,12 @@ fn ending(act: &Act, agents: &[Agent], unread: &[UnreadFile], here: Option<&Pane
 /// Has zellij do `act`.
 fn act(act: &Act) -> Result<(), String> {
     match act {
-        Act::Pane { session, started, pane } => {
-            zellij::closed(session, *started, &Close::Pane(*pane))
+        Act::Pane { session, whose, pane } => whose.closed(session, &Close::Pane(*pane)),
+        Act::Tab { session, whose, tab, panes } => {
+            whose.closed(session, &Close::Tab { id: *tab, panes: panes.clone() })
         },
-        Act::Tab { session, started, tab, panes } => {
-            zellij::closed(session, *started, &Close::Tab { id: *tab, panes: panes.clone() })
-        },
-        Act::Kill { session, started } | Act::Leave { session, started, .. } => {
-            zellij::killed(session, *started)
+        Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
+            whose.killed(session)
         },
     }
 }

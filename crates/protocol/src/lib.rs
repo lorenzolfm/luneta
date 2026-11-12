@@ -62,6 +62,20 @@ impl v1::Agent {
     }
 }
 
+impl v1::Session {
+    /// When it started, by its multiplexer: when zellij's server made its
+    /// socket, or the own server made it. None where its daemon says neither.
+    #[must_use]
+    pub fn started(&self) -> Option<std::time::SystemTime> {
+        let at = match &self.mux {
+            Some(v1::session::Mux::Zellij(zellij)) => zellij.started_at,
+            Some(v1::session::Mux::Own(own)) => own.made_at,
+            None => self.started_at,
+        };
+        std::time::SystemTime::try_from(at?).ok()
+    }
+}
+
 impl v1::Harness {
     /// Its word for the agent a person talks to at a prompt.
     #[must_use]

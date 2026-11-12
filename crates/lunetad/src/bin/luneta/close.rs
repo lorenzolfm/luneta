@@ -12,11 +12,11 @@
 //! one: luneta goes on in another machine's, or ends where none has one.
 
 use std::fmt;
-use std::time::SystemTime;
 
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
+use lunetad::closes::Whose;
 use lunetad::mux::TabId;
 
 use crate::sidebar::{Listed, Place};
@@ -149,21 +149,21 @@ pub struct Subject<'a> {
 /// What a delete key asks zellij for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// Close a pane of the session that started at `started`.
-    Pane { session: SessionName, started: SystemTime, pane: u32 },
-    /// Close a tab of the session that started at `started`, by its id, and the
-    /// terminals in it, the floating ones too.
-    Tab { session: SessionName, started: SystemTime, tab: TabId, panes: Vec<u32> },
-    /// Kill the session that started at `started`, and delete it, so that
+    /// Close a pane of the session `whose` says.
+    Pane { session: SessionName, whose: Whose, pane: u32 },
+    /// Close a tab of the session `whose` says, by its id, and the terminals
+    /// in it, the floating ones too.
+    Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
+    /// Kill the session `whose` says, and delete it, so that
     /// zellij keeps nothing to bring it back with. A key plans it for a
     /// session luneta's zellij is not in, or for its machine's only one,
     /// which luneta's zellij ends with, to go on in another machine's, or
     /// with luneta, where none has one; `luneta close` for any, as a client
     /// that ends with its session goes on in another.
-    Kill { session: SessionName, started: SystemTime },
+    Kill { session: SessionName, whose: Whose },
     /// Take luneta's zellij to `to`, and kill and delete `session`, which it
-    /// is in, the one that started at `started`, once it has left.
-    Leave { session: SessionName, started: SystemTime, to: Place },
+    /// is in, the one `whose` says, once it has left.
+    Leave { session: SessionName, whose: Whose, to: Place },
 }
 
 impl Act {
@@ -205,19 +205,19 @@ pub struct Plan {
 /// client, where it is its machine's only one; and none goes while luneta
 /// cannot tell which session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
-    let (session, started) = (subject.session.name().clone(), subject.session.started());
+    let (session, whose) = (subject.session.name().clone(), subject.session.whose());
     let act = match &subject.deletes {
         Deletes::Pane { pane, closes: Closes::Pane } => {
-            Act::Pane { session, started, pane: *pane }
+            Act::Pane { session, whose, pane: *pane }
         },
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
-            Act::Tab { session, started, tab: *id, panes: panes.clone() }
+            Act::Tab { session, whose, tab: *id, panes: panes.clone() }
         },
         Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
-            Seat::Elsewhere => Act::Kill { session, started },
+            Seat::Elsewhere => Act::Kill { session, whose },
             Seat::In => match subject.refuge.clone() {
-                Some(to) => Act::Leave { session, started, to },
-                None => Act::Kill { session, started },
+                Some(to) => Act::Leave { session, whose, to },
+                None => Act::Kill { session, whose },
             },
             Seat::Moving => return Err(MOVING.to_owned()),
         },
@@ -311,7 +311,7 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use super::*;
 
@@ -346,18 +346,18 @@ mod tests {
         let planned = |seat: Seat, deletes: Deletes| {
             plan(&subject(&luneta, seat, deletes, Vec::new())).map(|plan| plan.act)
         };
-        let (session, started) = (luneta.name().clone(), luneta.started());
+        let (session, whose) = (luneta.name().clone(), luneta.whose());
         assert_eq!(
             planned(Seat::In, pane(Closes::Pane)),
-            Ok(Act::Pane { session: session.clone(), started, pane: 4 })
+            Ok(Act::Pane { session: session.clone(), whose, pane: 4 })
         );
         assert_eq!(
             planned(Seat::In, pane(tab)),
-            Ok(Act::Tab { session: session.clone(), started, tab: TabId(3), panes: vec![4, 5] })
+            Ok(Act::Tab { session: session.clone(), whose, tab: TabId(3), panes: vec![4, 5] })
         );
-        let kill = Act::Kill { session: session.clone(), started };
+        let kill = Act::Kill { session: session.clone(), whose };
         assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), Ok(kill.clone()));
-        let leave = Act::Leave { session, started, to: elsewhere() };
+        let leave = Act::Leave { session, whose, to: elsewhere() };
         assert_eq!(planned(Seat::In, pane(Closes::Session)), Ok(leave.clone()));
         assert_eq!(planned(Seat::In, Deletes::Session), Ok(leave));
         assert_eq!(planned(Seat::Elsewhere, Deletes::Session), Ok(kill));
@@ -376,8 +376,8 @@ mod tests {
             let Ok(planned) = plan(&alone) else {
                 panic!("the only session is killed");
             };
-            let started = luneta.started();
-            assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), started });
+            let whose = luneta.whose();
+            assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), whose });
             let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
             assert_eq!(planned.question(), asks);
         }
@@ -394,8 +394,8 @@ mod tests {
             assert_eq!(planned.map(|plan| plan.act), Err(MOVING.to_owned()));
         }
         let planned = plan(&subject(&luneta, Seat::Moving, pane(Closes::Pane), Vec::new()));
-        let (session, started) = (luneta.name().clone(), luneta.started());
-        assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, started, pane: 4 }));
+        let (session, whose) = (luneta.name().clone(), luneta.whose());
+        assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, whose, pane: 4 }));
     }
 
     /// An idle agent or a shell goes without asking. A busy agent, one that
