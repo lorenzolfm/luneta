@@ -387,7 +387,7 @@ pub fn ended_away(destination: &Destination, seats: &[SessionName]) -> Result<En
                 let session = SessionName::running(&refuge.session).map_err(|why| {
                     format!("{destination}: lunetad went on in \"{}\": {why}", refuge.session)
                 })?;
-                Ok(Refuge { session, before: refuge.before })
+                Ok(Refuge { session, before: refuge.before, started: None })
             });
             Ok(Ended::Went(refuge.transpose()?))
         },
@@ -889,13 +889,6 @@ pub fn kill(
 /// The sessions that run, as `running_in` says of zellij's folder.
 pub fn running() -> Result<Vec<(SessionName, SystemTime)>, String> {
     running_in(&Zellij::socket_folder())
-}
-
-/// When `session`, of this machine's, started, as zellij's sockets say now:
-/// none where none runs by its name, or not all of zellij's folder reads.
-pub fn running_since(session: &SessionName) -> Option<SystemTime> {
-    let running = running().ok()?;
-    running.into_iter().find(|(name, _)| name == session).map(|(_, started)| started)
 }
 
 /// Does `after` on a thread of its own, now that luneta's client of an own

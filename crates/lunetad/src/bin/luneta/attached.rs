@@ -83,8 +83,9 @@ struct View {
 
 impl View {
     /// Takes in what the server said, but for what ends the client, which
-    /// luneta takes in itself.
-    fn heard(&mut self, heard: &Heard) {
+    /// luneta takes in itself; or says why it does not follow, as `framed`
+    /// says.
+    fn heard(&mut self, heard: &Heard) -> Result<(), String> {
         match heard {
             Heard::Went(went) => {
                 if self.went.is_none_or(|before| before.pane != went.pane) {
@@ -93,19 +94,22 @@ impl View {
                 }
                 self.went = Some(*went);
             },
-            Heard::Frame(frame) => self.framed(frame),
+            Heard::Frame(frame) => self.framed(frame)?,
             Heard::Attached | Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
         }
+        Ok(())
     }
 
     /// Takes in `frame`, where it is of the pane the client is on: the rows
     /// that changed of a frame of the size the last was, or all of them. One
-    /// of another pane, which the client left, is dropped, and so is one that
-    /// changes rows of none it had, which the server never sends. What was
-    /// selected of a frame of another size goes.
-    fn framed(&mut self, frame: &Frame) {
+    /// of another pane, which the client left, is dropped. One that changes
+    /// rows of none it had, or of a frame of another size, does not follow:
+    /// the server sends all the rows of a pane to a client new to it, or of
+    /// a size new to it, and the rows that changed of the last frame sent.
+    /// What was selected of a frame of another size goes.
+    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
         if self.went.is_none_or(|went| went.pane != frame.pane) {
-            return;
+            return Ok(());
         }
         let before = self.screen.take();
         let size = before.as_ref().map(|screen| screen.size);
@@ -119,8 +123,11 @@ impl View {
                 lines
             },
             (Rows::Changed(_), before) => {
+                let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
+                let had = before.as_ref().map_or_else(|| "none".to_owned(), |it| sides(it.size));
                 self.screen = before;
-                return;
+                let sides = sides(frame.size);
+                return Err(format!("a frame of {sides} changes the rows of {had}"));
             },
         };
         assert_eq!(lines.len(), usize::from(frame.size.rows.get()));
@@ -134,6 +141,7 @@ impl View {
             cursor: frame.cursor,
             tracks_mouse: frame.tracks_mouse,
         });
+        Ok(())
     }
 
     fn tracks_mouse(&self) -> bool {
@@ -247,60 +255,57 @@ impl Attached {
     }
 
     /// Takes in what the server said, but for what ends the client, which
-    /// luneta takes in itself.
+    /// luneta takes in itself. Where it does not follow what the client had,
+    /// luneta gives up on the client, which hears last that it is lost.
     pub fn heard(&mut self, heard: &Heard) {
-        self.view.heard(heard);
+        if let Err(why) = self.view.heard(heard) {
+            self.attach.give_up(format!("luneta-mux said what luneta cannot follow: {why}"));
+        }
     }
 
     /// Says the client is `columns` by `rows` now, where it was not: the pane
     /// takes the size of the client that last did anything in it.
-    pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) -> Result<(), String> {
+    pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {
         let size = Size::within(columns, rows);
         if size == self.size {
-            return Ok(());
+            return;
         }
         self.size = size;
-        self.send(to_server::Event::Resize(size.said()))
+        self.attach.send(to_server::Event::Resize(size.said()));
     }
 
     /// Sends the pane `key`, as you typed it: none of a key the server has no
     /// name for. What was selected goes.
-    pub fn key(&mut self, key: &KeyEvent) -> Result<(), String> {
+    pub fn key(&mut self, key: &KeyEvent) {
         self.view.unselect();
-        match key_said(key) {
-            Some(key) => self.send(to_server::Event::Key(key)),
-            None => Ok(()),
+        if let Some(key) = key_said(key) {
+            self.attach.send(to_server::Event::Key(key));
         }
     }
 
     /// Pastes `text` in the pane. What was selected goes.
-    pub fn paste(&mut self, text: &str) -> Result<(), String> {
+    pub fn paste(&mut self, text: &str) {
         self.view.unselect();
-        self.send(to_server::Event::Paste(api::Paste { text: text.to_owned() }))
+        self.attach.send(to_server::Event::Paste(api::Paste { text: text.to_owned() }));
     }
 
     /// Tells the pane its window took the focus, or lost it.
-    pub fn focus(&self, focused: bool) -> Result<(), String> {
-        self.send(to_server::Event::Focus(api::Focus { focused }))
+    pub fn focus(&self, focused: bool) {
+        self.attach.send(to_server::Event::Focus(api::Focus { focused }));
     }
 
     /// Takes the client to `to`.
-    pub fn go(&self, to: To) -> Result<(), String> {
-        self.send(to_server::Event::Go(to.said()))
+    pub fn go(&self, to: To) {
+        self.attach.send(to_server::Event::Go(to.said()));
     }
 
     /// Sends the pane what the mouse did at `at`, of its cells. The wheel
     /// goes to the server, which scrolls the client back where the program
     /// does not take the mouse.
-    pub fn mouse(&self, mouse: MouseEvent, at: Spot) -> Result<(), String> {
-        match mouse_said(mouse, at) {
-            Some(mouse) => self.send(to_server::Event::Mouse(mouse)),
-            None => Ok(()),
+    pub fn mouse(&self, mouse: MouseEvent, at: Spot) {
+        if let Some(mouse) = mouse_said(mouse, at) {
+            self.attach.send(to_server::Event::Mouse(mouse));
         }
-    }
-
-    fn send(&self, event: to_server::Event) -> Result<(), String> {
-        self.attach.send(event)
     }
 
     /// Whether a press of `mouse` selects, rather than goes to the pane: the
@@ -426,15 +431,14 @@ fn text(screen: &Screen, selection: Selection) -> String {
 
 /// The style a glyph is drawn in: the colours a terminal names are left for
 /// luneta's terminal to choose, as its theme does, as `hosted` leaves them.
+/// Each colour is one a terminal has, as `attach` read it at the edge.
 fn styled(style: &api::Style) -> Style {
     let colour = |colour: &Option<api::Colour>| {
-        let part = |part: u32| u8::try_from(part).unwrap_or(u8::MAX);
+        let byte = |value: u32| u8::try_from(value).expect("a colour's bytes read at the edge");
         match colour.as_ref().and_then(|it| it.is.as_ref()) {
-            Some(api::colour::Is::Palette(index)) => {
-                u8::try_from(*index).map_or(Color::Reset, Color::Indexed)
-            },
+            Some(api::colour::Is::Palette(index)) => Color::Indexed(byte(*index)),
             Some(api::colour::Is::Rgb(rgb)) => {
-                Color::Rgb(part(rgb.red), part(rgb.green), part(rgb.blue))
+                Color::Rgb(byte(rgb.red), byte(rgb.green), byte(rgb.blue))
             },
             None => Color::Reset,
         }
@@ -713,7 +717,26 @@ mod tests {
         let line = Line::new(vec![narrow("a"), narrow("b")], false, side(2)).unwrap();
         let rows = Rows::Whole(vec![line]);
         let size = Size { columns: side(2), rows: side(1) };
-        view.heard(&Heard::Frame(Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false }));
+        let frame = Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false };
+        view.heard(&Heard::Frame(frame)).unwrap();
         assert_eq!(view.selection, None);
+    }
+
+    /// The rows that changed of a frame follow the last frame of its size: of
+    /// another size, or with none before, they do not, and what the client
+    /// had stays.
+    #[test]
+    fn changed_rows_follow_only_a_frame_of_their_size() {
+        let mut view = view(vec![vec![narrow("a"), narrow("b")]]);
+        let line = Line::new(vec![narrow("c")], false, side(1)).unwrap();
+        let rows = Rows::Changed(vec![(0, line.clone())]);
+        let size = Size { columns: side(1), rows: side(1) };
+        let frame = Frame { pane: 1, size, rows, cursor: None, tracks_mouse: false };
+        let why = view.heard(&Heard::Frame(frame.clone())).unwrap_err();
+        assert_eq!(why, "a frame of 1x1 changes the rows of 2x1");
+        assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("a"));
+        view.screen = None;
+        assert!(view.heard(&Heard::Frame(frame)).unwrap_err().ends_with("the rows of none"));
+        assert!(view.screen.is_none());
     }
 }

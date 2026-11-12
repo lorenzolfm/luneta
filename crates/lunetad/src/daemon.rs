@@ -638,7 +638,7 @@ impl Daemon for Host {
             // luneta's client is on another machine.
             moves::refuge(&sockets, &seats, moves::before)
         });
-        let refuge = |moves::Refuge { session, before }| api::Refuge {
+        let refuge = |moves::Refuge { session, before, .. }| api::Refuge {
             session: session.to_string(),
             before,
         };

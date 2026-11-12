@@ -32,17 +32,25 @@ pub fn named(name: &SessionName) -> Result<Option<OwnId>, String> {
     Ok(named.map(|own| own.id()))
 }
 
-/// The newest own session that runs, by when its server made it, and its
-/// name, but the one luneta runs in: none where none runs, or the server does
-/// not answer, which the log says.
-pub fn newest() -> Option<(OwnId, SystemTime, SessionName)> {
+/// An own session luneta can go on in, as `newest` finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Newest {
+    pub id: OwnId,
+    /// When its server made it.
+    pub made: SystemTime,
+}
+
+/// The newest own session that runs, by when its server made it, but the
+/// one luneta runs in: none where none runs, or the server does not answer,
+/// which the log says.
+pub fn newest() -> Option<Newest> {
     let sessions = server::sessions()
         .inspect_err(|failure| log::say(&format!("no own session to go on in: {failure}")))
         .ok()?;
     let held = holding();
     let free = sessions.into_iter().filter(|session| Some(session.id) != held);
     let newest = free.max_by_key(|session| (session.made, session.id))?;
-    Some((newest.id, newest.made, newest.name))
+    Some(Newest { id: newest.id, made: newest.made })
 }
 
 /// Has the daemon make an own session named `name`, whose tab starts in

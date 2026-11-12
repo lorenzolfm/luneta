@@ -99,7 +99,7 @@ use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::prune;
 use crate::own::{Before, Look, Looked};
-use crate::owns;
+use crate::own_sessions;
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -582,10 +582,9 @@ struct Own {
     /// leaves. A `Go` refused leaves it undone.
     after: Option<After>,
     /// Where luneta goes where the client is lost before it comes to any
-    /// session, as where no server runs, or it is refused.
-    fails: Fails,
-    /// Whether the server said where it is.
-    came: bool,
+    /// session, as where no server runs, or it is refused: none once the
+    /// server said where it is.
+    fails: Option<Fails>,
 }
 
 /// How a client luneta starts comes to its session.
@@ -1195,7 +1194,7 @@ fn run_in(
             sidebar.attaching(session);
             let hello = hello(To::Session(session), areas.1, colours);
             let attached = Attached::start(started, hello, &events);
-            Right::Own(Own { attached, after: None, fails: Fails::End, came: false })
+            Right::Own(Own { attached, after: None, fails: Some(Fails::End) })
         },
     };
     let own = matches!(right, Right::Own(_));
@@ -1347,6 +1346,31 @@ fn hello(to: To, area: Rect, colours: Colours) -> Hello {
     Hello { to, size: own_attach::Size::within(size.columns, size.lines), foreground, background }
 }
 
+/// Where luneta goes on in this machine, of its newest sessions that answer.
+enum Onward {
+    Zellij(Refuge),
+    Own(OwnId),
+}
+
+/// Where luneta goes on in this machine: in the newer of zellij's `refuge`
+/// and the newest own session, `own`, and in zellij's where both started at
+/// once. A zellij session of no start luneta read is taken for the older.
+/// None where neither runs.
+fn onward(refuge: Option<Refuge>, own: Option<own_sessions::Newest>) -> Option<Onward> {
+    match (refuge, own) {
+        (Some(refuge), Some(own)) => {
+            if refuge.started.is_some_and(|started| started >= own.made) {
+                Some(Onward::Zellij(refuge))
+            } else {
+                Some(Onward::Own(own.id))
+            }
+        },
+        (Some(refuge), None) => Some(Onward::Zellij(refuge)),
+        (None, Some(own)) => Some(Onward::Own(own.id)),
+        (None, None) => None,
+    }
+}
+
 /// luneta's first client, as `first` says, of which the sidebar hears; or
 /// why zellij's client cannot attach.
 fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, String> {
@@ -1367,7 +1391,7 @@ fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, Stri
             let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
             Ok(FirstClient::Zellij(zellij::rejoin(&session)?, Fails::End, arrival))
         },
-        First::Away(destination, Refuge { session, before }) => {
+        First::Away(destination, Refuge { session, before, .. }) => {
             let program = zellij::attach_away(&destination, &session)?;
             let machine = Machine::Remote(destination);
             let look = sidebar.swapping(&machine, &session);
@@ -2118,11 +2142,7 @@ impl App {
                     self.typed();
                 }
             },
-            Right::Own(own) => {
-                if let Err(why) = own.attached.key(key) {
-                    self.sidebar.notify(why);
-                }
-            },
+            Right::Own(own) => own.attached.key(key),
         }
     }
 
@@ -2131,11 +2151,7 @@ impl App {
     fn paste(&mut self, text: &str) {
         match &mut self.right {
             Right::Zellij(client) => client.hosted.send(keys::paste(text, client.hosted.mode())),
-            Right::Own(own) => {
-                if let Err(why) = own.attached.paste(text) {
-                    self.sidebar.notify(why);
-                }
-            },
+            Right::Own(own) => own.attached.paste(text),
         }
     }
 
@@ -2149,11 +2165,7 @@ impl App {
                     client.hosted.send(bytes);
                 }
             },
-            Right::Own(own) => {
-                if let Err(why) = own.attached.focus(has) {
-                    self.sidebar.notify(why);
-                }
-            },
+            Right::Own(own) => own.attached.focus(has),
         }
     }
 
@@ -2448,11 +2460,7 @@ impl App {
                     client.hosted.send(bytes);
                 }
             },
-            Right::Own(own) => {
-                if let Err(why) = own.attached.mouse(mouse, at) {
-                    self.sidebar.notify(why);
-                }
-            },
+            Right::Own(own) => own.attached.mouse(mouse, at),
         }
     }
 
@@ -2604,7 +2612,7 @@ impl App {
                 self.name(None, move || {
                     let (name, _, dir) = lunetad::names::free_at(starts)
                         .map_err(|why| format!("menu: no own session made: {why}"))?;
-                    let made = owns::made(&name, &dir);
+                    let made = own_sessions::made(&name, &dir);
                     Ok(Made::Own(made.map_err(|why| format!("menu: no own session made: {why}"))?))
                 });
                 self.leave();
@@ -3021,7 +3029,7 @@ impl App {
             Some(why) => Err(why),
             None => self.sidebar.own_target(place),
         };
-        let target = target.and_then(|(id, to)| match owns::refusal(id, session) {
+        let target = target.and_then(|(id, to)| match own_sessions::refusal(id, session) {
             Some(why) => Err(why),
             None => Ok((id, to)),
         });
@@ -3040,13 +3048,7 @@ impl App {
             self.attach(id, to, after, fails);
             return true;
         };
-        if let Err(why) = own.attached.go(to) {
-            self.sidebar.notify(why);
-            if let Some(after) = after {
-                after.untold(&self.events);
-            }
-            return false;
-        }
+        own.attached.go(to);
         if let Some(before) = std::mem::replace(&mut own.after, after) {
             before.untold(&self.events);
         }
@@ -3066,7 +3068,7 @@ impl App {
         if let Right::Zellij(client) = &self.right {
             self.drops.gave_way(client.started.elapsed());
         }
-        self.right = Right::Own(Own { attached, after, fails, came: false });
+        self.right = Right::Own(Own { attached, after, fails: Some(fails) });
         self.sidebar.attaching(session);
         // The client that takes its place heard no button go down over it.
         if matches!(self.held, Held::Zellij | Held::Selecting) {
@@ -3091,7 +3093,7 @@ impl App {
         match heard {
             Heard::Attached | Heard::Frame(_) => {},
             Heard::Went(went) => {
-                own.came = true;
+                own.fails = None;
                 let after = own.after.take();
                 self.sidebar.went_own(went.session, went.pane);
                 if let Some(after) = after {
@@ -3121,7 +3123,7 @@ impl App {
         let Right::Own(own) = &mut self.right else {
             unreachable!("only an own client ends so");
         };
-        let (came, fails) = (own.came, own.fails.clone());
+        let fails = own.fails.take();
         if let Some(after) = own.after.take() {
             after.untold(&self.events);
         }
@@ -3129,10 +3131,10 @@ impl App {
             return self.newest_here(&[]);
         };
         let note = format!("luneta's client of an own session: {why}");
-        if came {
+        let Some(fails) = fails else {
             self.sidebar.notify(note);
             return self.newest_here(&[]);
-        }
+        };
         match fails.failed(&Machine::Local) {
             Failed::Back(back) => {
                 self.sidebar.notify(note);
@@ -3431,9 +3433,7 @@ impl App {
             self.attach(id, to, None, fails);
             return;
         };
-        if let Err(why) = own.attached.go(to) {
-            self.sidebar.notify(why);
-        }
+        own.attached.go(to);
     }
 
     /// Takes zellij's client to a session zellij makes on the machine of
@@ -3712,8 +3712,9 @@ impl App {
     /// zellij's client ended. Where it ended well, and its session with it, as
     /// zellij quits, the session's last pane exits, or the session is killed,
     /// a client of the newest session that answers takes its place, and
-    /// luneta goes on: of an own session newer than zellij's, or of another
-    /// machine's, as `newest_away` finds it, where none of this one's does. luneta ends where none does, and where the
+    /// luneta goes on: of an own session newer than zellij's, as `onward`
+    /// says, or of another machine's, as `newest_away` finds it, where none
+    /// of this one's does. luneta ends where none does, and where the
     /// client detached, or failed, as where zellij cannot attach; but one
     /// that took the place of a client on another machine goes back there
     /// where it failed, and the notes say what it said. A client on another
@@ -3762,22 +3763,13 @@ impl App {
                 return Ok(());
             },
         };
-        let own = owns::newest();
-        let newer = |own: &(OwnId, SystemTime, SessionName), refuge: &Refuge| {
-            zellij::running_since(&refuge.session).is_none_or(|started| own.1 > started)
-        };
-        let refuge = match (refuge, own) {
-            (Some(refuge), Some(own)) if newer(&own, &refuge) => Err(own.0),
-            (Some(refuge), _) => Ok(refuge),
-            (None, Some(own)) => Err(own.0),
-            (None, None) => return self.newest_away(&[]),
-        };
-        let Refuge { session: to, before } = match refuge {
-            Ok(refuge) => refuge,
-            Err(id) => {
+        let Refuge { session: to, before, .. } = match onward(refuge, own_sessions::newest()) {
+            Some(Onward::Zellij(refuge)) => refuge,
+            Some(Onward::Own(id)) => {
                 self.attach(id, To::Session(id), None, Fails::End);
                 return Ok(());
             },
+            None => return self.newest_away(&[]),
         };
         let hosted = match self.start_of(&Machine::Local, Joins::Attach(&to)) {
             Ok(hosted) => hosted,
@@ -3849,7 +3841,7 @@ impl App {
         // there yet.
         fails.came_in();
         match refuge {
-            Some(Refuge { session, before }) => {
+            Some(Refuge { session, before, .. }) => {
                 let joins = Joins::Attach(&session);
                 self.go_on(&on, joins, Before::Listed(before), fails)
             },
@@ -3949,28 +3941,19 @@ impl App {
     /// Has a client of this machine's newest session that answers take the
     /// place of the client that ended, as one of another machine's: of the
     /// newer of zellij's newest and the newest own session, which never
-    /// holds luneta, as `owns::newest` says; or of another machine's but
+    /// holds luneta, as `own_sessions::newest` says; or of another machine's but
     /// those `tried`, as `newest_away` says, where none does.
     fn newest_here(&mut self, tried: &[Destination]) -> io::Result<()> {
-        let own = owns::newest();
-        let refuge = zellij::newest();
-        let zellij_newer = |refuge: &Refuge, (_, made, _): &(OwnId, SystemTime, SessionName)| {
-            zellij::running_since(&refuge.session).is_some_and(|started| started >= *made)
-        };
-        match (refuge, own) {
-            (Some(refuge), Some(own)) if !zellij_newer(&refuge, &own) => {
-                self.attach(own.0, To::Session(own.0), None, Fails::End);
-                Ok(())
-            },
-            (Some(Refuge { session, before }), _) => {
+        match onward(zellij::newest(), own_sessions::newest()) {
+            Some(Onward::Zellij(Refuge { session, before, .. })) => {
                 let joins = Joins::Attach(&session);
                 self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
             },
-            (None, Some((id, ..))) => {
+            Some(Onward::Own(id)) => {
                 self.attach(id, To::Session(id), None, Fails::End);
                 Ok(())
             },
-            (None, None) => self.newest_away(tried),
+            None => self.newest_away(tried),
         }
     }
 
@@ -3983,7 +3966,7 @@ impl App {
     /// ends where no machine has one, and where it does not reach lunetad to
     /// ask; the log says why it passed each machine over.
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
-        let Sought::Found(destination, Refuge { session, before }) =
+        let Sought::Found(destination, Refuge { session, before, .. }) =
             starts::away(&self.sidebar, tried, away::QUICK)
         else {
             self.end("no machine has a session to go on in");
@@ -4121,9 +4104,7 @@ impl App {
                 },
                 Right::Own(own) => {
                     let size = window(zellij);
-                    if let Err(why) = own.attached.resize(size.columns, size.lines) {
-                        self.sidebar.notify(why);
-                    }
+                    own.attached.resize(size.columns, size.lines);
                 },
             }
             let buffer = frame.buffer_mut();
@@ -4316,6 +4297,34 @@ mod tests {
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
+
+    /// luneta goes on in the newer of zellij's newest session and the newest
+    /// own one, in zellij's where they started at once, and in the own one
+    /// where it did not read when zellij's started.
+    #[test]
+    fn luneta_goes_on_in_the_newer_of_zellij_s_and_the_own_newest() {
+        let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let refuge = |started: Option<u64>| Refuge {
+            session: SessionName::running("work").unwrap(),
+            before: Vec::new(),
+            started: started.map(at),
+        };
+        let id = OwnId::new(4).unwrap();
+        let own = |made| own_sessions::Newest { id, made: at(made) };
+        let went = |refuge, own| match onward(refuge, own) {
+            Some(Onward::Zellij(refuge)) => Some(Err(refuge.session.to_string())),
+            Some(Onward::Own(id)) => Some(Ok(id)),
+            None => None,
+        };
+        let zellij = Some(Err("work".to_owned()));
+        assert_eq!(went(Some(refuge(Some(20))), Some(own(10))), zellij);
+        assert_eq!(went(Some(refuge(Some(10))), Some(own(10))), zellij);
+        assert_eq!(went(Some(refuge(Some(10))), Some(own(20))), Some(Ok(id)));
+        assert_eq!(went(Some(refuge(None)), Some(own(0))), Some(Ok(id)));
+        assert_eq!(went(Some(refuge(None)), None), zellij);
+        assert_eq!(went(None, Some(own(0))), Some(Ok(id)));
+        assert_eq!(went(None, None), None);
+    }
 
     /// A terminal takes what it is to copy as base64, on the clipboard or the
     /// primary selection as the letter says.

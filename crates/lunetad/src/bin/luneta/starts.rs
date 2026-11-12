@@ -36,7 +36,7 @@ use crate::away::ANSWER;
 use crate::ledger::Session;
 use crate::machines;
 use crate::news::News;
-use crate::owns;
+use crate::own_sessions;
 use crate::sidebar::{NoRefuge, Sidebar};
 use crate::zellij::{self, Refuge, SessionName};
 
@@ -95,15 +95,15 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<Start, String> {
     if running.iter().any(|(name, _)| name == named) {
         return Err(format!("{named} is a session of zellij's: name another for an own one"));
     }
-    let session = if let Some(session) = owns::named(named)? {
+    let session = if let Some(session) = own_sessions::named(named)? {
         session
     } else {
         let unread = || format!("{} is no directory an own session starts in", dir.display());
         let cwd = dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok());
         let cwd = cwd.ok_or_else(unread)?;
-        owns::made(named, &cwd).map_err(|why| format!("no own session made: {why}"))?
+        own_sessions::made(named, &cwd).map_err(|why| format!("no own session made: {why}"))?
     };
-    if let Some(refusal) = owns::refusal(session, named) {
+    if let Some(refusal) = own_sessions::refusal(session, named) {
         return Err(refusal);
     }
     Ok(Start::Now(First::Own(session)))

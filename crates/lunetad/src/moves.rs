@@ -29,6 +29,9 @@ const SEEKING: Duration = Duration::from_secs(1);
 pub struct Refuge {
     pub session: SessionName,
     pub before: Vec<api::Client>,
+    /// When it started, as its socket said where it was sought among this
+    /// machine's: none where it was not, as of another machine's.
+    pub started: Option<SystemTime>,
 }
 
 /// What became of the session of a client that ended.
@@ -90,7 +93,8 @@ fn sought(
     running: Vec<(SessionName, SystemTime)>,
     clients: &mut impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
-    answering(refuges(running), clients)
+    let running = refuges(running).into_iter().map(|(session, started)| (session, Some(started)));
+    answering_since(running, clients)
 }
 
 /// What `refuge`'s `clients` answers for `session` on this machine: every row
@@ -112,12 +116,21 @@ pub fn answering(
     sessions: impl IntoIterator<Item = SessionName>,
     mut clients: impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
 ) -> Option<Refuge> {
+    answering_since(sessions.into_iter().map(|session| (session, None)), &mut clients)
+}
+
+/// The first of `sessions` that `clients` answers for, as `answering` says,
+/// each with when it started, if known.
+fn answering_since(
+    sessions: impl IntoIterator<Item = (SessionName, Option<SystemTime>)>,
+    clients: &mut impl FnMut(&SessionName) -> Option<Vec<api::Client>>,
+) -> Option<Refuge> {
     let seeking = Instant::now() + SEEKING;
-    let sessions = sessions.into_iter().filter(Zellij::attaches_to);
+    let sessions = sessions.into_iter().filter(|(session, _)| Zellij::attaches_to(session));
     let mut sessions = sessions.take_while(|_| Instant::now() < seeking);
-    sessions.find_map(|session| {
+    sessions.find_map(|(session, started)| {
         let before = clients(&session)?;
-        Some(Refuge { session, before })
+        Some(Refuge { session, before, started })
     })
 }
 
@@ -131,11 +144,11 @@ fn gone(seats: &[SessionName], running: &[(SessionName, SystemTime)]) -> bool {
     seats.iter().any(|seat| running.iter().all(|(name, _)| name != seat))
 }
 
-/// The names of `running` that a client can go on in, newest first, by when
+/// `running`, the sessions a client can go on in, newest first, by when
 /// each started and then by name, as the picker lists them.
-fn refuges(mut running: Vec<(SessionName, SystemTime)>) -> Vec<SessionName> {
+fn refuges(mut running: Vec<(SessionName, SystemTime)>) -> Vec<(SessionName, SystemTime)> {
     running.sort_by(|(a, a_at), (b, b_at)| (b_at, b).cmp(&(a_at, a)));
-    running.into_iter().map(|(name, _)| name).collect()
+    running
 }
 
 #[cfg(test)]
@@ -151,7 +164,8 @@ mod tests {
         let name = |name: &str| SessionName::running(name).unwrap();
         let running = [("b", at(2)), ("c", at(1)), ("a", at(2))];
         let running = running.map(|(it, started)| (name(it), started)).to_vec();
-        assert_eq!(refuges(running), ["b", "a", "c"].map(name));
+        let sought = [("b", at(2)), ("a", at(2)), ("c", at(1))];
+        assert_eq!(refuges(running), sought.map(|(it, started)| (name(it), started)));
         assert_eq!(refuges(Vec::new()), []);
     }
 

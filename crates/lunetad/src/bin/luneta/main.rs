@@ -44,7 +44,7 @@ mod named;
 mod news;
 mod order;
 mod own;
-mod owns;
+mod own_sessions;
 mod peers;
 mod picker;
 mod printed;

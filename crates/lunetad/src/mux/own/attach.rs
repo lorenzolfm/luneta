@@ -4,15 +4,18 @@
 //! waits on the stream, and hands on what the server says as it comes.
 //!
 //! What the server says is read here, at the edge: a frame whose rows do not
-//! add up to its size, or a word that names no session or pane, ends the
-//! client, as a server that says them is not one luneta can follow.
+//! add up to its size, a colour no terminal has, or a word that names no
+//! session or pane, ends the client, as a server that says them is not one
+//! luneta can follow. The client hears one last word, however it ends.
 
 use std::num::NonZeroU16;
+use std::pin::pin;
 use std::thread;
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tonic::Status;
 
 use super::api::{self, to_client, to_server};
 use super::server::{connect, refused, runtime, socket};
@@ -189,7 +192,8 @@ impl Line {
     }
 }
 
-/// `glyph`, or why it does not read.
+/// `glyph`, or why it does not read: no grapheme, one that writes more than
+/// itself, or a style of a colour no terminal has.
 fn glyph(glyph: api::Glyph) -> Result<Glyph, String> {
     let grapheme = |grapheme: String| {
         if grapheme.is_empty() {
@@ -205,7 +209,28 @@ fn glyph(glyph: api::Glyph) -> Result<Glyph, String> {
         api::glyph::Shows::Narrow(api::Narrow { grapheme: it }) => Shows::Narrow(grapheme(it)?),
         api::glyph::Shows::Wide(api::Wide { grapheme: it }) => Shows::Wide(grapheme(it)?),
     };
+    if let Some(style) = &glyph.style {
+        let colours = [&style.foreground, &style.background, &style.underline_colour];
+        for colour in colours.into_iter().flatten() {
+            colour_heard(colour)?;
+        }
+    }
     Ok(Glyph { shows, style: glyph.style })
+}
+
+/// Why `colour` does not read, if it does not: it is none, or of a palette
+/// entry past the 256 a terminal has, or of a part past 255.
+fn colour_heard(colour: &api::Colour) -> Result<(), String> {
+    let byte = |value: u32| u8::try_from(value).is_ok();
+    let reads = match colour.is.as_ref().ok_or("a colour is none")? {
+        api::colour::Is::Palette(index) => byte(*index),
+        api::colour::Is::Rgb(rgb) => byte(rgb.red) && byte(rgb.green) && byte(rgb.blue),
+    };
+    if reads {
+        Ok(())
+    } else {
+        Err(format!("the colour {colour:?} is of none a terminal has"))
+    }
 }
 
 /// The rows a frame has.
@@ -214,7 +239,7 @@ pub enum Rows {
     /// Each of the pane's, from the top.
     Whole(Vec<Line>),
     /// Those that changed since the last frame of the pane, each by its
-    /// index, from 0 at the top.
+    /// index, from 0 at the top, and each once.
     Changed(Vec<(u16, Line)>),
 }
 
@@ -251,7 +276,7 @@ pub struct Frame {
 
 impl Frame {
     /// `frame`, or why it does not read: a size out of bounds, rows that are
-    /// not the size's, or a cursor off them.
+    /// not the size's, a row changed twice, or a cursor off them.
     fn heard(frame: api::Frame) -> Result<Frame, String> {
         let size = Size::heard(frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
@@ -263,9 +288,13 @@ impl Frame {
                 Rows::Whole(lines.collect::<Result<_, _>>()?)
             },
             api::frame::Rows::Changed(api::Changed { rows }) => {
+                let mut changed = vec![false; usize::from(size.rows.get())];
                 let row = |row: api::Row| {
                     let index = u16::try_from(row.index).ok().filter(|it| *it < size.rows.get());
                     let index = index.ok_or_else(|| format!("a frame has no row {}", row.index))?;
+                    if std::mem::replace(&mut changed[usize::from(index)], true) {
+                        return Err(format!("a frame changes row {index} twice"));
+                    }
                     Ok((index, Line::heard(row.line, size.columns)?))
                 };
                 Rows::Changed(rows.into_iter().map(row).collect::<Result<_, String>>()?)
@@ -329,47 +358,73 @@ fn heard(said: api::ToClient) -> Result<Heard, String> {
 /// lets go of the session as it drops.
 pub struct Attach {
     said: mpsc::Sender<api::ToServer>,
+    /// Why luneta gave up on the client, which ends it: the first why alone.
+    giving_up: mpsc::Sender<String>,
 }
 
 impl Attach {
-    /// Sends the server `event`, or says why it did not: it has yet to take
-    /// the many sent before. Where the client is lost already, it goes
-    /// nowhere, as `Heard::Lost` says.
-    pub fn send(&self, event: to_server::Event) -> Result<(), String> {
+    /// Sends the server `event`. Where it has yet to take the `SAID_MAX` sent
+    /// before, luneta gives up on the client, as `give_up` says, rather than
+    /// drop what you did there and go on. Where the client is lost already,
+    /// it goes nowhere, as `Heard::Lost` says.
+    pub fn send(&self, event: to_server::Event) {
         match self.said.try_send(api::ToServer { event: Some(event) }) {
-            Ok(()) | Err(TrySendError::Closed(_)) => Ok(()),
+            Ok(()) | Err(TrySendError::Closed(_)) => {},
             Err(TrySendError::Full(_)) => {
-                Err(format!("luneta-mux has yet to take the last {SAID_MAX} events sent it"))
+                let why = format!("luneta-mux has yet to take the last {SAID_MAX} events sent it");
+                self.give_up(why);
             },
         }
+    }
+
+    /// Ends the client, for `why`, which it hears last, as lost. Of two whys,
+    /// the first stands.
+    pub fn give_up(&self, why: String) {
+        // Full, as luneta gave up already; or closed, as the client ended.
+        let _ = self.giving_up.try_send(why);
     }
 }
 
 /// A client of the own sessions, which says `hello` first: a thread of its
 /// own reaches the server, and has `told` hear what the server says, as it
-/// comes, until it says nothing more, as the last it hears says.
-pub fn attach(hello: Hello, mut told: impl FnMut(Heard) + Send + 'static) -> Attach {
+/// comes, until it says nothing more, as the last it hears says. Where no
+/// thread starts, `told` hears at once that the client is lost.
+pub fn attach<Told: FnMut(Heard) + Send + 'static>(hello: Hello, mut told: Told) -> Attach {
     let (said, saying) = mpsc::channel(SAID_MAX);
+    let (giving_up, given_up) = mpsc::channel(1);
+    // `told` goes to the thread once it runs, for luneta to have it still to
+    // tell where none does.
+    let (handing, handed) = std::sync::mpsc::sync_channel::<Told>(1);
     let attaching = move || {
+        let mut told = handed.recv().expect("`attach` hands its thread `told` as it starts");
         let last = match runtime() {
-            Ok(runtime) => runtime.block_on(attached(hello, saying, &mut told)),
+            Ok(runtime) => runtime.block_on(stream(hello, saying, given_up, &mut told)),
             Err(failure) => Heard::Lost(failure.to_string()),
         };
         told(last);
     };
-    let spawned = thread::Builder::new().name("luneta-mux client".to_owned()).spawn(attaching);
-    if let Err(error) = spawned {
-        // The sender drops with it, and the client never sends.
-        crate::log::say(&format!("no thread for a client of luneta-mux: {error}"));
+    match thread::Builder::new().name("luneta-mux client".to_owned()).spawn(attaching) {
+        Ok(_) => handing.send(told).expect("the thread waits on `told` before all else"),
+        Err(error) => told(Heard::Lost(format!("no thread for a client of luneta-mux: {error}"))),
     }
-    Attach { said }
+    Attach { said, giving_up }
+}
+
+/// What a client hears next: what the server said, or that it let go, or why
+/// luneta gave up on it.
+enum Next {
+    Said(Result<api::ToClient, Status>),
+    LetGo,
+    GaveUp(String),
 }
 
 /// The client: `hello`, then what comes on `saying`, to the server, and what
-/// the server says to `told`, but the last, which it gives back.
-async fn attached(
+/// the server says to `told`, but the last, which it gives back, until the
+/// server says no more or a why comes on `given_up`.
+async fn stream(
     hello: Hello,
     saying: mpsc::Receiver<api::ToServer>,
+    given_up: mpsc::Receiver<String>,
     told: &mut impl FnMut(Heard),
 ) -> Heard {
     let socket = match socket() {
@@ -382,15 +437,20 @@ async fn attached(
         Err(error) => return Heard::Lost(format!("{}: {error}", socket.display())),
     };
     let said = tokio_stream::once(hello.said()).chain(ReceiverStream::new(saying));
-    let mut hearing = match client.attach(said).await {
+    let hearing = match client.attach(said).await {
         Ok(hearing) => hearing.into_inner(),
         Err(status) => return Heard::Lost(refused(&status).to_string()),
     };
+    let hearing = hearing.map(Next::Said).chain(tokio_stream::once(Next::LetGo));
+    let mut next = pin!(hearing.merge(ReceiverStream::new(given_up).map(Next::GaveUp)));
     loop {
-        let said = match hearing.message().await {
-            Ok(Some(said)) => said,
-            Ok(None) => return Heard::Lost("luneta-mux let go of luneta's client".to_owned()),
-            Err(status) => return Heard::Lost(refused(&status).to_string()),
+        let said = match next.next().await {
+            Some(Next::Said(Ok(said))) => said,
+            Some(Next::Said(Err(status))) => return Heard::Lost(refused(&status).to_string()),
+            Some(Next::LetGo) | None => {
+                return Heard::Lost("luneta-mux let go of luneta's client".to_owned());
+            },
+            Some(Next::GaveUp(why)) => return Heard::Lost(why),
         };
         match heard(said) {
             Ok(Heard::Ended) => return Heard::Ended,
@@ -463,6 +523,13 @@ mod tests {
             ..frame(1, vec![row.clone()])
         };
         assert_eq!(Frame::heard(past).unwrap_err(), "a frame has no row 1");
+        let twice = |index| api::Row { index, line: Some(row.clone()) };
+        let changed = api::Changed { rows: vec![twice(0), twice(0)] };
+        let again = api::Frame {
+            rows: Some(api::frame::Rows::Changed(changed)),
+            ..frame(1, vec![row.clone()])
+        };
+        assert_eq!(Frame::heard(again).unwrap_err(), "a frame changes row 0 twice");
         let cursor = Some(api::Cursor { row: 0, column: 1, ..api::Cursor::default() });
         let off = api::Frame { cursor, ..frame(1, vec![row.clone()]) };
         assert_eq!(Frame::heard(off).unwrap_err(), "the cursor is off the frame, at 0:1");
@@ -471,6 +538,23 @@ mod tests {
         assert_eq!(Frame::heard(none).unwrap_err(), "a frame's columns are 0");
         let escape = api::Line { glyphs: vec![narrow("\u{1b}")], wraps_wide: false };
         assert!(Frame::heard(frame(1, vec![escape])).unwrap_err().contains("control character"));
+    }
+
+    /// A glyph's colours are of a palette entry of the 256, or of red, green
+    /// and blue of a byte each: any other does not read.
+    #[test]
+    fn a_glyph_of_a_colour_no_terminal_has_does_not_read() {
+        let coloured = |is| {
+            let foreground = Some(api::Colour { is });
+            let style = Some(api::Style { foreground, ..api::Style::default() });
+            glyph(api::Glyph { style, ..narrow("a") })
+        };
+        let rgb = |red| Some(api::colour::Is::Rgb(api::Rgb { red, green: 0, blue: 255 }));
+        assert!(coloured(Some(api::colour::Is::Palette(255))).is_ok());
+        assert!(coloured(rgb(255)).is_ok());
+        assert!(coloured(Some(api::colour::Is::Palette(256))).unwrap_err().contains("none a"));
+        assert!(coloured(rgb(256)).unwrap_err().contains("is of none a terminal has"));
+        assert_eq!(coloured(None).unwrap_err(), "a colour is none");
     }
 
     /// A client is never told it went to session 0 or pane 0, which name none.
