@@ -29,7 +29,6 @@ use crate::host::Event;
 /// What the client last had of the pane it is on: its frame's rows, and
 /// where its cursor is, and whether its program takes the mouse.
 struct Screen {
-    pane: u32,
     size: Size,
     lines: Vec<Line>,
     cursor: Option<Cursor>,
@@ -44,13 +43,24 @@ pub struct Spot {
 }
 
 /// What a drag over the pane selects: from the cell it went down on to the
-/// one it is over, which it shows lit, and copies as it lets go, once it
-/// has moved off the first. A selection of a pane the client left goes.
+/// one it is over, which it shows lit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
-    pane: u32,
     from: Spot,
     to: Spot,
+}
+
+/// What is selected of the pane the client is on, as it last showed: it goes
+/// as the client leaves the pane, or a frame of another size comes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Selected {
+    #[default]
+    Nothing,
+    /// The left button is down on it, and it follows the button.
+    Dragging(Selection),
+    /// The button let go of it once it had moved off its first cell, which
+    /// copied it, and it stays lit.
+    Held(Selection),
 }
 
 impl Selection {
@@ -76,9 +86,7 @@ impl Selection {
 struct View {
     went: Option<Went>,
     screen: Option<Screen>,
-    selection: Option<Selection>,
-    /// Whether the left button is down on the selection, which follows it.
-    selecting: bool,
+    selected: Selected,
 }
 
 impl View {
@@ -136,7 +144,6 @@ impl View {
             self.unselect();
         }
         self.screen = Some(Screen {
-            pane: frame.pane(),
             size: frame.size(),
             lines,
             cursor: frame.cursor(),
@@ -155,13 +162,11 @@ impl View {
             return;
         };
         let at = within(at, screen.size);
-        self.selection = Some(Selection { pane: screen.pane, from: at, to: at });
-        self.selecting = true;
+        self.selected = Selected::Dragging(Selection { from: at, to: at });
     }
 
     fn select_to(&mut self, at: Spot) {
-        let (Some(screen), Some(selection), true) =
-            (&self.screen, &mut self.selection, self.selecting)
+        let (Some(screen), Selected::Dragging(selection)) = (&self.screen, &mut self.selected)
         else {
             return;
         };
@@ -169,21 +174,21 @@ impl View {
     }
 
     fn selected(&mut self) -> Option<String> {
-        if !std::mem::take(&mut self.selecting) {
+        let Selected::Dragging(selection) = self.selected else {
             return None;
-        }
-        let selection = self.selection.filter(|selection| selection.from != selection.to);
-        let text = selection.and_then(|selection| Some(text(self.screen.as_ref()?, selection)));
+        };
+        let moved = Some(selection).filter(|selection| selection.from != selection.to);
+        let text = moved.and_then(|selection| Some(text(self.screen.as_ref()?, selection)));
         let text = text.filter(|text| !text.is_empty());
-        if text.is_none() {
-            self.selection = None;
-        }
+        self.selected = match text {
+            Some(_) => Selected::Held(selection),
+            None => Selected::Nothing,
+        };
         text
     }
 
     fn unselect(&mut self) {
-        self.selection = None;
-        self.selecting = false;
+        self.selected = Selected::Nothing;
     }
 
     fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
@@ -195,7 +200,10 @@ impl View {
             }
         }
         let screen = self.screen.as_ref()?;
-        let selection = self.selection.filter(|selection| selection.pane == screen.pane);
+        let selection = match self.selected {
+            Selected::Nothing => None,
+            Selected::Dragging(selection) | Selected::Held(selection) => Some(selection),
+        };
         for (row, line) in (0..area.height).zip(&screen.lines) {
             let mut column = 0;
             for glyph in line.glyphs() {
@@ -625,7 +633,7 @@ mod tests {
             .map(|glyphs| Line::new(glyphs, false, side(columns)).unwrap())
             .collect();
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
-        let screen = Screen { pane: 1, size, lines, cursor: None, tracks_mouse: false };
+        let screen = Screen { size, lines, cursor: None, tracks_mouse: false };
         let session = OwnKey { id: OwnId::new(1).unwrap(), made: SystemTime::UNIX_EPOCH };
         let went = Went { session, tab: 1, pane: 1 };
         View { went: Some(went), screen: Some(screen), ..View::default() }
@@ -646,7 +654,7 @@ mod tests {
             vec![narrow("c"), blank(), blank(), blank(), blank()],
         ]);
         let screen = view.screen.as_ref().unwrap();
-        let selection = |from, to| Selection { pane: 1, from, to };
+        let selection = |from, to| Selection { from, to };
         assert_eq!(text(screen, selection(spot(0, 1), spot(1, 0))), "b日\nc");
         assert_eq!(text(screen, selection(spot(1, 0), spot(0, 1))), "b日\nc");
         assert_eq!(text(screen, selection(spot(0, 3), spot(0, 3))), "日");
@@ -714,13 +722,13 @@ mod tests {
         view.select_from(spot(0, 0));
         view.select_to(spot(0, 9));
         assert_eq!(view.selected().as_deref(), Some("abc"));
-        assert!(view.selection.is_some());
+        assert!(matches!(view.selected, Selected::Held(_)));
         let line = Line::new(vec![narrow("a"), narrow("b")], false, side(2)).unwrap();
         let rows = Rows::Whole(vec![line]);
         let size = Size { columns: side(2), rows: side(1) };
         let frame = Frame::new(1, size, rows, None, false).unwrap();
         view.heard(&Heard::Frame(frame)).unwrap();
-        assert_eq!(view.selection, None);
+        assert_eq!(view.selected, Selected::Nothing);
     }
 
     /// The rows that changed of a frame follow the last frame of its size: of
