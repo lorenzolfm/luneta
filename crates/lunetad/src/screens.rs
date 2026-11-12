@@ -10,16 +10,17 @@ use crate::mux::{Laid, Mux, SessionName};
 /// terminal, and its lines, in the colours it shows them in, as zellij
 /// dumps them; or why zellij did not.
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
-    let pane = pane.map_or_else(|| focused(session), Ok)?;
-    Ok((pane, Mux::Zellij(session).screen_dumped(pane)?))
+    let mux = Mux::named(session)?;
+    let pane = pane.map_or_else(|| focused(mux, session), Ok)?;
+    Ok((pane, mux.screen_dumped(pane)?))
 }
 
 /// The terminal of `session` a client coming there would be on, as zellij
 /// lists its panes now: in its first tab, the one focused there, or else the
 /// first, a tiled one before one floating. zellij says which tab a session
 /// is on only while a client is on it.
-fn focused(session: &SessionName) -> Result<u32, String> {
-    let laid = Mux::Zellij(session).laid()?;
+fn focused(mux: Mux<'_>, session: &SessionName) -> Result<u32, String> {
+    let laid = mux.laid()?;
     shown(&laid).ok_or_else(|| format!("{session} has no terminal to show"))
 }
 

@@ -29,6 +29,7 @@ pub mod moves;
 pub mod mux;
 pub mod names;
 pub mod opens;
+mod owns;
 mod panes;
 mod pi;
 pub mod printed;

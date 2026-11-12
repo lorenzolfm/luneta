@@ -20,6 +20,8 @@ mod host;
 #[cfg(test)]
 mod mouse;
 #[cfg(test)]
+mod own;
+#[cfg(test)]
 mod pi;
 #[cfg(test)]
 mod prune;

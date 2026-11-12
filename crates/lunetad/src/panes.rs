@@ -80,7 +80,7 @@ impl Titled {
 /// read. A plugin's pane is no terminal, and a suppressed one is off the
 /// screen, in the place another took. A session gives each terminal an id of
 /// its own.
-fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
+pub(crate) fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
     let panes: Vec<Pane> = laid
         .into_iter()
         .filter(|laid| !laid.is_suppressed)
@@ -276,7 +276,7 @@ fn ask(
     troubles: &mut Troubles,
 ) -> Option<()> {
     let Addressed { id, name, .. } = session;
-    let asked = core::Asked::Zellij { id: *id, name: name.clone() };
+    let asked = core::Asked { id: *id, name: name.clone() };
     let said = |why: &String| troubles.say(format!("the panes of {name}: {why}"));
     if let Ok(panes) = list(name).inspect_err(said) {
         core.send(core::Command::Panes { asked: asked.clone(), panes }).ok()?;

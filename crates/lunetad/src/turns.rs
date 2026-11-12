@@ -69,7 +69,7 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::tab;
 
 use crate::closes::{same_session, terminals};
-use crate::mux::{Asks, Client, Laid, Listed, Mux, PaneId, SessionName, TabId};
+use crate::mux::{Asks, Client, Failure, Laid, Listed, Mux, PaneId, SessionName, TabId};
 
 /// What runs in a pane opened for another until that one is in its place: what
 /// ends on its own, which closes the pane, and a tab with nothing else in it,
@@ -136,7 +136,19 @@ pub struct OtherTab {
 /// The tabs of `session` other than that of its terminal `pane`, in their
 /// order, as zellij lists its panes now, or why it does not say.
 pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
+    zellij_s(session)?;
     others(&Mux::Zellij(session).laid()?, pane)
+}
+
+/// Whether `session` is zellij's, where its panes can turn, or why not: it is
+/// an own session, each of whose tabs holds one pane.
+fn zellij_s(session: &SessionName) -> Result<(), String> {
+    match Mux::named(session)? {
+        Mux::Zellij(_) => Ok(()),
+        Mux::Own(_) => {
+            Err(Failure::Unsupported("turn a pane into a tab or a tab into panes").into())
+        },
+    }
 }
 
 /// The tabs among `laid` other than that of the terminal `pane`, in their
@@ -200,6 +212,7 @@ pub fn pane_leaving(
     started: SystemTime,
     pane: u32,
 ) -> Result<Option<Leaving>, String> {
+    zellij_s(session)?;
     same_session(session, started)?;
     let laid = Mux::Zellij(session).laid()?;
     let name = leaving(&laid, pane)?;
@@ -253,6 +266,7 @@ pub fn panes_moving(
     pane: u32,
     beside: u32,
 ) -> Result<Moving, String> {
+    zellij_s(session)?;
     same_session(session, started)?;
     moving(&Mux::Zellij(session).laid()?, pane, beside)
 }

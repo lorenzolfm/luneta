@@ -180,7 +180,12 @@ fn file(id: &str, pid: u32, start: &str, status: &str) -> serde_json::Value {
 
 /// The file of a process that runs, as it starts.
 pub fn file_for(id: &str, process: &Running, status: &str) -> serde_json::Value {
-    file(id, process.pid(), &started(process.pid()), status)
+    file_of_pid(id, process.pid(), status)
+}
+
+/// The file of the process `pid`, which runs, as it starts.
+pub fn file_of_pid(id: &str, pid: u32, status: &str) -> serde_json::Value {
+    file(id, pid, &started(pid), status)
 }
 
 fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {

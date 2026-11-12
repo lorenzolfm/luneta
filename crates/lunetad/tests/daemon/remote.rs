@@ -1013,7 +1013,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         // another holds its tab open beside, and a tab with its terminals.
         let close = |session: &str, closes| {
             let (session, started_at) = (session.to_owned(), Some(SystemTime::UNIX_EPOCH.into()));
-            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
+            CloseRequest { on: on("far"), session, closes: Some(closes), started_at, own: None }
         };
         let pane = close_request::Closes::Pane;
         let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
@@ -1070,7 +1070,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         // A session there is killed by when it started, as its daemon lists
         // it, and deleted.
         let kill = |started_at| {
-            KillRequest { on: on("far"), session: "work".to_owned(), started_at }
+            KillRequest { on: on("far"), session: "work".to_owned(), started_at, own: None }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
         // What closes in a session there goes by when it started too.
@@ -1079,6 +1079,7 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
             session: "work".to_owned(),
             closes: Some(pane(4)),
             started_at,
+            own: None,
         };
         invalid(daemon.close(held(None)).await.unwrap_err());
         let since = Some(SystemTime::UNIX_EPOCH.into());

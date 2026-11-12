@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::closes::running_in;
+use crate::mux::own::server;
 use crate::mux::{SessionName, Zellij};
 use crate::Directory;
 
@@ -56,15 +57,19 @@ fn worktree_name(path: &str, common: &str) -> Option<SessionName> {
     SessionName::parse(&format!("{repository}-{base}")).ok()
 }
 
-/// The names `switch-session` takes the client to a session of, rather
-/// than make one: of the sessions that run, by zellij's sockets, and of those
-/// that ended, which zellij keeps to bring back. Or why luneta cannot tell
-/// them, as it cannot read where zellij keeps either.
+/// The names a session luneta makes cannot take: those `switch-session`
+/// takes the client to a session of, rather than make one, of the sessions
+/// that run, by zellij's sockets, and of those that ended, which zellij keeps
+/// to bring back; and those of the own sessions, as the two share names. Or
+/// why luneta cannot tell them, as it cannot read where zellij keeps either,
+/// or reach the own sessions' server.
 pub fn named() -> Result<Vec<SessionName>, String> {
     let running = running_in(&Zellij::socket_folder())?;
     let mut named: Vec<SessionName> = running.into_iter().map(|(name, _)| name).collect();
     let unknown = |why| format!("luneta cannot tell which sessions zellij keeps: {why}");
     named.extend(Zellij::kept().map_err(unknown)?);
+    let own = server::names()?.into_iter().filter_map(|name| SessionName::running(&name).ok());
+    named.extend(own);
     Ok(named)
 }
 
@@ -122,12 +127,24 @@ fn home() -> Result<Directory, String> {
     Directory::parse(home).map_err(|_| unset.to_owned())
 }
 
+/// Whether a session luneta makes could be called `to` now: neither zellij
+/// has it, as `unused_by_zellij` says, nor an own session. The time just
+/// before luneta read which names zellij has, as `free_for` says it; or why
+/// none could.
+pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
+    let since = unused_by_zellij(to)?;
+    if server::named(to)?.is_some() {
+        return Err(format!("{to} runs already, as an own session"));
+    }
+    Ok(since)
+}
+
 /// Whether zellij would make a session called `to` now, rather than take a
 /// client to one that has it: one that runs, by zellij's sockets, or one
 /// that ended, which zellij keeps to bring back. The time just before luneta
 /// read which names zellij has, as `free_for` says it; or why zellij would
 /// make none.
-pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
+pub fn unused_by_zellij(to: &SessionName) -> Result<SystemTime, String> {
     let since = SystemTime::now();
     let running = running_in(&Zellij::socket_folder())?;
     if running.iter().any(|(name, _)| name == to) {

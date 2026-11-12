@@ -96,9 +96,13 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     match open {
         Open::Pane { session, beside, cwd, command } => {
             let runs = Runs::of(command, Runs::ZellijShell);
-            Ok(terminal(Mux::Zellij(session).pane_opened(*beside, cwd, runs)?))
+            Ok(terminal(Mux::named(session)?.pane_opened(*beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
+            if let own @ Mux::Own(_) = Mux::named(session)? {
+                let (opened, laid) = tab_opened(own, tab)?;
+                return terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned());
+            }
             if !Mux::Zellij(session).has_clients()? {
                 return Err(format!(
                     "{}: go there first, or open a pane beside one of its panes",
@@ -108,7 +112,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
             if let Some(since) = alone_since {
                 return alone(session, tab, *since);
             }
-            let (opened, laid) = tab_opened(session, tab)?;
+            let (opened, laid) = tab_opened(Mux::Zellij(session), tab)?;
             terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned())
         },
     }
@@ -149,11 +153,12 @@ fn alone(session: &SessionName, tab: &Tab, since: SystemTime) -> Result<Opened, 
         None => tabs(&Mux::Zellij(session).laid()?),
         Some(_) => BTreeSet::new(),
     };
-    let (opened, laid) = tab_opened(session, tab)?;
+    let (opened, laid) = tab_opened(Mux::Zellij(session), tab)?;
     let terminal = terminal_of(&laid, opened).ok_or(NO_PANE)?;
     let mut notes: Vec<String> = kept.into_iter().collect();
     for made in made {
-        if let Err(why) = closes::closed_as_listed(session, &Close::tab(&laid, made)) {
+        let close = Close::tab(&laid, made);
+        if let Err(why) = closes::closed_as_listed(Mux::Zellij(session), &close) {
             notes.push(why);
         }
     }
@@ -173,17 +178,23 @@ fn made_since(session: &SessionName, since: SystemTime) -> Option<bool> {
     Some(started >= since)
 }
 
-/// Opens `tab` in `session`, as `opening` does, and says its id, and the
-/// panes of the session with it in. A tab with no command of its own runs
+/// Opens `tab` in the session `mux`, as `opening` does, and says its id, and
+/// the panes of the session with it in. A tab with no command of its own runs
 /// your shell as its command, and closes as it ends, as a pane of zellij's
 /// own shell does: zellij starts a command in the tab's `--cwd`, but its own
 /// shell where the session's template for a tab says, and the template of a
 /// session zellij brought back says the directory the session was in.
-pub fn tab_opened(session: &SessionName, tab: &Tab) -> Result<(TabId, Vec<Laid>), String> {
-    let shell = shell(login_shell(), env::var_os(SHELL_VAR));
+fn tab_opened(mux: Mux<'_>, tab: &Tab) -> Result<(TabId, Vec<Laid>), String> {
+    let shell = your_shell();
     let runs = runs(&tab.command, &shell);
-    let opened = Mux::Zellij(session).tab_opened(&tab.cwd, tab.name.as_deref(), runs)?;
-    Ok((opened, Mux::Zellij(session).laid()?))
+    let opened = mux.tab_opened(&tab.cwd, tab.name.as_deref(), runs)?;
+    Ok((opened, mux.laid()?))
+}
+
+/// Your shell, as a tab luneta opens with no command runs it.
+#[must_use]
+pub fn your_shell() -> OsString {
+    shell(login_shell(), env::var_os(SHELL_VAR))
 }
 
 /// What a tab whose command is `command` runs: `shell`, your shell, where it

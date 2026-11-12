@@ -301,6 +301,7 @@ impl Agent {
                 pane,
             }),
             topic: topic.map(String::from),
+            own: self.pane.as_ref().and_then(own_of),
         }
     }
 }
@@ -326,11 +327,19 @@ impl Unread {
 }
 
 /// The name and the terminal of the zellij pane `named` is, as the API gives
-/// one: none of an own pane, which it gives nothing of yet.
+/// one: none of an own pane.
 fn zellij_of(named: &Named) -> Option<(&str, u32)> {
     match named {
         Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
         Named::Own { .. } => None,
+    }
+}
+
+/// The own pane `named` is, as the API gives one: none of a pane of zellij's.
+fn own_of(named: &Named) -> Option<api::Own> {
+    match named {
+        Named::Zellij(_) => None,
+        Named::Own { session, pane } => Some(api::Own { session: session.get(), pane: *pane }),
     }
 }
 

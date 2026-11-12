@@ -174,7 +174,7 @@
             inherit version src;
             strictDeps = true;
 
-            cargoExtraArgs = "--locked -p lunetad";
+            cargoExtraArgs = "--locked -p lunetad -p luneta-mux";
 
             # The build scripts write the protocol out as Rust, through protoc, and
             # build the speech model's library.
@@ -233,7 +233,7 @@
               '';
 
               meta = {
-                description = "The luneta daemon, and the CLI that talks to it";
+                description = "The luneta daemon, its CLI, and luneta's own multiplexer";
                 homepage = "https://github.com/lorenzolfm/luneta";
                 license = pkgs.lib.licenses.mit;
                 mainProgram = "lunetad";

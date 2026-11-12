@@ -679,6 +679,13 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in reads no remotes"))
     }
 
+    async fn new_own(
+        &self,
+        _: Request<api::NewOwnRequest>,
+    ) -> Result<Response<api::NewOwnResponse>, Status> {
+        Err(Status::unimplemented("a stand-in makes no own session"))
+    }
+
     async fn list_clients(
         &self,
         _: Request<ListClientsRequest>,
@@ -845,8 +852,12 @@ impl Daemon for StandIn {
 
 #[test]
 fn the_waits_of_half_a_minute_hold_side_by_side() {
-    let waits: [(&str, fn()); 5] = [
+    let waits: [(&str, fn()); 6] = [
         ("the daemon ends alone", the_daemon_ends_once_zellij_has_had_no_session_for_a_while),
+        (
+            "an own session keeps the daemon",
+            crate::own::the_daemon_runs_on_while_an_own_session_does,
+        ),
         ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
         (
             "a client keeps the machines it watches",

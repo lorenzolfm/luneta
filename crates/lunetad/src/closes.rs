@@ -10,7 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, CloseRequest, On};
-use crate::mux::{tabs, Asks, Laid, Mux, PaneId, SessionName, SocketFolder, TabId, Zellij};
+use crate::mux::own;
+use crate::mux::{tabs, Asks, Laid, Mux, OwnId, PaneId, SessionName, SocketFolder, TabId, Zellij};
 
 /// What closing a terminal of a session closes with it, as zellij closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub enum Closes {
 /// What closing the terminal `pane` of `session` closes, as zellij lists the
 /// session's panes now, or why it closes nothing.
 pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
-    closing(&Mux::Zellij(session).laid()?, pane)
+    closing(&Mux::named(session)?.laid()?, pane)
 }
 
 /// What closing the terminal `pane` closes among `laid`, the panes of its
@@ -57,7 +58,7 @@ pub enum Closing {
 /// What closing the terminals `panes` of `session` closes, together, as
 /// zellij lists the session's panes now, or why it closes nothing.
 pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    together(&Mux::Zellij(session).laid()?, panes)
+    together(&Mux::named(session)?.laid()?, panes)
 }
 
 /// What closing the terminals `panes` closes among `laid`, the panes of their
@@ -116,14 +117,28 @@ impl Close {
         session: &SessionName,
         started: SystemTime,
     ) -> CloseRequest {
+        let started_at = Some(started.into());
+        CloseRequest { started_at, ..self.asked_of(on, session) }
+    }
+
+    /// The question that has luneta's own multiplexer close it of `session`,
+    /// the own session `id`, on the machine `on` names, or on the daemon's own,
+    /// where it names none.
+    #[must_use]
+    pub fn asked_own(&self, on: Option<On>, session: &SessionName, id: OwnId) -> CloseRequest {
+        CloseRequest { own: Some(id.get()), ..self.asked_of(on, session) }
+    }
+
+    /// The question that closes it of `session`, with nothing that tells which.
+    fn asked_of(&self, on: Option<On>, session: &SessionName) -> CloseRequest {
         let closes = match self {
             Close::Pane(pane) => close_request::Closes::Pane(*pane),
             Close::Tab { id, panes } => {
                 close_request::Closes::Tab(closes_response::Tab { id: id.0, panes: panes.clone() })
             },
         };
-        let started_at = Some(started.into());
-        CloseRequest { on, session: session.to_string(), closes: Some(closes), started_at }
+        let session = session.to_string();
+        CloseRequest { on, session, closes: Some(closes), started_at: None, own: None }
     }
 }
 
@@ -133,7 +148,29 @@ impl Close {
 /// server, and they stay.
 pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Result<(), String> {
     same_session(session, started)?;
-    closed_as_listed(session, close)
+    closed_as_listed(Mux::Zellij(session), close)
+}
+
+/// Closes `close` of the own session `id`, named `session`, as
+/// `closed_as_listed` does, or says why it closed nothing: a session that has
+/// the id and another name, or that took the name since, stays, as
+/// `same_own` says.
+pub fn closed_own(session: &SessionName, id: OwnId, close: &Close) -> Result<(), String> {
+    same_own(session, id)?;
+    closed_as_listed(Mux::Own(id), close)
+}
+
+/// Whether the own session named `session` is the one of id `id`, or why
+/// not. A server gives no other session an id while it runs, and so no tab
+/// or pane either, but the next server counts them from 1 again: a session
+/// of the id that has another name is one made since, or renamed, which a
+/// question asked of the name before it does not know.
+pub(crate) fn same_own(session: &SessionName, id: OwnId) -> Result<(), String> {
+    match own::server::named(session)? {
+        Some(named) if named == id => Ok(()),
+        Some(_) => Err(format!("\"{session}\" is a session made since, which stays")),
+        None => Err(format!("\"{session}\" is no own session that runs")),
+    }
 }
 
 /// Whether `session` is the one that started at `started`, as far as the
@@ -148,19 +185,17 @@ pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result
     Ok(())
 }
 
-/// Closes `close` of `session`, while zellij lists the session's panes as
-/// it did for the plan, and says why not when zellij did not, or why it
-/// closed nothing: a pane that would take its tab along now, or a tab that
-/// holds other terminals than it did, or that would take the session along
-/// now, stays. zellij closes nothing on a condition of its own: what changes
-/// between the list and the close goes with it.
-pub(crate) fn closed_as_listed(session: &SessionName, close: &Close) -> Result<(), String> {
-    still(&Mux::Zellij(session).laid()?, close)?;
+/// Closes `close` of the session `mux`, while its multiplexer lists the
+/// session's panes as it did for the plan, and says why not when it did not,
+/// or why it closed nothing: a pane that would take its tab along now, or a
+/// tab that holds other terminals than it did, or that would take the session
+/// along now, stays. Neither multiplexer closes on a condition of its own:
+/// what changes between the list and the close goes with it.
+pub(crate) fn closed_as_listed(mux: Mux<'_>, close: &Close) -> Result<(), String> {
+    still(&mux.laid()?, close)?;
     match close {
-        Close::Pane(pane) => {
-            Mux::Zellij(session).pane_closed(PaneId::Terminal(*pane), Asks::Once)?;
-        },
-        Close::Tab { id, .. } => Mux::Zellij(session).tab_closed(*id, Asks::Once)?,
+        Close::Pane(pane) => mux.pane_closed(PaneId::Terminal(*pane), Asks::Once)?,
+        Close::Tab { id, .. } => mux.tab_closed(*id, Asks::Once)?,
     }
     Ok(())
 }
@@ -247,6 +282,15 @@ fn settled(
         return deleted(session);
     }
     Ok(())
+}
+
+/// Kills the own session `id`, named `session`, which takes what runs in it
+/// along, and says why not when it did not: one that has the id and another
+/// name, or that took the name since, stays, as `same_own` says. Its server
+/// keeps nothing of a session that ended.
+pub fn killed_own(session: &SessionName, id: OwnId) -> Result<(), String> {
+    same_own(session, id)?;
+    Ok(Mux::Own(id).session_killed()?)
 }
 
 /// The sessions that run, each by its name and when it started, as their

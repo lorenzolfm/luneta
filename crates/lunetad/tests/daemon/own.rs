@@ -1,0 +1,356 @@
+//! Own sessions, of luneta's own multiplexer, as the daemon makes them and
+//! follows them: on the host with their panes and clients, through the same
+//! questions as zellij's, under names the two share. Each test has the daemon
+//! start the real `luneta-mux`, which the same build puts beside it.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use hyper_util::rt::TokioIo;
+use lunetad::api::close_request::Closes as Closed;
+use lunetad::api::closes_response::Closes;
+use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::open_request::{self, Opens};
+use lunetad::api::{
+    self, CheckNameRequest, CloseRequest, ClosesRequest, DumpScreenRequest, KillRequest,
+    NewOwnRequest, NewOwnResponse, OpenRequest, RenameSessionRequest, TurnIntoTabRequest,
+};
+use lunetad::mux::own::api::mux_client::MuxClient;
+use lunetad::mux::own::api::{pane::Program, ListRequest};
+use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::{Code, Status};
+
+use crate::agents;
+use crate::host::{eventually, folder_in, start, Daemon, Host, LUNETAD};
+use crate::sessions::session;
+
+/// What an own pane runs in these tests: a program that waits, and so holds
+/// its tab open, and that the server hangs up as its session goes.
+const WAITS: [&str; 2] = ["sleep", "600"];
+
+/// A host whose daemon runs, and the server of own sessions the daemon starts
+/// for it, which goes with the test, whatever becomes of its sessions.
+struct Owned {
+    host: Host,
+    daemon: Daemon,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Owned {
+    fn new() -> Self {
+        let server = Path::new(LUNETAD).with_file_name("luneta-mux");
+        assert!(server.is_file(), "{} is not built: dev test builds it", server.display());
+        let host = Host::new();
+        let daemon = start(host.vars()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        Owned { host, daemon, runtime }
+    }
+
+    /// Asks the daemon, as a client does.
+    fn ask<T, F>(&self, asking: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, Status>
+    where
+        F: Future<Output = Result<tonic::Response<T>, Status>>,
+    {
+        let folder = folder_in(self.host.runtime.path()).unwrap();
+        self.runtime.block_on(async {
+            let daemon = lunetad::connect(&folder).await.unwrap();
+            asking(daemon).await.map(tonic::Response::into_inner)
+        })
+    }
+
+    /// Has the daemon make the own session `name`, in the home, that runs
+    /// `WAITS`.
+    fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
+        let request = NewOwnRequest {
+            on: None,
+            name: name.to_owned(),
+            cwd: self.home(),
+            command: WAITS.map(str::to_owned).to_vec(),
+        };
+        self.ask(|mut daemon| async move { daemon.new_own(request).await })
+    }
+
+    fn home(&self) -> String {
+        self.host.home.path().to_str().unwrap().to_owned()
+    }
+
+    /// The own session `name`, once the host has it.
+    fn listed(&self, name: &str) -> api::Session {
+        eventually(&format!("{name} is on the host"), || session(&self.host.host(), name).cloned())
+    }
+
+    /// Where the server listens.
+    fn socket(&self) -> PathBuf {
+        self.host.folder().join("mux.sock")
+    }
+
+    /// The pid of what the pane `pane` runs, as its server lists it.
+    fn pid_of(&self, pane: u32) -> u32 {
+        let socket = self.socket();
+        let listing = self.runtime.block_on(async move {
+            let channel = Endpoint::from_static("http://luneta-mux")
+                .connect_with_connector(tower::service_fn(move |_: Uri| {
+                    let socket = socket.clone();
+                    async move {
+                        let stream = tokio::net::UnixStream::connect(socket).await?;
+                        std::io::Result::Ok(TokioIo::new(stream))
+                    }
+                }))
+                .await
+                .unwrap();
+            MuxClient::new(channel).list(ListRequest {}).await.unwrap().into_inner()
+        });
+        let panes = listing.sessions.iter().flat_map(|session| &session.tabs);
+        let listed = panes.flat_map(|tab| &tab.panes).find(|it| it.id == pane).unwrap();
+        let Some(Program::Pid(pid)) = listed.program else {
+            panic!("pane {pane} runs nothing: {listed:?}");
+        };
+        pid
+    }
+}
+
+impl Drop for Owned {
+    /// Ends the server, which hangs up what runs in its panes, where the test
+    /// left it running.
+    fn drop(&mut self) {
+        let socket = self.socket();
+        let listening = self.runtime.block_on(async move {
+            let stream = tokio::net::UnixStream::connect(socket).await.ok()?;
+            stream.peer_cred().ok()?.pid()
+        });
+        if let Some(pid) = listening.and_then(rustix::process::Pid::from_raw) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// The question that closes `closes` of the own session `own`, named `name`.
+fn close(name: &str, own: u64, closes: Closed) -> CloseRequest {
+    let session = name.to_owned();
+    CloseRequest { on: None, session, closes: Some(closes), started_at: None, own: Some(own) }
+}
+
+/// The question that opens a tab in `name` that runs `WAITS`.
+fn tab_in(name: &str, cwd: String) -> OpenRequest {
+    let tab = open_request::Tab { name: Some("second".to_owned()), alone_since: None };
+    let command = WAITS.map(str::to_owned).to_vec();
+    OpenRequest { on: None, session: name.to_owned(), cwd, command, opens: Some(Opens::Tab(tab)) }
+}
+
+/// The daemon makes an own session, starting the server for it, and has it
+/// on the host by its name and its id, with no socket and no time it started
+/// at, which are zellij's: its pane, which works where it was made, and its
+/// clients, none yet.
+#[test]
+fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
+    let owned = Owned::new();
+    let made = owned.make("own").unwrap();
+
+    let listed = owned.listed("own");
+    assert_eq!(listed.own, Some(made.session));
+    assert_eq!((listed.socket, listed.started_at), (0, None));
+    let pane = api::Pane {
+        id: made.pane,
+        tab: 0,
+        tab_name: "Tab #1".to_owned(),
+        cwd: Some(owned.home()),
+        command: None,
+        titled: None,
+        shell: None,
+        tab_id: Some(made.tab),
+        held: false,
+    };
+    assert_eq!(listed.panes, Some(api::Panes { panes: vec![pane] }));
+    assert_eq!(listed.clients, Some(api::Clients { clients: Vec::new() }));
+}
+
+/// A tab opens in an own session as in zellij's, at its end, and closes as
+/// `Closes` says it does: a tab, by the own session's id. The last closes
+/// the session, which `Closes` says too, and the host lets it go.
+#[test]
+fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
+    let owned = Owned::new();
+    let made = owned.make("own").unwrap();
+    owned.listed("own");
+
+    let request = tab_in("own", owned.home());
+    let opened = owned.ask(|mut daemon| async move { daemon.open(request).await }).unwrap();
+    let tabs = eventually("the tab is on the host", || {
+        let panes = session(&owned.host.host(), "own")?.panes.clone()?.panes;
+        (panes.len() == 2).then_some(panes)
+    });
+    let second = (tabs[1].id, tabs[1].tab, tabs[1].tab_name.as_str());
+    assert_eq!(second, (opened.terminal, 1, "second"));
+
+    let closes = |pane| {
+        let request = ClosesRequest { on: None, session: "own".to_owned(), pane };
+        owned.ask(|mut daemon| async move { daemon.closes(request).await }).unwrap().closes
+    };
+    let tab_id = tabs[1].tab_id.unwrap();
+    let tab = api::closes_response::Tab { id: tab_id, panes: vec![opened.terminal] };
+    assert_eq!(closes(opened.terminal), Some(Closes::Tab(tab.clone())));
+    let request = close("own", made.session, Closed::Tab(tab));
+    owned.ask(|mut daemon| async move { daemon.close(request).await }).unwrap();
+    eventually("the tab is gone", || {
+        let panes = session(&owned.host.host(), "own")?.panes.clone()?.panes;
+        (panes.len() == 1).then_some(())
+    });
+
+    assert_eq!(closes(made.pane), Some(Closes::Session(())));
+}
+
+/// A rename keeps an own session's id, and a kill by its name and its id ends
+/// it: the host lets it go, and so does its server, which held no other. A
+/// kill by the name it had stays, as the next server gives its ids again.
+#[test]
+fn an_own_session_is_renamed_and_killed_by_its_name_and_id() {
+    let owned = Owned::new();
+    let made = owned.make("own").unwrap();
+    owned.listed("own");
+
+    let session = "own".to_owned();
+    let request = RenameSessionRequest { on: None, session, to: "renamed".to_owned() };
+    owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
+    assert_eq!(owned.listed("renamed").own, Some(made.session));
+
+    let kill = |session: &str| {
+        let session = session.to_owned();
+        let request = KillRequest { on: None, session, started_at: None, own: Some(made.session) };
+        owned.ask(|mut daemon| async move { daemon.kill(request).await })
+    };
+    let stays = kill("own").unwrap_err();
+    assert!(stays.message().contains("no own session that runs"), "{stays:?}");
+    kill("renamed").unwrap();
+    eventually("the session is gone", || owned.host.host().sessions.is_empty().then_some(()));
+    eventually("the server has ended", || (!owned.socket().exists()).then_some(()));
+}
+
+/// A session made as the server ends, its last session killed, is made all
+/// the same: the daemon waits for that server to go, and starts another.
+#[test]
+fn a_session_made_as_the_server_ends_is_made_by_the_next() {
+    let owned = Owned::new();
+    let first = owned.make("first").unwrap();
+    owned.listed("first");
+    let session = "first".to_owned();
+    let request = KillRequest { on: None, session, started_at: None, own: Some(first.session) };
+    owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
+
+    let next = owned.make("next").unwrap();
+    assert_eq!(owned.listed("next").own, Some(next.session));
+}
+
+/// zellij's sessions and the own ones share their names: neither makes, nor
+/// renames to, a name a session of either has, and a name an own session has
+/// is no free one.
+#[test]
+fn zellij_s_sessions_and_own_ones_share_their_names() {
+    let owned = Owned::new();
+    let _work = owned.host.serve("work");
+    eventually("work runs", || session(&owned.host.host(), "work").map(drop));
+
+    let refused = owned.make("work").unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    assert!(refused.message().contains("work runs already"), "{refused:?}");
+    owned.make("own").unwrap();
+    owned.listed("own");
+    let refused = owned.make("own").unwrap_err();
+    assert!(refused.message().contains("own session"), "{refused:?}");
+
+    let request = CheckNameRequest { on: None, name: "own".to_owned() };
+    let refused = owned.ask(|mut daemon| async move { daemon.check_name(request).await });
+    assert!(refused.unwrap_err().message().contains("own session"));
+    let rename = |session: &str, to: &str| {
+        let (session, to) = (session.to_owned(), to.to_owned());
+        let request = RenameSessionRequest { on: None, session, to };
+        owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap_err()
+    };
+    assert!(rename("work", "own").message().contains("as an own session"));
+    assert!(rename("own", "work").message().contains("work runs already"));
+    assert_eq!(owned.host.zellij.renamed(), [] as [String; 0]);
+}
+
+/// What an own session has no way to do yet is refused as such, and a
+/// question that names it both by a time it started at and its id is no
+/// question.
+#[test]
+fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
+    let owned = Owned::new();
+    let made = owned.make("own").unwrap();
+    owned.listed("own");
+
+    let beside = OpenRequest {
+        on: None,
+        session: "own".to_owned(),
+        cwd: owned.home(),
+        command: Vec::new(),
+        opens: Some(Opens::Beside(made.pane)),
+    };
+    let refused = owned.ask(|mut daemon| async move { daemon.open(beside).await }).unwrap_err();
+    let message = refused.message();
+    assert!(message.contains("own sessions cannot open a pane beside another yet"), "{message}");
+
+    let started_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+    let session = "own".to_owned();
+    let request = TurnIntoTabRequest { on: None, session, pane: made.pane, started_at };
+    let refused = owned.ask(|mut daemon| async move { daemon.turn_into_tab(request).await });
+    assert!(refused.unwrap_err().message().contains("cannot turn a pane into a tab"));
+
+    let session = "own".to_owned();
+    let both = KillRequest { on: None, session, started_at, own: Some(made.session) };
+    let refused = owned.ask(|mut daemon| async move { daemon.kill(both).await }).unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
+    assert!(owned.listed("own").own.is_some());
+}
+
+/// The screen of an own pane dumps as a zellij pane's does, by the session's
+/// name.
+#[test]
+fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
+    let owned = Owned::new();
+    let request = NewOwnRequest {
+        on: None,
+        name: "own".to_owned(),
+        cwd: owned.home(),
+        command: ["sh", "-c", "echo own pane; exec sleep 600"].map(str::to_owned).to_vec(),
+    };
+    let made = owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
+
+    let screen = eventually("the pane says its line", || {
+        let request = DumpScreenRequest { on: None, session: "own".to_owned(), pane: None };
+        let dumped = owned.ask(|mut daemon| async move { daemon.dump_screen(request).await });
+        dumped.ok().filter(|dumped| dumped.screen.contains("own pane"))
+    });
+    assert_eq!(screen.pane, made.pane);
+}
+
+/// An agent that runs in an own pane is there, as the variables the server
+/// gives what runs in its panes name it: by the session's id and the pane's.
+#[test]
+fn an_agent_in_an_own_pane_is_there_by_its_ids() {
+    let owned = Owned::new();
+    let made = owned.make("own").unwrap();
+    owned.listed("own");
+    let pid = owned.pid_of(made.pane);
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let file = agents::file_of_pid("in-own", pid, "busy");
+    std::fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
+
+    let agent = eventually("the agent is on the host", || {
+        let host = owned.host.host();
+        host.agents.into_iter().find(|agent| agent.pid == pid)
+    });
+    assert_eq!(agent.own, Some(api::Own { session: made.session, pane: made.pane }));
+    assert_eq!(agent.zellij, None);
+}
+
+/// The daemon runs on while an own session does, however long zellij has had
+/// no session and no client has watched it. The test waits out longer than
+/// the daemon would run on alone.
+pub fn the_daemon_runs_on_while_an_own_session_does() {
+    let mut owned = Owned::new();
+    owned.make("own").unwrap();
+    owned.listed("own");
+    assert_eq!(owned.daemon.ended_within(Duration::from_secs(36)), None);
+}

@@ -63,6 +63,11 @@ pub enum Failure {
     Refused(String),
     /// It answered what does not read, for the reason it holds.
     Unread(String),
+    /// luneta's own multiplexer did not do it, as its server said, or as
+    /// luneta could not reach it.
+    Own(String),
+    /// luneta's own multiplexer has no way to do what it names yet.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for Failure {
@@ -74,6 +79,10 @@ impl fmt::Display for Failure {
                 write!(f, "zellij: {said}")
             },
             Failure::Unread(why) => f.write_str(why),
+            Failure::Own(said) => write!(f, "luneta-mux: {said}"),
+            Failure::Unsupported(what) => {
+                write!(f, "luneta's own sessions cannot {what} yet")
+            },
         }
     }
 }

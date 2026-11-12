@@ -1,10 +1,12 @@
 //! The multiplexers that hold the sessions of the machine luneta and its
 //! daemon run on, in luneta's own words: what they have one do to a session,
-//! and what they read of it. zellij is the only one yet. What luneta asks of
-//! a session goes through `Mux`; what zellij alone has, its folders, what it
-//! keeps of sessions that ended and the words of its client, through
-//! `Zellij`; and which pane a process runs in, of either multiplexer, through
-//! `pane_of` and `in_no_pane`. `zellij` is private.
+//! and what they read of it. They are zellij and luneta's own, whose sessions
+//! share one namespace. What luneta asks of a session goes through `Mux`;
+//! what zellij alone has, its folders, what it keeps of sessions that ended
+//! and the words of its client, through `Zellij`; what the own multiplexer
+//! alone has, its server, through `own`; and which pane a process runs in, of
+//! either multiplexer, through `pane_of` and `in_no_pane`. `zellij` is
+//! private.
 //!
 //! Not all luneta knows of zellij's ways is behind it yet. `Laid` still has
 //! zellij's plugins, bars and suppressed panes, `Asks` and `Failure` are
@@ -23,19 +25,21 @@ use crate::watch::Troubles;
 use crate::Directory;
 
 mod laid;
-mod own;
+pub mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
+pub use own::OwnId;
 pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
 
 /// A session of a multiplexer's that luneta has its sessions in, by what that
-/// multiplexer finds it by: zellij by its name.
+/// multiplexer finds it by: zellij by its name, and luneta's own by its id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mux<'a> {
     Zellij(&'a SessionName),
+    Own(OwnId),
 }
 
 /// A pane of a multiplexer's, as the variables of what runs in it name it.
@@ -44,7 +48,7 @@ pub enum Named {
     Zellij(ZellijPane),
     /// A pane of luneta's own multiplexer, by the ids its server gave its
     /// session and it, which it gives no other.
-    Own { session: u64, pane: u32 },
+    Own { session: OwnId, pane: u32 },
 }
 
 /// A pane of zellij's, as the variables of what runs in it name it: by the
@@ -105,12 +109,19 @@ pub struct ClientWords {
     pub unset: &'static [&'static str],
 }
 
-impl Mux<'_> {
+impl<'a> Mux<'a> {
+    /// The session named `name`, of whichever multiplexer runs one by it:
+    /// zellij's, where no own session has the name.
+    pub fn named(name: &'a SessionName) -> Result<Mux<'a>, Failure> {
+        Ok(own::server::named(name)?.map_or(Mux::Zellij(name), Mux::Own))
+    }
+
     /// The panes of the session as it lays them out now, the plugins' you can
     /// go to too.
     pub fn laid(self) -> Result<Vec<Laid>, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::laid(session),
+            Mux::Own(session) => own::server::laid_of(session),
         }
     }
 
@@ -119,6 +130,7 @@ impl Mux<'_> {
     pub fn panes_listed(self) -> Result<Vec<Laid>, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::panes_listed(session),
+            Mux::Own(session) => own::server::laid_of(session),
         }
     }
 
@@ -126,6 +138,7 @@ impl Mux<'_> {
     pub fn clients(self) -> Result<Listed, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::clients(session),
+            Mux::Own(session) => own::server::clients_of(session),
         }
     }
 
@@ -133,6 +146,7 @@ impl Mux<'_> {
     pub fn has_clients(self) -> Result<bool, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::has_clients(session),
+            Mux::Own(session) => Ok(!own::server::clients_of(session)?.is_empty()),
         }
     }
 
@@ -141,6 +155,7 @@ impl Mux<'_> {
     pub fn client_rows(self) -> Result<Vec<Client>, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::client_rows(session),
+            Mux::Own(session) => Ok(own::server::clients_of(session)?.to_vec()),
         }
     }
 
@@ -150,6 +165,7 @@ impl Mux<'_> {
     pub fn pane_opened(self, beside: u32, cwd: &Directory, runs: Runs) -> Result<u32, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::pane_opened(session, beside, cwd, runs),
+            Mux::Own(_) => Err(Failure::Unsupported(BESIDE)),
         }
     }
 
@@ -168,6 +184,7 @@ impl Mux<'_> {
             Mux::Zellij(session) => {
                 zellij::cli::pane_opened_once_heard(session, tab, name, runs, found)
             },
+            Mux::Own(_) => Err(Failure::Unsupported(BESIDE)),
         }
     }
 
@@ -181,6 +198,7 @@ impl Mux<'_> {
     ) -> Result<TabId, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::tab_opened(session, cwd, name, runs),
+            Mux::Own(session) => own::server::tab_opened(session, cwd, name, runs),
         }
     }
 
@@ -194,6 +212,7 @@ impl Mux<'_> {
     ) -> Result<TabId, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::tab_opened_once_heard(session, name, runs),
+            Mux::Own(session) => own::server::tab_opened_once_heard(session, name, runs),
         }
     }
 
@@ -201,6 +220,7 @@ impl Mux<'_> {
     pub fn pane_closed(self, pane: PaneId, asks: Asks) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::pane_closed(session, pane, asks),
+            Mux::Own(_) => Err(Failure::Unsupported("close a pane apart from its tab")),
         }
     }
 
@@ -208,6 +228,7 @@ impl Mux<'_> {
     pub fn tab_closed(self, tab: TabId, asks: Asks) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::tab_closed(session, tab, asks),
+            Mux::Own(session) => own::server::tab_closed(session, tab),
         }
     }
 
@@ -216,6 +237,7 @@ impl Mux<'_> {
     pub fn fullscreen_toggled(self, pane: PaneId) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::fullscreen_toggled(session, pane),
+            Mux::Own(_) => Err(Failure::Unsupported("show a pane over the others of its tab")),
         }
     }
 
@@ -225,14 +247,25 @@ impl Mux<'_> {
     pub fn panes_stacked<const N: usize>(self, panes: [PaneId; N]) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::panes_stacked(session, panes),
+            Mux::Own(_) => Err(Failure::Unsupported("stack panes")),
         }
     }
 
-    /// Renames the session to `to`, or says why not. A session with no client
-    /// takes the name as well as one with.
+    /// Renames the session to `to`, or says why not: a session of the other
+    /// multiplexer has it, as each holds names unique among its own alone. A
+    /// session with no client takes the name as well as one with.
     pub fn renamed(self, to: &SessionName) -> Result<(), String> {
         match self {
-            Mux::Zellij(session) => zellij::renamed(session, to),
+            Mux::Zellij(session) => {
+                if own::server::named(to)?.is_some() {
+                    return Err(format!("{to} runs already, as an own session"));
+                }
+                zellij::renamed(session, to)
+            },
+            Mux::Own(session) => {
+                crate::names::unused_by_zellij(to)?;
+                Ok(own::server::renamed(session, to)?)
+            },
         }
     }
 
@@ -241,6 +274,7 @@ impl Mux<'_> {
     pub fn screen_dumped(self, pane: u32) -> Result<String, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::screen_dumped(session, pane),
+            Mux::Own(session) => own::server::dumped(session, pane, own::api::Dumped::Screen),
         }
     }
 
@@ -250,6 +284,7 @@ impl Mux<'_> {
     pub fn text_dumped(self, pane: u32) -> Result<String, Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::text_dumped(session, pane),
+            Mux::Own(session) => own::server::dumped(session, pane, own::api::Dumped::Text),
         }
     }
 
@@ -257,6 +292,7 @@ impl Mux<'_> {
     pub fn session_killed(self) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::session_killed(session),
+            Mux::Own(session) => own::server::killed(session),
         }
     }
 
@@ -264,6 +300,7 @@ impl Mux<'_> {
     pub fn session_deleted(self) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::session_deleted(session),
+            Mux::Own(_) => Err(Failure::Unsupported("keep a session that ended")),
         }
     }
 
@@ -272,6 +309,10 @@ impl Mux<'_> {
     pub fn pane_focused(self, pane: PaneId) -> Result<(), Failure> {
         match self {
             Mux::Zellij(session) => zellij::cli::pane_focused(session, pane),
+            Mux::Own(session) => {
+                let pane = pane.terminal().ok_or(Failure::Unsupported("hold a plugin's pane"))?;
+                own::server::went(session, own::server::Place::Pane { session, pane })
+            },
         }
     }
 
@@ -280,8 +321,16 @@ impl Mux<'_> {
     /// session itself, as `pane_focused` does. A pane already focused is where
     /// it was to go.
     pub fn went(self, to: &SessionName, pane: Option<u32>) -> Result<(), Failure> {
-        match self {
-            Mux::Zellij(at) => zellij::cli::went(at, to, pane),
+        let own = own::server::named(to)?;
+        match (self, own) {
+            (Mux::Zellij(at), None) => zellij::cli::went(at, to, pane),
+            (Mux::Own(at), Some(to)) => {
+                let place = pane.map_or(own::server::Place::Session(to), |pane| {
+                    own::server::Place::Pane { session: to, pane }
+                });
+                own::server::went(at, place)
+            },
+            (Mux::Zellij(_), Some(_)) | (Mux::Own(_), None) => Err(Failure::Unsupported(ACROSS)),
         }
     }
 
@@ -291,10 +340,21 @@ impl Mux<'_> {
     /// unused.
     pub fn started(self, to: &SessionName, cwd: Option<&Directory>) -> Result<(), Failure> {
         match self {
+            Mux::Zellij(_) if own::server::named(to)?.is_some() => {
+                Err(Failure::Unsupported(ACROSS))
+            },
             Mux::Zellij(at) => zellij::cli::started(at, to, cwd),
+            Mux::Own(_) => Err(Failure::Unsupported("make a session from an own one")),
         }
     }
 }
+
+/// What an own session cannot do of a pane beside another, as each of its tabs
+/// holds one.
+const BESIDE: &str = "open a pane beside another";
+
+/// What luneta's client does itself, between an own session and zellij's.
+const ACROSS: &str = "take a client between one of zellij's sessions and an own one";
 
 /// What luneta finds and runs of zellij's alone, which no other multiplexer
 /// has: the folders it keeps its sessions in, what it keeps of those that
@@ -486,7 +546,8 @@ mod tests {
             entries.iter().map(OsString::from).collect()
         };
         let own = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=12"];
-        assert_eq!(pane_in(&environ(&own)), Some(Named::Own { session: 3, pane: 12 }));
+        let session = OwnId::new(3).unwrap();
+        assert_eq!(pane_in(&environ(&own)), Some(Named::Own { session, pane: 12 }));
         let zellij = ["ZELLIJ_SESSION_NAME=work", "ZELLIJ_PANE_ID=2"];
         let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(pane_in(&environ(&[&own[..], &zellij].concat())), Some(named));
@@ -504,6 +565,7 @@ mod tests {
         let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(pane_in(&environ(&twice)), Some(named));
         let twice = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=12", "LUNETA_MUX_SESSION=4"];
-        assert_eq!(pane_in(&environ(&twice)), Some(Named::Own { session: 3, pane: 12 }));
+        let session = OwnId::new(3).unwrap();
+        assert_eq!(pane_in(&environ(&twice)), Some(Named::Own { session, pane: 12 }));
     }
 }

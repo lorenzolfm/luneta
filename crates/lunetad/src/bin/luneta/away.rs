@@ -377,7 +377,7 @@ impl Away {
     /// it did not.
     pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
         let (session, started_at) = (session.to_string(), Some(started.into()));
-        let request = KillRequest { on: Some(self.on()), session, started_at };
+        let request = KillRequest { on: Some(self.on()), session, started_at, own: None };
         self.ask(|mut daemon| async move { daemon.kill(request).await })
     }
 

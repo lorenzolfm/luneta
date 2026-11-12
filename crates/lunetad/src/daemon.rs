@@ -7,11 +7,11 @@
 //! however it ends, so that a daemon that crashed never keeps the next one
 //! from starting.
 //!
-//! A daemon lives as long as zellij has a session, or a client watches it:
-//! once zellij has had no session, and no client has watched it, for `ALONE`,
-//! it ends. It takes its socket away first, while it still holds the folder,
-//! so that a luneta that comes for it then finds none there, and starts the
-//! next.
+//! A daemon lives as long as zellij or luneta's own multiplexer has a
+//! session, or a client watches it: once neither has had a session, and no
+//! client has watched it, for `ALONE`, it ends. It takes its socket away
+//! first, while it still holds the folder, so that a luneta that comes for it
+//! then finds none there, and starts the next.
 //!
 //! So a luneta that watches it keeps it, as it would not if every session
 //! were on another machine. So does the daemon of another machine that
@@ -70,7 +70,8 @@ use crate::api::{
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    NameSessionRequest, NameSessionResponse, OpenRequest, OpenResponse, OtherTabsRequest,
+    NameSessionRequest, NameSessionResponse, NewOwnRequest, NewOwnResponse, OpenRequest,
+    OpenResponse, OtherTabsRequest,
     OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, StartRequest,
     TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
@@ -89,7 +90,8 @@ use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
-use crate::mux::{self, Mux, SessionName, SocketFolder, Zellij};
+use crate::mux::own::server;
+use crate::mux::{self, Mux, OwnId, Runs, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -98,7 +100,8 @@ use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
     checks, claude, client, closes, eza, fetches, git, github, keeps, log, moves, names, opens,
-    panes, pi, printed, release, remote, screens, shells, skills, topics, turns, watch, zoxide,
+    owns, panes, pi, printed, release, remote, screens, shells, skills, topics, turns, watch,
+    zoxide,
     Harness,
 };
 
@@ -170,9 +173,9 @@ const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of
 /// across a line of 100 ms, which a screenshot does not notice.
 const IN_FLIGHT: u32 = 128 * 1024;
 
-/// How long the daemon runs on once zellij has no session, and no client
-/// watches it: long enough that ending the last one and opening another does
-/// not end it.
+/// How long the daemon runs on once neither zellij nor the own multiplexer
+/// has a session, and no client watches it: long enough that ending the last
+/// one and opening another does not end it.
 const ALONE: Duration = Duration::from_secs(30);
 
 /// How long the daemon waits, as it ends, for its clients to go: as long as
@@ -250,8 +253,10 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let claude_folder = claude::folder();
     let watchers = Arc::new(Watchers::default());
     let folders = (claude_folder.clone(), sockets.clone());
-    follow(&core, &claim.folder, folders, watchers.clone(), end)?;
+    let owns = Arc::new(AtomicBool::new(false));
+    follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
+    owns::follow(core.clone(), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -350,14 +355,15 @@ impl Alone {
 
 /// Has the core told what Claude Code's files in `claude_folder`, the files of
 /// the shells and of pi's agents in luneta's `folder` and zellij's sockets in
-/// `sockets` say, as they change, and says on `end` once zellij has had no session, and none of the
-/// `watchers` has watched the host, for `ALONE`. Each look has them say
-/// whether the daemon is kept.
+/// `sockets` say, as they change, and says on `end` once neither zellij nor
+/// the own multiplexer has had a session, as `owns` says of the own sessions,
+/// and none of the `watchers` has watched the host, for `ALONE`. Each look
+/// has them say whether the daemon is kept.
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
     (claude_folder, sockets): (Option<PathBuf>, SocketFolder),
-    watchers: Arc<Watchers>,
+    (watchers, owns): (Arc<Watchers>, Arc<AtomicBool>),
     end: oneshot::Sender<()>,
 ) -> io::Result<()> {
     match claude_folder {
@@ -406,7 +412,8 @@ fn follow(
         // only a client that asked since the look before counts.
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
-        let standing = Standing::of(!scan.alone() || clients || window, window);
+        let sessions = !scan.alone() || owns.load(Ordering::Relaxed);
+        let standing = Standing::of(sessions || clients || window, window);
         watchers.standing.send_if_modified(|was| mem::replace(was, standing) != standing);
         let shown = window || far_window;
         watchers.shown.send_if_modified(|was| mem::replace(was, shown) != shown);
@@ -414,7 +421,9 @@ fn follow(
             && let Some(end) = end.take()
         {
             let secs = ALONE.as_secs();
-            let none = format!("zellij has had no session for {secs}s, nor lunetad a watcher");
+            let none = format!(
+                "zellij has had no session for {secs}s, nor luneta-mux, nor lunetad a watcher"
+            );
             log::say(&format!("{none}, and so lunetad ends"));
             // The server has ended already, if no one waits for the word.
             let _ = end.send(());
@@ -587,7 +596,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || Mux::Zellij(&at).went(&to, pane)).await;
+        let went = task::spawn_blocking(move || Mux::named(&at)?.went(&to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -816,7 +825,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || Mux::Zellij(&at).started(&to, cwd.as_ref());
+        let start = move || Mux::named(&at)?.started(&to, cwd.as_ref());
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -846,9 +855,9 @@ impl Daemon for Host {
     }
 
     async fn close(&self, request: Request<CloseRequest>) -> Result<Response<()>, Status> {
-        let CloseRequest { on, session, closes, started_at } = request.into_inner();
+        let CloseRequest { on, session, closes, started_at, own } = request.into_inner();
         let session = named("session", &session)?;
-        let started = started_of(started_at)?;
+        let whose = whose(started_at, own)?;
         let close = match closes {
             Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
             Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
@@ -860,9 +869,17 @@ impl Daemon for Host {
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.close(close.asked(None, &session, started)).await;
+            let asked = match whose {
+                Whose::Zellij(started) => close.asked(None, &session, started),
+                Whose::Own(id) => close.asked_own(None, &session, id),
+            };
+            return daemon.close(asked).await;
         }
-        let closed = task::spawn_blocking(move || closes::closed(&session, started, &close)).await;
+        let closed = task::spawn_blocking(move || match whose {
+            Whose::Zellij(started) => closes::closed(&session, started, &close),
+            Whose::Own(id) => closes::closed_own(&session, id, &close),
+        });
+        let closed = closed.await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -932,14 +949,22 @@ impl Daemon for Host {
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
-        let KillRequest { on, session, started_at } = request.into_inner();
+        let KillRequest { on, session, started_at, own } = request.into_inner();
         let session = named("session", &session)?;
-        let started = started_of(started_at)?;
+        let whose = whose(started_at, own)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let (session, started_at) = (session.to_string(), Some(started.into()));
-            return daemon.kill(KillRequest { on: None, session, started_at }).await;
+            let session = session.to_string();
+            let (started_at, own) = match whose {
+                Whose::Zellij(started) => (Some(started.into()), None),
+                Whose::Own(id) => (None, Some(id.get())),
+            };
+            return daemon.kill(KillRequest { on: None, session, started_at, own }).await;
         }
-        let killed = task::spawn_blocking(move || closes::killed(&session, started)).await;
+        let killed = task::spawn_blocking(move || match whose {
+            Whose::Zellij(started) => closes::killed(&session, started),
+            Whose::Own(id) => closes::killed_own(&session, id),
+        });
+        let killed = killed.await;
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -999,7 +1024,7 @@ impl Daemon for Host {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
-        let renamed = task::spawn_blocking(move || Mux::Zellij(&session).renamed(&to)).await;
+        let renamed = task::spawn_blocking(move || Mux::named(&session)?.renamed(&to)).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -1154,6 +1179,28 @@ impl Daemon for Host {
 
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
 
+    async fn new_own(
+        &self,
+        request: Request<NewOwnRequest>,
+    ) -> Result<Response<NewOwnResponse>, Status> {
+        let NewOwnRequest { on, name, cwd, command } = request.into_inner();
+        let name = SessionName::parse(&name)
+            .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
+        let cwd = directory("cwd", cwd)?;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let (name, cwd) = (name.to_string(), cwd.into());
+            return daemon.new_own(NewOwnRequest { on: None, name, cwd, command }).await;
+        }
+        let made = task::spawn_blocking(move || -> Result<server::Made, String> {
+            names::unused(&name)?;
+            let shell = opens::your_shell();
+            Ok(server::made(&name, &cwd, Runs::of(&command, Runs::Shell(&shell)))?)
+        });
+        let made = made.await.map_err(|error| unfinished(&error))?;
+        let server::Made { session, tab, pane } = made.map_err(Status::failed_precondition)?;
+        Ok(Response::new(NewOwnResponse { session: session.get(), tab: tab.0, pane }))
+    }
+
     async fn keep_image(
         &self,
         request: Request<Streaming<KeepImageRequest>>,
@@ -1297,8 +1344,33 @@ where
 
 /// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = Mux::Zellij(session).clients()?;
+    let listed = Mux::named(session)?.clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
+}
+
+/// Which session a question is of, past its name, which another can take: a
+/// zellij session by when it started, and an own one by its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Whose {
+    Zellij(SystemTime),
+    Own(OwnId),
+}
+
+/// Which session a question is of, as its `started_at` and `own` say, or why
+/// it is invalid: it says both, or neither, or an own session of id 0.
+fn whose<At: TryInto<SystemTime>>(
+    started_at: Option<At>,
+    own: Option<u64>,
+) -> Result<Whose, Status> {
+    match (started_at, own) {
+        (None, Some(id)) => OwnId::new(id)
+            .map(Whose::Own)
+            .ok_or_else(|| Status::invalid_argument("own: 0 is no session's id")),
+        (Some(_), Some(_)) => {
+            Err(Status::invalid_argument("started_at: an own session has no time it started at"))
+        },
+        (started_at, None) => started_of(started_at).map(Whose::Zellij),
+    }
 }
 
 /// When a session started, as a question says it, or why it is invalid: it

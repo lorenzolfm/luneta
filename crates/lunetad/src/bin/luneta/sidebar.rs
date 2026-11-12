@@ -6355,6 +6355,7 @@ mod tests {
             panes: Some(Panes { panes }),
             clients: None,
             socket: started as u64,
+            own: None,
         }
     }
 
@@ -6432,6 +6433,7 @@ mod tests {
             }),
             waiting_for: None,
             topic: None,
+            own: None,
         }
     }
 

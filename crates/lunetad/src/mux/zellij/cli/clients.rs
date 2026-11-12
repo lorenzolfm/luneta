@@ -43,6 +43,16 @@ pub struct Listed {
 }
 
 impl Listed {
+    /// `clients`, as a multiplexer that lists each once by an id of its own
+    /// lists them: in the order of their ids, with none set aside.
+    #[must_use]
+    pub fn of(mut clients: Vec<Client>) -> Self {
+        clients.sort_unstable_by_key(|client| client.id);
+        let twice = clients.windows(2).any(|pair| pair[0].id == pair[1].id);
+        assert!(!twice, "a client's id comes twice");
+        Listed { clients, set_aside: Vec::new() }
+    }
+
     #[must_use]
     pub fn set_aside(&self) -> &[Client] {
         &self.set_aside
