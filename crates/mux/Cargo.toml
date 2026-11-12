@@ -9,6 +9,21 @@ description = "luneta's own multiplexer: a server that holds the pseudoterminals
 [dependencies]
 libghostty-vt = "=0.2.2"
 libghostty-vt-sys = { version = "=0.2.2", features = ["pkg-config"] }
+percent-encoding = "2.3.2"
+prost = "0.14.4"
+rustix = { version = "1.1.4", features = ["event", "fs", "process", "pty", "system", "termios"] }
+tokio = { version = "1.53.1", features = ["net", "rt", "sync", "time"] }
+tokio-stream = { version = "0.1.19", features = ["net", "sync"] }
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
 
 [lints]
 workspace = true

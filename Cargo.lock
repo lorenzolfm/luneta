@@ -1390,8 +1390,19 @@ dependencies = [
 name = "luneta-mux"
 version = "0.3.0"
 dependencies = [
+ "hyper-util",
  "libghostty-vt",
  "libghostty-vt-sys",
+ "percent-encoding",
+ "prost",
+ "rustix",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
 ]
 
 [[package]]
@@ -2856,6 +2867,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
