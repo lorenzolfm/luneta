@@ -10,7 +10,7 @@ use libghostty_vt::effect::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
     PrimaryDeviceAttributes, SecondaryDeviceAttributes, TertiaryDeviceAttributes,
 };
-use libghostty_vt::fmt::{Format, Formatter};
+use libghostty_vt::fmt::{Extras, Format, Formatter};
 use libghostty_vt::mode::Mode;
 use libghostty_vt::point::{Coordinate, Point};
 use libghostty_vt::render::{CellIteration, CellIterator, RowIterator};
@@ -313,7 +313,9 @@ impl Screen {
         let last = (terminal.cols()? - 1, u32::from(terminal.rows()?) - 1);
         let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
         let mut formatter = Formatter::new(terminal)?;
-        formatter.set_format(Format::Vt)?.set_trim(true)?;
+        // Only the lines and their styles: a new formatter also writes the
+        // palette ahead of them and the cursor's style and link after.
+        formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
         // SAFETY: both corners are of `terminal`'s active screen, taken from
         // it just now, and the formatter borrows it as they do.
         #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, unchecked")]
@@ -565,9 +567,7 @@ mod tests {
         assert_eq!(screen.write(b"one\r\ntwo\r\n\x1b[31mred\x1b[0m"), b"");
         assert_eq!(screen.dumped_text().unwrap(), "one\ntwo\nred");
         let dumped = screen.dumped_screen().unwrap();
-        assert!(dumped.contains("two"), "{dumped:?}");
-        assert!(dumped.contains("\x1b[38;5;1mred"), "{dumped:?}");
-        assert!(!dumped.contains("one"), "{dumped:?}");
+        assert_eq!(dumped, "two\r\n\x1b[0m\x1b[38;5;1mred\x1b[0m", "{dumped:?}");
     }
 
     /// A repeat inside left and right margins, after a text variation
