@@ -703,7 +703,7 @@ impl Thread {
         };
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
-        let mut pushed = Some(0);
+        let mut rows_pushed = Some(0);
         while total < most && unread.len() < UNREAD_BYTES_MAX {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
@@ -713,7 +713,8 @@ impl Thread {
                         self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
                     unread.extend_from_slice(&written.answers);
                     marks.extend(written.marks);
-                    pushed = pushed.zip(written.pushed).map(|(pushed, more)| pushed + more);
+                    rows_pushed =
+                        rows_pushed.zip(written.rows_pushed).map(|(rows, more)| rows + more);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -742,7 +743,7 @@ impl Thread {
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
             if watcher.back > 0 {
-                let back = pushed.map_or(scrollback, |pushed| watcher.back + pushed);
+                let back = rows_pushed.map_or(scrollback, |rows| watcher.back + rows);
                 watcher.back = back.min(scrollback);
             }
         }

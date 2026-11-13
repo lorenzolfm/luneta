@@ -68,11 +68,13 @@ impl Marks {
             at += stop.consumed;
             if stop.reached.contains(Boundary::OSC_END) {
                 self.keep(&bytes[from..at - 1]);
-                if let Some(mark) = self.end(stop.end == Some(StringEnd::Cancelled)) {
+                let osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
+                if let Some(mark) = osc.end(stop.end == Some(StringEnd::Cancelled)) {
                     marks.push(mark);
                 }
             }
             if stop.reached.contains(Boundary::OSC_START) {
+                assert!(self.osc.is_none(), "an OSC starts at {at} in another");
                 self.osc = Some(Osc::default());
             }
         }
@@ -87,29 +89,35 @@ impl Marks {
             return;
         };
         for &byte in bytes {
-            if !(osc.text.starts_with(MARK) || MARK.starts_with(&osc.text)) {
-                return;
+            let markable = osc.text.starts_with(MARK) || MARK.starts_with(&osc.text);
+            if !markable {
+                break;
             }
-            if osc.text.len() == MARK_BYTES_MAX {
+            if osc.text.len() < MARK_BYTES_MAX {
+                osc.text.push(byte);
+            } else {
                 osc.over = true;
-                return;
+                break;
             }
-            osc.text.push(byte);
         }
         assert!(osc.text.len() <= MARK_BYTES_MAX);
-    }
-
-    /// Ends the OSC read, `cancelled` by CAN or SUB or not, and gives its
-    /// mark where it is one.
-    fn end(&mut self, cancelled: bool) -> Option<Mark> {
-        let osc = self.osc.take()?;
         if osc.over {
             assert_eq!(osc.text.len(), MARK_BYTES_MAX);
+        }
+    }
+}
+
+impl Osc {
+    /// Ends the OSC, `cancelled` by CAN or SUB or not, and gives its mark
+    /// where it is one.
+    fn end(self, cancelled: bool) -> Option<Mark> {
+        if self.over {
+            assert_eq!(self.text.len(), MARK_BYTES_MAX);
         }
         if cancelled {
             return None;
         }
-        mark(osc.text.strip_prefix(MARK)?, osc.over)
+        mark(self.text.strip_prefix(MARK)?, self.over)
     }
 }
 
@@ -218,12 +226,15 @@ mod tests {
     }
 
     /// A mark starts and ends where Ghostty's parse says: an ESC ends it, as
-    /// another escape follows, and a 0x9D in an APC starts one.
+    /// another escape follows, and a 0x9D in an APC starts one, where in an
+    /// OSC it is the OSC's text.
     #[test]
     fn a_mark_starts_and_ends_where_ghostty_says() {
         assert_eq!(read(&[b"\x1b]133;A\x1b[m"]), [Mark::Prompt]);
         assert_eq!(read(&[b"\x1b]133;A\x1b\x1b]133;D;2\x07"]), [Mark::Prompt, Mark::Done(Some(2))]);
         assert_eq!(read(&[b"\x1b_x\x9d133;A\x07"]), [Mark::Prompt]);
+        assert_eq!(read(&[b"\x1b]133;A\x9d133;D;1\x07"]), []);
+        assert_eq!(read(&[b"\x1b]\x1b]\x9d\x9d\x07\x07"]), []);
     }
 
     /// A command line past what the scanner keeps reads as none, and the

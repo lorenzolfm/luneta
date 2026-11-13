@@ -150,7 +150,7 @@ pub struct Written {
     pub marks: Vec<Mark>,
     /// The rows it pushed into the scrollback: none where the rows that were
     /// there went, or the program went to its other screen.
-    pub pushed: Option<usize>,
+    pub rows_pushed: Option<usize>,
 }
 
 /// A screen, and what the program asked of its terminal that it answers.
@@ -194,20 +194,31 @@ impl Screen {
 
     /// Reads `bytes`, as the program wrote them. A program that sets 80 or
     /// 132 columns (DECCOLM) has the screen erased, as tmux does, and it
-    /// keeps its size.
+    /// keeps its size. The size comes back at the end of the write, as
+    /// Ghostty's parse has no stop at a CSI: what the same write holds after
+    /// the DECCOLM is drawn 80 or 132 wide and then reflowed, where a later
+    /// write draws it at the screen's size. A program that asked for 132
+    /// columns draws for 132 either way.
     pub fn write(&mut self, bytes: &[u8]) -> Result<Written, Error> {
         let (size, marks) = (self.size, &mut self.marks);
+        let (columns, rows) = (size.columns.get(), size.rows.get());
         let (made, answers) = self.answering.drive(|terminal| {
-            let before = Before::of(terminal)?;
+            // The rows pushed only move a scrolled-back view: where Ghostty
+            // cannot say them, the view goes to the top, as where the rows
+            // it was on went, and the pane goes on.
+            let before = Before::of(terminal).ok();
             let mut marked = Vec::new();
             marks.write(terminal, bytes, &mut marked)?;
-            if (terminal.cols()?, terminal.rows()?) != (size.columns.get(), size.rows.get()) {
-                terminal.resize(size.columns.get(), size.rows.get(), 0, 0)?;
+            if (terminal.cols()?, terminal.rows()?) != (columns, rows) {
+                terminal.resize(columns, rows, 0, 0)?;
             }
-            Ok((marked, before.pushed(terminal)?))
+            assert_eq!((terminal.cols()?, terminal.rows()?), (columns, rows));
+            let rows_pushed =
+                before.and_then(|before| before.rows_pushed(terminal).ok().flatten());
+            Ok((marked, rows_pushed))
         });
-        let (marks, pushed) = made?;
-        Ok(Written { answers, marks, pushed })
+        let (marks, rows_pushed) = made?;
+        Ok(Written { answers, marks, rows_pushed })
     }
 
     /// Makes the screen `size`, and gives back what it answered the program
@@ -382,8 +393,8 @@ impl Before {
     fn of(terminal: &Terminal<'_, '_>) -> Result<Before, Error> {
         let rows = terminal.scrollback_rows()?;
         let last = match rows.checked_sub(1) {
-            Some(last) => {
-                let y = u32::try_from(last).map_err(|_| Error::InvalidValue)?;
+            Some(index) => {
+                let y = u32::try_from(index).expect("a scrollback row fits a screen coordinate");
                 Some(terminal.track_grid_ref(Point::Screen(Coordinate { x: 0, y }))?)
             },
             None => None,
@@ -392,8 +403,9 @@ impl Before {
     }
 
     /// The rows that went into the scrollback since: those after the row it
-    /// tracks, which only the scrollback's pruning takes from it.
-    fn pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Option<usize>, Error> {
+    /// tracks, which only the scrollback's pruning takes from it. None where
+    /// that row is out of the scrollback, as a reflow may put it.
+    fn rows_pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Option<usize>, Error> {
         if terminal.active_screen()? != self.screen {
             return Ok(None);
         }
@@ -404,8 +416,8 @@ impl Before {
         let Some(at) = last.point(Space::Screen)? else {
             return Ok(None);
         };
-        let kept = usize::try_from(at.y).map_err(|_| Error::InvalidValue)? + 1;
-        Ok(Some(rows.saturating_sub(kept)))
+        let kept = usize::try_from(at.y).expect("a screen coordinate fits a usize") + 1;
+        Ok(rows.checked_sub(kept))
     }
 }
 
@@ -685,6 +697,11 @@ mod tests {
         assert_eq!(view.size(), size(10, 2));
         assert!(view.lines().iter().all(|line| line.cells().len() == 10));
         assert_eq!(glyphs(&view.lines()[0])[0], Glyph::Blank);
+        assert_eq!(answered(&mut screen, b"\x1b[?3hcd"), b"");
+        let view = screen.view(0).unwrap();
+        assert_eq!(view.size(), size(10, 2));
+        assert_eq!(glyphs(&view.lines()[0])[..3], [narrow("c"), narrow("d"), Glyph::Blank]);
+        assert_eq!(view.cursor().map(|cursor| (cursor.row, cursor.column)), Some((0, 2)));
         assert_eq!(answered(&mut screen, b"\x1b[?3l"), b"");
         assert_eq!(screen.size(), size(10, 2));
     }
@@ -694,14 +711,16 @@ mod tests {
     #[test]
     fn a_write_says_the_rows_it_pushed_into_the_scrollback() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4").unwrap().pushed, Some(2));
-        let mut pruned = false;
-        while !pruned {
+        assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4").unwrap().rows_pushed, Some(2));
+        // 10 kB holds some thousands of rows of 10 columns, so Ghostty lets
+        // go of some well before 100,000.
+        let pruned = (0..100_000).any(|_| {
             let before = screen.scrollback();
-            assert_eq!(screen.write(b"\r\nx").unwrap().pushed, Some(1));
-            pruned = screen.scrollback() < before;
-        }
-        assert_eq!(screen.write(b"\x1b[3J").unwrap().pushed, None);
+            assert_eq!(screen.write(b"\r\nx").unwrap().rows_pushed, Some(1));
+            screen.scrollback() < before
+        });
+        assert!(pruned, "the scrollback let go of no rows");
+        assert_eq!(screen.write(b"\x1b[3J").unwrap().rows_pushed, None);
     }
 
     /// A program that goes to its other screen pushed no rows the client
@@ -709,8 +728,8 @@ mod tests {
     #[test]
     fn a_write_to_the_other_screen_pushes_none() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().pushed, None);
-        assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().pushed, Some(0));
+        assert_eq!(screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().rows_pushed, None);
+        assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().rows_pushed, Some(0));
     }
 
     /// The marks a shell writes come back from the write that ends them.
