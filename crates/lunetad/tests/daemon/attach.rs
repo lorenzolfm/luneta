@@ -169,7 +169,11 @@ fn luneta_own_refuses_a_name_a_session_of_zellij_s_has() {
     let ended = on_terminal(command);
     assert!(!ended.status.success(), "{}", ended.said);
     assert!(ended.said.contains("project is a session of zellij's"), "{}", ended.said);
-    assert_eq!(clients(&owned, "project"), None);
+    let host = owned.host.host();
+    let named = host.sessions.iter().filter(|session| session.name == "project");
+    assert!(named.clone().all(|session| own(session).is_none()), "{:?}", host.sessions);
+    // As the daemon has asked zellij for them by now, or has yet to.
+    assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
 }
 
 /// As the own session luneta is in ends, the newest session of this machine
