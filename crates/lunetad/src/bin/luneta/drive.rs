@@ -825,17 +825,22 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let listed = commands::listed_agents(folder);
     let agents = listed.as_ref().ok().map(|listed| listed.agents.as_slice());
     let unread = listed.as_ref().map_or(&[][..], |listed| listed.unread_files.as_slice());
+    let placed = match agents.map(placed).transpose() {
+        Ok(placed) => placed.unwrap_or_default(),
+        Err(why) => {
+            eprintln!(
+                "luneta: {why}, so a close cannot tell which agents it ends, and closes nothing"
+            );
+            return ExitCode::FAILURE;
+        },
+    };
     let known = match &listed {
         Err(_) => Err(Untold::Away),
         Ok(listed) => {
             let seats = listed.unread_seats().map_err(Untold::Unplaced);
-            seats.map(|unread| Told { agents: &listed.agents, unread })
+            seats.map(|unread| Told { agents: &placed, unread })
         },
     };
-    if let Err(why) = agents.map_or(Ok(()), own_placed) {
-        eprintln!("luneta: {why}, so a close cannot tell which agents it ends, and closes nothing");
-        return ExitCode::FAILURE;
-    }
     let here = match seat(agents, &running) {
         Ok(here) => here,
         Err(why) => {
@@ -862,7 +867,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
         let planned = running.whose(session).and_then(|whose| {
-            Ok((whose, plans_in(session, whose, &wanted, known.as_ref(), &running)?))
+            Ok((whose, plans_in(session, whose, &wanted, known.as_ref())?))
         });
         match planned {
             Ok((whose, planned)) => {
@@ -899,8 +904,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let mut failed = false;
     for plan in &plans {
         println!("{}: {}", says(&plan.act), plan.ends());
-        let agents = agents.unwrap_or_default();
-        for line in ending(&plan.act, agents, unread, here.as_ref(), &running) {
+        for line in ending(&plan.act, &placed, unread, here.as_ref(), &running) {
             println!("  {line}");
         }
         if !told {
@@ -945,24 +949,24 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     }
 }
 
-/// The agents lunetad tells of: those it lists, and where the agents of the
-/// session files it cannot read run, as `unread_seats` gives them.
+/// The agents lunetad tells of: those it lists, where `placed` places them,
+/// and where the agents of the session files it cannot read run, as
+/// `unread_seats` gives them.
 struct Told<'a> {
-    agents: &'a [Agent],
+    agents: &'a [Placed<'a>],
     unread: Vec<(&'a str, u32)>,
 }
 
 /// What closing what is `wanted` of `session`, the one `whose` says, does,
 /// an act at a time, and the agents each ends among those lunetad `told` of,
-/// or why luneta cannot tell them, as they are placed among `running`. Its
-/// panes close together, as its multiplexer says closing them closes: an
-/// own session's tab goes with its one pane.
+/// or why luneta cannot tell them. Its panes close together, as its
+/// multiplexer says closing them closes: an own session's tab goes with its
+/// one pane.
 fn plans_in(
     session: &str,
     whose: Whose,
     wanted: &Wanted,
     told: Result<&Told, &Untold>,
-    running: &Running,
 ) -> Result<Vec<Plan>, String> {
     let named = session_named(session)?;
     let owned = || named.clone();
@@ -980,9 +984,8 @@ fn plans_in(
             },
         },
     };
-    let in_session = |agent: &Agent| {
-        let (at, pane) = spot(agent, running)?;
-        (at == session).then(|| (pane, Doing::from(agent)))
+    let in_session = |placed: &Placed| {
+        placed.spot.pane_in(session, whose).map(|pane| (pane, Doing::from(placed.agent)))
     };
     let agents: Result<Vec<_>, Untold> = match told {
         Ok(Told { agents, unread }) => {
@@ -1019,77 +1022,125 @@ fn says(act: &Act) -> String {
     }
 }
 
-/// That each of `agents` in an own pane names its session by a key that
-/// reads, as `spot` reads it. Or why one does not: `spot` would place it in
-/// no session, and a close would not say it ends it.
-fn own_placed(agents: &[Agent]) -> Result<(), String> {
-    for agent in agents {
-        let Some(agent::Pane::Own(own)) = &agent.pane else { continue };
-        let pane = own.pane;
-        let unsessioned = || format!("lunetad lists an agent in own pane {pane} of no session");
-        let session = own.session.as_ref().ok_or_else(unsessioned)?;
-        OwnKey::of(session)
-            .map_err(|why| format!("lunetad lists an agent in own pane {pane}, and {why}"))?;
+/// The session `act` closes in, past its name.
+fn whose_of(act: &Act) -> Whose {
+    match act {
+        Act::Pane { whose, .. }
+        | Act::Tab { whose, .. }
+        | Act::Kill { whose, .. }
+        | Act::Leave { whose, .. } => *whose,
     }
-    Ok(())
 }
 
-/// Where `agent` runs, by the name its session has now among `running` and
-/// its pane's id: none in no pane, nor where luneta cannot tell which session
-/// that is. A close has `own_placed` refuse an own pane's agent whose session
-/// does not read, so that one is never left out of its plan here.
-fn spot<'a>(agent: &'a Agent, running: &'a Running) -> Option<(&'a str, u32)> {
-    match agent.pane.as_ref()? {
-        agent::Pane::Zellij(zellij) => zellij_spot(zellij),
-        agent::Pane::Own(own) => {
-            let key = OwnKey::of(own.session.as_ref()?).ok()?;
-            Some((running.own_of(key)?.name.as_str(), own.pane))
-        },
+/// Where lunetad says an agent runs, as `placed` reads it once: in a pane of
+/// zellij's, by the name lunetad follows its session by; in an own pane, by
+/// its session's key, which a rename keeps; or in neither, as in no pane, or
+/// where lunetad cannot tell which session it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spot<'a> {
+    Zellij { session: &'a str, pane: u32 },
+    Own { session: OwnKey, pane: u32 },
+    Unplaced,
+}
+
+impl<'a> Spot<'a> {
+    /// Where a process runs in `zellij`, as lunetad says.
+    fn zellij(zellij: Option<&'a Zellij>) -> Self {
+        match zellij.and_then(|zellij| Some((zellij.session.as_deref()?, zellij.pane))) {
+            Some((session, pane)) => Spot::Zellij { session, pane },
+            None => Spot::Unplaced,
+        }
     }
+
+    /// Its pane, where it is in `session`, the one `whose` says: an own
+    /// session's by its key, and zellij's by its name, as lunetad names it.
+    fn pane_in(self, session: &str, whose: Whose) -> Option<u32> {
+        match (self, whose) {
+            (Spot::Zellij { session: at, pane }, Whose::Zellij(_)) => {
+                (at == session).then_some(pane)
+            },
+            (Spot::Own { session: at, pane }, Whose::Own(key)) => (at == key).then_some(pane),
+            _ => None,
+        }
+    }
+
+    /// Where it runs, by the name its session has now among `running`, and
+    /// its pane's id: none where it is placed in no session that runs.
+    fn named(self, running: &'a Running) -> Option<(&'a str, u32)> {
+        match self {
+            Spot::Zellij { session, pane } => Some((session, pane)),
+            Spot::Own { session, pane } => Some((running.own_of(session)?.name.as_str(), pane)),
+            Spot::Unplaced => None,
+        }
+    }
+}
+
+/// An agent lunetad lists, and where it runs, as `placed` reads it.
+#[derive(Clone, Copy, Debug)]
+struct Placed<'a> {
+    agent: &'a Agent,
+    spot: Spot<'a>,
+}
+
+/// Where each of `agents` runs, as lunetad lists them. Or why one in an own
+/// pane is placed in no session, as it names its session by no key that
+/// reads: a close would not say it ends it.
+fn placed<'a>(agents: &'a [Agent]) -> Result<Vec<Placed<'a>>, String> {
+    let place = |agent: &'a Agent| {
+        let spot = match &agent.pane {
+            Some(agent::Pane::Own(own)) => {
+                let pane = own.pane;
+                let lists = format!("lunetad lists an agent in own pane {pane}");
+                let session = own.session.as_ref().ok_or_else(|| format!("{lists} of no session"))?;
+                let session = OwnKey::of(session).map_err(|why| format!("{lists}, and {why}"))?;
+                Spot::Own { session, pane }
+            },
+            Some(agent::Pane::Zellij(_)) | None => Spot::zellij(agent.zellij()),
+        };
+        Ok(Placed { agent, spot })
+    };
+    agents.iter().map(place).collect()
 }
 
 /// What `ending` lines up: `T`, by its seat as `luneta agents` writes it, and
-/// where it runs, as `spot` says.
-type Placed<'a, T> = (String, &'a T, Option<(&'a str, u32)>);
-
-/// Where a process runs in `zellij`, as `spot` says.
-fn zellij_spot(zellij: &Zellij) -> Option<(&str, u32)> {
-    Some((zellij.session.as_deref()?, zellij.pane))
-}
+/// where it runs.
+type Ends<'a, T> = (String, &'a T, Spot<'a>);
 
 /// The agents among `agents` that `act` ends, and those of the session files
 /// among `unread` that lunetad cannot read, a line to each, as `luneta
-/// agents` writes them, by where they run among `running`: the one in the
-/// pane this runs in, `here`, says so.
+/// agents` writes them, by the names of their sessions among `running`: the
+/// one in the pane this runs in, `here`, says so.
 fn ending(
     act: &Act,
-    agents: &[Agent],
+    agents: &[Placed],
     unread: &[UnreadFile],
     here: Option<&Pane>,
     running: &Running,
 ) -> Vec<String> {
-    let session = session_of(act);
-    let ends = |spot: Option<(&str, u32)>| {
-        spot.is_some_and(|(at, pane)| at == session && act.takes(pane))
+    let (session, whose) = (session_of(act), whose_of(act));
+    let ends = |spot: Spot| spot.pane_in(session, whose).is_some_and(|pane| act.takes(pane));
+    let seat = |placed: &Placed| match placed.spot {
+        Spot::Own { session, pane } => commands::own_seat(session, pane, &running.own),
+        Spot::Zellij { .. } | Spot::Unplaced => commands::seat(placed.agent.zellij()),
     };
-    let agents: Vec<Placed<Agent>> = agents
+    let agents: Vec<Ends<Agent>> = agents
         .iter()
-        .map(|agent| (agent, spot(agent, running)))
-        .filter(|(_, spot)| ends(*spot))
-        .map(|(agent, spot)| (commands::seat_of(agent, &running.own), agent, spot))
+        .filter(|placed| ends(placed.spot))
+        .map(|placed| (seat(placed), placed.agent, placed.spot))
         .collect();
-    let unread: Vec<Placed<UnreadFile>> = unread
+    let unread: Vec<Ends<UnreadFile>> = unread
         .iter()
-        .map(|file| (file, file.zellij.as_ref().and_then(zellij_spot)))
+        .map(|file| (file, Spot::zellij(file.zellij.as_ref())))
         .filter(|(_, spot)| ends(*spot))
         .map(|(file, spot)| (commands::seat(file.zellij.as_ref()), file, spot))
         .collect();
     let seats = agents.iter().map(|(seat, ..)| seat).chain(unread.iter().map(|(seat, ..)| seat));
     let width = seats.map(String::len).max().unwrap_or(0);
-    let is_here = |spot: Option<(&str, u32)>| {
-        here.zip(spot).is_some_and(|(here, (at, pane))| at == here.session && pane == here.pane)
+    let is_here = |spot: Spot| {
+        let at = spot.named(running);
+        here.zip(at).is_some_and(|(here, (at, pane))| at == here.session && pane == here.pane)
     };
-    let mark = |line: String, spot: Option<(&str, u32)>| {
+    let mark = |line: String, spot: Spot| {
         if is_here(spot) { format!("{line}  (this runs here)") } else { line }
     };
     let agents = agents.into_iter().map(|(seat, agent, spot)| {
@@ -1201,9 +1252,10 @@ mod tests {
         assert!(pane_address("work").is_err());
     }
 
-    /// A close places each agent lunetad lists in an own pane by its session,
-    /// or closes nothing, as it could not say it ends one it cannot place:
-    /// one of no session, of id 0, or made at no time it says.
+    /// A close places each agent lunetad lists in an own pane by its session's
+    /// key, and closes it with that session alone, whatever its name: or it
+    /// closes nothing, as it could not say it ends one it cannot place: one of
+    /// no session, of id 0, or made at no time it says.
     #[test]
     fn a_close_places_each_agent_in_an_own_pane_or_closes_nothing() {
         let in_own = |session| {
@@ -1212,9 +1264,17 @@ mod tests {
         };
         let session = |id, made_at| Some(lunetad::api::OwnSession { id, made_at });
         let made = || Some(SystemTime::UNIX_EPOCH.into());
-        assert_eq!(own_placed(&[Agent::default(), in_own(session(3, made()))]), Ok(()));
+        let agents = [Agent::default(), in_own(session(3, made()))];
+        let spots: Vec<Spot> = placed(&agents).unwrap().iter().map(|it| it.spot).collect();
+        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: SystemTime::UNIX_EPOCH };
+        assert_eq!(spots, [Spot::Unplaced, Spot::Own { session: key, pane: 2 }]);
+        assert_eq!(spots[1].pane_in("any", Whose::Own(key)), Some(2));
+        let other = OwnKey { id: mux::OwnId::new(4).unwrap(), ..key };
+        assert_eq!(spots[1].pane_in("any", Whose::Own(other)), None);
+        assert_eq!(spots[1].pane_in("any", Whose::Zellij(SystemTime::UNIX_EPOCH)), None);
         for unread in [None, session(0, made()), session(3, None)] {
-            let refused = own_placed(&[Agent::default(), in_own(unread)]);
+            let agents = [Agent::default(), in_own(unread)];
+            let refused = placed(&agents).map(drop);
             assert!(refused.is_err_and(|why| why.contains("own pane 2")), "{unread:?}");
         }
     }

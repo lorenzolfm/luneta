@@ -404,15 +404,23 @@ async fn agents(
 pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
     match &agent.pane {
         Some(agent::Pane::Own(pane)) => {
-            let key = pane.session.as_ref().and_then(|session| OwnKey::of(session).ok());
-            let named = key.and_then(|key| own.iter().find(|listed| listed.key() == key));
-            if let Some(named) = named {
-                return format!("{}:{}", named.name, pane.pane);
+            if let Some(key) = pane.session.as_ref().and_then(|session| OwnKey::of(session).ok()) {
+                return own_seat(key, pane.pane, own);
             }
             let id = pane.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
             format!("own {id}:{}", pane.pane)
         },
         Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
+    }
+}
+
+/// Where an agent runs in the pane `pane` of the own session `session`, as
+/// `seat_of` says: by the name the session has among `own`, or by its id
+/// where `own` has none of its id made then.
+pub fn own_seat(session: OwnKey, pane: u32, own: &[Listing]) -> String {
+    match own.iter().find(|listed| listed.key() == session) {
+        Some(named) => format!("{}:{pane}", named.name),
+        None => format!("own {}:{pane}", session.id),
     }
 }
 
