@@ -6,19 +6,22 @@ mod input;
 
 use std::num::NonZeroU16;
 
-use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
+use libghostty_vt::effect::{
+    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
+    PrimaryDeviceAttributes, SecondaryDeviceAttributes, TertiaryDeviceAttributes,
+};
+use libghostty_vt::fmt::{Extras, Format, Formatter};
+use libghostty_vt::mode::Mode;
+use libghostty_vt::point::{Coordinate, Point};
 use libghostty_vt::render::{CellIteration, CellIterator, RowIterator};
 use libghostty_vt::screen::{CellContentTag, CellWide};
 use libghostty_vt::selection::Selection;
-use libghostty_vt::terminal::{
-    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point,
-    PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
-    TertiaryDeviceAttributes,
-};
-use libghostty_vt::{Error, RenderState, TerminalOptions};
+use libghostty_vt::terminal::ScrollViewport;
+use libghostty_vt::{Error, RenderState};
 
+pub use libghostty_vt::color::Rgb as RgbColor;
 pub use libghostty_vt::render::CursorVisualStyle as CursorShape;
-pub use libghostty_vt::style::{RgbColor, Style, StyleColor, Underline};
+pub use libghostty_vt::style::{Style, StyleColor, Underline};
 
 use answering::Answering;
 pub use input::{Click, Wheel};
@@ -137,13 +140,7 @@ impl Screen {
         rows: NonZeroU16,
         scrollback_bytes: usize,
     ) -> Result<Screen, Error> {
-        assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
-        let options = TerminalOptions {
-            cols: columns.get(),
-            rows: rows.get(),
-            max_scrollback: scrollback_bytes,
-        };
-        let mut answering = Answering::new(options)?;
+        let mut answering = Answering::new(columns, rows, scrollback_bytes)?;
         let (made, answers) = answering.drive(|terminal| {
             terminal
                 .on_xtversion(|_| Some(NAME))?
@@ -253,14 +250,16 @@ impl Screen {
     /// UTF-8.
     #[must_use]
     pub fn title(&self) -> Option<String> {
-        self.answering.terminal().title().ok().map(str::to_owned)
+        let title = self.answering.terminal().title().ok()?;
+        str::from_utf8(title).ok().map(str::to_owned)
     }
 
     /// Where the program last said it works (OSC 7), or nothing: none where
     /// it is not UTF-8.
     #[must_use]
     pub fn pwd(&self) -> Option<String> {
-        self.answering.terminal().pwd().ok().map(str::to_owned)
+        let pwd = self.answering.terminal().pwd().ok()?;
+        str::from_utf8(pwd).ok().map(str::to_owned)
     }
 
     /// What the screen shows, looked at from `back` rows back in its
@@ -310,24 +309,27 @@ impl Screen {
     /// The lines the screen shows, in their styles, as escape sequences.
     pub fn dumped_screen(&self) -> Result<String, Error> {
         let terminal = self.answering.terminal();
-        let corner = |x, y| terminal.grid_ref(Point::Active(PointCoordinate { x, y }));
+        let corner = |x, y| terminal.grid_ref(Point::Active(Coordinate { x, y }));
         let last = (terminal.cols()? - 1, u32::from(terminal.rows()?) - 1);
         let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
-        let options = FormatterOptions::new()
-            .with_format(Format::Vt)
-            .with_trim(true)
-            .with_selection(&shown);
-        let bytes = Formatter::new(terminal, options)?.format_alloc(None)?;
+        let mut formatter = Formatter::new(terminal)?;
+        // Only the lines and their styles: a new formatter also writes the
+        // palette ahead of them and the cursor's style and link after.
+        formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
+        // SAFETY: both corners are of `terminal`'s active screen, taken from
+        // it just now, and the formatter borrows it as they do.
+        #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, unchecked")]
+        unsafe { formatter.set_selection(Some(&shown)) }?;
+        let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// All the screen was written that it keeps, its scrollback with it: a
     /// line for each line written, with no styles and no spaces at its end.
     pub fn dumped_text(&self) -> Result<String, Error> {
-        let options =
-            FormatterOptions::new().with_format(Format::Plain).with_unwrap(true).with_trim(true);
-        let terminal = self.answering.terminal();
-        let bytes = Formatter::new(terminal, options)?.format_alloc(None)?;
+        let mut formatter = Formatter::new(self.answering.terminal())?;
+        formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
+        let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
@@ -565,8 +567,26 @@ mod tests {
         assert_eq!(screen.write(b"one\r\ntwo\r\n\x1b[31mred\x1b[0m"), b"");
         assert_eq!(screen.dumped_text().unwrap(), "one\ntwo\nred");
         let dumped = screen.dumped_screen().unwrap();
-        assert!(dumped.contains("two"), "{dumped:?}");
-        assert!(dumped.contains("\x1b[38;5;1mred"), "{dumped:?}");
-        assert!(!dumped.contains("one"), "{dumped:?}");
+        assert_eq!(dumped, "two\r\n\x1b[0m\x1b[38;5;1mred\x1b[0m", "{dumped:?}");
+    }
+
+    /// A repeat inside left and right margins, after a text variation
+    /// selector, is read: Ghostty's print once overflowed on it (#384).
+    #[test]
+    fn a_repeat_after_a_variation_selector_in_margins_is_read() {
+        let mut screen = screen(6, 1);
+        let bytes = "\x1b[?7l\x1b[?69h👍\u{fe0e}\x1b[?1049l\x1b[3b\x1b[2;5s\x1b[3b\u{fe0e}";
+        assert_eq!(screen.write(bytes.as_bytes()), b"");
+        assert_eq!(screen.dumped_text().unwrap(), "👍👍👍\u{fe0e}");
+    }
+
+    /// A joiner after a repeat inside left and right margins is read:
+    /// Ghostty's print once unwrapped a null on it (#384).
+    #[test]
+    fn a_joiner_after_a_repeat_in_margins_is_read() {
+        let mut screen = screen(5, 2);
+        let bytes = "\x1b[?69h\x1b[1;2r中\x1b[3;9s\x1b[3b☺\u{200d}👍";
+        assert_eq!(screen.write(bytes.as_bytes()), b"");
+        assert_eq!(screen.dumped_text().unwrap(), "中中   ☺\u{200d}👍");
     }
 }

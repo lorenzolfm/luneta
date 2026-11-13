@@ -3,7 +3,7 @@
 
 use libghostty_vt::key::{self, Mods};
 use libghostty_vt::mouse::{self, EncoderSize, Position};
-use libghostty_vt::terminal::Mode;
+use libghostty_vt::mode::Mode;
 use libghostty_vt::{Error, focus, paste};
 
 use super::Screen;
@@ -148,7 +148,7 @@ impl Screen {
         encoders
             .mice
             .set_options_from_terminal(terminal)
-            .set_size(size)
+            .set_size(size)?
             .set_any_button_pressed(encoders.held.is_some());
         let mut bytes = Vec::new();
         encoders.mice.encode_to_vec(&encoders.mouse, &mut bytes)?;
