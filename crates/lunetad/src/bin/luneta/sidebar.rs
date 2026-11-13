@@ -2256,11 +2256,14 @@ impl Sidebar {
     }
 
     /// luneta's client of an own session is `client`, as its server says as
-    /// it takes it in, which the ask box names to its agent.
+    /// it takes it in, which the ask box names to its agent. The server says
+    /// so once, before it says where the client is, as the client checks.
     pub fn attached_own(&mut self, client: OwnClientId) {
         let Beside::Own(seat) = &mut self.beside else {
             unreachable!("only a client of an own session is taken in by its server");
         };
+        assert_eq!(seat.client, None, "a client of an own session is taken in once");
+        assert_eq!(seat.pane, None, "a client of an own session is taken in before it goes");
         seat.client = Some(client);
     }
 
@@ -2271,6 +2274,7 @@ impl Sidebar {
         let Some(OwnSeat { client, .. }) = before else {
             unreachable!("only a client of an own session goes among them");
         };
+        assert!(client.is_some(), "a client of an own session goes once it is taken in");
         let session = pane.session;
         self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.id), client });
         if before.is_some_and(|before| before.session != session) {
@@ -10162,6 +10166,7 @@ mod tests {
         let made = OwnMade::of(moment(30_000)).unwrap();
         let key = OwnKey { id: OwnId::new(1).unwrap(), made };
         sidebar.attaching(key);
+        sidebar.attached_own(OwnClientId::new(4).unwrap());
         sidebar.went_own(OwnPane::new(key, 1).unwrap());
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         sidebar.heard(host(vec![own_session("new", 1, 30, panes())], Vec::new()));

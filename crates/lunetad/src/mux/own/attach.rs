@@ -524,8 +524,8 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
 /// What the server said to a client, as it comes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    /// It took the client in, as this: what it says next is where the client
-    /// is.
+    /// It took the client in, as this: its first word, which it says once.
+    /// What it says next is where the client is.
     Attached(OwnClientId),
     Went(Went),
     Frame(Frame),
@@ -541,9 +541,19 @@ pub enum Heard {
 }
 
 /// `said`, the server's word to a client, with `sessions` the sessions it
-/// lists, or why it does not read.
-fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
-    Ok(match said.event.ok_or("the server said nothing")? {
+/// lists, and the client `attached` or not before it, or why it does not
+/// read: the server takes a client in with its first word, and with no other.
+fn heard(said: api::ToClient, sessions: &[OwnKey], attached: bool) -> Result<Heard, String> {
+    let event = said.event.ok_or("the server said nothing")?;
+    let takes_in = matches!(event, to_client::Event::Attached(_));
+    if attached {
+        if takes_in {
+            return Err("the server took the client in twice".to_owned());
+        }
+    } else if !takes_in {
+        return Err("the server spoke to the client before it took it in".to_owned());
+    }
+    Ok(match event {
         to_client::Event::Attached(api::Attached { client }) => {
             Heard::Attached(OwnClientId::new(client).ok_or("the server named its client 0")?)
         },
@@ -694,6 +704,7 @@ async fn stream(
     let saying = saying.chain(tokio_stream::once(Next::Unsaid));
     let given_up = ReceiverStream::new(given_up).map(Next::GaveUp);
     let mut next = pin!(hearing.merge(saying).merge(given_up));
+    let mut attached = false;
     loop {
         let said = match next.next().await {
             Some(Next::Said(Ok(said))) => said,
@@ -742,9 +753,12 @@ async fn stream(
                 Err(lost) => return lost,
             };
         }
-        match heard(said, &sessions) {
+        match heard(said, &sessions, attached) {
             Ok(Heard::Ended) => return Heard::Ended,
-            Ok(heard) => told(heard),
+            Ok(heard) => {
+                attached |= matches!(heard, Heard::Attached(_));
+                told(heard);
+            },
             Err(why) => {
                 return Heard::Lost(format!("luneta-mux said what luneta cannot read: {why}"));
             },
@@ -909,7 +923,7 @@ mod tests {
         let sessions = [key(3, 20)];
         let went = |session, tab, pane| {
             let event = to_client::Event::Went(api::Went { session, tab, pane });
-            heard(api::ToClient { event: Some(event) }, &sessions)
+            heard(api::ToClient { event: Some(event) }, &sessions, true)
         };
         let pane = OwnPane::new(key(3, 20), 4).unwrap();
         assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { pane, tab: NonZeroU32::MIN })));
@@ -918,6 +932,27 @@ mod tests {
         assert_eq!(went(5, 1, 4).unwrap_err(), unlisted);
         assert_eq!(went(3, 0, 4).unwrap_err(), "the client went to tab 0");
         assert_eq!(went(3, 1, 0).unwrap_err(), "the client went to pane 0");
+    }
+
+    /// The server takes a client in with its first word, by an id never 0,
+    /// and with no other: where it says anything first, or takes the client
+    /// in again, it does not read.
+    #[test]
+    fn a_client_is_taken_in_first_and_once() {
+        let sessions = [key(3, 20)];
+        let said = |event, attached| {
+            heard(api::ToClient { event: Some(event) }, &sessions, attached)
+        };
+        let attached = |client| to_client::Event::Attached(api::Attached { client });
+        let client = OwnClientId::new(7).unwrap();
+        assert_eq!(said(attached(7), false), Ok(Heard::Attached(client)));
+        assert_eq!(said(attached(0), false).unwrap_err(), "the server named its client 0");
+        assert_eq!(said(attached(7), true).unwrap_err(), "the server took the client in twice");
+        let went = to_client::Event::Went(api::Went { session: 3, tab: 1, pane: 4 });
+        let early = "the server spoke to the client before it took it in";
+        assert_eq!(said(went, false).unwrap_err(), early);
+        let ended = to_client::Event::Ended(api::Ended {});
+        assert_eq!(said(ended, false).unwrap_err(), early);
     }
 
     /// A client goes only where the server lists its session, of the id it

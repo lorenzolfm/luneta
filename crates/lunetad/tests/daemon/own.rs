@@ -624,7 +624,11 @@ impl Shut {
 
 impl Drop for Shut {
     fn drop(&mut self) {
-        let _ = fs::set_permissions(&self.path, self.was.clone());
+        let opened = fs::set_permissions(&self.path, self.was.clone());
+        // A test failing already says why: a second panic would abort it.
+        if !thread::panicking() {
+            opened.unwrap();
+        }
     }
 }
 
