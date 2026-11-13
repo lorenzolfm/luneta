@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
@@ -132,8 +133,8 @@ impl Server {
     /// another is none of this one's.
     fn tab_of(&self, pane: OwnPane) -> Result<u32, Failure> {
         let tabs = self.session_keyed(pane.session)?.tabs;
-        let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane.pane.get()));
-        let none = || Failure::Own(no_pane(pane.session.id, pane.pane.get()));
+        let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane.id.get()));
+        let none = || Failure::Own(no_pane(pane.session.id, pane.id.get()));
         Ok(tab.ok_or_else(none)?.id)
     }
 }
@@ -629,18 +630,16 @@ impl Own {
     }
 
     /// Takes the client that last typed in the session to `to`, or says why
-    /// not: one of a server before this one is gone.
+    /// not: the server refuses a session of a server before this one.
     pub fn went(&self, to: Place) -> Result<(), Failure> {
-        let is = match to {
-            Place::Session(session) => {
-                self.server.session_keyed(session)?;
-                api::place::Is::Session(session.id.get())
-            },
-            Place::Pane(pane) => api::place::Is::Tab(self.server.tab_of(pane)?),
+        let (is, session) = match to {
+            Place::Session(session) => (api::place::Is::Session(session.id.get()), session),
+            Place::Pane(pane) => (api::place::Is::Tab(self.server.tab_of(pane)?), pane.session),
         };
+        let to = api::Place { is: Some(is), made_at: Some(session.made.into()) };
         let request = api::GoRequest {
             who: Some(api::go_request::Who::LastTypedIn(self.id().get())),
-            to: Some(api::Place { is: Some(is) }),
+            to: Some(to),
         };
         let went = self.server.ask(|mut client| async move { client.go(request).await });
         went.map(drop).map_err(|status| refused(&status))
@@ -652,7 +651,7 @@ impl Own {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Made {
     pub pane: OwnPane,
-    pub tab: TabId,
+    pub tab: NonZeroU32,
 }
 
 /// Makes an own session named `name` of one tab, in `cwd`, that runs `runs`,
@@ -685,7 +684,9 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
                 let session = OwnKey { id, made: made_at };
                 let zero = || Failure::Unread(format!("luneta-mux made {id} with the pane 0"));
                 let pane = OwnPane::new(session, made.pane).ok_or_else(zero)?;
-                return Ok(Made { pane, tab: TabId(made.tab) });
+                let unnumbered = || Failure::Unread(format!("luneta-mux made {id} with the tab 0"));
+                let tab = NonZeroU32::new(made.tab).ok_or_else(unnumbered)?;
+                return Ok(Made { pane, tab });
             },
             Err(status) if status.code() == Code::Unavailable => {
                 gone_by(&server, deadline)?;

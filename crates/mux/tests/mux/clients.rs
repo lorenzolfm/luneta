@@ -5,7 +5,7 @@ use luneta_mux::api;
 use tonic::Code;
 
 use crate::host::{
-    Attached, Server, new_session, new_tab, run, script, session, shell, size, tab, tabs,
+    Attached, Server, listed, new_session, new_tab, run, script, session, shell, size, tab, tabs,
     watched_until,
 };
 
@@ -64,6 +64,41 @@ fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
         assert_eq!(attached.went.tab, made.tab);
         attached.type_line("echo $((6 * 7))").await;
         attached.until_row("42").await;
+    });
+}
+
+/// A place that says when its session was made is taken where the server made
+/// it then, and refused where at another time, as of a server before this
+/// one: a go to the session or to its tab, and a hello.
+#[test]
+fn a_place_of_a_session_made_at_another_time_is_refused() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let made = new_session(&mut mux, "work", shell()).await;
+        let then = listed(&mut mux).await.sessions[0].made_at.expect("a session says its made_at");
+        let before = prost_types::Timestamp { seconds: then.seconds - 1, ..then };
+        let session = |made_at| api::Place { made_at, ..crate::host::session(made.session) };
+        let tab = |made_at| api::Place { made_at, ..crate::host::tab(made.tab) };
+        let attached = Attached::new(&mut mux, session(Some(then)), size(40, 10)).await;
+        let go = |to| api::GoRequest {
+            who: Some(api::go_request::Who::Client(attached.client)),
+            to: Some(to),
+        };
+        let refused = format!("no session {} made then", made.session);
+        let places = [(session(Some(before)), session(Some(then))), (tab(Some(before)), tab(None))];
+        for (stale, taken) in places {
+            let stale = mux.go(go(stale)).await.unwrap_err();
+            assert_eq!((stale.code(), stale.message()), (Code::NotFound, refused.as_str()));
+            let went = mux.go(go(taken)).await.unwrap().into_inner();
+            assert_eq!(went.client, attached.client);
+        }
+        let to = Some(session(Some(before)));
+        let hello = api::Hello { to, size: Some(size(40, 10)), colours: None };
+        let Err(stale) = Attached::hello(&mut mux, hello).await else {
+            panic!("a client went to a session made at another time");
+        };
+        assert_eq!((stale.code(), stale.message()), (Code::NotFound, refused.as_str()));
     });
 }
 

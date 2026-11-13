@@ -1187,8 +1187,8 @@ impl Daemon for Host {
         let server::Made { pane, tab } = made.map_err(Status::failed_precondition)?;
         Ok(Response::new(NewOwnResponse {
             session: pane.session.id.get(),
-            tab: tab.0,
-            pane: pane.pane.get(),
+            tab: tab.get(),
+            pane: pane.id.get(),
             made_at: Some(pane.session.made.into()),
         }))
     }

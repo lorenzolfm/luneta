@@ -244,7 +244,7 @@ impl User {
             },
             User::Own { pane, named } => Some(ask_request::User::Own(UserOwnPane {
                 session: Some(pane.session.into()),
-                pane: pane.pane.get(),
+                pane: pane.id.get(),
                 named: named.to_string(),
             })),
         }
@@ -292,7 +292,7 @@ impl User {
 /// named `named`: as `Asked::new` takes it, and `own_read` reads it back.
 fn own_spelled(pane: OwnPane, named: &SessionName) -> String {
     let made = made_nanos(pane.session.made).expect("Asked::new takes no own session made then");
-    format!("{}:{made}:{}:{named}", pane.session.id, pane.pane)
+    format!("{}:{made}:{}:{named}", pane.session.id, pane.id)
 }
 
 /// When an own session was made, `made`, in nanoseconds since the epoch, as
@@ -309,7 +309,7 @@ fn own_read(spelled: &str) -> Option<User> {
     let mut parts = spelled.splitn(4, ':');
     let id = OwnId::new(parts.next()?.parse().ok()?)?;
     let made = UNIX_EPOCH.checked_add(Duration::from_nanos(parts.next()?.parse().ok()?))?;
-    let pane = OwnPane { session: OwnKey { id, made }, pane: parts.next()?.parse().ok()? };
+    let pane = OwnPane { session: OwnKey { id, made }, id: parts.next()?.parse().ok()? };
     let named = SessionName::running(parts.next()?).ok()?;
     Some(User::Own { pane, named })
 }
@@ -577,13 +577,11 @@ fn told(user: &User, agents: Harness, words: &str) -> String {
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
-        User::Own { pane, named } => {
-            let pane = pane.pane;
-            format!(
-                "[luneta: the user is in pane {named}:{pane}, of an own session, whose tabs hold a \
-                 pane each: `open pane` and `turn` fail there.]"
-            )
-        },
+        User::Own { pane, named } => format!(
+            "[luneta: the user is in pane {named}:{}, of an own session, whose tabs hold a pane \
+             each: `open pane` and `turn` fail there.]",
+            pane.id
+        ),
         User::Away => "[luneta: the user is on another machine just now, where luneta's zellij \
                        is, and in none of this machine's panes: `luneta here`, `go` and `open \
                        session` fail, and so do `open pane` without --beside and `open tab` \

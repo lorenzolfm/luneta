@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Ends, Hello, Name, Opens, Place, Size, Who};
+use crate::asked::{Colours, Ends, Hello, Is, Name, Opens, Place, Size, Who};
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::pane::{self, Busy, Exit, Handle, Out, ToPane, Viewer};
 use crate::pty::{self, Pty};
@@ -477,11 +477,24 @@ impl Model {
             .find(|found| found.id == pane)
     }
 
-    /// The pane a client going to `place` goes to.
+    /// The pane a client going to `place` goes to, or why none: a place of a
+    /// session made at another time is of a server before this one.
     fn pane_of_place(&self, place: Place) -> Result<PaneId, Status> {
-        match place {
-            Place::Tab(tab) => Ok(self.tab_at(tab)?.1.pane.id),
-            Place::Session(session) => Ok(self.session(session)?.tabs.current().pane.id),
+        let (session, pane) = match place.is {
+            Is::Tab(tab) => {
+                let (session, tab) = self.tab_at(tab)?;
+                (self.session(session).expect("a tab's session is the model's"), tab.pane.id)
+            },
+            Is::Session(session) => {
+                let session = self.session(session)?;
+                (session, session.tabs.current().pane.id)
+            },
+        };
+        match place.made {
+            Some(made) if made != session.made => {
+                Err(Status::not_found(format!("no session {} made then", session.id)))
+            },
+            Some(_) | None => Ok(pane),
         }
     }
 

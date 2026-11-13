@@ -144,7 +144,8 @@ impl Owned {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
             runtime.unwrap().block_on(async move {
                 let size = Some(mux_api::Size { columns: 80, rows: 24 });
-                let to = Some(mux_api::Place { is: Some(mux_api::place::Is::Session(session)) });
+                let is = Some(mux_api::place::Is::Session(session));
+                let to = Some(mux_api::Place { is, made_at: None });
                 let hello = mux_api::Hello { to, size, colours: None };
                 let hello = Some(mux_api::to_server::Event::Hello(hello));
                 let hello = mux_api::ToServer { event: hello };

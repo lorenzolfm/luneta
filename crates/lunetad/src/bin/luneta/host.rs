@@ -4419,6 +4419,7 @@ fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::num::NonZeroU32;
     use std::rc::Rc;
 
     use alacritty_terminal::event::VoidListener;
@@ -4474,7 +4475,10 @@ mod tests {
             let whose = lunetad::closes::Whose::Own(here);
             Some(After::Kill { session: SessionName::running("here").unwrap(), whose })
         };
-        let went = |session, tab| own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab };
+        let went = |session, tab| {
+            let tab = NonZeroU32::new(tab).unwrap();
+            own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab }
+        };
         let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
         let going = Going { to: To::Session(there), after: kill() };
         let mut phase = Phase::Coming { fails: Fails::End, going };

@@ -14,7 +14,7 @@
 //! and goes only where that server holds the session it names, as it comes
 //! and on each go after.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::pin;
 use std::thread;
 use std::time::SystemTime;
@@ -61,18 +61,19 @@ impl To {
     pub fn reached(self, went: &Went) -> bool {
         match self {
             To::Session(session) => went.pane.session == session,
-            To::Tab { session, tab } => went.pane.session == session && went.tab == tab,
+            To::Tab { session, tab } => went.pane.session == session && went.tab.get() == tab,
         }
     }
 
-    /// It, by the ids alone, as the server takes it: the server it goes to
-    /// is the one `found_in` found it held by.
+    /// It, as the server takes it: the server it goes to is the one
+    /// `found_in` found it held by, and refuses it where the session it
+    /// holds by the id was made at another time.
     fn said(self) -> api::Place {
         let is = match self {
             To::Session(session) => api::place::Is::Session(session.id.get()),
             To::Tab { tab, .. } => api::place::Is::Tab(tab),
         };
-        api::Place { is: Some(is) }
+        api::Place { is: Some(is), made_at: Some(self.session().made.into()) }
     }
 
     /// Why `sessions`, as a server lists them, do not hold where it goes, if
@@ -175,7 +176,7 @@ impl Hello {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Went {
     pub pane: OwnPane,
-    pub tab: u32,
+    pub tab: NonZeroU32,
 }
 
 /// A grapheme a glyph shows: never none, and with no control character in
@@ -549,9 +550,7 @@ fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
             let session = sessions.iter().find(|key| key.id == id);
             let unlisted = || format!("the client went to session {id}, which it does not list");
             let session = *session.ok_or_else(unlisted)?;
-            if tab == 0 {
-                return Err("the client went to tab 0".to_owned());
-            }
+            let tab = NonZeroU32::new(tab).ok_or("the client went to tab 0")?;
             let pane = OwnPane::new(session, pane).ok_or("the client went to pane 0")?;
             Heard::Went(Went { pane, tab })
         },
@@ -912,7 +911,7 @@ mod tests {
             heard(api::ToClient { event: Some(event) }, &sessions)
         };
         let pane = OwnPane::new(key(3, 20), 4).unwrap();
-        assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { pane, tab: 1 })));
+        assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { pane, tab: NonZeroU32::MIN })));
         assert_eq!(went(0, 1, 4).unwrap_err(), "the client went to session 0");
         let unlisted = "the client went to session 5, which it does not list";
         assert_eq!(went(5, 1, 4).unwrap_err(), unlisted);

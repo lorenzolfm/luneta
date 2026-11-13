@@ -2249,7 +2249,7 @@ impl Sidebar {
         let before = self.own_seat();
         assert!(before.is_some(), "only a client of an own session goes among them");
         let session = pane.session;
-        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.pane) });
+        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.id) });
         if before.is_some_and(|before| before.session != session) {
             self.unfold_own(session);
         }
@@ -2411,12 +2411,15 @@ impl Sidebar {
             return User::Away;
         }
         if let Some(seat) = self.own_seat() {
-            let (Some(pane), Ok(PanePlace { session, .. })) = (seat.pane, self.here_place()) else {
+            let Ok(place) = self.here_place() else {
                 return User::Untold;
             };
-            let pane = OwnPane { session: seat.session, pane };
-            assert_eq!(session.own_key(), Some(pane.session), "here_place is of the seat's");
-            return User::Own { pane, named: session.name };
+            let session = seat.session;
+            let listed = place.session.own_key();
+            assert_eq!(listed, Some(session), "here_place is of the seat's session");
+            let id = seat.pane.expect("here_place has a pane only where the seat has one");
+            assert_eq!(id.get(), place.pane, "here_place is on the seat's pane");
+            return User::Own { pane: OwnPane { session, id }, named: place.session.name };
         }
         let Some(session) = self.here().filter(|_| self.going().is_none()) else {
             return User::Untold;

@@ -133,6 +133,9 @@ message Place {
     uint64 session = 1;
     uint32 tab = 2;
   }
+  // When the session, or the tab's, was made, where set: a place in one made
+  // at another time is of a server before this one, and refused.
+  google.protobuf.Timestamp made_at = 3;
 }
 
 message DumpRequest {

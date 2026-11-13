@@ -261,7 +261,7 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
                 None => Err(format!(
                     "luneta's ask box asked from pane {named}:{}, of an own session that no \
                      longer runs",
-                    pane.pane
+                    pane.id
                 )),
             };
         },
@@ -270,7 +270,7 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
                 Some(own) => Ok(Seated::In(own_here(own, pane))),
                 None => Err(format!(
                     "this runs in pane {} of own session {}, which no longer runs",
-                    pane.pane, pane.session.id
+                    pane.id, pane.session.id
                 )),
             };
         },
@@ -304,7 +304,7 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
 /// The pane `pane` of `own`, an own session, by the name it has now.
 fn own_here(own: &Listing, pane: OwnPane) -> Here {
     assert_eq!(own.key(), pane.session, "the pane is of the session listed");
-    let at = Pane { session: own.name.to_string(), pane: pane.pane.get() };
+    let at = Pane { session: own.name.to_string(), pane: pane.id.get() };
     Here { pane: at, whose: Whose::Own(pane.session) }
 }
 
@@ -1091,7 +1091,7 @@ impl<'a> Spot<'a> {
             (Spot::Zellij { session: at, pane }, Whose::Zellij(_)) => {
                 (at == session).then_some(pane)
             },
-            (Spot::Own(pane), Whose::Own(key)) => (pane.session == key).then_some(pane.pane.get()),
+            (Spot::Own(pane), Whose::Own(key)) => (pane.session == key).then_some(pane.id.get()),
             _ => None,
         }
     }

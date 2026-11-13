@@ -164,11 +164,11 @@ pub async fn new_tab(
 }
 
 pub fn session(id: u64) -> api::Place {
-    api::Place { is: Some(api::place::Is::Session(id)) }
+    api::Place { is: Some(api::place::Is::Session(id)), made_at: None }
 }
 
 pub fn tab(id: u32) -> api::Place {
-    api::Place { is: Some(api::place::Is::Tab(id)) }
+    api::Place { is: Some(api::place::Is::Tab(id)), made_at: None }
 }
 
 pub fn size(columns: u32, rows: u32) -> api::Size {

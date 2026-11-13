@@ -71,14 +71,14 @@ impl From<OwnKey> for crate::api::OwnSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OwnPane {
     pub session: OwnKey,
-    pub pane: NonZeroU32,
+    pub id: NonZeroU32,
 }
 
 impl OwnPane {
     /// The pane `pane` of `session`, or none: 0 names none.
     #[must_use]
     pub fn new(session: OwnKey, pane: u32) -> Option<Self> {
-        NonZeroU32::new(pane).map(|pane| OwnPane { session, pane })
+        NonZeroU32::new(pane).map(|id| OwnPane { session, id })
     }
 
     /// The pane `own` says, or why it says none: no session, or one that does
@@ -95,7 +95,7 @@ impl OwnPane {
 
 impl From<OwnPane> for crate::api::Own {
     fn from(own: OwnPane) -> Self {
-        crate::api::Own { session: Some(own.session.into()), pane: own.pane.get() }
+        crate::api::Own { session: Some(own.session.into()), pane: own.id.get() }
     }
 }
 
@@ -120,7 +120,7 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     let id = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
     let made = UNIX_EPOCH.checked_add(Duration::from_nanos(text(MADE_VAR)?.parse().ok()?))?;
     let pane = text(PANE_VAR)?.parse().ok()?;
-    Some(Named::Own(OwnPane { session: OwnKey { id, made }, pane }))
+    Some(Named::Own(OwnPane { session: OwnKey { id, made }, id: pane }))
 }
 
 /// The own pane this process runs in, as its variables name it, with its

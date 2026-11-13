@@ -116,7 +116,7 @@ impl View {
     /// a size new to it, and the rows that changed of the last frame sent.
     /// What was selected of a frame of another size goes.
     fn framed(&mut self, frame: &Frame) -> Result<(), String> {
-        if self.went.is_none_or(|went| went.pane.pane.get() != frame.pane()) {
+        if self.went.is_none_or(|went| went.pane.id.get() != frame.pane()) {
             return Ok(());
         }
         let before = self.screen.take();
@@ -602,6 +602,7 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
     use std::time::SystemTime;
 
     use lunetad::mux::own::attach::Grapheme;
@@ -635,7 +636,7 @@ mod tests {
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
         let screen = Screen { size, lines, cursor: None, tracks_mouse: false };
         let session = OwnKey { id: OwnId::new(1).unwrap(), made: SystemTime::UNIX_EPOCH };
-        let went = Went { pane: OwnPane::new(session, 1).unwrap(), tab: 1 };
+        let went = Went { pane: OwnPane::new(session, 1).unwrap(), tab: NonZeroU32::MIN };
         View { went: Some(went), screen: Some(screen), ..View::default() }
     }
 

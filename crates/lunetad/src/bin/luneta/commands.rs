@@ -419,8 +419,8 @@ pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
 /// its id made then.
 pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
     match own.iter().find(|listed| listed.key() == pane.session) {
-        Some(named) => format!("{}:{}", named.name, pane.pane),
-        None => format!("own {}:{}", pane.session.id, pane.pane),
+        Some(named) => format!("{}:{}", named.name, pane.id),
+        None => format!("own {}:{}", pane.session.id, pane.id),
     }
 }
 

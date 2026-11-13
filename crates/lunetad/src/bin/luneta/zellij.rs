@@ -113,7 +113,7 @@ fn seat_in(
             Err(asked_in_pane(&user, &format!("a pane of {session}")))
         },
         (Some((_, user)), None, Some(own)) => {
-            let (pane, session) = (own.pane, own.session.id);
+            let (pane, session) = (own.id, own.session.id);
             Err(asked_in_pane(&user, &format!("pane {pane} of own session {session}")))
         },
         (Some((turn, user)), None, None) => Ok(Some(Seat::Asked { turn, user })),
@@ -130,8 +130,7 @@ fn asked_in_pane(user: &User, in_pane: &str) -> String {
             format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
         },
         User::Own { pane, named } => {
-            let pane = pane.pane;
-            format!("{OWN_VAR} names {named}:{pane}, a pane luneta's ask box asked from")
+            format!("{OWN_VAR} names {named}:{}, a pane luneta's ask box asked from", pane.id)
         },
         User::Away => format!("{AWAY_VAR} says luneta's ask box asked from another machine"),
         User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
