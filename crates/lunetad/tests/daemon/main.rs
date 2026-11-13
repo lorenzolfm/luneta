@@ -24,6 +24,8 @@ mod mouse;
 #[cfg(test)]
 mod own;
 #[cfg(test)]
+mod own_drive;
+#[cfg(test)]
 mod pi;
 #[cfg(test)]
 mod prune;

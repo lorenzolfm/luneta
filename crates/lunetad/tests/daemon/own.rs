@@ -5,8 +5,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::mpsc;
 use std::time::Duration;
-use std::fs;
+use std::{fs, thread};
 
 use hyper_util::rt::TokioIo;
 use lunetad::api::close_request::Closes as Closed;
@@ -19,13 +20,14 @@ use lunetad::api::{
     OpenRequest, RenameSessionRequest, TurnIntoTabRequest,
 };
 use lunetad::mux::own::api::mux_client::MuxClient;
-use lunetad::mux::own::api::{pane::Program, ListRequest};
+use lunetad::mux::own::api::{self as mux_api, pane::Program, ListRequest, Listing};
 use lunetad::mux::own::server;
+use tokio_stream::StreamExt as _;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Status};
 
 use crate::agents;
-use crate::host::{eventually, folder_in, start, Daemon, Host, Running, LUNETAD};
+use crate::host::{answered, eventually, folder_in, start, Daemon, Host, Running, LUNETA, LUNETAD};
 use crate::sessions::session;
 
 /// What an own pane runs in these tests: a program that waits, and so holds
@@ -125,22 +127,44 @@ impl Owned {
         self.host.folder().join(server::SOCKET)
     }
 
+    /// The sessions as their server lists them now.
+    pub fn listing(&self) -> Listing {
+        let socket = self.socket();
+        self.runtime.block_on(async move {
+            mux_client(socket).await.list(ListRequest {}).await.unwrap().into_inner()
+        })
+    }
+
+    /// A client of the server, attached to the own session of id `session`.
+    pub fn attach(&self, session: u64) -> Attached {
+        let socket = self.socket();
+        let (hang_up, to_go) = tokio::sync::oneshot::channel::<()>();
+        let (came, arrival) = mpsc::channel();
+        let attaching = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            runtime.unwrap().block_on(async move {
+                let size = Some(mux_api::Size { columns: 80, rows: 24 });
+                let to = Some(mux_api::Place { is: Some(mux_api::place::Is::Session(session)) });
+                let hello = mux_api::Hello { to, size, colours: None };
+                let hello = Some(mux_api::to_server::Event::Hello(hello));
+                let hello = mux_api::ToServer { event: hello };
+                let said = tokio_stream::iter([hello]).chain(tokio_stream::pending());
+                let mut heard = mux_client(socket).await.attach(said).await.unwrap().into_inner();
+                let attached = heard.message().await.unwrap();
+                came.send(attached.is_some()).unwrap();
+                tokio::select! {
+                    _ = to_go => {},
+                    () = async { while let Ok(Some(_)) = heard.message().await {} } => {},
+                }
+            });
+        });
+        assert_eq!(arrival.recv_timeout(Duration::from_secs(15)), Ok(true), "the client came");
+        Attached { hang_up: Some(hang_up), attaching: Some(attaching) }
+    }
+
     /// The pid of what the pane `pane` runs, as its server lists it.
     fn pid_of(&self, pane: u32) -> u32 {
-        let socket = self.socket();
-        let listing = self.runtime.block_on(async move {
-            let channel = Endpoint::from_static("http://luneta-mux")
-                .connect_with_connector(tower::service_fn(move |_: Uri| {
-                    let socket = socket.clone();
-                    async move {
-                        let stream = tokio::net::UnixStream::connect(socket).await?;
-                        std::io::Result::Ok(TokioIo::new(stream))
-                    }
-                }))
-                .await
-                .unwrap();
-            MuxClient::new(channel).list(ListRequest {}).await.unwrap().into_inner()
-        });
+        let listing = self.listing();
         let panes = listing.sessions.iter().flat_map(|session| &session.tabs);
         let listed = panes.flat_map(|tab| &tab.panes).find(|it| it.id == pane).unwrap();
         let Some(Program::Pid(pid)) = listed.program else {
@@ -148,6 +172,38 @@ impl Owned {
         };
         pid
     }
+}
+
+/// A client of the server, which hangs up as it drops.
+pub struct Attached {
+    hang_up: Option<tokio::sync::oneshot::Sender<()>>,
+    attaching: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        if let Some(hang_up) = self.hang_up.take() {
+            let _ = hang_up.send(());
+        }
+        if let Some(attaching) = self.attaching.take() {
+            let _ = attaching.join();
+        }
+    }
+}
+
+/// A client of the server that listens on `socket`.
+async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
+    let channel = Endpoint::from_static("http://luneta-mux")
+        .connect_with_connector(tower::service_fn(move |_: Uri| {
+            let socket = socket.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(socket).await?;
+                std::io::Result::Ok(TokioIo::new(stream))
+            }
+        }))
+        .await
+        .unwrap();
+    MuxClient::new(channel)
 }
 
 /// The own session `session` is, by its id and when its server made it: none
@@ -481,6 +537,7 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
 
 /// An agent that runs in an own pane is there, as the variables the server
 /// gives what runs in its panes name it: by the session's id and the pane's.
+/// `luneta agents` names it by its session's name.
 #[test]
 fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let owned = Owned::new();
@@ -499,6 +556,9 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let own = api::Own { session: own(&owned.listed("own")), pane: made.pane };
     assert_eq!(agent.pane, Some(agent::Pane::Own(own)));
     assert_eq!(agent.zellij(), None);
+    let listed = answered(owned.host.vars().command(LUNETA).arg("agents"));
+    let listed = String::from_utf8(listed.stdout).unwrap();
+    assert!(listed.starts_with(&format!("own:{}  busy", made.pane)), "{listed}");
 }
 
 /// The daemon runs on while an own session does, however long zellij has had

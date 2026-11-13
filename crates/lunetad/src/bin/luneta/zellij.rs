@@ -16,7 +16,8 @@ use alacritty_terminal::term::TermMode;
 use luneta_protocol::said::Said;
 use lunetad::api::{refuge_response, Client};
 pub use lunetad::moves::{Ended, Refuge};
-use lunetad::mux::{self, ClientWords, Mux, PaneId, PaneVars, Zellij, ZellijPane};
+use lunetad::mux::own;
+use lunetad::mux::{self, ClientWords, Mux, OwnKey, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
 use lunetad::closes::{running_in, Whose};
 pub use lunetad::names::{session_for, Starts};
@@ -59,11 +60,14 @@ pub fn pane_address(spelled: &str) -> Result<Pane, String> {
 }
 
 /// Where a command of luneta's runs, as its variables say.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seat {
     /// In a pane of zellij, by the name its session had as the pane opened,
     /// which a rename leaves behind.
     Opened(ZellijPane),
+    /// In a pane of an own session, by the session's key and the pane's id,
+    /// which a rename keeps.
+    Own { session: OwnKey, pane: u32 },
     /// In no pane, as the agent of luneta's ask box runs, in `turn`, for you
     /// where `user` says: in the pane you asked from, by the name its session
     /// had as you asked, or on another machine, where luneta's zellij was,
@@ -76,27 +80,40 @@ impl Seat {
     pub fn turn(&self) -> Option<Turn> {
         match self {
             Seat::Asked { turn, .. } => Some(*turn),
-            Seat::Opened(_) => None,
+            Seat::Opened(_) | Seat::Own { .. } => None,
         }
     }
 }
 
 /// Where this runs, as zellij names it in the variables of what runs in its
-/// panes, or luneta's ask box in those of its agent: none outside both. Or
-/// why the box's do not read, as `asks::turn_in` says, or name a turn where
-/// zellij's name a pane: nothing runs in a pane and asks from another.
+/// panes, or luneta's own multiplexer in those of its own, or luneta's ask
+/// box in those of its agent: none outside all three. Or why the box's do
+/// not read, as `asks::turn_in` says, or name a turn where a multiplexer's
+/// name a pane: nothing runs in a pane and asks from another.
 pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
     let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), asked.as_deref(), away.as_deref());
-    seat_in(turn?, Zellij::here()?)
+    seat_in(turn?, Zellij::here()?, own::here())
 }
 
 /// The seat of the turn of luneta's ask box `asked`, and where it says you
-/// are, or else the pane zellij's variables name, as `here` says, or none.
-fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, String> {
-    match (asked, here.named()) {
-        (Some((_, user)), Some(session)) => {
+/// are, or else the pane zellij's variables name, or else the own pane
+/// `own` those of luneta's own multiplexer do, as `here` says, or none. A
+/// zellij started in an own pane gives its panes the variables of both, and
+/// what runs there is in zellij's.
+fn seat_in(
+    asked: Option<(Turn, User)>,
+    here: PaneVars,
+    own: Option<(OwnKey, u32)>,
+) -> Result<Option<Seat>, String> {
+    let in_pane = match (here.named(), own) {
+        (Some(session), _) => Some(format!("a pane of {session}")),
+        (None, Some((session, pane))) => Some(format!("pane {pane} of own session {}", session.id)),
+        (None, None) => None,
+    };
+    match (asked, in_pane) {
+        (Some((_, user)), Some(in_pane)) => {
             let asked = match user {
                 User::Pane { session: from, pane } => {
                     format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
@@ -106,11 +123,11 @@ fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, 
                 },
                 User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
             };
-            Err(format!("{asked}, and this runs in a pane of {session}"))
+            Err(format!("{asked}, and this runs in {in_pane}"))
         },
         (Some((turn, user)), None) => Ok(Some(Seat::Asked { turn, user })),
-        (None, Some(_)) => Ok(here.pane_named().map(Seat::Opened)),
-        (None, None) => Ok(None),
+        (None, Some(_)) if here.named().is_some() => Ok(here.pane_named().map(Seat::Opened)),
+        (None, _) => Ok(own.map(|(session, pane)| Seat::Own { session, pane })),
     }
 }
 
@@ -1539,15 +1556,22 @@ mod tests {
     }
 
     /// A command runs in the pane zellij's variables name, by the name its
-    /// session had as the pane opened, and the agent of luneta's ask box, in
+    /// session had as the pane opened, or else in the own pane those of
+    /// luneta's own multiplexer name, and the agent of luneta's ask box, in
     /// none, goes by the turn the box names, for you where it says. Where
-    /// zellij names a pane too, it goes by neither: nothing runs in one pane
-    /// and asks from another.
+    /// a multiplexer names a pane too, it goes by neither: nothing runs in
+    /// one pane and asks from another.
     #[test]
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let here = |named: Option<&str>, pane| PaneVars::spelled(named.map(str::to_owned), pane);
         let opened = Seat::Opened(ZellijPane { session: "work".to_owned(), pane: 2 });
-        assert_eq!(seat_in(None, here(Some("work"), Some("2"))), Ok(Some(opened)));
+        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: SystemTime::UNIX_EPOCH };
+        let own = Some((key, 12));
+        assert_eq!(seat_in(None, here(Some("work"), Some("2")), None), Ok(Some(opened.clone())));
+        assert_eq!(seat_in(None, here(Some("work"), Some("2")), own), Ok(Some(opened)));
+        let in_own = Seat::Own { session: key, pane: 12 };
+        assert_eq!(seat_in(None, here(None, None), own), Ok(Some(in_own)));
+        assert_eq!(seat_in(None, here(Some("work"), None), own), Ok(None));
         let unnamed = [
             (Some(""), Some("2")),
             (Some("work"), Some("terminal_2")),
@@ -1556,16 +1580,19 @@ mod tests {
             (None, None),
         ];
         for (session, pane) in unnamed {
-            assert_eq!(seat_in(None, here(session, pane)), Ok(None), "{session:?} {pane:?}");
+            assert_eq!(seat_in(None, here(session, pane), None), Ok(None), "{session:?} {pane:?}");
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
         for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
-            assert_eq!(seat_in(Some((turn, user.clone())), here(None, None)), asked);
-            assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2"))), asked);
-            let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None));
+            assert_eq!(seat_in(Some((turn, user.clone())), here(None, None), None), asked);
+            assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2")), None), asked);
+            let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None), None);
             assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
+            let in_own = seat_in(Some((turn, user.clone())), here(None, None), own);
+            let says = "this runs in pane 12 of own session 3";
+            assert!(in_own.is_err_and(|why| why.ends_with(says)));
         }
     }
 
