@@ -3,7 +3,9 @@
 //! questions as zellij's, under names the two share. Each test has the daemon
 //! start the real `luneta-mux`, which the same build puts beside it.
 
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -595,7 +597,7 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
 /// An agent that runs in an own pane is there, as the variables the server
 /// gives what runs in its panes name it: by the session's id and the pane's.
 /// `luneta agents` names it by its session's name, or by its ids where the
-/// server cannot be reached, and says why.
+/// server cannot be reached, and says why, but only where the daemon can be.
 #[test]
 fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let owned = Owned::new();
@@ -619,17 +621,33 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let listed = String::from_utf8(listed.stdout).unwrap();
     assert!(listed.starts_with(&format!("own:{}  busy", made.pane)), "{listed}");
 
-    // A socket luneta may not connect to is a server it cannot reach.
+    // A socket luneta may not connect to is a server it cannot reach: to all
+    // but root, which connects whatever the socket's mode.
     let socket = owned.socket();
     let allowed = fs::metadata(&socket).unwrap().permissions();
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o000)).unwrap();
+    let refused = UnixStream::connect(&socket).map(drop).map_err(|error| error.kind());
+    assert_eq!(refused, Err(ErrorKind::PermissionDenied), "root reaches any socket");
     let unreached = answered(owned.host.vars().command(LUNETA).arg("agents"));
-    fs::set_permissions(&socket, allowed).unwrap();
-    let (listed, why) = (String::from_utf8(unreached.stdout).unwrap(), unreached.stderr);
-    let why = String::from_utf8(why).unwrap();
+    let listed = String::from_utf8(unreached.stdout).unwrap();
+    let why = String::from_utf8(unreached.stderr).unwrap();
     assert!(unreached.status.success(), "{why}");
     assert!(listed.starts_with(&format!("?:{} (own {id})  busy", made.pane)), "{listed}");
     assert!(why.contains("luneta-mux cannot list them"), "{why}");
+
+    // Where the daemon cannot be reached either, its failure is all luneta
+    // says: what luneta-mux could not do is said only beside the agents.
+    let daemon = owned.host.folder().join(lunetad::folder::SOCKET);
+    let open = fs::metadata(&daemon).unwrap().permissions();
+    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o000)).unwrap();
+    let alone = answered(owned.host.vars().command(LUNETA).arg("agents"));
+    fs::set_permissions(&daemon, open).unwrap();
+    fs::set_permissions(&socket, allowed).unwrap();
+    let why = String::from_utf8(alone.stderr).unwrap();
+    assert!(!alone.status.success(), "{why}");
+    assert!(alone.stdout.is_empty(), "{why}");
+    assert!(why.contains(lunetad::folder::SOCKET), "{why}");
+    assert!(!why.contains("luneta-mux"), "{why}");
 }
 
 /// The daemon runs on while an own session does, however long zellij has had
