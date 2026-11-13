@@ -9,10 +9,48 @@ mod os;
 #[path = "process/macos.rs"]
 mod os;
 
-pub use os::{argv, children, process};
+pub use os::{children, process};
 
 /// The most children of a process the server reads.
 pub const CHILDREN_MAX: usize = 256;
+
+/// The most bytes of a process's arguments the server keeps, a NUL after
+/// each among them: what runs in front names a pane's command, which needs
+/// no more, and each listing holds it.
+pub const ARGV_BYTES_MAX: usize = 16 * 1024;
+
+/// The arguments of `pid`, as `os::argv` reads them, cut to
+/// `ARGV_BYTES_MAX`: none where it is gone.
+pub fn argv(pid: u32) -> Option<Vec<String>> {
+    os::argv(pid).map(bounded)
+}
+
+/// `args` up to `ARGV_BYTES_MAX` bytes, a NUL after each counted: the one
+/// that runs past them is cut at a character's boundary, and those after it
+/// are left out.
+fn bounded(args: Vec<String>) -> Vec<String> {
+    let mut room = ARGV_BYTES_MAX;
+    let mut kept = Vec::new();
+    for mut arg in args {
+        if room == 0 {
+            break;
+        }
+        if arg.len() < room {
+            room -= arg.len() + 1;
+            kept.push(arg);
+            continue;
+        }
+        let mut cut = room - 1;
+        while !arg.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        arg.truncate(cut);
+        kept.push(arg);
+        break;
+    }
+    assert!(kept.iter().map(|arg| arg.len() + 1).sum::<usize>() <= ARGV_BYTES_MAX);
+    kept
+}
 
 /// A process, as the kernel says it now.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +145,45 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         rustix::process::kill_process(raw, rustix::process::Signal::CONT).expect("it goes on");
+        child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
+        child.wait().expect("it ends");
+    }
+
+    /// Arguments past `ARGV_BYTES_MAX` are cut there, the one that runs past
+    /// it at a character's boundary.
+    #[test]
+    fn arguments_are_cut_to_their_bound() {
+        let long = "é".repeat(ARGV_BYTES_MAX);
+        let args = bounded(vec!["abc".to_owned(), long.clone(), "d".to_owned()]);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "abc");
+        assert!(long.starts_with(&args[1]));
+        assert_eq!(args[1].len(), ARGV_BYTES_MAX - 6);
+        let short = vec!["a".to_owned(), String::new()];
+        assert_eq!(bounded(short.clone()), short);
+    }
+
+    /// A child given an argument longer than the bound reads cut to it.
+    #[test]
+    fn a_child_s_long_argument_reads_cut() {
+        let long = "a".repeat(4 * ARGV_BYTES_MAX);
+        let mut child = Command::new("sh")
+            .args(["-c", "read line", "", &long])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("sh starts");
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let started =
+            || argv(pid).is_some_and(|argv| argv.first().is_some_and(|first| first == "sh"));
+        while !started() {
+            assert!(Instant::now() < deadline, "sh never ran: {:?}", argv(pid).map(|args| args.len()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let argv = argv(pid).expect("the child's arguments read");
+        assert_eq!(argv[..4], ["sh", "-c", "read line", ""]);
+        assert_eq!(argv[4], long[..ARGV_BYTES_MAX - 18]);
+        assert_eq!(argv.len(), 5);
         child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
         child.wait().expect("it ends");
     }

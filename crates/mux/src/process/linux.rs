@@ -1,8 +1,9 @@
 //! Processes as Linux's `/proc` says them.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read as _;
 
-use super::{CHILDREN_MAX, Group, Process, Terminal};
+use super::{ARGV_BYTES_MAX, CHILDREN_MAX, Group, Process, Terminal};
 
 /// The most threads of a process whose children the server reads.
 const TASKS_MAX: usize = 256;
@@ -70,10 +71,14 @@ pub fn children(pid: u32) -> Vec<u32> {
     children
 }
 
-/// The arguments of `pid`, as its `cmdline` holds them, each ended by a NUL:
-/// none where it is gone, or a zombie, whose `cmdline` is empty.
+/// The arguments of `pid`, as the first `ARGV_BYTES_MAX` bytes of its
+/// `cmdline` hold them, each ended by a NUL: none where it is gone, or a
+/// zombie, whose `cmdline` is empty.
 pub fn argv(pid: u32) -> Option<Vec<String>> {
-    let line = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let cmdline = File::open(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut line = Vec::with_capacity(ARGV_BYTES_MAX);
+    let most = u64::try_from(ARGV_BYTES_MAX).expect("16 KiB fit a u64");
+    cmdline.take(most).read_to_end(&mut line).ok()?;
     let line = line.strip_suffix(b"\0").unwrap_or(&line);
     if line.is_empty() {
         return None;
