@@ -8,7 +8,7 @@ use std::ffi::{CStr, c_int, c_void};
 use std::mem::{MaybeUninit, size_of};
 use std::ptr;
 
-use super::{CHILDREN_MAX, Process, Terminal};
+use super::{CHILDREN_MAX, Group, Process, Terminal};
 
 /// What `e_tdev` holds for a process with no terminal: `NODEV`.
 const NO_DEVICE: u32 = u32::MAX;
@@ -40,12 +40,12 @@ pub fn process(pid: u32) -> Option<Process> {
     let name = info.pbi_comm.iter().map(|byte| byte.cast_unsigned()).take_while(|byte| *byte != 0);
     let terminal = (info.e_tdev != NO_DEVICE).then(|| Terminal {
         device: u64::from(info.e_tdev),
-        front: Some(info.e_tpgid).filter(|front| *front > 0),
+        front: Some(info.e_tpgid).filter(|front| *front > 0).map(Group),
     });
     Some(Process {
         pid: info.pbi_pid,
         parent: info.pbi_ppid,
-        group: info.pbi_pgid,
+        group: Group(info.pbi_pgid),
         name: String::from_utf8_lossy(&name.collect::<Vec<u8>>()).into_owned(),
         sleeps: String::new(),
         stopped: info.pbi_status == libc::SSTOP,

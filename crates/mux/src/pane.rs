@@ -31,7 +31,7 @@ use crate::front::Front;
 use crate::id::{ClientId, PaneId};
 use crate::marks::{Mark, Marks};
 use crate::mux::Mux;
-use crate::process;
+use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Screen, View, Wheel};
@@ -464,7 +464,8 @@ impl Thread {
             return;
         };
         let group = pty.front_group();
-        let foreground = group.and_then(|group| foreground(group).or_else(|| foreground(self.pid)));
+        let foreground =
+            group.and_then(|group| foreground(group.leader()).or_else(|| foreground(self.pid)));
         if self.shell.going()
             && let Some(group) = group
         {
@@ -731,8 +732,8 @@ impl Thread {
         self.looks.heard(Instant::now());
         if !marks.is_empty() {
             let now = Now::current();
-            let job = |group| {
-                let leader = process::process(group)?;
+            let job = |group: Group| {
+                let leader = process::process(group.leader())?;
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
             for mark in marks {

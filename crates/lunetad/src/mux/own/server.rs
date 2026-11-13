@@ -290,22 +290,27 @@ impl Listing {
 }
 
 /// The own sessions among `sessions`, as the server lists them, and why each
-/// that it leaves out does not read: one whose id or name another before it
-/// has is left out too, as the server gives each its own.
+/// that it leaves out does not read, or each pane's shell: one whose id or
+/// name another before it has is left out too, as the server gives each its
+/// own.
 fn read(sessions: Vec<api::Session>) -> (Vec<Listing>, Vec<String>) {
     let mut listed: Vec<Listing> = Vec::with_capacity(sessions.len());
     let mut unread = Vec::new();
     for session in sessions {
         match one(&session, &listed) {
-            Ok(one) => listed.push(one),
+            Ok((one, shells)) => {
+                listed.push(one);
+                unread.extend(shells);
+            },
             Err(why) => unread.push(why),
         }
     }
     (listed, unread)
 }
 
-/// `session`, as the server lists it after `before`, or why it does not read.
-fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
+/// `session`, as the server lists it after `before`, with why each pane's
+/// shell left out does not read, or why the session does not read.
+fn one(session: &api::Session, before: &[Listing]) -> Result<(Listing, Vec<String>), String> {
     let id = OwnId::new(session.id).ok_or("a session of id 0")?;
     let name = SessionName::running(&session.name)
         .map_err(|why| format!("own session {id}'s name: {why}"))?;
@@ -314,45 +319,55 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
     }
     let made = made_of(session, id)?;
     let clients = clients(session).map_err(|why| format!("own session {id}'s clients: {why}"))?;
-    let doings = doings(session).map_err(|why| format!("own session {id}'s {why}"))?;
-    Ok(Listing { id, made, name, laid: laid(session), clients, doings })
+    let (doings, unread) = doings(session, id);
+    Ok((Listing { id, made, name, laid: laid(session), clients, doings }, unread))
 }
 
-/// What the shell of each pane of `session` said, by the pane's id, or why
-/// one does not read. One that said a command, but not which, said nothing
-/// the daemon keeps.
-fn doings(session: &api::Session) -> Result<BTreeMap<u32, Doing>, String> {
+/// What the shell of each pane of `session`, of id `id`, said, by the pane's
+/// id, and why each that is left out does not read: its pane stays, as one
+/// whose shell says nothing.
+fn doings(session: &api::Session, id: OwnId) -> (BTreeMap<u32, Doing>, Vec<String>) {
     let mut doings = BTreeMap::new();
+    let mut unread = Vec::new();
     for pane in session.tabs.iter().flat_map(|tab| &tab.panes) {
-        let Some(is) = pane.ran.as_ref().and_then(|ran| ran.is.as_ref()) else {
+        let Some(ran) = &pane.ran else {
             continue;
         };
-        if let Some(doing) = doing(is).map_err(|why| format!("pane {}'s shell: {why}", pane.id))? {
-            doings.insert(pane.id, doing);
+        let read = ran.is.as_ref().ok_or_else(|| "a word of a newer luneta-mux's".to_owned());
+        match read.and_then(doing) {
+            Ok(doing) => {
+                doings.insert(pane.id, doing);
+            },
+            Err(why) => unread.push(format!("own session {id}'s pane {}'s shell: {why}", pane.id)),
         }
     }
-    Ok(doings)
+    (doings, unread)
 }
 
 /// What a shell said, as the daemon keeps it, or why it does not read.
-fn doing(is: &api::ran::Is) -> Result<Option<Doing>, String> {
+fn doing(is: &api::ran::Is) -> Result<Doing, String> {
     use api::ran::{ended, Is};
     let time = |at: Option<prost_types::Timestamp>, what: &str| {
         let at = at.ok_or_else(|| format!("no {what}"))?;
         SystemTime::try_from(at).map_err(|why| format!("its {what}: {why}"))
     };
-    let said = |command: &str| Said::new(command.to_owned());
+    let said = |command: &Option<String>| match command {
+        None => Ok(None),
+        Some(command) => Said::new(command.clone()).map(Some).ok_or("an empty command line"),
+    };
     let doing = match is {
-        Is::Ready(_) => Some(Doing::Ready),
+        Is::Ready(_) => Doing::Ready,
         Is::Going(going) => {
             let front = match going.front() {
                 api::Front::Working => Front::Working,
                 api::Front::Asking => Front::Asking,
                 api::Front::Interactive => Front::Interactive,
-                api::Front::Unspecified => return Err("a command going in front of nothing".into()),
+                api::Front::Unspecified => {
+                    return Err("what its command does, in a word of a newer luneta-mux's".into());
+                },
             };
             let since = time(going.since, "since")?;
-            said(&going.command).map(|command| Doing::Going { command, since, front })
+            Doing::Going { command: said(&going.command)?, since, front }
         },
         Is::Ended(ended) => {
             let at = time(ended.at, "at")?;
@@ -362,11 +377,11 @@ fn doing(is: &api::ran::Is) -> Result<Option<Doing>, String> {
             });
             let took = ended.took.ok_or("no took")?;
             let took = Duration::try_from(took).map_err(|why| format!("its took: {why}"))?;
-            said(&ended.command).map(|command| Doing::Ended { command, at, ending, took })
+            Doing::Ended { command: said(&ended.command)?, at, ending, took }
         },
         Is::Stopped(stopped) => {
             let at = time(stopped.at, "at")?;
-            said(&stopped.command).map(|command| Doing::Stopped { command, at })
+            Doing::Stopped { command: said(&stopped.command)?, at }
         },
     };
     Ok(doing)
@@ -830,5 +845,41 @@ mod tests {
         assert_eq!(work.laid[0].tab_id, TabId(4));
         assert_eq!(work.laid[0].cwd.as_ref().map(Said::as_str), Some("/w"));
         assert!(!work.laid[0].is_held);
+    }
+
+    /// A pane whose shell says what does not read is left out of what the
+    /// shells said, with why, and its session reads: a word of a newer
+    /// server's, a going command of no front, an empty line, or no time. A
+    /// command of no line reads.
+    #[test]
+    fn a_shell_listed_that_does_not_read_is_left_out_alone() {
+        use api::ran::{Going, Is, Ready, Stopped};
+        let since = Some(prost_types::Timestamp { seconds: 90, nanos: 0 });
+        let working = api::Front::Working.into();
+        let unsaid = Going { command: None, since, front: working };
+        let shells = [
+            Some(Is::Ready(Ready {})),
+            None,
+            Some(Is::Going(Going { front: api::Front::Unspecified.into(), ..unsaid.clone() })),
+            Some(Is::Going(Going { command: Some(String::new()), ..unsaid.clone() })),
+            Some(Is::Stopped(Stopped { command: Some("vim".to_owned()), at: None })),
+            Some(Is::Going(unsaid)),
+        ];
+        let mut listed = session(1, "work", &[]);
+        let pane = listed.tabs[0].panes[0].clone();
+        listed.tabs[0].panes = (1..)
+            .zip(shells)
+            .map(|(id, is)| api::Pane { id, ran: Some(api::Ran { is }), ..pane.clone() })
+            .collect();
+        let (listed, unread) = read(vec![listed]);
+        assert_eq!(unread.len(), 4, "{unread:?}");
+        let doings: Vec<(u32, &Doing)> =
+            listed[0].doings.iter().map(|(pane, doing)| (*pane, doing)).collect();
+        let going = Doing::Going {
+            command: None,
+            since: SystemTime::UNIX_EPOCH + Duration::from_secs(90),
+            front: Front::Working,
+        };
+        assert_eq!(doings, [(1, &Doing::Ready), (6, &going)]);
     }
 }

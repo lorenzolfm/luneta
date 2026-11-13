@@ -104,17 +104,14 @@ struct Pane {
     /// the pane opened.
     cwd: PathBuf,
     program: Program,
-    /// The leader of the group in front of its terminal, and what its shell
-    /// said, as its thread last looked.
-    foreground: Option<api::Foreground>,
-    ran: Option<api::Ran>,
     handle: Handle,
 }
 
 /// The program a pane started: it runs, or it ended, in a tab that holds.
-#[derive(Clone, Copy)]
 enum Program {
-    Runs { pid: u32 },
+    /// It runs, with the leader of the group in front of its terminal, and
+    /// what its shell said, as its thread last looked.
+    Runs { pid: u32, foreground: Option<api::Foreground>, ran: Option<api::Ran> },
     Ended(Exit),
 }
 
@@ -342,9 +339,10 @@ impl Mux {
     /// Notes what runs in front in pane `pane`, and what its shell said.
     pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
         self.change(|model| {
-            if let Some(pane) = model.pane_mut(pane) {
-                pane.foreground = foreground;
-                pane.ran = ran;
+            if let Some(Pane { program: Program::Runs { foreground: was, ran: said, .. }, .. }) =
+                model.pane_mut(pane)
+            {
+                (*was, *said) = (foreground, ran);
             }
         });
     }
@@ -365,8 +363,6 @@ impl Mux {
                 Ends::Holds => {
                     if let Some(pane) = model.pane_mut(pane) {
                         pane.program = Program::Ended(exit);
-                        pane.foreground = None;
-                        pane.ran = None;
                     }
                     false
                 },
@@ -435,9 +431,7 @@ impl Model {
                 id: pane,
                 title: String::new(),
                 cwd: opens.cwd.clone(),
-                program: Program::Runs { pid: started.pid },
-                foreground: None,
-                ran: None,
+                program: Program::Runs { pid: started.pid, foreground: None, ran: None },
                 handle: started.handle,
             },
         })
@@ -659,9 +653,11 @@ impl Model {
             .map(|(client, seat)| (*client, seat))
             .collect();
         clients.sort_by_key(|(_, seat)| seat.came);
-        let program = match pane.program {
-            Program::Runs { pid } => api::pane::Program::Pid(pid),
-            Program::Ended(exit) => api::pane::Program::Ended(exit.said()),
+        let (program, foreground, ran) = match &pane.program {
+            Program::Runs { pid, foreground, ran } => {
+                (api::pane::Program::Pid(*pid), foreground.clone(), ran.clone())
+            },
+            Program::Ended(exit) => (api::pane::Program::Ended(exit.said()), None, None),
         };
         let cwd = pane.cwd.to_str().expect("a pane's cwd was said in UTF-8");
         let pane = api::Pane {
@@ -669,8 +665,8 @@ impl Model {
             title: pane.title.clone(),
             cwd: cwd.to_owned(),
             program: Some(program),
-            foreground: pane.foreground.clone(),
-            ran: pane.ran.clone(),
+            foreground,
+            ran,
             clients: clients
                 .into_iter()
                 .map(|(id, seat)| api::Client { id: id.said(), size: Some(seat.size.said()) })

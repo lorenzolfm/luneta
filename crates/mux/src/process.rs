@@ -19,7 +19,7 @@ pub const CHILDREN_MAX: usize = 256;
 pub struct Process {
     pub pid: u32,
     pub parent: u32,
-    pub group: u32,
+    pub group: Group,
     /// Its binary's name, as the kernel keeps it: cut to 15 bytes on Linux,
     /// 16 on macOS.
     pub name: String,
@@ -37,7 +37,19 @@ pub struct Terminal {
     /// Its device number.
     pub device: u64,
     /// The process group in front of it, if one is.
-    pub front: Option<u32>,
+    pub front: Option<Group>,
+}
+
+/// A process group, by the pid of its leader, which names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group(pub u32);
+
+impl Group {
+    /// The pid of its leader, which may be gone while the group is not.
+    #[must_use]
+    pub fn leader(self) -> u32 {
+        self.0
+    }
 }
 
 #[cfg(test)]
@@ -58,7 +70,7 @@ mod tests {
         let parent = rustix::process::getppid().expect("this process has a parent");
         assert_eq!(read.parent, parent.as_raw_nonzero().get().cast_unsigned());
         let group = rustix::process::getpgrp().as_raw_nonzero().get().cast_unsigned();
-        assert_eq!(read.group, group);
+        assert_eq!(read.group, Group(group));
         assert!(!read.stopped);
         let args: Vec<String> = std::env::args().collect();
         assert_eq!(argv(pid), Some(args));

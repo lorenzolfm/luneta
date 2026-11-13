@@ -296,7 +296,7 @@ fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
         let pane = panes.into_iter().next()?;
         let ended = matches!(
             pane.shell.as_ref()?.doing.as_ref()?,
-            api::shell::Doing::Ended(ended) if ended.command == "make test"
+            api::shell::Doing::Ended(ended) if ended.command.as_deref() == Some("make test")
         );
         (ended && pane.command.as_deref() == Some("sleep 600")).then_some(pane)
     });
@@ -305,6 +305,28 @@ fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
     };
     assert_eq!(ended.ending, Some(api::shell::ended::Ending::Status(3)));
     assert!(ended.at.is_some() && ended.took.is_some(), "{ended:?}");
+}
+
+/// A shell that marks a command without its line, as bash and zsh do with a
+/// terminal's integration, has the host say that command ended, with no line.
+#[test]
+fn an_own_pane_s_shell_that_marks_no_line_says_its_command_ended() {
+    let owned = Owned::new();
+    let marks =
+        "m() { printf '\\033]133;%s\\007' \"$1\"; }; m A; m C; m 'D;3'; m A; exec sleep 600";
+    let command = ["sh", "-c", marks].map(str::to_owned).to_vec();
+    let request =
+        NewOwnRequest { on: None, name: "unsaid".to_owned(), cwd: owned.home(), command };
+    owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
+    let ended = eventually("the host says a command ended", || {
+        let pane = owned.listed("unsaid").panes?.panes.into_iter().next()?;
+        match pane.shell?.doing? {
+            api::shell::Doing::Ended(ended) => Some(ended),
+            _ => None,
+        }
+    });
+    assert_eq!(ended.command, None);
+    assert_eq!(ended.ending, Some(api::shell::ended::Ending::Status(3)));
 }
 
 /// A tab opens in an own session as in zellij's, at its end, and closes as

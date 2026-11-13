@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use super::{CHILDREN_MAX, Process, Terminal};
+use super::{CHILDREN_MAX, Group, Process, Terminal};
 
 /// The most threads of a process whose children the server reads.
 const TASKS_MAX: usize = 256;
@@ -32,12 +32,12 @@ fn stat_of(stat: &[u8]) -> Option<Process> {
     let mut fields = rest.split_ascii_whitespace();
     let state = fields.next()?;
     let parent = fields.next()?.parse().ok()?;
-    let group = fields.next()?.parse().ok()?;
+    let group = Group(fields.next()?.parse().ok()?);
     let _session = fields.next()?;
     let device: u64 = fields.next()?.parse::<i64>().ok()?.try_into().ok()?;
     let front: i64 = fields.next()?.parse().ok()?;
-    let terminal = (device != 0)
-        .then(|| Terminal { device, front: u32::try_from(front).ok().filter(|front| *front > 0) });
+    let front = u32::try_from(front).ok().filter(|front| *front > 0).map(Group);
+    let terminal = (device != 0).then_some(Terminal { device, front });
     Some(Process {
         pid,
         parent,
@@ -92,9 +92,10 @@ mod tests {
     fn a_stat_reads_past_a_name_of_parentheses_and_spaces() {
         let stat = b"42 (a) b (c) T 7 9 9 34817 51 4194560 0 0";
         let read = stat_of(stat).expect("it reads");
-        assert_eq!((read.pid, read.name.as_str(), read.parent, read.group), (42, "a) b (c", 7, 9));
+        let read_as = (read.pid, read.name.as_str(), read.parent, read.group);
+        assert_eq!(read_as, (42, "a) b (c", 7, Group(9)));
         assert!(read.stopped);
-        assert_eq!(read.terminal, Some(Terminal { device: 34817, front: Some(51) }));
+        assert_eq!(read.terminal, Some(Terminal { device: 34817, front: Some(Group(51)) }));
         let read = stat_of(b"42 (sh) S 7 9 9 0 -1 0").expect("it reads");
         assert!(!read.stopped);
         assert_eq!(read.terminal, None);

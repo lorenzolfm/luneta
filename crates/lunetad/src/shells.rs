@@ -87,13 +87,14 @@ pub enum Doing {
     /// It is at its prompt, and has run nothing yet.
     Ready,
     /// It runs `command`, since `since`, and the command in front of its
-    /// terminal does as `front` says.
-    Going { command: Said, since: SystemTime, front: Front },
+    /// terminal does as `front` says. The hook always says the command; a
+    /// shell that marks its commands in an own pane may not.
+    Going { command: Option<Said>, since: SystemTime, front: Front },
     /// It ran `command`, for as long as `took`, and it ended at `at` as
     /// `ending` says, if the shell could say it.
-    Ended { command: Said, at: SystemTime, ending: Option<Ending>, took: Duration },
+    Ended { command: Option<Said>, at: SystemTime, ending: Option<Ending>, took: Duration },
     /// It stopped the job that runs `command`, which waits to be brought back.
-    Stopped { command: Said, at: SystemTime },
+    Stopped { command: Option<Said>, at: SystemTime },
 }
 
 /// What the command in front of a terminal does.
@@ -138,18 +139,18 @@ impl Doing {
         let doing = match self {
             Doing::Ready => Told::Ready(()),
             Doing::Going { command, since, front } => Told::Going(Going {
-                command: command.as_str().to_owned(),
+                command: command.clone().map(String::from),
                 since: Some((*since).into()),
                 front: front.to_api().into(),
             }),
             Doing::Ended { command, at, ending, took } => Told::Ended(Ended {
-                command: command.as_str().to_owned(),
+                command: command.clone().map(String::from),
                 at: Some((*at).into()),
                 ending: ending.map(Ending::to_api),
                 took: Some((*took).try_into().expect("the milliseconds of a u64 fit a Duration")),
             }),
             Doing::Stopped { command, at } => Told::Stopped(Stopped {
-                command: command.as_str().to_owned(),
+                command: command.clone().map(String::from),
                 at: Some((*at).into()),
             }),
         };
@@ -200,10 +201,12 @@ impl Line {
                     status => Some(Ending::Exited(status.parse().ok()?)),
                 };
                 let took = Duration::from_millis(took.parse().ok()?);
-                let command = command(rest)?;
+                let command = Some(command(rest)?);
                 Some(Line::Whole(Doing::Ended { command, at: moment, ending, took }))
             },
-            "stopped" => Some(Line::Whole(Doing::Stopped { command: command(rest)?, at: moment })),
+            "stopped" => {
+                Some(Line::Whole(Doing::Stopped { command: Some(command(rest)?), at: moment }))
+            },
             _ => None,
         }
     }
@@ -427,7 +430,7 @@ impl Shells {
                     let Some(front) = front(&tty) else {
                         continue;
                     };
-                    Doing::Going { command, since, front }
+                    Doing::Going { command: Some(command), since, front }
                 },
             };
             shells.push(Shell { named, pane, started, doing });
@@ -553,7 +556,7 @@ mod tests {
         assert_eq!(
             Line::read("ended 1760900042 101 41873 cargo test"),
             Some(Line::Whole(Doing::Ended {
-                command: said("cargo test"),
+                command: Some(said("cargo test")),
                 at: at(1_760_900_042),
                 ending: Some(Ending::Exited(101)),
                 took: Duration::from_millis(41_873),
@@ -569,7 +572,10 @@ mod tests {
         assert_eq!(ended(fg), Some(Ending::Resumed));
         assert_eq!(
             Line::read("stopped 1760900045 cargo test"),
-            Some(Line::Whole(Doing::Stopped { command: said("cargo test"), at: at(1_760_900_045) }))
+            Some(Line::Whole(Doing::Stopped {
+                command: Some(said("cargo test")),
+                at: at(1_760_900_045),
+            }))
         );
         for wrong in [
             "",
@@ -673,7 +679,7 @@ mod tests {
         let read = Shells::new(folder.path()).read_by(ending);
         let took = Duration::from_millis(1500);
         let ending = Some(Ending::Exited(0));
-        let doing = Doing::Ended { command: said("make"), at: at(102), ending, took };
+        let doing = Doing::Ended { command: Some(said("make")), at: at(102), ending, took };
         let shell = Shell { named: "work".to_owned(), pane: 1, started: at(100), doing };
         assert_eq!(read, [shell]);
     }

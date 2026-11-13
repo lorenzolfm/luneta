@@ -16,6 +16,7 @@ use rustix::pty::OpenptFlags;
 use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
 
 use crate::asked::{Opens, Runs, Size};
+use crate::process::Group;
 
 /// What names the session of a pane, by its id, in the variables of what runs
 /// in it: as `lunetad`'s `mux::own` reads it.
@@ -109,9 +110,9 @@ impl Pty {
     /// The process group in front of the terminal, as its near end says it:
     /// the far end says it only to a process whose terminal it is. None where
     /// none is, as once the program and all it started are gone.
-    pub fn front_group(&self) -> Option<u32> {
+    pub fn front_group(&self) -> Option<Group> {
         let group = termios::tcgetpgrp(&self.near).ok()?;
-        u32::try_from(group.as_raw_nonzero().get()).ok()
+        u32::try_from(group.as_raw_nonzero().get()).ok().map(Group)
     }
 
     /// How the terminal takes keys: a line at a time, as the kernel edits

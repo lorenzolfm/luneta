@@ -1210,12 +1210,14 @@ pub enum Ran {
     /// What this luneta cannot read: what a daemon newer than its own says,
     /// or a command of no words, which the protocol never sends.
     Unknown,
-    /// A command it runs still.
-    Going(Said),
+    /// A command it runs still, by its line, where its shell said it.
+    Going(Option<Said>),
     /// A job it stopped, with `Ctrl z`, which waits to be brought back.
-    Stopped(Said),
+    Stopped(Option<Said>),
     /// The command it ran last, which ended.
     Ended(Ended),
+    /// The command it ran last, which ended, of which its shell said no line.
+    EndedUnsaid,
 }
 
 /// The command a shell ran last, which ended: as `ending` says, where the
@@ -1397,13 +1399,23 @@ impl PaneRow {
         let pane = beside.pane;
         match &self.ran {
             Ran::Ended(ended) => Ok((beside, ended.clone())),
-            Ran::Going(command) => Err(format!(
+            Ran::Going(Some(command)) => Err(format!(
                 "menu: pane {pane} runs `{}` still, and what it prints is not over",
                 command.as_str()
             )),
-            Ran::Stopped(command) => Err(format!(
+            Ran::Going(None) => Err(format!(
+                "menu: pane {pane} runs a command still, and what it prints is not over"
+            )),
+            Ran::Stopped(Some(command)) => Err(format!(
                 "menu: `{}` is stopped in pane {pane}, and not over; bring it back with `fg`",
                 command.as_str()
+            )),
+            Ran::Stopped(None) => Err(format!(
+                "menu: a job is stopped in pane {pane}, and not over; bring it back with `fg`"
+            )),
+            Ran::EndedUnsaid => Err(format!(
+                "menu: pane {pane}'s shell said no line of the command it ran last, by which \
+                 luneta finds what it printed"
             )),
             Ran::Unknown => Err(format!(
                 "menu: what pane {pane}'s shell ran is in words this luneta cannot read, as a \
@@ -3807,12 +3819,12 @@ mod tests {
         let why =
             "menu: pane 4's shell went on as luneta read what `cargo test` printed; ask again";
         let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
-        for ran in [Ran::Going(said("ls")), Ran::Ended(again), Ran::Ready, Ran::Unhooked] {
+        for ran in [Ran::Going(Some(said("ls"))), Ran::Ended(again), Ran::Ready, Ran::Unhooked] {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy =
-            Target::Pane(Machine::Local, PaneRow { ran: Ran::Going(said("cargo test")), ..row() });
+        let busy = PaneRow { ran: Ran::Going(Some(said("cargo test"))), ..row() };
+        let busy = Target::Pane(Machine::Local, busy);
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
@@ -3986,12 +3998,25 @@ mod tests {
         };
         let ran = |ran| Target::Pane(Machine::Local, PaneRow { ran, ..row() });
         assert_eq!(
-            refused(ran(Ran::Going(said("make")))),
+            refused(ran(Ran::Going(Some(said("make"))))),
             "menu: pane 4 runs `make` still, and what it prints is not over"
         );
         assert_eq!(
-            refused(ran(Ran::Stopped(said("vim")))),
+            refused(ran(Ran::Going(None))),
+            "menu: pane 4 runs a command still, and what it prints is not over"
+        );
+        assert_eq!(
+            refused(ran(Ran::Stopped(Some(said("vim"))))),
             "menu: `vim` is stopped in pane 4, and not over; bring it back with `fg`"
+        );
+        assert_eq!(
+            refused(ran(Ran::Stopped(None))),
+            "menu: a job is stopped in pane 4, and not over; bring it back with `fg`"
+        );
+        assert_eq!(
+            refused(ran(Ran::EndedUnsaid)),
+            "menu: pane 4's shell said no line of the command it ran last, by which luneta \
+             finds what it printed"
         );
         assert_eq!(refused(ran(Ran::Ready)), "menu: pane 4's shell has run nothing yet");
         assert_eq!(

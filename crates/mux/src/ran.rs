@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::api;
 use crate::front::Front;
 use crate::marks::Mark;
+use crate::process::Group;
 
 /// The most jobs stopped that a shell is followed by, the oldest let go of
 /// past them.
@@ -29,20 +30,21 @@ pub struct Shell {
     ran: Option<Ran>,
     /// The jobs it stopped, by their groups, with their commands, the last
     /// stopped the last.
-    stopped: Vec<(u32, String)>,
+    stopped: Vec<(Group, Option<String>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ran {
     Ready,
     Going(Going),
-    Ended { command: String, at: SystemTime, ending: Option<Ending>, took: Duration },
-    Stopped { command: String, at: SystemTime },
+    Ended { command: Option<String>, at: SystemTime, ending: Option<Ending>, took: Duration },
+    Stopped { command: Option<String>, at: SystemTime },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Going {
-    command: String,
+    /// The command line, on one line, where the shell said one.
+    command: Option<String>,
     since: SystemTime,
     started: Instant,
     /// Whether the line typed was `fg`, which says nothing of how the job
@@ -50,7 +52,7 @@ struct Going {
     resumes: bool,
     front: Front,
     /// The group of the shell's job that the server last saw in front.
-    seen: Option<u32>,
+    seen: Option<Group>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +86,7 @@ impl Now {
 impl Shell {
     /// Takes in `mark`, which the shell wrote at `now`, with what a process
     /// group's leader is: stopped or not, or else gone.
-    pub fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(u32) -> Option<Job>) {
+    pub fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(Group) -> Option<Job>) {
         match mark {
             Mark::Prompt => {
                 if self.ran.is_none() {
@@ -92,13 +94,15 @@ impl Shell {
                 }
             },
             Mark::Command(line) => {
-                let mut command = line.unwrap_or_default().replace('\n', " ");
-                if execs(&command) {
+                let mut command =
+                    line.map(|line| line.replace('\n', " ")).filter(|line| !line.is_empty());
+                let typed = command.as_deref();
+                if typed.is_some_and(execs) {
                     self.ran = None;
                     return;
                 }
-                let resumes = is_fg(&command);
-                if command.trim() == "fg" {
+                let resumes = typed.is_some_and(is_fg);
+                if typed.map(str::trim) == Some("fg") {
                     self.stopped.retain(|(group, _)| job(*group).is_some());
                     if let Some((_, job)) = self.stopped.pop() {
                         command = job;
@@ -110,17 +114,16 @@ impl Shell {
                 self.ran = Some(Ran::Going(going));
             },
             Mark::Done(status) => {
-                if !self.going() {
+                let Some(Ran::Going(going)) = self.ran.take_if(|ran| matches!(ran, Ran::Going(_)))
+                else {
                     return;
-                }
-                let Some(Ran::Going(going)) = self.ran.take() else {
-                    unreachable!("a command runs, as `going` said");
                 };
                 if let Some(group) = going.seen.filter(|group| job(*group) == Some(Job::Stopped)) {
                     let was = self.stopped.iter().position(|(stopped, _)| *stopped == group);
-                    let command = match was {
-                        Some(place) => self.stopped.remove(place).1,
-                        None => going.command,
+                    let named = was.map(|place| self.stopped.remove(place).1);
+                    let command = match named {
+                        Some(named) if going.resumes => named,
+                        _ => going.command,
                     };
                     if self.stopped.len() == STOPPED_MAX {
                         self.stopped.remove(0);
@@ -150,10 +153,10 @@ impl Shell {
     /// Takes in what the server saw in front of the pane's terminal while a
     /// command runs: the group `group`, of which `program`'s is the shell's,
     /// and what that does.
-    pub fn saw(&mut self, group: u32, program: u32, front: Front) {
+    pub fn saw(&mut self, group: Group, program: u32, front: Front) {
         if let Some(Ran::Going(going)) = &mut self.ran {
             going.front = front;
-            if group != program {
+            if group.leader() != program {
                 going.seen = Some(group);
             }
         }
@@ -238,16 +241,28 @@ mod tests {
         Mark::Command(Some(line.to_owned()))
     }
 
-    fn ended(command: &str, at: u64, ending: Option<Ending>, took: u64) -> Ran {
-        let (command, at) = (command.to_owned(), SystemTime::UNIX_EPOCH + Duration::from_secs(at));
+    fn ended(command: Option<&str>, at: u64, ending: Option<Ending>, took: u64) -> Ran {
+        let command = command.map(str::to_owned);
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(at);
         Ran::Ended { command, at, ending, took: Duration::from_secs(took) }
     }
 
-    const NONE_STOPPED: fn(u32) -> Option<Job> = |_| None;
+    fn stopped_at(command: &str, at: u64) -> Ran {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(at);
+        Ran::Stopped { command: Some(command.to_owned()), at }
+    }
+
+    /// The command line of the command going in `shell`.
+    fn going(shell: &Shell) -> Option<&str> {
+        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
+        going.command.as_deref()
+    }
+
+    const NONE_STOPPED: fn(Group) -> Option<Job> = |_| None;
 
     /// The job of each group, stopped where `stopped` says.
-    fn stopped_if(stopped: fn(u32) -> bool) -> impl Fn(u32) -> Option<Job> {
-        move |group| Some(if stopped(group) { Job::Stopped } else { Job::Runs })
+    fn stopped_if(stopped: fn(u32) -> bool) -> impl Fn(Group) -> Option<Job> {
+        move |group| Some(if stopped(group.leader()) { Job::Stopped } else { Job::Runs })
     }
 
     /// Ready at its first prompt, a command runs from its mark, on one line,
@@ -260,24 +275,24 @@ mod tests {
         shell.marked(Mark::Prompt, now(1), NONE_STOPPED);
         assert_eq!(shell.ran, Some(Ran::Ready));
         shell.marked(command("make\ntest"), now(2), NONE_STOPPED);
-        assert!(shell.going());
-        let Some(Ran::Going(going)) = &shell.ran else { unreachable!() };
-        assert_eq!(going.command, "make test");
-        shell.saw(40, 10, Front::Asking);
+        assert_eq!(going(&shell), Some("make test"));
+        shell.saw(Group(40), 10, Front::Asking);
         let said = shell.said().and_then(|said| said.is);
         let Some(api::ran::Is::Going(going)) = said else { panic!("{said:?}") };
         assert_eq!(going.front(), api::Front::Asking);
         shell.marked(Mark::Done(Some(2)), now(5), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("make test", 5, Some(Ending::Status(2)), 3)));
+        let make = ended(Some("make test"), 5, Some(Ending::Status(2)), 3);
+        assert_eq!(shell.ran, Some(make.clone()));
         shell.marked(Mark::Prompt, now(6), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("make test", 5, Some(Ending::Status(2)), 3)));
+        assert_eq!(shell.ran, Some(make.clone()));
         shell.marked(Mark::Done(Some(0)), now(7), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("make test", 5, Some(Ending::Status(2)), 3)));
+        assert_eq!(shell.ran, Some(make));
     }
 
     /// A prompt while a command runs is the command's own, as fish's `read`
     /// draws one, and the command runs on to the mark of its end; and one
-    /// whose shell said no status says none.
+    /// whose shell said no line, or an empty one, and no status, says
+    /// neither.
     #[test]
     fn a_prompt_while_a_command_runs_is_its_own() {
         let now = shell_at(Instant::now());
@@ -286,10 +301,14 @@ mod tests {
         shell.marked(Mark::Prompt, now(2), NONE_STOPPED);
         assert!(shell.going());
         shell.marked(Mark::Done(Some(0)), now(3), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("read -P 'name? ' x", 3, Some(Ending::Status(0)), 2)));
+        let read = ended(Some("read -P 'name? ' x"), 3, Some(Ending::Status(0)), 2);
+        assert_eq!(shell.ran, Some(read));
         shell.marked(Mark::Command(None), now(4), NONE_STOPPED);
+        assert_eq!(going(&shell), None);
         shell.marked(Mark::Done(None), now(5), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("", 5, None, 1)));
+        assert_eq!(shell.ran, Some(ended(None, 5, None, 1)));
+        shell.marked(command(""), now(6), NONE_STOPPED);
+        assert_eq!(going(&shell), None);
     }
 
     /// `exec` leaves the shell saying nothing, in each place it may be typed.
@@ -317,20 +336,17 @@ mod tests {
         let stopped = stopped_if(|group| group == 40);
         let mut shell = Shell::default();
         shell.marked(command("sleep 30"), now(1), NONE_STOPPED);
-        shell.saw(10, 10, Front::Working);
-        shell.saw(40, 10, Front::Working);
-        shell.saw(10, 10, Front::Working);
+        shell.saw(Group(10), 10, Front::Working);
+        shell.saw(Group(40), 10, Front::Working);
+        shell.saw(Group(10), 10, Front::Working);
         shell.marked(Mark::Done(Some(0)), now(3), &stopped);
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
-        assert_eq!(shell.ran, Some(Ran::Stopped { command: "sleep 30".to_owned(), at }));
+        assert_eq!(shell.ran, Some(stopped_at("sleep 30", 3)));
         shell.marked(command("fg"), now(4), stopped_if(|_| false));
-        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
-        assert_eq!(going.command, "sleep 30");
+        assert_eq!(going(&shell), Some("sleep 30"));
         shell.marked(Mark::Done(Some(0)), now(6), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("sleep 30", 6, Some(Ending::Resumed), 2)));
+        assert_eq!(shell.ran, Some(ended(Some("sleep 30"), 6, Some(Ending::Resumed), 2)));
         shell.marked(command("fg"), now(7), NONE_STOPPED);
-        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
-        assert_eq!(going.command, "fg");
+        assert_eq!(going(&shell), Some("fg"));
     }
 
     /// A job that ended, though seen in front, ended; and `fg` skips a
@@ -341,20 +357,19 @@ mod tests {
         let mut shell = Shell::default();
         for (group, line) in [(40, "vim a"), (41, "vim b")] {
             shell.marked(command(line), now(1), NONE_STOPPED);
-            shell.saw(group, 10, Front::Interactive);
+            shell.saw(Group(group), 10, Front::Interactive);
             shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
         }
         shell.marked(command("fg %1"), now(3), stopped_if(|_| true));
-        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
-        assert_eq!((going.command.as_str(), going.resumes), ("fg %1", true));
+        let Some(Ran::Going(fg)) = &shell.ran else { panic!("{:?}", shell.ran) };
+        assert_eq!((fg.command.as_deref(), fg.resumes), (Some("fg %1"), true));
         shell.marked(Mark::Done(Some(0)), now(4), NONE_STOPPED);
-        shell.marked(command("fg"), now(5), |group| (group == 40).then_some(Job::Runs));
-        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
-        assert_eq!(going.command, "vim a");
+        shell.marked(command("fg"), now(5), |group| (group == Group(40)).then_some(Job::Runs));
+        assert_eq!(going(&shell), Some("vim a"));
         shell.marked(command("true"), now(6), NONE_STOPPED);
-        shell.saw(42, 10, Front::Working);
+        shell.saw(Group(42), 10, Front::Working);
         shell.marked(Mark::Done(Some(0)), now(7), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("true", 7, Some(Ending::Status(0)), 1)));
+        assert_eq!(shell.ran, Some(ended(Some("true"), 7, Some(Ending::Status(0)), 1)));
     }
 
     /// A job `fg %1` brought back and stopped again stands stopped once, by
@@ -364,18 +379,33 @@ mod tests {
         let now = shell_at(Instant::now());
         let mut shell = Shell::default();
         shell.marked(command("vim a"), now(1), NONE_STOPPED);
-        shell.saw(40, 10, Front::Interactive);
+        shell.saw(Group(40), 10, Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
         shell.marked(command("fg %1"), now(3), stopped_if(|_| true));
-        shell.saw(40, 10, Front::Interactive);
+        shell.saw(Group(40), 10, Front::Interactive);
         shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
-        assert_eq!(shell.ran, Some(Ran::Stopped { command: "vim a".to_owned(), at }));
-        assert_eq!(shell.stopped, [(40, "vim a".to_owned())]);
+        assert_eq!(shell.ran, Some(stopped_at("vim a", 4)));
+        assert_eq!(shell.stopped, [(Group(40), Some("vim a".to_owned()))]);
         shell.marked(command("fg"), now(5), stopped_if(|_| true));
-        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
-        assert_eq!(going.command, "vim a");
+        assert_eq!(going(&shell), Some("vim a"));
         assert_eq!(shell.stopped, []);
+    }
+
+    /// A job that leads the group of one stopped before, which ended since,
+    /// stands stopped by its own name, and in that one's place: the kernel
+    /// gave the group's number to it.
+    #[test]
+    fn a_job_in_a_group_of_one_gone_stands_stopped_by_its_own_name() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        shell.marked(command("vim a"), now(1), NONE_STOPPED);
+        shell.saw(Group(40), 10, Front::Interactive);
+        shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
+        shell.marked(command("less x"), now(3), stopped_if(|_| true));
+        shell.saw(Group(40), 10, Front::Interactive);
+        shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
+        assert_eq!(shell.ran, Some(stopped_at("less x", 4)));
+        assert_eq!(shell.stopped, [(Group(40), Some("less x".to_owned()))]);
     }
 
     /// Its program gone, the shell says nothing.

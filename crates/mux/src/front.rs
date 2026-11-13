@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use rustix::fs::{Mode, OFlags};
 
 use crate::api;
-use crate::process::{self, Process};
+use crate::process::{self, Group, Process};
 use crate::pty::{self, Modes, Pty};
 
 /// Where a process that reads its terminal sleeps in the kernel, as Linux
@@ -61,11 +61,11 @@ impl Front {
     /// What the command in front of `pty` does, the group `group` in front of
     /// it, of the processes `program`, the pane's, started.
     #[must_use]
-    pub fn of_pane(pty: &Pty, program: u32, group: u32) -> Front {
+    pub fn of_pane(pty: &Pty, program: u32, group: Group) -> Front {
         let modes = pty.modes().ok();
         let processes = tree(program, group);
         let front = in_front(&processes, group);
-        let said = Front::of(modes, &front, group == program);
+        let said = Front::of(modes, &front, group.leader() == program);
         if said != Front::Interactive {
             return said;
         }
@@ -137,7 +137,7 @@ impl Front {
 /// children, only those of `group` are followed, as a job the shell put in
 /// the background, and what that started, are none of the one in front. Up
 /// to `PROCESSES_MAX`.
-fn tree(root: u32, group: u32) -> Vec<Process> {
+fn tree(root: u32, group: Group) -> Vec<Process> {
     let Some(first) = process::process(root) else {
         return Vec::new();
     };
@@ -165,7 +165,7 @@ fn tree(root: u32, group: u32) -> Vec<Process> {
 }
 
 /// The processes of `group` among `processes`.
-fn in_front(processes: &[Process], group: u32) -> Vec<&Process> {
+fn in_front(processes: &[Process], group: Group) -> Vec<&Process> {
     processes.iter().filter(|process| process.group == group).collect()
 }
 
@@ -207,7 +207,7 @@ mod tests {
         Process {
             pid,
             parent: 1,
-            group: pid,
+            group: Group(pid),
             name: name.to_owned(),
             sleeps: sleeps.to_owned(),
             stopped: false,

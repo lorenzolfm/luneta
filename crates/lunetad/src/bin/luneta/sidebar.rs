@@ -576,11 +576,11 @@ impl Marked {
     }
 
     /// The mark of the command `shell` runs, or ran last, at `now`, and the
-    /// command. One that runs has the spinner, or the dot of an agent that
+    /// command, where the shell said it. One that runs has the spinner, or the dot of an agent that
     /// waits for you while it waits for you to type, once it has run for
     /// `LONG`; and one that ended says how, if it ran that long. One that takes
     /// the terminal over has none while you use it, nor has a job stopped.
-    fn of_shell(shell: &Shell, now: SystemTime) -> Option<(Self, &str)> {
+    fn of_shell(shell: &Shell, now: SystemTime) -> Option<(Self, Option<&str>)> {
         let (mark, since, command) = match shell.doing.as_ref()? {
             Doing::Going(going) => {
                 let since = told(going.since)?;
@@ -592,7 +592,7 @@ impl Marked {
                     Ok(Front::Asking) => Mark::Waiting,
                     Ok(Front::Interactive | Front::Unspecified) | Err(_) => return None,
                 };
-                (mark, since, going.command.as_str())
+                (mark, since, going.command.as_deref())
             },
             Doing::Ended(ended) => {
                 if Duration::try_from(ended.took?).ok()? < LONG {
@@ -603,7 +603,7 @@ impl Marked {
                     Some(Ending::Exited(_)) => Mark::Failed,
                     Some(Ending::Resumed) | None => Mark::Ran,
                 };
-                (mark, told(ended.at)?, ended.command.as_str())
+                (mark, told(ended.at)?, ended.command.as_deref())
             },
             Doing::Stopped(_) | Doing::Ready(()) => return None,
         };
@@ -655,11 +655,10 @@ fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
 
 /// What `shell`, a shell with luneta's hook, said it ran, for the menu.
 fn ran(shell: &Shell) -> Ran {
-    let said = |command: &String| Said::new(command.clone());
     let ran = match shell.doing.as_ref() {
-        Some(Doing::Going(going)) => said(&going.command).map(Ran::Going),
-        Some(Doing::Stopped(stopped)) => said(&stopped.command).map(Ran::Stopped),
-        Some(Doing::Ended(ended)) => ended_last(ended).map(Ran::Ended),
+        Some(Doing::Going(going)) => said(going.command.as_ref(), Ran::Going),
+        Some(Doing::Stopped(stopped)) => said(stopped.command.as_ref(), Ran::Stopped),
+        Some(Doing::Ended(ended)) => ended_last(ended),
         Some(Doing::Ready(())) => Some(Ran::Ready),
         // A daemon newer than this luneta's.
         None => None,
@@ -667,13 +666,24 @@ fn ran(shell: &Shell) -> Ran {
     ran.unwrap_or(Ran::Unknown)
 }
 
-/// The command a shell said it ran last, which ended, for the menu. None of
-/// one with no words, or with no moment it ended, which lunetad always says.
-fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<menu::Ended> {
-    let command = Said::new(ended.command.clone())?;
+/// What `ran` makes of the command line the daemon says, where the shell
+/// said one. None of one with no words, which lunetad never sends.
+fn said(command: Option<&String>, ran: impl FnOnce(Option<Said>) -> Ran) -> Option<Ran> {
+    match command {
+        None => Some(ran(None)),
+        Some(command) => Some(ran(Some(Said::new(command.clone())?))),
+    }
+}
+
+/// What a shell said it ran last, which ended, for the menu. None of one
+/// with no words, or with no moment it ended, which lunetad always says.
+fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<Ran> {
     let at = SystemTime::try_from(ended.at?).ok()?;
     let ending = ended.ending.as_ref().map(Ending::of_api);
-    Some(menu::Ended { command, ending, at })
+    said(ended.command.as_ref(), |command| match command {
+        Some(command) => Ran::Ended(menu::Ended { command, ending, at }),
+        None => Ran::EndedUnsaid,
+    })
 }
 
 /// When the command going in `shell` will have run for `LONG`.
@@ -2930,7 +2940,7 @@ impl Sidebar {
                         }
                     }
                     let (marked, ran) = shell.unzip();
-                    by_pane.push(Shows { marked, ran, unread });
+                    by_pane.push(Shows { marked, ran: ran.flatten(), unread });
                 }
                 let marks =
                     || by_pane.iter().filter_map(|shows| Some(&shows.marked.as_ref()?.mark));
@@ -8131,7 +8141,7 @@ mod tests {
 
     fn going(command: &str, since: i64, front: Front) -> Doing {
         let since = Some(Timestamp { seconds: since, nanos: 0 });
-        Doing::Going(Going { command: command.to_owned(), since, front: front.into() })
+        Doing::Going(Going { command: Some(command.to_owned()), since, front: front.into() })
     }
 
     fn ended(command: &str, status: Option<i32>, millis: i32) -> Doing {
@@ -8139,12 +8149,13 @@ mod tests {
         let took = Some(prost_types::Duration { seconds, nanos });
         let at = Some(Timestamp { seconds: 130, nanos: 0 });
         let ending = status.map(ended::Ending::Status);
-        Doing::Ended(Ended { command: command.to_owned(), at, ending, took })
+        Doing::Ended(Ended { command: Some(command.to_owned()), at, ending, took })
     }
 
-    /// What a shell said it ran is read as it comes from the daemon: a
-    /// command of no words, which lunetad never sends, and a shell that says
-    /// nothing this luneta knows, as a newer lunetad's would, are unknown.
+    /// What a shell said it ran is read as it comes from the daemon, with or
+    /// without its line: a command of no words, which lunetad never sends,
+    /// and a shell that says nothing this luneta knows, as a newer lunetad's
+    /// would, are unknown.
     #[test]
     fn what_a_shell_said_it_ran_is_read_as_it_comes() {
         let said = |doing| ran(&Shell { doing: Some(doing) });
@@ -8158,6 +8169,13 @@ mod tests {
         };
         assert_eq!(said(Doing::Ended(Ended { at: None, ..untimed })), Ran::Unknown);
         assert_eq!(said(going("", 100, Front::Working)), Ran::Unknown);
+        let Doing::Going(working) = going("make", 100, Front::Working) else {
+            panic!("a command going");
+        };
+        assert_eq!(said(Doing::Going(Going { command: None, ..working })), Ran::Going(None));
+        let unsaid = Ended { command: None, ..untimed };
+        assert_eq!(said(Doing::Ended(unsaid.clone())), Ran::EndedUnsaid);
+        assert_eq!(said(Doing::Ended(Ended { at: None, ..unsaid })), Ran::Unknown);
         assert_eq!(ran(&Shell { doing: None }), Ran::Unknown);
         assert_eq!(said(Doing::Ready(())), Ran::Ready);
     }
@@ -8177,7 +8195,7 @@ mod tests {
     fn a_command_has_an_agent_s_marks_and_its_row_is_named_for_it() {
         let mut sidebar = fresh();
         let stopped = Doing::Stopped(Stopped {
-            command: "make".to_owned(),
+            command: Some("make".to_owned()),
             at: Some(Timestamp { seconds: 130, nanos: 0 }),
         });
         let nvim = in_shell(3, going("nvim notes", 100, Front::Interactive));

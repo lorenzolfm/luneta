@@ -67,7 +67,7 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
         })
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
-        assert_eq!(going.command, "make test");
+        assert_eq!(going.command.as_deref(), Some("make test"));
         let pane = pane(&listing).unwrap();
         let Some(api::pane::Program::Pid(pid)) = pane.program else { panic!("{pane:?}") };
         let front = pane.foreground.as_ref().expect("something runs in front");
@@ -79,7 +79,7 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
         })
         .await;
         let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
-        assert_eq!(ended.command, "make test");
+        assert_eq!(ended.command.as_deref(), Some("make test"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Status(3)));
         let since = going.since.unwrap();
         let at = ended.at.unwrap();
@@ -114,21 +114,21 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         })
         .await;
         let Some(Is::Stopped(stopped)) = said(&listing) else { unreachable!() };
-        assert_eq!(stopped.command, "sleep 30");
+        assert_eq!(stopped.command.as_deref(), Some("sleep 30"));
         attached.type_line("").await;
         let listing = watched_until(&mut watch, "sleep brought back", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
-        assert_eq!(going.command, "sleep 30");
+        assert_eq!(going.command.as_deref(), Some("sleep 30"));
         signal_front(&listing, rustix::process::Signal::TERM);
         let listing = watched_until(&mut watch, "sleep ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_))) && in_front(listing, "bash")
         })
         .await;
         let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
-        assert_eq!(ended.command, "sleep 30");
+        assert_eq!(ended.command.as_deref(), Some("sleep 30"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Resumed(api::ran::Resumed {})));
         attached.type_line("").await;
         watched_until(&mut watch, "nothing said once the program ended", |listing| {
