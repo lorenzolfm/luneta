@@ -35,14 +35,23 @@ pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
 }
 
 /// The newest own session that runs, by when its server made it, but the
-/// one luneta runs in: none where none runs, or the server does not answer,
-/// which the log says.
-pub fn newest() -> Option<OwnKey> {
+/// one luneta runs in and those `passed`: none where none runs, or the server
+/// does not answer, which the log says.
+pub fn newest(passed: &[OwnKey]) -> Option<OwnKey> {
     let sessions = server::sessions()
         .inspect_err(|failure| log::say(&format!("no own session to go on in: {failure}")))
         .ok()?;
-    let held = holding();
-    let free = sessions.iter().map(server::Listing::key).filter(|key| Some(*key) != held);
+    newest_of(sessions.iter().map(server::Listing::key), holding(), passed)
+}
+
+/// The newest of `sessions`, by when their server made each, and then by
+/// id, but `held` and those `passed`.
+fn newest_of(
+    sessions: impl Iterator<Item = OwnKey>,
+    held: Option<OwnKey>,
+    passed: &[OwnKey],
+) -> Option<OwnKey> {
+    let free = sessions.filter(|key| Some(*key) != held && !passed.contains(key));
     free.max_by_key(|key| (key.made, key.id))
 }
 
@@ -82,5 +91,31 @@ pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, String> {
             Some(key) if key.id == id => Ok(key),
             _ => Err(format!("own session {id}, {name}, no longer runs")),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(id: u64, made: u64) -> OwnKey {
+        let made = SystemTime::UNIX_EPOCH + Duration::from_secs(made);
+        OwnKey { id: OwnId::new(id).unwrap(), made }
+    }
+
+    /// luneta goes on in the newest own session, but the one it runs in and
+    /// those it lost its client of since you last went anywhere, so that two
+    /// whose clients it keeps losing do not have it go back and forth: with
+    /// all passed, it goes on in none.
+    #[test]
+    fn luneta_goes_on_in_the_newest_own_session_it_did_not_pass() {
+        let sessions = [key(1, 10), key(2, 30), key(3, 20)];
+        let newest = |held, passed: &[OwnKey]| newest_of(sessions.into_iter(), held, passed);
+        assert_eq!(newest(None, &[]), Some(key(2, 30)));
+        assert_eq!(newest(Some(key(2, 30)), &[]), Some(key(3, 20)));
+        assert_eq!(newest(None, &[key(2, 30)]), Some(key(3, 20)));
+        assert_eq!(newest(None, &[key(2, 30), key(3, 20)]), Some(key(1, 10)));
+        assert_eq!(newest(Some(key(1, 10)), &[key(2, 30), key(3, 20)]), None);
+        assert_eq!(newest(None, &[key(2, 20)]), Some(key(2, 30)), "of the id made at another time");
     }
 }

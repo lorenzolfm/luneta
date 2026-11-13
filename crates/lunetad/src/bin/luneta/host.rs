@@ -961,6 +961,10 @@ struct App {
     /// Why luneta gave up on the clients zellij drops, where it did, to be said
     /// again once luneta's screen is gone.
     gave_up: Option<String>,
+    /// The own sessions whose clients luneta lost once they came, since you
+    /// last went anywhere: luneta goes on in none of them again by itself,
+    /// as a server that said what luneta cannot follow there would again.
+    own_lost: Vec<OwnKey>,
     /// What kills and deletes the sessions luneta's keys delete, which
     /// luneta waits for as it ends: it ends with the last session of every
     /// machine, which zellij lets go of only once the session's server has
@@ -1292,6 +1296,7 @@ fn run_in(
         ended: false,
         drops: Drops::default(),
         gave_up: None,
+        own_lost: Vec::new(),
         deleting: Vec::new(),
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
@@ -3069,8 +3074,10 @@ impl App {
     /// is in, a client there takes its place, as `swap` says, and opens what
     /// `after` opens once it is in; and so does one of zellij's here, in the
     /// place of luneta's client of an own session. To an own session, it goes
-    /// as `go_own` says. Whether it went.
+    /// as `go_own` says. Whether it went. luneta may go on in any own session
+    /// by itself again, as `own_lost` says.
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
+        self.own_lost.clear();
         if place.listed().own() {
             return self.go_own(machine, place, after);
         }
@@ -3225,6 +3232,9 @@ impl App {
         let note = format!("luneta's client of an own session: {why}");
         let Some(fails) = fails else {
             self.sidebar.notify(note);
+            if let Some(seat) = self.sidebar.own_seat() {
+                self.own_lost.push(seat.session);
+            }
             return self.newest_here(&[]);
         };
         match fails.failed(&Machine::Local) {
@@ -3551,6 +3561,7 @@ impl App {
     /// now, which the sidebar may not list yet: on the stream of its own, or
     /// as one takes the place of zellij's.
     fn go_made_own(&mut self, made: OwnKey) {
+        self.own_lost.clear();
         let to = To::Session(made);
         let Right::Own(own) = &mut self.right else {
             let fails = self.back();
@@ -3882,7 +3893,8 @@ impl App {
                 return Ok(());
             },
         };
-        let Refuge { session: to, before, .. } = match onward(refuge, own_sessions::newest()) {
+        let own = own_sessions::newest(&self.own_lost);
+        let Refuge { session: to, before, .. } = match onward(refuge, own) {
             Some(Onward::Zellij(refuge)) => refuge,
             Some(Onward::Own(id)) => {
                 self.attach(To::Session(id), None, Fails::End);
@@ -4060,10 +4072,11 @@ impl App {
     /// Has a client of this machine's newest session that answers take the
     /// place of the client that ended, as one of another machine's: of the
     /// newer of zellij's newest and the newest own session, which never
-    /// holds luneta, as `own_sessions::newest` says; or of another machine's but
+    /// holds luneta, as `own_sessions::newest` says, but those `own_lost`
+    /// holds; or of another machine's but
     /// those `tried`, as `newest_away` says, where none does.
     fn newest_here(&mut self, tried: &[Destination]) -> io::Result<()> {
-        match onward(zellij::newest(), own_sessions::newest()) {
+        match onward(zellij::newest(), own_sessions::newest(&self.own_lost)) {
             Some(Onward::Zellij(Refuge { session, before, .. })) => {
                 let joins = Joins::Attach(&session);
                 self.go_on(&Machine::Local, joins, Before::Listed(before), Fails::End)
