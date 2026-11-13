@@ -3,13 +3,15 @@
 //! knows the pane by its ids, which a rename keeps, opens a tab with no
 //! client there, refuses a pane beside another and a turn, which an own
 //! session's tabs have none of yet, takes a client among own sessions and
-//! not across to zellij's, closes as it closes in zellij's, and takes no
-//! session by a name both multiplexers run one by.
+//! not across to zellij's, luneta's from its ask box whoever typed last,
+//! closes as it closes in zellij's, and takes no session by a name both
+//! multiplexers run one by.
 
 use std::path::Path;
 use std::process::Output;
 
 use lunetad::api::{self, RenameSessionRequest};
+use lunetad::mux::own::api as mux_api;
 use lunetad::opens;
 
 use crate::host::{answered, eventually, LUNETA};
@@ -82,7 +84,7 @@ fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     assert_eq!(said(&luneta(&owned, &here, &["here"])), format!("work:{}\n", made.pane));
     let turn = ("LUNETA_TURN", "00000000000000aa".to_owned());
     let made_nanos = &here[1].1;
-    let asked = format!("{}:{made_nanos}:{}:named-then", work.id, made.pane);
+    let asked = format!("{}:{made_nanos}:{}:1:named-then", work.id, made.pane);
     let from_the_box = [("LUNETA_OWN_PANE", asked), turn];
     let box_says = said(&luneta(&owned, &from_the_box, &["here"]));
     assert_eq!(box_says, format!("work:{}\n", made.pane));
@@ -187,6 +189,36 @@ fn go_takes_a_client_among_own_sessions_and_not_across_to_zellij_s() {
     let across = why(&luneta(&owned, &in_work, &["go", "zellij-s"]));
     assert!(across.contains("luneta's own client and zellij's are two"), "{across}");
     assert_eq!(clients_on(&owned), [(client, work.pane)]);
+}
+
+/// `go` from luneta's ask box takes luneta's client, which the box names,
+/// not the one that last typed in the session it was asked from, nor the one
+/// that came to it last. Where luneta's client is gone, it takes none.
+#[test]
+fn go_from_the_ask_box_takes_luneta_s_client_whoever_typed_last() {
+    let owned = Owned::new();
+    let work = owned.make("work").unwrap();
+    let play = owned.make("play").unwrap();
+    let in_work = in_pane(own(&owned.listed("work")).unwrap(), work.pane);
+    owned.listed("play");
+    let attached = owned.attach(&work);
+    let paste = mux_api::to_server::Event::Paste(mux_api::Paste { text: "typed".to_owned() });
+    let typist = owned.attach_saying(&work, vec![mux_api::ToServer { event: Some(paste) }]);
+    let (luneta_s, other) = (attached.client, typist.client);
+    let made = &in_work[1].1;
+    let asked = format!("{}:{made}:{}:{luneta_s}:work", in_work[0].1, work.pane);
+    let from_the_box = [("LUNETA_OWN_PANE", asked), ("LUNETA_TURN", "00000000000000aa".to_owned())];
+
+    said(&luneta(&owned, &from_the_box, &["go", "play"]));
+    let mut on = clients_on(&owned);
+    on.sort_unstable();
+    assert_eq!(on, [(luneta_s, play.pane), (other, work.pane)]);
+
+    drop(attached);
+    eventually("luneta's client is gone", || (clients_on(&owned).len() == 1).then_some(()));
+    let gone = why(&luneta(&owned, &from_the_box, &["go", "play"]));
+    assert!(gone.contains(&format!("no client {luneta_s}")), "{gone}");
+    assert_eq!(clients_on(&owned), [(other, work.pane)]);
 }
 
 /// A name a zellij session and an own one share, as each multiplexer checks

@@ -103,7 +103,7 @@ impl View {
                 self.went = Some(*went);
             },
             Heard::Frame(frame) => self.framed(frame)?,
-            Heard::Attached | Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
+            Heard::Attached(_) | Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
         }
         Ok(())
     }

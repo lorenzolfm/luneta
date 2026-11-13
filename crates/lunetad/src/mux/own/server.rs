@@ -30,7 +30,7 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
-use super::{OwnId, OwnKey, OwnMade, OwnPane};
+use super::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
@@ -643,21 +643,35 @@ impl Own {
         killed.map(drop).map_err(|status| refused(&status))
     }
 
-    /// Takes the client that last typed in the session to `to`, or says why
-    /// not: the server refuses a session of a server before this one.
-    pub fn went(&self, to: Place) -> Result<(), Failure> {
+    /// Takes the client `mover` names to `to`, or says why not: the server
+    /// refuses a session of a server before this one, and a client it let go
+    /// of.
+    pub fn went(&self, mover: Mover, to: Place) -> Result<(), Failure> {
         let (is, session) = match to {
             Place::Session(session) => (api::place::Is::Session(session.id.get()), session),
             Place::Pane(pane) => (api::place::Is::Tab(self.server.tab_of(pane)?), pane.session),
         };
         let to = api::Place { is: Some(is), made_at: Some(session.made.into()) };
         let request = api::GoRequest {
-            who: Some(api::go_request::Who::LastTypedIn(self.id().get())),
+            who: Some(match mover {
+                Mover::LastTyped => api::go_request::Who::LastTypedIn(self.id().get()),
+                Mover::Client(client) => api::go_request::Who::Client(client.get()),
+            }),
             to: Some(to),
         };
         let went = self.server.ask(|mut client| async move { client.go(request).await });
         went.map(drop).map_err(|status| refused(&status))
     }
+}
+
+/// Which client a go from an own session takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mover {
+    /// The one that last typed in the session, or else the one that came to
+    /// it last.
+    LastTyped,
+    /// This one, wherever it is: luneta's, which its ask box names.
+    Client(OwnClientId),
 }
 
 /// An own session made: its first pane, in a session as no other is, and the

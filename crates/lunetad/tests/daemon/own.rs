@@ -141,6 +141,12 @@ impl Owned {
     /// A client of the server, attached to the own session the daemon says it
     /// made.
     pub fn attach(&self, made: &NewOwnResponse) -> Attached {
+        self.attach_saying(made, Vec::new())
+    }
+
+    /// A client of the server, attached to the own session the daemon says it
+    /// made, that says `said` once there.
+    pub fn attach_saying(&self, made: &NewOwnResponse, said: Vec<mux_api::ToServer>) -> Attached {
         let (session, made_at) = (made.session, made.made_at);
         let socket = self.socket();
         let (hang_up, to_go) = tokio::sync::oneshot::channel::<()>();
@@ -154,18 +160,23 @@ impl Owned {
                 let hello = mux_api::Hello { to, size, colours: None };
                 let hello = Some(mux_api::to_server::Event::Hello(hello));
                 let hello = mux_api::ToServer { event: hello };
-                let said = tokio_stream::iter([hello]).chain(tokio_stream::pending());
+                let said = std::iter::once(hello).chain(said);
+                let said = tokio_stream::iter(said).chain(tokio_stream::pending());
                 let mut heard = mux_client(socket).await.attach(said).await.unwrap().into_inner();
-                let attached = heard.message().await.unwrap();
-                came.send(attached.is_some()).unwrap();
+                let attached = heard.message().await.unwrap().and_then(|said| match said.event {
+                    Some(mux_api::to_client::Event::Attached(attached)) => Some(attached.client),
+                    _ => None,
+                });
+                came.send(attached).unwrap();
                 tokio::select! {
                     _ = to_go => {},
                     () = async { while let Ok(Some(_)) = heard.message().await {} } => {},
                 }
             });
         });
-        assert_eq!(arrival.recv_timeout(Duration::from_secs(15)), Ok(true), "the client came");
-        Attached { hang_up: Some(hang_up), attaching: Some(attaching) }
+        let came = arrival.recv_timeout(Duration::from_secs(15));
+        let Ok(Some(client)) = came else { panic!("the client came: {came:?}") };
+        Attached { client, hang_up: Some(hang_up), attaching: Some(attaching) }
     }
 
     /// The pid of what the pane `pane` runs, as its server lists it.
@@ -180,8 +191,9 @@ impl Owned {
     }
 }
 
-/// A client of the server, which hangs up as it drops.
+/// A client of the server, by the id it gave it, which hangs up as it drops.
 pub struct Attached {
+    pub client: u64,
     hang_up: Option<tokio::sync::oneshot::Sender<()>>,
     attaching: Option<thread::JoinHandle<()>>,
 }

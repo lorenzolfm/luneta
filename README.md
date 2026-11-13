@@ -1388,13 +1388,16 @@ zellij's, by the ids luneta's own multiplexer gives a pane and its session,
 which a rename keeps, and `luneta agents` names an agent there as
 `<session>:<pane>` too. Where it cannot tell the session's name, it writes
 `?:<pane> (own <id>)`, which no verb takes for a pane, and says why: that
-luneta-mux cannot be reached, or lists the session so it does not read. An own session's tab holds one pane for now, so
-`open pane` and `turn` refuse there and say so: `open tab` opens a tab of it,
-with no one in it needed. `open session` there makes an own session, which
-lunetad makes, as it does for `n o`. `go` takes you between own sessions, or
-between zellij's, but not from one kind to the other: luneta's own client and
-zellij's are two, and it says so. The ask box tells its agent the own pane
-you are on, as it does a pane of zellij's.
+luneta-mux cannot be reached, or lists the session so it does not read. An
+own session's tab holds one pane for now, so `open pane` and `turn` refuse
+there and say so: `open tab` opens a tab of it, with no one in it needed.
+`open session` there makes an own session, which lunetad makes, as it does
+for `n o`. `go` takes you between own sessions, or between zellij's, but not
+from one kind to the other: luneta's own client and zellij's are two, and it
+says so. The ask box tells its agent the own pane you are on, as it does a
+pane of zellij's, and which client is luneta's: `go` and `open session` from
+the box move that one, whoever typed in the session last, and fail where it
+is gone.
 
 `turn` does what `t t` and `t p` do, and refuses what they refuse, saying why.
 What runs in the panes goes on, an agent turning the pane it runs in too, and

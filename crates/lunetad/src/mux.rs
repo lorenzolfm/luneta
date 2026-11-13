@@ -30,7 +30,7 @@ pub mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
-pub use own::{OwnId, OwnKey, OwnMade, OwnPane};
+pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
 pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
@@ -357,7 +357,8 @@ impl Mux<'_> {
             Mux::Zellij(session) => zellij::cli::pane_focused(session, pane),
             Mux::Own(session) => {
                 let pane = pane.terminal().ok_or(Failure::Unsupported("hold a plugin's pane"))?;
-                session.went(own::server::Place::Pane(own::server::pane_of(session.key(), pane)?))
+                let pane = own::server::pane_of(session.key(), pane)?;
+                session.went(own::server::Mover::LastTyped, own::server::Place::Pane(pane))
             },
         }
     }
@@ -380,7 +381,7 @@ impl Mux<'_> {
                     None => own::server::Place::Session(to),
                     Some(pane) => own::server::Place::Pane(own::server::pane_of(to, pane)?),
                 };
-                at.went(place)
+                at.went(own::server::Mover::LastTyped, place)
             },
         }
     }

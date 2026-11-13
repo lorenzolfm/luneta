@@ -26,7 +26,7 @@ use tonic::Status;
 
 use super::api::{self, mux_client::MuxClient, to_client, to_server};
 use super::server::{connect, refused, runtime, socket};
-use super::{OwnId, OwnKey, OwnMade, OwnPane};
+use super::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
 
 /// The most the server lets a side of a pane be, in cells: more is refused.
 pub const SIDE_MAX: u16 = 1000;
@@ -524,8 +524,9 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
 /// What the server said to a client, as it comes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    /// It took the client in: what it says next is where the client is.
-    Attached,
+    /// It took the client in, as this: what it says next is where the client
+    /// is.
+    Attached(OwnClientId),
     Went(Went),
     Frame(Frame),
     /// A go the client sent was refused, for this reason, and it stays where
@@ -543,7 +544,9 @@ pub enum Heard {
 /// lists, or why it does not read.
 fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
     Ok(match said.event.ok_or("the server said nothing")? {
-        to_client::Event::Attached(_) => Heard::Attached,
+        to_client::Event::Attached(api::Attached { client }) => {
+            Heard::Attached(OwnClientId::new(client).ok_or("the server named its client 0")?)
+        },
         to_client::Event::Went(api::Went { session, tab, pane }) => {
             let id = OwnId::new(session).ok_or("the client went to session 0")?;
             let session = sessions.iter().find(|key| key.id == id);

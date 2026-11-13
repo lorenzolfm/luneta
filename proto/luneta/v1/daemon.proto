@@ -770,6 +770,10 @@ message AskRequest {
     // a name zellij takes, or else the question is invalid. The session goes
     // by `session`, which a rename keeps.
     string named = 3;
+    // luneta's client, by the id the session's server gave it, which a go
+    // the agent asks for takes, wherever it is by then, and whoever typed
+    // last. Never 0.
+    uint64 client = 4;
   }
 }
 
