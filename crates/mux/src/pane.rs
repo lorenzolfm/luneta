@@ -27,9 +27,13 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size};
 use crate::frame::{self, Flags};
+use crate::front::Front;
 use crate::id::{ClientId, PaneId};
+use crate::marks::{Mark, Marks};
 use crate::mux::Mux;
+use crate::process;
 use crate::pty::Pty;
+use crate::ran::{Job, Now, Shell};
 use crate::screen::{Screen, View, Wheel};
 
 /// The scrollback each pane keeps, in bytes.
@@ -66,6 +70,16 @@ pub const UNREAD_BYTES_MAX: usize = 1024 * 1024;
 
 /// The most a pane reads of what its program wrote as it ended.
 const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
+
+/// How long after it last heard the program a pane looks again at what runs
+/// in front of its terminal: a shell writes as it hands the terminal to a
+/// command, and the command has it a little after.
+const LOOK_AGAIN: Duration = Duration::from_millis(100);
+
+/// How often a pane looks at what runs in front of its terminal while its
+/// shell runs a command, which may come to read the terminal, or to stop,
+/// with no word.
+const LOOK_WHILE_GOING: Duration = Duration::from_secs(1);
 
 /// The rows a turn of the wheel scrolls.
 const WHEEL_ROWS: isize = 3;
@@ -249,6 +263,11 @@ pub fn start(
             title: String::new(),
             pwd: String::new(),
             host: host(),
+            pid,
+            marks: Marks::default(),
+            shell: Shell::default(),
+            looks: Looks::first(),
+            told: (None, None),
         };
         let failed = match panic::catch_unwind(AssertUnwindSafe(|| thread.run())) {
             Ok(Ok(())) => None,
@@ -334,6 +353,49 @@ struct Thread {
     pwd: String,
     /// This machine's name, as an OSC 7 names it.
     host: String,
+    /// The program's pid, which leads its session.
+    pid: u32,
+    marks: Marks,
+    shell: Shell,
+    looks: Looks,
+    /// What the model was last told runs in front, and what the shell said.
+    told: (Option<api::Foreground>, Option<api::Ran>),
+}
+
+/// When a pane looks next at what runs in front of its terminal.
+#[derive(Default)]
+struct Looks {
+    due: Option<Instant>,
+    /// Whether the program wrote since the last look was due.
+    heard: bool,
+}
+
+impl Looks {
+    /// A look as the pane starts, at what its program runs: a program that
+    /// writes nothing would have none. Its program has run its own by then,
+    /// as `spawn` returns once it has.
+    fn first() -> Looks {
+        Looks { due: Some(Instant::now()), heard: false }
+    }
+
+    /// The program wrote: the pane looks now, or at the look due, and again
+    /// after that.
+    fn heard(&mut self, now: Instant) {
+        self.due.get_or_insert(now);
+        self.heard = true;
+    }
+
+    /// The pane looked at `now`, while its shell runs a command where it is
+    /// `going`.
+    fn looked(&mut self, now: Instant, going: bool) {
+        self.due = if std::mem::take(&mut self.heard) {
+            Some(now + LOOK_AGAIN)
+        } else if going {
+            Some(now + LOOK_WHILE_GOING)
+        } else {
+            None
+        };
+    }
 }
 
 impl Thread {
@@ -367,12 +429,53 @@ impl Thread {
             if writable || self.program.owed() {
                 self.write()?;
             }
+            if self.looks.due.is_some_and(|due| due <= Instant::now()) {
+                self.look();
+            }
             self.frame()?;
         }
     }
 
-    /// How long the loop waits for the program or a message.
+    /// Looks at what runs in front of the terminal, and, while the shell
+    /// runs a command, at what that does.
+    fn look(&mut self) {
+        let now = Instant::now();
+        let Program::Runs { pty, .. } = &self.program else {
+            self.looks = Looks::default();
+            return;
+        };
+        let group = pty.front_group();
+        let foreground = group.and_then(|group| foreground(group).or_else(|| foreground(self.pid)));
+        if self.shell.going()
+            && let Some(group) = group
+        {
+            self.shell.saw(group, self.pid, Front::of_pane(pty, self.pid, group));
+        }
+        self.looks.looked(now, self.shell.going());
+        self.tell(foreground);
+    }
+
+    /// Tells the model what runs in front, `foreground`, and what the shell
+    /// said, where either changed since it was told last.
+    fn tell(&mut self, foreground: Option<api::Foreground>) {
+        let told = (foreground, self.shell.said());
+        if told != self.told {
+            self.told = told.clone();
+            self.mux.looked(self.pane, told.0, told.1);
+        }
+    }
+
+    /// How long the loop waits for the program, a message, or the next look.
     fn timeout(&self) -> Option<Duration> {
+        let look = self.looks.due.map(|due| due.saturating_duration_since(Instant::now()));
+        match (self.framing(), look) {
+            (Some(framing), Some(look)) => Some(framing.min(look)),
+            (framing, look) => framing.or(look),
+        }
+    }
+
+    /// How long the loop waits for the program or a message, for its frames.
+    fn framing(&self) -> Option<Duration> {
         if !self.inbox.is_empty() {
             return Some(Duration::ZERO);
         }
@@ -467,6 +570,9 @@ impl Thread {
         }
         self.read(LAST_WORDS_BYTES_MAX)?;
         self.program = Program::Gone;
+        self.shell.gone();
+        self.looks = Looks::default();
+        self.told = (None, None);
         self.dirty = true;
         self.frame()?;
         Ok(self.mux.ended(self.pane, exit))
@@ -580,11 +686,13 @@ impl Thread {
         };
         let before = self.screen.scrollback();
         let mut total = 0;
+        let mut marks: Vec<Mark> = Vec::new();
         while total < most && unread.len() < UNREAD_BYTES_MAX {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
+                    self.marks.read(&self.buffer[..read], &mut marks);
                     let answers = self.screen.write(&self.buffer[..read]);
                     unread.extend_from_slice(&answers);
                 },
@@ -600,6 +708,19 @@ impl Thread {
         }
         if total == 0 {
             return Ok(());
+        }
+        self.looks.heard(Instant::now());
+        if !marks.is_empty() {
+            let now = Now::current();
+            let job = |group| {
+                let leader = process::process(group)?;
+                Some(if leader.stopped { Job::Stopped } else { Job::Runs })
+            };
+            for mark in marks {
+                self.shell.marked(mark, now, job);
+            }
+            let foreground = self.told.0.clone();
+            self.tell(foreground);
         }
         self.dirty = true;
         let after = self.screen.scrollback();
@@ -713,6 +834,12 @@ impl Thread {
         assert!(views.len() <= self.watchers.len());
         Ok(())
     }
+}
+
+/// The process `pid`, as the protocol says what runs in front: none where it
+/// is gone.
+fn foreground(pid: u32) -> Option<api::Foreground> {
+    Some(api::Foreground { pid, argv: process::argv(pid)? })
 }
 
 /// This machine's name.

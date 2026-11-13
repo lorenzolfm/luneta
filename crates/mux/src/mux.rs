@@ -87,7 +87,7 @@ enum Closed {
     /// It was the last, which stays for the session to end with.
     Last,
     /// It is out of them, and its clients go to the pane `next`.
-    Out { tab: Tab, next: PaneId },
+    Out { tab: Box<Tab>, next: PaneId },
 }
 
 struct Tab {
@@ -104,6 +104,10 @@ struct Pane {
     /// the pane opened.
     cwd: PathBuf,
     program: Program,
+    /// The leader of the group in front of its terminal, and what its shell
+    /// said, as its thread last looked.
+    foreground: Option<api::Foreground>,
+    ran: Option<api::Ran>,
     handle: Handle,
 }
 
@@ -335,6 +339,16 @@ impl Mux {
         });
     }
 
+    /// Notes what runs in front in pane `pane`, and what its shell said.
+    pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
+        self.change(|model| {
+            if let Some(pane) = model.pane_mut(pane) {
+                pane.foreground = foreground;
+                pane.ran = ran;
+            }
+        });
+    }
+
     /// Notes that pane `pane`'s program ended, as `exit` says, and says
     /// whether the pane went with it.
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
@@ -351,6 +365,8 @@ impl Mux {
                 Ends::Holds => {
                     if let Some(pane) = model.pane_mut(pane) {
                         pane.program = Program::Ended(exit);
+                        pane.foreground = None;
+                        pane.ran = None;
                     }
                     false
                 },
@@ -420,6 +436,8 @@ impl Model {
                 title: String::new(),
                 cwd: opens.cwd.clone(),
                 program: Program::Runs { pid: started.pid },
+                foreground: None,
+                ran: None,
                 handle: started.handle,
             },
         })
@@ -651,6 +669,8 @@ impl Model {
             title: pane.title.clone(),
             cwd: cwd.to_owned(),
             program: Some(program),
+            foreground: pane.foreground.clone(),
+            ran: pane.ran.clone(),
             clients: clients
                 .into_iter()
                 .map(|(id, seat)| api::Client { id: id.said(), size: Some(seat.size.said()) })
@@ -706,7 +726,7 @@ impl Tabs {
         if self.current >= place {
             self.current = self.current.saturating_sub(1);
         }
-        Closed::Out { tab, next: self.tabs[next].pane.id }
+        Closed::Out { tab: Box::new(tab), next: self.tabs[next].pane.id }
     }
 }
 

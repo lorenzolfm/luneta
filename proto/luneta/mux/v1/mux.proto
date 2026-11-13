@@ -9,6 +9,7 @@ syntax = "proto3";
 
 package luneta.mux.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 service Mux {
@@ -198,6 +199,94 @@ message Pane {
   }
   // The clients on it, in the order they came to it.
   repeated Client clients = 6;
+  // The leader of the process group in front of the pane's terminal, while
+  // the program runs: the program itself where none of its jobs is in front,
+  // as at a shell's prompt, or where the leader of the one in front is gone.
+  // None where neither can be read.
+  Foreground foreground = 7;
+  // What the pane's shell last said of the commands it runs, by the marks it
+  // writes (OSC 133). None where it said nothing, as a shell without them
+  // does, and once it gave the pane to another program with `exec`.
+  Ran ran = 8;
+}
+
+// A process, by the server's look at it, which comes after each burst of
+// what the pane's program writes, and a second time 0.1s after the last,
+// and each second while a command runs.
+message Foreground {
+  uint32 pid = 1;
+  // Its program, then its arguments, as the process has them now: one that
+  // forked has its parent's until it runs a program of its own.
+  repeated string argv = 2;
+}
+
+// What a shell said, with the marks of where a command starts and where it
+// ends, and what the server saw of the command between them.
+message Ran {
+  // One of these, always: a client that finds none has a newer server's.
+  oneof is {
+    // At its prompt, and it has run nothing yet.
+    Ready ready = 1;
+    Going going = 2;
+    Ended ended = 3;
+    Stopped stopped = 4;
+  }
+
+  message Ready {}
+
+  // A command it runs.
+  message Going {
+    // The command line, on one line, as the shell said it: the job `fg`
+    // brought back, where it was the last the server saw stopped. Empty where
+    // the shell said none.
+    string command = 1;
+    // When it started. Always there.
+    google.protobuf.Timestamp since = 2;
+    // What the command in front of the pane's terminal does. Never
+    // unspecified.
+    Front front = 3;
+  }
+
+  // The command it ran last, which ended.
+  message Ended {
+    string command = 1;
+    // When it ended. Always there.
+    google.protobuf.Timestamp at = 2;
+    // How it ended. Neither where the shell did not say.
+    oneof ending {
+      // Its exit status.
+      int32 status = 3;
+      // `fg` brought it back, and its shell cannot say its exit status, as
+      // fish cannot after `fg`: the status it says is `fg`'s.
+      Resumed resumed = 4;
+    }
+    // How long it ran. Always there.
+    google.protobuf.Duration took = 5;
+  }
+
+  message Resumed {}
+
+  // A job it stopped, as with `Ctrl z`, which waits to be brought back: its
+  // shell said the command ended while its process group stood stopped.
+  message Stopped {
+    string command = 1;
+    // When it stopped. Always there.
+    google.protobuf.Timestamp at = 2;
+  }
+}
+
+// What the command in front of a terminal does, by how the terminal takes
+// keys and whether a process in front of it sleeps in a read of it.
+enum Front {
+  FRONT_UNSPECIFIED = 0;
+  // It works, and reads nothing from the terminal.
+  FRONT_WORKING = 1;
+  // It waits for you to type: it reads the terminal a line at a time, or
+  // with the echo off, as a password prompt does.
+  FRONT_ASKING = 2;
+  // It takes the terminal over a key at a time, as an editor, a pager or
+  // `ssh` does, for as long as you use it.
+  FRONT_INTERACTIVE = 3;
 }
 
 message Exit {

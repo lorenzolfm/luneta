@@ -731,6 +731,8 @@ mod tests {
             cwd: "/w".to_owned(),
             program: Some(api::pane::Program::Pid(70)),
             clients,
+            foreground: None,
+            ran: None,
         };
         let tab = api::Tab { id: 4, name: "Tab #1".to_owned(), panes: vec![pane] };
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
