@@ -71,6 +71,7 @@ impl<'a> Vars<'a> {
             "ZELLIJ_SESSION_NAME",
             "ZELLIJ_PANE_ID",
             "LUNETA_PANE",
+            "LUNETA_OWN_PANE",
             "LUNETA_AWAY",
             "LUNETA_MUX_SESSION",
             "LUNETA_MUX_MADE",

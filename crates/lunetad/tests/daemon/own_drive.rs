@@ -1,5 +1,6 @@
 //! What the CLI has luneta's own multiplexer do, for an agent that drives
-//! luneta from an own pane: it knows the pane by its ids, which a rename keeps, opens a tab with no
+//! luneta from an own pane, or from luneta's ask box while you are in one: it
+//! knows the pane by its ids, which a rename keeps, opens a tab with no
 //! client there, refuses a pane beside another and a turn, which an own
 //! session's tabs have none of yet, takes a client among own sessions and
 //! not across to zellij's, and closes as it closes in zellij's.
@@ -69,7 +70,8 @@ fn clients_on(owned: &Owned) -> Vec<(u64, u32)> {
 
 /// A command in an own pane is in it by the ids its server gave the pane and
 /// its session: `here` names it by the session's name now, through a rename,
-/// and says so once the session is gone.
+/// and says so once the session is gone. The ask box's agent goes by the own
+/// pane the box names in the same way.
 #[test]
 fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     let owned = Owned::new();
@@ -77,12 +79,20 @@ fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     let work = own(&owned.listed("work")).unwrap();
     let here = in_pane(work, made.pane);
     assert_eq!(said(&luneta(&owned, &here, &["here"])), format!("work:{}\n", made.pane));
+    let turn = ("LUNETA_TURN", "00000000000000aa".to_owned());
+    let made_nanos = &here[1].1;
+    let asked = format!("{}:{made_nanos}:{}:named-then", work.id, made.pane);
+    let from_the_box = [("LUNETA_OWN_PANE", asked), turn];
+    let box_says = said(&luneta(&owned, &from_the_box, &["here"]));
+    assert_eq!(box_says, format!("work:{}\n", made.pane));
 
     let request =
         RenameSessionRequest { on: None, session: "work".to_owned(), to: "play".to_owned() };
     owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
     owned.listed("play");
     assert_eq!(said(&luneta(&owned, &here, &["here"])), format!("play:{}\n", made.pane));
+    let box_says = said(&luneta(&owned, &from_the_box, &["here"]));
+    assert_eq!(box_says, format!("play:{}\n", made.pane));
 
     let other = own(&owned.listed("play")).map(|play| api::OwnSession { id: play.id + 1, ..play });
     let gone = why(&luneta(&owned, &in_pane(other.unwrap(), made.pane), &["here"]));

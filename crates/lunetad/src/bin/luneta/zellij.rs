@@ -22,7 +22,7 @@ pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, C
 use lunetad::closes::{running_in, Whose};
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};
-use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
+use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{moves, Destination, Directory, SocketId};
 pub use lunetad::{var, SessionName};
@@ -92,8 +92,9 @@ impl Seat {
 /// name a pane: nothing runs in a pane and asks from another.
 pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
-    let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
-    let turn = asks::turn_in(key.as_deref(), before.as_deref(), asked.as_deref(), away.as_deref());
+    let (asked, own, away) = (var(ASKED_VAR)?, var(OWN_VAR)?, var(AWAY_VAR)?);
+    let said = asks::Where { asked: asked.as_deref(), own: own.as_deref(), away: away.as_deref() };
+    let turn = asks::turn_in(key.as_deref(), before.as_deref(), said);
     seat_in(turn?, Zellij::here()?, own::here())
 }
 
@@ -117,6 +118,9 @@ fn seat_in(
             let asked = match user {
                 User::Pane { session: from, pane } => {
                     format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
+                },
+                User::Own { named, pane, .. } => {
+                    format!("{OWN_VAR} names {named}:{pane}, a pane luneta's ask box asked from")
                 },
                 User::Away => {
                     format!("{AWAY_VAR} says luneta's ask box asked from another machine")
@@ -1584,7 +1588,9 @@ mod tests {
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
-        for user in [work, User::Away, User::Untold] {
+        let named = SessionName::running("mine").unwrap();
+        let mine = User::Own { session: key, named, pane: 5 };
+        for user in [work, mine, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
             assert_eq!(seat_in(Some((turn, user.clone())), here(None, None), None), asked);
             assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2")), None), asked);

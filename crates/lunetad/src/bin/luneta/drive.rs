@@ -29,7 +29,8 @@
 //!
 //! It does the same in luneta's own sessions, which share zellij's names:
 //! there a command knows its pane by the ids luneta's own multiplexer gave it
-//! and its session, which a rename keeps. An own session's tab holds one pane, so a pane opens there in a tab
+//! and its session, which a rename keeps, and the ask box names your pane so
+//! too. An own session's tab holds one pane, so a pane opens there in a tab
 //! of its own, with `open tab`, and none turns. `open session` makes one of
 //! the kind it runs in. `go` takes a client between sessions of one
 //! multiplexer, as luneta's own client and zellij's are two.
@@ -204,9 +205,9 @@ impl Seated {
 /// machine, or from where luneta's ask box cannot tell, where the box says
 /// so. Or why luneta cannot tell which session that is.
 ///
-/// A pane of an own session goes by the id its server gave its session, and
-/// when it made it, which a rename keeps: its session is the one that runs
-/// by those, by the name it has now.
+/// A pane of an own session, and one the ask box was asked from, goes by the
+/// id its server gave its session, and when it made it, which a rename keeps:
+/// its session is the one that runs by those, by the name it has now.
 ///
 /// zellij names the session in the variables of this pane by the name it had
 /// as the pane opened, and a rename leaves that behind. lunetad follows the
@@ -236,6 +237,15 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
                 "luneta's ask box asked from pane {asked}, and no session runs by that name \
                  now: it was renamed since"
             ));
+        },
+        Some(Seat::Asked { user: User::Own { session, named, pane }, .. }) => {
+            return match running.own_of(session) {
+                Some(own) => Ok(Seated::In(Pane { session: own.name.to_string(), pane })),
+                None => Err(format!(
+                    "luneta's ask box asked from pane {named}:{pane}, of an own session that no \
+                     longer runs"
+                )),
+            };
         },
         Some(Seat::Own { session, pane }) => {
             return match running.own_of(session) {
