@@ -173,7 +173,7 @@ impl Mux {
         self: &Arc<Mux>,
         name: Name,
         opens: &Opens,
-    ) -> Result<(SessionId, TabId, PaneId), Status> {
+    ) -> Result<(SessionId, SystemTime, TabId, PaneId), Status> {
         self.change(|model| {
             model.refuse_if_ended()?;
             model.refuse_if_taken(&name, None)?;
@@ -181,7 +181,7 @@ impl Mux {
             let session = SessionId::next(&mut model.last.session);
             let made = SystemTime::now();
             let tab = model.tab(self, (session, made), Name::numbered(1), opens)?;
-            let ids = (session, tab.id, tab.pane.id);
+            let ids = (session, made, tab.id, tab.pane.id);
             let tabs = Tabs::one(tab);
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
             Ok(ids)
@@ -490,12 +490,10 @@ impl Model {
                 (session, session.tabs.current().pane.id)
             },
         };
-        match place.made {
-            Some(made) if made != session.made => {
-                Err(Status::not_found(format!("no session {} made then", session.id)))
-            },
-            Some(_) | None => Ok(pane),
+        if place.made != session.made {
+            return Err(Status::not_found(format!("no session {} made then", session.id)));
         }
+        Ok(pane)
     }
 
     fn seat(&self, client: ClientId) -> Result<&Seat, Status> {

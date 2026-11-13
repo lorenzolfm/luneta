@@ -17,7 +17,7 @@ fn a_session_runs_a_shell_that_a_client_types_in() {
         let server = Server::start();
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         assert_eq!(
             (attached.went.session, attached.went.tab, attached.went.pane),
             (made.session, made.tab, made.pane),
@@ -130,7 +130,7 @@ fn a_pane_works_where_it_says_on_this_machine() {
         let says = "printf '\\033]7;file://elsewhere/tmp\\007'; echo one; read x; \
             printf '\\033]7;file:///tmp\\007'; echo two; read x";
         let made = new_session(&mut mux, "cwd", script(says, api::Ends::Holds)).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(20, 4)).await;
         attached.until_row("one").await;
         assert_eq!(tabs(&listed(&mut mux).await)[0].panes[0].cwd, "/");
         attached.type_line("").await;
@@ -167,7 +167,7 @@ fn the_server_ends_with_its_last_session() {
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let made = new_session(&mut mux, "work", shell()).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         mux.kill(api::KillRequest { session: made.session }).await.unwrap();
         loop {
             match attached.next().await {

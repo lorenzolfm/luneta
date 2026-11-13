@@ -30,7 +30,7 @@ pub mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
-pub use own::{OwnId, OwnKey, OwnPane};
+pub use own::{OwnId, OwnKey, OwnMade, OwnPane};
 pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
@@ -611,7 +611,7 @@ mod tests {
             entries.iter().map(OsString::from).collect()
         };
         let own = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
-        let made = SystemTime::UNIX_EPOCH + Duration::from_nanos(60);
+        let made = OwnMade::from_nanos(60);
         let session = OwnKey { id: OwnId::new(3).unwrap(), made };
         assert_eq!(pane_in(&environ(&own)), OwnPane::new(session, 12).map(Named::Own));
         let zellij = ["ZELLIJ_SESSION_NAME=work", "ZELLIJ_PANE_ID=2"];
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(pane_in(&environ(&twice)), Some(named));
         let twice = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
         let twice = [&twice[..], &["LUNETA_MUX_SESSION=4"]].concat();
-        let made = SystemTime::UNIX_EPOCH + Duration::from_nanos(60);
+        let made = OwnMade::from_nanos(60);
         let session = OwnKey { id: OwnId::new(3).unwrap(), made };
         assert_eq!(pane_in(&environ(&twice)), OwnPane::new(session, 12).map(Named::Own));
     }

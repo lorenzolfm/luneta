@@ -257,7 +257,7 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
         },
         Some(Seat::Asked { user: User::Own { pane, named }, .. }) => {
             return match running.own_of(pane.session) {
-                Some(own) => Ok(Seated::In(own_here(own, pane))),
+                Some(own) => Ok(Seated::In(own_here(&own.name, pane))),
                 None => Err(format!(
                     "luneta's ask box asked from pane {named}:{}, of an own session that no \
                      longer runs",
@@ -267,7 +267,7 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
         },
         Some(Seat::Own(pane)) => {
             return match running.own_of(pane.session) {
-                Some(own) => Ok(Seated::In(own_here(own, pane))),
+                Some(own) => Ok(Seated::In(own_here(&own.name, pane))),
                 None => Err(format!(
                     "this runs in pane {} of own session {}, which no longer runs",
                     pane.id, pane.session.id
@@ -301,10 +301,9 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
     }))
 }
 
-/// The pane `pane` of `own`, an own session, by the name it has now.
-fn own_here(own: &Listing, pane: OwnPane) -> Here {
-    assert_eq!(own.key(), pane.session, "the pane is of the session listed");
-    let at = Pane { session: own.name.to_string(), pane: pane.id.get() };
+/// The own pane `pane`, by the name `named` its session has now.
+fn own_here(named: &SessionName, pane: OwnPane) -> Here {
+    let at = Pane { session: named.to_string(), pane: pane.id.get() };
     Here { pane: at, whose: Whose::Own(pane.session) }
 }
 
@@ -1284,7 +1283,7 @@ mod tests {
         let made = || Some(SystemTime::UNIX_EPOCH.into());
         let agents = [Agent::default(), in_own(session(3, made()))];
         let spots: Vec<Spot> = placed(&agents).unwrap().iter().map(|it| it.spot).collect();
-        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: SystemTime::UNIX_EPOCH };
+        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: mux::OwnMade::from_nanos(0) };
         assert_eq!(spots, [Spot::Unplaced, Spot::Own(OwnPane::new(key, 2).unwrap())]);
         assert_eq!(spots[1].pane_in("any", Whose::Own(key)), Some(2));
         let other = OwnKey { id: mux::OwnId::new(4).unwrap(), ..key };

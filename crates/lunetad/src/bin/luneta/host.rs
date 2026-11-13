@@ -1448,7 +1448,7 @@ enum Onward {
 fn onward(refuge: Option<Refuge>, own: Option<OwnKey>) -> Option<Onward> {
     match (refuge, own) {
         (Some(refuge), Some(own)) => {
-            if refuge.started.is_some_and(|started| started >= own.made) {
+            if refuge.started.is_some_and(|started| started >= own.made.at()) {
                 Some(Onward::Zellij(refuge))
             } else {
                 Some(Onward::Own(own))
@@ -4427,7 +4427,7 @@ mod tests {
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
-    use lunetad::mux::own::OwnPane;
+    use lunetad::mux::own::{OwnMade, OwnPane};
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
@@ -4444,7 +4444,7 @@ mod tests {
             started: started.map(at),
         };
         let id = lunetad::mux::own::OwnId::new(4).unwrap();
-        let own = |made| OwnKey { id, made: at(made) };
+        let own = |made| OwnKey { id, made: OwnMade::of(at(made)).unwrap() };
         let went = |refuge, own| match onward(refuge, own) {
             Some(Onward::Zellij(refuge)) => Some(Err(refuge.session.to_string())),
             Some(Onward::Own(own)) => Some(Ok(own.id)),
@@ -4468,7 +4468,7 @@ mod tests {
     fn a_go_s_after_waits_for_the_client_to_be_where_it_went() {
         let key = |id, made| OwnKey {
             id: lunetad::mux::own::OwnId::new(id).unwrap(),
-            made: SystemTime::UNIX_EPOCH + Duration::from_secs(made),
+            made: OwnMade::from_nanos(made * 1_000_000_000_u64),
         };
         let (here, there) = (key(1, 10), key(2, 20));
         let kill = || {
@@ -4486,7 +4486,7 @@ mod tests {
         assert!(matches!(phase, Phase::In { going: Some(_) }), "it came, and still goes");
         assert!(is_kill(phase.went(&went(there, 4))));
         assert!(matches!(phase, Phase::In { going: None }));
-        let to = To::Tab { session: there, tab: 5 };
+        let to = To::Tab { session: there, tab: NonZeroU32::new(5).unwrap() };
         assert!(phase.going(Going { to, after: kill() }).is_none());
         assert!(phase.went(&went(there, 4)).is_none(), "another tab of the session");
         assert!(is_kill(phase.going(Going { to: To::Session(here), after: None })));

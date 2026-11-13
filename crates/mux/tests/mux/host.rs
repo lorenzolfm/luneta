@@ -163,12 +163,14 @@ pub async fn new_tab(
     mux.new_tab(request).await.unwrap().into_inner()
 }
 
-pub fn session(id: u64) -> api::Place {
-    api::Place { is: Some(api::place::Is::Session(id)), made_at: None }
+/// The session `made` says it made.
+pub fn session(made: &api::NewSessionResponse) -> api::Place {
+    api::Place { is: Some(api::place::Is::Session(made.session)), made_at: made.made_at }
 }
 
-pub fn tab(id: u32) -> api::Place {
-    api::Place { is: Some(api::place::Is::Tab(id)), made_at: None }
+/// The tab `id` of the session `made` says it made.
+pub fn tab(id: u32, made: &api::NewSessionResponse) -> api::Place {
+    api::Place { is: Some(api::place::Is::Tab(id)), made_at: made.made_at }
 }
 
 pub fn size(columns: u32, rows: u32) -> api::Size {

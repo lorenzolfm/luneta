@@ -17,7 +17,6 @@
 use std::num::{NonZeroU16, NonZeroU32};
 use std::pin::pin;
 use std::thread;
-use std::time::SystemTime;
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
@@ -27,7 +26,7 @@ use tonic::Status;
 
 use super::api::{self, mux_client::MuxClient, to_client, to_server};
 use super::server::{connect, refused, runtime, socket};
-use super::{OwnId, OwnKey, OwnPane};
+use super::{OwnId, OwnKey, OwnMade, OwnPane};
 
 /// The most the server lets a side of a pane be, in cells: more is refused.
 pub const SIDE_MAX: u16 = 1000;
@@ -44,7 +43,7 @@ pub enum To {
     /// A session, on the tab a client coming there goes to.
     Session(OwnKey),
     /// A tab of a session.
-    Tab { session: OwnKey, tab: u32 },
+    Tab { session: OwnKey, tab: NonZeroU32 },
 }
 
 impl To {
@@ -61,7 +60,7 @@ impl To {
     pub fn reached(self, went: &Went) -> bool {
         match self {
             To::Session(session) => went.pane.session == session,
-            To::Tab { session, tab } => went.pane.session == session && went.tab.get() == tab,
+            To::Tab { session, tab } => went.pane.session == session && went.tab == tab,
         }
     }
 
@@ -71,7 +70,7 @@ impl To {
     fn said(self) -> api::Place {
         let is = match self {
             To::Session(session) => api::place::Is::Session(session.id.get()),
-            To::Tab { tab, .. } => api::place::Is::Tab(tab),
+            To::Tab { tab, .. } => api::place::Is::Tab(tab.get()),
         };
         api::Place { is: Some(is), made_at: Some(self.session().made.into()) }
     }
@@ -88,7 +87,7 @@ impl To {
             return Ok(());
         };
         let listed = listing.iter().find(|listed| listed.id == session.id.get());
-        if listed.is_some_and(|listed| listed.tabs.iter().any(|it| it.id == tab)) {
+        if listed.is_some_and(|listed| listed.tabs.iter().any(|it| it.id == tab.get())) {
             Ok(())
         } else {
             Err(format!("own session {} has no tab {tab}", session.id))
@@ -101,7 +100,7 @@ impl To {
 fn keys(listing: &[api::Session]) -> Vec<OwnKey> {
     let key = |session: &api::Session| {
         let id = OwnId::new(session.id)?;
-        let made = SystemTime::try_from(session.made_at?).ok()?;
+        let made = OwnMade::read(session.made_at?).ok()?;
         Some(OwnKey { id, made })
     };
     listing.iter().filter_map(key).collect()
@@ -897,8 +896,7 @@ mod tests {
     }
 
     fn key(id: u64, made: u64) -> OwnKey {
-        let made = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(made);
-        OwnKey { id: OwnId::new(id).unwrap(), made }
+        OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(made * 1_000_000_000) }
     }
 
     /// A client went to a session as no other is, of those its server
@@ -928,7 +926,7 @@ mod tests {
         let listed = |id, made: u64, tabs| api::Session {
             id,
             tabs,
-            made_at: Some((SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(made)).into()),
+            made_at: Some(OwnMade::from_nanos(made * 1_000_000_000).into()),
             ..api::Session::default()
         };
         let listing = [listed(1, 30, vec![tab(7)]), listed(0, 10, Vec::new())];
@@ -937,7 +935,7 @@ mod tests {
         assert_eq!(To::Session(key(1, 30)).found_in(&sessions, &listing), Ok(()));
         let since = To::Session(key(1, 10)).found_in(&sessions, &listing);
         assert_eq!(since.unwrap_err(), "own session 1 no longer runs");
-        let tab = |tab| To::Tab { session: key(1, 30), tab };
+        let tab = |tab| To::Tab { session: key(1, 30), tab: NonZeroU32::new(tab).unwrap() };
         assert_eq!(tab(7).found_in(&sessions, &listing), Ok(()));
         assert_eq!(tab(8).found_in(&sessions, &listing).unwrap_err(), "own session 1 has no tab 8");
     }

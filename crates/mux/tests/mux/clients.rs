@@ -21,9 +21,9 @@ fn a_client_goes_between_tabs_and_is_told_where_it_is() {
             new_session(&mut mux, "work", script("echo one; read x", api::Ends::Holds)).await;
         let two =
             new_tab(&mut mux, made.session, script("echo two; read x", api::Ends::Holds)).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(20, 4)).await;
         attached.until_row("one").await;
-        attached.send(api::to_server::Event::Go(tab(two.tab))).await;
+        attached.send(api::to_server::Event::Go(tab(two.tab, &made))).await;
         attached
             .until("the client went to the second tab", |attached| attached.went.tab == two.tab)
             .await;
@@ -32,7 +32,7 @@ fn a_client_goes_between_tabs_and_is_told_where_it_is() {
         attached.type_line("").await;
         let back = api::GoRequest {
             who: Some(api::go_request::Who::LastTypedIn(made.session)),
-            to: Some(tab(made.tab)),
+            to: Some(tab(made.tab, &made)),
         };
         let went = mux.go(back).await.unwrap().into_inner();
         assert_eq!(went.client, attached.client);
@@ -51,8 +51,8 @@ fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
         let made = new_session(&mut mux, "work", shell()).await;
         let gone = new_tab(&mut mux, made.session, shell()).await;
         mux.close_tab(api::CloseTabRequest { tab: gone.tab }).await.unwrap();
-        let mut attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
-        attached.send(api::to_server::Event::Go(tab(gone.tab))).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
+        attached.send(api::to_server::Event::Go(tab(gone.tab, &made))).await;
         let reason = loop {
             match attached.next().await {
                 Some(api::to_client::Event::Stayed(stayed)) => break stayed.reason,
@@ -67,38 +67,47 @@ fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
     });
 }
 
-/// A place that says when its session was made is taken where the server made
-/// it then, and refused where at another time, as of a server before this
-/// one: a go to the session or to its tab, and a hello.
+/// A place says when its session was made, as the server said it made it,
+/// and is taken where the server made it then. It is refused where at
+/// another time, as of a server before this one, and where it says no time:
+/// a go to the session or to its tab, and a hello.
 #[test]
 fn a_place_of_a_session_made_at_another_time_is_refused() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
-        let then = listed(&mut mux).await.sessions[0].made_at.expect("a session says its made_at");
+        let then = made.made_at.expect("the server says when it made the session");
+        assert_eq!(listed(&mut mux).await.sessions[0].made_at, Some(then));
         let before = prost_types::Timestamp { seconds: then.seconds - 1, ..then };
-        let session = |made_at| api::Place { made_at, ..crate::host::session(made.session) };
-        let tab = |made_at| api::Place { made_at, ..crate::host::tab(made.tab) };
+        let session = |made_at| api::Place { made_at, ..crate::host::session(&made) };
+        let tab = |made_at| api::Place { made_at, ..crate::host::tab(made.tab, &made) };
         let attached = Attached::new(&mut mux, session(Some(then)), size(40, 10)).await;
         let go = |to| api::GoRequest {
             who: Some(api::go_request::Who::Client(attached.client)),
             to: Some(to),
         };
         let refused = format!("no session {} made then", made.session);
-        let places = [(session(Some(before)), session(Some(then))), (tab(Some(before)), tab(None))];
-        for (stale, taken) in places {
-            let stale = mux.go(go(stale)).await.unwrap_err();
+        let places: [&dyn Fn(Option<prost_types::Timestamp>) -> api::Place; 2] = [&session, &tab];
+        for place in places {
+            let stale = mux.go(go(place(Some(before)))).await.unwrap_err();
             assert_eq!((stale.code(), stale.message()), (Code::NotFound, refused.as_str()));
-            let went = mux.go(go(taken)).await.unwrap().into_inner();
+            let untold = mux.go(go(place(None))).await.unwrap_err();
+            let missing = (Code::InvalidArgument, "to.made_at is missing");
+            assert_eq!((untold.code(), untold.message()), missing);
+            let went = mux.go(go(place(Some(then)))).await.unwrap().into_inner();
             assert_eq!(went.client, attached.client);
         }
-        let to = Some(session(Some(before)));
-        let hello = api::Hello { to, size: Some(size(40, 10)), colours: None };
-        let Err(stale) = Attached::hello(&mut mux, hello).await else {
+        let hello = |to| api::Hello { to: Some(to), size: Some(size(40, 10)), colours: None };
+        let Err(stale) = Attached::hello(&mut mux, hello(session(Some(before)))).await else {
             panic!("a client went to a session made at another time");
         };
         assert_eq!((stale.code(), stale.message()), (Code::NotFound, refused.as_str()));
+        let Err(untold) = Attached::hello(&mut mux, hello(session(None))).await else {
+            panic!("a client went to a session made at no time it said");
+        };
+        let missing = (Code::InvalidArgument, "hello.to.made_at is missing");
+        assert_eq!((untold.code(), untold.message()), missing);
     });
 }
 
@@ -111,8 +120,8 @@ fn each_client_looks_back_in_the_scrollback_on_its_own() {
         let mut mux = server.client().await;
         let lines = "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done; read x";
         let made = new_session(&mut mux, "work", script(lines, api::Ends::Holds)).await;
-        let mut reading = Attached::new(&mut mux, session(made.session), size(20, 5)).await;
-        let mut watching = Attached::new(&mut mux, session(made.session), size(20, 5)).await;
+        let mut reading = Attached::new(&mut mux, session(&made), size(20, 5)).await;
+        let mut watching = Attached::new(&mut mux, session(&made), size(20, 5)).await;
         reading.until_row("line30").await;
         watching.until_row("line30").await;
         reading.send(api::to_server::Event::Scroll(api::Scroll { back: 10 })).await;
@@ -134,7 +143,7 @@ fn the_pane_takes_the_size_of_the_latest_client() {
         let server = Server::start();
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
-        let mut mine = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let mut mine = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         mine.type_line("stty size").await;
         mine.until_row("10 40").await;
         mine.send(api::to_server::Event::Resize(size(50, 12))).await;
@@ -166,7 +175,7 @@ fn a_hello_of_no_columns_is_refused_by_its_field() {
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
         let hello =
-            api::Hello { to: Some(session(made.session)), size: Some(size(0, 10)), colours: None };
+            api::Hello { to: Some(session(&made)), size: Some(size(0, 10)), colours: None };
         let Err(refused) = Attached::hello(&mut mux, hello).await else {
             panic!("a client of no columns was taken");
         };

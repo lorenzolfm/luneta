@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -30,7 +30,7 @@ use crate::api::ask_request::{self, UserOwnPane, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::{self, OwnId, OwnKey, OwnPane, SessionName};
+use crate::mux::{self, OwnId, OwnKey, OwnMade, OwnPane, SessionName};
 use crate::{git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
@@ -289,17 +289,10 @@ impl User {
 }
 
 /// `OWN_VAR` as `name_in` spells it, of the own pane `pane`, of the session
-/// named `named`: as `Asked::new` takes it, and `own_read` reads it back.
+/// named `named`: as `own_read` reads it back.
 fn own_spelled(pane: OwnPane, named: &SessionName) -> String {
-    let made = made_nanos(pane.session.made).expect("Asked::new takes no own session made then");
+    let made = pane.session.made.nanos();
     format!("{}:{made}:{}:{named}", pane.session.id, pane.id)
-}
-
-/// When an own session was made, `made`, in nanoseconds since the epoch, as
-/// luneta's own multiplexer names it in the variables of its panes and
-/// `own_read` reads it: none before the epoch, nor past what a `u64` holds.
-fn made_nanos(made: SystemTime) -> Option<u64> {
-    u64::try_from(made.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 
 /// The pane of an own session `spelled` names, as `own_spelled` spells it:
@@ -308,7 +301,7 @@ fn made_nanos(made: SystemTime) -> Option<u64> {
 fn own_read(spelled: &str) -> Option<User> {
     let mut parts = spelled.splitn(4, ':');
     let id = OwnId::new(parts.next()?.parse().ok()?)?;
-    let made = UNIX_EPOCH.checked_add(Duration::from_nanos(parts.next()?.parse().ok()?))?;
+    let made = OwnMade::from_nanos(parts.next()?.parse().ok()?);
     let pane = OwnPane { session: OwnKey { id, made }, id: parts.next()?.parse().ok()? };
     let named = SessionName::running(parts.next()?).ok()?;
     Some(User::Own { pane, named })
@@ -441,12 +434,6 @@ impl Asked {
         let words = words.trim();
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
-        }
-        if let User::Own { pane, .. } = &user
-            && made_nanos(pane.session.made).is_none()
-        {
-            let id = pane.session.id;
-            return Err(format!("user: own session {id} was made at no time {OWN_VAR} says"));
         }
         Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
@@ -776,6 +763,7 @@ fn failed(stderr: &[u8], status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::time::UNIX_EPOCH;
 
     use serde_json::json;
 
@@ -794,7 +782,7 @@ mod tests {
     /// The pane `pane` of an own session named `named`, of id 3, made
     /// `made` nanoseconds after the epoch.
     fn own_pane_made(named: &str, pane: u32, made: u64) -> User {
-        let made = UNIX_EPOCH + Duration::from_nanos(made);
+        let made = OwnMade::from_nanos(made);
         let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, pane).unwrap();
         User::Own { pane, named: SessionName::running(named).unwrap() }
     }

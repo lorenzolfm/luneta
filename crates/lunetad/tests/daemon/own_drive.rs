@@ -169,7 +169,7 @@ fn go_takes_a_client_among_own_sessions_and_not_across_to_zellij_s() {
     let play = owned.make("play").unwrap();
     let in_work = in_pane(own(&owned.listed("work")).unwrap(), work.pane);
     let in_play = in_pane(own(&owned.listed("play")).unwrap(), play.pane);
-    let _client = owned.attach(work.session);
+    let _client = owned.attach(&work);
     let [(client, on)] = clients_on(&owned)[..] else {
         panic!("one client: {:?}", clients_on(&owned));
     };
@@ -221,7 +221,7 @@ fn an_own_pane_s_session_is_its_own_where_zellij_runs_one_by_its_name() {
     let play = owned.make("play").unwrap();
     let in_work = in_pane(own(&owned.listed("work")).unwrap(), work.pane);
     owned.listed("play");
-    let _client = owned.attach(work.session);
+    let _client = owned.attach(&work);
     let _zellij = owned.host.serve("work");
     eventually("both are on the host", || {
         let host = owned.host.host();
@@ -275,7 +275,7 @@ fn a_session_opened_from_an_own_pane_is_an_own_one_the_client_goes_to() {
     let owned = Owned::new();
     let work = owned.make("work").unwrap();
     let in_work = in_pane(own(&owned.listed("work")).unwrap(), work.pane);
-    let _client = owned.attach(work.session);
+    let _client = owned.attach(&work);
     let [(client, _)] = clients_on(&owned)[..] else {
         panic!("one client: {:?}", clients_on(&owned));
     };

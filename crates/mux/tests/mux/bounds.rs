@@ -42,7 +42,7 @@ fn a_folder_named_in_no_utf_8_breaks_no_pane() {
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let says = "printf '\\033]7;file://host/\\376\\007'; echo after; read x";
         let made = new_session(&mut mux, "odd", script(says, api::Ends::Holds)).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(20, 4)).await;
         attached.until_row("after").await;
         let listing =
             watched_until(&mut watch, "the tab", |listing| !tabs(listing).is_empty()).await;
@@ -65,7 +65,7 @@ fn a_server_holds_more_files_than_it_started_with_and_its_programs_get_that_back
         let mut mux = server.client().await;
         let says = script("ulimit -Sn; read x", api::Ends::Holds);
         let made = new_session(&mut mux, "many", says).await;
-        let mut attached = Attached::new(&mut mux, session(made.session), size(20, 4)).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(20, 4)).await;
         attached.until_row("64").await;
         for _ in 0..20 {
             new_tab(&mut mux, made.session, script("read x", api::Ends::Holds)).await;

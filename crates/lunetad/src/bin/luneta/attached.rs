@@ -603,10 +603,9 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
-    use std::time::SystemTime;
 
     use lunetad::mux::own::attach::Grapheme;
-    use lunetad::mux::own::{OwnId, OwnKey, OwnPane};
+    use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 
     use super::*;
 
@@ -635,7 +634,7 @@ mod tests {
             .collect();
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
         let screen = Screen { size, lines, cursor: None, tracks_mouse: false };
-        let session = OwnKey { id: OwnId::new(1).unwrap(), made: SystemTime::UNIX_EPOCH };
+        let session = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
         let went = Went { pane: OwnPane::new(session, 1).unwrap(), tab: NonZeroU32::MIN };
         View { went: Some(went), screen: Some(screen), ..View::default() }
     }

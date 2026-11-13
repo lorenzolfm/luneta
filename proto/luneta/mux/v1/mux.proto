@@ -50,6 +50,8 @@ message NewSessionResponse {
   uint64 session = 1;
   uint32 tab = 2;
   uint32 pane = 3;
+  // When the server made it, as its `Session.made_at` says.
+  google.protobuf.Timestamp made_at = 4;
 }
 
 message NewTabRequest {
@@ -133,8 +135,8 @@ message Place {
     uint64 session = 1;
     uint32 tab = 2;
   }
-  // When the session, or the tab's, was made, where set: a place in one made
-  // at another time is of a server before this one, and refused.
+  // When the session, or the tab's, was made: a place in one made at another
+  // time is of a server before this one, and refused. Always there.
   google.protobuf.Timestamp made_at = 3;
 }
 

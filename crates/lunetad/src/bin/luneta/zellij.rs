@@ -1572,7 +1572,8 @@ mod tests {
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let here = |named: Option<&str>, pane| PaneVars::spelled(named.map(str::to_owned), pane);
         let opened = Seat::Opened(ZellijPane { session: "work".to_owned(), pane: 2 });
-        let key = mux::OwnKey { id: mux::OwnId::new(3).unwrap(), made: SystemTime::UNIX_EPOCH };
+        let made = mux::OwnMade::from_nanos(0);
+        let key = mux::OwnKey { id: mux::OwnId::new(3).unwrap(), made };
         let own = OwnPane::new(key, 12);
         assert_eq!(seat_in(None, here(Some("work"), Some("2")), None), Ok(Some(opened.clone())));
         assert_eq!(seat_in(None, here(Some("work"), Some("2")), own), Ok(Some(opened)));

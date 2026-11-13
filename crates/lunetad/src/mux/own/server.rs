@@ -30,7 +30,7 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
-use super::{OwnId, OwnKey, OwnPane};
+use super::{OwnId, OwnKey, OwnMade, OwnPane};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
@@ -290,7 +290,7 @@ fn clients(session: &api::Session) -> Result<Listed, String> {
 pub struct Listing {
     pub id: OwnId,
     /// When its server made it.
-    pub made: SystemTime,
+    pub made: OwnMade,
     pub name: SessionName,
     /// Its panes, as luneta lays a session's out.
     pub laid: Vec<Laid>,
@@ -432,9 +432,9 @@ pub fn followed(
 }
 
 /// When the server made `session`, of id `id`, or why it does not say.
-fn made_of(session: &api::Session, id: OwnId) -> Result<SystemTime, String> {
+fn made_of(session: &api::Session, id: OwnId) -> Result<OwnMade, String> {
     let made = session.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
-    SystemTime::try_from(made).map_err(|why| format!("own session {id}'s made_at: {why}"))
+    OwnMade::read(made).map_err(|why| format!("own session {id}'s made_at: {why}"))
 }
 
 /// The session named `name` among `listing`, where one has it, or why the
@@ -680,8 +680,12 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
                 let session = OwnId::new(made.session);
                 let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
                 let id = session.ok_or_else(unread)?;
-                let made_at = made_of(&server.session(id)?, id).map_err(Failure::Unread)?;
-                let session = OwnKey { id, made: made_at };
+                let made_at = match made.made_at {
+                    Some(at) => OwnMade::read(at)
+                        .map_err(|why| format!("own session {id}'s made_at: {why}")),
+                    None => made_of(&server.session(id)?, id),
+                };
+                let session = OwnKey { id, made: made_at.map_err(Failure::Unread)? };
                 let zero = || Failure::Unread(format!("luneta-mux made {id} with the pane 0"));
                 let pane = OwnPane::new(session, made.pane).ok_or_else(zero)?;
                 let unnumbered = || Failure::Unread(format!("luneta-mux made {id} with the tab 0"));
@@ -873,7 +877,7 @@ mod tests {
         assert_eq!(read, [(1, "work"), (5, "fine")]);
         assert_eq!(unread.len(), 7, "{unread:?}");
         let work = &listed[0];
-        assert_eq!(work.made, SystemTime::UNIX_EPOCH + Duration::from_secs(60));
+        assert_eq!(work.made, OwnMade::from_nanos(60_000_000_000));
         assert_eq!(work.clients.to_vec(), [Client { id: 2, pane: PaneId::Terminal(7) }]);
         assert_eq!(work.laid[0].tab_id, TabId(4));
         assert_eq!(work.laid[0].cwd.as_ref().map(Said::as_str), Some("/w"));
@@ -923,7 +927,7 @@ mod tests {
     fn a_session_is_the_one_its_key_says_or_gone() {
         let key = |seconds| OwnKey {
             id: OwnId::new(3).unwrap(),
-            made: SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+            made: OwnMade::from_nanos(seconds * 1_000_000_000_u64),
         };
         let work = || session(3, "work", &[]);
         assert_eq!(of_key(work(), key(60)).map(|it| it.name).ok(), Some("work".to_owned()));
