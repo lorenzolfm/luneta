@@ -41,7 +41,8 @@ service Mux {
 
 message NewSessionRequest {
   // Not empty, and no other session's. At most 255 bytes, with no control
-  // characters.
+  // characters, and as luneta reads a session's name: not only whitespace,
+  // not `.` or `..`, and with no `/`.
   string name = 1;
   Opens opens = 2;
 }
@@ -56,8 +57,9 @@ message NewSessionResponse {
 
 message NewTabRequest {
   uint64 session = 1;
-  // As a session's name is held to. None for `Tab #<n>`, where n is the tab's
-  // place among the session's as it opens.
+  // Not empty, at most 255 bytes, and with no control characters, as a
+  // session's name, which is held to more. None for `Tab #<n>`, where n is
+  // the tab's place among the session's as it opens.
   optional string name = 2;
   Opens opens = 3;
 }
