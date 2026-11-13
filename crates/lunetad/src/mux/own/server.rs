@@ -7,7 +7,7 @@
 //! is ending says so, and one that holds the folder still keeps the next from
 //! starting: either way, luneta waits for it to go, and starts another.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
@@ -21,6 +21,7 @@ use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use tokio::net::UnixStream;
 use tokio::runtime::{self, Runtime};
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -30,6 +31,7 @@ use tower::service_fn;
 use super::api::{self, mux_client::MuxClient};
 use super::{OwnId, OwnKey};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
+use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
 /// The socket the server listens on, in luneta's runtime folder, as
@@ -238,7 +240,7 @@ fn laid(session: &api::Session) -> Vec<Laid> {
             tab_position: position,
             tab_name: tab.name.clone(),
             cwd: Said::new(pane.cwd.clone()),
-            command: None,
+            command: pane.foreground.as_ref().and_then(|front| Said::new(front.argv.join(" "))),
         })
     });
     laid.collect()
@@ -274,6 +276,9 @@ pub struct Listing {
     /// Its panes, as luneta lays a session's out.
     pub laid: Vec<Laid>,
     pub clients: Listed,
+    /// What the shell of each pane said, by the pane's id, where it said
+    /// something.
+    pub doings: BTreeMap<u32, Doing>,
 }
 
 impl Listing {
@@ -285,22 +290,27 @@ impl Listing {
 }
 
 /// The own sessions among `sessions`, as the server lists them, and why each
-/// that it leaves out does not read: one whose id or name another before it
-/// has is left out too, as the server gives each its own.
+/// that it leaves out does not read, or each pane's shell: one whose id or
+/// name another before it has is left out too, as the server gives each its
+/// own.
 fn read(sessions: Vec<api::Session>) -> (Vec<Listing>, Vec<String>) {
     let mut listed: Vec<Listing> = Vec::with_capacity(sessions.len());
     let mut unread = Vec::new();
     for session in sessions {
         match one(&session, &listed) {
-            Ok(one) => listed.push(one),
+            Ok((one, shells)) => {
+                listed.push(one);
+                unread.extend(shells);
+            },
             Err(why) => unread.push(why),
         }
     }
     (listed, unread)
 }
 
-/// `session`, as the server lists it after `before`, or why it does not read.
-fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
+/// `session`, as the server lists it after `before`, with why each pane's
+/// shell left out does not read, or why the session does not read.
+fn one(session: &api::Session, before: &[Listing]) -> Result<(Listing, Vec<String>), String> {
     let id = OwnId::new(session.id).ok_or("a session of id 0")?;
     let name = SessionName::running(&session.name)
         .map_err(|why| format!("own session {id}'s name: {why}"))?;
@@ -309,7 +319,72 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
     }
     let made = made_of(session, id)?;
     let clients = clients(session).map_err(|why| format!("own session {id}'s clients: {why}"))?;
-    Ok(Listing { id, made, name, laid: laid(session), clients })
+    let (doings, unread) = doings(session, id);
+    Ok((Listing { id, made, name, laid: laid(session), clients, doings }, unread))
+}
+
+/// What the shell of each pane of `session`, of id `id`, said, by the pane's
+/// id, and why each that is left out does not read: its pane stays, as one
+/// whose shell says nothing.
+fn doings(session: &api::Session, id: OwnId) -> (BTreeMap<u32, Doing>, Vec<String>) {
+    let mut doings = BTreeMap::new();
+    let mut unread = Vec::new();
+    for pane in session.tabs.iter().flat_map(|tab| &tab.panes) {
+        let Some(ran) = &pane.ran else {
+            continue;
+        };
+        let read = ran.is.as_ref().ok_or_else(|| "a word of a newer luneta-mux's".to_owned());
+        match read.and_then(doing) {
+            Ok(doing) => {
+                doings.insert(pane.id, doing);
+            },
+            Err(why) => unread.push(format!("own session {id}'s pane {}'s shell: {why}", pane.id)),
+        }
+    }
+    (doings, unread)
+}
+
+/// What a shell said, as the daemon keeps it, or why it does not read.
+fn doing(is: &api::ran::Is) -> Result<Doing, String> {
+    use api::ran::{ended, Is};
+    let time = |at: Option<prost_types::Timestamp>, what: &str| {
+        let at = at.ok_or_else(|| format!("no {what}"))?;
+        SystemTime::try_from(at).map_err(|why| format!("its {what}: {why}"))
+    };
+    let said = |command: &Option<String>| match command {
+        None => Ok(None),
+        Some(command) => Said::new(command.clone()).map(Some).ok_or("an empty command line"),
+    };
+    let doing = match is {
+        Is::Ready(_) => Doing::Ready,
+        Is::Going(going) => {
+            let front = match going.front() {
+                api::Front::Working => Front::Working,
+                api::Front::Asking => Front::Asking,
+                api::Front::Interactive => Front::Interactive,
+                api::Front::Unspecified => {
+                    return Err("what its command does, in a word of a newer luneta-mux's".into());
+                },
+            };
+            let since = time(going.since, "since")?;
+            Doing::Going { command: said(&going.command)?, since, front }
+        },
+        Is::Ended(ended) => {
+            let at = time(ended.at, "at")?;
+            let ending = ended.ending.as_ref().map(|ending| match ending {
+                ended::Ending::Status(status) => Ending::Exited(*status),
+                ended::Ending::Resumed(_) => Ending::Resumed,
+            });
+            let took = ended.took.ok_or("no took")?;
+            let took = Duration::try_from(took).map_err(|why| format!("its took: {why}"))?;
+            Doing::Ended { command: said(&ended.command)?, at, ending, took }
+        },
+        Is::Stopped(stopped) => {
+            let at = time(stopped.at, "at")?;
+            Doing::Stopped { command: said(&stopped.command)?, at }
+        },
+    };
+    Ok(doing)
 }
 
 /// Follows the own sessions: has `told` hear them as the server lists them
@@ -731,6 +806,8 @@ mod tests {
             cwd: "/w".to_owned(),
             program: Some(api::pane::Program::Pid(70)),
             clients,
+            foreground: None,
+            ran: None,
         };
         let tab = api::Tab { id: 4, name: "Tab #1".to_owned(), panes: vec![pane] };
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
@@ -768,5 +845,41 @@ mod tests {
         assert_eq!(work.laid[0].tab_id, TabId(4));
         assert_eq!(work.laid[0].cwd.as_ref().map(Said::as_str), Some("/w"));
         assert!(!work.laid[0].is_held);
+    }
+
+    /// A pane whose shell says what does not read is left out of what the
+    /// shells said, with why, and its session reads: a word of a newer
+    /// server's, a going command of no front, an empty line, or no time. A
+    /// command of no line reads.
+    #[test]
+    fn a_shell_listed_that_does_not_read_is_left_out_alone() {
+        use api::ran::{Going, Is, Ready, Stopped};
+        let since = Some(prost_types::Timestamp { seconds: 90, nanos: 0 });
+        let working = api::Front::Working.into();
+        let unsaid = Going { command: None, since, front: working };
+        let shells = [
+            Some(Is::Ready(Ready {})),
+            None,
+            Some(Is::Going(Going { front: api::Front::Unspecified.into(), ..unsaid.clone() })),
+            Some(Is::Going(Going { command: Some(String::new()), ..unsaid.clone() })),
+            Some(Is::Stopped(Stopped { command: Some("vim".to_owned()), at: None })),
+            Some(Is::Going(unsaid)),
+        ];
+        let mut listed = session(1, "work", &[]);
+        let pane = listed.tabs[0].panes[0].clone();
+        listed.tabs[0].panes = (1..)
+            .zip(shells)
+            .map(|(id, is)| api::Pane { id, ran: Some(api::Ran { is }), ..pane.clone() })
+            .collect();
+        let (listed, unread) = read(vec![listed]);
+        assert_eq!(unread.len(), 4, "{unread:?}");
+        let doings: Vec<(u32, &Doing)> =
+            listed[0].doings.iter().map(|(pane, doing)| (*pane, doing)).collect();
+        let going = Doing::Going {
+            command: None,
+            since: SystemTime::UNIX_EPOCH + Duration::from_secs(90),
+            front: Front::Working,
+        };
+        assert_eq!(doings, [(1, &Doing::Ready), (6, &going)]);
     }
 }

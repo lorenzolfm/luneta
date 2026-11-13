@@ -1391,6 +1391,7 @@ name = "luneta-mux"
 version = "0.3.0"
 dependencies = [
  "hyper-util",
+ "libc",
  "libghostty-vt",
  "libghostty-vt-sys",
  "percent-encoding",

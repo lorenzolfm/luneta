@@ -964,7 +964,8 @@ for the command and its age counting up. A program that takes the terminal
 over, as an editor does, and a job stopped with `Ctrl z` have none, and nor
 does a command that ends within a second. A command that ended keeps its mark
 until you have seen it, as the `•` below says, and its row is then the plain
-row it was. A shell without the hook has no marks.
+row it was. A shell without the hook has no marks, nor, in an own session, a
+shell that writes none of [its own](#hook-the-shell).
 
 lunetad reads what the hook writes, and the terminal of each command that
 runs. The terminal says whether the command works or waits for you: how it
@@ -1909,7 +1910,7 @@ or did not, has its own notification.
 | [`git`](https://git-scm.com) | optional | the branch and its status under a pane in [luneta's sidebar](#luneta-in-your-terminal), and, from 2.41, the fetch that keeps its count behind of what the remote has |
 | [`gh`](https://cli.github.com), logged in | optional | the number of a branch's pull request under a pane in [luneta's sidebar](#luneta-in-your-terminal), with the mark of its checks, the logs `c c` hands an agent, the issue of a link you paste there, and the issues `i` files |
 | a [Nerd Font](https://www.nerdfonts.com), 3.5.0 or later | optional | the icons in luneta's sidebar, and in the directory preview |
-| the [hook](#hook-the-shell) in fish, which the package brings | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
+| the [hook](#hook-the-shell) in fish, which the package brings, or in an own session a shell that marks its commands (OSC 133), as fish 4 does | optional | a command's spinner in luneta's sidebar, how it ended, and the agent the menu starts on it |
 | a microphone, and `curl` and `sha256sum` (`shasum` on macOS) | optional | [dictation](#dictate), and the fetch of its model the first time |
 | speakers, and the same `curl` and `sha256sum` | optional | [reading aloud](#read-aloud), and the fetch of its model the first time |
 | a freedesktop notification server on Linux, [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) on macOS | optional | [notifications](#notifications) |
@@ -1963,6 +1964,20 @@ shell that has run nothing yet as one with no hook.
 
 A shell started before the hook was there has none: start it again, or
 `source` the file in it, after which it is ready.
+
+An [own session](#luneta-in-your-terminal)'s shell needs no hook, and the hook
+does nothing there. `luneta-mux` reads the marks the shell writes around each
+command (OSC 133): where its prompt starts, the command line it runs, and its
+exit status. fish 4 writes them by itself, and zsh and bash write them with a
+terminal's shell integration. The server looks at the pane's terminal as
+lunetad looks at the hook's, by the same rules: as the shell writes, again
+0.1s later, and each second while a command runs. On macOS, which says where
+no process sleeps, a command that waits for a line you type, with the echo
+on, counts as working. It holds `exec`, `fg` and `Ctrl z` to the rules the
+hook holds them to, and it names a job that `Ctrl z` stopped once it saw the
+job in front. As the hook does, it follows only the pane's own shell: the
+marks of a shell that a command runs, over `ssh` or in `nix develop`, are none
+of its own.
 
 The hook keeps a file for each shell, of one line, at
 `$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under

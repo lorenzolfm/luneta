@@ -48,12 +48,13 @@ fn shells(host: &Host, name: &str) -> Option<Vec<Option<api::Shell>>> {
 }
 
 fn command(shell: &api::Shell) -> &str {
-    match shell.doing.as_ref().unwrap() {
+    let command = match shell.doing.as_ref().unwrap() {
         Doing::Going(going) => &going.command,
         Doing::Ended(ended) => &ended.command,
         Doing::Stopped(stopped) => &stopped.command,
-        Doing::Ready(()) => "",
-    }
+        Doing::Ready(()) => return "",
+    };
+    command.as_deref().expect("the hook says each command")
 }
 
 /// A terminal of the test's own, which no process runs in front of: what the
@@ -118,7 +119,7 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     let at = Some(Timestamp { seconds: i64::try_from(started).unwrap(), nanos: 0 });
     let doing = |doing| Some(api::Shell { doing: Some(doing) });
     let going = |front: Front| {
-        let command = "cargo build".to_owned();
+        let command = Some("cargo build".to_owned());
         doing(Doing::Going(Going { command, since: at, front: front.into() }))
     };
     let took = |seconds, millis: i32| Some(Duration { seconds, nanos: millis * 1_000_000 });
@@ -127,18 +128,18 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
         [
             going(Front::Working),
             doing(Doing::Ended(Ended {
-                command: "cargo test".to_owned(),
+                command: Some("cargo test".to_owned()),
                 at,
                 ending: Some(ended::Ending::Status(101)),
                 took: took(41, 873),
             })),
             doing(Doing::Ended(Ended {
-                command: "make".to_owned(),
+                command: Some("make".to_owned()),
                 at,
                 ending: Some(ended::Ending::Resumed(())),
                 took: took(7, 120),
             })),
-            doing(Doing::Stopped(Stopped { command: "nvim".to_owned(), at })),
+            doing(Doing::Stopped(Stopped { command: Some("nvim".to_owned()), at })),
             None,
             None,
             None,

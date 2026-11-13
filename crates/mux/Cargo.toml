@@ -18,6 +18,9 @@ tokio-stream = { version = "0.1.19", features = ["net", "sync"] }
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+
 [build-dependencies]
 tonic-prost-build = "0.14.6"
 

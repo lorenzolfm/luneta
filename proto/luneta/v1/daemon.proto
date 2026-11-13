@@ -1227,8 +1227,10 @@ message Shell {
 
   // A command it runs.
   message Going {
-    // The command line, on one line.
-    string command = 1;
+    // The command line, on one line. None where the shell said none, as a
+    // shell that marks its commands may not, and never empty. It was a
+    // `string` of the same number, which a client of then reads as empty.
+    optional string command = 1;
     // When it started. Always there.
     google.protobuf.Timestamp since = 2;
     // What the command in front of its terminal does. Never unspecified.
@@ -1237,7 +1239,7 @@ message Shell {
 
   // The command it ran last, which ended.
   message Ended {
-    string command = 1;
+    optional string command = 1;
     // When it ended. Always there.
     google.protobuf.Timestamp at = 2;
     // How it ended. Neither where the shell cannot say. `status` was an
@@ -1255,7 +1257,7 @@ message Shell {
 
   // A job it stopped, with `Ctrl z`, which waits to be brought back.
   message Stopped {
-    string command = 1;
+    optional string command = 1;
     // When it stopped. Always there.
     google.protobuf.Timestamp at = 2;
   }

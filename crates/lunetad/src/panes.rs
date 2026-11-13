@@ -21,7 +21,7 @@ use notify::RecursiveMode;
 
 use crate::api;
 use crate::core::{self, Addressed};
-use crate::shells::Shell;
+use crate::shells::Doing;
 use crate::watch::{self, Troubles};
 use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName, Zellij};
 
@@ -44,9 +44,9 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// The pane as the API gives it, with what its `shell` says.
+    /// The pane as the API gives it, with what its shell is `doing`.
     #[must_use]
-    pub fn to_api(&self, shell: Option<&Shell>) -> api::Pane {
+    pub fn to_api(&self, doing: Option<&Doing>) -> api::Pane {
         api::Pane {
             id: self.id,
             tab: self.tab,
@@ -54,7 +54,7 @@ impl Pane {
             cwd: self.cwd.clone().map(String::from),
             command: self.command.clone().map(String::from),
             titled: self.titled.as_ref().map(Titled::to_api),
-            shell: shell.map(Shell::to_api),
+            shell: doing.map(Doing::to_api),
             tab_id: Some(self.tab_id),
             held: self.held,
         }

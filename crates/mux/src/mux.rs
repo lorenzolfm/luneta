@@ -87,7 +87,7 @@ enum Closed {
     /// It was the last, which stays for the session to end with.
     Last,
     /// It is out of them, and its clients go to the pane `next`.
-    Out { tab: Tab, next: PaneId },
+    Out { tab: Box<Tab>, next: PaneId },
 }
 
 struct Tab {
@@ -108,9 +108,10 @@ struct Pane {
 }
 
 /// The program a pane started: it runs, or it ended, in a tab that holds.
-#[derive(Clone, Copy)]
 enum Program {
-    Runs { pid: u32 },
+    /// It runs, with the leader of the group in front of its terminal, and
+    /// what its shell said, as its thread last looked.
+    Runs { pid: u32, foreground: Option<api::Foreground>, ran: Option<api::Ran> },
     Ended(Exit),
 }
 
@@ -335,6 +336,17 @@ impl Mux {
         });
     }
 
+    /// Notes what runs in front in pane `pane`, and what its shell said.
+    pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
+        self.change(|model| {
+            if let Some(Pane { program: Program::Runs { foreground: was, ran: said, .. }, .. }) =
+                model.pane_mut(pane)
+            {
+                (*was, *said) = (foreground, ran);
+            }
+        });
+    }
+
     /// Notes that pane `pane`'s program ended, as `exit` says, and says
     /// whether the pane went with it.
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
@@ -419,7 +431,7 @@ impl Model {
                 id: pane,
                 title: String::new(),
                 cwd: opens.cwd.clone(),
-                program: Program::Runs { pid: started.pid },
+                program: Program::Runs { pid: started.pid, foreground: None, ran: None },
                 handle: started.handle,
             },
         })
@@ -641,9 +653,11 @@ impl Model {
             .map(|(client, seat)| (*client, seat))
             .collect();
         clients.sort_by_key(|(_, seat)| seat.came);
-        let program = match pane.program {
-            Program::Runs { pid } => api::pane::Program::Pid(pid),
-            Program::Ended(exit) => api::pane::Program::Ended(exit.said()),
+        let (program, foreground, ran) = match &pane.program {
+            Program::Runs { pid, foreground, ran } => {
+                (api::pane::Program::Pid(*pid), foreground.clone(), ran.clone())
+            },
+            Program::Ended(exit) => (api::pane::Program::Ended(exit.said()), None, None),
         };
         let cwd = pane.cwd.to_str().expect("a pane's cwd was said in UTF-8");
         let pane = api::Pane {
@@ -651,6 +665,8 @@ impl Model {
             title: pane.title.clone(),
             cwd: cwd.to_owned(),
             program: Some(program),
+            foreground,
+            ran,
             clients: clients
                 .into_iter()
                 .map(|(id, seat)| api::Client { id: id.said(), size: Some(seat.size.said()) })
@@ -706,7 +722,7 @@ impl Tabs {
         if self.current >= place {
             self.current = self.current.saturating_sub(1);
         }
-        Closed::Out { tab, next: self.tabs[next].pane.id }
+        Closed::Out { tab: Box::new(tab), next: self.tabs[next].pane.id }
     }
 }
 
