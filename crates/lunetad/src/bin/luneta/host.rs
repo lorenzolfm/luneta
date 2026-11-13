@@ -625,9 +625,10 @@ impl Phase {
         }
     }
 
-    /// The server refused the client's go: what it was to do once there is
+    /// The client does not go where it was going: the server refused its go,
+    /// or another client takes its place. What it was to do once there is
     /// left to the caller, undone.
-    fn stayed(&mut self) -> Option<After> {
+    fn undone(&mut self) -> Option<After> {
         match self {
             Phase::Coming { going, .. } => going.after.take(),
             Phase::In { going } => going.take().and_then(|going| going.after),
@@ -3154,9 +3155,7 @@ impl App {
         let hello = hello(to, self.areas.1, self.colours);
         let attached = Attached::start(number, hello, &self.events);
         self.started = number;
-        if let Right::Zellij(client) = &self.right {
-            self.drops.gave_way(client.started.elapsed());
-        }
+        self.give_way();
         let going = Going { to, after };
         self.right = Right::Own(Own { attached, phase: Phase::Coming { fails, going } });
         self.sidebar.attaching(to.session());
@@ -3191,7 +3190,7 @@ impl App {
                 }
             },
             Heard::Stayed(reason) => {
-                let after = own.phase.stayed();
+                let after = own.phase.undone();
                 let note = format!("luneta-mux did not take luneta's client there: {reason}");
                 self.sidebar.notify(note);
                 if let Some(after) = after {
@@ -3404,6 +3403,21 @@ impl App {
         Ok(hosted)
     }
 
+    /// What runs beside the sidebar gives way to another client: how long
+    /// zellij's lasted counts for whether zellij drops its clients, and what
+    /// luneta's client of an own session was to do where it went is told
+    /// undone.
+    fn give_way(&mut self) {
+        match &mut self.right {
+            Right::Zellij(client) => self.drops.gave_way(client.started.elapsed()),
+            Right::Own(own) => {
+                if let Some(after) = own.phase.undone() {
+                    after.untold(&self.events);
+                }
+            },
+        }
+    }
+
     /// Has `hosted` take the place of zellij's client, on its `arrival`, if
     /// luneta looks for it as zellij first shows anything, going where it
     /// `fails` where it does, and on to `then_pane` once it is in.
@@ -3414,9 +3428,7 @@ impl App {
         arrival: Option<Arrival>,
         then_pane: Option<Place>,
     ) {
-        if let Right::Zellij(client) = &self.right {
-            self.drops.gave_way(client.started.elapsed());
-        }
+        self.give_way();
         self.right = Right::Zellij(Client::new(hosted, fails, arrival, then_pane));
         // The client that takes its place heard no button go down over it.
         if matches!(self.held, Held::Zellij | Held::Selecting) {
@@ -4460,9 +4472,9 @@ mod tests {
         assert!(phase.going(Going { to, after: kill() }).is_none());
         assert!(phase.went(&went(there, 4)).is_none(), "another tab of the session");
         assert!(is_kill(phase.going(Going { to: To::Session(here), after: None })));
-        assert!(phase.stayed().is_none());
+        assert!(phase.undone().is_none());
         assert!(phase.going(Going { to: To::Session(here), after: kill() }).is_none());
-        assert!(is_kill(phase.stayed()));
+        assert!(is_kill(phase.undone()));
         assert!(matches!(phase, Phase::In { going: None }));
     }
 
