@@ -49,22 +49,21 @@ fn signal_front(listing: &api::Listing, signal: rustix::process::Signal) {
 
 /// A shell's marks say it is ready, then what it runs and since when, and
 /// how that ended and how long it took. The shell in front, reading a line
-/// of the terminal, reads as asking, where the kernel says where it sleeps;
-/// and what runs in front is the pane's program.
+/// of the terminal with the echo off, as a password prompt does, reads as
+/// asking; and what runs in front is the pane's program.
 #[test]
 fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
-        let body = "m A; m 'C;cmdline_url=make%20test'; read x; m 'D;3'; m A; read y";
+        let body = "m A; m 'C;cmdline_url=make%20test'; stty -echo; read x; stty echo; m 'D;3'\n\
+            m A; read y";
         let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
         let made = new_session(&mut mux, "marks", opens).await;
         let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
-        let linux = cfg!(target_os = "linux");
-        let asking = if linux { api::Front::Asking } else { api::Front::Working };
         let listing = watched_until(&mut watch, "make test going, asking", |listing| {
-            matches!(said(listing), Some(Is::Going(going)) if going.front() == asking)
+            matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
