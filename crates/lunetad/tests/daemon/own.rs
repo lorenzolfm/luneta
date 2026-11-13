@@ -606,6 +606,28 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
     assert_eq!(screen.pane, made.pane);
 }
 
+/// A socket no one but root may connect to, until it drops: then as open as
+/// it was, even where a test fails first, for `Owned` to reach the server as
+/// it drops, and end it.
+struct Shut {
+    path: PathBuf,
+    was: fs::Permissions,
+}
+
+impl Shut {
+    fn new(path: &Path) -> Shut {
+        let was = fs::metadata(path).unwrap().permissions();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        Shut { path: path.to_owned(), was }
+    }
+}
+
+impl Drop for Shut {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.was.clone());
+    }
+}
+
 /// An agent that runs in an own pane is there, as the variables the server
 /// gives what runs in its panes name it: by the session's id and the pane's.
 /// `luneta agents` names it by its session's name, or by its ids where the
@@ -636,8 +658,7 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     // A socket luneta may not connect to is a server it cannot reach: to all
     // but root, which connects whatever the socket's mode.
     let socket = owned.socket();
-    let allowed = fs::metadata(&socket).unwrap().permissions();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o000)).unwrap();
+    let shut = Shut::new(&socket);
     let refused = UnixStream::connect(&socket).map(drop).map_err(|error| error.kind());
     assert_eq!(refused, Err(ErrorKind::PermissionDenied), "root reaches any socket");
     let unreached = answered(owned.host.vars().command(LUNETA).arg("agents"));
@@ -649,12 +670,9 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
 
     // Where the daemon cannot be reached either, its failure is all luneta
     // says: what luneta-mux could not do is said only beside the agents.
-    let daemon = owned.host.folder().join(lunetad::folder::SOCKET);
-    let open = fs::metadata(&daemon).unwrap().permissions();
-    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o000)).unwrap();
+    let daemon = Shut::new(&owned.host.folder().join(lunetad::folder::SOCKET));
     let alone = answered(owned.host.vars().command(LUNETA).arg("agents"));
-    fs::set_permissions(&daemon, open).unwrap();
-    fs::set_permissions(&socket, allowed).unwrap();
+    drop((daemon, shut));
     let why = String::from_utf8(alone.stderr).unwrap();
     assert!(!alone.status.success(), "{why}");
     assert!(alone.stdout.is_empty(), "{why}");

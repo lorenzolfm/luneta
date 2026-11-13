@@ -24,6 +24,10 @@ luneta agents     # each agent: <session>:<pane>, status (busy/idle/waiting/shel
 zoxide query -l   # the directories the user works in, most used first; `zoxide query <words>` picks one
 ```
 
+`luneta agents` writes `?:<pane> (own <id>)` for an agent of an own session
+whose name it can't tell, and says why. That is no pane address: no verb
+takes it.
+
 - "X" is a directory, a repository or a session: match it against the zoxide
   list and the session names. Ask when two fit.
 - "that PR", "this branch": the pane you run in, or the PR you were just
