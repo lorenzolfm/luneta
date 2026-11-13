@@ -11,7 +11,8 @@
 //! A client goes to an own session as no other is, by its id and when its
 //! server made it, as the next server counts its ids from 1 again: it asks the
 //! server it reached for its sessions first, on the one connection it keeps,
-//! and goes only where that server holds the session it names.
+//! and goes only where that server holds the session it names, as it comes
+//! and on each go after.
 
 use std::num::NonZeroU16;
 use std::pin::pin;
@@ -66,8 +67,7 @@ impl To {
 
     /// It, by the ids alone, as the server takes it: the server it goes to
     /// is the one `found_in` found it held by.
-    #[must_use]
-    pub fn said(self) -> api::Place {
+    fn said(self) -> api::Place {
         let is = match self {
             To::Session(session) => api::place::Is::Session(session.id.get()),
             To::Tab { tab, .. } => api::place::Is::Tab(tab),
@@ -528,8 +528,9 @@ pub enum Heard {
     Attached,
     Went(Went),
     Frame(Frame),
-    /// A `Go` the client sent was refused, for this reason, and it stays where
-    /// it is.
+    /// A go the client sent was refused, for this reason, and it stays where
+    /// it is: by the server, or by the client, as the server holds none of
+    /// where it goes, as `To::found_in` says.
     Stayed(String),
     /// The client's session ended. The server says nothing more.
     Ended,
@@ -562,10 +563,18 @@ fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
     })
 }
 
+/// What luneta has a client say to the server, in the order it says it: an
+/// event, which goes as it is, or a go, which goes where the server holds
+/// where it goes, as `To::found_in` says, and is refused where not.
+enum Saying {
+    Event(to_server::Event),
+    Go(To),
+}
+
 /// A client attached to an own session, which takes what you do there. It
 /// lets go of the session as it drops.
 pub struct Attach {
-    said: mpsc::Sender<api::ToServer>,
+    said: mpsc::Sender<Saying>,
     /// Why luneta gave up on the client, which ends it: the first why alone.
     giving_up: mpsc::Sender<String>,
 }
@@ -576,12 +585,20 @@ impl Attach {
     /// drop what you did there and go on. Where the client is lost already,
     /// it goes nowhere, as `Heard::Lost` says.
     pub fn send(&self, event: to_server::Event) {
-        match self.said.try_send(api::ToServer { event: Some(event) }) {
+        self.say(Saying::Event(event));
+    }
+
+    /// Takes the client `to` a session or a tab, as `send` sends an event:
+    /// where the server it reached holds none there, the client hears that
+    /// it stayed, as `Heard::Stayed` says.
+    pub fn go(&self, to: To) {
+        self.say(Saying::Go(to));
+    }
+
+    fn say(&self, saying: Saying) {
+        match self.said.try_send(saying) {
             Ok(()) | Err(TrySendError::Closed(_)) => {},
-            Err(TrySendError::Full(_)) => {
-                let why = format!("luneta-mux has yet to take the last {SAID_MAX} events sent it");
-                self.give_up(why);
-            },
+            Err(TrySendError::Full(_)) => self.give_up(untaken()),
         }
     }
 
@@ -618,23 +635,32 @@ pub fn attach<Told: FnMut(Heard) + Send + 'static>(hello: Hello, mut told: Told)
     Attach { said, giving_up }
 }
 
-/// What a client hears next: what the server said, or that it let go, or why
-/// luneta gave up on it.
+/// Why luneta gives up on a client whose server has yet to take what it sent.
+fn untaken() -> String {
+    format!("luneta-mux has yet to take the last {SAID_MAX} events sent it")
+}
+
+/// What a client hears next: what the server said, or that it let go; what
+/// luneta has it say, or that luneta says no more, as it let go of the
+/// client; or why luneta gave up on it.
 enum Next {
     Said(Result<api::ToClient, Status>),
     LetGo,
+    Saying(Saying),
+    Unsaid,
     GaveUp(String),
 }
 
-/// The client: `hello`, then what comes on `saying`, to the server, and what
-/// the server says to `told`, but the last, which it gives back, until the
-/// server says no more or a why comes on `given_up`. It goes only where the
-/// server it reached holds the session `hello` goes to; and it asks that
-/// server for its sessions again where the client went to one it did not
-/// list before.
+/// The client: `hello`, then what comes on `saying`, to the server, in turn,
+/// and what the server says to `told`, but the last, which it gives back,
+/// until the server says no more or a why comes on `given_up`. It goes only
+/// where the server it reached holds the session `hello` goes to, or a go
+/// after, which it asks that server for its sessions for, and `told` hears
+/// it stayed where not. It asks for them again too where the client went to
+/// one it did not list before.
 async fn stream(
     hello: Hello,
-    saying: mpsc::Receiver<api::ToServer>,
+    saying: mpsc::Receiver<Saying>,
     given_up: mpsc::Receiver<String>,
     told: &mut impl FnMut(Heard),
 ) -> Heard {
@@ -654,13 +680,21 @@ async fn stream(
         },
         Err(lost) => return lost,
     };
-    let said = tokio_stream::once(hello.said()).chain(ReceiverStream::new(saying));
+    // What luneta has the client say goes on to the server through this, in
+    // turn, once each go is checked; and as luneta lets go of the client, so
+    // does this, which ends what the client says, and the server lets go.
+    let (sending, sent) = mpsc::channel(SAID_MAX);
+    let mut sending = Some(sending);
+    let said = tokio_stream::once(hello.said()).chain(ReceiverStream::new(sent));
     let hearing = match client.attach(said).await {
         Ok(hearing) => hearing.into_inner(),
         Err(status) => return Heard::Lost(refused(&status).to_string()),
     };
     let hearing = hearing.map(Next::Said).chain(tokio_stream::once(Next::LetGo));
-    let mut next = pin!(hearing.merge(ReceiverStream::new(given_up).map(Next::GaveUp)));
+    let saying = ReceiverStream::new(saying).map(Next::Saying);
+    let saying = saying.chain(tokio_stream::once(Next::Unsaid));
+    let given_up = ReceiverStream::new(given_up).map(Next::GaveUp);
+    let mut next = pin!(hearing.merge(saying).merge(given_up));
     loop {
         let said = match next.next().await {
             Some(Next::Said(Ok(said))) => said,
@@ -669,6 +703,37 @@ async fn stream(
                 return Heard::Lost("luneta-mux let go of luneta's client".to_owned());
             },
             Some(Next::GaveUp(why)) => return Heard::Lost(why),
+            Some(Next::Unsaid) => {
+                sending = None;
+                continue;
+            },
+            Some(Next::Saying(saying)) => {
+                let event = match saying {
+                    Saying::Event(event) => event,
+                    Saying::Go(to) => {
+                        let listing = match listed(&mut client).await {
+                            Ok((listed, listing)) => {
+                                sessions = listed;
+                                listing
+                            },
+                            Err(lost) => return lost,
+                        };
+                        if let Err(why) = to.found_in(&sessions, &listing) {
+                            told(Heard::Stayed(why));
+                            continue;
+                        }
+                        to_server::Event::Go(to.said())
+                    },
+                };
+                let said = api::ToServer { event: Some(event) };
+                // Closed, as the server let go, which the client hears next.
+                if let Some(Err(TrySendError::Full(_))) =
+                    sending.as_ref().map(|sending| sending.try_send(said))
+                {
+                    return Heard::Lost(untaken());
+                }
+                continue;
+            },
         };
         if let Some(to_client::Event::Went(went)) = &said.event
             && !sessions.iter().any(|key| key.id.get() == went.session)

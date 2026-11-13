@@ -305,7 +305,7 @@ impl Attached {
 
     /// Takes the client to `to`.
     pub fn go(&self, to: To) {
-        self.attach.send(to_server::Event::Go(to.said()));
+        self.attach.go(to);
     }
 
     /// Sends the pane what the mouse did at `at`, of its cells. The wheel
