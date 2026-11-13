@@ -142,6 +142,40 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
     });
 }
 
+/// A command of the pane's shell is what runs until that shell says it ended:
+/// the marks of a shell it runs, as over `ssh`, are none of its own, as that
+/// one is in front of the terminal as it writes them.
+#[test]
+fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let inner = "m A; m 'C;cmdline_url=ls'; m 'D;0'; stty -echo; read x; stty echo";
+        let body = format!(
+            "set -m; export -f m\n\
+             m A; m 'C;cmdline_url=inner'; bash -c \"{inner}\"; m 'D;7'\n\
+             m A; read y"
+        );
+        let made = new_session(&mut mux, "nested", bash(&format!("{MARK}\n{body}"))).await;
+        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let listing = watched_until(&mut watch, "inner going, asking", |listing| {
+            matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
+        })
+        .await;
+        let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
+        assert_eq!(going.command.as_deref(), Some("inner"));
+        attached.type_line("").await;
+        let listing = watched_until(&mut watch, "inner ended", |listing| {
+            matches!(said(listing), Some(Is::Ended(_)))
+        })
+        .await;
+        let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
+        assert_eq!(ended.command.as_deref(), Some("inner"));
+        assert_eq!(ended.ending, Some(api::ran::ended::Ending::Status(7)));
+    });
+}
+
 /// A job in front under a process that is not, as a shell that `nix develop`
 /// started runs its jobs, is what the command does: one that reads a line
 /// of the terminal asks. macOS says where no process sleeps.

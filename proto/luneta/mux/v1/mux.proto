@@ -205,8 +205,9 @@ message Pane {
   // None where neither can be read.
   Foreground foreground = 7;
   // What the pane's shell last said of the commands it runs, by the marks it
-  // writes (OSC 133). None where it said nothing, as a shell without them
-  // does, and once it gave the pane to another program with `exec`.
+  // writes (OSC 133): not by those of a shell its command runs, as over
+  // `ssh`. None where it said nothing, as a shell without them does, and once
+  // it gave the pane to another program with `exec`.
   Ran ran = 8;
 }
 

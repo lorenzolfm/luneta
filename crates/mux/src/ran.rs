@@ -12,6 +12,12 @@
 //!   the shell says it ended, stopped.
 //! - `fg` brings the last job back, which is what runs. Its shell cannot say
 //!   how that ends, as the status it says is `fg`'s.
+//! - Only the shell's own marks count, as only its own hook writes the hook's
+//!   file. A prompt or an end is its own where its group is in front of the
+//!   terminal as it is read, or where it marks a command after it, as it
+//!   does running a line typed ahead; a command, where it has drawn a prompt
+//!   and runs none. What a command prints is none of its marks: a shell over
+//!   `ssh`, or one `nix develop` started, writes its own.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -84,9 +90,33 @@ impl Now {
 }
 
 impl Shell {
+    /// Takes in those of `marks` that are the shell's, read at `now` in the
+    /// order written, with its group `in_front` of the terminal or not as they
+    /// were read, and what a process group's leader is: stopped or not, or
+    /// else gone.
+    pub fn read(
+        &mut self,
+        marks: Vec<Mark>,
+        now: Now,
+        in_front: bool,
+        job: impl Fn(Group) -> Option<Job>,
+    ) {
+        let last_command = marks.iter().rposition(|mark| matches!(mark, Mark::Command(_)));
+        for (at, mark) in marks.into_iter().enumerate() {
+            let typed_ahead = last_command.is_some_and(|last| at < last);
+            let own = match mark {
+                Mark::Prompt | Mark::Done(_) => in_front || typed_ahead,
+                Mark::Command(_) => self.ran.is_some() && !self.going(),
+            };
+            if own {
+                self.marked(mark, now, &job);
+            }
+        }
+    }
+
     /// Takes in `mark`, which the shell wrote at `now`, with what a process
     /// group's leader is: stopped or not, or else gone.
-    pub fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(Group) -> Option<Job>) {
+    fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(Group) -> Option<Job>) {
         match mark {
             Mark::Prompt => {
                 if self.ran.is_none() {
@@ -406,6 +436,64 @@ mod tests {
         shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
         assert_eq!(shell.ran, Some(stopped_at("less x", 4)));
         assert_eq!(shell.stopped, [(Group(40), Some("less x".to_owned()))]);
+    }
+
+    /// The marks of a shell the command runs are none of the pane's: neither
+    /// a prompt nor an end while another group is in front, nor a command
+    /// while one runs. Its own end, in front, ends what it runs.
+    #[test]
+    fn the_marks_of_what_a_command_runs_are_none_of_the_shell_s() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        shell.read(vec![Mark::Prompt, command("ssh host")], now(1), true, NONE_STOPPED);
+        let remote = vec![Mark::Prompt, command("ls"), Mark::Done(Some(0)), Mark::Prompt];
+        shell.read(remote, now(2), false, NONE_STOPPED);
+        assert_eq!(going(&shell), Some("ssh host"));
+        shell.read(vec![Mark::Done(Some(255)), Mark::Prompt], now(4), true, NONE_STOPPED);
+        assert_eq!(shell.ran, Some(ended(Some("ssh host"), 4, Some(Ending::Status(255)), 3)));
+    }
+
+    /// A shell that writes no marks says nothing of those of a shell it runs,
+    /// as over `ssh`, read as you type to that one; and a command marked with
+    /// no prompt of its own before it is none of its.
+    #[test]
+    fn a_shell_of_no_marks_says_nothing_of_another_s() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        for mark in [Mark::Prompt, command("make"), Mark::Done(Some(2)), Mark::Prompt] {
+            shell.read(vec![mark], now(1), false, NONE_STOPPED);
+        }
+        assert_eq!(shell.said(), None);
+        shell.read(vec![command("make")], now(2), true, NONE_STOPPED);
+        assert_eq!(shell.said(), None);
+    }
+
+    /// A line typed ahead of the shell's first prompt runs as it draws it:
+    /// that prompt, read with the command in front, is its own, as the mark
+    /// of the command follows it.
+    #[test]
+    fn a_line_typed_ahead_of_the_first_prompt_runs() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        shell.read(vec![Mark::Prompt, command("claude")], now(1), false, NONE_STOPPED);
+        assert_eq!(going(&shell), Some("claude"));
+    }
+
+    /// A line typed ahead runs as the last ends: the shell's end of that one,
+    /// read with the next already in front, is its own, as the mark of the
+    /// next command follows it.
+    #[test]
+    fn a_line_typed_ahead_ends_the_last_and_runs() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        shell.read(vec![Mark::Prompt, command("make")], now(1), true, NONE_STOPPED);
+        let ahead = vec![Mark::Done(Some(0)), Mark::Prompt, command("vim")];
+        shell.read(ahead, now(3), false, NONE_STOPPED);
+        assert_eq!(going(&shell), Some("vim"));
+        shell.read(vec![Mark::Done(Some(1))], now(4), false, NONE_STOPPED);
+        assert_eq!(going(&shell), Some("vim"));
+        shell.read(vec![Mark::Done(Some(0))], now(5), true, NONE_STOPPED);
+        assert_eq!(shell.ran, Some(ended(Some("vim"), 5, Some(Ending::Status(0)), 2)));
     }
 
     /// Its program gone, the shell says nothing.

@@ -1975,7 +1975,9 @@ lunetad looks at the hook's, by the same rules: as the shell writes, again
 no process sleeps, a command that waits for a line you type, with the echo
 on, counts as working. It holds `exec`, `fg` and `Ctrl z` to the rules the
 hook holds them to, and it names a job that `Ctrl z` stopped once it saw the
-job in front.
+job in front. As the hook does, it follows only the pane's own shell: the
+marks of a shell that a command runs, over `ssh` or in `nix develop`, are none
+of its own.
 
 The hook keeps a file for each shell, of one line, at
 `$XDG_RUNTIME_DIR/luneta/commands/<session>/<pane>.<started>`, or under

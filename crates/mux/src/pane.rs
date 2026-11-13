@@ -732,13 +732,12 @@ impl Thread {
         self.looks.heard(Instant::now());
         if !marks.is_empty() {
             let now = Now::current();
+            let in_front = pty.front_group() == Some(Group(self.pid));
             let job = |group: Group| {
                 let leader = process::process(group.leader())?;
                 Some(if leader.stopped { Job::Stopped } else { Job::Runs })
             };
-            for mark in marks {
-                self.shell.marked(mark, now, job);
-            }
+            self.shell.read(marks, now, in_front, job);
         }
         self.dirty = true;
         let after = self.screen.scrollback();
