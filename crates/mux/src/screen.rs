@@ -140,7 +140,6 @@ impl Screen {
         rows: NonZeroU16,
         scrollback_bytes: usize,
     ) -> Result<Screen, Error> {
-        assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
         let mut answering = Answering::new(columns, rows, scrollback_bytes)?;
         let (made, answers) = answering.drive(|terminal| {
             terminal
@@ -308,7 +307,6 @@ impl Screen {
     }
 
     /// The lines the screen shows, in their styles, as escape sequences.
-    #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, and unchecked")]
     pub fn dumped_screen(&self) -> Result<String, Error> {
         let terminal = self.answering.terminal();
         let corner = |x, y| terminal.grid_ref(Point::Active(Coordinate { x, y }));
@@ -318,6 +316,7 @@ impl Screen {
         formatter.set_format(Format::Vt)?.set_trim(true)?;
         // SAFETY: both corners are of `terminal`'s active screen, taken from
         // it just now, and the formatter borrows it as they do.
+        #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, unchecked")]
         unsafe { formatter.set_selection(Some(&shown)) }?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -578,7 +577,7 @@ mod tests {
         let mut screen = screen(6, 1);
         let bytes = "\x1b[?7l\x1b[?69h👍\u{fe0e}\x1b[?1049l\x1b[3b\x1b[2;5s\x1b[3b\u{fe0e}";
         assert_eq!(screen.write(bytes.as_bytes()), b"");
-        assert_eq!(screen.view(0).unwrap().lines.len(), 1);
+        assert_eq!(screen.dumped_text().unwrap(), "👍👍👍\u{fe0e}");
     }
 
     /// A joiner after a repeat inside left and right margins is read:
@@ -588,6 +587,6 @@ mod tests {
         let mut screen = screen(5, 2);
         let bytes = "\x1b[?69h\x1b[1;2r中\x1b[3;9s\x1b[3b☺\u{200d}👍";
         assert_eq!(screen.write(bytes.as_bytes()), b"");
-        assert_eq!(screen.view(0).unwrap().lines.len(), 2);
+        assert_eq!(screen.dumped_text().unwrap(), "中中   ☺\u{200d}👍");
     }
 }

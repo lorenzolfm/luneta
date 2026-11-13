@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 use libghostty_vt::{Error, Terminal};
 
+use super::SCROLLBACK_BYTES_MAX;
+
 /// A terminal, which only [`Answering::drive`] can change.
 pub(super) struct Answering {
     terminal: Terminal<'static, 'static>,
@@ -21,8 +23,10 @@ impl Answering {
         rows: NonZeroU16,
         scrollback_bytes: usize,
     ) -> Result<Answering, Error> {
+        assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
         let mut terminal = Terminal::new(columns.get(), rows.get())?;
         terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
+        assert_eq!(terminal.scrollback_max_bytes()?, Some(scrollback_bytes));
         let answers = Rc::new(RefCell::new(Vec::new()));
         let written = Rc::clone(&answers);
         terminal.on_pty_write(move |_, bytes| written.borrow_mut().extend_from_slice(bytes))?;
