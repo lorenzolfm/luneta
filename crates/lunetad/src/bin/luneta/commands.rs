@@ -2,9 +2,9 @@
 //! do, as `drive` does it.
 
 use std::error::Error;
-use std::fmt;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -25,7 +25,7 @@ use lunetad::api::{
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
 use lunetad::mux::own::server::{self, Listing};
-use lunetad::mux::{Failure, OwnPane, ZellijPane};
+use lunetad::mux::{Failure, OwnId, OwnPane, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
@@ -158,7 +158,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::running(folder), info),
         Command::Agents => {
-            let own = server::sessions();
+            let own = server::listed();
             ask(folder, daemon::running(folder), |daemon| agents(daemon, own))
         },
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
@@ -379,20 +379,32 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
 
 /// One line to an agent, by its session and pane, as `line` writes it, an
 /// own session's by its name among `own`. Where luneta-mux could not list
-/// them, an agent in one goes by its ids, and why is said once the daemon has
-/// listed the agents: where it has not, its failure is the one said.
+/// them, or lists one that does not read, an agent in one goes by its ids;
+/// and so does one in an own pane lunetad says what does not read of, with
+/// `?` for what it does not say. Why is said once the daemon has listed the
+/// agents: where it has not, its failure is the one said.
 async fn agents(
     mut daemon: DaemonClient<Channel>,
-    own: Result<Vec<Listing>, Failure>,
+    own: Result<(Vec<Listing>, Vec<String>), Failure>,
 ) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
-    let own = own.unwrap_or_else(|failure| {
+    let (own, left_out) = own.unwrap_or_else(|failure| {
         let why = "own sessions go by their ids, as luneta-mux cannot list them";
         eprintln!("luneta: {why}: {failure}");
-        Vec::new()
+        (Vec::new(), Vec::new())
     });
+    for why in left_out {
+        let left = "luneta-mux lists a session that does not read, whose agents go by its id";
+        eprintln!("luneta: {left}: {why}");
+    }
+    let seated = |agent: &Agent| {
+        seat_of(agent, &own).unwrap_or_else(|(seat, why)| {
+            eprintln!("luneta: lunetad lists an agent in {why}");
+            seat
+        })
+    };
     let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seat_of(agent, &own), agent)).collect();
+        listed.agents.iter().map(|agent| (seated(agent), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {
@@ -405,37 +417,38 @@ async fn agents(
 }
 
 /// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
-/// `<session>:<pane>` by the name it has among `own`, or as `?:<pane> (own
-/// <session id>)` where `own` has none of its id made then, with `?` for an
-/// id its daemon does not say.
-pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
+/// `own_seat` says. Or, where its daemon says an own pane that does not read,
+/// as `?:<pane> (own <session id>)` with `?` for what it does not say, and
+/// why it does not read.
+pub fn seat_of(agent: &Agent, own: &[Listing]) -> Result<String, (String, String)> {
     match &agent.pane {
         Some(agent::Pane::Own(pane)) => {
-            if let Ok(pane) = OwnPane::of(pane) {
-                return own_seat(pane, own);
-            }
-            unnamed_own(pane.session.map(|session| session.id), pane.pane)
+            OwnPane::of(pane).map(|read| own_seat(read, own)).map_err(|why| {
+                let session = pane.session.and_then(|session| OwnId::new(session.id));
+                (unnamed_own(session, NonZeroU32::new(pane.pane)), why)
+            })
         },
-        Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
+        Some(agent::Pane::Zellij(_)) | None => Ok(seat(agent.zellij())),
     }
 }
 
-/// Where an agent runs in the own pane `pane`, as `seat_of` says: by the
-/// name its session has among `own`, or by its id where `own` has none of
-/// its id made then.
+/// Where an agent runs in the own pane `pane`: as `<session>:<pane>` by the
+/// name its session has among `own`, or as `?:<pane> (own <session id>)`
+/// where `own` has none of its id made then.
 pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
     match own.iter().find(|listed| listed.key() == pane.session) {
         Some(named) => format!("{}:{}", named.name, pane.id),
-        None => unnamed_own(Some(pane.session.id), pane.id),
+        None => unnamed_own(Some(pane.session.id), Some(pane.id)),
     }
 }
 
 /// The pane `pane` of the own session `session`, which goes by no name: `?`
 /// for the name, as `seat` has for a zellij session it cannot tell, so that
-/// no verb reads it as a pane of a session by a name; and `?` for the id
-/// where its daemon does not say one.
-fn unnamed_own(session: Option<impl fmt::Display>, pane: impl fmt::Display) -> String {
+/// no verb reads it as a pane of a session by a name; and `?` for the id of
+/// either where its daemon does not say one.
+fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {
     let id = session.map_or_else(|| "?".to_owned(), |id| id.to_string());
+    let pane = pane.map_or_else(|| "?".to_owned(), |id| id.to_string());
     let seat = format!("?:{pane} (own {id})");
     assert!(zellij::pane_address(&seat).is_err(), "{seat} reads as a pane");
     seat

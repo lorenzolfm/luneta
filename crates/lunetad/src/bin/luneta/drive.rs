@@ -1271,13 +1271,32 @@ mod tests {
 
     /// An agent in an own session that goes by no name is written so that no
     /// verb reads it as a pane: `own 3:2` would be pane 2 of a zellij session
-    /// named `own 3`.
+    /// named `own 3`. So is one in an own pane lunetad says what does not read
+    /// of, with `?` for an id that is none, and why it does not read.
     #[test]
     fn an_own_pane_by_no_name_is_no_pane_address() {
         let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: mux::OwnMade::from_nanos(0) };
         let seat = commands::own_seat(OwnPane::new(key, 2).unwrap(), &[]);
         assert_eq!(seat, "?:2 (own 3)");
         assert!(pane_address(&seat).is_err(), "{seat}");
+        let in_own = |session, pane| {
+            let pane = Some(agent::Pane::Own(lunetad::api::Own { session, pane }));
+            Agent { pane, ..Agent::default() }
+        };
+        let session = |id, made_at| Some(lunetad::api::OwnSession { id, made_at });
+        let made = || Some(SystemTime::UNIX_EPOCH.into());
+        let unread = [
+            (in_own(None, 2), "?:2 (own ?)", "of no session"),
+            (in_own(session(0, made()), 2), "?:2 (own ?)", "0 is no session's id"),
+            (in_own(session(3, None), 2), "?:2 (own 3)", "no made_at"),
+            (in_own(session(3, made()), 0), "?:? (own 3)", "0 is no pane's id"),
+        ];
+        for (agent, spelled, said) in unread {
+            let (seat, why) = commands::seat_of(&agent, &[]).unwrap_err();
+            assert_eq!(seat, spelled);
+            assert!(why.contains(said), "{why}");
+            assert!(pane_address(&seat).is_err(), "{seat}");
+        }
     }
 
     /// A close places each agent lunetad lists in an own pane by its session's
