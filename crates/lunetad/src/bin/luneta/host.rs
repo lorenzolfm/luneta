@@ -1997,11 +1997,18 @@ impl App {
     /// zellij drew nothing in the time luneta holds the input for it: it has
     /// the input all the same, and is asked what waited on it at once where
     /// its server took its first client long before, or else once it draws.
+    /// What it handed may have put another client in its place, as a key that
+    /// goes to an own session does: what waited on its arrival goes with it,
+    /// as it does with any client another takes the place of.
     fn overdue(&mut self, waiting: Waiting) {
         let fresh = waiting.fresh();
+        let number = self.zellij().map(|client| client.hosted.number());
         self.hand(waiting.input);
+        let Some(client) = self.zellij_mut().filter(|it| Some(it.hosted.number()) == number) else {
+            return;
+        };
         if fresh {
-            self.zellij_client().coming = Some(Coming::Overdue(waiting.arrival));
+            client.coming = Some(Coming::Overdue(waiting.arrival));
         } else {
             self.ask(waiting.arrival);
         }
