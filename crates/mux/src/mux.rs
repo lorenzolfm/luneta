@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Ends, Hello, Name, Opens, Place, Size, Who};
+use crate::asked::{Colours, Ends, Hello, Is, Name, Opens, Place, Size, Who};
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::pane::{self, Busy, Exit, Handle, Out, ToPane, Viewer};
 use crate::pty::{self, Pty};
@@ -173,7 +173,7 @@ impl Mux {
         self: &Arc<Mux>,
         name: Name,
         opens: &Opens,
-    ) -> Result<(SessionId, TabId, PaneId), Status> {
+    ) -> Result<(SessionId, SystemTime, TabId, PaneId), Status> {
         self.change(|model| {
             model.refuse_if_ended()?;
             model.refuse_if_taken(&name, None)?;
@@ -181,7 +181,7 @@ impl Mux {
             let session = SessionId::next(&mut model.last.session);
             let made = SystemTime::now();
             let tab = model.tab(self, (session, made), Name::numbered(1), opens)?;
-            let ids = (session, tab.id, tab.pane.id);
+            let ids = (session, made, tab.id, tab.pane.id);
             let tabs = Tabs::one(tab);
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
             Ok(ids)
@@ -477,12 +477,23 @@ impl Model {
             .find(|found| found.id == pane)
     }
 
-    /// The pane a client going to `place` goes to.
+    /// The pane a client going to `place` goes to, or why none: a place of a
+    /// session made at another time is of a server before this one.
     fn pane_of_place(&self, place: Place) -> Result<PaneId, Status> {
-        match place {
-            Place::Tab(tab) => Ok(self.tab_at(tab)?.1.pane.id),
-            Place::Session(session) => Ok(self.session(session)?.tabs.current().pane.id),
+        let (session, pane) = match place.is {
+            Is::Tab(tab) => {
+                let (session, tab) = self.tab_at(tab)?;
+                (self.session(session).expect("a tab's session is the model's"), tab.pane.id)
+            },
+            Is::Session(session) => {
+                let session = self.session(session)?;
+                (session, session.tabs.current().pane.id)
+            },
+        };
+        if place.made != session.made {
+            return Err(Status::not_found(format!("no session {} made then", session.id)));
         }
+        Ok(pane)
     }
 
     fn seat(&self, client: ClientId) -> Result<&Seat, Status> {

@@ -18,7 +18,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lunetad::mux::own::OwnId;
+use lunetad::mux::own::{OwnId, OwnMade};
 use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
 
@@ -52,10 +52,9 @@ impl Session {
         Some(Session::Zellij { started_ns: nanos(started)?, socket })
     }
 
-    /// The own session `id`, which its server made at `made`, or none as
-    /// `new` says.
-    pub fn own(made: SystemTime, id: OwnId) -> Option<Self> {
-        Some(Session::Own { made_ns: nanos(made)?, id })
+    /// The own session `id`, which its server made at `made`.
+    pub fn own(made: OwnMade, id: OwnId) -> Self {
+        Session::Own { made_ns: made.nanos(), id }
     }
 
     /// The session of the socket `id`, or none as `new` says, or for a socket
@@ -425,8 +424,8 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::within(scratch.path().to_owned());
         let id = OwnId::new(1).unwrap();
-        let own = Session::own(at(10), id).unwrap();
-        let next = Session::own(at(20), id).unwrap();
+        let made = |seconds| OwnMade::of(at(seconds)).unwrap();
+        let (own, next) = (Session::own(made(10), id), Session::own(made(20), id));
         let zellij = session(10, 1);
         ledger.set(Key { session: own, pane: 3 }, Some(at(5)));
         ledger.set(Key { session: next, pane: 3 }, Some(at(6)));

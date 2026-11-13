@@ -30,7 +30,7 @@ pub mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
-pub use own::{OwnId, OwnKey};
+pub use own::{OwnId, OwnKey, OwnMade, OwnPane};
 pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
@@ -99,9 +99,8 @@ impl<'a> Called<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Named {
     Zellij(ZellijPane),
-    /// A pane of luneta's own multiplexer, by its session and the id its
-    /// server gave it, which it gives no other.
-    Own { session: OwnKey, pane: u32 },
+    /// A pane of luneta's own multiplexer.
+    Own(OwnPane),
 }
 
 /// A pane of zellij's, as the variables of what runs in it name it: by the
@@ -358,7 +357,7 @@ impl Mux<'_> {
             Mux::Zellij(session) => zellij::cli::pane_focused(session, pane),
             Mux::Own(session) => {
                 let pane = pane.terminal().ok_or(Failure::Unsupported("hold a plugin's pane"))?;
-                session.went(own::server::Place::Pane { session: session.id(), pane })
+                session.went(own::server::Place::Pane(own::server::pane_of(session.key(), pane)?))
             },
         }
     }
@@ -377,9 +376,10 @@ impl Mux<'_> {
                 let Some(to) = at.named(to)? else {
                     return Err(unowned(to)?);
                 };
-                let place = pane.map_or(own::server::Place::Session(to), |pane| {
-                    own::server::Place::Pane { session: to, pane }
-                });
+                let place = match pane {
+                    None => own::server::Place::Session(to),
+                    Some(pane) => own::server::Place::Pane(own::server::pane_of(to, pane)?),
+                };
                 at.went(place)
             },
         }
@@ -611,9 +611,9 @@ mod tests {
             entries.iter().map(OsString::from).collect()
         };
         let own = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
-        let made = SystemTime::UNIX_EPOCH + Duration::from_nanos(60);
+        let made = OwnMade::from_nanos(60);
         let session = OwnKey { id: OwnId::new(3).unwrap(), made };
-        assert_eq!(pane_in(&environ(&own)), Some(Named::Own { session, pane: 12 }));
+        assert_eq!(pane_in(&environ(&own)), OwnPane::new(session, 12).map(Named::Own));
         let zellij = ["ZELLIJ_SESSION_NAME=work", "ZELLIJ_PANE_ID=2"];
         let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(pane_in(&environ(&[&own[..], &zellij].concat())), Some(named));
@@ -632,8 +632,8 @@ mod tests {
         assert_eq!(pane_in(&environ(&twice)), Some(named));
         let twice = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
         let twice = [&twice[..], &["LUNETA_MUX_SESSION=4"]].concat();
-        let made = SystemTime::UNIX_EPOCH + Duration::from_nanos(60);
+        let made = OwnMade::from_nanos(60);
         let session = OwnKey { id: OwnId::new(3).unwrap(), made };
-        assert_eq!(pane_in(&environ(&twice)), Some(Named::Own { session, pane: 12 }));
+        assert_eq!(pane_in(&environ(&twice)), OwnPane::new(session, 12).map(Named::Own));
     }
 }

@@ -1448,7 +1448,7 @@ enum Onward {
 fn onward(refuge: Option<Refuge>, own: Option<OwnKey>) -> Option<Onward> {
     match (refuge, own) {
         (Some(refuge), Some(own)) => {
-            if refuge.started.is_some_and(|started| started >= own.made) {
+            if refuge.started.is_some_and(|started| started >= own.made.at()) {
                 Some(Onward::Zellij(refuge))
             } else {
                 Some(Onward::Own(own))
@@ -3191,7 +3191,7 @@ impl App {
             Heard::Attached | Heard::Frame(_) => {},
             Heard::Went(went) => {
                 let after = own.phase.went(&went);
-                self.sidebar.went_own(went.session, went.pane);
+                self.sidebar.went_own(went.pane);
                 if let Some(after) = after {
                     zellij::came_here(after, &self.events);
                 }
@@ -4419,6 +4419,7 @@ fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::num::NonZeroU32;
     use std::rc::Rc;
 
     use alacritty_terminal::event::VoidListener;
@@ -4426,6 +4427,7 @@ mod tests {
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+    use lunetad::mux::own::{OwnMade, OwnPane};
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
@@ -4442,7 +4444,7 @@ mod tests {
             started: started.map(at),
         };
         let id = lunetad::mux::own::OwnId::new(4).unwrap();
-        let own = |made| OwnKey { id, made: at(made) };
+        let own = |made| OwnKey { id, made: OwnMade::of(at(made)).unwrap() };
         let went = |refuge, own| match onward(refuge, own) {
             Some(Onward::Zellij(refuge)) => Some(Err(refuge.session.to_string())),
             Some(Onward::Own(own)) => Some(Ok(own.id)),
@@ -4466,14 +4468,17 @@ mod tests {
     fn a_go_s_after_waits_for_the_client_to_be_where_it_went() {
         let key = |id, made| OwnKey {
             id: lunetad::mux::own::OwnId::new(id).unwrap(),
-            made: SystemTime::UNIX_EPOCH + Duration::from_secs(made),
+            made: OwnMade::from_nanos(made * 1_000_000_000_u64),
         };
         let (here, there) = (key(1, 10), key(2, 20));
         let kill = || {
             let whose = lunetad::closes::Whose::Own(here);
             Some(After::Kill { session: SessionName::running("here").unwrap(), whose })
         };
-        let went = |session, tab| own_attach::Went { session, tab, pane: 9 };
+        let went = |session, tab| {
+            let tab = NonZeroU32::new(tab).unwrap();
+            own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab }
+        };
         let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
         let going = Going { to: To::Session(there), after: kill() };
         let mut phase = Phase::Coming { fails: Fails::End, going };
@@ -4481,7 +4486,7 @@ mod tests {
         assert!(matches!(phase, Phase::In { going: Some(_) }), "it came, and still goes");
         assert!(is_kill(phase.went(&went(there, 4))));
         assert!(matches!(phase, Phase::In { going: None }));
-        let to = To::Tab { session: there, tab: 5 };
+        let to = To::Tab { session: there, tab: NonZeroU32::new(5).unwrap() };
         assert!(phase.going(Going { to, after: kill() }).is_none());
         assert!(phase.went(&went(there, 4)).is_none(), "another tab of the session");
         assert!(is_kill(phase.going(Going { to: To::Session(here), after: None })));

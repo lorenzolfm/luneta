@@ -24,7 +24,7 @@ use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
 use crate::log;
 use crate::transcripts::SessionId;
-use crate::mux::{Client, Id, Listed, OwnId, OwnKey, SessionName, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, OwnId, OwnKey, OwnMade, SessionName, Sessions, Socket};
 
 /// A zellij session zellij was asked about, as it was asked: by the name it
 /// had then, which a rename moves to another.
@@ -41,7 +41,7 @@ pub struct Own {
     pub id: OwnId,
     /// When its server made it, which tells it from the sessions of another
     /// server with its id.
-    pub made: SystemTime,
+    pub made: OwnMade,
     pub name: SessionName,
     pub panes: Vec<Pane>,
     pub clients: Listed,

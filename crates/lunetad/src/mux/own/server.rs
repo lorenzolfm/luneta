@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
@@ -29,7 +30,7 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
-use super::{OwnId, OwnKey};
+use super::{OwnId, OwnKey, OwnMade, OwnPane};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
@@ -121,14 +122,32 @@ impl Server {
         listed.ok_or_else(|| gone(id))
     }
 
-    /// The tab of the session `id` that holds the pane `pane`, as the server
-    /// lists it now, or why none does: the server numbers panes across its
-    /// sessions, so a pane of another is none of this one's.
-    fn tab_of(&self, id: OwnId, pane: u32) -> Result<u32, Failure> {
-        let tabs = self.session(id)?.tabs;
-        let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane));
-        let none = || Failure::Own(format!("own session {id} has no pane {pane}"));
+    /// The session `key`, as the server lists it now, or why not, as `of_key`
+    /// says.
+    fn session_keyed(&self, key: OwnKey) -> Result<api::Session, Failure> {
+        of_key(self.session(key.id)?, key)
+    }
+
+    /// The tab that holds `pane`, as the server lists its session now, or why
+    /// none does: the server numbers panes across its sessions, so a pane of
+    /// another is none of this one's.
+    fn tab_of(&self, pane: OwnPane) -> Result<u32, Failure> {
+        let tabs = self.session_keyed(pane.session)?.tabs;
+        let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane.id.get()));
+        let none = || Failure::Own(no_pane(pane.session.id, pane.id.get()));
         Ok(tab.ok_or_else(none)?.id)
+    }
+}
+
+/// `session`, of the id `key` says, where it is the one `key` says, or why
+/// not: one of the id made at another time is another's, of a server before
+/// this one, and gone.
+fn of_key(session: api::Session, key: OwnKey) -> Result<api::Session, Failure> {
+    assert_eq!(session.id, key.id.get(), "of_key takes a session of the key's id");
+    match made_of(&session, key.id) {
+        Ok(made) if made == key.made => Ok(session),
+        Ok(_) => Err(gone(key.id)),
+        Err(why) => Err(Failure::Unread(why)),
     }
 }
 
@@ -271,7 +290,7 @@ fn clients(session: &api::Session) -> Result<Listed, String> {
 pub struct Listing {
     pub id: OwnId,
     /// When its server made it.
-    pub made: SystemTime,
+    pub made: OwnMade,
     pub name: SessionName,
     /// Its panes, as luneta lays a session's out.
     pub laid: Vec<Laid>,
@@ -413,9 +432,9 @@ pub fn followed(
 }
 
 /// When the server made `session`, of id `id`, or why it does not say.
-fn made_of(session: &api::Session, id: OwnId) -> Result<SystemTime, String> {
+fn made_of(session: &api::Session, id: OwnId) -> Result<OwnMade, String> {
     let made = session.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
-    SystemTime::try_from(made).map_err(|why| format!("own session {id}'s made_at: {why}"))
+    OwnMade::read(made).map_err(|why| format!("own session {id}'s made_at: {why}"))
 }
 
 /// The session named `name` among `listing`, where one has it, or why the
@@ -483,9 +502,19 @@ pub fn sessions() -> Result<Vec<Listing>, Failure> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
     /// A session, on the tab a client coming there goes to.
-    Session(OwnId),
+    Session(OwnKey),
     /// The tab of a session that holds a pane.
-    Pane { session: OwnId, pane: u32 },
+    Pane(OwnPane),
+}
+
+/// The pane `pane` of `session`, or why it is none: 0 is no pane's id.
+pub fn pane_of(session: OwnKey, pane: u32) -> Result<OwnPane, Failure> {
+    OwnPane::new(session, pane).ok_or_else(|| Failure::Own(no_pane(session.id, pane)))
+}
+
+/// What says the own session `id` has no pane `pane`.
+fn no_pane(id: OwnId, pane: u32) -> String {
+    format!("own session {id} has no pane {pane}")
 }
 
 /// An own session, by its id, with the server that runs it reached: what
@@ -515,8 +544,8 @@ impl Own {
     }
 
     /// The own session named `name`, on the same server, where one runs by it.
-    pub fn named(&self, name: &SessionName) -> Result<Option<OwnId>, Failure> {
-        Ok(found(&self.server.listing()?, name)?.map(|key| key.id))
+    pub fn named(&self, name: &SessionName) -> Result<Option<OwnKey>, Failure> {
+        found(&self.server.listing()?, name)
     }
 
     /// The session's panes, as luneta lays them out.
@@ -587,7 +616,7 @@ impl Own {
     /// What the pane `pane` of the session shows, or all it was written, as
     /// `dumped` says, or why not: one of another session is none of its.
     pub fn dumped(&self, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
-        self.server.tab_of(self.id(), pane)?;
+        self.server.tab_of(pane_of(self.key, pane)?)?;
         let request = api::DumpRequest { pane, dumped: dumped.into() };
         let dump = self.server.ask(|mut client| async move { client.dump(request).await });
         Ok(dump.map_err(|status| refused(&status))?.text)
@@ -600,29 +629,29 @@ impl Own {
         killed.map(drop).map_err(|status| refused(&status))
     }
 
-    /// Takes the client that last typed in the session to `to`.
+    /// Takes the client that last typed in the session to `to`, or says why
+    /// not: the server refuses a session of a server before this one.
     pub fn went(&self, to: Place) -> Result<(), Failure> {
-        let is = match to {
-            Place::Session(session) => api::place::Is::Session(session.get()),
-            Place::Pane { session, pane } => {
-                api::place::Is::Tab(self.server.tab_of(session, pane)?)
-            },
+        let (is, session) = match to {
+            Place::Session(session) => (api::place::Is::Session(session.id.get()), session),
+            Place::Pane(pane) => (api::place::Is::Tab(self.server.tab_of(pane)?), pane.session),
         };
+        let to = api::Place { is: Some(is), made_at: Some(session.made.into()) };
         let request = api::GoRequest {
             who: Some(api::go_request::Who::LastTypedIn(self.id().get())),
-            to: Some(api::Place { is: Some(is) }),
+            to: Some(to),
         };
         let went = self.server.ask(|mut client| async move { client.go(request).await });
         went.map(drop).map_err(|status| refused(&status))
     }
 }
 
-/// An own session made: as no other is, and its first tab's and pane's ids.
+/// An own session made: its first pane, in a session as no other is, and the
+/// id of the pane's tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Made {
-    pub session: OwnKey,
-    pub tab: TabId,
-    pub pane: u32,
+    pub pane: OwnPane,
+    pub tab: NonZeroU32,
 }
 
 /// Makes an own session named `name` of one tab, in `cwd`, that runs `runs`,
@@ -651,9 +680,17 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
                 let session = OwnId::new(made.session);
                 let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
                 let id = session.ok_or_else(unread)?;
-                let made_at = made_of(&server.session(id)?, id).map_err(Failure::Unread)?;
-                let session = OwnKey { id, made: made_at };
-                return Ok(Made { session, tab: TabId(made.tab), pane: made.pane });
+                let made_at = match made.made_at {
+                    Some(at) => OwnMade::read(at)
+                        .map_err(|why| format!("own session {id}'s made_at: {why}")),
+                    None => made_of(&server.session(id)?, id),
+                };
+                let session = OwnKey { id, made: made_at.map_err(Failure::Unread)? };
+                let zero = || Failure::Unread(format!("luneta-mux made {id} with the pane 0"));
+                let pane = OwnPane::new(session, made.pane).ok_or_else(zero)?;
+                let unnumbered = || Failure::Unread(format!("luneta-mux made {id} with the tab 0"));
+                let tab = NonZeroU32::new(made.tab).ok_or_else(unnumbered)?;
+                return Ok(Made { pane, tab });
             },
             Err(status) if status.code() == Code::Unavailable => {
                 gone_by(&server, deadline)?;
@@ -840,7 +877,7 @@ mod tests {
         assert_eq!(read, [(1, "work"), (5, "fine")]);
         assert_eq!(unread.len(), 7, "{unread:?}");
         let work = &listed[0];
-        assert_eq!(work.made, SystemTime::UNIX_EPOCH + Duration::from_secs(60));
+        assert_eq!(work.made, OwnMade::from_nanos(60_000_000_000));
         assert_eq!(work.clients.to_vec(), [Client { id: 2, pane: PaneId::Terminal(7) }]);
         assert_eq!(work.laid[0].tab_id, TabId(4));
         assert_eq!(work.laid[0].cwd.as_ref().map(Said::as_str), Some("/w"));
@@ -881,5 +918,22 @@ mod tests {
             front: Front::Working,
         };
         assert_eq!(doings, [(1, &Doing::Ready), (6, &going)]);
+    }
+
+    /// A session goes by its key: one of the key's id that its server made
+    /// at another time is gone, as it is another's, of a server before this
+    /// one, and one that says no time it was made does not read.
+    #[test]
+    fn a_session_is_the_one_its_key_says_or_gone() {
+        let key = |seconds| OwnKey {
+            id: OwnId::new(3).unwrap(),
+            made: OwnMade::from_nanos(seconds * 1_000_000_000_u64),
+        };
+        let work = || session(3, "work", &[]);
+        assert_eq!(of_key(work(), key(60)).map(|it| it.name).ok(), Some("work".to_owned()));
+        let before = of_key(work(), key(59));
+        assert!(matches!(&before, Err(Failure::Own(why)) if why.ends_with("no longer runs")));
+        let unmade = of_key(api::Session { made_at: None, ..work() }, key(60));
+        assert!(matches!(&unmade, Err(Failure::Unread(_))), "{unmade:?}");
     }
 }

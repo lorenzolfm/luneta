@@ -4,9 +4,9 @@
 //! round again. Each goes as no other is, by its id and when its server made
 //! it, as the next server counts its ids from 1 again.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use lunetad::api::NewOwnRequest;
+use lunetad::api::{NewOwnRequest, OwnSession};
 use lunetad::mux::own::{self, server, OwnId, OwnKey};
 use lunetad::{log, Directory, SessionName};
 
@@ -18,7 +18,7 @@ const MAKING: Duration = Duration::from_secs(20);
 
 /// The own session luneta runs in, where it runs in a pane of one.
 fn holding() -> Option<OwnKey> {
-    own::here().map(|(session, _)| session)
+    own::here().map(|pane| pane.session)
 }
 
 /// Why luneta would not go to the own session `session`: it runs in a pane
@@ -78,29 +78,27 @@ pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, String> {
     };
     let made = runtime.block_on(async { tokio::time::timeout(MAKING, making).await });
     let made = made.map_err(|_| format!("lunetad made no session in {}s", MAKING.as_secs()))??;
+    if made.made_at.is_some() {
+        let session = OwnSession { id: made.session, made_at: made.made_at };
+        return OwnKey::of(&session).map_err(|why| format!("lunetad made {why}"));
+    }
+    // A daemon older than `made_at`: the server that made it says, where it
+    // still holds a session of the id by the name.
     let id = OwnId::new(made.session).ok_or("lunetad made an own session of id 0")?;
-    match made.made_at {
-        Some(at) => {
-            let made = SystemTime::try_from(at)
-                .map_err(|why| format!("lunetad made own session {id} at no time: {why}"))?;
-            Ok(OwnKey { id, made })
-        },
-        // A daemon older than `made_at`: the server that made it says, where
-        // it still holds a session of the id by the name.
-        None => match named(name)? {
-            Some(key) if key.id == id => Ok(key),
-            _ => Err(format!("own session {id}, {name}, no longer runs")),
-        },
+    match named(name)? {
+        Some(key) if key.id == id => Ok(key),
+        _ => Err(format!("own session {id}, {name}, no longer runs")),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use lunetad::mux::own::OwnMade;
+
     use super::*;
 
     fn key(id: u64, made: u64) -> OwnKey {
-        let made = SystemTime::UNIX_EPOCH + Duration::from_secs(made);
-        OwnKey { id: OwnId::new(id).unwrap(), made }
+        OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(made * 1_000_000_000) }
     }
 
     /// luneta goes on in the newest own session, but the one it runs in and

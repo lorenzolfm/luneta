@@ -61,7 +61,7 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
             m A; read y";
         let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
         let made = new_session(&mut mux, "marks", opens).await;
-        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         let listing = watched_until(&mut watch, "make test going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
@@ -103,7 +103,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
             m A; read x; m 'C;cmdline_url=fg'; fg >/dev/null; m 'D;0'\n\
             m A; read x";
         let made = new_session(&mut mux, "jobs", bash(&format!("{MARK}\n{body}"))).await;
-        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         let listing = watched_until(&mut watch, "sleep in front", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
@@ -158,7 +158,7 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
              m A; read y"
         );
         let made = new_session(&mut mux, "nested", bash(&format!("{MARK}\n{body}"))).await;
-        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         let listing = watched_until(&mut watch, "inner going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
@@ -190,7 +190,7 @@ fn a_job_in_front_under_one_that_is_not_reads_as_asking() {
             m A; read y";
         let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
         let made = new_session(&mut mux, "under", opens).await;
-        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         watched_until(&mut watch, "nested going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })

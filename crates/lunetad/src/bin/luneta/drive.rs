@@ -58,7 +58,7 @@ use lunetad::api::{agent, Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
 use lunetad::closes::Whose;
 use lunetad::mux::own::server::{self, Listing, Place};
-use lunetad::mux::{self, Client, OwnKey, PaneId, ZellijPane};
+use lunetad::mux::{self, Client, OwnKey, OwnPane, PaneId, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
@@ -255,21 +255,22 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
                  now: it was renamed since"
             ));
         },
-        Some(Seat::Asked { user: User::Own { session, named, pane }, .. }) => {
-            return match running.own_of(session) {
-                Some(own) => Ok(Seated::In(own_here(own, pane))),
+        Some(Seat::Asked { user: User::Own { pane, named }, .. }) => {
+            return match running.own_of(pane.session) {
+                Some(own) => Ok(Seated::In(own_here(&own.name, pane))),
                 None => Err(format!(
-                    "luneta's ask box asked from pane {named}:{pane}, of an own session that no \
-                     longer runs"
+                    "luneta's ask box asked from pane {named}:{}, of an own session that no \
+                     longer runs",
+                    pane.id
                 )),
             };
         },
-        Some(Seat::Own { session, pane }) => {
-            return match running.own_of(session) {
-                Some(own) => Ok(Seated::In(own_here(own, pane))),
+        Some(Seat::Own(pane)) => {
+            return match running.own_of(pane.session) {
+                Some(own) => Ok(Seated::In(own_here(&own.name, pane))),
                 None => Err(format!(
-                    "this runs in pane {pane} of own session {}, which no longer runs",
-                    session.id
+                    "this runs in pane {} of own session {}, which no longer runs",
+                    pane.id, pane.session.id
                 )),
             };
         },
@@ -300,9 +301,10 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
     }))
 }
 
-/// The pane `pane` of `own`, an own session, by the name it has now.
-fn own_here(own: &Listing, pane: u32) -> Here {
-    Here { pane: Pane { session: own.name.to_string(), pane }, whose: Whose::Own(own.key()) }
+/// The own pane `pane`, by the name `named` its session has now.
+fn own_here(named: &SessionName, pane: OwnPane) -> Here {
+    let at = Pane { session: named.to_string(), pane: pane.id.get() };
+    Here { pane: at, whose: Whose::Own(pane.session) }
 }
 
 /// The agents lunetad lists, or none while it lists none: none runs, or it
@@ -543,7 +545,7 @@ fn session(
 /// the server's environment, not this one's.
 fn own_made(at: OwnKey, to: &SessionName, cwd: &Directory) -> Result<(), String> {
     let made = own_sessions::made(to, cwd)?;
-    let went = server::keyed(at).and_then(|at| at.went(Place::Session(made.id)));
+    let went = server::keyed(at).and_then(|at| at.went(Place::Session(made)));
     went.map_err(|failure| format!("made {to}, and took no client there: {failure}"))
 }
 
@@ -574,10 +576,10 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
         match whose {
             (Whose::Zellij(_), Whose::Zellij(_)) => zellij::taken(&at, &to, pane),
             (Whose::Own(from), Whose::Own(into)) => {
-                let place = pane.map_or(Place::Session(into.id), |pane| Place::Pane {
-                    session: into.id,
-                    pane,
-                });
+                let place = match pane {
+                    None => Place::Session(into),
+                    Some(pane) => Place::Pane(server::pane_of(into, pane)?),
+                };
                 Ok(server::keyed(from)?.went(place)?)
             },
             (at_whose @ Whose::Zellij(_), Whose::Own(_))
@@ -1068,7 +1070,7 @@ fn whose_of(act: &Act) -> Whose {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spot<'a> {
     Zellij { session: &'a str, pane: u32 },
-    Own { session: OwnKey, pane: u32 },
+    Own(OwnPane),
     Unplaced,
 }
 
@@ -1088,7 +1090,7 @@ impl<'a> Spot<'a> {
             (Spot::Zellij { session: at, pane }, Whose::Zellij(_)) => {
                 (at == session).then_some(pane)
             },
-            (Spot::Own { session: at, pane }, Whose::Own(key)) => (at == key).then_some(pane),
+            (Spot::Own(pane), Whose::Own(key)) => (pane.session == key).then_some(pane.id.get()),
             _ => None,
         }
     }
@@ -1107,13 +1109,9 @@ struct Placed<'a> {
 fn placed<'a>(agents: &'a [Agent]) -> Result<Vec<Placed<'a>>, String> {
     let place = |agent: &'a Agent| {
         let spot = match &agent.pane {
-            Some(agent::Pane::Own(own)) => {
-                let pane = own.pane;
-                let lists = format!("lunetad lists an agent in own pane {pane}");
-                let session = own.session.as_ref().ok_or_else(|| format!("{lists} of no session"))?;
-                let session = OwnKey::of(session).map_err(|why| format!("{lists}, and {why}"))?;
-                Spot::Own { session, pane }
-            },
+            Some(agent::Pane::Own(own)) => Spot::Own(
+                OwnPane::of(own).map_err(|why| format!("lunetad lists an agent in {why}"))?,
+            ),
             Some(agent::Pane::Zellij(_)) | None => Spot::zellij(agent.zellij()),
         };
         Ok(Placed { agent, spot })
@@ -1139,7 +1137,7 @@ fn ending(
     let (session, whose) = (session_of(act), whose_of(act));
     let ends = |spot: Spot| spot.pane_in(session, whose).is_some_and(|pane| act.takes(pane));
     let seat = |placed: &Placed| match placed.spot {
-        Spot::Own { session, pane } => commands::own_seat(session, pane, &running.own),
+        Spot::Own(pane) => commands::own_seat(pane, &running.own),
         Spot::Zellij { .. } | Spot::Unplaced => commands::seat(placed.agent.zellij()),
     };
     let agents: Vec<Ends<Agent>> = agents
@@ -1285,8 +1283,8 @@ mod tests {
         let made = || Some(SystemTime::UNIX_EPOCH.into());
         let agents = [Agent::default(), in_own(session(3, made()))];
         let spots: Vec<Spot> = placed(&agents).unwrap().iter().map(|it| it.spot).collect();
-        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: SystemTime::UNIX_EPOCH };
-        assert_eq!(spots, [Spot::Unplaced, Spot::Own { session: key, pane: 2 }]);
+        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: mux::OwnMade::from_nanos(0) };
+        assert_eq!(spots, [Spot::Unplaced, Spot::Own(OwnPane::new(key, 2).unwrap())]);
         assert_eq!(spots[1].pane_in("any", Whose::Own(key)), Some(2));
         let other = OwnKey { id: mux::OwnId::new(4).unwrap(), ..key };
         assert_eq!(spots[1].pane_in("any", Whose::Own(other)), None);

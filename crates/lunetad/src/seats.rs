@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::api::session::Mux;
 use crate::api::{agent, Agent, Harness, Pane, Session, Zellij};
-use crate::mux::OwnKey;
+use crate::mux::{OwnKey, OwnPane};
 
 /// A session, as a seat is in it: a zellij session by its name, and an own
 /// one as no other is. An own session can have the name of a zellij one.
@@ -20,7 +20,8 @@ pub enum Where<'a> {
 /// the agent started at a prompt, or else the one that started first. An
 /// agent is in the zellij session the daemon follows its pane to, or, where
 /// the daemon cannot tell, the one `found` finds; or in an own pane, in the
-/// own session its pane's variables name.
+/// own session its pane's variables name, and in none where `OwnPane::of`
+/// reads no own pane of what the daemon says.
 #[must_use]
 pub fn seated<'a>(
     agents: &'a [Agent],
@@ -35,8 +36,7 @@ pub fn seated<'a>(
                 .or_else(|| found(agent, zellij, sessions))
                 .map(|session| (Where::Zellij(session), zellij.pane)),
             Some(agent::Pane::Own(own)) => {
-                let key = own.session.as_ref().and_then(|session| OwnKey::of(session).ok());
-                key.map(|key| (Where::Own(key), own.pane))
+                OwnPane::of(own).ok().map(|own| (Where::Own(own.session), own.id.get()))
             },
             None => None,
         };

@@ -1184,12 +1184,12 @@ impl Daemon for Host {
             Ok(server::made(&name, &cwd, Runs::of(&command, Runs::Shell(&shell)))?)
         });
         let made = made.await.map_err(|error| unfinished(&error))?;
-        let server::Made { session, tab, pane } = made.map_err(Status::failed_precondition)?;
+        let server::Made { pane, tab } = made.map_err(Status::failed_precondition)?;
         Ok(Response::new(NewOwnResponse {
-            session: session.id.get(),
-            tab: tab.0,
-            pane,
-            made_at: Some(session.made.into()),
+            session: pane.session.id.get(),
+            tab: tab.get(),
+            pane: pane.id.get(),
+            made_at: Some(pane.session.made.into()),
         }))
     }
 

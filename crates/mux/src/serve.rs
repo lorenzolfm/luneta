@@ -55,11 +55,12 @@ impl mux_server::Mux for Service {
         let request = request.into_inner();
         let name = Name::parse("name", request.name)?;
         let opens = Opens::parse("opens", request.opens)?;
-        let (session, tab, pane) = self.mux.new_session(name, &opens)?;
+        let (session, made, tab, pane) = self.mux.new_session(name, &opens)?;
         Ok(Response::new(api::NewSessionResponse {
             session: session.said(),
             tab: tab.said(),
             pane: pane.said(),
+            made_at: Some(made.into()),
         }))
     }
 

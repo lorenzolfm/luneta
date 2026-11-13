@@ -5,6 +5,7 @@
 use std::fmt;
 use std::num::NonZeroU16;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use libghostty_vt::key::{self as keys, Mods};
 use libghostty_vt::mouse;
@@ -149,21 +150,34 @@ impl Opens {
     }
 }
 
-/// A session, on the tab a client coming there goes to, or a tab.
+/// A session, on the tab a client coming there goes to, or a tab: of the
+/// session made when `made` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Place {
+pub struct Place {
+    pub is: Is,
+    pub made: SystemTime,
+}
+
+/// What a place is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Is {
     Session(SessionId),
     Tab(TabId),
 }
 
 impl Place {
     pub fn parse(field: &str, place: Option<api::Place>) -> Result<Place, Status> {
-        match present(&format!("{field}.is"), present(field, place)?.is)? {
+        let place = present(field, place)?;
+        let is = match present(&format!("{field}.is"), place.is)? {
             api::place::Is::Session(session) => {
-                Ok(Place::Session(SessionId::parse(&format!("{field}.session"), session)?))
+                Is::Session(SessionId::parse(&format!("{field}.session"), session)?)
             },
-            api::place::Is::Tab(tab) => Ok(Place::Tab(TabId::parse(&format!("{field}.tab"), tab)?)),
-        }
+            api::place::Is::Tab(tab) => Is::Tab(TabId::parse(&format!("{field}.tab"), tab)?),
+        };
+        let made_at = format!("{field}.made_at");
+        let made = SystemTime::try_from(present(&made_at, place.made_at)?)
+            .map_err(|why| refused(&made_at, why))?;
+        Ok(Place { is, made })
     }
 }
 
@@ -517,6 +531,11 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
 mod tests {
     use super::*;
 
+    /// A time a session was made at.
+    fn at() -> prost_types::Timestamp {
+        prost_types::Timestamp { seconds: 60, nanos: 0 }
+    }
+
     fn size(columns: u32, rows: u32) -> Result<Size, Status> {
         Size::parse("resize", Some(api::Size { columns, rows }))
     }
@@ -613,7 +632,7 @@ mod tests {
     fn only_the_first_message_is_a_hello() {
         let hello_said = api::ToServer {
             event: Some(api::to_server::Event::Hello(api::Hello {
-                to: Some(api::Place { is: Some(api::place::Is::Session(1)) }),
+                to: Some(api::Place { is: Some(api::place::Is::Session(1)), made_at: Some(at()) }),
                 size: Some(api::Size { columns: 80, rows: 24 }),
                 colours: None,
             })),
@@ -622,7 +641,9 @@ mod tests {
             event: Some(api::to_server::Event::Focus(api::Focus { focused: true })),
         };
         let first = SessionId::parse("session", 1).unwrap();
-        assert_eq!(hello(hello_said.clone()).unwrap().to, Place::Session(first));
+        let made = SystemTime::try_from(at()).unwrap();
+        let first = Place { is: Is::Session(first), made };
+        assert_eq!(hello(hello_said.clone()).unwrap().to, first);
         assert_eq!(
             hello(focus.clone()).unwrap_err().message(),
             "event is not hello, as the first must be"

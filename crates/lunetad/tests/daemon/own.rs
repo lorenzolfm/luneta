@@ -135,8 +135,10 @@ impl Owned {
         })
     }
 
-    /// A client of the server, attached to the own session of id `session`.
-    pub fn attach(&self, session: u64) -> Attached {
+    /// A client of the server, attached to the own session the daemon says it
+    /// made.
+    pub fn attach(&self, made: &NewOwnResponse) -> Attached {
+        let (session, made_at) = (made.session, made.made_at);
         let socket = self.socket();
         let (hang_up, to_go) = tokio::sync::oneshot::channel::<()>();
         let (came, arrival) = mpsc::channel();
@@ -144,7 +146,8 @@ impl Owned {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
             runtime.unwrap().block_on(async move {
                 let size = Some(mux_api::Size { columns: 80, rows: 24 });
-                let to = Some(mux_api::Place { is: Some(mux_api::place::Is::Session(session)) });
+                let is = Some(mux_api::place::Is::Session(session));
+                let to = Some(mux_api::Place { is, made_at });
                 let hello = mux_api::Hello { to, size, colours: None };
                 let hello = Some(mux_api::to_server::Event::Hello(hello));
                 let hello = mux_api::ToServer { event: hello };
