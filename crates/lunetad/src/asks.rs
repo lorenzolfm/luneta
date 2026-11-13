@@ -30,7 +30,7 @@ use crate::api::ask_request::{self, UserOwnPane, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::{self, OwnId, OwnKey, SessionName};
+use crate::mux::{self, OwnId, OwnKey, OwnPane, SessionName};
 use crate::{git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
@@ -208,10 +208,10 @@ pub enum User {
     /// In the pane `pane` of `session`, of zellij on the agent's machine,
     /// where luneta's zellij is, by the name its session has now.
     Pane { session: SessionName, pane: u32 },
-    /// In the pane `pane` of the own session `session`, on the agent's
-    /// machine, where luneta's client of an own session is: `named`, as the
-    /// turn started, which the agent is told.
-    Own { session: OwnKey, named: SessionName, pane: u32 },
+    /// In the own pane `pane`, on the agent's machine, where luneta's client
+    /// of an own session is, of the session `named` as the turn started,
+    /// which the agent is told.
+    Own { pane: OwnPane, named: SessionName },
     /// On another machine, where luneta's zellij is: in none of the agent's
     /// machine's panes.
     Away,
@@ -227,9 +227,7 @@ impl User {
         command.env_remove(ASKED_VAR).env_remove(OWN_VAR).env_remove(AWAY_VAR);
         match self {
             User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
-            User::Own { session, named, pane } => {
-                command.env(OWN_VAR, own_spelled(*session, named, *pane))
-            },
+            User::Own { pane, named } => command.env(OWN_VAR, own_spelled(*pane, named)),
             User::Away => command.env(AWAY_VAR, AWAY_SET),
             User::Untold => command,
         };
@@ -244,9 +242,9 @@ impl User {
                 let session = session.to_string();
                 Some(ask_request::User::Pane(UserPane { session, pane: *pane }))
             },
-            User::Own { session, named, pane } => Some(ask_request::User::Own(UserOwnPane {
-                session: Some((*session).into()),
-                pane: *pane,
+            User::Own { pane, named } => Some(ask_request::User::Own(UserOwnPane {
+                session: Some(pane.session.into()),
+                pane: pane.pane.get(),
                 named: named.to_string(),
             })),
         }
@@ -290,13 +288,11 @@ impl User {
     }
 }
 
-/// `OWN_VAR` as `name_in` spells it, of the pane `pane` of the own session
-/// `session`, named `named`: as `Asked::new` takes it, and `own_read` reads
-/// it back.
-fn own_spelled(session: OwnKey, named: &SessionName, pane: u32) -> String {
-    assert_ne!(pane, 0, "Asked::new takes no own pane of id 0");
-    let made = made_nanos(session.made).expect("Asked::new takes no own session made then");
-    format!("{}:{made}:{pane}:{named}", session.id)
+/// `OWN_VAR` as `name_in` spells it, of the own pane `pane`, of the session
+/// named `named`: as `Asked::new` takes it, and `own_read` reads it back.
+fn own_spelled(pane: OwnPane, named: &SessionName) -> String {
+    let made = made_nanos(pane.session.made).expect("Asked::new takes no own session made then");
+    format!("{}:{made}:{}:{named}", pane.session.id, pane.pane)
 }
 
 /// When an own session was made, `made`, in nanoseconds since the epoch, as
@@ -313,9 +309,9 @@ fn own_read(spelled: &str) -> Option<User> {
     let mut parts = spelled.splitn(4, ':');
     let id = OwnId::new(parts.next()?.parse().ok()?)?;
     let made = UNIX_EPOCH.checked_add(Duration::from_nanos(parts.next()?.parse().ok()?))?;
-    let pane = parts.next()?.parse().ok().filter(|pane| *pane != 0)?;
+    let pane = OwnPane { session: OwnKey { id, made }, pane: parts.next()?.parse().ok()? };
     let named = SessionName::running(parts.next()?).ok()?;
-    Some(User::Own { session: OwnKey { id, made }, named, pane })
+    Some(User::Own { pane, named })
 }
 
 /// Where you are, as the variables of the agent of luneta's ask box spell it:
@@ -446,14 +442,11 @@ impl Asked {
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
         }
-        if let User::Own { session, pane, .. } = &user {
-            if *pane == 0 {
-                return Err("user: 0 is no own pane's id".to_owned());
-            }
-            if made_nanos(session.made).is_none() {
-                let id = session.id;
-                return Err(format!("user: own session {id} was made at no time {OWN_VAR} says"));
-            }
+        if let User::Own { pane, .. } = &user
+            && made_nanos(pane.session.made).is_none()
+        {
+            let id = pane.session.id;
+            return Err(format!("user: own session {id} was made at no time {OWN_VAR} says"));
         }
         Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
@@ -481,10 +474,10 @@ impl Asked {
                 User::Pane { session, pane }
             },
             Some(ask_request::User::Own(UserOwnPane { session, pane, named })) => {
-                let session = session.ok_or("user: an own pane of no session")?;
-                let session = OwnKey::of(&session).map_err(|why| format!("user: {why}"))?;
+                let pane = OwnPane::of(&crate::api::Own { session, pane })
+                    .map_err(|why| format!("user: {why}"))?;
                 let named = SessionName::running(&named).map_err(|why| format!("user: {why}"))?;
-                User::Own { session, named, pane }
+                User::Own { pane, named }
             },
         };
         let turn = Turn::new(turn, before)?;
@@ -584,7 +577,8 @@ fn told(user: &User, agents: Harness, words: &str) -> String {
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
-        User::Own { named, pane, .. } => {
+        User::Own { pane, named } => {
+            let pane = pane.pane;
             format!(
                 "[luneta: the user is in pane {named}:{pane}, of an own session, whose tabs hold a \
                  pane each: `open pane` and `turn` fail there.]"
@@ -803,8 +797,8 @@ mod tests {
     /// `made` nanoseconds after the epoch.
     fn own_pane_made(named: &str, pane: u32, made: u64) -> User {
         let made = UNIX_EPOCH + Duration::from_nanos(made);
-        let session = OwnKey { id: OwnId::new(3).unwrap(), made };
-        User::Own { session, named: SessionName::running(named).unwrap(), pane }
+        let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, pane).unwrap();
+        User::Own { pane, named: SessionName::running(named).unwrap() }
     }
 
     fn own_pane(named: &str, pane: u32) -> User {

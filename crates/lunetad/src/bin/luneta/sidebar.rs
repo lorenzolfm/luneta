@@ -69,7 +69,7 @@ use lunetad::closes::Whose;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::attach::To;
-use lunetad::mux::own::OwnKey;
+use lunetad::mux::own::{OwnKey, OwnPane};
 use lunetad::prunes;
 use lunetad::seats::{seated, Where};
 use lunetad::transcripts::SessionId;
@@ -406,7 +406,7 @@ pub struct PanePlace {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OwnSeat {
     pub session: OwnKey,
-    pub pane: Option<u32>,
+    pub pane: Option<NonZeroU32>,
 }
 
 /// What luneta runs beside the sidebar, as the sidebar follows it.
@@ -2243,12 +2243,13 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// luneta's client of an own session is in `session` now, on `pane`, as
-    /// its server says, which unfolds where it went to another.
-    pub fn went_own(&mut self, session: OwnKey, pane: u32) {
+    /// luneta's client of an own session is on `pane` now, as its server
+    /// says, which unfolds its session where it went to another.
+    pub fn went_own(&mut self, pane: OwnPane) {
         let before = self.own_seat();
         assert!(before.is_some(), "only a client of an own session goes among them");
-        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane) });
+        let session = pane.session;
+        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.pane) });
         if before.is_some_and(|before| before.session != session) {
             self.unfold_own(session);
         }
@@ -2410,12 +2411,12 @@ impl Sidebar {
             return User::Away;
         }
         if let Some(seat) = self.own_seat() {
-            let Ok(PanePlace { session, pane }) = self.here_place() else {
+            let (Some(pane), Ok(PanePlace { session, .. })) = (seat.pane, self.here_place()) else {
                 return User::Untold;
             };
-            let key = seat.session;
-            assert_eq!(session.own_key(), Some(key), "here_place is of the seat's own session");
-            return User::Own { session: key, named: session.name, pane };
+            let pane = OwnPane { session: seat.session, pane };
+            assert_eq!(session.own_key(), Some(pane.session), "here_place is of the seat's");
+            return User::Own { pane, named: session.name };
         }
         let Some(session) = self.here().filter(|_| self.going().is_none()) else {
             return User::Untold;
@@ -2506,7 +2507,7 @@ impl Sidebar {
     /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
         if let Some(seat) = self.own_seat() {
-            let pane = seat.pane.ok_or(NO_HERE_PANE)?;
+            let pane = seat.pane.ok_or(NO_HERE_PANE)?.get();
             let session = self.own_listed(seat.session).ok_or(NO_HERE_PANE)?;
             return Ok(PanePlace { session, pane });
         }
@@ -10102,11 +10103,11 @@ mod tests {
         sidebar.attaching(key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         assert_eq!(sidebar.user(&Machine::Local), User::Untold);
-        sidebar.went_own(key, 1);
+        sidebar.went_own(OwnPane::new(key, 1).unwrap());
         let twin = Listed::new_own("twin", moment(20_000), 1);
         assert_eq!(sidebar.here(), None);
         assert_eq!(sidebar.here_place(), Ok(PanePlace { session: twin.clone(), pane: 1 }));
-        let user = User::Own { session: key, named: session_name("twin"), pane: 1 };
+        let user = User::Own { pane: OwnPane::new(key, 1).unwrap(), named: session_name("twin") };
         assert_eq!(sidebar.user(&Machine::Local), user);
         assert_eq!(sidebar.user(&Machine::Remote(nixos())), User::Away);
         let zellij = sidebar.plan(&Machine::Local, &listed("twin", 10), Deletes::Session);
@@ -10131,7 +10132,7 @@ mod tests {
         sidebar.heard(host(vec![own_session("old", 1, 20, panes())], Vec::new()));
         let key = OwnKey { id: OwnId::new(1).unwrap(), made: moment(30_000) };
         sidebar.attaching(key);
-        sidebar.went_own(key, 1);
+        sidebar.went_own(OwnPane::new(key, 1).unwrap());
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         sidebar.heard(host(vec![own_session("new", 1, 30, panes())], Vec::new()));
         let new = Listed::new_own("new", moment(30_000), 1);

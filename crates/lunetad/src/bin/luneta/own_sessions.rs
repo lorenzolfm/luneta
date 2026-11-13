@@ -18,7 +18,7 @@ const MAKING: Duration = Duration::from_secs(20);
 
 /// The own session luneta runs in, where it runs in a pane of one.
 fn holding() -> Option<OwnKey> {
-    own::here().map(|(session, _)| session)
+    own::here().map(|pane| pane.session)
 }
 
 /// Why luneta would not go to the own session `session`: it runs in a pane

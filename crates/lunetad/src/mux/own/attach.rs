@@ -27,7 +27,7 @@ use tonic::Status;
 
 use super::api::{self, mux_client::MuxClient, to_client, to_server};
 use super::server::{connect, refused, runtime, socket};
-use super::{OwnId, OwnKey};
+use super::{OwnId, OwnKey, OwnPane};
 
 /// The most the server lets a side of a pane be, in cells: more is refused.
 pub const SIDE_MAX: u16 = 1000;
@@ -60,8 +60,8 @@ impl To {
     #[must_use]
     pub fn reached(self, went: &Went) -> bool {
         match self {
-            To::Session(session) => went.session == session,
-            To::Tab { session, tab } => went.session == session && went.tab == tab,
+            To::Session(session) => went.pane.session == session,
+            To::Tab { session, tab } => went.pane.session == session && went.tab == tab,
         }
     }
 
@@ -169,13 +169,13 @@ impl Hello {
     }
 }
 
-/// Where the client is now, as the server says each time it moves: in a
-/// session as no other is, by the server the client keeps to.
+/// Where the client is now, as the server says each time it moves: on a pane,
+/// in a session as no other is, by the server the client keeps to, and on
+/// the pane's tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Went {
-    pub session: OwnKey,
+    pub pane: OwnPane,
     pub tab: u32,
-    pub pane: u32,
 }
 
 /// A grapheme a glyph shows: never none, and with no control character in
@@ -552,10 +552,8 @@ fn heard(said: api::ToClient, sessions: &[OwnKey]) -> Result<Heard, String> {
             if tab == 0 {
                 return Err("the client went to tab 0".to_owned());
             }
-            if pane == 0 {
-                return Err("the client went to pane 0".to_owned());
-            }
-            Heard::Went(Went { session, tab, pane })
+            let pane = OwnPane::new(session, pane).ok_or("the client went to pane 0")?;
+            Heard::Went(Went { pane, tab })
         },
         to_client::Event::Frame(frame) => Heard::Frame(Frame::heard(frame)?),
         to_client::Event::Ended(api::Ended {}) => Heard::Ended,
@@ -913,7 +911,8 @@ mod tests {
             let event = to_client::Event::Went(api::Went { session, tab, pane });
             heard(api::ToClient { event: Some(event) }, &sessions)
         };
-        assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { session: key(3, 20), tab: 1, pane: 4 })));
+        let pane = OwnPane::new(key(3, 20), 4).unwrap();
+        assert_eq!(went(3, 1, 4), Ok(Heard::Went(Went { pane, tab: 1 })));
         assert_eq!(went(0, 1, 4).unwrap_err(), "the client went to session 0");
         let unlisted = "the client went to session 5, which it does not list";
         assert_eq!(went(5, 1, 4).unwrap_err(), unlisted);

@@ -3191,7 +3191,7 @@ impl App {
             Heard::Attached | Heard::Frame(_) => {},
             Heard::Went(went) => {
                 let after = own.phase.went(&went);
-                self.sidebar.went_own(went.session, went.pane);
+                self.sidebar.went_own(went.pane);
                 if let Some(after) = after {
                     zellij::came_here(after, &self.events);
                 }
@@ -4426,6 +4426,7 @@ mod tests {
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+    use lunetad::mux::own::OwnPane;
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
@@ -4473,7 +4474,7 @@ mod tests {
             let whose = lunetad::closes::Whose::Own(here);
             Some(After::Kill { session: SessionName::running("here").unwrap(), whose })
         };
-        let went = |session, tab| own_attach::Went { session, tab, pane: 9 };
+        let went = |session, tab| own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab };
         let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
         let going = Going { to: To::Session(there), after: kill() };
         let mut phase = Phase::Coming { fails: Fails::End, going };

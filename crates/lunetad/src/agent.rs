@@ -303,10 +303,7 @@ impl Agent {
                         pane: *pane,
                     })
                 },
-                Named::Own { session, pane } => {
-                    let session = Some((*session).into());
-                    api::agent::Pane::Own(api::Own { session, pane: *pane })
-                },
+                Named::Own(own) => api::agent::Pane::Own((*own).into()),
             }),
             topic: topic.map(String::from),
         }
@@ -338,7 +335,7 @@ impl Unread {
 fn zellij_of(named: &Named) -> Option<(&str, u32)> {
     match named {
         Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
-        Named::Own { .. } => None,
+        Named::Own(_) => None,
     }
 }
 
