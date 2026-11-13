@@ -127,7 +127,7 @@ impl Close {
 /// Which session a question is of, past its name, which another can take: a
 /// zellij session by when it started, and an own one by its id and when its
 /// server made it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Whose {
     Zellij(SystemTime),
     Own(OwnKey),

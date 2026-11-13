@@ -2392,11 +2392,20 @@ impl Sidebar {
     /// Where you are, for the ask box's agent on `machine` to go by: on
     /// another machine while luneta's zellij is; or else on the pane
     /// luneta's zellij is on, by its session's name now, while it is on its
-    /// way to no session, and on a pane, not a plugin's; or where luneta
-    /// cannot tell.
+    /// way to no session, and on a pane, not a plugin's; or on the pane of an
+    /// own session luneta's client of one is on, as its server says, by the
+    /// session's key and its name now; or where luneta cannot tell.
     pub fn user(&self, machine: &Machine) -> User {
         if self.on != *machine {
             return User::Away;
+        }
+        if let Some(seat) = self.own_seat() {
+            let Ok(PanePlace { session, pane }) = self.here_place() else {
+                return User::Untold;
+            };
+            let key = seat.session;
+            assert_eq!(session.own_key(), Some(key), "here_place is of the seat's own session");
+            return User::Own { session: key, named: session.name, pane };
         }
         let Some(session) = self.here().filter(|_| self.going().is_none()) else {
             return User::Untold;
@@ -10054,7 +10063,8 @@ mod tests {
     }
 
     /// luneta's client of an own session is where its server says, and in
-    /// no zellij session of that name. A delete of its session leaves for the
+    /// no zellij session of that name: the ask box's agent is told that pane,
+    /// once the server says which. A delete of its session leaves for the
     /// newest other session of this machine, of either kind, and deletes it
     /// once luneta is there; one of the zellij session of the name goes at
     /// once.
@@ -10073,10 +10083,14 @@ mod tests {
         let key = OwnKey { id, made: moment(20_000) };
         sidebar.attaching(key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
+        assert_eq!(sidebar.user(&Machine::Local), User::Untold);
         sidebar.went_own(key, 1);
         let twin = Listed::new_own("twin", moment(20_000), 1);
         assert_eq!(sidebar.here(), None);
         assert_eq!(sidebar.here_place(), Ok(PanePlace { session: twin.clone(), pane: 1 }));
+        let user = User::Own { session: key, named: session_name("twin"), pane: 1 };
+        assert_eq!(sidebar.user(&Machine::Local), user);
+        assert_eq!(sidebar.user(&Machine::Remote(nixos())), User::Away);
         let zellij = sidebar.plan(&Machine::Local, &listed("twin", 10), Deletes::Session);
         let whose = Whose::Zellij(moment(10_000));
         assert_eq!(zellij.unwrap().act, Act::Kill { session: session_name("twin"), whose });

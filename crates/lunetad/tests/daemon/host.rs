@@ -66,8 +66,17 @@ impl<'a> Vars<'a> {
             "PI_CODING_AGENT_DIR",
             "ZELLIJ_SOCKET_DIR",
         ];
-        let panes =
-            ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID", "LUNETA_PANE", "LUNETA_AWAY"];
+        let panes = [
+            "ZELLIJ",
+            "ZELLIJ_SESSION_NAME",
+            "ZELLIJ_PANE_ID",
+            "LUNETA_PANE",
+            "LUNETA_OWN_PANE",
+            "LUNETA_AWAY",
+            "LUNETA_MUX_SESSION",
+            "LUNETA_MUX_MADE",
+            "LUNETA_MUX_PANE",
+        ];
         let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
         for name in names.into_iter().chain(panes).chain(turns) {
             command.env_remove(name);

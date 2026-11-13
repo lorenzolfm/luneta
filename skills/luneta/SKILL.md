@@ -7,10 +7,11 @@ description: Drive luneta and zellij for the user with the `luneta` CLI - open a
 
 luneta runs zellij beside a sidebar of every session on the host, and what
 the agent in each pane is doing. Its CLI reads what lunetad, its daemon, knows,
-and has zellij open, move and close things. You run in a pane of zellij:
-`luneta here` says which, as `<session>:<pane>`. Don't read it from
-`$ZELLIJ_SESSION_NAME`: that keeps the name the session had when your pane
-opened, and a rename leaves it behind.
+and has zellij open, move and close things. You run in a pane of zellij, or of
+one of luneta's own sessions (`◇` in the sidebar, `luneta-mux`'s), whose names
+are shared with zellij's: `luneta here` says which pane, as
+`<session>:<pane>`. Don't read it from `$ZELLIJ_SESSION_NAME`: that keeps the
+name the session had when your pane opened, and a rename leaves it behind.
 
 A pane is named `<session>:<pane>`, as `luneta:11`; a session by its name alone.
 
@@ -40,6 +41,12 @@ agents end, and `prune` deletes nothing and says so.
 `--beside`/`--session` need to know which session you run in. If your session
 was renamed and luneta can't tell which it is now (no lunetad, or one that
 can't say), they fail and say so. Tell the user. Don't guess a session.
+
+An own session's tab holds one pane for now. There `open pane` and `turn`
+fail and say so: open a tab with `open tab --session <session>` instead.
+`open session` from an own session makes an own one. `go` takes the user
+between own sessions, or between zellij's, and not from one kind to the
+other: it fails and says so, and the user goes across in luneta's sidebar.
 
 ## Verbs
 

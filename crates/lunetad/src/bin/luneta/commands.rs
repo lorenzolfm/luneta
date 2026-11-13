@@ -23,7 +23,8 @@ use lunetad::api::{
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
-use lunetad::mux::ZellijPane;
+use lunetad::mux::own::server::{self, Listing};
+use lunetad::mux::{OwnKey, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
@@ -155,7 +156,11 @@ fn version(spelled: &str) -> Result<Version, String> {
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::running(folder), info),
-        Command::Agents => ask(folder, daemon::running(folder), agents),
+        Command::Agents => {
+            // Without the own sessions' names, an agent in one goes by its ids.
+            let own = server::sessions().unwrap_or_default();
+            ask(folder, daemon::running(folder), |daemon| agents(daemon, own))
+        },
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {
             let current = async { daemon::current(folder).await.map(|current| current.daemon) };
@@ -241,7 +246,7 @@ fn speaker_here() -> Option<Zellij> {
     let (named, pane) = match zellij::here().ok()?? {
         Seat::Opened(ZellijPane { session, pane }) => (session, pane),
         Seat::Asked { user: User::Pane { session, pane }, .. } => (session.to_string(), pane),
-        Seat::Asked { .. } => return None,
+        Seat::Asked { .. } | Seat::Own { .. } => return None,
     };
     Some(Zellij { named, session: None, pane })
 }
@@ -372,11 +377,15 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// One line to an agent, by its session and pane, as `line` writes it.
-async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
+/// One line to an agent, by its session and pane, as `line` writes it, an
+/// own session's by its name among `own`.
+async fn agents(
+    mut daemon: DaemonClient<Channel>,
+    own: Vec<Listing>,
+) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
     let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seat_of(agent), agent)).collect();
+        listed.agents.iter().map(|agent| (seat_of(agent, &own), agent)).collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {
@@ -389,14 +398,29 @@ async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>>
 }
 
 /// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
-/// `own <session id>:<pane>`, with `?` for an id its daemon does not say.
-fn seat_of(agent: &Agent) -> String {
+/// `<session>:<pane>` by the name it has among `own`, or as `own <session
+/// id>:<pane>` where `own` has none of its id made then, with `?` for an id
+/// its daemon does not say.
+pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
     match &agent.pane {
-        Some(agent::Pane::Own(own)) => {
-            let id = own.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
-            format!("own {id}:{}", own.pane)
+        Some(agent::Pane::Own(pane)) => {
+            if let Some(key) = pane.session.as_ref().and_then(|session| OwnKey::of(session).ok()) {
+                return own_seat(key, pane.pane, own);
+            }
+            let id = pane.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
+            format!("own {id}:{}", pane.pane)
         },
         Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
+    }
+}
+
+/// Where an agent runs in the pane `pane` of the own session `session`, as
+/// `seat_of` says: by the name the session has among `own`, or by its id
+/// where `own` has none of its id made then.
+pub fn own_seat(session: OwnKey, pane: u32, own: &[Listing]) -> String {
+    match own.iter().find(|listed| listed.key() == session) {
+        Some(named) => format!("{}:{pane}", named.name),
+        None => format!("own {}:{pane}", session.id),
     }
 }
 

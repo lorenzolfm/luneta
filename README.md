@@ -1382,6 +1382,17 @@ you there, and say that zellij moved nobody where you have left that session
 since. zellij's client makes the session, so what runs in it has your
 environment, not the agent's.
 
+In an [own session](#luneta-in-your-terminal) they work as they do in
+zellij's, by the ids luneta's own multiplexer gives a pane and its session,
+which a rename keeps, and `luneta agents` names an agent there as
+`<session>:<pane>` too. An own session's tab holds one pane for now, so
+`open pane` and `turn` refuse there and say so: `open tab` opens a tab of it,
+with no one in it needed. `open session` there makes an own session, which
+lunetad makes, as it does for `n o`. `go` takes you between own sessions, or
+between zellij's, but not from one kind to the other: luneta's own client and
+zellij's are two, and it says so. The ask box tells its agent the own pane
+you are on, as it does a pane of zellij's.
+
 `turn` does what `t t` and `t p` do, and refuses what they refuse, saying why.
 What runs in the panes goes on, an agent turning the pane it runs in too, and
 each pane keeps its id, so `turn` says the pane it was given. `--into` takes a

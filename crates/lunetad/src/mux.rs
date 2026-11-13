@@ -20,6 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::closes::Whose;
 use crate::process;
 use crate::watch::Troubles;
 use crate::Directory;
@@ -43,6 +44,13 @@ pub enum Mux<'a> {
     Own(&'a own::server::Own),
 }
 
+/// Why no session goes by the name `name`: zellij runs one by it, and luneta's
+/// own multiplexer another, as each makes sessions by names it alone checks.
+#[must_use]
+pub fn two_named(name: &str) -> String {
+    format!("two sessions are named {name}: one of zellij's and an own one")
+}
+
 /// A session by its name, of whichever multiplexer runs one by it: an own
 /// session, with its server reached, or else zellij's.
 #[derive(Debug)]
@@ -62,10 +70,19 @@ impl<'a> Called<'a> {
         };
         let zellij = crate::closes::running_in(&Zellij::socket_folder()).map_err(Failure::Unread)?;
         if zellij.iter().any(|(running, _)| running == name) {
-            let two = format!("two sessions are named {name}: one of zellij's and an own one");
-            return Err(Failure::Unread(two));
+            return Err(Failure::Unread(two_named(name.as_str())));
         }
         Ok(Called::Own(Box::new(own)))
+    }
+
+    /// The session `whose` says, named `name` now: an own one by its key, with
+    /// its server reached, where it runs still, which a rename keeps, and
+    /// zellij's by `name`, whether or not an own session has it too.
+    pub fn of(name: &'a SessionName, whose: Whose) -> Result<Called<'a>, Failure> {
+        match whose {
+            Whose::Zellij(_) => Ok(Called::Zellij(name)),
+            Whose::Own(key) => Ok(Called::Own(Box::new(own::server::keyed(key)?))),
+        }
     }
 
     /// The session, to ask its multiplexer of.

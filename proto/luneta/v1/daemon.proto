@@ -738,6 +738,10 @@ message AskRequest {
     UserPane pane = 6;
     // On another machine, where luneta's zellij is: in none of its panes.
     google.protobuf.Empty away = 7;
+    // In a pane of an own session there, where luneta's client of an own
+    // session is. A daemon older than this field takes the user for one it
+    // cannot tell the place of.
+    UserOwnPane own = 11;
   }
   // The key of the turn, and of the turn before, absent for the first: a
   // close the agent runs takes a yes only to a plan said in the turn before.
@@ -755,6 +759,17 @@ message AskRequest {
   message UserPane {
     string session = 1;
     uint32 pane = 2;
+  }
+
+  message UserOwnPane {
+    // The own session, as its `Session.own` says. Always there.
+    OwnSession session = 1;
+    // The pane's id, which its server gives no other.
+    uint32 pane = 2;
+    // The session's name as luneta sent the turn, for the agent to be told:
+    // a name zellij takes, or else the question is invalid. The session goes
+    // by `session`, which a rename keeps.
+    string named = 3;
   }
 }
 
