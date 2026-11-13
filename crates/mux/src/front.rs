@@ -63,7 +63,7 @@ impl Front {
     #[must_use]
     pub fn of_pane(pty: &Pty, program: u32, group: Group) -> Front {
         let modes = pty.modes().ok();
-        let processes = tree(program, group);
+        let processes = tree(program);
         let front = in_front(&processes, group);
         let said = Front::of(modes, &front, group.leader() == program);
         if said != Front::Interactive {
@@ -82,7 +82,7 @@ impl Front {
                 let Some(inner) = terminal.front else {
                     return Front::behind(modes_at(terminal.device), &[]);
                 };
-                let below = tree(child.pid, inner);
+                let below = tree(child.pid);
                 Front::behind(modes_at(terminal.device), &in_front(&below, inner))
             },
             None => said,
@@ -133,24 +133,18 @@ impl Front {
     }
 }
 
-/// `root` and the processes it started, to the depth of `group`'s: past its
-/// children, only those of `group` are followed, as a job the shell put in
-/// the background, and what that started, are none of the one in front. Up
-/// to `PROCESSES_MAX`.
-fn tree(root: u32, group: Group) -> Vec<Process> {
+/// `root` and each process it started, and what those started, up to
+/// `PROCESSES_MAX`: a job in front may run under a process that is not, as a
+/// shell that `nix develop` started runs its jobs.
+fn tree(root: u32) -> Vec<Process> {
     let Some(first) = process::process(root) else {
         return Vec::new();
     };
     let mut processes = vec![first];
     let mut next = 0;
     while next < processes.len() {
-        let parent = &processes[next];
-        let follow = next == 0 || parent.group == group;
-        let pid = parent.pid;
+        let pid = processes[next].pid;
         next += 1;
-        if !follow {
-            continue;
-        }
         for child in process::children(pid) {
             if processes.len() == PROCESSES_MAX {
                 return processes;

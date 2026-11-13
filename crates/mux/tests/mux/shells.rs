@@ -141,3 +141,30 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         .await;
     });
 }
+
+/// A job in front under a process that is not, as a shell that `nix develop`
+/// started runs its jobs, is what the command does: one that reads a line
+/// of the terminal asks. macOS says where no process sleeps.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_job_in_front_under_one_that_is_not_reads_as_asking() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
+        let body = "m A; m 'C;cmdline_url=nested'; bash -c 'set -m; head -n1; true'; m 'D;0'\n\
+            m A; read y";
+        let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
+        let made = new_session(&mut mux, "under", opens).await;
+        let attached = Attached::new(&mut mux, session(made.session), size(40, 10)).await;
+        watched_until(&mut watch, "nested going, asking", |listing| {
+            matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
+        })
+        .await;
+        attached.type_line("").await;
+        watched_until(&mut watch, "nested ended", |listing| {
+            matches!(said(listing), Some(Is::Ended(_)))
+        })
+        .await;
+    });
+}
