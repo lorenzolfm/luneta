@@ -2399,14 +2399,13 @@ impl Sidebar {
         if self.on != *machine {
             return User::Away;
         }
-        if self.own_seat().is_some() {
+        if let Some(seat) = self.own_seat() {
             let Ok(PanePlace { session, pane }) = self.here_place() else {
                 return User::Untold;
             };
-            return match session.own_key() {
-                Some(key) => User::Own { session: key, named: session.name, pane },
-                None => User::Untold,
-            };
+            let key = seat.session;
+            assert_eq!(session.own_key(), Some(key), "here_place is of the seat's own session");
+            return User::Own { session: key, named: session.name, pane };
         }
         let Some(session) = self.here().filter(|_| self.going().is_none()) else {
             return User::Untold;

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -283,6 +283,7 @@ impl User {
                 });
                 let away = away.map(|_| format!("{AWAY_VAR} says it asked from another machine"));
                 let said: Vec<String> = [asked, own, away].into_iter().flatten().collect();
+                assert!(said.len() >= 2, "the arms above take each place alone, and none");
                 Err(said.join(", and "))
             },
         }
@@ -290,10 +291,19 @@ impl User {
 }
 
 /// `OWN_VAR` as `name_in` spells it, of the pane `pane` of the own session
-/// `session`, named `named`.
+/// `session`, named `named`: as `Asked::new` takes it, and `own_read` reads
+/// it back.
 fn own_spelled(session: OwnKey, named: &SessionName, pane: u32) -> String {
-    let made = session.made.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    assert_ne!(pane, 0, "Asked::new takes no own pane of id 0");
+    let made = made_nanos(session.made).expect("Asked::new takes no own session made then");
     format!("{}:{made}:{pane}:{named}", session.id)
+}
+
+/// When an own session was made, `made`, in nanoseconds since the epoch, as
+/// luneta's own multiplexer names it in the variables of its panes and
+/// `own_read` reads it: none before the epoch, nor past what a `u64` holds.
+fn made_nanos(made: SystemTime) -> Option<u64> {
+    u64::try_from(made.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 
 /// The pane of an own session `spelled` names, as `own_spelled` spells it:
@@ -418,7 +428,8 @@ pub struct Asked {
 
 impl Asked {
     /// The turn of `words`, as `Asked` has it, or why not: `cwd` is by no
-    /// absolute path, or the words are only white space.
+    /// absolute path, or the words are only white space, or `user` is in an
+    /// own pane of id 0, or of a session made at a time `OWN_VAR` cannot say.
     pub fn new(
         cwd: Option<PathBuf>,
         words: &str,
@@ -434,6 +445,15 @@ impl Asked {
         let words = words.trim();
         if words.is_empty() {
             return Err("words: nothing asked".to_owned());
+        }
+        if let User::Own { session, pane, .. } = &user {
+            if *pane == 0 {
+                return Err("user: 0 is no own pane's id".to_owned());
+            }
+            if made_nanos(session.made).is_none() {
+                let id = session.id;
+                return Err(format!("user: own session {id} was made at no time {OWN_VAR} says"));
+            }
         }
         Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
@@ -464,9 +484,6 @@ impl Asked {
                 let session = session.ok_or("user: an own pane of no session")?;
                 let session = OwnKey::of(&session).map_err(|why| format!("user: {why}"))?;
                 let named = SessionName::running(&named).map_err(|why| format!("user: {why}"))?;
-                if pane == 0 {
-                    return Err("user: 0 is no own pane's id".to_owned());
-                }
                 User::Own { session, named, pane }
             },
         };
@@ -990,7 +1007,8 @@ mod tests {
     /// none is invalid: one in a directory by no absolute path, of words
     /// that are only white space, that resumes a session by no id of one,
     /// that names your pane in a session by a name zellij does not take, or
-    /// whose turn is of the key of the turn before it.
+    /// an own pane of no session, of id 0, or of a session made before the
+    /// epoch, or whose turn is of the key of the turn before it.
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
@@ -1007,6 +1025,8 @@ mod tests {
             let asked = Asked::new(None, "close it", None, row, User::Untold, turn(), CLAUDE);
             asked.unwrap().asked(None)
         };
+        let made_at = Some((UNIX_EPOCH - Duration::from_secs(1)).into());
+        let made_before = Some(crate::api::OwnSession { id: 3, made_at });
         let invalid = [
             AskRequest { cwd: Some(String::new()), ..request() },
             AskRequest { cwd: Some("w".to_owned()), ..request() },
@@ -1018,6 +1038,7 @@ mod tests {
             },
             AskRequest { user: Some(own_asked(|own| own.session = None)), ..request() },
             AskRequest { user: Some(own_asked(|own| own.pane = 0)), ..request() },
+            AskRequest { user: Some(own_asked(|own| own.session = made_before)), ..request() },
             AskRequest { user: Some(own_asked(|own| own.named = "a/b".to_owned())), ..request() },
             AskRequest { turn: 7, before: Some(7), ..request() },
             AskRequest { agents: Some(99), ..request() },

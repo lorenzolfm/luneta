@@ -58,7 +58,7 @@ use lunetad::api::{agent, Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
 use lunetad::closes::Whose;
 use lunetad::mux::own::server::{self, Listing};
-use lunetad::mux::{Called, Client, OwnKey, PaneId, ZellijPane};
+use lunetad::mux::{self, Called, Client, OwnKey, PaneId, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::turns::{self, IntoPanes};
@@ -108,8 +108,9 @@ pub fn address(spelled: &str) -> Result<Address, String> {
     Ok(Address::Session(spelled.to_owned()))
 }
 
-/// The sessions that run on this machine, zellij's and luneta's own, whose
-/// names are of one namespace.
+/// The sessions that run on this machine, zellij's and luneta's own. A name
+/// is meant for one of them, but each multiplexer makes sessions by names it
+/// alone checks, so one of each can run by a name.
 struct Running {
     /// Each by its name and when it started, as their sockets say.
     zellij: Vec<(SessionName, SystemTime)>,
@@ -125,12 +126,17 @@ impl Running {
         Ok(Running { zellij, own })
     }
 
-    /// Which session runs by the name `session`, or that none does.
+    /// Which session runs by the name `session`, or that none does, or that
+    /// one of each multiplexer does, of which luneta takes neither, as
+    /// `Called::named` takes neither.
     fn whose(&self, session: &str) -> Result<Whose, String> {
-        if let Some(own) = self.own.iter().find(|own| own.name.as_str() == session) {
-            return Ok(Whose::Own(own.key()));
+        let own = self.own.iter().find(|own| own.name.as_str() == session);
+        let zellij = started(session, &self.zellij);
+        match (own, zellij) {
+            (Some(_), Ok(_)) => Err(mux::two_named(session)),
+            (Some(own), Err(_)) => Ok(Whose::Own(own.key())),
+            (None, zellij) => zellij.map(Whose::Zellij),
         }
-        started(session, &self.zellij).map(Whose::Zellij)
     }
 
     /// The names of the sessions, of both kinds.
@@ -363,8 +369,8 @@ pub fn open(what: &Opening, folder: &Path) -> ExitCode {
 
 /// The pane this runs in, as `seat` tells it, where there is no other: none
 /// outside zellij. Or why none is to be had.
-fn seat_here(folder: &Path) -> Result<Option<Pane>, String> {
-    seat(listed(folder).as_deref(), &Running::now()?)?.pane()
+fn seat_here(folder: &Path, running: &Running) -> Result<Option<Pane>, String> {
+    seat(listed(folder).as_deref(), running)?.pane()
 }
 
 /// Whether a pane this opens may run `command`, as `runs` says: in luneta's
@@ -444,13 +450,14 @@ fn pane(
     folder: &Path,
 ) -> Result<String, String> {
     may_run(command)?;
+    let running = Running::now()?;
     let beside = match beside {
         Some(beside) => Some(beside.clone()),
-        None => seat_here(folder)?,
+        None => seat_here(folder, &running)?,
     };
     let Pane { session, pane } =
         beside.ok_or("this runs in no pane of zellij: name one to open beside with --beside")?;
-    if let Whose::Own(_) = Running::now()?.whose(&session)? {
+    if let Whose::Own(_) = running.whose(&session)? {
         return Err(one_pane(&session));
     }
     let cwd = directory(cwd)?;
@@ -471,11 +478,12 @@ fn tab(
 ) -> Result<String, String> {
     const UNNAMED: &str = "this runs in no pane of zellij: name a --session";
     may_run(command)?;
+    let running = Running::now()?;
     let session = match session {
         Some(session) => session.to_owned(),
-        None => seat_here(folder)?.ok_or(UNNAMED)?.session,
+        None => seat_here(folder, &running)?.ok_or(UNNAMED)?.session,
     };
-    Running::now()?.whose(&session)?;
+    running.whose(&session)?;
     let (name, command) = (name.map(str::to_owned), command.to_vec());
     let tab = Tab { cwd: directory(cwd)?, name, command };
     let open = Open::Tab { session: session_named(&session)?, tab, alone_since: None };
@@ -548,19 +556,20 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
         match whose {
             (Whose::Zellij(_), Whose::Zellij(_)) => zellij::taken(&at, &to, pane),
             (Whose::Own(_), Whose::Own(_)) => Ok(Called::named(&at)?.mux().went(&to, pane)?),
-            (Whose::Zellij(_), Whose::Own(_)) | (Whose::Own(_), Whose::Zellij(_)) => {
-                Err(across(&at, &to, matches!(whose.0, Whose::Own(_))))
-            },
+            (at_whose @ Whose::Zellij(_), Whose::Own(_))
+            | (at_whose @ Whose::Own(_), Whose::Zellij(_)) => Err(across(&at, at_whose, &to)),
         }
     });
     said(went.map(|()| String::new()))
 }
 
-/// Why `go` takes no client from `at` to `to`, of the other multiplexer: the
-/// one luneta's own client is in, where `own` says, or zellij's.
-fn across(at: &SessionName, to: &SessionName, own: bool) -> String {
-    let (at_is, to_is) =
-        if own { ("an own session", "zellij's") } else { ("zellij's", "an own one") };
+/// Why `go` takes no client from `at`, the session `whose` says, to `to`, of
+/// the other multiplexer.
+fn across(at: &SessionName, whose: Whose, to: &SessionName) -> String {
+    let (at_is, to_is) = match whose {
+        Whose::Own(_) => ("an own session", "zellij's"),
+        Whose::Zellij(_) => ("zellij's", "an own one"),
+    };
     format!(
         "{at} is {at_is} and {to} is {to_is}: luneta's own client and zellij's are two, and `go` \
          moves a client between sessions of one multiplexer; luneta's sidebar takes the user \
@@ -823,6 +832,10 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
             seats.map(|unread| Told { agents: &listed.agents, unread })
         },
     };
+    if let Err(why) = agents.map_or(Ok(()), own_placed) {
+        eprintln!("luneta: {why}, so a close cannot tell which agents it ends, and closes nothing");
+        return ExitCode::FAILURE;
+    }
     let here = match seat(agents, &running) {
         Ok(here) => here,
         Err(why) => {
@@ -1006,9 +1019,25 @@ fn says(act: &Act) -> String {
     }
 }
 
+/// That each of `agents` in an own pane names its session by a key that
+/// reads, as `spot` reads it. Or why one does not: `spot` would place it in
+/// no session, and a close would not say it ends it.
+fn own_placed(agents: &[Agent]) -> Result<(), String> {
+    for agent in agents {
+        let Some(agent::Pane::Own(own)) = &agent.pane else { continue };
+        let pane = own.pane;
+        let unsessioned = || format!("lunetad lists an agent in own pane {pane} of no session");
+        let session = own.session.as_ref().ok_or_else(unsessioned)?;
+        OwnKey::of(session)
+            .map_err(|why| format!("lunetad lists an agent in own pane {pane}, and {why}"))?;
+    }
+    Ok(())
+}
+
 /// Where `agent` runs, by the name its session has now among `running` and
 /// its pane's id: none in no pane, nor where luneta cannot tell which session
-/// that is.
+/// that is. A close has `own_placed` refuse an own pane's agent whose session
+/// does not read, so that one is never left out of its plan here.
 fn spot<'a>(agent: &'a Agent, running: &'a Running) -> Option<(&'a str, u32)> {
     match agent.pane.as_ref()? {
         agent::Pane::Zellij(zellij) => zellij_spot(zellij),
@@ -1170,6 +1199,24 @@ mod tests {
         assert_eq!(address(":3"), session(":3"));
         assert!(address("").is_err());
         assert!(pane_address("work").is_err());
+    }
+
+    /// A close places each agent lunetad lists in an own pane by its session,
+    /// or closes nothing, as it could not say it ends one it cannot place:
+    /// one of no session, of id 0, or made at no time it says.
+    #[test]
+    fn a_close_places_each_agent_in_an_own_pane_or_closes_nothing() {
+        let in_own = |session| {
+            let pane = Some(agent::Pane::Own(lunetad::api::Own { session, pane: 2 }));
+            Agent { pane, ..Agent::default() }
+        };
+        let session = |id, made_at| Some(lunetad::api::OwnSession { id, made_at });
+        let made = || Some(SystemTime::UNIX_EPOCH.into());
+        assert_eq!(own_placed(&[Agent::default(), in_own(session(3, made()))]), Ok(()));
+        for unread in [None, session(0, made()), session(3, None)] {
+            let refused = own_placed(&[Agent::default(), in_own(unread)]);
+            assert!(refused.is_err_and(|why| why.contains("own pane 2")), "{unread:?}");
+        }
     }
 
     /// zellij names no client it moved: of a list before and after a turn of

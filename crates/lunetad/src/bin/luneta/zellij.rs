@@ -108,31 +108,33 @@ fn seat_in(
     here: PaneVars,
     own: Option<(OwnKey, u32)>,
 ) -> Result<Option<Seat>, String> {
-    let in_pane = match (here.named(), own) {
-        (Some(session), _) => Some(format!("a pane of {session}")),
-        (None, Some((session, pane))) => Some(format!("pane {pane} of own session {}", session.id)),
-        (None, None) => None,
-    };
-    match (asked, in_pane) {
-        (Some((_, user)), Some(in_pane)) => {
-            let asked = match user {
-                User::Pane { session: from, pane } => {
-                    format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
-                },
-                User::Own { named, pane, .. } => {
-                    format!("{OWN_VAR} names {named}:{pane}, a pane luneta's ask box asked from")
-                },
-                User::Away => {
-                    format!("{AWAY_VAR} says luneta's ask box asked from another machine")
-                },
-                User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
-            };
-            Err(format!("{asked}, and this runs in {in_pane}"))
+    match (asked, here.named(), own) {
+        (Some((_, user)), Some(session), _) => {
+            Err(asked_in_pane(&user, &format!("a pane of {session}")))
         },
-        (Some((turn, user)), None) => Ok(Some(Seat::Asked { turn, user })),
-        (None, Some(_)) if here.named().is_some() => Ok(here.pane_named().map(Seat::Opened)),
-        (None, _) => Ok(own.map(|(session, pane)| Seat::Own { session, pane })),
+        (Some((_, user)), None, Some((session, pane))) => {
+            Err(asked_in_pane(&user, &format!("pane {pane} of own session {}", session.id)))
+        },
+        (Some((turn, user)), None, None) => Ok(Some(Seat::Asked { turn, user })),
+        (None, Some(_), _) => Ok(here.pane_named().map(Seat::Opened)),
+        (None, None, own) => Ok(own.map(|(session, pane)| Seat::Own { session, pane })),
     }
+}
+
+/// Why `seat_in` takes no seat where luneta's ask box says you are where
+/// `user` says, and this runs `in_pane` of a multiplexer.
+fn asked_in_pane(user: &User, in_pane: &str) -> String {
+    let asked = match user {
+        User::Pane { session: from, pane } => {
+            format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
+        },
+        User::Own { named, pane, .. } => {
+            format!("{OWN_VAR} names {named}:{pane}, a pane luneta's ask box asked from")
+        },
+        User::Away => format!("{AWAY_VAR} says luneta's ask box asked from another machine"),
+        User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
+    };
+    format!("{asked}, and this runs in {in_pane}")
 }
 
 /// Why zellij's client must not attach to `session` from the terminal luneta

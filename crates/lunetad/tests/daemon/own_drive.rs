@@ -3,7 +3,8 @@
 //! knows the pane by its ids, which a rename keeps, opens a tab with no
 //! client there, refuses a pane beside another and a turn, which an own
 //! session's tabs have none of yet, takes a client among own sessions and
-//! not across to zellij's, and closes as it closes in zellij's.
+//! not across to zellij's, closes as it closes in zellij's, and takes no
+//! session by a name both multiplexers run one by.
 
 use std::path::Path;
 use std::process::Output;
@@ -186,6 +187,27 @@ fn go_takes_a_client_among_own_sessions_and_not_across_to_zellij_s() {
     let across = why(&luneta(&owned, &in_work, &["go", "zellij-s"]));
     assert!(across.contains("luneta's own client and zellij's are two"), "{across}");
     assert_eq!(clients_on(&owned), [(client, work.pane)]);
+}
+
+/// A name a zellij session and an own one share, as each multiplexer checks
+/// only its own, names neither to the CLI: a close of it closes nothing, nor
+/// does a tab open in it, and the own session runs on.
+#[test]
+fn a_name_both_multiplexers_run_a_session_by_is_neither_s() {
+    let owned = Owned::new();
+    owned.make("work").unwrap();
+    owned.listed("work");
+    let _zellij = owned.host.serve("work");
+    eventually("both are on the host", || {
+        let host = owned.host.host();
+        let named = host.sessions.iter().filter(|session| session.name == "work").count();
+        (named == 2).then_some(())
+    });
+    for args in [&["close", "work"][..], &["open", "tab", "--session", "work"]] {
+        let refused = why(&luneta(&owned, &[], args));
+        assert!(refused.contains("two sessions are named work"), "{args:?}: {refused}");
+    }
+    assert_eq!(owned.listing().sessions.len(), 1);
 }
 
 /// `open session` in an own pane names its session as none of either
