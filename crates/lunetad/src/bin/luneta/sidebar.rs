@@ -69,7 +69,7 @@ use lunetad::closes::Whose;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::attach::To;
-use lunetad::mux::own::{OwnKey, OwnMade, OwnPane};
+use lunetad::mux::own::{OwnClientId, OwnKey, OwnMade, OwnPane};
 use lunetad::prunes;
 use lunetad::seats::{seated, Where};
 use lunetad::transcripts::SessionId;
@@ -404,19 +404,29 @@ pub struct PanePlace {
 }
 
 /// luneta's client of an own session, as its server says where it is: in this
-/// session, as no other is, and on this pane, once the server has said.
+/// session, as no other is; and once the server has taken it in, which it
+/// says first, which client it is, and then which pane it is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OwnSeat {
     pub session: OwnKey,
-    pub pane: Option<NonZeroU32>,
+    taken: Option<TakenIn>,
 }
 
 impl OwnSeat {
     /// The pane it is on, once its server has said.
     #[must_use]
     pub fn on(self) -> Option<OwnPane> {
-        self.pane.map(|id| OwnPane { session: self.session, id })
+        Some(OwnPane { session: self.session, id: self.taken?.pane? })
     }
+}
+
+/// luneta's client of an own session, as its server took it in: by the id it
+/// gave it, which the ask box names to its agent, and on this pane, once the
+/// server has said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TakenIn {
+    client: OwnClientId,
+    pane: Option<NonZeroU32>,
 }
 
 /// What luneta runs beside the sidebar, as the sidebar follows it.
@@ -2247,20 +2257,34 @@ impl Sidebar {
     /// is. What luneta knew of zellij's client, and its title, are another's.
     pub fn attaching(&mut self, session: OwnKey) {
         self.on = Machine::Local;
-        self.beside = Beside::Own(OwnSeat { session, pane: None });
+        self.beside = Beside::Own(OwnSeat { session, taken: None });
         self.own.anew();
         self.unfold_own(session);
         self.rebuild();
     }
 
+    /// luneta's client of an own session is `client`, as its server says as
+    /// it takes it in, which the ask box names to its agent. The server says
+    /// so once, before it says where the client is, as the client checks.
+    pub fn attached_own(&mut self, client: OwnClientId) {
+        let Beside::Own(seat) = &mut self.beside else {
+            unreachable!("only a client of an own session is taken in by its server");
+        };
+        assert_eq!(seat.taken, None, "a client of an own session is taken in once");
+        seat.taken = Some(TakenIn { client, pane: None });
+    }
+
     /// luneta's client of an own session is on `pane` now, as its server
     /// says, which unfolds its session where it went to another.
     pub fn went_own(&mut self, pane: OwnPane) {
-        let before = self.own_seat();
-        assert!(before.is_some(), "only a client of an own session goes among them");
+        let Some(OwnSeat { session: was, taken: Some(TakenIn { client, .. }) }) = self.own_seat()
+        else {
+            unreachable!("only a client of an own session its server took in goes among them");
+        };
         let session = pane.session;
-        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.id) });
-        if before.is_some_and(|before| before.session != session) {
+        let taken = Some(TakenIn { client, pane: Some(pane.id) });
+        self.beside = Beside::Own(OwnSeat { session, taken });
+        if was != session {
             self.unfold_own(session);
         }
         self.rebuild();
@@ -2416,16 +2440,20 @@ impl Sidebar {
     /// luneta's zellij is on, by its session's name now, while it is on its
     /// way to no session, and on a pane, not a plugin's; or on the pane of an
     /// own session luneta's client of one is on, as its server says, by the
-    /// session's key and its name now; or where luneta cannot tell.
+    /// session's key and its name now, with which client that is, for a go
+    /// to take it whoever typed last; or where luneta cannot tell.
     pub fn user(&self, machine: &Machine) -> User {
         if self.on != *machine {
             return User::Away;
         }
         if let Some(seat) = self.own_seat() {
-            let (Some(pane), Some(listed)) = (seat.on(), self.own_listed(seat.session)) else {
+            let listed = self.own_listed(seat.session);
+            let (Some(pane), Some(TakenIn { client, .. }), Some(listed)) =
+                (seat.on(), seat.taken, listed)
+            else {
                 return User::Untold;
             };
-            return User::Own { pane, named: listed.name };
+            return User::Own { pane, named: listed.name, client };
         }
         let Some(session) = self.here().filter(|_| self.going().is_none()) else {
             return User::Untold;
@@ -2516,7 +2544,7 @@ impl Sidebar {
     /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
         if let Some(seat) = self.own_seat() {
-            let pane = seat.pane.ok_or(NO_HERE_PANE)?.get();
+            let pane = seat.on().ok_or(NO_HERE_PANE)?.id.get();
             let session = self.own_listed(seat.session).ok_or(NO_HERE_PANE)?;
             return Ok(PanePlace { session, pane });
         }
@@ -10114,12 +10142,15 @@ mod tests {
         sidebar.attaching(key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         assert_eq!(sidebar.user(&Machine::Local), User::Untold);
+        let client = OwnClientId::new(4).unwrap();
+        sidebar.attached_own(client);
+        assert_eq!(sidebar.user(&Machine::Local), User::Untold);
         sidebar.went_own(OwnPane::new(key, 1).unwrap());
         let twin = Listed::new_own("twin", moment(20_000), 1);
         assert_eq!(sidebar.here(), None);
         assert_eq!(sidebar.here_place(), Ok(PanePlace { session: twin.clone(), pane: 1 }));
-        let user = User::Own { pane: OwnPane::new(key, 1).unwrap(), named: session_name("twin") };
-        assert_eq!(sidebar.user(&Machine::Local), user);
+        let (pane, named) = (OwnPane::new(key, 1).unwrap(), session_name("twin"));
+        assert_eq!(sidebar.user(&Machine::Local), User::Own { pane, named, client });
         assert_eq!(sidebar.user(&Machine::Remote(nixos())), User::Away);
         let zellij = sidebar.plan(&Machine::Local, &listed("twin", 10), Deletes::Session);
         let whose = Whose::Zellij(moment(10_000));
@@ -10144,6 +10175,7 @@ mod tests {
         let made = OwnMade::of(moment(30_000)).unwrap();
         let key = OwnKey { id: OwnId::new(1).unwrap(), made };
         sidebar.attaching(key);
+        sidebar.attached_own(OwnClientId::new(4).unwrap());
         sidebar.went_own(OwnPane::new(key, 1).unwrap());
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         sidebar.heard(host(vec![own_session("new", 1, 30, panes())], Vec::new()));

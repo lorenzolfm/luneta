@@ -141,6 +141,12 @@ impl Owned {
     /// A client of the server, attached to the own session the daemon says it
     /// made.
     pub fn attach(&self, made: &NewOwnResponse) -> Attached {
+        self.attach_saying(made, Vec::new())
+    }
+
+    /// A client of the server, attached to the own session the daemon says it
+    /// made, that says `said` once there.
+    pub fn attach_saying(&self, made: &NewOwnResponse, said: Vec<mux_api::ToServer>) -> Attached {
         let (session, made_at) = (made.session, made.made_at);
         let socket = self.socket();
         let (hang_up, to_go) = tokio::sync::oneshot::channel::<()>();
@@ -154,18 +160,23 @@ impl Owned {
                 let hello = mux_api::Hello { to, size, colours: None };
                 let hello = Some(mux_api::to_server::Event::Hello(hello));
                 let hello = mux_api::ToServer { event: hello };
-                let said = tokio_stream::iter([hello]).chain(tokio_stream::pending());
+                let said = std::iter::once(hello).chain(said);
+                let said = tokio_stream::iter(said).chain(tokio_stream::pending());
                 let mut heard = mux_client(socket).await.attach(said).await.unwrap().into_inner();
-                let attached = heard.message().await.unwrap();
-                came.send(attached.is_some()).unwrap();
+                let attached = heard.message().await.unwrap().and_then(|said| match said.event {
+                    Some(mux_api::to_client::Event::Attached(attached)) => Some(attached.client),
+                    _ => None,
+                });
+                came.send(attached).unwrap();
                 tokio::select! {
                     _ = to_go => {},
                     () = async { while let Ok(Some(_)) = heard.message().await {} } => {},
                 }
             });
         });
-        assert_eq!(arrival.recv_timeout(Duration::from_secs(15)), Ok(true), "the client came");
-        Attached { hang_up: Some(hang_up), attaching: Some(attaching) }
+        let came = arrival.recv_timeout(Duration::from_secs(15));
+        let Ok(Some(client)) = came else { panic!("the client came: {came:?}") };
+        Attached { client, hang_up: Some(hang_up), attaching: Some(attaching) }
     }
 
     /// The pid of what the pane `pane` runs, as its server lists it.
@@ -180,8 +191,9 @@ impl Owned {
     }
 }
 
-/// A client of the server, which hangs up as it drops.
+/// A client of the server, by the id it gave it, which hangs up as it drops.
 pub struct Attached {
+    pub client: u64,
     hang_up: Option<tokio::sync::oneshot::Sender<()>>,
     attaching: Option<thread::JoinHandle<()>>,
 }
@@ -594,6 +606,32 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
     assert_eq!(screen.pane, made.pane);
 }
 
+/// A socket no one but root may connect to, until it drops: then as open as
+/// it was, even where a test fails first, for `Owned` to reach the server as
+/// it drops, and end it.
+struct Shut {
+    path: PathBuf,
+    was: fs::Permissions,
+}
+
+impl Shut {
+    fn new(path: &Path) -> Shut {
+        let was = fs::metadata(path).unwrap().permissions();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        Shut { path: path.to_owned(), was }
+    }
+}
+
+impl Drop for Shut {
+    fn drop(&mut self) {
+        let opened = fs::set_permissions(&self.path, self.was.clone());
+        // A test failing already says why: a second panic would abort it.
+        if !thread::panicking() {
+            opened.unwrap();
+        }
+    }
+}
+
 /// An agent that runs in an own pane is there, as the variables the server
 /// gives what runs in its panes name it: by the session's id and the pane's.
 /// `luneta agents` names it by its session's name, or by its ids where the
@@ -624,8 +662,7 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     // A socket luneta may not connect to is a server it cannot reach: to all
     // but root, which connects whatever the socket's mode.
     let socket = owned.socket();
-    let allowed = fs::metadata(&socket).unwrap().permissions();
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o000)).unwrap();
+    let shut = Shut::new(&socket);
     let refused = UnixStream::connect(&socket).map(drop).map_err(|error| error.kind());
     assert_eq!(refused, Err(ErrorKind::PermissionDenied), "root reaches any socket");
     let unreached = answered(owned.host.vars().command(LUNETA).arg("agents"));
@@ -637,12 +674,9 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
 
     // Where the daemon cannot be reached either, its failure is all luneta
     // says: what luneta-mux could not do is said only beside the agents.
-    let daemon = owned.host.folder().join(lunetad::folder::SOCKET);
-    let open = fs::metadata(&daemon).unwrap().permissions();
-    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o000)).unwrap();
+    let daemon = Shut::new(&owned.host.folder().join(lunetad::folder::SOCKET));
     let alone = answered(owned.host.vars().command(LUNETA).arg("agents"));
-    fs::set_permissions(&daemon, open).unwrap();
-    fs::set_permissions(&socket, allowed).unwrap();
+    drop((daemon, shut));
     let why = String::from_utf8(alone.stderr).unwrap();
     assert!(!alone.status.success(), "{why}");
     assert!(alone.stdout.is_empty(), "{why}");

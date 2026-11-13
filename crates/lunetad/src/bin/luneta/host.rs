@@ -2846,7 +2846,8 @@ impl App {
         };
         let user = self.sidebar.user(&ask.machine());
         // Whether it typed there before or not: another client may have
-        // since, and the agent acts well after the nudge.
+        // since, and the agent acts well after the nudge. An own session's
+        // server needs none: the agent is told which client is luneta's.
         if matches!(user, User::Pane { .. })
             && let Ok((client, seat)) = self.seated()
         {
@@ -3178,17 +3179,19 @@ impl App {
     }
 
     /// Takes in what luneta-mux said to luneta's client of an own session:
-    /// where it is, which the sidebar has it at, and does what waited on its
-    /// coming there, where it is where it went, as `Phase::went` says; what
-    /// its pane shows; a go it refused, which leaves what waited on it undone;
-    /// and its end, as `own_ended` says.
+    /// which client it is, and where it is, which the sidebar has it as and
+    /// at, and does what waited on its coming there, where it is where it
+    /// went, as `Phase::went` says; what its pane shows; a go it refused,
+    /// which leaves what waited on it undone; and its end, as `own_ended`
+    /// says.
     fn own_heard(&mut self, heard: Heard) -> io::Result<()> {
         let Right::Own(own) = &mut self.right else {
             unreachable!("only an own client hears its server");
         };
         own.attached.heard(&heard);
         match heard {
-            Heard::Attached | Heard::Frame(_) => {},
+            Heard::Attached(client) => self.sidebar.attached_own(client),
+            Heard::Frame(_) => {},
             Heard::Went(went) => {
                 let after = own.phase.went(&went);
                 self.sidebar.went_own(went.pane);

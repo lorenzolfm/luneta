@@ -11,8 +11,9 @@
 //! send it the turn: the pane luneta's zellij is on, where that is of zellij
 //! on the agent's machine, which luneta's commands take for the one they run
 //! in, by `ASKED_VAR`; or the pane of an own session luneta's client is on,
-//! by `OWN_VAR`; or another machine, by `AWAY_VAR`, where a close takes none
-//! of your panes along, and `go` moves none of your clients.
+//! and which client that is, for `go` to move it, by `OWN_VAR`; or another
+//! machine, by `AWAY_VAR`, where a close takes none of your panes along, and
+//! `go` moves none of your clients.
 
 use std::env;
 use std::ffi::OsString;
@@ -30,7 +31,7 @@ use crate::api::ask_request::{self, UserOwnPane, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::{self, OwnId, OwnKey, OwnMade, OwnPane, SessionName};
+use crate::mux::{self, OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, SessionName};
 use crate::{git, program, Harness};
 
 /// The model the agent runs on: one that works out what words point at, and
@@ -53,10 +54,12 @@ pub const LOOK: Duration = Duration::from_millis(5);
 pub const ASKED_VAR: &str = "LUNETA_PANE";
 
 /// What names the pane of an own session you asked luneta's ask box from, in
-/// the variables of the agent it runs, as `<session>:<made>:<pane>:<name>`:
-/// the session by its id and when its server made it, in nanoseconds since
-/// the epoch, which a rename keeps, the pane by its id, and last the name
-/// the session had as the turn started, which may hold a `:` of its own.
+/// the variables of the agent it runs, as
+/// `<session>:<made>:<pane>:<client>:<name>`: the session by its id and when
+/// its server made it, in nanoseconds since the epoch, which a rename keeps,
+/// the pane by its id, luneta's client by the id its server gave it, which a
+/// go takes, and last the name the session had as the turn started, which
+/// may hold a `:` of its own.
 pub const OWN_VAR: &str = "LUNETA_OWN_PANE";
 
 /// What says, in the variables of the agent of luneta's ask box, that you
@@ -210,8 +213,9 @@ pub enum User {
     Pane { session: SessionName, pane: u32 },
     /// In the own pane `pane`, on the agent's machine, where luneta's client
     /// of an own session is, of the session `named` as the turn started,
-    /// which the agent is told.
-    Own { pane: OwnPane, named: SessionName },
+    /// which the agent is told; and that client, `client`, which a go the
+    /// agent asks for takes, whoever typed last in the session.
+    Own { pane: OwnPane, named: SessionName, client: OwnClientId },
     /// On another machine, where luneta's zellij is: in none of the agent's
     /// machine's panes.
     Away,
@@ -227,7 +231,9 @@ impl User {
         command.env_remove(ASKED_VAR).env_remove(OWN_VAR).env_remove(AWAY_VAR);
         match self {
             User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
-            User::Own { pane, named } => command.env(OWN_VAR, own_spelled(*pane, named)),
+            User::Own { pane, named, client } => {
+                command.env(OWN_VAR, own_spelled(*pane, named, *client))
+            },
             User::Away => command.env(AWAY_VAR, AWAY_SET),
             User::Untold => command,
         };
@@ -242,10 +248,11 @@ impl User {
                 let session = session.to_string();
                 Some(ask_request::User::Pane(UserPane { session, pane: *pane }))
             },
-            User::Own { pane, named } => Some(ask_request::User::Own(UserOwnPane {
+            User::Own { pane, named, client } => Some(ask_request::User::Own(UserOwnPane {
                 session: Some(pane.session.into()),
                 pane: pane.id.get(),
                 named: named.to_string(),
+                client: client.get(),
             })),
         }
     }
@@ -289,22 +296,24 @@ impl User {
 }
 
 /// `OWN_VAR` as `name_in` spells it, of the own pane `pane`, of the session
-/// named `named`: as `own_read` reads it back.
-fn own_spelled(pane: OwnPane, named: &SessionName) -> String {
+/// named `named`, with luneta's client there `client`: as `own_read` reads it
+/// back.
+fn own_spelled(pane: OwnPane, named: &SessionName, client: OwnClientId) -> String {
     let made = pane.session.made.nanos();
-    format!("{}:{made}:{}:{named}", pane.session.id, pane.id)
+    format!("{}:{made}:{}:{client}:{named}", pane.session.id, pane.id)
 }
 
 /// The pane of an own session `spelled` names, as `own_spelled` spells it:
 /// none where it does not read, as where an id is 0, or the name is one no
 /// session takes.
 fn own_read(spelled: &str) -> Option<User> {
-    let mut parts = spelled.splitn(4, ':');
+    let mut parts = spelled.splitn(5, ':');
     let id = OwnId::new(parts.next()?.parse().ok()?)?;
     let made = OwnMade::from_nanos(parts.next()?.parse().ok()?);
     let pane = OwnPane { session: OwnKey { id, made }, id: parts.next()?.parse().ok()? };
+    let client = OwnClientId::new(parts.next()?.parse().ok()?)?;
     let named = SessionName::running(parts.next()?).ok()?;
-    Some(User::Own { pane, named })
+    Some(User::Own { pane, named, client })
 }
 
 /// Where you are, as the variables of the agent of luneta's ask box spell it:
@@ -460,11 +469,12 @@ impl Asked {
                 let session = SessionName::running(&session).map_err(|why| format!("user: {why}"))?;
                 User::Pane { session, pane }
             },
-            Some(ask_request::User::Own(UserOwnPane { session, pane, named })) => {
+            Some(ask_request::User::Own(UserOwnPane { session, pane, named, client })) => {
                 let pane = OwnPane::of(&crate::api::Own { session, pane })
                     .map_err(|why| format!("user: {why}"))?;
                 let named = SessionName::running(&named).map_err(|why| format!("user: {why}"))?;
-                User::Own { pane, named }
+                let client = OwnClientId::new(client).ok_or("user: 0 is no client's id")?;
+                User::Own { pane, named, client }
             },
         };
         let turn = Turn::new(turn, before)?;
@@ -564,7 +574,7 @@ fn told(user: &User, agents: Harness, words: &str) -> String {
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
-        User::Own { pane, named } => format!(
+        User::Own { pane, named, .. } => format!(
             "[luneta: the user is in pane {named}:{}, of an own session, whose tabs hold a pane \
              each: `open pane` and `turn` fail there.]",
             pane.id
@@ -780,11 +790,12 @@ mod tests {
     }
 
     /// The pane `pane` of an own session named `named`, of id 3, made
-    /// `made` nanoseconds after the epoch.
+    /// `made` nanoseconds after the epoch, with luneta's client 7 on it.
     fn own_pane_made(named: &str, pane: u32, made: u64) -> User {
         let made = OwnMade::from_nanos(made);
         let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, pane).unwrap();
-        User::Own { pane, named: SessionName::running(named).unwrap() }
+        let client = OwnClientId::new(7).unwrap();
+        User::Own { pane, named: SessionName::running(named).unwrap(), client }
     }
 
     fn own_pane(named: &str, pane: u32) -> User {
@@ -929,7 +940,7 @@ mod tests {
         let at = |asked, away| Where { asked, own: None, away };
         let own = |own| Where { own: Some(own), ..Where::default() };
         assert_eq!(turn_in(key, before, Where::default()), Ok(Some((turn(), User::Untold))));
-        let read = turn_in(key, before, own("3:60000000005:12:a:b"));
+        let read = turn_in(key, before, own("3:60000000005:12:7:a:b"));
         assert_eq!(read, Ok(Some((turn(), own_pane_made("a:b", 12, 60_000_000_005)))));
         for (key, before) in [
             (Some(""), None),
@@ -940,13 +951,22 @@ mod tests {
         ] {
             assert!(turn_in(key, before, Where::default()).is_err(), "{key:?} {before:?}");
         }
-        for said in [at(Some("work:2"), None), at(None, Some("1")), own("3:60:12:work")] {
+        for said in [at(Some("work:2"), None), at(None, Some("1")), own("3:60:12:7:work")] {
             assert!(turn_in(None, None, said).is_err(), "{said:?}");
         }
-        for forged in ["", "3:60:12", "0:60:12:work", "3:60:0:work", "3:x:12:work", "3:60:12:a/b"] {
+        for forged in [
+            "",
+            "3:60:12:7",
+            "3:60:12:work",
+            "0:60:12:7:work",
+            "3:60:0:7:work",
+            "3:60:12:0:work",
+            "3:x:12:7:work",
+            "3:60:12:7:a/b",
+        ] {
             assert!(turn_in(key, before, own(forged)).is_err(), "{forged:?}");
         }
-        let twice = Where { asked: Some("work:2"), own: Some("3:60:12:work"), away: None };
+        let twice = Where { asked: Some("work:2"), own: Some("3:60:12:7:work"), away: None };
         assert!(turn_in(key, before, twice).is_err());
         for (asked, away) in [
             (Some(""), None),
@@ -988,7 +1008,8 @@ mod tests {
     /// that are only white space, that resumes a session by no id of one,
     /// that names your pane in a session by a name zellij does not take, or
     /// an own pane of no session, of id 0, or of a session made before the
-    /// epoch, or whose turn is of the key of the turn before it.
+    /// epoch, or with luneta's client there 0, or whose turn is of the key
+    /// of the turn before it.
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
@@ -1020,6 +1041,7 @@ mod tests {
             AskRequest { user: Some(own_asked(|own| own.pane = 0)), ..request() },
             AskRequest { user: Some(own_asked(|own| own.session = made_before)), ..request() },
             AskRequest { user: Some(own_asked(|own| own.named = "a/b".to_owned())), ..request() },
+            AskRequest { user: Some(own_asked(|own| own.client = 0)), ..request() },
             AskRequest { turn: 7, before: Some(7), ..request() },
             AskRequest { agents: Some(99), ..request() },
         ];

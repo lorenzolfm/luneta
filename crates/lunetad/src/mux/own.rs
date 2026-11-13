@@ -40,6 +40,30 @@ impl fmt::Display for OwnId {
     }
 }
 
+/// A client of the own sessions, by the id its server gave it, which it gives
+/// no other client: luneta's, which a go its ask box asks for takes. Never 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnClientId(NonZeroU64);
+
+impl OwnClientId {
+    /// The client `id` names, or none: 0 names none.
+    #[must_use]
+    pub fn new(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(OwnClientId)
+    }
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for OwnClientId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// When an own session was made, in nanoseconds since the epoch, as its
 /// server names it in the variables of its panes: never before 1970, nor
 /// past 2554.
