@@ -2,6 +2,7 @@
 //! do, as `drive` does it.
 
 use std::error::Error;
+use std::fmt;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -158,7 +159,11 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Info => ask(folder, daemon::running(folder), info),
         Command::Agents => {
             // Without the own sessions' names, an agent in one goes by its ids.
-            let own = server::sessions().unwrap_or_default();
+            let own = server::sessions().unwrap_or_else(|failure| {
+                let why = "own sessions go by their ids, as luneta-mux cannot list them";
+                eprintln!("luneta: {why}: {failure}");
+                Vec::new()
+            });
             ask(folder, daemon::running(folder), |daemon| agents(daemon, own))
         },
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
@@ -398,9 +403,9 @@ async fn agents(
 }
 
 /// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
-/// `<session>:<pane>` by the name it has among `own`, or as `own <session
-/// id>:<pane>` where `own` has none of its id made then, with `?` for an id
-/// its daemon does not say.
+/// `<session>:<pane>` by the name it has among `own`, or as `?:<pane> (own
+/// <session id>)` where `own` has none of its id made then, with `?` for an
+/// id its daemon does not say.
 pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
     match &agent.pane {
         Some(agent::Pane::Own(pane)) => {
@@ -408,7 +413,7 @@ pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
                 return own_seat(pane, own);
             }
             let id = pane.session.map_or_else(|| "?".to_owned(), |session| session.id.to_string());
-            format!("own {id}:{}", pane.pane)
+            unnamed_own(&id, pane.pane)
         },
         Some(agent::Pane::Zellij(_)) | None => seat(agent.zellij()),
     }
@@ -420,8 +425,15 @@ pub fn seat_of(agent: &Agent, own: &[Listing]) -> String {
 pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
     match own.iter().find(|listed| listed.key() == pane.session) {
         Some(named) => format!("{}:{}", named.name, pane.id),
-        None => format!("own {}:{}", pane.session.id, pane.id),
+        None => unnamed_own(&pane.session.id.to_string(), pane.id),
     }
+}
+
+/// The pane `pane` of the own session `id`, which goes by no name: `?` for
+/// the name, as `seat` has for a zellij session it cannot tell, so that no
+/// verb reads it as a pane of a session by a name.
+fn unnamed_own(id: &str, pane: impl fmt::Display) -> String {
+    format!("?:{pane} (own {id})")
 }
 
 /// Where an agent runs in `zellij`, as `<session>:<pane>`: `-` outside

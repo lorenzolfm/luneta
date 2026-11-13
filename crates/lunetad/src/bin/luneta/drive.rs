@@ -1269,6 +1269,17 @@ mod tests {
         assert!(pane_address("work").is_err());
     }
 
+    /// An agent in an own session that goes by no name is written so that no
+    /// verb reads it as a pane: `own 3:2` would be pane 2 of a zellij session
+    /// named `own 3`.
+    #[test]
+    fn an_own_pane_by_no_name_is_no_pane_address() {
+        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: mux::OwnMade::from_nanos(0) };
+        let seat = commands::own_seat(OwnPane::new(key, 2).unwrap(), &[]);
+        assert_eq!(seat, "?:2 (own 3)");
+        assert!(pane_address(&seat).is_err(), "{seat}");
+    }
+
     /// A close places each agent lunetad lists in an own pane by its session's
     /// key, and closes it with that session alone, whatever its name: or it
     /// closes nothing, as it could not say it ends one it cannot place: one of
