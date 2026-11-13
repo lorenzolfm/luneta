@@ -131,14 +131,14 @@ impl Server {
 }
 
 /// A runtime of one thread, for the questions of one question to the daemon.
-fn runtime() -> Result<Runtime, Failure> {
+pub(super) fn runtime() -> Result<Runtime, Failure> {
     let runtime = runtime::Builder::new_current_thread().enable_all().build();
     runtime.map_err(|error| Failure::Own(format!("no runtime: {error}")))
 }
 
 /// Why luneta-mux did not answer, as it said it, or the code it answered with
 /// where it said nothing.
-fn refused(status: &Status) -> Failure {
+pub(super) fn refused(status: &Status) -> Failure {
     match status.message() {
         "" => Failure::Own(status.code().description().to_owned()),
         said => Failure::Own(said.to_owned()),
@@ -161,7 +161,7 @@ pub fn socket() -> Result<PathBuf, Failure> {
 /// server left as it ended without taking it away. The client keeps to the
 /// one connection, and asks nothing once that is gone: the socket could have
 /// another server by then, which counts its ids from 1 again.
-async fn connect(
+pub(super) async fn connect(
     socket: &Path,
     answer: Option<Duration>,
 ) -> io::Result<Option<MuxClient<Channel>>> {
@@ -276,6 +276,14 @@ pub struct Listing {
     pub clients: Listed,
 }
 
+impl Listing {
+    /// The session as no other is.
+    #[must_use]
+    pub fn key(&self) -> OwnKey {
+        OwnKey { id: self.id, made: self.made }
+    }
+}
+
 /// The own sessions among `sessions`, as the server lists them, and why each
 /// that it leaves out does not read: one whose id or name another before it
 /// has is left out too, as the server gives each its own.
@@ -368,6 +376,17 @@ pub fn names() -> Result<Vec<String>, Failure> {
         return Ok(Vec::new());
     };
     Ok(server.listing()?.into_iter().map(|session| session.name).collect())
+}
+
+/// The own sessions that run, as the server lists them, by when it made
+/// each, its id and its name: none where no server runs. One that does not
+/// read is left out, as `followed` leaves it out.
+pub fn sessions() -> Result<Vec<Listing>, Failure> {
+    let Some(server) = Server::reached()? else {
+        return Ok(Vec::new());
+    };
+    let (listed, _) = read(server.listing()?);
+    Ok(listed)
 }
 
 /// Where a client goes among the own sessions.
@@ -508,10 +527,10 @@ impl Own {
     }
 }
 
-/// An own session made: its id, and its first tab's and pane's.
+/// An own session made: as no other is, and its first tab's and pane's ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Made {
-    pub session: OwnId,
+    pub session: OwnKey,
     pub tab: TabId,
     pub pane: u32,
 }
@@ -519,6 +538,8 @@ pub struct Made {
 /// Makes an own session named `name` of one tab, in `cwd`, that runs `runs`,
 /// and starts the server for it where none listens; or says why not. A
 /// server that ends as it is asked is waited for to go, and another started.
+/// When it made the session, that server says on the connection that made
+/// it, as the next would give its id to another.
 pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made, Failure> {
     let deadline = Instant::now() + MAKING;
     let request = api::NewSessionRequest {
@@ -539,7 +560,9 @@ pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made,
             Ok(made) => {
                 let session = OwnId::new(made.session);
                 let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
-                let session = session.ok_or_else(unread)?;
+                let id = session.ok_or_else(unread)?;
+                let made_at = made_of(&server.session(id)?, id).map_err(Failure::Unread)?;
+                let session = OwnKey { id, made: made_at };
                 return Ok(Made { session, tab: TabId(made.tab), pane: made.pane });
             },
             Err(status) if status.code() == Code::Unavailable => {

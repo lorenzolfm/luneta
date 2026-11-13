@@ -433,6 +433,9 @@ const _: () = {
     assert!(Top::moves(ISSUE).is_none(), "the issue box on a key the sidebar moves with");
 };
 
+/// Why the menu makes no own session on another machine.
+const OWN_HERE: &str = "menu: own sessions are of this machine alone, as yet";
+
 /// What a key of the New group opens, for the pane the menu is for, in the
 /// directory it works in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -444,6 +447,10 @@ pub enum New {
     /// A session, named for the directory, as the picker's directories are;
     /// or on a machine's header, for the home of its user.
     Session,
+    /// A session of luneta's own multiplexer, named as `Session` is: on this
+    /// machine's rows, as own sessions are of this machine alone. It stands
+    /// beside `Session` until zellij goes, when `Session` is an own one.
+    Own,
     /// A machine for lunetad to watch through ssh, by its destination, typed
     /// in a box: on any row.
     Machine,
@@ -451,13 +458,14 @@ pub enum New {
 
 impl New {
     /// Each, in the order the New group shows them.
-    const ALL: [New; 4] = [New::Pane, New::Tab, New::Session, New::Machine];
+    const ALL: [New; 5] = [New::Pane, New::Tab, New::Session, New::Own, New::Machine];
 
     const fn key(self) -> char {
         match self {
             New::Pane => 'p',
             New::Tab => 't',
             New::Session => 's',
+            New::Own => 'o',
             New::Machine => 'm',
         }
     }
@@ -468,6 +476,7 @@ impl New {
             New::Pane => "new pane",
             New::Tab => "new tab",
             New::Session => "new session",
+            New::Own => "new own session",
             New::Machine => "new machine",
         }
     }
@@ -697,6 +706,9 @@ impl Entry {
             | Entry::New(New::Tab) => pane.then_some(self),
             Entry::New(New::Pane) | Entry::Turn(_) => (pane && !target.own()).then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
+            Entry::New(New::Own) => {
+                (!session && *target.machine() == Machine::Local).then_some(self)
+            },
             Entry::Issue => target.repository().is_some().then_some(self),
             Entry::New(New::Machine)
             | Entry::Ask
@@ -1502,6 +1514,9 @@ pub enum Done {
     /// Take luneta's zellij to a session it makes, on the machine, that
     /// starts where `Starts` says.
     Start(Machine, Starts),
+    /// Take luneta's client to an own session it makes on this machine, that
+    /// starts where `Starts` says.
+    Own(Starts),
     /// Take luneta's zellij to the pane that has the pull request's branch
     /// checked out, on the machine.
     Go(Machine, Place),
@@ -1918,7 +1933,7 @@ impl Menu {
                     | Pressed::Turn(_),
                     Target::Session(..) | Target::Machine(_),
                 )
-                | (Pressed::New(New::Session), Target::Session(..)) => {
+                | (Pressed::New(New::Session | New::Own), Target::Session(..)) => {
                     stays(Stage::Choosing(keys), Wants::Nothing)
                 },
                 (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
@@ -1981,6 +1996,16 @@ impl Menu {
                         Did::Closed(Done::Start(machine.clone(), Starts::In(cwd)))
                     },
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                (Pressed::New(New::Own), Target::Machine(Machine::Local)) => {
+                    Did::Closed(Done::Own(Starts::Home))
+                },
+                (Pressed::New(New::Own), Target::Pane(Machine::Local, row)) => match row.beside() {
+                    Ok(Beside { cwd, .. }) => Did::Closed(Done::Own(Starts::In(cwd))),
+                    Err(reason) => Did::Closed(Done::Wrong(reason)),
+                },
+                (Pressed::New(New::Own), Target::Machine(_) | Target::Pane(..)) => {
+                    Did::Closed(Done::Wrong(OWN_HERE.to_owned()))
                 },
                 (Pressed::Turn(turning), Target::Pane(_, row)) => {
                     let (session, pane) = (row.session.clone(), row.pane);
@@ -3468,6 +3493,7 @@ mod tests {
                 " p  new pane",
                 " t  new tab",
                 " s  new session",
+                " o  new own session",
                 " m  new machine",
                 " <BS> - Back, <ESC> - Close",
             ]
@@ -3628,9 +3654,10 @@ mod tests {
         let lines = text(&menu.lines(31, 10, 0).0);
         assert!(lines.iter().all(|line| !line.contains("Turn")), "{lines:?}");
         let (menu, _) = stays(opened(own_row(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
             " t  new tab",
             " s  new session",
+            " o  new own session",
             " m  new machine",
         ]);
         let (_, wants) = stays(stays(opened(own_row(), Some('c'))).0.key(&char('t')));
@@ -4050,6 +4077,15 @@ mod tests {
         Target::Machine(Machine::Remote("me@vps".parse().unwrap()))
     }
 
+    /// `n o` makes an own session where `n s` makes one: where the pane works,
+    /// or in your home on this machine's header.
+    #[test]
+    fn n_o_makes_an_own_session_where_n_s_makes_one() {
+        let own = |target| closed(stays(opened(target, Some(NEW))).0.key(&char('o')));
+        assert_eq!(own(pane_row()), Done::Own(Starts::In(main_dir())));
+        assert_eq!(own(local_header()), Done::Own(Starts::Home));
+    }
+
     /// `n m` opens a box, on any row, for what ssh reaches a machine by: a
     /// character types, `Backspace` takes one back, and `Enter` adds the
     /// machine, once what is typed is a destination, and else says why it
@@ -4421,6 +4457,13 @@ mod tests {
         assert_eq!(new(remote_header()), [
             "─ New ─────────────────────────",
             " s  new session",
+            " m  new machine",
+            " <BS> - Back, <ESC> - Close",
+        ]);
+        assert_eq!(new(local_header()), [
+            "─ New ─────────────────────────",
+            " s  new session",
+            " o  new own session",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);

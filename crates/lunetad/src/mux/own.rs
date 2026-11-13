@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::mux::{value_in, Named};
 
 pub mod api;
+pub mod attach;
 pub mod server;
 
 /// An own session, by the id its server gave it, which it gives no other, and
@@ -87,6 +88,24 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     let made = UNIX_EPOCH.checked_add(Duration::from_nanos(text(MADE_VAR)?.parse().ok()?))?;
     let pane = text(PANE_VAR)?.parse().ok().filter(|pane| *pane != 0)?;
     Some(Named::Own { session: OwnKey { id, made }, pane })
+}
+
+/// The own pane this process runs in, as its variables name it, with its
+/// session: none where it runs in none.
+#[must_use]
+pub fn here() -> Option<(OwnKey, u32)> {
+    let environ: Vec<OsString> = std::env::vars_os()
+        .map(|(name, value)| {
+            let mut entry = name;
+            entry.push("=");
+            entry.push(value);
+            entry
+        })
+        .collect();
+    match pane_in(&environ)? {
+        Named::Own { session, pane } => Some((session, pane)),
+        Named::Zellij(_) => None,
+    }
 }
 
 /// Has `command` run without the variables luneta's own multiplexer gives

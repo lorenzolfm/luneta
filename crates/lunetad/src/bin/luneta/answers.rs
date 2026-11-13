@@ -95,6 +95,13 @@ impl Colours {
         }
     }
 
+    /// The foreground and the background, each as red, green and blue,
+    /// where luneta's terminal said it.
+    pub fn both(self) -> (Option<[u8; 3]>, Option<[u8; 3]>) {
+        let rgb = |colour: Rgb| [colour.r, colour.g, colour.b];
+        (self.foreground.map(rgb), self.background.map(rgb))
+    }
+
     /// The answer to a program that asks for the colour alacritty numbers
     /// `index`, as `spell` spells it: none for one luneta's terminal did not
     /// say, or for one of the rest, as the sixteen and the cursor's.

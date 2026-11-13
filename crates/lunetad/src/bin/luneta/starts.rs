@@ -27,13 +27,16 @@
 
 use std::time::{Duration, SystemTime};
 
-use lunetad::log;
-use lunetad::Destination;
+use std::path::Path;
+
+use lunetad::mux::own::OwnKey;
+use lunetad::{log, Destination, Directory};
 
 use crate::away::ANSWER;
 use crate::ledger::Session;
 use crate::machines;
 use crate::news::News;
+use crate::own_sessions;
 use crate::sidebar::{NoRefuge, Sidebar};
 use crate::zellij::{self, Refuge, SessionName};
 
@@ -46,6 +49,8 @@ pub enum First {
     /// One attached to this session, made if none runs by its name, or with
     /// none named in a session of a name zellij makes up.
     Make(Option<SessionName>),
+    /// luneta's own client of this own session.
+    Own(OwnKey),
 }
 
 /// How luneta comes to its first client.
@@ -79,6 +84,29 @@ enum Here {
 /// asking for it, made if none runs.
 pub fn named(session: SessionName) -> Result<Start, String> {
     make(Some(session)).map(Start::Now)
+}
+
+/// Where a `luneta --own` starts, in `dir`, or why it does not: in the own
+/// session `named`, made in `dir` with your shell where none runs by the
+/// name. Never one a session of zellij's has the name of, nor the one luneta
+/// runs in.
+pub fn own(named: &SessionName, dir: &Path) -> Result<Start, String> {
+    let running = zellij::running()?;
+    if running.iter().any(|(name, _)| name == named) {
+        return Err(format!("{named} is a session of zellij's: name another for an own one"));
+    }
+    let session = if let Some(session) = own_sessions::named(named)? {
+        session
+    } else {
+        let unread = || format!("{} is no directory an own session starts in", dir.display());
+        let cwd = dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok());
+        let cwd = cwd.ok_or_else(unread)?;
+        own_sessions::made(named, &cwd).map_err(|why| format!("no own session made: {why}"))?
+    };
+    if let Some(refusal) = own_sessions::refusal(session, named) {
+        return Err(refusal);
+    }
+    Ok(Start::Now(First::Own(session)))
 }
 
 /// Where a bare `luneta` starts, whose directory's session is `named`, or why

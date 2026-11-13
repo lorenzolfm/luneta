@@ -34,9 +34,9 @@ const REACH: Duration = Duration::from_secs(10);
 const HEARING: Duration = Duration::from_secs(5);
 
 /// How luneta ended, and what it wrote on its terminal.
-struct Ended {
-    status: ExitStatus,
-    said: String,
+pub struct Ended {
+    pub status: ExitStatus,
+    pub said: String,
 }
 
 /// A terminal of 40 lines of 120 columns: its controller, and the end a program
@@ -62,7 +62,7 @@ pub fn spawn_on(tty: &OwnedFd, command: &mut Command) -> Running {
 /// Runs `command`, a luneta, on a terminal of its own until it ends. The
 /// terminal is read all along, so that nothing waits on a write, and to its
 /// end, once all that hold it have let go, as a `Command` does as it goes.
-fn on_terminal(command: Command) -> Ended {
+pub fn on_terminal(command: Command) -> Ended {
     on_terminal_with(command, |_| {})
 }
 

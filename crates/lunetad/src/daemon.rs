@@ -638,7 +638,7 @@ impl Daemon for Host {
             // luneta's client is on another machine.
             moves::refuge(&sockets, &seats, moves::before)
         });
-        let refuge = |moves::Refuge { session, before }| api::Refuge {
+        let refuge = |moves::Refuge { session, before, .. }| api::Refuge {
             session: session.to_string(),
             before,
         };
@@ -1185,7 +1185,12 @@ impl Daemon for Host {
         });
         let made = made.await.map_err(|error| unfinished(&error))?;
         let server::Made { session, tab, pane } = made.map_err(Status::failed_precondition)?;
-        Ok(Response::new(NewOwnResponse { session: session.get(), tab: tab.0, pane }))
+        Ok(Response::new(NewOwnResponse {
+            session: session.id.get(),
+            tab: tab.0,
+            pane,
+            made_at: Some(session.made.into()),
+        }))
     }
 
     async fn keep_image(

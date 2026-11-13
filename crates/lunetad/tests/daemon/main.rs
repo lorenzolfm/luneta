@@ -7,6 +7,8 @@
 #[cfg(test)]
 mod agents;
 #[cfg(test)]
+mod attach;
+#[cfg(test)]
 mod bridge;
 #[cfg(test)]
 #[cfg(test)]
