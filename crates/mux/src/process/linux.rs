@@ -4,6 +4,9 @@ use std::fs;
 
 use super::{CHILDREN_MAX, Process, Terminal};
 
+/// The most threads of a process whose children the server reads.
+const TASKS_MAX: usize = 256;
+
 /// The process `pid`, as its `stat` and `wchan` say it, or none where it is
 /// gone.
 pub fn process(pid: u32) -> Option<Process> {
@@ -46,14 +49,14 @@ fn stat_of(stat: &[u8]) -> Option<Process> {
     })
 }
 
-/// The children of `pid`, of each of its threads, up to `CHILDREN_MAX`:
-/// none where it is gone.
+/// The children of `pid`, of each of its first `TASKS_MAX` threads, up to
+/// `CHILDREN_MAX`: none where it is gone.
 pub fn children(pid: u32) -> Vec<u32> {
     let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
         return Vec::new();
     };
     let mut children = Vec::new();
-    for task in tasks.flatten() {
+    for task in tasks.flatten().take(TASKS_MAX) {
         let Ok(listed) = fs::read_to_string(task.path().join("children")) else {
             continue;
         };

@@ -160,6 +160,7 @@ fn tree(root: u32, group: u32) -> Vec<Process> {
             }
         }
     }
+    assert!(processes.len() <= PROCESSES_MAX);
     processes
 }
 
@@ -193,7 +194,8 @@ fn path_of(device: u64) -> PathBuf {
 /// device numbers are 32 bits, as `device_of` gives them.
 #[cfg(target_os = "macos")]
 fn path_of(device: u64) -> PathBuf {
-    let device = rustix::fs::Dev::from_ne_bytes((device as u32).to_ne_bytes());
+    let device = u32::try_from(device).expect("macOS device numbers are 32 bits");
+    let device = rustix::fs::Dev::from_ne_bytes(device.to_ne_bytes());
     PathBuf::from(format!("/dev/ttys{:03}", rustix::fs::minor(device)))
 }
 

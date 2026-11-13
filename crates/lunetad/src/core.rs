@@ -632,6 +632,38 @@ impl Known {
     /// not changed is built the same.
     fn built(&self) -> api::Host {
         self.assert_listed();
+        let sessions = self.built_sessions();
+        let mut agents = self.agents();
+        agents.sort_by_key(|agent| agent.pid);
+        let (unread, unread_files) = self.unread();
+        // What gh found of a branch that is no longer checked out where it
+        // was asked about is not that directory's, until gh has said of the
+        // one that is.
+        let pull_requests = self
+            .pull_requests
+            .iter()
+            .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
+            .map(|(dir, found)| found.pull_request.to_api(dir))
+            .collect();
+        let remotes =
+            self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
+        api::Host {
+            version: None,
+            sessions,
+            work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
+            agents,
+            unread,
+            pull_requests,
+            unread_sockets: Some(self.unread_sockets),
+            unread_files,
+            remotes,
+            unread_hosts: Some(self.unread_hosts),
+            sayings: self.sayings.fresh(SystemTime::now()),
+        }
+    }
+
+    /// The sessions as `built` gives them, in the order they rank in.
+    fn built_sessions(&self) -> Vec<api::Session> {
         let zellij = self.sessions.running().map(|(id, name)| Row::Zellij(id, name));
         let mut running: Vec<Row> = zellij.chain(self.owns.iter().map(Row::Own)).collect();
         running.sort_unstable_by_key(|row| row.ranked());
@@ -646,7 +678,7 @@ impl Known {
         let clients_of = |clients: &Listed| api::Clients {
             clients: clients.iter().copied().map(Client::to_api).collect(),
         };
-        let sessions = running
+        running
             .into_iter()
             .map(|row| {
                 let name = row.name().to_string();
@@ -675,34 +707,7 @@ impl Known {
                     },
                 }
             })
-            .collect();
-        let mut agents = self.agents();
-        agents.sort_by_key(|agent| agent.pid);
-        let (unread, unread_files) = self.unread();
-        // What gh found of a branch that is no longer checked out where it
-        // was asked about is not that directory's, until gh has said of the
-        // one that is.
-        let pull_requests = self
-            .pull_requests
-            .iter()
-            .filter(|(dir, found)| self.branch(dir) == Some(&found.branch))
-            .map(|(dir, found)| found.pull_request.to_api(dir))
-            .collect();
-        let remotes =
-            self.remotes.iter().map(|(destination, reached)| reached.to_api(destination)).collect();
-        api::Host {
-            version: None,
-            sessions,
-            work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
-            agents,
-            unread,
-            pull_requests,
-            unread_sockets: Some(self.unread_sockets),
-            unread_files,
-            remotes,
-            unread_hosts: Some(self.unread_hosts),
-            sayings: self.sayings.fresh(SystemTime::now()),
-        }
+            .collect()
     }
 
     fn version(&self) -> api::Version {

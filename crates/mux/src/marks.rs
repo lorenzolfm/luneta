@@ -123,10 +123,14 @@ impl Marks {
         } else {
             self.over = true;
         }
+        assert!(self.text.len() <= MARK_BYTES_MAX);
     }
 
     /// Ends the OSC read, and puts it in `marks` where it is one.
     fn end(&mut self, marks: &mut Vec<Mark>) {
+        if self.over {
+            assert_eq!(self.text.len(), MARK_BYTES_MAX);
+        }
         self.state = State::Ground;
         if let Some(text) = self.text.strip_prefix(MARK)
             && let Some(mark) = mark(text, self.over)

@@ -267,7 +267,7 @@ pub fn start(
             marks: Marks::default(),
             shell: Shell::default(),
             looks: Looks::first(),
-            told: (None, None),
+            told: Told::default(),
         };
         let failed = match panic::catch_unwind(AssertUnwindSafe(|| thread.run())) {
             Ok(Ok(())) => None,
@@ -358,8 +358,14 @@ struct Thread {
     marks: Marks,
     shell: Shell,
     looks: Looks,
-    /// What the model was last told runs in front, and what the shell said.
-    told: (Option<api::Foreground>, Option<api::Ran>),
+    told: Told,
+}
+
+/// What the model was last told runs in front, and what the shell said.
+#[derive(Clone, Default, PartialEq)]
+struct Told {
+    foreground: Option<api::Foreground>,
+    ran: Option<api::Ran>,
 }
 
 /// When a pane looks next at what runs in front of its terminal.
@@ -386,6 +392,7 @@ impl Looks {
         let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
         self.due = Some(self.due.map_or(soonest, |due| due.min(soonest)));
         self.heard = true;
+        self.assert_paced();
     }
 
     /// The pane looked at `now`, while its shell runs a command where it is
@@ -399,6 +406,14 @@ impl Looks {
         } else {
             None
         };
+        self.assert_paced();
+    }
+
+    /// Asserts that no look is due sooner than `LOOK_AGAIN` after the last.
+    fn assert_paced(&self) {
+        if let (Some(due), Some(last)) = (self.due, self.last) {
+            assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
+        }
     }
 }
 
@@ -462,10 +477,10 @@ impl Thread {
     /// Tells the model what runs in front, `foreground`, and what the shell
     /// said, where either changed since it was told last.
     fn tell(&mut self, foreground: Option<api::Foreground>) {
-        let told = (foreground, self.shell.said());
+        let told = Told { foreground, ran: self.shell.said() };
         if told != self.told {
             self.told = told.clone();
-            self.mux.looked(self.pane, told.0, told.1);
+            self.mux.looked(self.pane, told.foreground, told.ran);
         }
     }
 
@@ -576,7 +591,7 @@ impl Thread {
         self.program = Program::Gone;
         self.shell.gone();
         self.looks = Looks::default();
-        self.told = (None, None);
+        self.told = Told::default();
         self.dirty = true;
         self.frame()?;
         Ok(self.mux.ended(self.pane, exit))
@@ -723,8 +738,6 @@ impl Thread {
             for mark in marks {
                 self.shell.marked(mark, now, job);
             }
-            let foreground = self.told.0.clone();
-            self.tell(foreground);
         }
         self.dirty = true;
         let after = self.screen.scrollback();
@@ -911,8 +924,6 @@ fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
 mod tests {
     use super::*;
 
-    /// An OSC 7 names a folder of this machine's, which it may spell in
-    /// escapes, or a folder of another's, which is none of this one's.
     /// What the program writes brings a look due later forward, to no
     /// sooner than `LOOK_AGAIN` after the last, and has another follow it.
     #[test]
@@ -937,6 +948,8 @@ mod tests {
         assert_eq!(looks.due, None);
     }
 
+    /// An OSC 7 names a folder of this machine's, which it may spell in
+    /// escapes, or a folder of another's, which is none of this one's.
     #[test]
     fn a_cwd_is_one_this_machine_has() {
         let cwd = |said: &str| local_cwd(said, "here");

@@ -36,6 +36,7 @@ pub fn process(pid: u32) -> Option<Process> {
     }
     // SAFETY: the call wrote all of `info`, as it said.
     let info = unsafe { info.assume_init() };
+    assert_eq!(info.pbi_pid, pid, "proc_pidinfo said another process");
     let name = info.pbi_comm.iter().map(|byte| byte.cast_unsigned()).take_while(|byte| *byte != 0);
     let terminal = (info.e_tdev != NO_DEVICE).then(|| Terminal {
         device: u64::from(info.e_tdev),
