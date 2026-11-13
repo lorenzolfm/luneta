@@ -17,7 +17,7 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
-use crate::asked::{self, Dumped, Heard, Name, Opens, Place, Who};
+use crate::asked::{self, Dumped, Heard, Name, Opens, Place, SessionName, Who};
 use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::mux::Mux;
@@ -53,7 +53,7 @@ impl mux_server::Mux for Service {
         request: Request<api::NewSessionRequest>,
     ) -> Answer<api::NewSessionResponse> {
         let request = request.into_inner();
-        let name = Name::parse("name", request.name)?;
+        let name = SessionName::parse("name", request.name)?;
         let opens = Opens::parse("opens", request.opens)?;
         let (session, made, tab, pane) = self.mux.new_session(name, &opens)?;
         Ok(Response::new(api::NewSessionResponse {
@@ -89,7 +89,7 @@ impl mux_server::Mux for Service {
     async fn rename(&self, request: Request<api::RenameRequest>) -> Answer<api::RenameResponse> {
         let request = request.into_inner();
         let session = SessionId::parse("session", request.session)?;
-        self.mux.rename(session, Name::parse("name", request.name)?)?;
+        self.mux.rename(session, SessionName::parse("name", request.name)?)?;
         Ok(Response::new(api::RenameResponse {}))
     }
 

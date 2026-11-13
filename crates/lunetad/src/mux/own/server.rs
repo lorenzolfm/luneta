@@ -313,18 +313,26 @@ impl Listing {
 /// name another before it has is left out too, as the server gives each its
 /// own.
 fn read(sessions: Vec<api::Session>) -> (Vec<Listing>, Vec<String>) {
+    let (listed, mut unread, shells) = read_apart(sessions);
+    unread.extend(shells);
+    (listed, unread)
+}
+
+/// The own sessions among `sessions`, as `read` says, with why each session
+/// left out does not read apart from why each pane's shell does.
+fn read_apart(sessions: Vec<api::Session>) -> (Vec<Listing>, Vec<String>, Vec<String>) {
     let mut listed: Vec<Listing> = Vec::with_capacity(sessions.len());
-    let mut unread = Vec::new();
+    let (mut unread, mut unsaid) = (Vec::new(), Vec::new());
     for session in sessions {
         match one(&session, &listed) {
             Ok((one, shells)) => {
                 listed.push(one);
-                unread.extend(shells);
+                unsaid.extend(shells);
             },
             Err(why) => unread.push(why),
         }
     }
-    (listed, unread)
+    (listed, unread, unsaid)
 }
 
 /// `session`, as the server lists it after `before`, with why each pane's
@@ -491,11 +499,17 @@ pub fn names() -> Result<Vec<String>, Failure> {
 /// each, its id and its name: none where no server runs. One that does not
 /// read is left out, as `followed` leaves it out.
 pub fn sessions() -> Result<Vec<Listing>, Failure> {
+    Ok(listed()?.0)
+}
+
+/// The own sessions that run, as `sessions` says, and why each it leaves
+/// out does not read.
+pub fn listed() -> Result<(Vec<Listing>, Vec<String>), Failure> {
     let Some(server) = Server::reached()? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
-    let (listed, _) = read(server.listing()?);
-    Ok(listed)
+    let (listed, unread, _) = read_apart(server.listing()?);
+    Ok((listed, unread))
 }
 
 /// Where a client goes among the own sessions.
@@ -871,6 +885,8 @@ mod tests {
             twice,
             session(5, "fine", &[]),
         ];
+        let (_, sessions, shells) = read_apart(listing.clone());
+        assert_eq!((sessions.len(), shells.len()), (7, 0), "{sessions:?} {shells:?}");
         let (listed, unread) = read(listing);
         let read: Vec<(u64, &str)> =
             listed.iter().map(|listed| (listed.id.get(), listed.name.as_str())).collect();
@@ -908,6 +924,8 @@ mod tests {
             .zip(shells)
             .map(|(id, is)| api::Pane { id, ran: Some(api::Ran { is }), ..pane.clone() })
             .collect();
+        let (_, sessions, shells) = read_apart(vec![listed.clone()]);
+        assert_eq!((sessions.len(), shells.len()), (0, 4), "{sessions:?} {shells:?}");
         let (listed, unread) = read(vec![listed]);
         assert_eq!(unread.len(), 4, "{unread:?}");
         let doings: Vec<(u32, &Doing)> =

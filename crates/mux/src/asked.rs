@@ -90,6 +90,33 @@ impl Name {
     }
 }
 
+/// A session's name: a name, as a tab's is, that is also one luneta reads
+/// as a session's, as it reads zellij's: not only whitespace, not `.` or
+/// `..`, and with no `/`. luneta leaves a session of another name out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionName(Name);
+
+impl SessionName {
+    pub fn parse(field: &str, name: String) -> Result<SessionName, Status> {
+        let name = Name::parse(field, name)?;
+        if name.as_str().trim().is_empty() {
+            return Err(refused(field, "is only whitespace"));
+        }
+        if name.as_str() == "." || name.as_str() == ".." {
+            return Err(refused(field, "is '.' or '..'"));
+        }
+        if name.as_str().contains('/') {
+            return Err(refused(field, "has a '/'"));
+        }
+        Ok(SessionName(name))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// What a new tab's pane runs, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
@@ -561,6 +588,27 @@ mod tests {
         assert_eq!(refusal("").message(), "name is empty");
         assert_eq!(refusal("a\nb").message(), "name has a control character");
         assert_eq!(refusal(&"x".repeat(256)).message(), "name is over 255 bytes");
+        assert_eq!(Name::parse("name", "src/main".to_owned()).unwrap().as_str(), "src/main");
+    }
+
+    /// A session's name is held to a name's rules, and to those luneta reads
+    /// a session's name by, which a tab's is not.
+    #[test]
+    fn a_session_s_name_is_one_luneta_reads() {
+        let parsed = |name: &str| SessionName::parse("name", name.to_owned());
+        assert_eq!(parsed("work").unwrap().as_str(), "work");
+        assert_eq!(parsed("café . 2").unwrap().as_str(), "café . 2");
+        let refused = [
+            ("", "name is empty"),
+            ("a\nb", "name has a control character"),
+            (" \u{a0}", "name is only whitespace"),
+            (".", "name is '.' or '..'"),
+            ("..", "name is '.' or '..'"),
+            ("a/b", "name has a '/'"),
+        ];
+        for (name, message) in refused {
+            assert_eq!(parsed(name).unwrap_err().message(), message, "{name:?}");
+        }
     }
 
     /// What a new tab runs is said in full: where, what, and what becomes of

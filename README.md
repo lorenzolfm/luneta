@@ -1386,7 +1386,9 @@ environment, not the agent's.
 In an [own session](#luneta-in-your-terminal) they work as they do in
 zellij's, by the ids luneta's own multiplexer gives a pane and its session,
 which a rename keeps, and `luneta agents` names an agent there as
-`<session>:<pane>` too. An own session's tab holds one pane for now, so
+`<session>:<pane>` too. Where it cannot tell the session's name, it writes
+`?:<pane> (own <id>)`, which no verb takes for a pane, and says why: that
+luneta-mux cannot be reached, or lists the session so it does not read. An own session's tab holds one pane for now, so
 `open pane` and `turn` refuse there and say so: `open tab` opens a tab of it,
 with no one in it needed. `open session` there makes an own session, which
 lunetad makes, as it does for `n o`. `go` takes you between own sessions, or

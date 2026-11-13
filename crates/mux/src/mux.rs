@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Ends, Hello, Is, Name, Opens, Place, Size, Who};
+use crate::asked::{Colours, Ends, Hello, Is, Name, Opens, Place, SessionName, Size, Who};
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::pane::{self, Busy, Exit, Handle, Out, ToPane, Viewer};
 use crate::pty::{self, Pty};
@@ -68,7 +68,7 @@ struct Session {
     /// When the server made it, which `id` tells it from the sessions of
     /// every other server by.
     made: SystemTime,
-    name: Name,
+    name: SessionName,
     tabs: Tabs,
     last_typed: Option<ClientId>,
 }
@@ -171,7 +171,7 @@ impl Mux {
 
     pub fn new_session(
         self: &Arc<Mux>,
-        name: Name,
+        name: SessionName,
         opens: &Opens,
     ) -> Result<(SessionId, SystemTime, TabId, PaneId), Status> {
         self.change(|model| {
@@ -223,7 +223,7 @@ impl Mux {
         })
     }
 
-    pub fn rename(&self, session: SessionId, name: Name) -> Result<(), Status> {
+    pub fn rename(&self, session: SessionId, name: SessionName) -> Result<(), Status> {
         self.change(|model| {
             model.session(session)?;
             model.refuse_if_taken(&name, Some(session))?;
@@ -379,7 +379,7 @@ impl Model {
         Ok(())
     }
 
-    fn refuse_if_taken(&self, name: &Name, renamed: Option<SessionId>) -> Result<(), Status> {
+    fn refuse_if_taken(&self, name: &SessionName, renamed: Option<SessionId>) -> Result<(), Status> {
         let taken = self
             .sessions
             .iter()
