@@ -18,17 +18,17 @@
     "ghostty": {
       "flake": false,
       "locked": {
-        "lastModified": 1783806457,
-        "narHash": "sha256-1Zz65SCk3rkJ9+Q0MmyNOTNiDSLBRIHRd3IvFM4iNXw=",
+        "lastModified": 1794425765,
+        "narHash": "sha256-3XBFm8yq25P9eCdjLWwVwZ0tedWCN39U1FbjYD8C+w4=",
         "owner": "ghostty-org",
         "repo": "ghostty",
-        "rev": "a887df42c56f6de86c0fe6da9c4eeca37931e083",
+        "rev": "108cacb17ed8990840cd14abfce43d8ed8503ca1",
         "type": "github"
       },
       "original": {
         "owner": "ghostty-org",
         "repo": "ghostty",
-        "rev": "a887df42c56f6de86c0fe6da9c4eeca37931e083",
+        "rev": "108cacb17ed8990840cd14abfce43d8ed8503ca1",
         "type": "github"
       }
     },
@@ -48,11 +48,28 @@
         "type": "github"
       }
     },
+    "nixpkgs-zig": {
+      "locked": {
+        "lastModified": 1794386569,
+        "narHash": "sha256-x9sADJvoVG0L6RejZB+/BB4YiGZFBZrfTlhF4uBq1tQ=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "d4f25a3e562008648d45bcf2d70bcc7422cad84e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "d4f25a3e562008648d45bcf2d70bcc7422cad84e",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
         "ghostty": "ghostty",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-zig": "nixpkgs-zig",
         "rust-overlay": "rust-overlay"
       }
     },

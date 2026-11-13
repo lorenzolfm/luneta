@@ -7,9 +7,10 @@
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
     ghostty = {
-      url = "github:ghostty-org/ghostty/a887df42c56f6de86c0fe6da9c4eeca37931e083";
+      url = "github:ghostty-org/ghostty/108cacb17ed8990840cd14abfce43d8ed8503ca1";
       flake = false;
     };
+    nixpkgs-zig.url = "github:nixos/nixpkgs/d4f25a3e562008648d45bcf2d70bcc7422cad84e";
   };
 
   outputs =
@@ -19,6 +20,7 @@
       rust-overlay,
       crane,
       ghostty,
+      nixpkgs-zig,
       ...
     }:
     let
@@ -116,23 +118,28 @@
           speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
 
           ghosttyRevs = {
-            "0.2.2" = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
+            "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
+              "108cacb17ed8990840cd14abfce43d8ed8503ca1";
           };
           ghosttySys =
             pkgs.lib.findFirst (crate: crate.name == "libghostty-vt-sys")
               (throw "Cargo.lock has no libghostty-vt-sys")
               (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
           ghosttySysRev =
-            ghosttyRevs.${ghosttySys.version}
-              or (throw "ghosttyRevs has no commit for libghostty-vt-sys ${ghosttySys.version}");
+            ghosttyRevs.${ghosttySys.source}
+              or (throw "ghosttyRevs has no commit for libghostty-vt-sys from ${ghosttySys.source}");
           libghosttyVt =
             pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
               "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
               (
-                pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
-                  optimize = "ReleaseSafe";
-                  revision = ghostty.shortRev;
-                }
+                (pkgs.lib.makeScope pkgs.newScope (_: {
+                  inherit (nixpkgs-zig.legacyPackages.${system}) zig_0_17;
+                })).callPackage
+                  "${ghostty}/nix/libghostty-vt.nix"
+                  {
+                    optimize = "ReleaseSafe";
+                    revision = ghostty.shortRev;
+                  }
               );
 
           # ggml builds for the CPU it is built on, with -march=native, which nix's
@@ -304,7 +311,7 @@
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${
                 pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
-              }:${libghosttyVt.dev}/share/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+              }:${libghosttyVt.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
               ${macBuildEnv}
             '';
           };

@@ -21,7 +21,7 @@ ignore = [
 unknown-registry = "deny"
 unknown-git = "deny"
 required-git-spec = "rev"
-allow-git = ["https://github.com/lorenzolfm/wt"]
+allow-git = ["https://github.com/lorenzolfm/wt", "https://github.com/uzaaft/libghostty-rs"]
 
 [bans]
 wildcards = "deny"

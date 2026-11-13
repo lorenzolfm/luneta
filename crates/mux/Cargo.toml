@@ -7,8 +7,8 @@ publish = false
 description = "luneta's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each pane's program as Ghostty does"
 
 [dependencies]
-libghostty-vt = "=0.2.2"
-libghostty-vt-sys = { version = "=0.2.2", features = ["pkg-config"] }
+libghostty-vt = { git = "https://github.com/uzaaft/libghostty-rs", rev = "cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" }
+libghostty-vt-sys = { git = "https://github.com/uzaaft/libghostty-rs", rev = "cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf", features = ["pkg-config"] }
 percent-encoding = "2.3.2"
 prost = "0.14.4"
 prost-types = "0.14.4"
