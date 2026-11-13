@@ -117,11 +117,18 @@ impl Shell {
                     unreachable!("a command runs, as `going` said");
                 };
                 if let Some(group) = going.seen.filter(|group| job(*group) == Some(Job::Stopped)) {
+                    let was = self.stopped.iter().position(|(stopped, _)| *stopped == group);
+                    let command = match was {
+                        Some(place) => self.stopped.remove(place).1,
+                        None => going.command,
+                    };
                     if self.stopped.len() == STOPPED_MAX {
                         self.stopped.remove(0);
                     }
-                    self.stopped.push((group, going.command.clone()));
-                    self.ran = Some(Ran::Stopped { command: going.command, at: now.at });
+                    assert!(!self.stopped.iter().any(|(stopped, _)| *stopped == group));
+                    self.stopped.push((group, command.clone()));
+                    assert!(self.stopped.len() <= STOPPED_MAX);
+                    self.ran = Some(Ran::Stopped { command, at: now.at });
                 } else {
                     let ending = if going.resumes {
                         Some(Ending::Resumed)
@@ -348,6 +355,27 @@ mod tests {
         shell.saw(42, 10, Front::Working);
         shell.marked(Mark::Done(Some(0)), now(7), NONE_STOPPED);
         assert_eq!(shell.ran, Some(ended("true", 7, Some(Ending::Status(0)), 1)));
+    }
+
+    /// A job `fg %1` brought back and stopped again stands stopped once, by
+    /// the name it had, and `fg` brings it back by that name.
+    #[test]
+    fn a_job_stopped_again_stands_stopped_once_by_its_name() {
+        let now = shell_at(Instant::now());
+        let mut shell = Shell::default();
+        shell.marked(command("vim a"), now(1), NONE_STOPPED);
+        shell.saw(40, 10, Front::Interactive);
+        shell.marked(Mark::Done(Some(0)), now(2), stopped_if(|_| true));
+        shell.marked(command("fg %1"), now(3), stopped_if(|_| true));
+        shell.saw(40, 10, Front::Interactive);
+        shell.marked(Mark::Done(Some(0)), now(4), stopped_if(|_| true));
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
+        assert_eq!(shell.ran, Some(Ran::Stopped { command: "vim a".to_owned(), at }));
+        assert_eq!(shell.stopped, [(40, "vim a".to_owned())]);
+        shell.marked(command("fg"), now(5), stopped_if(|_| true));
+        let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
+        assert_eq!(going.command, "vim a");
+        assert_eq!(shell.stopped, []);
     }
 
     /// Its program gone, the shell says nothing.
