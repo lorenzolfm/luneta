@@ -404,21 +404,29 @@ pub struct PanePlace {
 }
 
 /// luneta's client of an own session, as its server says where it is: in this
-/// session, as no other is, and on this pane, once the server has said; and
-/// which client it is, once the server has said that, which it says first.
+/// session, as no other is; and once the server has taken it in, which it
+/// says first, which client it is, and then which pane it is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OwnSeat {
     pub session: OwnKey,
-    pub pane: Option<NonZeroU32>,
-    pub client: Option<OwnClientId>,
+    taken: Option<TakenIn>,
 }
 
 impl OwnSeat {
     /// The pane it is on, once its server has said.
     #[must_use]
     pub fn on(self) -> Option<OwnPane> {
-        self.pane.map(|id| OwnPane { session: self.session, id })
+        Some(OwnPane { session: self.session, id: self.taken?.pane? })
     }
+}
+
+/// luneta's client of an own session, as its server took it in: by the id it
+/// gave it, which the ask box names to its agent, and on this pane, once the
+/// server has said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TakenIn {
+    client: OwnClientId,
+    pane: Option<NonZeroU32>,
 }
 
 /// What luneta runs beside the sidebar, as the sidebar follows it.
@@ -2249,7 +2257,7 @@ impl Sidebar {
     /// is. What luneta knew of zellij's client, and its title, are another's.
     pub fn attaching(&mut self, session: OwnKey) {
         self.on = Machine::Local;
-        self.beside = Beside::Own(OwnSeat { session, pane: None, client: None });
+        self.beside = Beside::Own(OwnSeat { session, taken: None });
         self.own.anew();
         self.unfold_own(session);
         self.rebuild();
@@ -2262,22 +2270,21 @@ impl Sidebar {
         let Beside::Own(seat) = &mut self.beside else {
             unreachable!("only a client of an own session is taken in by its server");
         };
-        assert_eq!(seat.client, None, "a client of an own session is taken in once");
-        assert_eq!(seat.pane, None, "a client of an own session is taken in before it goes");
-        seat.client = Some(client);
+        assert_eq!(seat.taken, None, "a client of an own session is taken in once");
+        seat.taken = Some(TakenIn { client, pane: None });
     }
 
     /// luneta's client of an own session is on `pane` now, as its server
     /// says, which unfolds its session where it went to another.
     pub fn went_own(&mut self, pane: OwnPane) {
-        let before = self.own_seat();
-        let Some(OwnSeat { client, .. }) = before else {
-            unreachable!("only a client of an own session goes among them");
+        let Some(OwnSeat { session: was, taken: Some(TakenIn { client, .. }) }) = self.own_seat()
+        else {
+            unreachable!("only a client of an own session its server took in goes among them");
         };
-        assert!(client.is_some(), "a client of an own session goes once it is taken in");
         let session = pane.session;
-        self.beside = Beside::Own(OwnSeat { session, pane: Some(pane.id), client });
-        if before.is_some_and(|before| before.session != session) {
+        let taken = Some(TakenIn { client, pane: Some(pane.id) });
+        self.beside = Beside::Own(OwnSeat { session, taken });
+        if was != session {
             self.unfold_own(session);
         }
         self.rebuild();
@@ -2441,7 +2448,9 @@ impl Sidebar {
         }
         if let Some(seat) = self.own_seat() {
             let listed = self.own_listed(seat.session);
-            let (Some(pane), Some(client), Some(listed)) = (seat.on(), seat.client, listed) else {
+            let (Some(pane), Some(TakenIn { client, .. }), Some(listed)) =
+                (seat.on(), seat.taken, listed)
+            else {
                 return User::Untold;
             };
             return User::Own { pane, named: listed.name, client };
@@ -2535,7 +2544,7 @@ impl Sidebar {
     /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
         if let Some(seat) = self.own_seat() {
-            let pane = seat.pane.ok_or(NO_HERE_PANE)?.get();
+            let pane = seat.on().ok_or(NO_HERE_PANE)?.id.get();
             let session = self.own_listed(seat.session).ok_or(NO_HERE_PANE)?;
             return Ok(PanePlace { session, pane });
         }

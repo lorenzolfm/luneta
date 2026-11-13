@@ -670,7 +670,13 @@ pub enum Mover {
     /// The one that last typed in the session, or else the one that came to
     /// it last.
     LastTyped,
-    /// This one, wherever it is: luneta's, which its ask box names.
+    /// This one, wherever it is: luneta's, which its ask box names. The id is
+    /// of one server, and one started since gives it to another client: a
+    /// go's request names no server, so the key of the session the id was
+    /// named in, which `keyed` finds the server by, and which a server
+    /// started since lists none of, is what says the id is this server's.
+    /// So a go by it fails where that session ended, though luneta's client
+    /// runs on in another.
     Client(OwnClientId),
 }
 
