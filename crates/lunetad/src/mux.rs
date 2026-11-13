@@ -20,6 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::closes::Whose;
 use crate::process;
 use crate::watch::Troubles;
 use crate::Directory;
@@ -72,6 +73,16 @@ impl<'a> Called<'a> {
             return Err(Failure::Unread(two_named(name.as_str())));
         }
         Ok(Called::Own(Box::new(own)))
+    }
+
+    /// The session `whose` says, named `name` now: an own one by its key, with
+    /// its server reached, where it runs still, which a rename keeps, and
+    /// zellij's by `name`, whether or not an own session has it too.
+    pub fn of(name: &'a SessionName, whose: Whose) -> Result<Called<'a>, Failure> {
+        match whose {
+            Whose::Zellij(_) => Ok(Called::Zellij(name)),
+            Whose::Own(key) => Ok(Called::Own(Box::new(own::server::keyed(key)?))),
+        }
     }
 
     /// The session, to ask its multiplexer of.

@@ -21,7 +21,7 @@ use lunetad::mux::{self, ClientWords, Mux, OwnKey, PaneId, PaneVars, Zellij, Zel
 pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
 use lunetad::closes::{running_in, Whose};
 pub use lunetad::names::{session_for, Starts};
-pub use lunetad::opens::{opening, Open, Opened, Tab};
+pub use lunetad::opens::{opening, opening_of, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{moves, Destination, Directory, SocketId};

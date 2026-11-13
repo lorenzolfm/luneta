@@ -370,6 +370,21 @@ pub fn named(name: &SessionName) -> Result<Option<Own>, Failure> {
     Ok(key.map(|key| Own { server, key }))
 }
 
+/// The own session `key` says, with its server reached, where it runs still:
+/// by its id and when its server made it, whatever its name now, which another
+/// may have taken since. Or that it no longer runs, as none does where no
+/// server runs.
+pub fn keyed(key: OwnKey) -> Result<Own, Failure> {
+    let Some(server) = Server::reached()? else {
+        return Err(gone(key.id));
+    };
+    let (listed, _) = read(server.listing()?);
+    if !listed.iter().any(|own| own.key() == key) {
+        return Err(gone(key.id));
+    }
+    Ok(Own { server, key })
+}
+
 /// The names of the own sessions that run: none where no server does.
 pub fn names() -> Result<Vec<String>, Failure> {
     let Some(server) = Server::reached()? else {

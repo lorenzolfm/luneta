@@ -210,6 +210,46 @@ fn a_name_both_multiplexers_run_a_session_by_is_neither_s() {
     assert_eq!(owned.listing().sessions.len(), 1);
 }
 
+/// A command in an own pane goes by its session's ids, whatever zellij runs
+/// by the session's name: `here` names its pane, a tab opens in it, a pane
+/// beside another does not, as there alone, and `go` takes its client to
+/// another own session. The name, typed, is still neither's.
+#[test]
+fn an_own_pane_s_session_is_its_own_where_zellij_runs_one_by_its_name() {
+    let owned = Owned::new();
+    let work = owned.make("work").unwrap();
+    let play = owned.make("play").unwrap();
+    let in_work = in_pane(own(&owned.listed("work")).unwrap(), work.pane);
+    owned.listed("play");
+    let _client = owned.attach(work.session);
+    let _zellij = owned.host.serve("work");
+    eventually("both are on the host", || {
+        let host = owned.host.host();
+        let named = host.sessions.iter().filter(|session| session.name == "work").count();
+        (named == 2).then_some(())
+    });
+    let tabs = |owned: &Owned| {
+        let listing = owned.listing();
+        listing.sessions.iter().find(|session| session.name == "work").unwrap().tabs.len()
+    };
+
+    assert_eq!(said(&luneta(&owned, &in_work, &["here"])), format!("work:{}\n", work.pane));
+    let opened = said(&luneta(&owned, &in_work, &["open", "tab", "--", "sleep", "600"]));
+    assert!(opened.starts_with("work:"), "{opened}");
+    assert_eq!(tabs(&owned), 2);
+    let beside = why(&luneta(&owned, &in_work, &["open", "pane", "--", "sleep", "600"]));
+    assert!(beside.contains("whose tabs hold a pane each"), "{beside}");
+    said(&luneta(&owned, &in_work, &["go", "play"]));
+    let [(_, on)] = clients_on(&owned)[..] else {
+        panic!("one client: {:?}", clients_on(&owned));
+    };
+    assert_eq!(on, play.pane);
+
+    let typed = why(&luneta(&owned, &in_work, &["open", "tab", "--session", "work"]));
+    assert!(typed.contains("two sessions are named work"), "{typed}");
+    assert_eq!(tabs(&owned), 2);
+}
+
 /// `open session` in an own pane names its session as none of either
 /// multiplexer has it: a name either has is taken.
 #[test]

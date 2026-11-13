@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
 use crate::mux::{tabs, terminal_of, Called, Laid, Mux, Runs, SessionName, TabId, Zellij};
-use crate::closes::{self, Close};
+use crate::closes::{self, Close, Whose};
 use crate::Directory;
 
 /// What names your shell, in luneta's variables, as in those of the zellij
@@ -48,6 +48,14 @@ pub enum Open {
 }
 
 impl Open {
+    /// The session it opens in, by its name.
+    #[must_use]
+    pub fn session(&self) -> &SessionName {
+        match self {
+            Open::Pane { session, .. } | Open::Tab { session, .. } => session,
+        }
+    }
+
     /// The question that has zellij open it on the machine `on` names, or
     /// on the daemon's own, where it names none.
     #[must_use]
@@ -92,14 +100,27 @@ pub struct Opened {
 /// where it would have no room for its panes, as `Open::Tab` says, alone or
 /// beside the session's tabs.
 pub fn opening(open: &Open) -> Result<Opened, String> {
+    opened(Called::named(open.session())?, open)
+}
+
+/// Opens `open`, as `opening` does, in the session `whose` says, which runs
+/// by the name `open` gives it, or ran by it as luneta found it: an own one by
+/// its key, which a rename keeps, and zellij's by that name, whether or not
+/// an own session has it too.
+pub fn opening_of(open: &Open, whose: Whose) -> Result<Opened, String> {
+    opened(Called::of(open.session(), whose)?, open)
+}
+
+/// Opens `open` in `called`, its session, as `opening` says.
+fn opened(called: Called<'_>, open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
-        Open::Pane { session, beside, cwd, command } => {
+        Open::Pane { beside, cwd, command, .. } => {
             let runs = Runs::of(command, Runs::ZellijShell);
-            Ok(terminal(Called::named(session)?.mux().pane_opened(*beside, cwd, runs)?))
+            Ok(terminal(called.mux().pane_opened(*beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if let Called::Own(own) = Called::named(session)? {
+            if let Called::Own(own) = called {
                 let own = Mux::Own(&own);
                 let (opened, laid) = tab_opened(own, tab)?;
                 return terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned());
