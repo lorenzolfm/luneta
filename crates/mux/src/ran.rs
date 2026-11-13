@@ -3,6 +3,8 @@
 //! pane's shell, by the same rules.
 //!
 //! - A shell is ready from its first prompt until it runs a command.
+//! - Only the mark of a command's end ends it: a prompt while it runs is its
+//!   own, as fish's `read` draws one with the shell's line editor.
 //! - `exec` gives the pane to another program, and nothing would say how
 //!   what it runs ends: the shell says nothing from there on.
 //! - A shell says a job it stopped with `Ctrl z` ended, with a status of 0:
@@ -84,10 +86,10 @@ impl Shell {
     /// group's leader is: stopped or not, or else gone.
     pub fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(u32) -> Option<Job>) {
         match mark {
-            Mark::Prompt => match self.ran.take() {
-                None => self.ran = Some(Ran::Ready),
-                Some(Ran::Going(going)) => self.ran = Some(going.ended(None, now)),
-                Some(ran) => self.ran = Some(ran),
+            Mark::Prompt => {
+                if self.ran.is_none() {
+                    self.ran = Some(Ran::Ready);
+                }
             },
             Mark::Command(line) => {
                 let mut command = line.unwrap_or_default().replace('\n', " ");
@@ -266,18 +268,21 @@ mod tests {
         assert_eq!(shell.ran, Some(ended("make test", 5, Some(Ending::Status(2)), 3)));
     }
 
-    /// A command that ends with no mark of its own ends at the next prompt,
-    /// with no word of how; and one whose shell said no status says none.
+    /// A prompt while a command runs is the command's own, as fish's `read`
+    /// draws one, and the command runs on to the mark of its end; and one
+    /// whose shell said no status says none.
     #[test]
-    fn a_command_with_no_mark_of_its_end_ends_at_the_prompt() {
+    fn a_prompt_while_a_command_runs_is_its_own() {
         let now = shell_at(Instant::now());
         let mut shell = Shell::default();
-        shell.marked(command("ls"), now(1), NONE_STOPPED);
+        shell.marked(command("read -P 'name? ' x"), now(1), NONE_STOPPED);
         shell.marked(Mark::Prompt, now(2), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("ls", 2, None, 1)));
-        shell.marked(Mark::Command(None), now(3), NONE_STOPPED);
-        shell.marked(Mark::Done(None), now(4), NONE_STOPPED);
-        assert_eq!(shell.ran, Some(ended("", 4, None, 1)));
+        assert!(shell.going());
+        shell.marked(Mark::Done(Some(0)), now(3), NONE_STOPPED);
+        assert_eq!(shell.ran, Some(ended("read -P 'name? ' x", 3, Some(Ending::Status(0)), 2)));
+        shell.marked(Mark::Command(None), now(4), NONE_STOPPED);
+        shell.marked(Mark::Done(None), now(5), NONE_STOPPED);
+        assert_eq!(shell.ran, Some(ended("", 5, None, 1)));
     }
 
     /// `exec` leaves the shell saying nothing, in each place it may be typed.

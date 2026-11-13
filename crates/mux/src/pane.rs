@@ -366,7 +366,8 @@ struct Thread {
 #[derive(Default)]
 struct Looks {
     due: Option<Instant>,
-    /// Whether the program wrote since the last look was due.
+    last: Option<Instant>,
+    /// Whether the program wrote since the last look.
     heard: bool,
 }
 
@@ -375,19 +376,22 @@ impl Looks {
     /// writes nothing would have none. Its program has run its own by then,
     /// as `spawn` returns once it has.
     fn first() -> Looks {
-        Looks { due: Some(Instant::now()), heard: false }
+        Looks { due: Some(Instant::now()), last: None, heard: false }
     }
 
-    /// The program wrote: the pane looks now, or at the look due, and again
-    /// after that.
+    /// The program wrote: the pane looks now, or `LOOK_AGAIN` after the last
+    /// look, where that is later, and again after that. A look due later
+    /// comes as soon.
     fn heard(&mut self, now: Instant) {
-        self.due.get_or_insert(now);
+        let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
+        self.due = Some(self.due.map_or(soonest, |due| due.min(soonest)));
         self.heard = true;
     }
 
     /// The pane looked at `now`, while its shell runs a command where it is
     /// `going`.
     fn looked(&mut self, now: Instant, going: bool) {
+        self.last = Some(now);
         self.due = if std::mem::take(&mut self.heard) {
             Some(now + LOOK_AGAIN)
         } else if going {
@@ -909,6 +913,30 @@ mod tests {
 
     /// An OSC 7 names a folder of this machine's, which it may spell in
     /// escapes, or a folder of another's, which is none of this one's.
+    /// What the program writes brings a look due later forward, to no
+    /// sooner than `LOOK_AGAIN` after the last, and has another follow it.
+    #[test]
+    fn what_the_program_writes_brings_a_later_look_forward() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut looks = Looks::first();
+        looks.heard(start);
+        assert_eq!(looks.due, Some(start));
+        looks.looked(start, true);
+        assert_eq!(looks.due, Some(at(100)));
+        looks.looked(at(100), true);
+        assert_eq!(looks.due, Some(at(1100)));
+        looks.heard(at(300));
+        assert_eq!(looks.due, Some(at(300)));
+        looks.looked(at(300), true);
+        looks.heard(at(310));
+        assert_eq!(looks.due, Some(at(400)));
+        looks.looked(at(400), false);
+        assert_eq!(looks.due, Some(at(500)));
+        looks.looked(at(500), false);
+        assert_eq!(looks.due, None);
+    }
+
     #[test]
     fn a_cwd_is_one_this_machine_has() {
         let cwd = |said: &str| local_cwd(said, "here");
