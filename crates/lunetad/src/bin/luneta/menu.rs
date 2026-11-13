@@ -1202,7 +1202,8 @@ pub struct PaneRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ran {
     /// No shell with the hook runs in the pane: one with it says it is ready
-    /// from its first prompt.
+    /// from its first prompt. In an own pane, the shell writes no marks of the
+    /// commands it runs (OSC 133), which its server reads in place of a hook.
     Unhooked,
     /// A shell with the hook, at its prompt, that has run nothing yet.
     Ready,
@@ -1409,6 +1410,10 @@ impl PaneRow {
                  newer lunetad's"
             )),
             Ran::Ready => Err(format!("menu: pane {pane}'s shell has run nothing yet")),
+            Ran::Unhooked if self.session.own() => Err(format!(
+                "menu: pane {pane}'s shell marks none of the commands it runs; a shell that \
+                 writes OSC 133, as fish 4 does, marks them"
+            )),
             Ran::Unhooked => Err(format!(
                 "menu: pane {pane} runs no shell with luneta's hook; a fish started since the \
                  hook was installed has it"
@@ -3968,8 +3973,8 @@ mod tests {
     }
 
     /// Only a shell at its prompt, after a command its hook said the end of,
-    /// has a last command to start an agent on. The menu says why it starts
-    /// none on another.
+    /// or its marks in an own pane, has a last command to start an agent on.
+    /// The menu says why it starts none on another.
     #[test]
     fn a_key_for_the_last_command_needs_a_shell_at_its_prompt_after_one() {
         let refused = |target: Target| {
@@ -3993,6 +3998,13 @@ mod tests {
             refused(ran(Ran::Unhooked)),
             "menu: pane 4 runs no shell with luneta's hook; a fish started since the hook was \
              installed has it"
+        );
+        let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
+        let unmarked = PaneRow { session: own, ran: Ran::Unhooked, ..row() };
+        assert_eq!(
+            refused(Target::Pane(Machine::Local, unmarked)),
+            "menu: pane 4's shell marks none of the commands it runs; a shell that writes OSC \
+             133, as fish 4 does, marks them"
         );
         assert_eq!(
             refused(ran(Ran::Unknown)),

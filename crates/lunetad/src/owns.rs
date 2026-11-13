@@ -87,12 +87,14 @@ fn is_socket(path: &Path) -> bool {
 /// the daemon reads a session's panes. One whose panes do not read is left
 /// out, and `troubles` says why.
 fn owns(listed: Vec<Listing>, troubles: &mut Troubles) -> Vec<core::Own> {
-    let own = |Listing { id, made, name, laid, clients }: Listing| match panes::terminals(laid) {
-        Ok(panes) => Some(core::Own { id, made, name, panes, clients }),
-        Err(why) => {
-            troubles.say(format!("the panes of own session {id}: {why}"));
-            None
-        },
+    let own = |Listing { id, made, name, laid, clients, doings }: Listing| {
+        match panes::terminals(laid) {
+            Ok(panes) => Some(core::Own { id, made, name, panes, clients, doings }),
+            Err(why) => {
+                troubles.say(format!("the panes of own session {id}: {why}"));
+                None
+            },
+        }
     };
     listed.into_iter().filter_map(own).collect()
 }

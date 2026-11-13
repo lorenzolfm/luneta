@@ -256,7 +256,11 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let owned = Owned::new();
     let made = owned.make("own").unwrap();
 
-    let listed = owned.listed("own");
+    let listed = eventually("own's pane says what it runs", || {
+        let listed = owned.listed("own");
+        let panes = listed.panes.as_ref()?;
+        panes.panes.iter().any(|pane| pane.command.is_some()).then_some(listed)
+    });
     let key = own(&listed).map(|own| (own.id, own.made_at));
     assert_eq!(key, Some((made.session, made.made_at)));
     assert!(made.made_at.is_some(), "the daemon says when it made the session");
@@ -266,7 +270,7 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
         tab: 0,
         tab_name: "Tab #1".to_owned(),
         cwd: Some(owned.home()),
-        command: None,
+        command: Some(WAITS.join(" ")),
         titled: None,
         shell: None,
         tab_id: Some(made.tab),
@@ -274,6 +278,33 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     };
     assert_eq!(listed.panes, Some(api::Panes { panes: vec![pane] }));
     assert_eq!(listed.clients, Some(api::Clients { clients: Vec::new() }));
+}
+
+/// An own pane's shell needs no hook: the host has what it runs, and what the
+/// marks it writes (OSC 133) say it ran, and how that ended.
+#[test]
+fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
+    let owned = Owned::new();
+    let marks = "m() { printf '\\033]133;%s\\007' \"$1\"; }; \
+        m A; m 'C;cmdline_url=make%20test'; m 'D;3'; m A; exec sleep 600";
+    let command = ["sh", "-c", marks].map(str::to_owned).to_vec();
+    let request =
+        NewOwnRequest { on: None, name: "marks".to_owned(), cwd: owned.home(), command };
+    owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
+    let pane = eventually("the host says make test ended", || {
+        let panes = owned.listed("marks").panes?.panes;
+        let pane = panes.into_iter().next()?;
+        let ended = matches!(
+            pane.shell.as_ref()?.doing.as_ref()?,
+            api::shell::Doing::Ended(ended) if ended.command == "make test"
+        );
+        (ended && pane.command.as_deref() == Some("sleep 600")).then_some(pane)
+    });
+    let Some(api::shell::Doing::Ended(ended)) = pane.shell.and_then(|shell| shell.doing) else {
+        unreachable!("the host said it ended");
+    };
+    assert_eq!(ended.ending, Some(api::shell::ended::Ending::Status(3)));
+    assert!(ended.at.is_some() && ended.took.is_some(), "{ended:?}");
 }
 
 /// A tab opens in an own session as in zellij's, at its end, and closes as

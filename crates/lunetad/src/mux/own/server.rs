@@ -7,7 +7,7 @@
 //! is ending says so, and one that holds the folder still keeps the next from
 //! starting: either way, luneta waits for it to go, and starts another.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
@@ -21,6 +21,7 @@ use std::{env, fs};
 
 use hyper_util::rt::TokioIo;
 use luneta_protocol::said::Said;
+use luneta_protocol::shell::Ending;
 use tokio::net::UnixStream;
 use tokio::runtime::{self, Runtime};
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -30,6 +31,7 @@ use tower::service_fn;
 use super::api::{self, mux_client::MuxClient};
 use super::{OwnId, OwnKey};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
+use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
 /// The socket the server listens on, in luneta's runtime folder, as
@@ -238,7 +240,7 @@ fn laid(session: &api::Session) -> Vec<Laid> {
             tab_position: position,
             tab_name: tab.name.clone(),
             cwd: Said::new(pane.cwd.clone()),
-            command: None,
+            command: pane.foreground.as_ref().and_then(|front| Said::new(front.argv.join(" "))),
         })
     });
     laid.collect()
@@ -274,6 +276,9 @@ pub struct Listing {
     /// Its panes, as luneta lays a session's out.
     pub laid: Vec<Laid>,
     pub clients: Listed,
+    /// What the shell of each pane said, by the pane's id, where it said
+    /// something.
+    pub doings: BTreeMap<u32, Doing>,
 }
 
 impl Listing {
@@ -309,7 +314,62 @@ fn one(session: &api::Session, before: &[Listing]) -> Result<Listing, String> {
     }
     let made = made_of(session, id)?;
     let clients = clients(session).map_err(|why| format!("own session {id}'s clients: {why}"))?;
-    Ok(Listing { id, made, name, laid: laid(session), clients })
+    let doings = doings(session).map_err(|why| format!("own session {id}'s {why}"))?;
+    Ok(Listing { id, made, name, laid: laid(session), clients, doings })
+}
+
+/// What the shell of each pane of `session` said, by the pane's id, or why
+/// one does not read. One that said a command, but not which, said nothing
+/// the daemon keeps.
+fn doings(session: &api::Session) -> Result<BTreeMap<u32, Doing>, String> {
+    let mut doings = BTreeMap::new();
+    for pane in session.tabs.iter().flat_map(|tab| &tab.panes) {
+        let Some(is) = pane.ran.as_ref().and_then(|ran| ran.is.as_ref()) else {
+            continue;
+        };
+        if let Some(doing) = doing(is).map_err(|why| format!("pane {}'s shell: {why}", pane.id))? {
+            doings.insert(pane.id, doing);
+        }
+    }
+    Ok(doings)
+}
+
+/// What a shell said, as the daemon keeps it, or why it does not read.
+fn doing(is: &api::ran::Is) -> Result<Option<Doing>, String> {
+    use api::ran::{ended, Is};
+    let time = |at: Option<prost_types::Timestamp>, what: &str| {
+        let at = at.ok_or_else(|| format!("no {what}"))?;
+        SystemTime::try_from(at).map_err(|why| format!("its {what}: {why}"))
+    };
+    let said = |command: &str| Said::new(command.to_owned());
+    let doing = match is {
+        Is::Ready(_) => Some(Doing::Ready),
+        Is::Going(going) => {
+            let front = match going.front() {
+                api::Front::Working => Front::Working,
+                api::Front::Asking => Front::Asking,
+                api::Front::Interactive => Front::Interactive,
+                api::Front::Unspecified => return Err("a command going in front of nothing".into()),
+            };
+            let since = time(going.since, "since")?;
+            said(&going.command).map(|command| Doing::Going { command, since, front })
+        },
+        Is::Ended(ended) => {
+            let at = time(ended.at, "at")?;
+            let ending = ended.ending.as_ref().map(|ending| match ending {
+                ended::Ending::Status(status) => Ending::Exited(*status),
+                ended::Ending::Resumed(_) => Ending::Resumed,
+            });
+            let took = ended.took.ok_or("no took")?;
+            let took = Duration::try_from(took).map_err(|why| format!("its took: {why}"))?;
+            said(&ended.command).map(|command| Doing::Ended { command, at, ending, took })
+        },
+        Is::Stopped(stopped) => {
+            let at = time(stopped.at, "at")?;
+            said(&stopped.command).map(|command| Doing::Stopped { command, at })
+        },
+    };
+    Ok(doing)
 }
 
 /// Follows the own sessions: has `told` hear them as the server lists them
