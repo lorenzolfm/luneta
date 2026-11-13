@@ -377,7 +377,7 @@ impl Mux<'_> {
                     return Err(unowned(to)?);
                 };
                 let place = match pane {
-                    None => own::server::Place::Session(to.id),
+                    None => own::server::Place::Session(to),
                     Some(pane) => own::server::Place::Pane(own::server::pane_of(to, pane)?),
                 };
                 at.went(place)

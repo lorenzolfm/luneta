@@ -121,14 +121,32 @@ impl Server {
         listed.ok_or_else(|| gone(id))
     }
 
+    /// The session `key`, as the server lists it now, or why not, as `of_key`
+    /// says.
+    fn session_keyed(&self, key: OwnKey) -> Result<api::Session, Failure> {
+        of_key(self.session(key.id)?, key)
+    }
+
     /// The tab that holds `pane`, as the server lists its session now, or why
     /// none does: the server numbers panes across its sessions, so a pane of
     /// another is none of this one's.
     fn tab_of(&self, pane: OwnPane) -> Result<u32, Failure> {
-        let tabs = self.session(pane.session.id)?.tabs;
+        let tabs = self.session_keyed(pane.session)?.tabs;
         let tab = tabs.iter().find(|tab| tab.panes.iter().any(|it| it.id == pane.pane.get()));
         let none = || Failure::Own(no_pane(pane.session.id, pane.pane.get()));
         Ok(tab.ok_or_else(none)?.id)
+    }
+}
+
+/// `session`, of the id `key` says, where it is the one `key` says, or why
+/// not: one of the id made at another time is another's, of a server before
+/// this one, and gone.
+fn of_key(session: api::Session, key: OwnKey) -> Result<api::Session, Failure> {
+    assert_eq!(session.id, key.id.get(), "of_key takes a session of the key's id");
+    match made_of(&session, key.id) {
+        Ok(made) if made == key.made => Ok(session),
+        Ok(_) => Err(gone(key.id)),
+        Err(why) => Err(Failure::Unread(why)),
     }
 }
 
@@ -483,7 +501,7 @@ pub fn sessions() -> Result<Vec<Listing>, Failure> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
     /// A session, on the tab a client coming there goes to.
-    Session(OwnId),
+    Session(OwnKey),
     /// The tab of a session that holds a pane.
     Pane(OwnPane),
 }
@@ -610,10 +628,14 @@ impl Own {
         killed.map(drop).map_err(|status| refused(&status))
     }
 
-    /// Takes the client that last typed in the session to `to`.
+    /// Takes the client that last typed in the session to `to`, or says why
+    /// not: one of a server before this one is gone.
     pub fn went(&self, to: Place) -> Result<(), Failure> {
         let is = match to {
-            Place::Session(session) => api::place::Is::Session(session.get()),
+            Place::Session(session) => {
+                self.server.session_keyed(session)?;
+                api::place::Is::Session(session.id.get())
+            },
             Place::Pane(pane) => api::place::Is::Tab(self.server.tab_of(pane)?),
         };
         let request = api::GoRequest {
@@ -891,5 +913,22 @@ mod tests {
             front: Front::Working,
         };
         assert_eq!(doings, [(1, &Doing::Ready), (6, &going)]);
+    }
+
+    /// A session goes by its key: one of the key's id that its server made
+    /// at another time is gone, as it is another's, of a server before this
+    /// one, and one that says no time it was made does not read.
+    #[test]
+    fn a_session_is_the_one_its_key_says_or_gone() {
+        let key = |seconds| OwnKey {
+            id: OwnId::new(3).unwrap(),
+            made: SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+        };
+        let work = || session(3, "work", &[]);
+        assert_eq!(of_key(work(), key(60)).map(|it| it.name).ok(), Some("work".to_owned()));
+        let before = of_key(work(), key(59));
+        assert!(matches!(&before, Err(Failure::Own(why)) if why.ends_with("no longer runs")));
+        let unmade = of_key(api::Session { made_at: None, ..work() }, key(60));
+        assert!(matches!(&unmade, Err(Failure::Unread(_))), "{unmade:?}");
     }
 }

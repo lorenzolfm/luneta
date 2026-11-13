@@ -546,7 +546,7 @@ fn session(
 /// the server's environment, not this one's.
 fn own_made(at: OwnKey, to: &SessionName, cwd: &Directory) -> Result<(), String> {
     let made = own_sessions::made(to, cwd)?;
-    let went = server::keyed(at).and_then(|at| at.went(Place::Session(made.id)));
+    let went = server::keyed(at).and_then(|at| at.went(Place::Session(made)));
     went.map_err(|failure| format!("made {to}, and took no client there: {failure}"))
 }
 
@@ -578,7 +578,7 @@ pub fn go(to: &Address, folder: &Path) -> ExitCode {
             (Whose::Zellij(_), Whose::Zellij(_)) => zellij::taken(&at, &to, pane),
             (Whose::Own(from), Whose::Own(into)) => {
                 let place = match pane {
-                    None => Place::Session(into.id),
+                    None => Place::Session(into),
                     Some(pane) => Place::Pane(server::pane_of(into, pane)?),
                 };
                 Ok(server::keyed(from)?.went(place)?)
