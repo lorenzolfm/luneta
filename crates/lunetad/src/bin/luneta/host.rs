@@ -3179,8 +3179,8 @@ impl App {
     }
 
     /// Takes in what luneta-mux said to luneta's client of an own session:
-    /// which client it is, and where it is, which the sidebar has it as and
-    /// at, and does what waited on its coming there, where it is where it
+    /// where it is, and as which client, which the sidebar has it at and as,
+    /// and does what waited on its coming there, where it is where it
     /// went, as `Phase::went` says; what its pane shows; a go it refused,
     /// which leaves what waited on it undone; and its end, as `own_ended`
     /// says.
@@ -3190,11 +3190,10 @@ impl App {
         };
         own.attached.heard(&heard);
         match heard {
-            Heard::Attached(client) => self.sidebar.attached_own(client),
             Heard::Frame(_) => {},
             Heard::Went(went) => {
                 let after = own.phase.went(&went);
-                self.sidebar.went_own(went.pane);
+                self.sidebar.went_own(went.pane, went.client);
                 if let Some(after) = after {
                     zellij::came_here(after, &self.events);
                 }
@@ -3236,7 +3235,7 @@ impl App {
         let Some(fails) = fails else {
             self.sidebar.notify(note);
             if let Some(seat) = self.sidebar.own_seat() {
-                self.own_lost.push(seat.session);
+                self.own_lost.push(seat.session());
             }
             return self.newest_here(&[]);
         };
@@ -3340,7 +3339,7 @@ impl App {
     /// is on now; or nowhere, where luneta does not know which that is.
     fn back(&self) -> Fails {
         if let Some(seat) = self.sidebar.own_seat() {
-            return Fails::Own(seat.session);
+            return Fails::Own(seat.session());
         }
         self.here_back().map_or(Fails::End, Fails::Back)
     }
@@ -4430,7 +4429,7 @@ mod tests {
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
-    use lunetad::mux::own::{OwnMade, OwnPane};
+    use lunetad::mux::own::{OwnClientId, OwnMade, OwnPane};
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
@@ -4480,7 +4479,8 @@ mod tests {
         };
         let went = |session, tab| {
             let tab = NonZeroU32::new(tab).unwrap();
-            own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab }
+            let client = OwnClientId::new(1).unwrap();
+            own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab, client }
         };
         let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
         let going = Going { to: To::Session(there), after: kill() };

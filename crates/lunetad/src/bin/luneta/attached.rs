@@ -103,7 +103,7 @@ impl View {
                 self.went = Some(*went);
             },
             Heard::Frame(frame) => self.framed(frame)?,
-            Heard::Attached(_) | Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
+            Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
         }
         Ok(())
     }
@@ -605,7 +605,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use lunetad::mux::own::attach::Grapheme;
-    use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
+    use lunetad::mux::own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
 
     use super::*;
 
@@ -635,7 +635,8 @@ mod tests {
         let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
         let screen = Screen { size, lines, cursor: None, tracks_mouse: false };
         let session = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
-        let went = Went { pane: OwnPane::new(session, 1).unwrap(), tab: NonZeroU32::MIN };
+        let (pane, client) = (OwnPane::new(session, 1).unwrap(), OwnClientId::new(1).unwrap());
+        let went = Went { pane, tab: NonZeroU32::MIN, client };
         View { went: Some(went), screen: Some(screen), ..View::default() }
     }
 

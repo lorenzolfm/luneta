@@ -22,7 +22,9 @@ pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, C
 use lunetad::closes::{running_in, Whose};
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, opening_of, Open, Opened, Tab};
-use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, TURN_VAR};
+use lunetad::asks::{
+    self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, OWN_VAR_BEFORE, TURN_VAR,
+};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::{moves, Destination, Directory, SocketId};
 pub use lunetad::{var, SessionName};
@@ -93,7 +95,13 @@ impl Seat {
 pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
     let (asked, own, away) = (var(ASKED_VAR)?, var(OWN_VAR)?, var(AWAY_VAR)?);
-    let said = asks::Where { asked: asked.as_deref(), own: own.as_deref(), away: away.as_deref() };
+    let own_before = var(OWN_VAR_BEFORE)?;
+    let said = asks::Where {
+        asked: asked.as_deref(),
+        own: own.as_deref(),
+        away: away.as_deref(),
+        own_before: own_before.as_deref(),
+    };
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), said);
     seat_in(turn?, Zellij::here()?, own::here())
 }

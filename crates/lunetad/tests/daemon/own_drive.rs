@@ -74,7 +74,9 @@ fn clients_on(owned: &Owned) -> Vec<(u64, u32)> {
 /// A command in an own pane is in it by the ids its server gave the pane and
 /// its session: `here` names it by the session's name now, through a rename,
 /// and says so once the session is gone. The ask box's agent goes by the own
-/// pane the box names in the same way.
+/// pane the box names in the same way, and by none an older lunetad's box
+/// named: its spelling, of a session named `1:named-then`, reads as this
+/// one's of client 1.
 #[test]
 fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     let owned = Owned::new();
@@ -85,7 +87,10 @@ fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     let turn = ("LUNETA_TURN", "00000000000000aa".to_owned());
     let made_nanos = &here[1].1;
     let asked = format!("{}:{made_nanos}:{}:1:named-then", work.id, made.pane);
-    let from_the_box = [("LUNETA_OWN_PANE", asked), turn];
+    let older_box = [("LUNETA_OWN_PANE", asked.clone()), turn.clone()];
+    let older = why(&luneta(&owned, &older_box, &["here"]));
+    assert!(older.contains("relaunch luneta"), "{older}");
+    let from_the_box = [("LUNETA_OWN_SEAT", asked), turn];
     let box_says = said(&luneta(&owned, &from_the_box, &["here"]));
     assert_eq!(box_says, format!("work:{}\n", made.pane));
 
@@ -207,7 +212,7 @@ fn go_from_the_ask_box_takes_luneta_s_client_whoever_typed_last() {
     let (luneta_s, other) = (attached.client, typist.client);
     let made = &in_work[1].1;
     let asked = format!("{}:{made}:{}:{luneta_s}:work", in_work[0].1, work.pane);
-    let from_the_box = [("LUNETA_OWN_PANE", asked), ("LUNETA_TURN", "00000000000000aa".to_owned())];
+    let from_the_box = [("LUNETA_OWN_SEAT", asked), ("LUNETA_TURN", "00000000000000aa".to_owned())];
 
     said(&luneta(&owned, &from_the_box, &["go", "play"]));
     let mut on = clients_on(&owned);
