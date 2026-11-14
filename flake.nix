@@ -49,6 +49,19 @@
           # and not written again here, so that the two cannot name two rusts.
           toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
+          localToolchain =
+            if pkgs.stdenv.hostPlatform.isDarwin then
+              pkgs.symlinkJoin {
+                name = "${toolchain.name}-unwrapped-cargo";
+                paths = [ toolchain ];
+                postBuild = ''
+                  rm "$out/bin/cargo"
+                  ln -s ${toolchain.availableComponents.cargo}/bin/cargo "$out/bin/cargo"
+                '';
+              }
+            else
+              toolchain;
+
           # Every crate is built through crane, on the toolchain above, because it
           # builds a crate's dependencies in a derivation of their own. That
           # derivation reads the manifests and Cargo.lock, with each source file of
@@ -156,7 +169,7 @@
             .${system} or "-DGGML_NATIVE=OFF";
 
           buildTools = [
-            toolchain
+            localToolchain
             pkgs.coreutils
             pkgs.gnumake
             pkgs.protobuf
