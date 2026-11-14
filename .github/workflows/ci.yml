@@ -13,15 +13,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: actions/checkout v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
             keep-outputs = true
 
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      - name: nix-community/cache-nix-action v7
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         with:
           primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
@@ -32,7 +35,11 @@ jobs:
         run: nix build --no-link .#dev
 
       - name: Lints
-        run: nix build -L --keep-going --out-link lint .#checks.x86_64-linux.statix .#checks.x86_64-linux.deadnix .#checks.x86_64-linux.comments
+        run: >-
+          nix build -L --keep-going --out-link lint
+          .#checks.x86_64-linux.statix
+          .#checks.x86_64-linux.deadnix
+          .#checks.x86_64-linux.comments
 
       - name: Bans, licenses and sources
         run: nix build -L --out-link deny .#checks.x86_64-linux.deny
@@ -52,11 +59,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: actions/checkout v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 2
 
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -74,22 +83,25 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: actions/checkout v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
             keep-outputs = true
 
-      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+      - name: nix-community/cache-nix-action v7
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         with:
           primary-key: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'nix/**', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'crates/**', 'proto/**', 'skills/luneta/SKILL.md', 'clippy.toml', '.config/nextest.toml', 'deny.toml') }}
           restore-prefixes-first-match: nix-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
           save: ${{ github.ref == 'refs/heads/main' }}
           gc-max-store-size: 0
 
-      - name: Restore the tests' target/
+      - name: Restore the tests' target/, with actions/cache v6.1.0
         id: target
         if: runner.os == 'macOS'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -121,7 +133,7 @@ jobs:
         if: runner.os != 'macOS' || steps.target.outputs.cache-hit != 'true'
         run: nix build -L .#lunetad
 
-      - name: Save the tests' target/
+      - name: Save the tests' target/, with actions/cache v6.1.0
         if: >-
           runner.os == 'macOS' && github.ref == 'refs/heads/main'
           && steps.target.outputs.cache-hit != 'true'
