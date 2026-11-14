@@ -60,7 +60,13 @@ pub const ASKED_VAR: &str = "LUNETA_PANE";
 /// the pane by its id, luneta's client by the id its server gave it, which a
 /// go takes, and last the name the session had as the turn started, which
 /// may hold a `:` of its own.
-pub const OWN_VAR: &str = "LUNETA_OWN_PANE";
+pub const OWN_VAR: &str = "LUNETA_OWN_SEAT";
+
+/// What named the pane of an own session you asked luneta's ask box from,
+/// before it named luneta's client too, as `<session>:<made>:<pane>:<name>`:
+/// set by a lunetad older than this luneta, whose spelling `OWN_VAR`'s would
+/// read wrong where the name starts with digits and a `:`, so none is read.
+pub const OWN_VAR_BEFORE: &str = "LUNETA_OWN_PANE";
 
 /// What says, in the variables of the agent of luneta's ask box, that you
 /// asked it from another machine, where luneta's zellij was as the turn
@@ -228,7 +234,9 @@ impl User {
     /// by: the pane, as `<session>:<pane>`, in `ASKED_VAR`, or an own one in
     /// `OWN_VAR`, or another machine in `AWAY_VAR`, or none of them.
     fn name_in(&self, command: &mut Command) {
-        command.env_remove(ASKED_VAR).env_remove(OWN_VAR).env_remove(AWAY_VAR);
+        for name in [ASKED_VAR, OWN_VAR, OWN_VAR_BEFORE, AWAY_VAR] {
+            command.env_remove(name);
+        }
         match self {
             User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
             User::Own { pane, named, client } => {
@@ -258,16 +266,19 @@ impl User {
     }
 
     /// Where you are, as `name_in` names it in `said`. Or why they do not
-    /// read, or say more than one place.
+    /// read, or say more than one place, or are of an older lunetad's.
     fn read(said: Where<'_>) -> Result<User, String> {
+        if let Some(before) = said.own_before {
+            return Err(older(before));
+        }
         match said {
-            Where { asked: None, own: None, away: None } => Ok(User::Untold),
-            Where { asked: None, own: None, away: Some(AWAY_SET) } => Ok(User::Away),
-            Where { asked: None, own: None, away: Some(away) } => {
+            Where { asked: None, own: None, away: None, .. } => Ok(User::Untold),
+            Where { asked: None, own: None, away: Some(AWAY_SET), .. } => Ok(User::Away),
+            Where { asked: None, own: None, away: Some(away), .. } => {
                 Err(format!("{AWAY_VAR} is {away:?}, and luneta's ask box sets it to {AWAY_SET}"))
             },
             // A session's name may hold a `:` of its own, as zellij's may.
-            Where { asked: Some(asked), own: None, away: None } => {
+            Where { asked: Some(asked), own: None, away: None, .. } => {
                 let pane = asked.rsplit_once(':').and_then(|(session, pane)| {
                     let session = SessionName::running(session).ok()?;
                     Some(User::Pane { session, pane: pane.parse().ok()? })
@@ -275,11 +286,11 @@ impl User {
                 let no_pane = || format!("{ASKED_VAR}: {asked} is no pane of a session zellij runs");
                 pane.ok_or_else(no_pane)
             },
-            Where { asked: None, own: Some(own), away: None } => {
+            Where { asked: None, own: Some(own), away: None, .. } => {
                 let no_pane = || format!("{OWN_VAR}: {own} is no pane of an own session");
                 own_read(own).ok_or_else(no_pane)
             },
-            Where { asked, own, away } => {
+            Where { asked, own, away, .. } => {
                 let asked = asked.map(|asked| {
                     format!("{ASKED_VAR} names {asked}, a pane luneta's ask box asked from")
                 });
@@ -293,6 +304,15 @@ impl User {
             },
         }
     }
+}
+
+/// Why `OWN_VAR_BEFORE`, set to `before`, does not read: a lunetad older than
+/// this luneta set it, and the luneta it runs with stops it once relaunched.
+fn older(before: &str) -> String {
+    format!(
+        "{OWN_VAR_BEFORE} is {before:?}, as a lunetad older than this luneta sets it: relaunch \
+         luneta, and ask again"
+    )
 }
 
 /// `OWN_VAR` as `name_in` spells it, of the own pane `pane`, of the session
@@ -318,12 +338,13 @@ fn own_read(spelled: &str) -> Option<User> {
 
 /// Where you are, as the variables of the agent of luneta's ask box spell it:
 /// of `ASKED_VAR`, `OWN_VAR` and `AWAY_VAR`, which the box sets one of at
-/// most.
+/// most, and `OWN_VAR_BEFORE`, which only an older lunetad's box sets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Where<'a> {
     pub asked: Option<&'a str>,
     pub own: Option<&'a str>,
     pub away: Option<&'a str>,
+    pub own_before: Option<&'a str>,
 }
 
 /// The turn of luneta's ask box a command runs in, and where you are, as the
@@ -338,7 +359,8 @@ pub fn turn_in(
 ) -> Result<Option<(Turn, User)>, String> {
     let Some(turn) = Turn::read(key, before)? else {
         let set = match user {
-            Where { asked: None, own: None, away: None } => return Ok(None),
+            Where { asked: None, own: None, away: None, own_before: None } => return Ok(None),
+            Where { own_before: Some(before), .. } => return Err(older(before)),
             Where { asked: Some(_), .. } => ASKED_VAR,
             Where { own: Some(_), .. } => OWN_VAR,
             Where { away: Some(_), .. } => AWAY_VAR,
@@ -903,8 +925,10 @@ mod tests {
                 let names = [TURN_VAR, BEFORE_VAR, ASKED_VAR, OWN_VAR, AWAY_VAR];
                 let [key, before, asked, own, away] = names.map(|name| var(&claude, name));
                 let (asked, own, away) = (asked.as_deref(), own.as_deref(), away.as_deref());
-                let read = turn_in(key.as_deref(), before.as_deref(), Where { asked, own, away });
+                let said = Where { asked, own, away, own_before: None };
+                let read = turn_in(key.as_deref(), before.as_deref(), said);
                 assert_eq!(read, Ok(Some((turn, user.clone()))));
+                assert_eq!(var(&claude, OWN_VAR_BEFORE), None);
             }
         }
         assert_eq!(turn_in(None, None, Where::default()), Ok(None));
@@ -937,7 +961,7 @@ mod tests {
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
         let (key, before) = (Some("ff"), Some("0a"));
-        let at = |asked, away| Where { asked, own: None, away };
+        let at = |asked, away| Where { asked, away, ..Where::default() };
         let own = |own| Where { own: Some(own), ..Where::default() };
         assert_eq!(turn_in(key, before, Where::default()), Ok(Some((turn(), User::Untold))));
         let read = turn_in(key, before, own("3:60000000005:12:7:a:b"));
@@ -966,8 +990,20 @@ mod tests {
         ] {
             assert!(turn_in(key, before, own(forged)).is_err(), "{forged:?}");
         }
-        let twice = Where { asked: Some("work:2"), own: Some("3:60:12:7:work"), away: None };
+        let twice = Where { asked: Some("work:2"), ..own("3:60:12:7:work") };
         assert!(turn_in(key, before, twice).is_err());
+        let older = |own_before| Where { own_before: Some(own_before), ..Where::default() };
+        for spelled in ["3:60:12:7:work", "3:60:12:work"] {
+            let said = older(spelled);
+            let refused = format!(
+                "LUNETA_OWN_PANE is {spelled:?}, as a lunetad older than this luneta sets it: \
+                 relaunch luneta, and ask again"
+            );
+            assert_eq!(turn_in(key, before, said), Err(refused.clone()), "{spelled:?}");
+            assert_eq!(turn_in(None, None, said), Err(refused), "{spelled:?}");
+            let both = Where { own: Some("3:60:12:7:work"), ..said };
+            assert!(turn_in(key, before, both).is_err(), "{spelled:?}");
+        }
         for (asked, away) in [
             (Some(""), None),
             (Some("work"), None),
