@@ -1397,7 +1397,9 @@ from one kind to the other: luneta's own client and zellij's are two, and it
 says so. The ask box tells its agent the own pane you are on, as it does a
 pane of zellij's, and which client is luneta's: `go` and `open session` from
 the box move that one, whoever typed in the session last, and fail where it
-is gone.
+is gone. `close` counts the agent of a session file lunetad cannot read in
+the own pane it runs in, and `luneta say` there names its pane and session
+on the sidebar, as in zellij's.
 
 `turn` does what `t t` and `t p` do, and refuses what they refuse, saying why.
 What runs in the panes goes on, an agent turning the pane it runs in too, and
@@ -1662,7 +1664,7 @@ listed when all of these hold:
 A worktree with a merged pull request that fails any of these is shown as kept,
 with the reason, and one `gh` or git said nothing of is too. Any other isn't
 mentioned. While lunetad doesn't answer, has yet to list every pane, can't read all of
-zellij's folder, or can't read the session file of an agent outside zellij's panes,
+zellij's folder, or can't read the session file of an agent in no pane,
 luneta can't tell where the panes and agents are, so it deletes nothing and says so. A
 pane whose command has ended runs nothing, so it counts only where zellij said where
 it worked.

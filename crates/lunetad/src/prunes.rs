@@ -14,6 +14,7 @@ use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::program;
+use crate::seats;
 
 pub const PLANNING: Duration = Duration::from_mins(5);
 
@@ -171,11 +172,12 @@ impl Occupied {
                         that runs"
                 .to_owned());
         }
-        host.unread_seats().map_err(|unplaced| unplaced.to_string())?;
-        if let Some(file) = host.unread_files.iter().find(|file| file.zellij.is_none()) {
+        seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
+        let in_none = |file: &&api::UnreadFile| file.zellij.is_none() && file.own.is_none();
+        if let Some(file) = host.unread_files.iter().find(in_none) {
             let pid = file.pid;
             return Err(format!(
-                "lunetad cannot read the session file of agent {pid}, which runs outside zellij"
+                "lunetad cannot read the session file of agent {pid}, which runs in no pane"
             ));
         }
         let mut panes = Vec::new();
@@ -1036,7 +1038,7 @@ mod tests {
             unread_files,
             ..sockets(Some(0))
         };
-        let file = |zellij| api::UnreadFile { pid: 9, zellij };
+        let file = |zellij| api::UnreadFile { pid: 9, zellij, own: None };
         let in_pane = |session: Option<&str>| {
             let session = session.map(str::to_owned);
             Some(api::Zellij { named: "work".to_owned(), session, pane: 4 })
@@ -1047,10 +1049,16 @@ mod tests {
         for unplaced_files in [vec![], vec![file(in_pane(None))]] {
             assert_eq!(Occupied::of(&files(1, unplaced_files)), Err(unplaced.to_owned()));
         }
+        let own = |pane| {
+            let made_at = Some(prost_types::Timestamp::default());
+            let session = api::OwnSession { id: 3, made_at };
+            api::UnreadFile { own: Some(api::Own { session: Some(session), pane }), ..file(None) }
+        };
+        assert!(Occupied::of(&files(1, vec![own(4)])).is_ok());
+        assert_eq!(Occupied::of(&files(1, vec![own(0)])), Err(unplaced.to_owned()));
         assert_eq!(
             Occupied::of(&files(1, vec![file(None)])),
-            Err("lunetad cannot read the session file of agent 9, which runs outside zellij"
-                .to_owned())
+            Err("lunetad cannot read the session file of agent 9, which runs in no pane".to_owned())
         );
     }
 

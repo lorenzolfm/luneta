@@ -16,8 +16,8 @@ use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status, UnreadFile, Utterance,
-    Version, WatchRequest, WorkTree, Zellij,
+    Agent, ListAgentsResponse, OwnSpeaker, PullRequest, Say, SayRequest, Session, Status,
+    UnreadFile, Utterance, Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
@@ -245,7 +245,8 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        let utterance = Utterance { text, speaker: speaker_here() };
+        let (speaker, own_speaker) = speaker_here();
+        let utterance = Utterance { text, speaker, own_speaker };
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
@@ -263,13 +264,19 @@ fn from_stdin() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&read).into_owned())
 }
 
-fn speaker_here() -> Option<Zellij> {
-    let (named, pane) = match zellij::here().ok()?? {
-        Seat::Opened(ZellijPane { session, pane }) => (session, pane),
-        Seat::Asked { user: User::Pane { session, pane }, .. } => (session.to_string(), pane),
-        Seat::Asked { .. } | Seat::Own { .. } => return None,
-    };
-    Some(Zellij { named, session: None, pane })
+fn speaker_here() -> (Option<Zellij>, Option<OwnSpeaker>) {
+    let zellij = |named, pane| (Some(Zellij { named, session: None, pane }), None);
+    let own = |pane: OwnPane| (None, Some(OwnSpeaker { pane: Some(pane.into()), session: None }));
+    match zellij::here() {
+        Ok(Some(Seat::Opened(ZellijPane { session, pane }))) => zellij(session, pane),
+        Ok(Some(Seat::Asked { user: User::Pane { session, pane }, .. })) => {
+            zellij(session.to_string(), pane)
+        },
+        Ok(Some(Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. })) => own(pane),
+        Ok(Some(Seat::Asked { user: User::Away | User::Untold, .. }) | None) | Err(_) => {
+            (None, None)
+        },
+    }
 }
 
 fn ssh(destination: &Destination, folder: &Path) -> ExitCode {

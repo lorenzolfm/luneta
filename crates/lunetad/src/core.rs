@@ -210,7 +210,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 *was = reached;
             },
             Command::Say { said, at, answer } => {
-                known.sayings.take(said, &known.sessions, at);
+                let owns = &known.owns;
+                let own_named = |key: OwnKey| {
+                    let own = owns.iter().find(|own| own.id == key.id && own.made == key.made)?;
+                    Some(own.name.to_string())
+                };
+                known.sayings.take(said, &known.sessions, own_named, at);
                 let _ = answer.send(());
             },
             Command::Sessions(answer) => {

@@ -262,6 +262,10 @@ impl Unread {
                 }),
                 pane,
             }),
+            own: self.pane.as_ref().and_then(|named| match named {
+                Named::Own(own) => Some((*own).into()),
+                Named::Zellij(_) => None,
+            }),
         }
     }
 }
