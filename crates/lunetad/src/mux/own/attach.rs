@@ -20,6 +20,7 @@ const SAID_MAX: usize = 1024;
 pub enum To {
     Session(OwnKey),
     Tab { session: OwnKey, tab: NonZeroU32 },
+    Pane(OwnPane),
 }
 
 impl To {
@@ -27,6 +28,7 @@ impl To {
     pub fn session(self) -> OwnKey {
         match self {
             To::Session(session) | To::Tab { session, .. } => session,
+            To::Pane(pane) => pane.session,
         }
     }
 
@@ -35,6 +37,7 @@ impl To {
         match self {
             To::Session(session) => went.pane.session == session,
             To::Tab { session, tab } => went.pane.session == session && went.tab == tab,
+            To::Pane(pane) => went.pane == pane,
         }
     }
 
@@ -42,6 +45,7 @@ impl To {
         let is = match self {
             To::Session(session) => api::place::Is::Session(session.id.get()),
             To::Tab { tab, .. } => api::place::Is::Tab(tab.get()),
+            To::Pane(pane) => api::place::Is::Pane(pane.id.get()),
         };
         api::Place { is: Some(is), made_at: Some(self.session().made.into()) }
     }
@@ -51,14 +55,16 @@ impl To {
         if !sessions.contains(&session) {
             return Err(format!("own session {} no longer runs", session.id));
         }
-        let To::Tab { tab, .. } = self else {
-            return Ok(());
-        };
         let listed = listing.iter().find(|listed| listed.id == session.id.get());
-        if listed.is_some_and(|listed| listed.tabs.iter().any(|it| it.id == tab.get())) {
-            Ok(())
-        } else {
-            Err(format!("own session {} has no tab {tab}", session.id))
+        let tabs = listed.map_or(&[][..], |listed| &listed.tabs);
+        let has_pane =
+            |pane: NonZeroU32| tabs.iter().flat_map(|tab| &tab.panes).any(|it| it.id == pane.get());
+        match self {
+            To::Session(_) => Ok(()),
+            To::Tab { tab, .. } if tabs.iter().any(|it| it.id == tab.get()) => Ok(()),
+            To::Tab { tab, .. } => Err(format!("own session {} has no tab {tab}", session.id)),
+            To::Pane(pane) if has_pane(pane.id) => Ok(()),
+            To::Pane(pane) => Err(format!("own session {} has no pane {}", session.id, pane.id)),
         }
     }
 }
@@ -489,7 +495,7 @@ impl Layout {
         &self.tabs
     }
 
-    fn heard(layout: api::Layout) -> Result<Layout, String> {
+    pub fn heard(layout: api::Layout) -> Result<Layout, String> {
         let size = Size::heard("a layout", layout.size)?;
         let tab = NonZeroU32::new(layout.tab).ok_or("a layout is of tab 0")?;
         let (columns, rows) = (size.columns.get(), size.rows.get());
@@ -979,7 +985,8 @@ mod tests {
 
     #[test]
     fn a_client_goes_only_to_a_session_its_server_holds() {
-        let tab = |id| api::Tab { id, ..api::Tab::default() };
+        let pane = api::Pane { id: 3, ..api::Pane::default() };
+        let tab = |id| api::Tab { id, panes: vec![pane.clone()], ..api::Tab::default() };
         let listed = |id, made: u64, tabs| api::Session {
             id,
             tabs,
@@ -995,6 +1002,10 @@ mod tests {
         let tab = |tab| To::Tab { session: key(1, 30), tab: NonZeroU32::new(tab).unwrap() };
         assert_eq!(tab(7).found_in(&sessions, &listing), Ok(()));
         assert_eq!(tab(8).found_in(&sessions, &listing).unwrap_err(), "own session 1 has no tab 8");
+        let pane = |pane| To::Pane(OwnPane::new(key(1, 30), pane).unwrap());
+        assert_eq!(pane(3).found_in(&sessions, &listing), Ok(()));
+        let none = pane(4).found_in(&sessions, &listing).unwrap_err();
+        assert_eq!(none, "own session 1 has no pane 4");
     }
 
     #[test]

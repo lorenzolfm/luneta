@@ -31,7 +31,13 @@ pub const CLIENTS_MAX: usize = 256;
 
 const _: () = assert!(TABS_MAX <= PANES_MAX);
 
-pub type Layouts = watch::Receiver<Option<api::Layout>>;
+pub type Layouts = watch::Receiver<Option<LaidOut>>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaidOut {
+    pub layout: api::Layout,
+    pub wents: u64,
+}
 
 pub struct Mux {
     model: Mutex<Model>,
@@ -101,8 +107,9 @@ struct Seat {
     size: Size,
     colours: Colours,
     out: Out,
-    layout: watch::Sender<Option<api::Layout>>,
+    layout: watch::Sender<Option<LaidOut>>,
     came: u64,
+    wents: u64,
     _gone: oneshot::Sender<()>,
 }
 
@@ -265,7 +272,7 @@ impl Mux {
             out.try_send(Ok(attached)).expect("a new client's stream has room for its first word");
             let (size, colours) = (hello.size, hello.colours);
             let (layout, layouts) = watch::channel(None);
-            let seat = Seat { pane, size, colours, out, layout, came: 0, _gone: gone };
+            let seat = Seat { pane, size, colours, out, layout, came: 0, wents: 0, _gone: gone };
             model.clients.insert(client, seat);
             model.seat_on(client, pane)?;
             Ok((client, layouts))
@@ -690,6 +697,7 @@ impl Model {
         }
         seat.pane = pane;
         seat.came = came;
+        seat.wents += 1;
         self.session_mut(session).expect("a pane's session").tabs.make_current(tab);
         let found = self.tab_mut(tab);
         if found.focused != pane {
@@ -787,21 +795,6 @@ impl Model {
             if let Some(size) = smallest(seated.iter().map(|(_, seat)| seat.size)) {
                 tab.tree.fit(size);
             }
-            let viewers: Arc<[Viewer]> = seated
-                .iter()
-                .map(|(client, seat)| Viewer {
-                    client: *client,
-                    out: seat.out.clone(),
-                    colours: seat.colours,
-                    came: seat.came,
-                })
-                .collect();
-            let whole = Rect::whole(tab.tree.size()).inner();
-            for (pane, rect) in tab.tree.laid() {
-                let full = tab.fullscreen && pane.id == tab.focused;
-                let size = if full { whole } else { rect.inner() };
-                pane.handle.want(Wanted { size, viewers: Arc::clone(&viewers) });
-            }
         }
         let mut laid_out = 0;
         for session in &self.sessions {
@@ -817,17 +810,38 @@ impl Model {
                     if let Some(api::layout::Shown::Tiled(tiled)) = &mut layout.shown {
                         tiled.focused = seat.pane.said();
                     }
-                    let layout = Some(layout);
+                    let wents = seat.wents;
                     seat.layout.send_if_modified(|said| {
-                        let modified = *said != layout;
-                        *said = layout;
-                        modified
+                        if said.as_ref().is_some_and(|said| said.layout == layout) {
+                            return false;
+                        }
+                        *said = Some(LaidOut { layout, wents });
+                        true
                     });
                     laid_out += 1;
                 }
             }
         }
         assert_eq!(laid_out, self.clients.len(), "every client sits on a pane of the model");
+        for tab in self.sessions.iter().flat_map(|session| session.tabs.iter()) {
+            let viewers: Arc<[Viewer]> = self
+                .clients
+                .iter()
+                .filter(|(_, seat)| tab.holds(seat.pane))
+                .map(|(client, seat)| Viewer {
+                    client: *client,
+                    out: seat.out.clone(),
+                    colours: seat.colours,
+                    came: seat.came,
+                })
+                .collect();
+            let whole = Rect::whole(tab.tree.size()).inner();
+            for (pane, rect) in tab.tree.laid() {
+                let full = tab.fullscreen && pane.id == tab.focused;
+                let size = if full { whole } else { rect.inner() };
+                pane.handle.want(Wanted { size, viewers: Arc::clone(&viewers) });
+            }
+        }
     }
 
     fn listing(&self) -> api::Listing {

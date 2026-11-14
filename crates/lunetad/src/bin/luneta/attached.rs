@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::mpsc::Sender;
 
 use alacritty_terminal::vte::ansi::CursorShape;
@@ -7,13 +7,18 @@ use crossterm::event::{
     MouseEventKind,
 };
 use lunetad::mux::own::api::{self, to_server};
+use lunetad::mux::own::OwnPane;
 use lunetad::mux::own::attach::{
-    self, Attach, Cursor, Frame, Glyph, Heard, Hello, Line, Rows, Shows, Size, To, Went,
+    self, Attach, Cursor, Frame, Glyph, Heard, Hello, Layout, Line, Placed, Rows, Shown, Shows,
+    Size, Tabbed, To, Went,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
+use unicode_width::UnicodeWidthStr as _;
 
+use crate::gruvbox;
 use crate::host::Event;
 
 struct Screen {
@@ -58,38 +63,79 @@ impl Selection {
     }
 }
 
+const TAB_BAR: u16 = 1;
+
+#[must_use]
+pub fn laid_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
+    let rows = NonZeroU16::new(rows.get().saturating_sub(TAB_BAR)).unwrap_or(NonZeroU16::MIN);
+    Size::within(columns, rows)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Clicked {
+    Nothing,
+    Go(To),
+    Sent(api::Mouse),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TabSpan {
+    id: NonZeroU32,
+    column: u16,
+    columns: u16,
+    name: String,
+}
+
 #[derive(Default)]
 struct View {
     went: Option<Went>,
-    screen: Option<Screen>,
+    layout: Option<Layout>,
+    screens: Vec<(u32, Screen)>,
     selected: Selected,
+    pressed: bool,
 }
 
 impl View {
     fn heard(&mut self, heard: &Heard) -> Result<(), String> {
         match heard {
-            Heard::Went(went) => {
-                if self.went.is_none_or(|before| before.pane != went.pane) {
-                    self.screen = None;
-                    self.unselect();
-                }
-                self.went = Some(*went);
-            },
+            Heard::Went(went) => self.went(*went),
+            Heard::Layout(layout) => self.laid(layout),
             Heard::Frame(frame) => self.framed(frame)?,
-            Heard::Layout(_)
-            | Heard::Stayed(_)
-            | Heard::Refused(_)
-            | Heard::Ended
-            | Heard::Lost(_) => {},
+            Heard::Stayed(_) | Heard::Refused(_) | Heard::Ended | Heard::Lost(_) => {},
         }
         Ok(())
     }
 
-    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
-        if self.went.is_none_or(|went| went.pane.id.get() != frame.pane()) {
-            return Ok(());
+    fn went(&mut self, went: Went) {
+        let tab = |went: Went| (went.pane.session, went.tab);
+        if self.went.is_none_or(|before| tab(before) != tab(went)) {
+            self.screens.clear();
+            self.pressed = false;
         }
-        let before = self.screen.take();
+        if self.layout.as_ref().is_some_and(|layout| layout.tab() != went.tab) {
+            self.layout = None;
+        }
+        if self.went.is_none_or(|before| before.pane != went.pane) {
+            self.unselect();
+        }
+        self.went = Some(went);
+    }
+
+    fn laid(&mut self, layout: &Layout) {
+        if let Shown::Tiled(_) = layout.shown() {
+            let panes = layout.shown().panes();
+            self.screens.retain(|(pane, _)| panes.iter().any(|placed| placed.pane.get() == *pane));
+        }
+        if self.focused().is_none_or(|focused| focused.pane != layout.shown().focused().pane) {
+            self.unselect();
+            self.pressed = false;
+        }
+        self.layout = Some(layout.clone());
+    }
+
+    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+        let at = self.screens.iter().position(|(pane, _)| *pane == frame.pane());
+        let before = at.map(|at| self.screens.swap_remove(at).1);
         let size = before.as_ref().map(|screen| screen.size);
         let lines = match (frame.rows(), before) {
             (Rows::Whole(lines), _) => lines.clone(),
@@ -104,41 +150,66 @@ impl View {
             (Rows::Changed(_), Some(screen)) => {
                 let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
                 let (had, sides) = (sides(screen.size), sides(frame.size()));
-                self.screen = Some(screen);
+                self.screens.push((frame.pane(), screen));
                 return Err(format!("a frame of {sides} changes the rows of {had}"));
             },
         };
-        if size != Some(frame.size()) {
+        let focused = self.focused().is_some_and(|focused| focused.pane.get() == frame.pane());
+        if focused && size != Some(frame.size()) {
             self.unselect();
         }
-        self.screen = Some(Screen {
+        let screen = Screen {
             size: frame.size(),
             lines,
             cursor: frame.cursor(),
             tracks_mouse: frame.tracks_mouse(),
-        });
+        };
+        self.screens.push((frame.pane(), screen));
         Ok(())
     }
 
+    fn focused(&self) -> Option<&Placed> {
+        Some(self.layout.as_ref()?.shown().focused())
+    }
+
+    fn screen(&self, pane: NonZeroU32) -> Option<&Screen> {
+        self.screens.iter().find(|(id, _)| *id == pane.get()).map(|(_, screen)| screen)
+    }
+
+    fn focused_screen(&self) -> Option<(Rect, &Screen)> {
+        let focused = self.focused()?;
+        Some((inner(outer(Rect::default(), focused.rect)), self.screen(focused.pane)?))
+    }
+
     fn tracks_mouse(&self) -> bool {
-        self.screen.as_ref().is_some_and(|screen| screen.tracks_mouse)
+        self.focused_screen().is_some_and(|(_, screen)| screen.tracks_mouse)
+    }
+
+    fn selects(&self, mouse: MouseEvent, at: Spot) -> bool {
+        let inside = self
+            .focused_screen()
+            .zip(on_panes(at))
+            .is_some_and(|((inner, _), at)| inner.contains(at));
+        inside && selects(self.tracks_mouse(), mouse)
     }
 
     fn select_from(&mut self, at: Spot) {
         self.unselect();
-        let Some(screen) = &self.screen else {
+        let (Some((inner, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
             return;
         };
-        let at = within(at, screen.size);
+        let at = within(into(inner, at), screen.size);
         self.selected = Selected::Dragging(Selection { from: at, to: at });
     }
 
     fn select_to(&mut self, at: Spot) {
-        let (Some(screen), Selected::Dragging(selection)) = (&self.screen, &mut self.selected)
-        else {
+        let Some((inner, screen)) = self.focused_screen() else {
             return;
         };
-        selection.to = within(at, screen.size);
+        let at = within(into(inner, below_bar(at)), screen.size);
+        if let Selected::Dragging(selection) = &mut self.selected {
+            selection.to = at;
+        }
     }
 
     fn selected(&mut self) -> Option<String> {
@@ -146,7 +217,8 @@ impl View {
             return None;
         };
         let moved = Some(selection).filter(|selection| selection.from != selection.to);
-        let text = moved.and_then(|selection| Some(text(self.screen.as_ref()?, selection)));
+        let screen = self.focused_screen().map(|(_, screen)| screen);
+        let text = moved.zip(screen).map(|(selection, screen)| text(screen, selection));
         let text = text.filter(|text| !text.is_empty());
         self.selected = match text {
             Some(_) => Selected::Held(selection),
@@ -159,6 +231,70 @@ impl View {
         self.selected = Selected::Nothing;
     }
 
+    fn clicked(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Clicked {
+        let (Some(went), Some(layout)) = (self.went, &self.layout) else {
+            return Clicked::Nothing;
+        };
+        let session = went.pane.session;
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
+        let Some(spot) = on_panes(at).filter(|_| !self.pressed) else {
+            if self.pressed {
+                return self.sent(mouse, below_bar(at));
+            }
+            if !down {
+                return Clicked::Nothing;
+            }
+            let spans = tab_spans(layout.tabs(), width);
+            let span = spans
+                .iter()
+                .find(|span| (span.column..span.column + span.columns).contains(&at.column));
+            return match span {
+                Some(span) if span.id != layout.tab() => {
+                    Clicked::Go(To::Tab { session, tab: span.id })
+                },
+                Some(_) | None => Clicked::Nothing,
+            };
+        };
+        let focused = layout.shown().focused().pane;
+        let under = layout
+            .shown()
+            .panes()
+            .iter()
+            .find(|placed| outer(Rect::default(), placed.rect).contains(spot));
+        if down
+            && let Some(under) = under
+            && under.pane != focused
+        {
+            return Clicked::Go(To::Pane(OwnPane { session, id: under.pane }));
+        }
+        self.sent(mouse, spot)
+    }
+
+    fn sent(&mut self, mouse: MouseEvent, at: Position) -> Clicked {
+        let Some(focused) = self.focused() else {
+            return Clicked::Nothing;
+        };
+        let inner = inner(outer(Rect::default(), focused.rect));
+        let inside = inner.contains(at);
+        let sends = match mouse.kind {
+            MouseEventKind::Down(_) => {
+                self.pressed = inside;
+                inside
+            },
+            MouseEventKind::Drag(_) => self.pressed,
+            MouseEventKind::Up(_) => std::mem::replace(&mut self.pressed, false),
+            MouseEventKind::Moved
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => inside,
+        };
+        if !sends {
+            return Clicked::Nothing;
+        }
+        mouse_said(mouse, into(inner, at)).map_or(Clicked::Nothing, Clicked::Sent)
+    }
+
     fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -167,30 +303,35 @@ impl View {
                 }
             }
         }
-        let screen = self.screen.as_ref()?;
+        let layout = self.layout.as_ref()?;
+        let bar = Rect { height: area.height.min(TAB_BAR), ..area };
+        let panes = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
+        draw_tabs(buffer, bar, layout);
+        let focused = layout.shown().focused().pane;
         let selection = match self.selected {
             Selected::Nothing => None,
             Selected::Dragging(selection) | Selected::Held(selection) => Some(selection),
         };
-        for (row, line) in (0..area.height).zip(&screen.lines) {
-            let mut column = 0;
-            for glyph in line.glyphs() {
-                if column >= area.width {
-                    break;
-                }
-                let at = Spot { row, column };
-                let lit = selection.is_some_and(|selection| selection.holds(at));
-                paint(buffer, area, at, glyph, lit);
-                column += glyph.shows.columns();
+        let mut cursor = None;
+        for placed in layout.shown().panes() {
+            let mine = placed.pane == focused;
+            let outer = outer(panes, placed.rect);
+            let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
+            border(buffer, panes, outer, &placed.title, Style::new().fg(colour));
+            let seen = inner(outer).intersection(panes);
+            let Some(screen) = self.screen(placed.pane).filter(|_| !seen.is_empty()) else {
+                continue;
+            };
+            let drawn = draw_screen(buffer, seen, screen, selection.filter(|_| mine));
+            if mine {
+                cursor = drawn;
             }
         }
-        let cursor = screen.cursor?;
-        (cursor.row < area.height && cursor.column < area.width)
-            .then(|| Position::new(area.x + cursor.column, area.y + cursor.row))
+        cursor
     }
 
     fn cursor_style(&self) -> (CursorShape, bool) {
-        let cursor = self.screen.as_ref().and_then(|screen| screen.cursor);
+        let cursor = self.focused_screen().and_then(|(_, screen)| screen.cursor);
         let Some(cursor) = cursor else {
             return (CursorShape::HollowBlock, false);
         };
@@ -202,6 +343,124 @@ impl View {
         };
         (shape, cursor.blinking)
     }
+}
+
+fn on_panes(at: Spot) -> Option<Position> {
+    Some(Position::new(at.column, at.row.checked_sub(TAB_BAR)?))
+}
+
+fn below_bar(at: Spot) -> Position {
+    Position::new(at.column, at.row.saturating_sub(TAB_BAR))
+}
+
+fn outer(panes: Rect, rect: attach::Rect) -> Rect {
+    let column = panes.x.saturating_add(rect.column);
+    Rect::new(column, panes.y.saturating_add(rect.row), rect.columns, rect.rows)
+}
+
+fn inner(outer: Rect) -> Rect {
+    outer.inner(Margin::new(1, 1))
+}
+
+fn into(inner: Rect, at: Position) -> Spot {
+    let row = at.y.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
+    let column = at.x.saturating_sub(inner.x).min(inner.width.saturating_sub(1));
+    Spot { row, column }
+}
+
+fn printable(text: &str) -> String {
+    text.chars().filter(|character| !character.is_control()).collect()
+}
+
+fn tab_spans(tabs: &[Tabbed], width: u16) -> Vec<TabSpan> {
+    let mut spans = Vec::new();
+    let mut column: u16 = 0;
+    for tabbed in tabs {
+        let name = printable(&tabbed.name);
+        let wanted = u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2);
+        let columns = wanted.min(width.saturating_sub(column));
+        if columns == 0 {
+            break;
+        }
+        spans.push(TabSpan { id: tabbed.id, column, columns, name });
+        column = column.saturating_add(columns).saturating_add(1);
+    }
+    spans
+}
+
+fn draw_tabs(buffer: &mut Buffer, bar: Rect, layout: &Layout) {
+    if bar.is_empty() {
+        return;
+    }
+    buffer.set_style(bar, Style::new().bg(gruvbox::BG1));
+    for span in tab_spans(layout.tabs(), bar.width) {
+        let style = if span.id == layout.tab() {
+            Style::new().fg(gruvbox::BG0).bg(gruvbox::GREEN).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(gruvbox::FG1).bg(gruvbox::BG2)
+        };
+        let x = bar.x + span.column;
+        buffer.set_style(Rect::new(x, bar.y, span.columns, 1), style);
+        let room = usize::from(span.columns.saturating_sub(2));
+        buffer.set_stringn(x + 1, bar.y, &span.name, room, style);
+    }
+}
+
+fn border(buffer: &mut Buffer, panes: Rect, outer: Rect, title: &str, style: Style) {
+    if outer.is_empty() {
+        return;
+    }
+    let set = border::ROUNDED;
+    let (left, top) = (outer.left(), outer.top());
+    let (right, bottom) = (outer.right() - 1, outer.bottom() - 1);
+    let mut put = |x: u16, y: u16, symbol: &str| {
+        if panes.contains(Position::new(x, y))
+            && let Some(cell) = buffer.cell_mut((x, y))
+        {
+            cell.reset();
+            cell.set_symbol(symbol).set_style(style);
+        }
+    };
+    for x in left..=right {
+        put(x, top, set.horizontal_top);
+        put(x, bottom, set.horizontal_bottom);
+    }
+    for y in top..=bottom {
+        put(left, y, set.vertical_left);
+        put(right, y, set.vertical_right);
+    }
+    put(left, top, set.top_left);
+    put(right, top, set.top_right);
+    put(left, bottom, set.bottom_left);
+    put(right, bottom, set.bottom_right);
+    let title = printable(title);
+    let (start, end) = (left + 1, right.min(panes.right()));
+    if !title.is_empty() && start < end && panes.contains(Position::new(start, top)) {
+        buffer.set_stringn(start, top, format!(" {title} "), usize::from(end - start), style);
+    }
+}
+
+fn draw_screen(
+    buffer: &mut Buffer,
+    area: Rect,
+    screen: &Screen,
+    selection: Option<Selection>,
+) -> Option<Position> {
+    for (row, line) in (0..area.height).zip(&screen.lines) {
+        let mut column = 0;
+        for glyph in line.glyphs() {
+            if column >= area.width {
+                break;
+            }
+            let at = Spot { row, column };
+            let lit = selection.is_some_and(|selection| selection.holds(at));
+            paint(buffer, area, at, glyph, lit);
+            column += glyph.shows.columns();
+        }
+    }
+    let cursor = screen.cursor?;
+    (cursor.row < area.height && cursor.column < area.width)
+        .then(|| Position::new(area.x + cursor.column, area.y + cursor.row))
 }
 
 pub struct Attached {
@@ -231,7 +490,7 @@ impl Attached {
     }
 
     pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {
-        let size = Size::within(columns, rows);
+        let size = laid_size(columns, rows);
         if size == self.size {
             return;
         }
@@ -259,14 +518,19 @@ impl Attached {
         self.attach.go(to);
     }
 
-    pub fn mouse(&self, mouse: MouseEvent, at: Spot) {
-        if let Some(mouse) = mouse_said(mouse, at) {
-            self.attach.send(to_server::Event::Mouse(mouse));
+    pub fn mouse(&mut self, mouse: MouseEvent, at: Spot, area: Rect) -> Option<To> {
+        match self.view.clicked(mouse, at, area.width) {
+            Clicked::Nothing => None,
+            Clicked::Go(to) => Some(to),
+            Clicked::Sent(mouse) => {
+                self.attach.send(to_server::Event::Mouse(mouse));
+                None
+            },
         }
     }
 
-    pub fn selects(&self, mouse: MouseEvent) -> bool {
-        selects(self.view.tracks_mouse(), mouse)
+    pub fn selects(&self, mouse: MouseEvent, at: Spot) -> bool {
+        self.view.selects(mouse, at)
     }
 
     pub fn select_from(&mut self, at: Spot) {
@@ -516,10 +780,8 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-
     use lunetad::mux::own::attach::Grapheme;
-    use lunetad::mux::own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
+    use lunetad::mux::own::{OwnClientId, OwnId, OwnKey, OwnMade};
 
     use super::*;
 
@@ -539,54 +801,197 @@ mod tests {
         NonZeroU16::new(count).unwrap()
     }
 
-    fn view(rows: Vec<Vec<Glyph>>) -> View {
-        let columns = rows[0].iter().map(|glyph| glyph.shows.columns()).sum();
-        let lines: Vec<Line> = rows
-            .into_iter()
-            .map(|glyphs| Line::new(glyphs, false, side(columns)).unwrap())
-            .collect();
-        let size = Size { columns: side(columns), rows: side(u16::try_from(lines.len()).unwrap()) };
-        let screen = Screen { size, lines, cursor: None, tracks_mouse: false };
-        let session = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
-        let (pane, client) = (OwnPane::new(session, 1).unwrap(), OwnClientId::new(1).unwrap());
-        let went = Went { pane, tab: NonZeroU32::MIN, client };
-        View { went: Some(went), screen: Some(screen), ..View::default() }
+    fn session() -> OwnKey {
+        OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) }
+    }
+
+    fn pane(id: u32) -> OwnPane {
+        OwnPane::new(session(), id).unwrap()
+    }
+
+    fn went(id: u32, tab: u32) -> Went {
+        let client = OwnClientId::new(1).unwrap();
+        Went { pane: pane(id), tab: NonZeroU32::new(tab).unwrap(), client }
+    }
+
+    fn line(glyphs: Vec<Glyph>) -> Line {
+        let columns = glyphs.iter().map(|glyph| glyph.shows.columns()).sum();
+        Line::new(glyphs, false, side(columns)).unwrap()
+    }
+
+    fn lines(rows: &[&str]) -> Vec<Line> {
+        let glyphs = |row: &str| row.chars().map(|it| narrow(&it.to_string())).collect();
+        rows.iter().map(|row| line(glyphs(row))).collect()
+    }
+
+    fn whole(pane: u32, lines: Vec<Line>, cursor: Option<Cursor>) -> Frame {
+        let columns = lines[0].glyphs().iter().map(|glyph| glyph.shows.columns()).sum();
+        let columns = side(columns);
+        let size = Size { columns, rows: side(u16::try_from(lines.len()).unwrap()) };
+        Frame::new(pane, size, Rows::Whole(lines), cursor, false).unwrap()
+    }
+
+    fn rect(column: u32, row: u32, columns: u32, rows: u32) -> api::Rect {
+        api::Rect { column, row, columns, rows }
+    }
+
+    fn placed(pane: u32, rect: api::Rect) -> api::Placed {
+        api::Placed { pane, rect: Some(rect), title: format!("p{pane}") }
+    }
+
+    fn laid(tab: u32, columns: u32, rows: u32, shown: api::layout::Shown) -> Layout {
+        let tabbed = |id, name: &str| api::Tabbed { id, name: name.to_owned() };
+        Layout::heard(api::Layout {
+            session: 1,
+            tab,
+            size: Some(api::Size { columns, rows }),
+            shown: Some(shown),
+            tabs: vec![tabbed(1, "one"), tabbed(2, "two")],
+        })
+        .unwrap()
+    }
+
+    fn tiled(panes: Vec<api::Placed>, focused: u32) -> api::layout::Shown {
+        api::layout::Shown::Tiled(api::Tiled { panes, focused })
+    }
+
+    fn two_panes() -> Layout {
+        laid(1, 20, 4, tiled(vec![placed(1, rect(0, 0, 10, 4)), placed(2, rect(10, 0, 10, 4))], 1))
+    }
+
+    fn heard(view: &mut View, heard: &Heard) {
+        view.heard(heard).unwrap();
+    }
+
+    fn split_view() -> View {
+        let mut view = View::default();
+        heard(&mut view, &Heard::Went(went(1, 1)));
+        heard(&mut view, &Heard::Layout(two_panes()));
+        let cursor =
+            Cursor { row: 1, column: 2, shape: attach::CursorShape::Block, blinking: false };
+        heard(&mut view, &Heard::Frame(whole(1, lines(&["abcdefgh", "ijklmnop"]), Some(cursor))));
+        let wide = glyph(Shows::Wide(grapheme("日")));
+        let first = line(
+            ["q", "r"]
+                .map(narrow)
+                .into_iter()
+                .chain([wide])
+                .chain(["s", "t", "u", "v"].map(narrow))
+                .collect(),
+        );
+        let mut rows = lines(&["yz012345"]);
+        rows.insert(0, first);
+        heard(&mut view, &Heard::Frame(whole(2, rows, None)));
+        view
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE }
     }
 
     fn spot(row: u16, column: u16) -> Spot {
         Spot { row, column }
     }
 
+    fn row(buffer: &Buffer, y: u16, from: u16, to: u16) -> String {
+        (from..to).map(|x| buffer[(x, y)].symbol()).collect()
+    }
+
     #[test]
     fn a_selection_reads_as_the_text_from_its_first_cell_to_its_last() {
         let blank = || glyph(Shows::Blank);
-        let view = view(vec![
-            vec![narrow("a"), narrow("b"), glyph(Shows::Wide(grapheme("日"))), blank()],
-            vec![narrow("c"), blank(), blank(), blank(), blank()],
-        ]);
-        let screen = view.screen.as_ref().unwrap();
+        let rows = vec![
+            line(vec![narrow("a"), narrow("b"), glyph(Shows::Wide(grapheme("日"))), blank()]),
+            line(vec![narrow("c"), blank(), blank(), blank(), blank()]),
+        ];
+        let size = Size { columns: side(5), rows: side(2) };
+        let screen = Screen { size, lines: rows, cursor: None, tracks_mouse: false };
         let selection = |from, to| Selection { from, to };
-        assert_eq!(text(screen, selection(spot(0, 1), spot(1, 0))), "b日\nc");
-        assert_eq!(text(screen, selection(spot(1, 0), spot(0, 1))), "b日\nc");
-        assert_eq!(text(screen, selection(spot(0, 3), spot(0, 3))), "日");
-        assert_eq!(text(screen, selection(spot(0, 0), spot(0, 1))), "ab");
+        assert_eq!(text(&screen, selection(spot(0, 1), spot(1, 0))), "b日\nc");
+        assert_eq!(text(&screen, selection(spot(1, 0), spot(0, 1))), "b日\nc");
+        assert_eq!(text(&screen, selection(spot(0, 3), spot(0, 3))), "日");
+        assert_eq!(text(&screen, selection(spot(0, 0), spot(0, 1))), "ab");
     }
 
     #[test]
     fn a_glyph_is_drawn_as_wide_as_the_server_says() {
         let wide = glyph(Shows::Wide(grapheme("👍🏽")));
-        let view = view(vec![vec![narrow("a"), wide, narrow("b")]]);
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 2));
-        buffer[(5, 1)].set_symbol("x");
-        view.draw(&mut buffer, Rect::new(1, 0, 5, 2));
+        let rows = vec![line(vec![narrow("a"), wide, narrow("b")])];
+        let size = Size { columns: side(4), rows: side(1) };
+        let screen = Screen { size, lines: rows, cursor: None, tracks_mouse: false };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
+        draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None);
         assert_eq!(buffer[(2, 0)].symbol(), "👍🏽");
         assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(side(2)));
         assert_eq!(buffer[(3, 0)].diff_option, CellDiffOption::Skip);
         assert_eq!(buffer[(4, 0)].symbol(), "b");
-        assert_eq!(buffer[(5, 1)].symbol(), " ");
         let mut cut = Buffer::empty(Rect::new(0, 0, 2, 1));
-        view.draw(&mut cut, Rect::new(0, 0, 2, 1));
+        draw_screen(&mut cut, Rect::new(0, 0, 2, 1), &screen, None);
         assert_eq!((cut[(0, 0)].symbol(), cut[(1, 0)].symbol()), ("a", " "));
+    }
+
+    #[test]
+    fn each_pane_draws_in_its_frame_under_the_tab_bar_and_a_larger_area_keeps_a_margin() {
+        let view = split_view();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
+        buffer[(23, 5)].set_symbol("x");
+        let cursor = view.draw(&mut buffer, Rect::new(2, 0, 22, 6));
+        assert_eq!(row(&buffer, 0, 2, 14), " one   two  ");
+        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::GREEN));
+        assert_eq!(buffer[(9, 0)].bg, gruvbox::BG2);
+        assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
+        assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
+        assert_eq!(row(&buffer, 3, 12, 22), "│yz012345│");
+        assert_eq!(row(&buffer, 4, 2, 22), "╰────────╯╰────────╯");
+        assert_eq!((buffer[(2, 1)].fg, buffer[(12, 1)].fg), (gruvbox::GREEN, gruvbox::GREY));
+        assert_eq!(buffer[(15, 2)].symbol(), "日");
+        assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
+        assert_eq!(row(&buffer, 1, 22, 24), "  ");
+        assert_eq!(cursor, Some(Position::new(5, 3)));
+        let mut view = split_view();
+        let untitled = api::Placed { title: "\u{7}".to_owned(), ..placed(2, rect(10, 0, 10, 4)) };
+        let shown = tiled(vec![placed(1, rect(0, 0, 10, 4)), untitled], 1);
+        heard(&mut view, &Heard::Layout(laid(1, 20, 4, shown)));
+        view.draw(&mut buffer, Rect::new(2, 0, 22, 6));
+        assert_eq!(row(&buffer, 1, 12, 22), "╭────────╮");
+    }
+
+    #[test]
+    fn a_layout_larger_than_the_area_is_cut_at_its_right_and_bottom() {
+        let view = split_view();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 4));
+        buffer[(5, 3)].set_symbol("x");
+        let cursor = view.draw(&mut buffer, Rect::new(0, 0, 14, 3));
+        assert_eq!(row(&buffer, 1, 0, 14), "╭ p1 ────╮╭ p2");
+        assert_eq!(row(&buffer, 2, 0, 14), "│abcdefgh││qr ");
+        assert_eq!(buffer[(5, 3)].symbol(), "x");
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn a_press_focuses_the_pane_under_it_or_goes_to_its_tab_and_reaches_the_program_inside() {
+        let mut view = split_view();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left));
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left));
+        let up = mouse(MouseEventKind::Up(MouseButton::Left));
+        let sent = |row, column| -> (u32, u32) { (row, column) };
+        let at = |clicked: Clicked| match clicked {
+            Clicked::Sent(said) => Some(sent(said.row, said.column)),
+            Clicked::Nothing | Clicked::Go(_) => None,
+        };
+        assert_eq!(view.clicked(down, spot(2, 14), 22), Clicked::Go(To::Pane(pane(2))));
+        let tab = NonZeroU32::new(2).unwrap();
+        assert_eq!(
+            view.clicked(down, spot(0, 7), 22),
+            Clicked::Go(To::Tab { session: session(), tab })
+        );
+        assert_eq!(view.clicked(down, spot(0, 1), 22), Clicked::Nothing);
+        assert_eq!(view.clicked(down, spot(1, 0), 22), Clicked::Nothing);
+        assert_eq!(view.clicked(drag, spot(2, 3), 22), Clicked::Nothing);
+        assert_eq!(at(view.clicked(down, spot(2, 3), 22)), Some((0, 2)));
+        assert_eq!(at(view.clicked(drag, spot(0, 15), 22)), Some((0, 7)));
+        assert_eq!(at(view.clicked(up, spot(4, 15), 22)), Some((1, 7)));
+        assert_eq!(view.clicked(up, spot(2, 3), 22), Clicked::Nothing);
     }
 
     #[test]
@@ -607,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_selects_where_the_program_does_not_take_the_mouse() {
+    fn a_drag_selects_in_the_focused_pane_where_its_program_does_not_take_the_mouse() {
         let press = |modifiers| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 0,
@@ -617,47 +1022,56 @@ mod tests {
         assert!(selects(false, press(KeyModifiers::NONE)));
         assert!(!selects(true, press(KeyModifiers::NONE)));
         assert!(selects(true, press(KeyModifiers::SHIFT)));
-        let mut view = view(vec![vec![narrow("a"), narrow("b"), narrow("c")]]);
-        view.select_from(spot(0, 1));
+        let mut view = split_view();
+        assert!(view.selects(press(KeyModifiers::NONE), spot(2, 1)));
+        assert!(!view.selects(press(KeyModifiers::NONE), spot(1, 1)));
+        assert!(!view.selects(press(KeyModifiers::NONE), spot(2, 11)));
+        view.select_from(spot(2, 2));
         assert_eq!(view.selected(), None);
-        view.select_from(spot(0, 0));
-        view.select_to(spot(0, 9));
-        assert_eq!(view.selected().as_deref(), Some("abc"));
+        view.select_from(spot(2, 1));
+        view.select_to(spot(3, 30));
+        assert_eq!(view.selected().as_deref(), Some("abcdefgh\nijklmnop"));
         assert!(matches!(view.selected, Selected::Held(_)));
-        let line = Line::new(vec![narrow("a"), narrow("b")], false, side(2)).unwrap();
-        let rows = Rows::Whole(vec![line]);
-        let size = Size { columns: side(2), rows: side(1) };
-        let frame = Frame::new(1, size, rows, None, false).unwrap();
-        view.heard(&Heard::Frame(frame)).unwrap();
+        heard(&mut view, &Heard::Frame(whole(2, lines(&["ab"]), None)));
+        assert!(matches!(view.selected, Selected::Held(_)));
+        heard(&mut view, &Heard::Frame(whole(1, lines(&["ab"]), None)));
         assert_eq!(view.selected, Selected::Nothing);
     }
 
     #[test]
     fn changed_rows_follow_only_a_frame_of_their_size() {
-        let mut view = view(vec![vec![narrow("a"), narrow("b")]]);
-        let line = Line::new(vec![narrow("c")], false, side(1)).unwrap();
-        let rows = Rows::Changed(vec![(0, line.clone())]);
+        let mut view = split_view();
+        let rows = Rows::Changed(vec![(0, line(vec![narrow("c")]))]);
         let size = Size { columns: side(1), rows: side(1) };
         let frame = Frame::new(1, size, rows, None, false).unwrap();
-        let why = view.heard(&Heard::Frame(frame.clone())).unwrap_err();
-        assert_eq!(why, "a frame of 1x1 changes the rows of 2x1");
-        assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("a"));
+        let why = view.heard(&Heard::Frame(frame)).unwrap_err();
+        assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
+        assert_eq!(view.screen(NonZeroU32::MIN).unwrap().lines[0].glyphs()[0], narrow("a"));
     }
 
     #[test]
-    fn changed_rows_before_a_whole_frame_of_the_pane_gone_to_wait_for_it() {
-        let mut view = view(vec![vec![narrow("a"), narrow("b")]]);
-        let went = view.went.unwrap();
-        let other = OwnPane::new(went.pane.session, 2).unwrap();
-        view.heard(&Heard::Went(Went { pane: other, ..went })).unwrap();
-        assert!(view.screen.is_none());
+    fn a_pane_keeps_its_screen_while_its_tab_lays_it_out_and_waits_for_a_whole_frame_after() {
+        let mut view = split_view();
+        let two = NonZeroU32::new(2).unwrap();
+        let full = laid(1, 20, 4, api::layout::Shown::Full(placed(1, rect(0, 0, 20, 4))));
+        heard(&mut view, &Heard::Layout(full));
+        assert!(view.screen(two).is_some(), "a pane hidden by a fullscreen one keeps its screen");
+        heard(&mut view, &Heard::Went(went(2, 1)));
+        assert!(view.screen(two).is_some(), "a client moving inside its tab keeps every screen");
+        heard(
+            &mut view,
+            &Heard::Layout(laid(1, 20, 4, tiled(vec![placed(1, rect(0, 0, 20, 4))], 1))),
+        );
+        assert!(view.screen(two).is_none(), "a pane its tab no longer lays out has no screen");
+        heard(&mut view, &Heard::Went(went(3, 2)));
+        assert!(view.screens.is_empty() && view.layout.is_none());
         let size = Size { columns: side(1), rows: side(1) };
-        let line = |it| Line::new(vec![narrow(it)], false, side(1)).unwrap();
-        let changed = Frame::new(2, size, Rows::Changed(vec![(0, line("c"))]), None, false);
-        view.heard(&Heard::Frame(changed.unwrap())).unwrap();
-        assert!(view.screen.is_none());
-        let whole = Frame::new(2, size, Rows::Whole(vec![line("d")]), None, false).unwrap();
-        view.heard(&Heard::Frame(whole)).unwrap();
-        assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("d"));
+        let changed =
+            Frame::new(3, size, Rows::Changed(vec![(0, line(vec![narrow("c")]))]), None, false);
+        heard(&mut view, &Heard::Frame(changed.unwrap()));
+        assert!(view.screens.is_empty(), "changed rows wait for a whole frame of a new tab");
+        heard(&mut view, &Heard::Frame(whole(3, lines(&["d"]), None)));
+        let three = NonZeroU32::new(3).unwrap();
+        assert_eq!(view.screen(three).unwrap().lines[0].glyphs()[0], narrow("d"));
     }
 }
