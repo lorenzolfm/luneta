@@ -12,14 +12,18 @@ use lunetad::log::{self, Process};
 use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
-/// The luneta daemon of this host, for this user.
 #[derive(Parser)]
-#[command(version = release::SAID.as_str())]
+#[command(
+    version = release::SAID.as_str(),
+    about = "The luneta daemon of this host, for this user"
+)]
 struct Args {
-    /// Run in a session of its own, away from the terminal of whatever
-    /// started it, as luneta starts it: so that the terminal closing does
-    /// not end it. What it was handed open past its stdio, it closes.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Run in a session of its own, away from the terminal of whatever started it, as \
+                luneta starts it: so that the terminal closing does not end it. What it was \
+                handed open past its stdio, it closes"
+    )]
     detached: bool,
 }
 

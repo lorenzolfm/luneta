@@ -41,106 +41,140 @@ use crate::order::Order;
 use crate::prune;
 use crate::zellij::{self, Seat};
 
-/// What the CLI asks lunetad, and what it has zellij do. Only `watch` and
-/// `bridge` start a lunetad where none runs, as a program reads the host by
-/// them: the rest say that none does, or, for `close`, that it cannot tell the
-/// agents, or, for `ssh`, that it reaches the machine once one runs, or, for
-/// `prune`, that it cannot tell where the panes are, and deletes nothing.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Say which lunetad runs, and for how long it has.
+    #[command(about = "Say which lunetad runs, and for how long it has")]
     Info,
-    /// List the agents that run, and the pane each is in.
+    #[command(about = "List the agents that run, and the pane each is in")]
     Agents,
-    /// List the zellij sessions that run, their panes, and how the work tree
-    /// each pane works in stands.
+    #[command(
+        about = "List the zellij sessions that run, their panes, and how the work tree each pane \
+                 works in stands"
+    )]
     Sessions,
-    /// Wait for the host to change, and write it out as the protocol encodes
-    /// it, for a program to read. lunetad is started where none runs, and
-    /// again where an older one does.
+    #[command(
+        about = "Wait for the host to change, and write it out as the protocol encodes it, for a \
+                 program to read. lunetad is started where none runs, and again where an older \
+                 one does"
+    )]
     Watch {
-        /// The host as last seen, `<pid>:<seq>` from its version, to wait for
-        /// the next. Without it, the host is written out at once.
-        #[arg(long, value_parser = version)]
+        #[arg(
+            long,
+            value_parser = version,
+            help = "The host as last seen, `<pid>:<seq>` from its version, to wait for the next. \
+                    Without it, the host is written out at once"
+        )]
         after: Option<Version>,
     },
-    /// Hand on what comes on stdin to lunetad's socket, and what comes on the
-    /// socket to stdout, until either end hangs up, for a client on another
-    /// host to ask it through ssh. lunetad is started where none runs, and
-    /// again where an older one does, and once it answers, `lunetad` and a
-    /// newline go to stdout before anything it says.
-    #[command(hide = true)]
+    #[command(
+        hide = true,
+        about = "Hand on what comes on stdin to lunetad's socket, and what comes on the socket to \
+                 stdout, until either end hangs up, for a client on another host to ask it \
+                 through ssh. lunetad is started where none runs, and again where an older one \
+                 does, and once it answers, `lunetad` and a newline go to stdout before anything \
+                 it says"
+    )]
     Bridge,
-    /// Have lunetad watch another machine through ssh, as the sidebar's
-    /// `n m` does: add it to luneta's hosts file, and say how the first ssh
-    /// to it goes, where lunetad runs. lunetad's ssh asks you nothing, so a
-    /// machine whose host key ssh has yet to know is reached once you have
-    /// run `ssh` to it yourself.
+    #[command(
+        about = "Have lunetad watch another machine through ssh, as the sidebar's `n m` does: add \
+                 it to luneta's hosts file, and say how the first ssh to it goes, where lunetad \
+                 runs. lunetad's ssh asks you nothing, so a machine whose host key ssh has yet to \
+                 know is reached once you have run `ssh` to it yourself"
+    )]
     Ssh {
-        /// What ssh takes for a destination: a Tailscale name, a `Host` of
-        /// your ssh config, or `me@vps`.
+        #[arg(
+            help = "What ssh takes for a destination: a Tailscale name, a `Host` of your ssh \
+                    config, or `me@vps`"
+        )]
         destination: Destination,
     },
-    /// Say which pane this runs in, as `<session>:<pane>`, by the name its
-    /// session has now: zellij's variables keep the name it had as the pane
-    /// opened, and lunetad follows a rename.
+    #[command(
+        about = "Say which pane this runs in, as `<session>:<pane>`, by the name its session has \
+                 now: zellij's variables keep the name it had as the pane opened, and lunetad \
+                 follows a rename"
+    )]
     Here,
-    /// Open a pane, a tab or a session, as the menu's New group does.
+    #[command(about = "Open a pane, a tab or a session, as the menu's New group does")]
     Open {
         #[command(subcommand)]
         what: Opening,
     },
-    /// Take you to a session, or to a pane of one: the client that last typed
-    /// in the session this runs in, which zellij moves.
+    #[command(
+        about = "Take you to a session, or to a pane of one: the client that last typed in the \
+                 session this runs in, which zellij moves"
+    )]
     Go {
-        /// `<session>` or `<session>:<pane>`, as `luneta agents` names them.
-        #[arg(value_parser = drive::address)]
+        #[arg(
+            value_parser = drive::address,
+            help = "`<session>` or `<session>:<pane>`, as `luneta agents` names them"
+        )]
         to: Address,
     },
-    /// Turn a pane into a tab, or a tab into panes of another, as the menu's
-    /// Turn group does. What runs in them runs on.
+    #[command(
+        about = "Turn a pane into a tab, or a tab into panes of another, as the menu's Turn group \
+                 does. What runs in them runs on"
+    )]
     Turn {
         #[command(subcommand)]
         what: Turning,
     },
-    /// Close panes and delete sessions, as the menu's Delete group does. The
-    /// panes of a session close together: a tab goes once nothing left holds
-    /// it open, and the session once all its tabs do. Without `--yes`, say
-    /// what would go and which agents with it, and the plan to tell `--yes`,
-    /// and close nothing.
+    #[command(
+        about = "Close panes and delete sessions, as the menu's Delete group does. The panes of a \
+                 session close together: a tab goes once nothing left holds it open, and the \
+                 session once all its tabs do. Without `--yes`, say what would go and which \
+                 agents with it, and the plan to tell `--yes`, and close nothing"
+    )]
     Close {
-        /// Each `<session>` to delete, or `<session>:<pane>` to close.
-        #[arg(required = true, value_parser = drive::address)]
+        #[arg(
+            required = true,
+            value_parser = drive::address,
+            help = "Each `<session>` to delete, or `<session>:<pane>` to close"
+        )]
         what: Vec<Address>,
-        /// Close them, while what would go is still the plan said as `PLAN`.
-        #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
+        #[arg(
+            long,
+            value_name = "PLAN",
+            value_parser = drive::agreed,
+            help = "Close them, while what would go is still the plan said as `PLAN`"
+        )]
         yes: Option<Agreed>,
     },
-    /// Delete the worktrees of a repository whose pull requests are merged, with
-    /// their branches, as the menu's `d m` does. Without `--yes`, say what would
-    /// go, what stays and why, and the plan to tell `--yes`, and delete nothing.
-    /// It asks gh of each worktree of the repository.
+    #[command(
+        about = "Delete the worktrees of a repository whose pull requests are merged, with their \
+                 branches, as the menu's `d m` does. Without `--yes`, say what would go, what \
+                 stays and why, and the plan to tell `--yes`, and delete nothing. It asks gh of \
+                 each worktree of the repository"
+    )]
     Prune {
-        /// A directory of the repository. Without one, this one.
-        #[arg(long, value_name = "DIR")]
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory of the repository. Without one, this one"
+        )]
         repo: Option<PathBuf>,
-        /// Delete them, while what would go is still the plan said as `PLAN`.
-        #[arg(long, value_name = "PLAN", value_parser = drive::agreed)]
+        #[arg(
+            long,
+            value_name = "PLAN",
+            value_parser = drive::agreed,
+            help = "Delete them, while what would go is still the plan said as `PLAN`"
+        )]
         yes: Option<Agreed>,
     },
-    /// Read text aloud on the machine you sit at, whichever machine this runs
-    /// on: queue it, after what waits to be read, and return once lunetad has
-    /// it, without waiting for it to be read. It fails at once where no
-    /// lunetad runs.
+    #[command(
+        about = "Read text aloud on the machine you sit at, whichever machine this runs on: queue \
+                 it, after what waits to be read, and return once lunetad has it, without waiting \
+                 for it to be read. It fails at once where no lunetad runs"
+    )]
     Say {
-        /// What to read. Without it, what comes on stdin.
-        #[arg(allow_hyphen_values = true)]
+        #[arg(allow_hyphen_values = true, help = "What to read. Without it, what comes on stdin")]
         text: Option<String>,
-        /// Read it first, and cut off what is being read.
-        #[arg(long)]
+        #[arg(long, help = "Read it first, and cut off what is being read")]
         now: bool,
-        /// Stop what is being read, and let go of what waits.
-        #[arg(long, conflicts_with_all = ["text", "now"])]
+        #[arg(
+            long,
+            conflicts_with_all = ["text", "now"],
+            help = "Stop what is being read, and let go of what waits"
+        )]
         stop: bool,
     },
 }

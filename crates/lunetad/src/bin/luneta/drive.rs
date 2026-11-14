@@ -343,52 +343,61 @@ pub fn here(folder: &Path) -> ExitCode {
     said(here.and_then(|here| Ok(here.ok_or(none)?.pane.to_string())))
 }
 
-/// What `luneta open` opens.
 #[derive(Subcommand)]
 pub enum Opening {
-    /// Open a pane beside another, in its tab, with nobody moved, and say
-    /// which it is, as `<session>:<pane>`.
+    #[command(
+        about = "Open a pane beside another, in its tab, with nobody moved, and say which it is, \
+                 as `<session>:<pane>`"
+    )]
     Pane {
-        /// The pane to open it beside, as `<session>:<pane>`. Without one,
-        /// the pane this runs in.
-        #[arg(long, value_parser = pane_address)]
+        #[arg(
+            long,
+            value_parser = pane_address,
+            help = "The pane to open it beside, as `<session>:<pane>`. Without one, the pane this \
+                    runs in"
+        )]
         beside: Option<Pane>,
-        /// The directory it starts in. Without one, this one.
-        #[arg(long)]
+        #[arg(long, help = "The directory it starts in. Without one, this one")]
         cwd: Option<PathBuf>,
-        /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
-        #[arg(last = true)]
+        #[arg(
+            last = true,
+            help = "What runs in it, after `--`. Without it, your shell. In luneta's ask box, \
+                    only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`"
+        )]
         command: Vec<String>,
     },
-    /// Open a tab of a session, with nobody moved, and say which pane it
-    /// has, as `<session>:<pane>`. zellij makes a tab as big as a client of
-    /// its session, so a client must be in it.
+    #[command(
+        about = "Open a tab of a session, with nobody moved, and say which pane it has, as \
+                 `<session>:<pane>`. zellij makes a tab as big as a client of its session, so a \
+                 client must be in it"
+    )]
     Tab {
-        /// The session to open it in. Without one, the session this runs in.
-        #[arg(long)]
+        #[arg(long, help = "The session to open it in. Without one, the session this runs in")]
         session: Option<String>,
-        /// The directory it starts in. Without one, this one.
-        #[arg(long)]
+        #[arg(long, help = "The directory it starts in. Without one, this one")]
         cwd: Option<PathBuf>,
-        /// What it is named. Without one, zellij numbers it.
-        #[arg(long)]
+        #[arg(long, help = "What it is named. Without one, zellij numbers it")]
         name: Option<String>,
-        /// What runs in it, after `--`. Without it, your shell. In luneta's
-        /// ask box, only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`.
-        #[arg(last = true)]
+        #[arg(
+            last = true,
+            help = "What runs in it, after `--`. Without it, your shell. In luneta's ask box, \
+                    only `claude` or `pi`, as `claude [--name <name>] [<prompt>]`"
+        )]
         command: Vec<String>,
     },
-    /// Make a session, take you there as `go` does, and say its name.
-    /// zellij's client makes it, so that what runs in it has your
-    /// environment, not this one's.
+    #[command(
+        about = "Make a session, take you there as `go` does, and say its name. zellij's client \
+                 makes it, so that what runs in it has your environment, not this one's"
+    )]
     Session {
-        /// Without one, it is named for its directory, as the picker names
-        /// one, with a `-2` where a session runs by that name.
-        #[arg(long, value_parser = SessionName::parse)]
+        #[arg(
+            long,
+            value_parser = SessionName::parse,
+            help = "Without one, it is named for its directory, as the picker names one, with a \
+                    `-2` where a session runs by that name"
+        )]
         name: Option<SessionName>,
-        /// The directory it starts in. Without one, this one.
-        #[arg(long)]
+        #[arg(long, help = "The directory it starts in. Without one, this one")]
         cwd: Option<PathBuf>,
     },
 }
@@ -627,28 +636,33 @@ fn across(at: &SessionName, whose: Whose, to: &SessionName) -> String {
     )
 }
 
-/// What `luneta turn` turns. What runs in the panes runs on, and each keeps its
-/// id wherever it goes, so each says the pane it was given, as
-/// `<session>:<pane>`.
 #[derive(Subcommand)]
 pub enum Turning {
-    /// Turn a pane into a tab of its own, named as the tab it leaves is, if
-    /// someone named that one, with nobody moved. zellij makes a tab as big
-    /// as a client of its session, so a client must be in it.
+    #[command(
+        about = "Turn a pane into a tab of its own, named as the tab it leaves is, if someone \
+                 named that one, with nobody moved. zellij makes a tab as big as a client of its \
+                 session, so a client must be in it"
+    )]
     Pane {
-        /// The pane, as `<session>:<pane>`.
-        #[arg(value_parser = pane_address)]
+        #[arg(value_parser = pane_address, help = "The pane, as `<session>:<pane>`")]
         pane: Pane,
     },
-    /// Turn the panes of a tab into panes of another tab of its session, with
-    /// nobody moved. The tab they left goes.
+    #[command(
+        about = "Turn the panes of a tab into panes of another tab of its session, with nobody \
+                 moved. The tab they left goes"
+    )]
     Tab {
-        /// A pane of the tab they leave, as `<session>:<pane>`.
-        #[arg(value_parser = pane_address)]
+        #[arg(
+            value_parser = pane_address,
+            help = "A pane of the tab they leave, as `<session>:<pane>`"
+        )]
         pane: Pane,
-        /// A pane of the tab they go into, as `<session>:<pane>`: two tabs can
-        /// share a name, and a pane is of one.
-        #[arg(long, value_parser = pane_address)]
+        #[arg(
+            long,
+            value_parser = pane_address,
+            help = "A pane of the tab they go into, as `<session>:<pane>`: two tabs can share a \
+                    name, and a pane is of one"
+        )]
         into: Pane,
     },
 }
