@@ -10,9 +10,13 @@
 //! ESC ] 133 ; D [; <status>] ST                 it ended
 //! ```
 //!
-//! with ST either `ESC \` or BEL. A mark may come split over two reads, and
-//! the screen reads the same bytes for itself.
+//! with ST either `ESC \` or BEL, and an ESC alone ends it too. A mark may
+//! come split over two reads. Where an OSC starts and ends is Ghostty's to
+//! say, as it reads the same bytes for the screen: the scanner keeps only the
+//! text between.
 
+use libghostty_vt::terminal::{Boundary, StringEnd};
+use libghostty_vt::{Error, Terminal};
 use percent_encoding::percent_decode;
 
 /// The most bytes of a mark the scanner keeps: one past them says no command
@@ -32,112 +36,84 @@ pub enum Mark {
     Done(Option<i32>),
 }
 
-/// Where the scanner is in what the program writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-    Ground,
-    Escape,
-    /// In an OSC, its text so far in `text`.
-    Osc,
-    /// In an OSC, past an ESC, which ends it where a `\` follows.
-    OscEscape,
+/// The marks in what a program writes, read as it writes it.
+#[derive(Default)]
+pub struct Marks {
+    /// The OSC being read, where one is.
+    osc: Option<Osc>,
 }
 
-/// The marks in what a program writes, read as it writes it.
-pub struct Marks {
-    state: State,
+/// The text so far of an OSC, as far as it may be a mark.
+#[derive(Default)]
+struct Osc {
     text: Vec<u8>,
-    /// Whether the OSC being read is past `MARK_BYTES_MAX`.
+    /// Whether the OSC is past `MARK_BYTES_MAX`.
     over: bool,
 }
 
-impl Default for Marks {
-    fn default() -> Self {
-        Marks { state: State::Ground, text: Vec::new(), over: false }
+impl Marks {
+    /// Writes `bytes`, which follow those written before, to `terminal`,
+    /// and puts each mark they end in `marks`.
+    pub fn write(
+        &mut self,
+        terminal: &mut Terminal<'_, '_>,
+        bytes: &[u8],
+        marks: &mut Vec<Mark>,
+    ) -> Result<(), Error> {
+        let mut at = 0;
+        while let Some(stop) =
+            terminal.vt_write_until(&bytes[at..], Boundary::OSC_START | Boundary::OSC_END)?
+        {
+            assert!(stop.consumed > 0, "a stop at {at} took no byte");
+            let from = at;
+            at += stop.consumed;
+            if stop.reached.contains(Boundary::OSC_END) {
+                let mut osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
+                osc.keep(&bytes[from..at - 1]);
+                if let Some(mark) = osc.end(stop.end == Some(StringEnd::Cancelled)) {
+                    marks.push(mark);
+                }
+            }
+            if stop.reached.contains(Boundary::OSC_START) {
+                assert!(self.osc.is_none(), "an OSC starts at {at} in another");
+                self.osc = Some(Osc::default());
+            }
+        }
+        if let Some(osc) = &mut self.osc {
+            osc.keep(&bytes[at..]);
+        }
+        Ok(())
     }
 }
 
-impl Marks {
-    /// Reads `bytes`, which follow those read before, and puts each mark
-    /// they end in `marks`.
-    pub fn read(&mut self, bytes: &[u8], marks: &mut Vec<Mark>) {
-        let mut at = 0;
-        while at < bytes.len() {
-            if self.state == State::Ground {
-                match bytes[at..].iter().position(|byte| *byte == 0x1b) {
-                    Some(escape) => at += escape,
-                    None => return,
-                }
+impl Osc {
+    /// Keeps `bytes` of its text, as far as it may be a mark.
+    fn keep(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            let markable = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
+            if !markable {
+                break;
             }
-            self.byte(bytes[at], marks);
-            at += 1;
-        }
-    }
-
-    fn byte(&mut self, byte: u8, marks: &mut Vec<Mark>) {
-        match self.state {
-            State::Ground => {
-                if byte == 0x1b {
-                    self.state = State::Escape;
-                }
-            },
-            State::Escape => self.escape(byte),
-            State::Osc => match byte {
-                0x07 => self.end(marks),
-                0x1b => self.state = State::OscEscape,
-                0x18 | 0x1a => self.state = State::Ground,
-                _ => self.keep(byte),
-            },
-            State::OscEscape => {
-                if byte == b'\\' {
-                    self.end(marks);
-                } else {
-                    self.escape(byte);
-                }
-            },
-        }
-    }
-
-    /// Takes the byte after an ESC.
-    fn escape(&mut self, byte: u8) {
-        self.state = match byte {
-            b']' => {
-                self.text.clear();
-                self.over = false;
-                State::Osc
-            },
-            0x1b => State::Escape,
-            _ => State::Ground,
-        };
-    }
-
-    /// Keeps a byte of an OSC's text, of one that may be a mark.
-    fn keep(&mut self, byte: u8) {
-        let length = self.text.len();
-        let mark = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
-        if !mark {
-            return;
-        }
-        if length < MARK_BYTES_MAX {
-            self.text.push(byte);
-        } else {
-            self.over = true;
+            if self.text.len() < MARK_BYTES_MAX {
+                self.text.push(byte);
+            } else {
+                self.over = true;
+                break;
+            }
         }
         assert!(self.text.len() <= MARK_BYTES_MAX);
-    }
-
-    /// Ends the OSC read, and puts it in `marks` where it is one.
-    fn end(&mut self, marks: &mut Vec<Mark>) {
         if self.over {
             assert_eq!(self.text.len(), MARK_BYTES_MAX);
         }
-        self.state = State::Ground;
-        if let Some(text) = self.text.strip_prefix(MARK)
-            && let Some(mark) = mark(text, self.over)
-        {
-            marks.push(mark);
+    }
+
+    /// Ends the OSC, `cancelled` by CAN or SUB or not, and gives its mark
+    /// where it is one.
+    fn end(self, cancelled: bool) -> Option<Mark> {
+        if cancelled {
+            return None;
         }
-        self.text.clear();
+        mark(self.text.strip_prefix(MARK)?, self.over)
     }
 }
 
@@ -179,10 +155,11 @@ mod tests {
     use super::*;
 
     fn read(chunks: &[&[u8]]) -> Vec<Mark> {
+        let mut terminal = Terminal::new(10, 2).unwrap();
         let mut scanner = Marks::default();
         let mut marks = Vec::new();
         for chunk in chunks {
-            scanner.read(chunk, &mut marks);
+            scanner.write(&mut terminal, chunk, &mut marks).unwrap();
         }
         marks
     }
@@ -235,15 +212,25 @@ mod tests {
         assert_eq!(read(&[b"\x1b]133;D;99999999999\x07"]), [Mark::Done(None)]);
     }
 
-    /// Other OSCs, other escapes, `B`, and a mark called off by CAN or by
-    /// another escape are none.
+    /// Other OSCs, other escapes, `B`, and a mark called off by CAN are
+    /// none.
     #[test]
     fn what_is_no_mark_reads_as_none() {
         assert_eq!(read(&[b"\x1b]0;133;A\x07\x1b]1330;A\x07\x1b[133;Am"]), []);
         assert_eq!(read(&[b"\x1b]133;B\x07\x1b]133;Z\x07\x1b]133\x07"]), []);
         assert_eq!(read(&[b"\x1b]133;A\x18\x07"]), []);
-        assert_eq!(read(&[b"\x1b]133;A\x1b[m\x1b\\"]), []);
-        assert_eq!(read(&[b"\x1b]133;A\x1b\x1b]133;D;2\x07"]), [Mark::Done(Some(2))]);
+    }
+
+    /// A mark starts and ends where Ghostty's parse says: an ESC ends it, as
+    /// another escape follows, and a 0x9D in an APC starts one, where in an
+    /// OSC it is the OSC's text.
+    #[test]
+    fn a_mark_starts_and_ends_where_ghostty_says() {
+        assert_eq!(read(&[b"\x1b]133;A\x1b[m"]), [Mark::Prompt]);
+        assert_eq!(read(&[b"\x1b]133;A\x1b\x1b]133;D;2\x07"]), [Mark::Prompt, Mark::Done(Some(2))]);
+        assert_eq!(read(&[b"\x1b_x\x9d133;A\x07"]), [Mark::Prompt]);
+        assert_eq!(read(&[b"\x1b]133;A\x9d133;D;1\x07"]), []);
+        assert_eq!(read(&[b"\x1b]\x1b]\x9d\x9d\x07\x07"]), []);
     }
 
     /// A command line past what the scanner keeps reads as none, and the

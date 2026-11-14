@@ -2,7 +2,6 @@
 //! the modes a client mirrors.
 
 use crate::api;
-use crate::asked::Size;
 use crate::id::PaneId;
 use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
 
@@ -15,24 +14,18 @@ pub struct Flags {
     pub scrollback: usize,
 }
 
-/// The frame of pane `pane` that shows `view`, of `size`, to a client that
-/// last got `before`: the rows that changed since, or all of them where it
-/// got none of this size.
+/// The frame of pane `pane` that shows `view` to a client that last got
+/// `before`: the rows that changed since, or all of them where it got none
+/// of this size.
 #[must_use]
-pub fn said(
-    pane: PaneId,
-    view: &View,
-    before: Option<(Size, &View)>,
-    size: Size,
-    flags: Flags,
-) -> api::Frame {
+pub fn said(pane: PaneId, view: &View, before: Option<&View>, flags: Flags) -> api::Frame {
+    let size = view.size();
     let rows = match before {
-        Some((before_size, before)) if before_size == size => {
-            assert_eq!(view.lines.len(), before.lines.len(), "two views of {size:?}");
+        Some(before) if before.size() == size => {
             let rows = view
-                .lines
+                .lines()
                 .iter()
-                .zip(&before.lines)
+                .zip(before.lines())
                 .enumerate()
                 .filter(|(_, (line, before))| line != before)
                 .map(|(index, (line, _))| api::Row {
@@ -43,7 +36,7 @@ pub fn said(
             api::frame::Rows::Changed(api::Changed { rows })
         },
         _ => api::frame::Rows::Whole(api::Whole {
-            lines: view.lines.iter().map(line_said).collect(),
+            lines: view.lines().iter().map(line_said).collect(),
         }),
     };
     let count =
@@ -52,7 +45,7 @@ pub fn said(
         pane: pane.said(),
         size: Some(size.said()),
         rows: Some(rows),
-        cursor: view.cursor.map(cursor_said),
+        cursor: view.cursor().map(cursor_said),
         clusters: flags.clusters,
         mouse_tracking: flags.tracks,
         scrolled_back: count(flags.back),

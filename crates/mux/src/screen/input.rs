@@ -130,10 +130,11 @@ impl Screen {
         column: u16,
         row: u16,
     ) -> Result<Vec<u8>, Error> {
+        let (columns, rows) = self.size.get();
         let terminal = self.answering.terminal();
         let size = EncoderSize {
-            screen_width: u32::from(terminal.cols()?) * CELL_PIXELS,
-            screen_height: u32::from(terminal.rows()?) * CELL_PIXELS,
+            screen_width: u32::from(columns) * CELL_PIXELS,
+            screen_height: u32::from(rows) * CELL_PIXELS,
             cell_width: CELL_PIXELS,
             cell_height: CELL_PIXELS,
             padding_top: 0,
@@ -195,9 +196,17 @@ mod tests {
     use libghostty_vt::key::{Action, Key};
 
     use super::*;
+    use crate::asked::Size;
 
     fn screen() -> Screen {
-        Screen::new(NonZeroU16::new(10).unwrap(), NonZeroU16::new(4).unwrap(), 0).unwrap()
+        let columns = NonZeroU16::new(10).unwrap();
+        let rows = NonZeroU16::new(4).unwrap();
+        Screen::new(Size { columns, rows }, 0).unwrap()
+    }
+
+    /// What `screen` answered the program that wrote `bytes`.
+    fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
+        screen.write(bytes).unwrap().answers
     }
 
     fn typed(
@@ -217,7 +226,7 @@ mod tests {
         let mut screen = screen();
         assert_eq!(typed(&mut screen, Key::A, Mods::empty(), Some("a"), 'a'), b"a");
         assert_eq!(typed(&mut screen, Key::A, Mods::CTRL, None, 'a'), b"\x01");
-        assert_eq!(screen.write(b"\x1b[>1u"), b"");
+        assert_eq!(answered(&mut screen, b"\x1b[>1u"), b"");
         assert_eq!(typed(&mut screen, Key::A, Mods::CTRL, None, 'a'), b"\x1b[97;5u");
     }
 
@@ -229,7 +238,7 @@ mod tests {
             screen.key(Action::Press, Key::ArrowUp, Mods::empty(), None, None).unwrap()
         };
         assert_eq!(up(&mut screen), b"\x1b[A");
-        assert_eq!(screen.write(b"\x1b[?1h"), b"");
+        assert_eq!(answered(&mut screen, b"\x1b[?1h"), b"");
         assert_eq!(up(&mut screen), b"\x1bOA");
     }
 
@@ -238,7 +247,7 @@ mod tests {
     fn a_paste_is_bracketed_where_asked() {
         let mut screen = screen();
         assert_eq!(screen.paste("ls\n").unwrap(), b"ls\r");
-        assert_eq!(screen.write(b"\x1b[?2004h"), b"");
+        assert_eq!(answered(&mut screen, b"\x1b[?2004h"), b"");
         assert_eq!(screen.paste("ls\n").unwrap(), b"\x1b[200~ls\n\x1b[201~");
     }
 
@@ -249,7 +258,7 @@ mod tests {
         let mut screen = screen();
         let click = Click::Press(mouse::Button::Left);
         assert_eq!(screen.mouse(click, Mods::empty(), 2, 1).unwrap(), b"");
-        assert_eq!(screen.write(b"\x1b[?1000h\x1b[?1006h"), b"");
+        assert_eq!(answered(&mut screen, b"\x1b[?1000h\x1b[?1006h"), b"");
         assert_eq!(screen.mouse(click, Mods::empty(), 2, 1).unwrap(), b"\x1b[<0;3;2M");
     }
 
@@ -258,7 +267,7 @@ mod tests {
     fn the_focus_is_told_where_asked() {
         let mut screen = screen();
         assert_eq!(screen.focus(true).unwrap(), b"");
-        assert_eq!(screen.write(b"\x1b[?1004h"), b"");
+        assert_eq!(answered(&mut screen, b"\x1b[?1004h"), b"");
         assert_eq!(screen.focus(false).unwrap(), b"\x1b[O");
     }
 }

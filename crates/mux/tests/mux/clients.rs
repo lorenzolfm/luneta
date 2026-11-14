@@ -135,6 +135,39 @@ fn each_client_looks_back_in_the_scrollback_on_its_own() {
     });
 }
 
+/// A client back in the scrollback stays on the rows it looks at as the
+/// program writes more below them.
+#[test]
+fn a_client_back_in_the_scrollback_stays_on_its_rows() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let lines = "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done; read x; \
+                     echo more1; echo more2; echo more3; read x";
+        let made = new_session(&mut mux, "work", script(lines, api::Ends::Holds)).await;
+        let mut reading = Attached::new(&mut mux, session(&made), size(20, 5)).await;
+        let mut typing = Attached::new(&mut mux, session(&made), size(20, 5)).await;
+        reading.until_row("line30").await;
+        reading.send(api::to_server::Event::Scroll(api::Scroll { back: 10 })).await;
+        reading.until_row("line20").await;
+        let rows = reading.rows.clone();
+        let before = reading.last.clone().unwrap();
+        assert_eq!(before.scrolled_back, 10);
+        typing.type_line("").await;
+        typing.until_row("more3").await;
+        reading
+            .until("the program's three rows more", |attached| {
+                let frame = attached.last.as_ref().unwrap();
+                frame.scrollback >= before.scrollback + 3
+            })
+            .await;
+        let after = reading.last.clone().unwrap();
+        let pushed = after.scrollback - before.scrollback;
+        assert_eq!(after.scrolled_back, before.scrolled_back + pushed);
+        assert_eq!(reading.rows, rows);
+    });
+}
+
 /// The pane takes the size of the client that last came, resized or typed,
 /// and its program is told.
 #[test]
