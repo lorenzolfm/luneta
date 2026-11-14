@@ -928,7 +928,9 @@ mod tests {
                 let said = Where { asked, own, away, own_before: None };
                 let read = turn_in(key.as_deref(), before.as_deref(), said);
                 assert_eq!(read, Ok(Some((turn, user.clone()))));
-                assert_eq!(var(&claude, OWN_VAR_BEFORE), None);
+                let mut envs = claude.get_envs();
+                let removed = envs.any(|(key, value)| key == OWN_VAR_BEFORE && value.is_none());
+                assert!(removed, "{OWN_VAR_BEFORE}");
             }
         }
         assert_eq!(turn_in(None, None, Where::default()), Ok(None));
