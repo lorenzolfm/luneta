@@ -153,21 +153,33 @@ fn a_client_back_in_the_scrollback_stays_on_its_rows() {
 }
 
 #[test]
-fn the_pane_takes_the_size_of_the_latest_client() {
+fn a_tab_takes_the_size_of_its_smallest_client_and_a_pane_sits_in_its_frame() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
         let mut mine = Attached::new(&mut mux, session(&made), size(40, 10)).await;
         mine.type_line("stty size").await;
-        mine.until_row("10 40").await;
+        mine.until_row("8 38").await;
         mine.send(api::to_server::Event::Resize(size(50, 12))).await;
         mine.until("a frame of the new size", |attached| {
-            attached.last.as_ref().and_then(|frame| frame.size) == Some(size(50, 12))
+            attached.last.as_ref().and_then(|frame| frame.size) == Some(size(48, 10))
         })
         .await;
         mine.type_line("stty size").await;
-        mine.until_row("12 50").await;
+        mine.until_row("10 48").await;
+        let small = Attached::new(&mut mux, session(&made), size(30, 20)).await;
+        mine.until_laid("the tab at the smaller of each side", |layout| {
+            layout.size == Some(size(30, 12))
+        })
+        .await;
+        mine.type_line("stty size").await;
+        mine.until_row("10 28").await;
+        drop(small);
+        mine.until_laid("the tab back at its one client's size", |layout| {
+            layout.size == Some(size(50, 12))
+        })
+        .await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         watched_until(&mut watch, "the client at its new size", |listing| {
             let Some(tab) = tabs(listing).first() else {

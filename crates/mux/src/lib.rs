@@ -7,6 +7,7 @@ mod asked;
 mod frame;
 mod front;
 mod id;
+mod layout;
 mod marks;
 mod mux;
 mod pane;

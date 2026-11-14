@@ -76,7 +76,11 @@ impl View {
                 self.went = Some(*went);
             },
             Heard::Frame(frame) => self.framed(frame)?,
-            Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
+            Heard::Layout(_)
+            | Heard::Stayed(_)
+            | Heard::Refused(_)
+            | Heard::Ended
+            | Heard::Lost(_) => {},
         }
         Ok(())
     }
@@ -96,11 +100,11 @@ impl View {
                 }
                 lines
             },
-            (Rows::Changed(_), before) => {
+            (Rows::Changed(_), None) => return Ok(()),
+            (Rows::Changed(_), Some(screen)) => {
                 let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
-                let had = before.as_ref().map_or_else(|| "none".to_owned(), |it| sides(it.size));
-                self.screen = before;
-                let sides = sides(frame.size());
+                let (had, sides) = (sides(screen.size), sides(frame.size()));
+                self.screen = Some(screen);
                 return Err(format!("a frame of {sides} changes the rows of {had}"));
             },
         };
@@ -638,8 +642,22 @@ mod tests {
         let why = view.heard(&Heard::Frame(frame.clone())).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 2x1");
         assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("a"));
-        view.screen = None;
-        assert!(view.heard(&Heard::Frame(frame)).unwrap_err().ends_with("the rows of none"));
+    }
+
+    #[test]
+    fn changed_rows_before_a_whole_frame_of_the_pane_gone_to_wait_for_it() {
+        let mut view = view(vec![vec![narrow("a"), narrow("b")]]);
+        let went = view.went.unwrap();
+        let other = OwnPane::new(went.pane.session, 2).unwrap();
+        view.heard(&Heard::Went(Went { pane: other, ..went })).unwrap();
         assert!(view.screen.is_none());
+        let size = Size { columns: side(1), rows: side(1) };
+        let line = |it| Line::new(vec![narrow(it)], false, side(1)).unwrap();
+        let changed = Frame::new(2, size, Rows::Changed(vec![(0, line("c"))]), None, false);
+        view.heard(&Heard::Frame(changed.unwrap())).unwrap();
+        assert!(view.screen.is_none());
+        let whole = Frame::new(2, size, Rows::Whole(vec![line("d")]), None, false).unwrap();
+        view.heard(&Heard::Frame(whole)).unwrap();
+        assert_eq!(view.screen.as_ref().unwrap().lines[0].glyphs()[0], narrow("d"));
     }
 }

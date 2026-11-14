@@ -16,6 +16,9 @@ service Mux {
   rpc List(ListRequest) returns (Listing);
   rpc Watch(WatchRequest) returns (stream Listing);
   rpc Attach(stream ToServer) returns (stream ToClient);
+  rpc NewPane(NewPaneRequest) returns (NewPaneResponse);
+  rpc ClosePane(ClosePaneRequest) returns (ClosePaneResponse);
+  rpc Turn(TurnRequest) returns (TurnResponse);
 }
 
 message NewSessionRequest {
@@ -62,6 +65,55 @@ enum Ends {
   ENDS_HOLDS = 2;
 }
 
+message NewPaneRequest {
+  oneof at {
+    Beside beside = 1;
+    uint32 tab = 2;
+  }
+  Opens opens = 3;
+}
+
+message Beside {
+  uint32 pane = 1;
+  Towards towards = 2;
+}
+
+enum Towards {
+  TOWARDS_UNSPECIFIED = 0;
+  TOWARDS_RIGHT = 1;
+  TOWARDS_DOWN = 2;
+}
+
+message NewPaneResponse {
+  uint32 pane = 1;
+}
+
+message ClosePaneRequest {
+  uint32 pane = 1;
+}
+
+message ClosePaneResponse {}
+
+message TurnRequest {
+  uint32 pane = 1;
+  Into into = 2;
+}
+
+message Into {
+  oneof is {
+    NewTab new_tab = 1;
+    uint32 tab = 2;
+  }
+}
+
+message NewTab {
+  optional string name = 1;
+}
+
+message TurnResponse {
+  uint32 tab = 1;
+}
+
 message CloseTabRequest {
   uint32 tab = 1;
 }
@@ -97,6 +149,7 @@ message Place {
   oneof is {
     uint64 session = 1;
     uint32 tab = 2;
+    uint32 pane = 4;
   }
   google.protobuf.Timestamp made_at = 3;
 }
@@ -149,6 +202,7 @@ message Pane {
   repeated Client clients = 6;
   Foreground foreground = 7;
   Ran ran = 8;
+  optional string name = 9;
 }
 
 message Foreground {
@@ -224,7 +278,82 @@ message ToServer {
     Size resize = 6;
     Scroll scroll = 7;
     Place go = 8;
+    Open open = 9;
+    ClosePane close_pane = 10;
+    FocusPane focus_pane = 11;
+    ResizePane resize_pane = 12;
+    MovePane move_pane = 13;
+    Fullscreen fullscreen = 14;
+    NamePane name_pane = 15;
+    NameTab name_tab = 16;
+    MoveTab move_tab = 17;
+    Into turn = 18;
   }
+}
+
+message Open {
+  oneof at {
+    Largest largest = 1;
+    Towards beside = 2;
+  }
+}
+
+message Largest {}
+
+message ClosePane {}
+
+message FocusPane {
+  oneof to {
+    Direction towards = 1;
+    Order towards_or_tab = 2;
+    Order order = 3;
+  }
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_LEFT = 1;
+  DIRECTION_RIGHT = 2;
+  DIRECTION_UP = 3;
+  DIRECTION_DOWN = 4;
+}
+
+enum Order {
+  ORDER_UNSPECIFIED = 0;
+  ORDER_NEXT = 1;
+  ORDER_PREVIOUS = 2;
+}
+
+message ResizePane {
+  Change change = 1;
+  optional Direction towards = 2;
+}
+
+enum Change {
+  CHANGE_UNSPECIFIED = 0;
+  CHANGE_GROW = 1;
+  CHANGE_SHRINK = 2;
+}
+
+message MovePane {
+  oneof to {
+    Direction towards = 1;
+    Order order = 2;
+  }
+}
+
+message Fullscreen {}
+
+message NamePane {
+  optional string name = 1;
+}
+
+message NameTab {
+  string name = 1;
+}
+
+message MoveTab {
+  Order order = 1;
 }
 
 message Hello {
@@ -362,7 +491,47 @@ message ToClient {
     Frame frame = 3;
     Ended ended = 4;
     Stayed stayed = 5;
+    Layout layout = 6;
+    Refused refused = 7;
   }
+}
+
+message Layout {
+  uint64 session = 1;
+  uint32 tab = 2;
+  Size size = 3;
+  oneof shown {
+    Tiled tiled = 4;
+    Placed full = 5;
+  }
+  repeated Tabbed tabs = 6;
+}
+
+message Tiled {
+  repeated Placed panes = 1;
+  uint32 focused = 2;
+}
+
+message Placed {
+  uint32 pane = 1;
+  Rect rect = 2;
+  string title = 3;
+}
+
+message Rect {
+  uint32 column = 1;
+  uint32 row = 2;
+  uint32 columns = 3;
+  uint32 rows = 4;
+}
+
+message Tabbed {
+  uint32 id = 1;
+  string name = 2;
+}
+
+message Refused {
+  string reason = 1;
 }
 
 message Attached {

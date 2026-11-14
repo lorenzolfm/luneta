@@ -2418,7 +2418,10 @@ impl App {
         };
         own.attached.heard(&heard);
         match heard {
-            Heard::Frame(_) => {},
+            Heard::Frame(_) | Heard::Layout(_) => {},
+            Heard::Refused(reason) => {
+                self.sidebar.notify(format!("luneta-mux refused: {reason}"));
+            },
             Heard::Went(went) => {
                 let after = own.phase.went(&went);
                 self.sidebar.went_own(went.pane, went.client);

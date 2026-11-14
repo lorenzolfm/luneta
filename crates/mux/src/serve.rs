@@ -14,10 +14,10 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
-use crate::asked::{self, Dumped, Heard, Name, Opens, Place, SessionName, Who};
+use crate::asked::{self, At, Dumped, Heard, Name, Opens, Place, SessionName, TurnTo, Who};
 use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
-use crate::mux::Mux;
+use crate::mux::{Layouts, Mux};
 use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
 use crate::pty;
 
@@ -62,6 +62,32 @@ impl mux_server::Mux for Service {
         let opens = Opens::parse("opens", request.opens)?;
         let (tab, pane) = self.mux.new_tab(session, name, &opens)?;
         Ok(Response::new(api::NewTabResponse { tab: tab.said(), pane: pane.said() }))
+    }
+
+    async fn new_pane(
+        &self,
+        request: Request<api::NewPaneRequest>,
+    ) -> Answer<api::NewPaneResponse> {
+        let request = request.into_inner();
+        let at = At::parse("at", request.at)?;
+        let opens = Opens::parse("opens", request.opens)?;
+        let pane = self.mux.new_pane(at, &opens)?;
+        Ok(Response::new(api::NewPaneResponse { pane: pane.said() }))
+    }
+
+    async fn close_pane(
+        &self,
+        request: Request<api::ClosePaneRequest>,
+    ) -> Answer<api::ClosePaneResponse> {
+        self.mux.close_pane(PaneId::parse("pane", request.into_inner().pane)?)?;
+        Ok(Response::new(api::ClosePaneResponse {}))
+    }
+
+    async fn turn(&self, request: Request<api::TurnRequest>) -> Answer<api::TurnResponse> {
+        let request = request.into_inner();
+        let pane = PaneId::parse("pane", request.pane)?;
+        let to = TurnTo::parse("into", request.into)?;
+        Ok(Response::new(api::TurnResponse { tab: self.mux.turn(pane, to)?.said() }))
     }
 
     async fn close_tab(
@@ -126,10 +152,11 @@ impl mux_server::Mux for Service {
         let hello = asked::hello(first.ok_or_else(|| Status::invalid_argument("no hello came"))?)?;
         let (out, going) = mpsc::channel(CLIENT_MESSAGES);
         let (gone, let_go) = oneshot::channel();
-        let client = self.mux.attach(hello, out.clone(), gone)?;
+        let (client, layouts) = self.mux.attach(hello, out.clone(), gone)?;
         tokio::spawn(listen(Arc::clone(&self.mux), client, heard, out));
         let going = ReceiverStream::new(going);
-        Ok(Response::new(UntilEnded { going, let_go, ended: false }))
+        let layouts = laid(layouts);
+        Ok(Response::new(UntilEnded { going, layouts, let_go, spoke: false, ended: false }))
     }
 }
 
@@ -153,18 +180,23 @@ async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToSer
     mux.detach(client);
 }
 
-async fn take(mux: &Mux, client: ClientId, said: Heard, out: &Out) {
+fn laid(layouts: Layouts) -> Laid {
+    let laid = WatchStream::new(layouts).filter_map(|layout| {
+        layout.map(|layout| {
+            Ok(api::ToClient { event: Some(api::to_client::Event::Layout(layout)) })
+        })
+    });
+    Box::pin(laid.fuse())
+}
+
+async fn take(mux: &Arc<Mux>, client: ClientId, said: Heard, out: &Out) {
     match said {
         Heard::Input(input) => {
             if let Some(handle) = mux.input(client, input.types()) {
                 handle.send(ToPane::Input(client, input)).await;
             }
         },
-        Heard::Resize(size) => {
-            if let Some(handle) = mux.resize(client, size) {
-                handle.send(ToPane::Resize(client, size)).await;
-            }
-        },
+        Heard::Resize(size) => mux.resize(client, size),
         Heard::Go(to) => {
             if let Err(refusal) = mux.go(Who::Client(client), to) {
                 let reason = refusal.message().to_owned();
@@ -174,12 +206,27 @@ async fn take(mux: &Mux, client: ClientId, said: Heard, out: &Out) {
                 }
             }
         },
+        Heard::Act(act) => {
+            if let Err(refusal) = mux.act(client, act) {
+                let reason = refusal.message().to_owned();
+                let refused = api::to_client::Event::Refused(api::Refused { reason });
+                if out.send(Ok(api::ToClient { event: Some(refused) })).await.is_err() {
+                    eprintln!("luneta-mux: client {client} went before it heard it was refused");
+                }
+            }
+        },
     }
 }
 
+type Said = Result<api::ToClient, Status>;
+
+type Laid = Pin<Box<dyn Stream<Item = Said> + Send>>;
+
 pub struct UntilEnded {
-    going: ReceiverStream<Result<api::ToClient, Status>>,
+    going: ReceiverStream<Said>,
+    layouts: Laid,
     let_go: oneshot::Receiver<()>,
+    spoke: bool,
     ended: bool,
 }
 
@@ -198,10 +245,16 @@ impl Stream for UntilEnded {
                     Ok(api::ToClient { event: Some(api::to_client::Event::Ended(_)) })
                 );
                 self.ended = ended || said.is_err();
+                self.spoke = true;
                 next
             },
             Poll::Ready(None) => next,
             Poll::Pending => {
+                if self.spoke
+                    && let Poll::Ready(Some(laid)) = self.layouts.as_mut().poll_next(context)
+                {
+                    return Poll::Ready(Some(laid));
+                }
                 if Pin::new(&mut self.let_go).poll(context).is_ready() {
                     self.ended = true;
                     return Poll::Ready(None);
