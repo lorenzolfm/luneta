@@ -1,6 +1,5 @@
 id: no-yaml-run-comments
 language: yaml
-severity: error
 message: >-
   No comments, in a step's script either. Say it in the code: a name, a type, a test.
 rule:

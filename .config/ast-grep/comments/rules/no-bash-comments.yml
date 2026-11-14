@@ -1,6 +1,5 @@
 id: no-bash-comments
 language: bash
-severity: error
 message: >-
   No comments. Say it in the code: a name, a type, a test.
 rule:

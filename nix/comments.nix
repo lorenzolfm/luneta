@@ -13,21 +13,13 @@ let
     ".envrc"
     ".gitignore"
   ];
-  scanned = bashNames ++ map (extension: "*.${extension}") (
-    [
-      "nix"
-      "rs"
-      "ts"
-      "yml"
-    ]
-    ++ lib.concatLists (builtins.attrValues extensions)
-  );
   skipped = [
     "LICENSE"
     "*.lock"
     "*.md"
     "*.png"
   ];
+  suppression = "ast-grep" + "-ignore";
   runBlock = {
     kind = "block_node";
     inside = {
@@ -68,13 +60,14 @@ let
       ];
     }
   );
-  patterns = lib.concatStringsSep " | ";
 in
 pkgs.writeShellApplication {
   name = "luneta-comments";
   runtimeInputs = [
     pkgs.ast-grep
+    pkgs.coreutils
     pkgs.findutils
+    pkgs.gnugrep
   ];
   text = ''
     status=0
@@ -84,14 +77,8 @@ pkgs.writeShellApplication {
         continue
       fi
       case ''${path##*/} in
-        ${patterns scanned})
-          found+=("$path")
-          ;;
-        ${patterns skipped}) ;;
-        *)
-          echo "luneta-comments: no rule says what a comment is in $path" >&2
-          status=1
-          ;;
+        ${lib.concatStringsSep " | " skipped}) ;;
+        *) found+=("''${path#./}") ;;
       esac
     done
     if (( ''${#found[@]} == 0 )); then
@@ -99,7 +86,31 @@ pkgs.writeShellApplication {
       exit 1
     fi
     ast-grep test --config ${config} || status=1
-    printf '%s\0' "''${found[@]}" | xargs -0 ast-grep scan --config ${config} || status=1
+    inspect="$(mktemp)"
+    trap 'rm -f "$inspect"' EXIT
+    printf '%s\0' "''${found[@]}" |
+      xargs -0 ast-grep scan --error --inspect entity --config ${config} 2>"$inspect" || status=1
+    ruled_file='^sg: entity[|]file[|](.*): language=[^,]*,appliedRuleCount=[1-9][0-9]*$'
+    declare -A ruled=()
+    while IFS= read -r line; do
+      if [[ $line =~ $ruled_file ]]; then
+        ruled[''${BASH_REMATCH[1]}]=1
+      elif [[ $line != "sg: "* ]]; then
+        echo "$line" >&2
+      fi
+    done <"$inspect"
+    for path in "''${found[@]}"; do
+      if [[ -z ''${ruled[$path]-} ]]; then
+        echo "luneta-comments: no rule says what a comment is in $path" >&2
+        status=1
+      fi
+    done
+    if grep -lF -- ${lib.escapeShellArg suppression} "''${found[@]}" >&2; then
+      echo "luneta-comments: the files above turn a rule off with ${suppression}" >&2
+      status=1
+    elif (( $? != 1 )); then
+      status=1
+    fi
     exit "$status"
   '';
 }

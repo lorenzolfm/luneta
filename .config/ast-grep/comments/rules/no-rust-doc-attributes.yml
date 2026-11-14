@@ -1,6 +1,5 @@
 id: no-rust-doc-attributes
 language: rust
-severity: error
 message: >-
   No documentation, as an attribute either. Say it in the code: a name, a type, a test.
 rule:
