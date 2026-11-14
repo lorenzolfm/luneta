@@ -82,10 +82,11 @@ impl fmt::Display for Untold {
 }
 
 pub fn unread_in<'a>(
-    unread: &'a [(Where<'_>, u32)],
+    unread_seats: &'a [(Where<'_>, u32)],
     session: Where<'a>,
 ) -> impl Iterator<Item = (u32, Doing)> + 'a {
-    unread.iter().filter(move |(at, _)| *at == session).map(|(_, pane)| (*pane, Doing::Unknown))
+    let in_session = unread_seats.iter().filter(move |(at, _)| *at == session);
+    in_session.map(|(_, pane)| (*pane, Doing::Unknown))
 }
 
 #[derive(Debug)]

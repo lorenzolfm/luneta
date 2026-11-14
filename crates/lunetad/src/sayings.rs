@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use crate::api;
 use crate::api::say::Does;
 use crate::mux::{OwnKey, OwnPane, SessionName, Sessions};
+use crate::seats::Where;
 
 pub const BYTES_MAX: usize = 16 * 1024;
 
@@ -11,43 +12,109 @@ pub const STALE: Duration = Duration::from_mins(2);
 
 const KEPT: usize = 16;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Speaker {
+    Zellij(api::Zellij),
+    Own { pane: OwnPane, session: Option<String> },
+}
+
+impl Speaker {
+    pub fn of(
+        zellij: Option<api::Zellij>,
+        own: Option<api::OwnSpeaker>,
+    ) -> Result<Option<Speaker>, String> {
+        match (zellij, own) {
+            (None, None) => Ok(None),
+            (Some(zellij), None) => Ok(Some(Speaker::Zellij(zellij))),
+            (None, Some(own)) => {
+                let pane = own.pane.ok_or_else(|| "own speaker: no pane".to_owned())?;
+                let pane = OwnPane::of(&pane).map_err(|why| format!("own speaker: {why}"))?;
+                Ok(Some(Speaker::Own { pane, session: own.session }))
+            },
+            (Some(_), Some(_)) => Err("it comes from a pane of zellij's and an own one".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn called(&self) -> Option<&str> {
+        match self {
+            Speaker::Zellij(zellij) => Some(zellij.session.as_deref().unwrap_or(&zellij.named)),
+            Speaker::Own { session, .. } => session.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn seat(&self) -> Option<(Where<'_>, u32)> {
+        match self {
+            Speaker::Zellij(zellij) => {
+                Some((Where::Zellij(zellij.session.as_deref()?), zellij.pane))
+            },
+            Speaker::Own { pane, .. } => Some((Where::Own(pane.session), pane.id.get())),
+        }
+    }
+}
+
+#[must_use]
+pub fn utterance(text: String, speaker: Option<Speaker>) -> api::Utterance {
+    let (speaker, own_speaker) = match speaker {
+        None => (None, None),
+        Some(Speaker::Zellij(zellij)) => (Some(zellij), None),
+        Some(Speaker::Own { pane, session }) => {
+            (None, Some(api::OwnSpeaker { pane: Some(pane.into()), session }))
+        },
+    };
+    api::Utterance { text, speaker, own_speaker }
+}
+
 #[derive(Debug)]
-pub struct ToSay {
-    does: Does,
-    own: Option<OwnPane>,
+pub enum ToSay {
+    InTurn(Spoken),
+    Now(Spoken),
+    Stop,
+}
+
+#[derive(Debug)]
+pub struct Spoken {
+    text: String,
+    speaker: Option<Speaker>,
 }
 
 impl ToSay {
     pub fn parse(does: Does) -> Result<ToSay, String> {
-        let (Does::InTurn(utterance) | Does::Now(utterance)) = &does else {
-            return Ok(ToSay { does, own: None });
-        };
-        if utterance.text.trim().is_empty() {
+        match does {
+            Does::InTurn(utterance) => Ok(ToSay::InTurn(Spoken::parse(utterance)?)),
+            Does::Now(utterance) => Ok(ToSay::Now(Spoken::parse(utterance)?)),
+            Does::Stop(()) => Ok(ToSay::Stop),
+        }
+    }
+}
+
+impl Spoken {
+    fn parse(utterance: api::Utterance) -> Result<Spoken, String> {
+        let api::Utterance { text, speaker, own_speaker } = utterance;
+        if text.trim().is_empty() {
             return Err("it says nothing".to_owned());
         }
-        let mut bytes = utterance.text.len();
-        let own = match (&utterance.speaker, &utterance.own_speaker) {
-            (Some(_), Some(_)) => {
-                return Err("it comes from a pane of zellij's and an own one".to_owned());
+        let speaker = Speaker::of(speaker, own_speaker)?;
+        let named = match &speaker {
+            Some(Speaker::Zellij(zellij)) => {
+                SessionName::running(&zellij.named).map_err(|why| format!("speaker: {why}"))?;
+                Some(zellij.named.as_str())
             },
-            (Some(speaker), None) => {
-                SessionName::running(&speaker.named).map_err(|why| format!("speaker: {why}"))?;
-                bytes += speaker.named.len();
-                None
-            },
-            (None, Some(own)) => {
-                let none = || "own speaker: no pane".to_owned();
-                let pane = own.pane.as_ref().ok_or_else(none)?;
-                Some(OwnPane::of(pane).map_err(|why| format!("own speaker: {why}"))?)
-            },
-            (None, None) => None,
+            Some(Speaker::Own { .. }) | None => None,
         };
-        if bytes > BYTES_MAX {
-            let most = format!("{BYTES_MAX} is the most to say at once");
-            return Err(format!("it is {bytes} bytes long, and {most}"));
-        }
-        Ok(ToSay { does, own })
+        bounded(&text, named)?;
+        Ok(Spoken { text, speaker })
     }
+}
+
+fn bounded(text: &str, called: Option<&str>) -> Result<(), String> {
+    let bytes = text.len() + called.map_or(0, str::len);
+    if bytes > BYTES_MAX {
+        let most = format!("{BYTES_MAX} is the most to say at once");
+        return Err(format!("it is {bytes} bytes long, and {most}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -61,15 +128,14 @@ impl Sayings {
         &mut self,
         said: ToSay,
         sessions: &Sessions,
-        own_named: impl Fn(OwnKey) -> Option<String>,
         at: SystemTime,
-    ) {
-        let own = said.own.map(|pane| (pane, own_named(pane.session)));
-        let placed = |utterance| placed(utterance, sessions, own);
-        let does = match said.does {
-            Does::InTurn(utterance) => Does::InTurn(placed(utterance)),
-            Does::Now(utterance) => Does::Now(placed(utterance)),
-            Does::Stop(()) => Does::Stop(()),
+        own_named: impl Fn(OwnKey) -> Option<String>,
+    ) -> Result<(), String> {
+        let placed = |spoken| placed(spoken, sessions, &own_named);
+        let does = match said {
+            ToSay::InTurn(spoken) => Does::InTurn(placed(spoken)?),
+            ToSay::Now(spoken) => Does::Now(placed(spoken)?),
+            ToSay::Stop => Does::Stop(()),
         };
         self.numbered += 1;
         let say = Some(api::Say { does: Some(does) });
@@ -78,6 +144,7 @@ impl Sayings {
         if self.kept.len() > KEPT {
             self.kept.pop_front();
         }
+        Ok(())
     }
 
     #[must_use]
@@ -88,17 +155,22 @@ impl Sayings {
 }
 
 fn placed(
-    mut utterance: api::Utterance,
+    spoken: Spoken,
     sessions: &Sessions,
-    own: Option<(OwnPane, Option<String>)>,
-) -> api::Utterance {
-    if let Some(speaker) = &mut utterance.speaker {
-        speaker.session = sessions.lead(&speaker.named, None).map(ToString::to_string);
-    }
-    if let Some((pane, session)) = own {
-        utterance.own_speaker = Some(api::OwnSpeaker { pane: Some(pane.into()), session });
-    }
-    utterance
+    own_named: &impl Fn(OwnKey) -> Option<String>,
+) -> Result<api::Utterance, String> {
+    let Spoken { text, speaker } = spoken;
+    assert_ne!(text.trim(), "");
+    assert!(text.len() <= BYTES_MAX);
+    let speaker = speaker.map(|speaker| match speaker {
+        Speaker::Zellij(zellij) => {
+            let session = sessions.lead(&zellij.named, None).map(ToString::to_string);
+            Speaker::Zellij(api::Zellij { session, ..zellij })
+        },
+        Speaker::Own { pane, .. } => Speaker::Own { pane, session: own_named(pane.session) },
+    });
+    bounded(&text, speaker.as_ref().and_then(Speaker::called))?;
+    Ok(utterance(text, speaker))
 }
 
 #[cfg(test)]
@@ -151,7 +223,7 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH;
         let mut sayings = Sayings::default();
         for count in 0..KEPT + 2 {
-            sayings.take(said(&count.to_string()), &Sessions::default(), nameless, at);
+            sayings.take(said(&count.to_string()), &Sessions::default(), at, nameless).unwrap();
         }
         let fresh = sayings.fresh(at);
         assert_eq!(fresh.len(), KEPT);
@@ -165,8 +237,8 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_hours(1);
         let mut sayings = Sayings::default();
         let sessions = Sessions::default();
-        sayings.take(said("early"), &sessions, nameless, at);
-        sayings.take(said("late"), &sessions, nameless, at + Duration::from_mins(1));
+        sayings.take(said("early"), &sessions, at, nameless).unwrap();
+        sayings.take(said("late"), &sessions, at + Duration::from_mins(1), nameless).unwrap();
         assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
         assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
@@ -175,9 +247,9 @@ mod tests {
 
     #[test]
     fn what_a_speaker_was_asked_with_has_no_say_in_its_session() {
-        let speaker = Some(from("work", Some("made up")));
-        let utterance = api::Utterance { text: "hello".to_owned(), speaker, own_speaker: None };
-        let placed = placed(utterance, &Sessions::default(), None).speaker.unwrap();
+        let speaker = Some(Speaker::Zellij(from("work", Some("made up"))));
+        let spoken = Spoken { text: "hello".to_owned(), speaker };
+        let placed = placed(spoken, &Sessions::default(), &nameless).unwrap().speaker.unwrap();
         assert_eq!(placed.session, None);
         assert_eq!(placed.named, "work");
     }
@@ -192,9 +264,9 @@ mod tests {
         };
         let mut sayings = Sayings::default();
         let named = |key: OwnKey| (key == pane.session).then(|| "work".to_owned());
-        sayings.take(asked(), &Sessions::default(), named, SystemTime::UNIX_EPOCH);
+        sayings.take(asked(), &Sessions::default(), SystemTime::UNIX_EPOCH, named).unwrap();
         assert_eq!(utterance(&sayings).own_speaker, Some(from_own(pane.into(), Some("work"))));
-        sayings.take(asked(), &Sessions::default(), nameless, SystemTime::UNIX_EPOCH);
+        sayings.take(asked(), &Sessions::default(), SystemTime::UNIX_EPOCH, nameless).unwrap();
         assert_eq!(utterance(&sayings).own_speaker, Some(from_own(pane.into(), None)));
     }
 
@@ -214,6 +286,25 @@ mod tests {
         let no_pane = Some(api::OwnSpeaker { pane: None, session: None });
         assert!(parsed(None, no_pane).is_err());
         assert!(parsed(Some(from("work", None)), Some(from_own(pane, None))).is_err());
+    }
+
+    #[test]
+    fn the_name_an_own_speaker_is_said_by_counts() {
+        let pane = own_pane(3, 12);
+        let asked = || {
+            let own_speaker = Some(from_own(pane.into(), None));
+            let text = "a".repeat(BYTES_MAX - 4);
+            let utterance = api::Utterance { text, speaker: None, own_speaker };
+            ToSay::parse(Does::InTurn(utterance)).unwrap()
+        };
+        let mut sayings = Sayings::default();
+        let at = SystemTime::UNIX_EPOCH;
+        let named = |name: &'static str| move |_: OwnKey| Some(name.to_owned());
+        assert!(sayings.take(asked(), &Sessions::default(), at, named("work")).is_ok());
+        let refused = sayings.take(asked(), &Sessions::default(), at, named("works"));
+        assert!(refused.unwrap_err().contains("the most to say at once"));
+        assert!(sayings.take(asked(), &Sessions::default(), at, nameless).is_ok());
+        assert_eq!(sayings.fresh(at).len(), 2);
     }
 
     #[test]

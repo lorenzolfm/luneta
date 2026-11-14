@@ -103,6 +103,23 @@ fn a_session_by_what_is_no_name_or_too_long_a_one_is_refused() {
 }
 
 #[test]
+fn a_seat_it_cannot_tell_is_said_from_no_pane_and_warned_of() {
+    let host = Host::new();
+    let _daemon = start(host.vars()).unwrap();
+    let plain = luneta(&host, &["say", "plain"]);
+    succeeds(&plain);
+    assert_eq!(String::from_utf8_lossy(&plain.stderr), "");
+    let mut command = host.vars().command(LUNETA);
+    command.env("LUNETA_PANE", "work:2");
+    let untold = answered(command.args(["say", "hello"]));
+    succeeds(&untold);
+    let why = String::from_utf8_lossy(&untold.stderr);
+    assert!(why.contains("said from no pane"), "{why}");
+    assert!(why.contains("LUNETA_PANE is set, and LUNETA_TURN is not"), "{why}");
+    assert_eq!(said(&host.host()), [("in turn", "plain", None), ("in turn", "hello", None)]);
+}
+
+#[test]
 fn with_no_lunetad_it_fails_at_once_and_starts_none() {
     let host = Host::new();
     let began = Instant::now();

@@ -14,7 +14,7 @@ use lunetad::mux::own::server::{self, Listing, Mover, Place};
 use lunetad::mux::{self, Client, OwnKey, OwnPane, PaneId, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
-use lunetad::seats::{self, Where};
+use lunetad::seats::{self, UnreadSeat, Where};
 use lunetad::turns::{self, IntoPanes};
 use lunetad::Directory;
 
@@ -690,7 +690,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
         Ok(listed) => {
             let seats = seats::unread(listed.unread, &listed.unread_files);
             let seats = seats.map_err(Untold::Unplaced);
-            seats.map(|unread| Told { agents: &placed, unread })
+            seats.map(|unread_seats| Told { agents: &placed, unread_seats })
         },
     };
     let here = match seat(agents, &running) {
@@ -800,7 +800,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
 
 struct Told<'a> {
     agents: &'a [Placed<'a>],
-    unread: Vec<(Where<'a>, u32)>,
+    unread_seats: Vec<(Where<'a>, u32)>,
 }
 
 fn plans_in(
@@ -833,9 +833,9 @@ fn plans_in(
         Whose::Own(key) => Where::Own(key),
     };
     let agents: Result<Vec<_>, Untold> = match told {
-        Ok(Told { agents, unread }) => {
+        Ok(Told { agents, unread_seats }) => {
             let agents = agents.iter().filter_map(in_session);
-            Ok(agents.chain(close::unread_in(unread, at)).collect())
+            Ok(agents.chain(close::unread_in(unread_seats, at)).collect())
         },
         Err(untold) => Err(*untold),
     };
@@ -890,10 +890,10 @@ impl<'a> Spot<'a> {
     }
 
     fn unread(file: &'a UnreadFile) -> Self {
-        match (&file.zellij, &file.own) {
-            (zellij @ Some(_), None) => Spot::zellij(zellij.as_ref()),
-            (None, Some(own)) => OwnPane::of(own).map_or(Spot::Unplaced, Spot::Own),
-            (None, None) | (Some(_), Some(_)) => Spot::Unplaced,
+        match UnreadSeat::of(file) {
+            UnreadSeat::Zellij { session, pane } => Spot::Zellij { session, pane },
+            UnreadSeat::Own(pane) => Spot::Own(pane),
+            UnreadSeat::NoPane | UnreadSeat::Unplaced => Spot::Unplaced,
         }
     }
 

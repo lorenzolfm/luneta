@@ -14,7 +14,7 @@ use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::program;
-use crate::seats;
+use crate::seats::{self, UnreadSeat};
 
 pub const PLANNING: Duration = Duration::from_mins(5);
 
@@ -173,8 +173,8 @@ impl Occupied {
                 .to_owned());
         }
         seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
-        let in_none = |file: &&api::UnreadFile| file.zellij.is_none() && file.own.is_none();
-        if let Some(file) = host.unread_files.iter().find(in_none) {
+        let in_no_pane = |file: &&api::UnreadFile| UnreadSeat::of(file) == UnreadSeat::NoPane;
+        if let Some(file) = host.unread_files.iter().find(in_no_pane) {
             let pid = file.pid;
             return Err(format!(
                 "lunetad cannot read the session file of agent {pid}, which runs in no pane"

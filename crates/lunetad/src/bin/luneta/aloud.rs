@@ -6,9 +6,8 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use lunetad::api::say::Does;
-use lunetad::api::{Saying, Utterance, Zellij};
-use lunetad::mux::OwnPane;
-use lunetad::sayings::STALE;
+use lunetad::api::{Saying, Utterance};
+use lunetad::sayings::{Speaker, STALE};
 use lunetad::seats::Where;
 use lunetad::transcripts::one_line;
 use ratatui::buffer::Buffer;
@@ -69,41 +68,6 @@ const SHOWN_CHARS: usize = 200;
 pub enum Whose {
     Selection,
     Said { on: Machine, speaker: Option<Speaker> },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Speaker {
-    Zellij(Zellij),
-    Own { pane: OwnPane, session: Option<String> },
-}
-
-impl Speaker {
-    fn of(utterance: &mut Utterance) -> Option<Self> {
-        match (utterance.speaker.take(), utterance.own_speaker.take()) {
-            (Some(zellij), None) => Some(Speaker::Zellij(zellij)),
-            (None, Some(own)) => {
-                let pane = OwnPane::of(own.pane.as_ref()?).ok()?;
-                Some(Speaker::Own { pane, session: own.session })
-            },
-            (None, None) | (Some(_), Some(_)) => None,
-        }
-    }
-
-    fn called(&self) -> Option<&str> {
-        match self {
-            Speaker::Zellij(zellij) => Some(zellij.session.as_deref().unwrap_or(&zellij.named)),
-            Speaker::Own { session, .. } => session.as_deref(),
-        }
-    }
-
-    fn seat(&self) -> Option<(Where<'_>, u32)> {
-        match self {
-            Speaker::Zellij(zellij) => {
-                Some((Where::Zellij(zellij.session.as_deref()?), zellij.pane))
-            },
-            Speaker::Own { pane, .. } => Some((Where::Own(pane.session), pane.id.get())),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -251,9 +215,10 @@ impl Queue {
 
     fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
         let does = saying.say.and_then(|say| say.does);
-        let waiting = |mut utterance: Utterance| {
-            let whose = Whose::Said { on: on.clone(), speaker: Speaker::of(&mut utterance) };
-            Waiting { whose, text: utterance.text, came: Some(at) }
+        let waiting = |utterance: Utterance| {
+            let Utterance { text, speaker, own_speaker } = utterance;
+            let speaker = Speaker::of(speaker, own_speaker).ok().flatten();
+            Waiting { whose: Whose::Said { on: on.clone(), speaker }, text, came: Some(at) }
         };
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
@@ -509,7 +474,8 @@ impl Aloud {
 mod tests {
     use std::time::Duration;
 
-    use lunetad::api::{OwnSpeaker, Say};
+    use lunetad::api::{OwnSpeaker, Say, Zellij};
+    use lunetad::mux::OwnPane;
     use lunetad::Destination;
     use ratatui::layout::Position;
 

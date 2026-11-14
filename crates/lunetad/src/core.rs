@@ -37,6 +37,13 @@ pub struct Own {
     pub doings: BTreeMap<u32, Doing>,
 }
 
+impl Own {
+    #[must_use]
+    pub fn key(&self) -> OwnKey {
+        OwnKey { id: self.id, made: self.made }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Branch {
     pub repository: Said,
@@ -56,7 +63,7 @@ pub enum Command {
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
     Remote { destination: Destination, reached: Reached },
-    Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<()> },
+    Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
     Sessions(oneshot::Sender<Vec<Addressed>>),
     Dirs(oneshot::Sender<BTreeSet<String>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
@@ -212,11 +219,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Say { said, at, answer } => {
                 let owns = &known.owns;
                 let own_named = |key: OwnKey| {
-                    let own = owns.iter().find(|own| own.id == key.id && own.made == key.made)?;
-                    Some(own.name.to_string())
+                    owns.iter().find(|own| own.key() == key).map(|own| own.name.to_string())
                 };
-                known.sayings.take(said, &known.sessions, own_named, at);
-                let _ = answer.send(());
+                let taken = known.sayings.take(said, &known.sessions, at, own_named);
+                let _ = answer.send(taken);
             },
             Command::Sessions(answer) => {
                 let sessions = known.addressed().into_iter().map(|(id, name)| {
@@ -543,9 +549,7 @@ impl Known {
                         socket: 0,
                         panes: Some(own_panes(own)),
                         clients: Some(clients_of(&own.clients)),
-                        mux: Some(api::session::Mux::Own(
-                            OwnKey { id: own.id, made: own.made }.into(),
-                        )),
+                        mux: Some(api::session::Mux::Own(own.key().into())),
                     },
                 }
             })

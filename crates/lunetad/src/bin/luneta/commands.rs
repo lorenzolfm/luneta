@@ -16,8 +16,8 @@ use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
 use lunetad::api::work_tree::Stands;
 use lunetad::api::{
-    Agent, ListAgentsResponse, OwnSpeaker, PullRequest, Say, SayRequest, Session, Status,
-    UnreadFile, Utterance, Version, WatchRequest, WorkTree, Zellij,
+    Agent, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status, UnreadFile,
+    Version, WatchRequest, WorkTree, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
@@ -25,7 +25,7 @@ use lunetad::mux::own::server::{self, Listing};
 use lunetad::mux::{Failure, OwnId, OwnPane, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
-use lunetad::sayings::BYTES_MAX;
+use lunetad::sayings::{self, Speaker, BYTES_MAX};
 use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -235,6 +235,7 @@ where
 }
 
 fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
+    let mut untold = None;
     let does = if stop {
         Does::Stop(())
     } else {
@@ -245,15 +246,22 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        let (speaker, own_speaker) = speaker_here();
-        let utterance = Utterance { text, speaker, own_speaker };
+        let speaker = speaker_here().unwrap_or_else(|why| {
+            untold = Some(why);
+            None
+        });
+        let utterance = sayings::utterance(text, speaker);
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
-    ask(folder, daemon::running(folder), |mut daemon| async move {
+    let asked = ask(folder, daemon::running(folder), |mut daemon| async move {
         daemon.say(SayRequest { say }).await?;
         Ok(())
-    })
+    });
+    if let (Some(why), true) = (untold, asked == ExitCode::SUCCESS) {
+        eprintln!("luneta: said from no pane, as it cannot tell the one it runs in: {why}");
+    }
+    asked
 }
 
 fn from_stdin() -> Result<String, String> {
@@ -264,19 +272,19 @@ fn from_stdin() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&read).into_owned())
 }
 
-fn speaker_here() -> (Option<Zellij>, Option<OwnSpeaker>) {
-    let zellij = |named, pane| (Some(Zellij { named, session: None, pane }), None);
-    let own = |pane: OwnPane| (None, Some(OwnSpeaker { pane: Some(pane.into()), session: None }));
-    match zellij::here() {
-        Ok(Some(Seat::Opened(ZellijPane { session, pane }))) => zellij(session, pane),
-        Ok(Some(Seat::Asked { user: User::Pane { session, pane }, .. })) => {
+fn speaker_here() -> Result<Option<Speaker>, String> {
+    let zellij = |named, pane| Speaker::Zellij(Zellij { named, session: None, pane });
+    let speaker = match zellij::here()? {
+        Some(Seat::Opened(ZellijPane { session, pane })) => zellij(session, pane),
+        Some(Seat::Asked { user: User::Pane { session, pane }, .. }) => {
             zellij(session.to_string(), pane)
         },
-        Ok(Some(Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. })) => own(pane),
-        Ok(Some(Seat::Asked { user: User::Away | User::Untold, .. }) | None) | Err(_) => {
-            (None, None)
+        Some(Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. }) => {
+            Speaker::Own { pane, session: None }
         },
-    }
+        Some(Seat::Asked { user: User::Away | User::Untold, .. }) | None => return Ok(None),
+    };
+    Ok(Some(speaker))
 }
 
 fn ssh(destination: &Destination, folder: &Path) -> ExitCode {

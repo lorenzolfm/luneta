@@ -898,7 +898,8 @@ impl Daemon for Host {
         let say = say.ok_or_else(|| Status::invalid_argument("it says nothing to do"))?;
         let said = ToSay::parse(say).map_err(Status::invalid_argument)?;
         let at = SystemTime::now();
-        self.ask(|answer| Command::Say { said, at, answer }).await?;
+        let taken = self.ask(|answer| Command::Say { said, at, answer }).await?;
+        taken.map_err(Status::invalid_argument)?;
         Ok(Response::new(()))
     }
 

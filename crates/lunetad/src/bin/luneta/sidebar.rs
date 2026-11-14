@@ -3431,12 +3431,12 @@ impl Sidebar {
         let mut refuge: Option<Listed> = None;
         if let Some(seen) = self.seen(on) {
             if self.away.is_none() {
-                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread| {
+                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
                     let seated = seated(seen.agents, seen.sessions);
                     let doing = seated.iter().filter(|((at, _), _)| *at == listed.at());
                     let doing =
                         doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
-                    doing.chain(close::unread_in(&unread, listed.at())).collect()
+                    doing.chain(close::unread_in(&unread_seats, listed.at())).collect()
                 });
             }
             let (sessions, _) = oldest_first(seen.sessions);
@@ -10844,7 +10844,7 @@ mod tests {
         assert_eq!(marked(&mut sidebar), [""; 0]);
 
         let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
-        let speaker = aloud::Speaker::Zellij(speaker);
+        let speaker = lunetad::sayings::Speaker::Zellij(speaker);
         let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
         let text = "the tests pass".to_owned();
         sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));
@@ -10867,7 +10867,7 @@ mod tests {
         let made = OwnMade::of(moment(20_000)).unwrap();
         let key = OwnKey { id: OwnId::new(1).unwrap(), made };
         let pane = OwnPane::new(key, 2).unwrap();
-        let speaker = aloud::Speaker::Own { pane, session: Some("work".to_owned()) };
+        let speaker = lunetad::sayings::Speaker::Own { pane, session: Some("work".to_owned()) };
         let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
         let text = "the tests pass".to_owned();
         sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));

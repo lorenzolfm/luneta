@@ -83,32 +83,48 @@ fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<
     }
 }
 
-pub fn unread(unread: u32, files: &[UnreadFile]) -> Result<Vec<(Where<'_>, u32)>, Unplaced> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadSeat<'a> {
+    NoPane,
+    Zellij { session: &'a str, pane: u32 },
+    Own(OwnPane),
+    Unplaced,
+}
+
+impl<'a> UnreadSeat<'a> {
+    #[must_use]
+    pub fn of(file: &'a UnreadFile) -> Self {
+        match (&file.zellij, &file.own) {
+            (None, None) => UnreadSeat::NoPane,
+            (Some(zellij), None) => match zellij.session.as_deref() {
+                Some(session) => UnreadSeat::Zellij { session, pane: zellij.pane },
+                None => UnreadSeat::Unplaced,
+            },
+            (None, Some(own)) => OwnPane::of(own).map_or(UnreadSeat::Unplaced, UnreadSeat::Own),
+            (Some(_), Some(_)) => UnreadSeat::Unplaced,
+        }
+    }
+}
+
+pub fn unread(told: u32, files: &[UnreadFile]) -> Result<Vec<(Where<'_>, u32)>, Unplaced> {
     let listed = u32::try_from(files.len()).unwrap_or(u32::MAX);
-    let unread = unread.max(listed);
-    let mut unplaced = unread - listed;
+    let unread_count = told.max(listed);
+    let mut unplaced = unread_count - listed;
     let mut seats = Vec::with_capacity(files.len());
     for file in files {
-        let seat = match (&file.zellij, &file.own) {
-            (None, None) => continue,
-            (Some(zellij), None) => {
-                zellij.session.as_deref().map(|session| (Where::Zellij(session), zellij.pane))
-            },
-            (None, Some(own)) => {
-                OwnPane::of(own).ok().map(|own| (Where::Own(own.session), own.id.get()))
-            },
-            (Some(_), Some(_)) => None,
-        };
-        match seat {
-            Some(seat) => seats.push(seat),
-            None => unplaced += 1,
+        match UnreadSeat::of(file) {
+            UnreadSeat::NoPane => {},
+            UnreadSeat::Zellij { session, pane } => seats.push((Where::Zellij(session), pane)),
+            UnreadSeat::Own(own) => seats.push((Where::Own(own.session), own.id.get())),
+            UnreadSeat::Unplaced => unplaced += 1,
         }
     }
     let Some(unplaced) = NonZeroU32::new(unplaced) else {
         return Ok(seats);
     };
-    let unread = NonZeroU32::new(unread).expect("a file it cannot place is one it cannot read");
-    Err(Unplaced::new(unread, unplaced))
+    let unread_count =
+        NonZeroU32::new(unread_count).expect("a file it cannot place is one it cannot read");
+    Err(Unplaced::new(unread_count, unplaced))
 }
 
 #[cfg(test)]
