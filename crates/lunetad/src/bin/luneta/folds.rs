@@ -1,23 +1,3 @@
-//! The sessions and the machines folded in the sidebar, the same in every
-//! luneta on the host, and kept for the next.
-//!
-//! A folded session of this machine's is a file named for it, in the folder
-//! `luneta/folded` of `$XDG_STATE_HOME`, or of `~/.local/state` where that is
-//! not set: a fold is a file to make or take away, so that two lunetas that
-//! fold at once never write over each other, as a file of every fold would
-//! have them. A `SessionName` holds no `/`, and is neither `.` nor `..`, so it
-//! names a file. Each luneta watches the folder, and takes up a fold another
-//! makes as it makes it.
-//!
-//! A folded machine is a file in `luneta/folded-machines`, beside it, named
-//! for the machine as `spelled` spells its destination, or `-` for this one,
-//! which no destination starts with. A folded session of another machine's is
-//! a file there too, named for its machine, then a `:`, which no spelling
-//! holds, then its name: two machines can each run a session of one name.
-//!
-//! A fold keeps to the name, so that a session started again under it comes
-//! back folded, and the sessions that share one fold together.
-
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -33,10 +13,8 @@ use crate::machines::Machine;
 use crate::state;
 use crate::zellij::SessionName;
 
-/// The name of the file of this machine's fold, in `folded-machines`.
 const LOCAL: &str = "-";
 
-/// What folds: a machine, or a session of one.
 #[derive(Clone, Copy, Debug)]
 pub enum Fold<'a> {
     Machine(&'a Machine),
@@ -44,7 +22,6 @@ pub enum Fold<'a> {
 }
 
 impl Fold<'_> {
-    /// The folder its file is in, and the file's name.
     fn file(self) -> (Kept, String) {
         match self {
             Fold::Session(Machine::Local, name) => (Kept::Sessions, name.as_str().to_owned()),
@@ -57,19 +34,12 @@ impl Fold<'_> {
     }
 }
 
-/// Which of the two folders a fold is kept in.
 #[derive(Clone, Copy)]
 enum Kept {
-    /// `folded`: this machine's sessions.
     Sessions,
-    /// `folded-machines`: the machines, and the sessions of the others.
     Machines,
 }
 
-/// `destination` as a file's name: each `%`, `/` and `:` in it, and a `.` it
-/// starts with, spelled as a `%` and its byte in hex, so that it names a
-/// file, and a `:` after it starts a session's name. A destination never
-/// starts with a `-`, nor so does its spelling.
 fn spelled(destination: &Destination) -> String {
     let mut spelled = String::new();
     for (at, c) in destination.to_string().char_indices() {
@@ -84,28 +54,20 @@ fn spelled(destination: &Destination) -> String {
 
 #[derive(Default)]
 pub struct Folds {
-    /// The files of `folded`.
     sessions: BTreeSet<String>,
-    /// The files of `folded-machines`.
     machines: BTreeSet<String>,
     sharing: Sharing,
 }
 
-/// What the folds are shared through.
 #[derive(Default)]
 enum Sharing {
-    /// The two folders, which every luneta watches.
     Folders { sessions: PathBuf, machines: PathBuf },
-    /// Nothing: the folds are this luneta's alone, as a test's are.
     #[default]
     Alone,
-    /// Nothing, as a folder failed them for this reason: the folds are this
-    /// luneta's alone from then on.
     Lost(String),
 }
 
 impl Folds {
-    /// The folds every luneta on the host shares, as they stand.
     pub fn shared() -> Self {
         let dirs = state::path("folded").and_then(|sessions| {
             Ok((sessions, state::path("folded-machines")?))
@@ -116,7 +78,6 @@ impl Folds {
         }
     }
 
-    /// The folds kept in `sessions`, this machine's, and in `machines`.
     fn within(sessions: PathBuf, machines: PathBuf) -> Self {
         let made = [&sessions, &machines]
             .into_iter()
@@ -130,7 +91,6 @@ impl Folds {
         folds
     }
 
-    /// The folders they are shared through, while they are.
     pub fn dirs(&self) -> Vec<&Path> {
         match &self.sharing {
             Sharing::Folders { sessions, machines } => vec![sessions, machines],
@@ -138,7 +98,6 @@ impl Folds {
         }
     }
 
-    /// Why the folds are this luneta's alone, where a folder failed them.
     pub fn lost(&self) -> Option<&str> {
         match &self.sharing {
             Sharing::Lost(why) => Some(why),
@@ -151,10 +110,6 @@ impl Folds {
         self.names(kept).contains(&name)
     }
 
-    /// Folds or unfolds `fold`, for every luneta, and says whether that
-    /// changed anything in this one. A folder that fails a write is given up,
-    /// and the folds are this luneta's from then on, rather than undone by
-    /// the next `reload`.
     pub fn set(&mut self, fold: Fold, folded: bool) -> bool {
         let (kept, name) = fold.file();
         if let Sharing::Folders { sessions, machines } = &self.sharing {
@@ -166,7 +121,6 @@ impl Folds {
             let written = if folded {
                 fs::write(&path, "")
             } else {
-                // Another luneta may have unfolded it first.
                 fs::remove_file(&path).or_else(|error| match error.kind() {
                     ErrorKind::NotFound => Ok(()),
                     _ => Err(error),
@@ -190,9 +144,6 @@ impl Folds {
         }
     }
 
-    /// Takes up what the other lunetas folded and unfolded since, and says
-    /// whether that changed anything. A folder that cannot be read leaves its
-    /// folds as they were.
     pub fn reload(&mut self) -> bool {
         let Sharing::Folders { sessions, machines } = &self.sharing else {
             return false;
@@ -213,8 +164,6 @@ impl Folds {
     }
 }
 
-/// Tells luneta's loop each time a fold is made or taken away in `dirs`, for
-/// as long as the watcher it returns is kept.
 pub fn watch(dirs: &[&Path], events: Sender<Event>) -> notify::Result<RecommendedWatcher> {
     state::watch(dirs, events, || Event::Folds)
 }
@@ -238,8 +187,6 @@ mod tests {
         Folds::within(root.join("folded"), root.join("folded-machines"))
     }
 
-    /// Two lunetas: what one folds or unfolds, the other shows once it
-    /// reloads, and a luneta started later starts with it.
     #[test]
     fn a_fold_in_one_luneta_shows_in_every_other_and_the_next() {
         let scratch = tempfile::tempdir().unwrap();
@@ -259,8 +206,6 @@ mod tests {
         assert!(!here.contains(session(&test)) && here.contains(session(&work)));
         assert!(!here.reload());
 
-        // Unfolded twice, as two lunetas may before they hear of each other:
-        // the folder still shares what comes after.
         assert!(!here.set(session(&test), false));
         let later = name("later");
         assert!(here.set(session(&later), true));
@@ -269,9 +214,6 @@ mod tests {
         assert_eq!((here.lost(), there.lost()), (None, None));
     }
 
-    /// A machine folds apart from the sessions of every machine, and a
-    /// session of another machine's apart from this one's of its name, as
-    /// the next luneta finds them, whatever the destination spells.
     #[test]
     fn a_machine_and_its_sessions_fold_apart_from_this_one_s() {
         let scratch = tempfile::tempdir().unwrap();
@@ -292,8 +234,6 @@ mod tests {
         assert_eq!(next.lost(), None);
     }
 
-    /// A folder luneta cannot keep the folds in leaves them to this luneta,
-    /// and says why.
     #[test]
     fn a_folder_that_fails_keeps_the_folds_here() {
         let scratch = tempfile::tempdir().unwrap();
@@ -306,17 +246,12 @@ mod tests {
         assert!(folds.contains(session(&work)));
     }
 
-    /// What another luneta folds wakes this one's loop, and a read of the
-    /// folders does not.
     #[test]
     fn a_fold_made_elsewhere_is_heard() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = within(scratch.path());
         let (events, heard) = mpsc::channel();
         let _watcher = watch(&here.dirs(), events).unwrap();
-        // macOS can tell of the folders' own making once the watch has
-        // started: FSEvents numbers a change as it hears of it, which can be
-        // after. What comes before the folders go quiet is that.
         while heard.recv_timeout(Duration::from_millis(200)).is_ok() {}
         here.reload();
         assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());

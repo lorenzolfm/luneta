@@ -1,0 +1,8 @@
+id: no-rust-comments
+language: rust
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment

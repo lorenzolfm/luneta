@@ -1,5 +1,3 @@
-//! A server of a test's own, and clients of it.
-
 use std::future::Future;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -20,17 +18,13 @@ use tower::service_fn;
 
 pub const LUNETA_MUX: &str = env!("CARGO_BIN_EXE_luneta-mux");
 
-/// How long a test waits for what it waits for.
 pub const PATIENCE: Duration = Duration::from_secs(20);
 
-/// Runs `test` to its end on a runtime of its own.
 pub fn run<F: Future<Output = ()>>(test: F) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(test);
 }
 
-/// A server, started as one is in a pane of zellij's, with zellij's variables
-/// set, in a runtime folder of its own.
 pub struct Server {
     child: Child,
     runtime: TempDir,
@@ -41,8 +35,6 @@ impl Server {
         Server::started(Command::new(LUNETA_MUX))
     }
 
-    /// A server that starts with a limit of `files` open files, as a shell
-    /// that set it starts it.
     pub fn start_with_files(files: u32) -> Server {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "ulimit -Sn \"$1\" && exec \"$0\"", LUNETA_MUX]);
@@ -84,7 +76,6 @@ impl Server {
         Server { child, runtime }
     }
 
-    /// The server's resident memory, in KiB, as `ps` says.
     pub fn resident_kib(&self) -> u64 {
         let pid = self.child.id().to_string();
         let listed = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
@@ -107,7 +98,6 @@ impl Server {
         MuxClient::new(channel)
     }
 
-    /// How the server ended, which it does within `PATIENCE`.
     pub async fn ended(&mut self) -> ExitStatus {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -135,7 +125,6 @@ pub fn shell() -> api::Opens {
     }
 }
 
-/// What runs `script` in `/bin/sh`, in `/`, its tab ending as `ends` says.
 pub fn script(script: &str, ends: api::Ends) -> api::Opens {
     let argv = ["/bin/sh", "-c", script].map(str::to_owned).to_vec();
     api::Opens {
@@ -163,12 +152,10 @@ pub async fn new_tab(
     mux.new_tab(request).await.unwrap().into_inner()
 }
 
-/// The session `made` says it made.
 pub fn session(made: &api::NewSessionResponse) -> api::Place {
     api::Place { is: Some(api::place::Is::Session(made.session)), made_at: made.made_at }
 }
 
-/// The tab `id` of the session `made` says it made.
 pub fn tab(id: u32, made: &api::NewSessionResponse) -> api::Place {
     api::Place { is: Some(api::place::Is::Tab(id)), made_at: made.made_at }
 }
@@ -177,8 +164,6 @@ pub fn size(columns: u32, rows: u32) -> api::Size {
     api::Size { columns, rows }
 }
 
-/// The sessions a watch says, each time they change, until `test` holds of
-/// them.
 pub async fn watched_until(
     watch: &mut Streaming<api::Listing>,
     what: &str,
@@ -199,17 +184,14 @@ pub async fn watched_until(
     }
 }
 
-/// The sessions as they stand.
 pub async fn listed(mux: &mut MuxClient<Channel>) -> api::Listing {
     mux.list(api::ListRequest {}).await.unwrap().into_inner()
 }
 
-/// The tabs of the first session `listing` has, none where it has none.
 pub fn tabs(listing: &api::Listing) -> &[api::Tab] {
     listing.sessions.first().map_or(&[], |session| &session.tabs)
 }
 
-/// How the program of `pane` ended, none while it runs.
 pub fn ended(pane: &api::Pane) -> Option<api::Exit> {
     match &pane.program {
         Some(api::pane::Program::Ended(exit)) => Some(*exit),
@@ -217,7 +199,6 @@ pub fn ended(pane: &api::Pane) -> Option<api::Exit> {
     }
 }
 
-/// A client attached to a pane, and the text of the rows it was sent.
 pub struct Attached {
     pub client: u64,
     pub went: api::Went,
@@ -256,7 +237,6 @@ impl Attached {
         self.to.send(event(said)).await.unwrap();
     }
 
-    /// Types `text` as keys, a key a character, and Enter after.
     pub async fn type_line(&self, text: &str) {
         for character in text.chars() {
             let key = api::Key {
@@ -276,7 +256,6 @@ impl Attached {
         self.send(api::to_server::Event::Key(enter)).await;
     }
 
-    /// The next message, or none where the stream ended.
     pub async fn next(&mut self) -> Option<api::to_client::Event> {
         let next = tokio::time::timeout(PATIENCE, self.from.message()).await;
         let message = next.expect("the server said something in time").ok()??;
@@ -301,14 +280,12 @@ impl Attached {
         }
     }
 
-    /// The rows until `test` holds of them.
     pub async fn until(&mut self, what: &str, test: impl Fn(&Attached) -> bool) {
         while !test(self) {
             assert!(self.next().await.is_some(), "the stream ended before {what}: {}", self.text());
         }
     }
 
-    /// Waits until a row reads `text`, trimmed.
     pub async fn until_row(&mut self, text: &str) {
         self.until(&format!("a row reads {text:?}"), |attached| {
             attached.rows.iter().any(|row| row == text)
@@ -340,7 +317,6 @@ fn event(said: api::to_server::Event) -> api::ToServer {
     api::ToServer { event: Some(said) }
 }
 
-/// A line's text, with no spaces at its end.
 fn line_text(line: &api::Line) -> String {
     let mut text = String::new();
     for glyph in &line.glyphs {
@@ -353,7 +329,6 @@ fn line_text(line: &api::Line) -> String {
     text.trim_end().to_owned()
 }
 
-/// Whether nothing is at `path`.
 pub fn gone(path: &Path) -> bool {
     !path.exists()
 }

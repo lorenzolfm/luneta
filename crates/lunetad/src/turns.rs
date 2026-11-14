@@ -1,68 +1,3 @@
-//! What zellij moves of a session of the machine it runs on, for a key of
-//! luneta's menu or a command of its CLI: a pane into a tab of its own, or the
-//! panes of a tab into another tab, which the tab they left goes with. What runs
-//! in them runs on, and each keeps its id. luneta has zellij move them on its
-//! own machine; a daemon has it move them here for a luneta on another machine,
-//! whose menu was for a row of this one.
-//!
-//! zellij's CLI has no command for it, but its `stack-panes` takes a pane out
-//! of whatever tab it is in, by its id, to stack it on another
-//! (`stack_panes` in zellij-server 0.45.1's `screen.rs`). So a pane moves by
-//! stacking on a stand-in opened where it goes, which then closes and leaves
-//! it tiled in its place. One at a time, the stack asks the least room of
-//! zellij. Where it has none, it takes nothing and says nothing, so each move
-//! is read back from what zellij lists.
-//!
-//! No pane floats on the way, though floating is what takes one out of a
-//! stack: zellij's toggle takes a pane out of the tiled ones before it looks
-//! for room to float it, and with none, as in a window of under 15 rows or
-//! columns, it drops the pane, says nothing, and what runs in it runs on with
-//! no pane to reach it by (`add_floating_pane` in zellij-server's `tab`).
-//!
-//! A tab goes by a terminal in it, from the moment it is listed to the moment
-//! it is picked: zellij gives the id of a tab that closed to the next it
-//! opens, and never a terminal's while its server runs.
-//!
-//! zellij moves the client that last typed in the session to the last pane it is
-//! told to stack, and hides the floating panes of the tab it goes to. It passes
-//! over a pane that is none of the session's, so with `NOWHERE` last it moves no
-//! client, as `stacked` has it: what you type goes on reaching your pane. A client
-//! on the pane that moves is to go with it, so that one goes with no `NOWHERE`,
-//! as does one with no room for it, which counts as a pane of the stack. zellij
-//! then does move the client that last typed: the menu takes luneta's own there in
-//! the end, and the CLI takes that client back. A pane that moves with no client
-//! taken to it needs a second stand-in for it to end a pane like any other, as
-//! `under_stack` says. A tab whose last tiled pane leaves closes as zellij next
-//! draws for a client, with the floating panes left in it, which end: so those go
-//! first, and a pane that alone holds its tab open stays where they would end.
-//!
-//! zellij makes a tab with no room for its panes in a session no client is in,
-//! so only a pane that would move says it needs one: one that stays moves no
-//! client there to find that out.
-//!
-//! A session goes by when it started as well as its name: zellij numbers panes
-//! from 0 for each server, so one that took the name since has panes of the
-//! same ids.
-//!
-//! Closing a stand-in can cut short the calls of zellij's that follow it, so
-//! those are asked again, but for the `new-pane` of a stand-in, which
-//! opens all the same, and is found by its name: asked again, it would open a second
-//! that stands in the tab until it ends on its own. A `stack-panes` cut short can still be on
-//! its way as zellij lists the panes, and read as having no room: the pane then
-//! stays, or moves after all, and nothing is lost either way, as what goes then
-//! is its stand-in, and never a tab, which would end a pane late to land there.
-//! A client it takes along goes after the CLI has taken it back, and no one says.
-//!
-//! zellij's CLI holds no condition on what it last listed. So a tiled pane
-//! that ends between the listing and the move can still have its tab close on
-//! the floating panes, and a tab that closes in that moment can give its id to
-//! another. Nothing here can tell: only reading zellij afresh keeps that moment
-//! as short as it is.
-//!
-//! A turn reads what it would move before it asks zellij to move anything, in
-//! `pane_leaving` or `panes_moving`, so that what stops it there has moved nobody,
-//! and `Leaving` and `Moving` say what it asks zellij to move.
-
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -71,77 +6,46 @@ use luneta_protocol::tab;
 use crate::closes::{same_session, terminals};
 use crate::mux::{Asks, Called, Client, Failure, Laid, Listed, Mux, PaneId, SessionName, TabId};
 
-/// What runs in a pane opened for another until that one is in its place: what
-/// ends on its own, which closes the pane, and a tab with nothing else in it,
-/// where luneta is gone before it does.
 const STAND_IN: [&str; 2] = ["sleep", "10"];
 
-/// What a stand-in is named, for `open_stand_in` to find it.
 const STAND_IN_NAME: &str = "luneta stand-in";
 
-/// What the second stand-in of `under_stack` is named: found by the first's name,
-/// it would be the first.
 const SECOND_STAND_IN_NAME: &str = "luneta second stand-in";
 
-/// How long a stand-in whose answer was cut short has to show in what zellij lists,
-/// and how often it is looked for: it opens a moment after.
 const FINDING: Duration = Duration::from_millis(100);
 const LOOKING: Duration = Duration::from_millis(5);
 
-/// What zellij is told to stack last for it to move no client, as it focuses the
-/// last pane it is told to stack: a pane none of a session's has, as zellij
-/// numbers terminals from 0 and gives no id of one again while its server runs.
 const NOWHERE: PaneId = PaneId::Terminal(u32::MAX);
 
-/// What a pane of a session turns into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Turn {
-    /// A tab of its own, named as the tab it leaves is, if someone named that
-    /// one. The tab it leaves keeps its other panes.
     PaneIntoTab,
-    /// Panes of the tab of the terminal `beside`, with the other panes of its
-    /// tab, which goes.
     TabIntoPanes { beside: u32 },
 }
 
-/// What came of asking zellij to turn a pane into a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntoTab {
-    /// It did.
     Done,
-    /// Nothing moved: a session no client is in has no room for a tab, as
-    /// `opens::no_client` says, and a client that comes there makes it.
     NoClient,
 }
 
-/// What came of asking zellij to turn a tab into panes of another, where any
-/// moved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntoPanes {
-    /// All that were there moved, and the tab they left goes.
     Done,
-    /// `moved` of the `of` that were there, less any that ended on the way,
-    /// did, tiled where they went, and the rest stay in their tab, for `why`.
     Partly { moved: u32, of: u32, why: String },
 }
 
-/// A tab the panes of another can turn into: a terminal in it, which names it,
-/// and its name, as zellij lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OtherTab {
     pub pane: u32,
     pub name: String,
 }
 
-/// The tabs of `session` other than that of its terminal `pane`, in their
-/// order, as zellij lists its panes now, or why it does not say.
 pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
     zellij_s(session)?;
     others(&Mux::Zellij(session).laid()?, pane)
 }
 
-/// Whether `session` is zellij's, where its panes can turn, or why not: it is
-/// an own session, each of whose tabs holds one pane.
 fn zellij_s(session: &SessionName) -> Result<(), String> {
     match Called::named(session)? {
         Called::Zellij(_) => Ok(()),
@@ -151,8 +55,6 @@ fn zellij_s(session: &SessionName) -> Result<(), String> {
     }
 }
 
-/// The tabs among `laid` other than that of the terminal `pane`, in their
-/// order, that have a terminal to name them by; or why not: it is gone.
 fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
     let own = terminal(laid, pane)?.tab_id;
     let others = laid.iter().filter(|it| it.tab_id != own);
@@ -163,8 +65,6 @@ fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
     Ok(tabs.into_iter().map(|(it, pane)| OtherTab { pane, name: it.tab_name.clone() }).collect())
 }
 
-/// A pane that can turn into a tab of its own, and what that tab is named, as
-/// zellij lists them: it has been asked to move nothing yet.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Leaving {
     pane: u32,
@@ -173,21 +73,16 @@ pub struct Leaving {
 }
 
 impl Leaving {
-    /// The pane that turns.
     #[must_use]
     pub fn pane(&self) -> PaneId {
         PaneId::Terminal(self.pane)
     }
 
-    /// The pane shown fullscreen in the tab it leaves, which its leaving ends.
     #[must_use]
     pub fn fullscreen(&self) -> Option<PaneId> {
         self.fullscreen
     }
 
-    /// Moves it into a tab made for it in `session`, or says why it did not,
-    /// where it stays where it was, and the tab goes as what holds it closes.
-    /// What runs in it runs on either way.
     pub fn turn(&self, session: &SessionName) -> Result<(), String> {
         let tab = new_tab(session, self.name.as_deref())?;
         let laid = Mux::Zellij(session).laid()?;
@@ -203,10 +98,6 @@ impl Leaving {
     }
 }
 
-/// What turning the terminal `pane` of `session`, the one that started at
-/// `started`, into a tab would move, as zellij lists it now, with nothing moved;
-/// or why nothing would. None where no client is in the session, which has no
-/// room for the tab: a pane that stays says so ahead of that.
 pub fn pane_leaving(
     session: &SessionName,
     started: SystemTime,
@@ -221,9 +112,6 @@ pub fn pane_leaving(
     Ok(has_client(session)?.then_some(Leaving { pane, name, fullscreen }))
 }
 
-/// Moves the terminal `pane` of `session`, the one that started at `started`,
-/// into a tab made for it, as `pane_leaving` and `Leaving::turn` say, and says
-/// what came of it, or why it did not.
 pub fn into_tab(
     session: &SessionName,
     started: SystemTime,
@@ -235,10 +123,6 @@ pub fn into_tab(
     }
 }
 
-/// What the tab made for the terminal `pane` among `laid`, the panes of its
-/// session, is named: as the tab it leaves is, if someone named that one. Or
-/// why it does not leave: it is gone, or nothing would hold that tab open
-/// after it, as its floating panes do not, which would end.
 fn leaving(laid: &[Laid], pane: u32) -> Result<Option<String>, String> {
     let leaves = terminal(laid, pane)?;
     let beside = |it: &&Laid| {
@@ -257,9 +141,6 @@ fn leaving(laid: &[Laid], pane: u32) -> Result<Option<String>, String> {
     Ok(tab::named(&leaves.tab_name).map(str::to_owned))
 }
 
-/// What moving the panes of the tab of the terminal `pane` of `session`, the one
-/// that started at `started`, into the tab of the terminal `beside` would move,
-/// as zellij lists it now, with nothing moved; or why nothing would.
 pub fn panes_moving(
     session: &SessionName,
     started: SystemTime,
@@ -271,10 +152,6 @@ pub fn panes_moving(
     moving(&Mux::Zellij(session).laid()?, pane, beside)
 }
 
-/// Moves the panes of the tab of the terminal `pane` of `session`, the one that
-/// started at `started`, into the tab of the terminal `beside`, as `panes_moving`
-/// and `Moving::turn` say, and says what came of it where any moved, or why none
-/// did.
 pub fn into_panes(
     session: &SessionName,
     started: SystemTime,
@@ -284,8 +161,6 @@ pub fn into_panes(
     panes_moving(session, started, pane, beside)?.turn(session)
 }
 
-/// What came of zellij stopping for `why` once `moved` of `of` panes had: none
-/// moved, or some did.
 fn stopped(moved: u32, of: u32, why: String) -> Result<IntoPanes, String> {
     if moved == 0 {
         return Err(why);
@@ -293,9 +168,6 @@ fn stopped(moved: u32, of: u32, why: String) -> Result<IntoPanes, String> {
     Ok(IntoPanes::Partly { moved, of, why })
 }
 
-/// What moving the panes of a tab into another moves: the tab they leave, the
-/// tab they go into, and the panes, in the order they go. zellij has been asked
-/// to move none of them yet.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Moving {
     from: TabId,
@@ -305,22 +177,16 @@ pub struct Moving {
 }
 
 impl Moving {
-    /// The panes it moves, in the order they go.
     #[must_use]
     pub fn panes(&self) -> &[PaneId] {
         &self.panes
     }
 
-    /// The pane shown fullscreen in the tab they go into, which their coming
-    /// ends.
     #[must_use]
     pub fn fullscreen(&self) -> Option<PaneId> {
         self.fullscreen
     }
 
-    /// Moves them in `session`, tiled, and the tab they left goes; and says what
-    /// came of it where any moved, or why none did. One that ends on its way does
-    /// not stop the rest: what runs in it had ended anyway.
     pub fn turn(&self, session: &SessionName) -> Result<IntoPanes, String> {
         let mut of = u32::try_from(self.panes.len()).unwrap_or(u32::MAX);
         let mut moved = 0;
@@ -339,11 +205,6 @@ impl Moving {
     }
 }
 
-/// What moving the panes of the tab of the terminal `pane` into the tab of the
-/// terminal `beside` moves, among `laid`, the panes of their session: all of
-/// them, the tiled ones last, as the floating ones end once the last tiled one
-/// has left. A suppressed plugin's goes with the tab. Or why it moves nothing:
-/// either terminal is gone, or both are in one tab.
 fn moving(laid: &[Laid], pane: u32, beside: u32) -> Result<Moving, String> {
     let from = terminal(laid, pane)?.tab_id;
     let to = terminal(laid, beside)
@@ -359,21 +220,14 @@ fn moving(laid: &[Laid], pane: u32, beside: u32) -> Result<Moving, String> {
     Ok(Moving { from, to, panes, fullscreen: fullscreen_of(laid, to) })
 }
 
-/// Whether `it` is a plugin's pane off the screen, as a bar of a tab is, which
-/// goes with its tab.
 fn suppressed_plugin(it: &Laid) -> bool {
     it.is_suppressed && matches!(it.pane, PaneId::Plugin(_))
 }
 
-/// The pane shown fullscreen in the tab `tab` among `laid`, if one is.
 fn fullscreen_of(laid: &[Laid], tab: TabId) -> Option<PaneId> {
     laid.iter().find(|it| it.tab_id == tab && it.is_fullscreen).map(|it| it.pane)
 }
 
-/// Shows `pane` of `session` fullscreen again, as it was before a turn, once the
-/// turn is over: a pane that leaves its tab, or a stand-in that opens there, ends
-/// that. Not one that is gone, or that still is, nor while a client is on another
-/// pane of its tab, whom zellij would move to it.
 pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), String> {
     if !ended_fullscreen(&Mux::Zellij(session).laid()?, &clients_of(session)?, pane) {
         return Ok(());
@@ -381,8 +235,6 @@ pub fn fullscreen_again(session: &SessionName, pane: PaneId) -> Result<(), Strin
     Ok(Mux::Zellij(session).fullscreen_toggled(pane)?)
 }
 
-/// Whether `pane`, among `laid`, the panes of a session that `clients` are in, is
-/// no longer shown fullscreen and can be again with no client moved.
 fn ended_fullscreen(laid: &[Laid], clients: &[Client], pane: PaneId) -> bool {
     let Some(shown) = laid.iter().find(|it| it.pane == pane) else {
         return false;
@@ -394,27 +246,18 @@ fn ended_fullscreen(laid: &[Laid], clients: &[Client], pane: PaneId) -> bool {
     !shown.is_fullscreen && !clients.iter().any(beside)
 }
 
-/// The terminal `pane` among `laid`, or why not: it is gone.
 fn terminal(laid: &[Laid], pane: u32) -> Result<&Laid, String> {
     let found = laid.iter().find(|it| it.pane == PaneId::Terminal(pane));
     found.ok_or_else(|| format!("pane {pane} is gone"))
 }
 
-/// Where a pane is that zellij was asked to move into a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Landed {
-    /// In that tab.
     There,
-    /// Elsewhere: zellij says nothing of a stack it has no room for, and
-    /// stacks nothing.
     Stayed,
-    /// Nowhere zellij lists: what ran in it ended, which it says nothing of
-    /// either.
     Gone,
 }
 
-/// Where `laid`, the panes of a session, lists `pane`, as it was to move into
-/// the tab `tab`.
 fn landed(laid: &[Laid], pane: PaneId, tab: TabId) -> Landed {
     match laid.iter().find(|it| it.pane == pane) {
         Some(it) if it.tab_id == tab => Landed::There,
@@ -423,49 +266,33 @@ fn landed(laid: &[Laid], pane: PaneId, tab: TabId) -> Landed {
     }
 }
 
-/// Why `pane` stays out of the tab `tab`.
 fn no_room(pane: PaneId, tab: TabId) -> String {
     format!("zellij found no room for {pane} in tab {tab}, so it stays")
 }
 
-/// Whether a client is in `session`, as zellij lists them now.
 fn has_client(session: &SessionName) -> Result<bool, String> {
     Ok(Mux::Zellij(session).has_clients()?)
 }
 
-/// The clients in `session`, as zellij lists them now.
 fn clients_of(session: &SessionName) -> Result<Listed, String> {
     Ok(Mux::Zellij(session).clients()?)
 }
 
-/// Has zellij open a tab for a pane in `session`, named `name` or as zellij
-/// numbers it, with no client moved, and says its id. One zellij opened as a
-/// pane closing cut its answer short has a second open beside it, and ends on
-/// its own with its stand-in.
 fn new_tab(session: &SessionName, name: Option<&str>) -> Result<TabId, String> {
     Ok(Mux::Zellij(session).tab_opened_once_heard(name, &STAND_IN)?)
 }
 
-/// Moves `pane` to the tab `to` of `session`, by stacking it on a stand-in
-/// opened there, which then closes and leaves it in its place; and says where
-/// it ended up, or why zellij was not asked to the end.
 fn over_stand_in(session: &SessionName, pane: PaneId, to: TabId) -> Result<Landed, String> {
     let stand_in = open_stand_in(session, to, STAND_IN_NAME)?;
     let listed = over_stand_ins(session, &[stand_in], pane, to)?;
     Ok(landed(&listed, pane, to))
 }
 
-/// Has zellij open a stand-in named `name` in the tab `to` of `session`, with no
-/// client moved, and says which. One whose answer a pane closing cut short opens
-/// all the same, so it is found by its name, and asked for again only where it does
-/// not show: that one has a second open beside it, which ends on its own.
 fn open_stand_in(session: &SessionName, to: TabId, name: &str) -> Result<PaneId, String> {
     let found = || found_stand_in(session, to, name);
     Ok(PaneId::Terminal(Mux::Zellij(session).pane_opened_once_heard(to, name, &STAND_IN, found)?))
 }
 
-/// The newest stand-in named `name` in the tab `to` of `session`, as zellij lists
-/// it within `FINDING`, or none.
 fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
     let deadline = Instant::now() + FINDING;
     loop {
@@ -481,15 +308,10 @@ fn found_stand_in(session: &SessionName, to: TabId, name: &str) -> Option<u32> {
     }
 }
 
-/// Has zellij close the stand-in `pane` of `session`. What came of the move
-/// stands whether it does: a stand-in ends on its own, and closes as it does.
 fn close_stand_in(session: &SessionName, pane: PaneId) {
     let _ = Mux::Zellij(session).pane_closed(pane, Asks::OnceReached);
 }
 
-/// Has zellij stack `moved` on the first of `stand_ins`, in the tab `tab` of
-/// `session`, closes them, and says what it listed with `moved` stacked. `moved`
-/// is left a pane like any other, as `under_stack` says.
 fn over_stand_ins(
     session: &SessionName,
     stand_ins: &[PaneId],
@@ -513,18 +335,11 @@ fn over_stand_ins(
     came.map(|came| came.listed)
 }
 
-/// What came of having zellij stack a pane: what it lists then, and whether it
-/// stacked it with `NOWHERE` last, so that it moved no client.
 struct Stacked {
     listed: Vec<Laid>,
     unfocused: bool,
 }
 
-/// Has zellij stack `moved` on `root`, in the tab `tab` of `session`, and says what
-/// came of it. With `NOWHERE` it moves no client, unless one is on `moved`, as that
-/// one goes with it. A stack with no room does nothing, and `NOWHERE` takes up room:
-/// asked again without it, it moves the pane where it ever did, and the client that
-/// last typed along with it.
 fn stacked(
     session: &SessionName,
     root: PaneId,
@@ -545,30 +360,16 @@ fn stacked(
     Ok(Stacked { listed: Mux::Zellij(session).laid()?, unfocused: false })
 }
 
-/// Has zellij stack a second stand-in in the tab `tab` of `session` under the pane
-/// stacked on `root` with no client moved, and says which, to close after `root`.
-/// In a tab no client is on, that pane has all the room of the stack and `root` a
-/// row of it. Closing a pane of one row leaves the other a stack of one, which
-/// zellij splits for no stand-in after it, and a new pane opened on it joins. It
-/// makes a pane like any other only of closing the one with the room, and the
-/// second stand-in takes that from it. Where it finds no room for this one, the
-/// pane stays a stack of one, as it ends with no client in the session: it has
-/// moved all the same.
 fn under_stack(session: &SessionName, root: PaneId, tab: TabId) -> Option<PaneId> {
     let last = open_stand_in(session, tab, SECOND_STAND_IN_NAME).ok()?;
     let _ = stack(session, [root, last, NOWHERE]);
     Some(last)
 }
 
-/// Has zellij stack `panes` on the first of them, each from whatever tab it is
-/// in. It stacks nothing where it has no room, and says nothing of it.
 fn stack<const N: usize>(session: &SessionName, panes: [PaneId; N]) -> Result<(), String> {
     Ok(Mux::Zellij(session).panes_stacked(panes)?)
 }
 
-/// Closes the tab `from`, which the panes of `session` left, where zellij
-/// keeps it: it closes one as it next draws for a client, and with none it
-/// lists it on with nothing in it. One that has panes in it by now stays.
 fn close_emptied(session: &SessionName, from: TabId) -> Result<(), String> {
     if has_client(session)? || Mux::Zellij(session).laid()?.iter().any(|it| it.tab_id == from) {
         return Ok(());
@@ -613,8 +414,6 @@ mod tests {
         Laid { pane: PaneId::Plugin(id), ..laid }
     }
 
-    /// A pane leaves a tab another pane holds open, whether it floats itself,
-    /// and takes the name of the tab where someone named it.
     #[test]
     fn a_pane_leaves_a_tab_another_holds_open_with_its_name() {
         let named = |laid: Laid| Laid { tab_name: "auth".to_owned(), ..laid };
@@ -626,8 +425,6 @@ mod tests {
         assert_eq!(leaving(&parked, 1), Ok(None));
     }
 
-    /// A pane alone in its tab has nothing to do, whatever else its session
-    /// has, and a plugin's pane suppressed there changes nothing.
     #[test]
     fn a_pane_alone_in_its_tab_stays() {
         let alone = "pane 1 is alone in its tab already";
@@ -636,8 +433,6 @@ mod tests {
         assert_eq!(leaving(&hidden, 1), Err(alone.to_owned()));
     }
 
-    /// zellij closes a tab with its last tiled pane, and the floating panes
-    /// in it end: one that alone holds its tab open stays, and says why.
     #[test]
     fn a_pane_that_alone_holds_its_tab_open_stays_for_the_floating_ones() {
         let why = leaving(&[pane(1, 0), floating(pane(2, 0))], 1).unwrap_err();
@@ -650,13 +445,9 @@ mod tests {
         assert_eq!(leaving(&[pane(1, 0)], 9), Err(gone.clone()));
         assert_eq!(moving(&[pane(1, 0)], 9, 1), Err(gone.clone()));
         assert_eq!(others(&[pane(1, 0)], 9), Err(gone));
-        // A plugin's pane of that id is no terminal.
         assert!(leaving(&[plugin(pane(9, 0)), pane(1, 0)], 9).is_err());
     }
 
-    /// The floating panes of a tab, and those another stands in for, go ahead
-    /// of the tiled ones, whose last closes the tab; a plugin's goes too, but
-    /// for one zellij keeps suppressed, which goes with the tab.
     #[test]
     fn the_tiled_panes_of_a_tab_go_last() {
         let laid = [
@@ -676,17 +467,12 @@ mod tests {
         assert_eq!(spelled, order);
     }
 
-    /// zellij gives the id of a tab that closed to the next it opens: panes go
-    /// to the tab the terminal picked is in now, whichever tab holds that id
-    /// by then, and a plugin's pane of that id is no terminal.
     #[test]
     fn panes_go_to_the_tab_of_the_terminal_picked() {
         let laid = [pane(1, 0), pane(2, 0), plugin(pane(7, 1)), pane(7, 5)];
         assert_eq!(moving(&laid, 1, 7).unwrap().to, TabId(5));
     }
 
-    /// The terminal picked may have closed, and taken its tab, since; nothing
-    /// moves to whatever took that tab's id then.
     #[test]
     fn a_tab_turns_into_panes_of_another_tab_only() {
         let laid = [pane(1, 0), pane(3, 0), pane(2, 1)];
@@ -695,9 +481,6 @@ mod tests {
         assert_eq!(moving(&laid, 1, 7), Err(gone));
     }
 
-    /// The other tabs go in their order, each once, as zellij lists a tab of
-    /// each of its panes and not by its id, each by a terminal in it; a tab
-    /// with none has nothing to go by.
     #[test]
     fn the_other_tabs_go_in_their_order() {
         let at = |laid: Laid, tab_position| Laid { tab_position, ..laid };
@@ -717,8 +500,6 @@ mod tests {
         assert_eq!(others(&[pane(1, 0)], 1), Ok(Vec::new()));
     }
 
-    /// zellij exits 0 on a stack it did not do, for no room or for a pane that
-    /// ended: only what it lists tells them apart.
     #[test]
     fn what_zellij_lists_says_where_a_pane_landed() {
         let moved = PaneId::Terminal(1);

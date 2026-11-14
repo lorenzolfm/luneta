@@ -1,59 +1,3 @@
-//! The menu: a key, then another, and a pane opens where you work, as
-//! which-key shows the keys in neovim. It opens at the bottom of the sidebar,
-//! for the row highlighted then, or floats in a box at the bottom right of
-//! zellij's side, for the pane zellij is on.
-//!
-//! Its keys are luneta's own. `/` searches every skill the directory of the
-//! row's pane can run, for an agent to start on the one you pick, beside that
-//! pane. `a` opens the ask box, for an agent to do what you say in words, as
-//! the menu would. `c` opens the Skills group, a key for each of a few skills, which
-//! starts an agent on it there, `f` and `e`, which start one on what the
-//! command a shell ran last printed, to fix what went wrong or explain it, and
-//! `c`, which starts one on the checks that failed on its pull request. Each
-//! starts in the harness the line under the keys names, by its icon and its
-//! name: the one that runs in the pane, which the line says, or else the one
-//! you picked last, and `Tab` picks the next: in the search too, and in the
-//! menu for a link.
-//! `n` opens the New group: your shell beside the
-//! pane, a tab of its session, or a session, in the directory it works in, or
-//! on a machine's header in the home of its user there, or a machine for
-//! lunetad to watch through ssh, by what you type ssh to it. `t`
-//! opens the Turn group: the pane into a tab of its own, or its tab into panes
-//! of another you pick, what runs in them running on. `d`
-//! opens the Delete group, which closes the pane or deletes its session, and
-//! asks first when that would end an agent at work, or on a pane's row in a
-//! repository lists the worktrees of its merged pull requests, to delete once
-//! you say yes, and on another machine's header forgets the machine. `b` opens the
-//! Brief group, which briefs you on every session, the row's session, or the agent in its pane, or on a machine's
-//! header, the machine's sessions. luneta has no
-//! configuration to read keys for skills from, and the Skills group's are its
-//! own. The menu lists only the keys that work on its kind of row: a session's
-//! row and a machine's header have no pane, and none of the keys that need one,
-//! and this machine's header nothing to delete.
-//!
-//! A pull request's link pasted with the sidebar's keys, or in the menu,
-//! opens it for that pull request instead: `w` makes a worktree of it, in a
-//! tab of the session that works in its repository, and `r` starts an agent
-//! on a review of it there too. Where a pane has its branch checked out
-//! already, `w` takes you there, and `r` starts the agent beside it. An
-//! issue's link opens it for that issue: `w` makes a worktree of a branch for
-//! it, and `t` starts an agent there on tackling it. Each acts on the row's
-//! machine, or else on the first other machine that has the repository.
-//!
-//! What a key started is the sidebar's from the moment you press it, not the
-//! menu's: the menu closing, as the keys leave it for zellij, or as `Esc`
-//! closes it, does not end it. The sidebar keeps it, says in its notes what it
-//! waits on, and opens the tab and starts the agent once it has, where they
-//! would have been, without taking zellij's client from where you went.
-//!
-//! At the top of the sidebar, a key the sidebar has no use of its own for
-//! opens the menu on the group it opens, and `m` opens it on its first group,
-//! where every key is the menu's. While the sidebar has the focus and no menu
-//! is open, the legend at its bottom lists the keys it takes there. A key
-//! there that waits for the next, as a group's does, shows what can come next
-//! only once a pause passes with none, as which-key does, and `?` lists every
-//! key luneta has in the legend's place.
-
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
@@ -89,14 +33,9 @@ use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{SessionName, Starts};
 
-/// The key that lists every key luneta has, at the bottom of the sidebar, and
-/// what a list of keys short of room says it does on its last line.
 pub const ALL_KEYS: char = '?';
 const ALL_KEYS_DOES: &str = "All keys";
 
-/// The keys a line of a list of keys names: one key, with what is held with
-/// it, or two characters, as `g g` typed one after the other, or `j k`, each
-/// one way of what the line says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Label {
     Key(KeyCode, KeyModifiers),
@@ -104,17 +43,14 @@ pub enum Label {
 }
 
 impl Label {
-    /// The character `c`, with nothing held.
     pub const fn char(c: char) -> Label {
         Label::Key(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
-    /// The key `code`, with nothing held.
     pub const fn code(code: KeyCode) -> Label {
         Label::Key(code, KeyModifiers::NONE)
     }
 
-    /// The key a click on its line presses: none for two.
     fn pressed(self) -> Option<KeyEvent> {
         match self {
             Label::Key(code, modifiers) => Some(KeyEvent::new(code, modifiers)),
@@ -124,8 +60,6 @@ impl Label {
 }
 
 impl std::fmt::Display for Label {
-    /// What is held, as `Ctrl`, `Alt` and `Shift`, then the key, `Space`,
-    /// `Enter`, `Esc`, `Tab` and `BS` by name; or the two characters.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (code, modifiers) = match *self {
             Label::Two(first, second) => return write!(f, "{first} {second}"),
@@ -153,8 +87,6 @@ impl std::fmt::Display for Label {
     }
 }
 
-/// The moves and folds at the top of the sidebar, as the list of every key
-/// names them.
 const MOVES: [(Label, &str); 10] = [
     (Label::Two('j', 'k'), "Next row, row before"),
     (Label::Two('g', 'g'), "First row"),
@@ -168,8 +100,6 @@ const MOVES: [(Label, &str); 10] = [
     (Label::code(KeyCode::Esc), "Back to zellij"),
 ];
 
-/// The keys of the menu besides its entries, as the list of every key names
-/// them: those it takes in any group, and those of the menu for a pasted link.
 const MENU_MOVES: [(Label, &str); 6] = [
     (Label::code(KeyCode::Tab), "use another agent"),
     (Label::code(KeyCode::Backspace), "back a group"),
@@ -179,67 +109,43 @@ const MENU_MOVES: [(Label, &str); 6] = [
     (Label::char('t'), "tackle a pasted issue"),
 ];
 
-/// The Delete group's keys, as the list of every key names them, on no row in
-/// particular: what `d d` deletes is the row's.
 const DELETES: [(Label, &str); 3] = [
     (Label::Two(DELETE, 'd'), "delete the row"),
     (Label::Two(DELETE, 's'), "delete the session"),
     (Label::Two(DELETE, 'm'), DELETE_MERGED_DOES),
 ];
 
-/// The key that opens the search over the skills, at the top of the menu, and
-/// what the menu says it does.
 const SEARCH: char = '/';
 const SEARCH_DOES: &str = "Search skills";
 
-/// The key that opens the ask box, at the top of the menu, and what the menu
-/// says it does.
 const ASK: char = 'a';
 const ASK_DOES: &str = "Ask";
 
-/// The key that opens the issue box, at the top of the menu, and what the
-/// menu says it does.
 const ISSUE: char = 'i';
 const ISSUE_DOES: &str = "File issue";
 
-/// The key of the Skills group, its name, and its keys, each with the skill
-/// it starts an agent on: the skills the author runs most. luneta has no
-/// configuration to read yours from.
 const SKILLS: char = 'c';
 const SKILLS_NAME: &str = "Skills";
 const SKILL_KEYS: [(char, &str); 3] =
     [('t', REVIEW), ('m', "make-illegal-states-unrepresentable"), ('s', "tigerstyle")];
 
-/// The key of the Skills group that starts an agent on the checks that failed
-/// on the head of the pane's pull request, and what the menu says it does.
 const CHECKS: char = 'c';
 const CHECKS_DOES: &str = "fix the failing checks";
 
-/// The skill an agent reviews a pull request with: the Skills group's `t`,
-/// and the `r` of the menu for a pull request, which gives it the link.
 const REVIEW: &str = "thermo-nuclear-review";
 
-/// What the `t` of the menu for an issue tells an agent, before the link: in
-/// words, as you would, with no skill.
 const TACKLE: &str = "Tackle";
 
-/// The key of luneta's own New group, and its name.
 const NEW: char = 'n';
 const NEW_NAME: &str = "New";
 
-/// The key of luneta's own Turn group, and its name.
 const TURN: char = 't';
 const TURN_NAME: &str = "Turn";
 
-/// What the menu names the list of tabs a tab's panes can turn into.
 const TABS_TITLE: &str = "Into tab";
 
-/// The keys of that list, a tab each, in their order. A session with more
-/// tabs than this leaves the rest out.
 const TAB_KEYS: &str = "123456789abcdefghijklmnopqrstuvwxyz";
 
-/// The key of luneta's own Delete group, its name, and its keys: one deletes
-/// what the menu is for, the other its session.
 const DELETE: char = 'd';
 const DELETE_NAME: &str = "Delete";
 const DELETE_ROW: char = 'd';
@@ -247,77 +153,44 @@ const DELETE_SESSION: char = 's';
 const DELETE_MERGED: char = 'm';
 const DELETE_MERGED_DOES: &str = "delete merged worktrees";
 
-/// The key of luneta's own Brief group, and its name.
 const BRIEF: char = 'b';
 const BRIEF_NAME: &str = "Brief";
 
-/// What the key of the Delete group that forgets a machine says it does.
 const FORGET_DOES: &str = "forget the machine";
 
-/// What the rule over the menu's first group, and over the legend, names
-/// them, and the sidebar's first line; and what it names the search box, and
-/// the box a machine's destination is typed in.
 pub const TITLE: &str = "luneta";
 const SEARCH_TITLE: &str = "Skills";
 const SSH_TITLE: &str = "ssh";
 
-/// What the line under the keys that start agents says `Tab` does, in as
-/// many words as it has room for.
 const NEXT_DOES: [&str; 2] = ["another agent", "another"];
 
-/// What the line under the keys that start agents says after the name of the
-/// harness, where the agent in the pane picked it.
 const PANE_S: &str = ", the pane's";
 
-/// What follows a group's name: it opens, as a folded session does.
 const GROUP: &str = "▸";
 
-/// The columns between a key and what it does.
 const GAP: usize = 2;
 
-/// The most skills the search box shows at once. The list scrolls under it.
 const SEARCH_ROWS: usize = 8;
 
-/// The fewest and the most columns inside the box the menu floats in, past
-/// its borders: as many as what it shows takes, the search box the most, and
-/// what is longer wraps or is cut.
 const FLOATING: (usize, usize) = (24, 62);
 
-/// The key that waits for what to yank at the top of the sidebar, what the
-/// legend names it, the key that then yanks a pull request's link, and what
-/// is said of that key.
 const YANK: char = 'y';
 const YANK_NAME: &str = "Yank";
 pub const YANK_PULL: char = 'p';
 const YANK_PULL_DOES: &str = "PR link";
 
-/// What `y` waits for: its group in the legend holds them, and the bottom of
-/// the sidebar lists them while it waits.
 const YANKS: [Entry; 1] = [Entry::YankPull];
 
-/// A key of the sidebar's own that does more than move the highlight or fold
-/// a session. The legend lists each before the menu's keys, and a key of the
-/// menu's that one has stays the command's at the top of the sidebar: `/`
-/// searches the rows there, and the skills only in the menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Narrows the rows to those that match what you type.
     Search,
-    /// Marks the highlighted pane read while its row has the dot, or else
-    /// unread.
     Unread,
-    /// Selects the session of the highlighted row, or the machine of the
-    /// highlighted header, for `Top::Shift` to move, and ends the selection.
     Reorder,
-    /// Picks the highlighted pane for `Top::Shift` to move among the panes,
-    /// then its tab, and ends.
     MovePane,
-    /// Opens the pull request of the highlighted row in your browser.
     Open,
 }
 
 impl Command {
-    /// Every command, in the order the legend lists them.
     const ALL: [Command; 5] =
         [Command::Search, Command::Unread, Command::Reorder, Command::MovePane, Command::Open];
 
@@ -331,8 +204,6 @@ impl Command {
         }
     }
 
-    /// What the legend says the command does, and the rule over the search
-    /// names it.
     pub const fn does(self) -> &'static str {
         match self {
             Command::Search => "Search",
@@ -343,47 +214,25 @@ impl Command {
         }
     }
 
-    /// The command `key` runs at the top of the sidebar, if any.
     fn of(key: char) -> Option<Command> {
         Command::ALL.into_iter().find(|command| command.key() == key)
     }
 }
 
-/// What a key does at the top of the sidebar, ahead of the menu's keys. The
-/// sidebar does what `of` says, and the legend leaves out a key of the menu's
-/// that `moves` takes, so the legend shows no key that does something else
-/// there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Top {
-    /// Moves the highlight so many rows down, or up.
     Move(isize),
-    /// Moves the highlight to the last row, as vim's `G`.
     Last,
-    /// Moves the highlight to the first row once pressed twice, as vim's
-    /// `gg`. Pressed once, the sidebar waits for the second, and any other
-    /// key drops the first: `Esc` does only that, as in vim.
     First,
-    /// Moves the sessions, or the machines, a selection holds so many places
-    /// down, or up, or where what `V` picked lands. Without either, nothing.
     Shift(isize),
-    /// `Some(true)` folds, `Some(false)` unfolds, and `None` turns it over.
     Fold(Option<bool>),
-    /// Opens the menu on its first group, where every key is the menu's.
     Menu,
-    /// Waits for what to yank, as vim's `y` waits for a motion: `YANK_PULL`
-    /// copies the link of the highlighted row's pull request. Any other key
-    /// drops it, `Esc` doing only that, as after a lone `First`.
     Yank,
-    /// Lists every key luneta has, in the legend's place.
     AllKeys,
-    /// Runs a command of the sidebar's own.
     Command(Command),
 }
 
 impl Top {
-    /// What `key` does at the top of the sidebar besides a command: moves the
-    /// highlight or the sessions selected, folds, opens the menu, or waits for
-    /// what to yank.
     const fn moves(key: char) -> Option<Top> {
         match key {
             'j' => Some(Top::Move(1)),
@@ -402,18 +251,11 @@ impl Top {
         }
     }
 
-    /// What `key` does at the top of the sidebar. None for a key the menu has
-    /// the say on.
     pub fn of(key: char) -> Option<Top> {
         Top::moves(key).or_else(|| Command::of(key).map(Top::Command))
     }
 }
 
-/// No command takes the key of the ask box or the issue box, or of luneta's
-/// Skills, New, Turn, Delete or Brief group, which would be out of reach at
-/// the top of the sidebar, and gone from the legend; nor a key the sidebar
-/// moves, folds or opens the menu with, which `Top::of` finds first. Nor does
-/// the sidebar move with the ask box's or the issue box's.
 const _: () = {
     let mut at = 0;
     while at < Command::ALL.len() {
@@ -433,31 +275,18 @@ const _: () = {
     assert!(Top::moves(ISSUE).is_none(), "the issue box on a key the sidebar moves with");
 };
 
-/// Why the menu makes no own session on another machine.
 const OWN_HERE: &str = "menu: own sessions are of this machine alone, as yet";
 
-/// What a key of the New group opens, for the pane the menu is for, in the
-/// directory it works in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum New {
-    /// Your shell, in a pane of its own beside that pane.
     Pane,
-    /// A tab of that pane's session.
     Tab,
-    /// A session, named for the directory, as the picker's directories are;
-    /// or on a machine's header, for the home of its user.
     Session,
-    /// A session of luneta's own multiplexer, named as `Session` is: on this
-    /// machine's rows, as own sessions are of this machine alone. It stands
-    /// beside `Session` until zellij goes, when `Session` is an own one.
     Own,
-    /// A machine for lunetad to watch through ssh, by its destination, typed
-    /// in a box: on any row.
     Machine,
 }
 
 impl New {
-    /// Each, in the order the New group shows them.
     const ALL: [New; 5] = [New::Pane, New::Tab, New::Session, New::Own, New::Machine];
 
     const fn key(self) -> char {
@@ -470,7 +299,6 @@ impl New {
         }
     }
 
-    /// What the menu says the key does.
     const fn does(self) -> &'static str {
         match self {
             New::Pane => "new pane",
@@ -482,18 +310,13 @@ impl New {
     }
 }
 
-/// A key of the Turn group, for the pane the menu is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TurnKey {
-    /// That pane, into a tab of its own.
     PaneIntoTab,
-    /// That pane's tab, into panes of another tab, which you pick where it
-    /// has more than one.
     TabIntoPanes,
 }
 
 impl TurnKey {
-    /// Each, in the order the Turn group shows them.
     const ALL: [TurnKey; 2] = [TurnKey::PaneIntoTab, TurnKey::TabIntoPanes];
 
     const fn key(self) -> char {
@@ -503,7 +326,6 @@ impl TurnKey {
         }
     }
 
-    /// What the menu says the key does.
     const fn does(self) -> &'static str {
         match self {
             TurnKey::PaneIntoTab => "pane into tab",
@@ -512,9 +334,6 @@ impl TurnKey {
     }
 }
 
-/// A key of the Skills group that starts an agent on what the command a
-/// shell ran last printed, beside its pane: to fix what went wrong, or to
-/// explain it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Last {
     Fix,
@@ -522,7 +341,6 @@ enum Last {
 }
 
 impl Last {
-    /// Each, in the order the Skills group shows them, after its skills.
     const ALL: [Last; 2] = [Last::Fix, Last::Explain];
 
     const fn key(self) -> char {
@@ -532,7 +350,6 @@ impl Last {
         }
     }
 
-    /// What the menu says the key does.
     const fn does(self) -> &'static str {
         match self {
             Last::Fix => "fix the last command",
@@ -540,7 +357,6 @@ impl Last {
         }
     }
 
-    /// What the agent is asked, before it is told of the command.
     const fn asks(self) -> &'static str {
         match self {
             Last::Fix => "Fix this.",
@@ -549,8 +365,6 @@ impl Last {
     }
 }
 
-/// No key of the Skills group's skills is one of `Last`'s, or `CHECKS`, nor
-/// one of `Last`'s `CHECKS`, which would hide it.
 const _: () = {
     let mut at = 0;
     while at < Last::ALL.len() {
@@ -566,21 +380,12 @@ const _: () = {
     }
 };
 
-/// What a key of the menu for a pull request, an issue or a file does, in a
-/// tab of the session that works in its repository, or where its branch is
-/// checked out. The menu for each has both, and `Asks` says what its agent is
-/// on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pull {
-    /// A worktree of the pull request, or of the branch of the issue or the
-    /// file, as `wt add` makes it.
     Worktree,
-    /// The same, with an agent on it: on a review of the pull request, or on
-    /// tackling the issue or the file.
     Agent,
 }
 
-/// What the agent of a menu for a pull request, an issue or a file is asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Asks {
     Review,
@@ -588,8 +393,6 @@ enum Asks {
 }
 
 impl Asks {
-    /// What the agent on `work` is asked: a review of a pull request, and of
-    /// anything else, to tackle it.
     fn of(work: &Work) -> Asks {
         match work {
             Work::Link(link) if link.kind() == Kind::Pull => Asks::Review,
@@ -599,10 +402,8 @@ impl Asks {
 }
 
 impl Pull {
-    /// Each, in the order the menu shows them.
     const ALL: [Pull; 2] = [Pull::Worktree, Pull::Agent];
 
-    /// Its key in a menu whose agent `asks`.
     const fn key(self, asks: Asks) -> char {
         match (self, asks) {
             (Pull::Worktree, _) => 'w',
@@ -611,7 +412,6 @@ impl Pull {
         }
     }
 
-    /// What a menu whose agent `asks` says the key does.
     fn does(self, asks: Asks) -> String {
         match (self, asks) {
             (Pull::Worktree, _) => "worktree".to_owned(),
@@ -627,8 +427,6 @@ impl Pull {
         }
     }
 
-    /// The one of a menu whose agent `asks` that `key` presses, if any: its
-    /// key, with no modifier but `Shift`.
     fn pressed(key: &KeyEvent, asks: Asks) -> Option<Pull> {
         let KeyCode::Char(c) = key.code else {
             return None;
@@ -638,58 +436,26 @@ impl Pull {
 }
 
 enum Entry {
-    /// A key that opens a group, the name the menu shows for it, and the keys
-    /// in it.
     Group { key: char, name: &'static str, entries: Vec<Entry> },
-    /// A key of the Skills group: starts an agent on the skill so named.
     Start { key: char, skill: &'static str },
-    /// A key of the Skills group: starts an agent on what the command the
-    /// pane's shell ran last printed.
     Last(Last),
-    /// The key of the Skills group that starts an agent on the checks that
-    /// failed on the pane's pull request.
     Checks,
-    /// A key of the New group: opens a pane, a tab or a session.
     New(New),
-    /// A key of the Turn group: turns the pane the menu is for, or its tab.
     Turn(TurnKey),
-    /// A key of the list of tabs a tab's panes can turn into: the tab of this
-    /// name, which that list shows.
     Tab { key: char, name: String },
-    /// A key of the Delete group: closes the pane the menu is for, or deletes
-    /// its session, `session`.
     Close { key: char, session: Listed, scope: Scope },
-    /// The key of the Delete group on a pane's row in a repository: lists the
-    /// worktrees of its merged pull requests, by a directory of it.
     Prune { dir: Directory },
-    /// The key of the Delete group on another machine's header: forgets the
-    /// machine.
     Forget(Destination),
-    /// A key of the Brief group: briefs you on what the agents it covers are
-    /// doing.
     Brief(brief::Scope),
-    /// A command of the sidebar's own, which the legend lists beside the
-    /// menu's keys.
     Command(Command),
-    /// The key that yanks a pull request's link, which the bottom of the
-    /// sidebar lists while `y` waits.
     YankPull,
-    /// A key of the menu for what was pasted, a pull request's link, an
-    /// issue's or a file's path, which that menu shows.
     Pull(Pull, Asks),
-    /// The key that opens the search over the skills.
     Search,
-    /// The key that opens the ask box.
     Ask,
-    /// The key that opens the issue box, on a pane's row in a repository.
     Issue,
 }
 
 impl Entry {
-    /// The entry as the menu for `target` lists it: a key that works on its
-    /// kind of row and of session, or a group with those of its keys that do; or none, for
-    /// a key that does not, or a group left with none. A key built for the
-    /// row, as the Delete group's are, works on it.
     fn on(self, target: &Target) -> Option<Entry> {
         let pane = matches!(target, Target::Pane(..));
         let session = matches!(target, Target::Session(..));
@@ -745,7 +511,6 @@ impl Entry {
         }
     }
 
-    /// What the menu says the key does: for a group, its name.
     fn does(&self) -> String {
         match self {
             Entry::Group { name, .. } => (*name).to_owned(),
@@ -768,10 +533,6 @@ impl Entry {
         }
     }
 
-    /// The keys under it, each the keys that press it from the group it is
-    /// in, after `before`, and what it does, as the list of every key names
-    /// them: a group's are those of its entries, and the Delete group's are
-    /// `DELETES`, on no row in particular.
     fn spelled(&self, before: &str, into: &mut Vec<(String, String)>) {
         let keys = format!("{before}{}", self.key());
         match self {
@@ -788,83 +549,40 @@ impl Entry {
     }
 }
 
-/// What a key did to the keys.
 #[derive(Debug, PartialEq, Eq)]
 enum Pressed {
-    /// Opened a group, or went back to the one before, or typed in the search
-    /// box, moved its cursor or closed it.
     Moved,
-    /// Asks for the search box over the skills.
     Search,
-    /// Starts an agent on the skill so named.
     Start(String),
-    /// Picks this harness for the agents the menu starts.
     Switched(Harness),
-    /// Starts an agent on what the pane's shell printed last.
     Last(Last),
-    /// Starts an agent on the checks that failed on the pane's pull request.
     Checks,
-    /// Opens a pane, a tab or a session.
     New(New),
-    /// Turns the pane the menu is for, or its tab.
     Turn(TurnKey),
-    /// Closes the pane the menu is for, or deletes its session, `session`,
-    /// by `key`.
     Delete { key: char, session: Listed, scope: Scope },
-    /// Lists the worktrees of the merged pull requests of a repository, by a
-    /// directory of it.
     Prune(Directory),
-    /// Forgets the machine the menu is for.
     Forget(Destination),
-    /// Asks for a brief of what the scope covers.
     Brief(brief::Scope),
-    /// Opens the ask box.
     Ask,
-    /// Opens the issue box.
     Issue,
-    /// Closes the menu.
     Close,
-    /// Nothing: the group open has no such key.
     Nothing,
 }
 
-/// The menu's entries, the groups opened so far, the search box over the
-/// skills while it is open, and the harness its keys start agents in.
 struct Keys {
     root: Vec<Entry>,
-    /// Each group opened, by where it stands in the one before.
     open: Vec<usize>,
     search: Option<Search>,
     agent: Picked,
 }
 
 impl Keys {
-    /// The keys of the menu for `target`: those of `every` that work on its
-    /// kind of row, as `Entry::on` says. A pane's row has them all, but `i`
-    /// and `d m` where it works in no repository; a
-    /// session's row `a`, `n m`, `d d`, `d s` and the Brief group; another
-    /// machine's header `a`, `n s`, `n m`, `d d` and the Brief group; and
-    /// this one's the same but `d d`. They start agents in `agent`.
     fn new(target: &Target, agent: Picked) -> Self {
         let every = Keys::every(target.removes()).into_iter();
         let root = every.filter_map(|entry| entry.on(target)).collect();
         Keys { root, open: Vec::new(), search: None, agent }
     }
 
-    /// The menu's keys, on whatever row: `/`, which opens the search over
-    /// the skills, `a`, which opens the ask box, `i`, which opens the issue
-    /// box, and the Claude, New, Turn,
-    /// Delete and Brief groups: `c t`, `c m` and `c s` start an
-    /// agent on a skill, `c f` and `c e` one on what the pane's shell printed
-    /// last, `c c` one on the checks that failed on its pull request, `n p`,
-    /// `n t` and `n s` open a pane, a tab and a session, and `n m` the box for
-    /// a machine's destination, `t t` turns the pane into a tab and `t p` its
-    /// tab into panes of another, `d d` deletes
-    /// what the menu is for, as `removes` says, `d s` deletes its session,
-    /// and on a row in a repository, `d m` its merged worktrees, or on
-    /// another machine's header `d d` alone forgets the machine, and
-    /// `b z`, `b s` and `b h` brief you on every session, its session and
-    /// what the menu is for, or on a machine's header, its sessions.
     fn every(removes: Option<Removes>) -> Vec<Entry> {
         let start = |(key, skill)| Entry::Start { key, skill };
         vec![
@@ -915,11 +633,6 @@ impl Keys {
         ]
     }
 
-    /// The legend: the sidebar's commands, and what `y` waits on, which it
-    /// lists as a group, then the keys at the top of the menu on any row, but
-    /// for those a command has, or the sidebar moves with, which `m` reaches.
-    /// It shows the Delete group's key and not what it deletes, which is the
-    /// row's.
     fn legend() -> Vec<Entry> {
         let mut root: Vec<Entry> = Command::ALL.into_iter().map(Entry::Command).collect();
         root.push(Entry::Group { key: YANK, name: YANK_NAME, entries: YANKS.into() });
@@ -928,7 +641,6 @@ impl Keys {
         root
     }
 
-    /// The groups opened, each its name and its entries.
     fn trail(&self) -> Vec<(&'static str, &[Entry])> {
         let mut trail = Vec::with_capacity(self.open.len());
         let mut entries = self.root.as_slice();
@@ -941,23 +653,14 @@ impl Keys {
         trail
     }
 
-    /// The entries of the group open.
     fn entries(&self) -> &[Entry] {
         self.trail().last().map_or(self.root.as_slice(), |(_, entries)| entries)
     }
 
-    /// Whether what is open starts agents, and names their harness: the
-    /// Skills group, or the search box over the skills.
     fn starts(&self) -> bool {
         self.search.is_some() || self.trail().last().is_some_and(|(name, _)| *name == SKILLS_NAME)
     }
 
-    /// What `key` does: a key the group open shows opens its group, opens or
-    /// closes what it opens or closes, or asks for the search box,
-    /// `Backspace` goes back a group, and out of the menu from the first, and
-    /// `Esc` closes it. While the search box is open, it takes the keys
-    /// instead. Where what is open starts agents, `Tab` picks the next
-    /// harness for them.
     fn key(&mut self, key: &KeyEvent) -> Pressed {
         if key.code == KeyCode::Tab && bare(key) && self.starts() {
             self.agent = self.agent.next();
@@ -1006,8 +709,6 @@ impl Keys {
             Entry::Search => return Pressed::Search,
             Entry::Ask => return Pressed::Ask,
             Entry::Issue => return Pressed::Issue,
-            // The legend only shows, and runs nothing, as do the menu for a
-            // pull request and the list of tabs, which take their keys themselves.
             Entry::Command(_) | Entry::YankPull | Entry::Pull(..) | Entry::Tab { .. } => {
                 return Pressed::Nothing;
             },
@@ -1018,13 +719,10 @@ impl Keys {
     }
 }
 
-/// Whether `key` is pressed with no modifier but `Shift`, which is in the
-/// character it types.
 fn bare(key: &KeyEvent) -> bool {
     key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
 }
 
-/// Whether `key` closes the menu, whatever group is open.
 pub fn closes(key: &KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('c') => key.modifiers == KeyModifiers::CONTROL,
@@ -1033,11 +731,6 @@ pub fn closes(key: &KeyEvent) -> bool {
     }
 }
 
-/// What `key` does in the search box, as in the sidebar's: a character types,
-/// `Backspace` takes one back, `Down` and `Up` move the cursor, and `Enter`
-/// starts an agent on the skill it is on. `Esc` closes the box, back to the
-/// keys, and so does `Backspace` once there is nothing to take back; `Ctrl c`
-/// closes the menu. Says too whether the box stays open.
 fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
         return (Pressed::Close, true);
@@ -1068,24 +761,16 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
     }
 }
 
-/// What the box for a machine's destination says under what is typed, until
-/// `Enter` finds it is none.
 const SSH_HINT: &str = "what you type ssh to it: a Tailscale name, a Host of your ssh config, or \
                         me@vps";
 
-/// What a key did in the box for a machine's destination.
 enum Typed {
     Typing,
     Enter,
-    /// Back to the keys: `Esc`, or `Backspace` with nothing typed.
     Back,
     Close,
 }
 
-/// What `key` does in the box for a machine's destination, with `typed` in
-/// it, as in the search box: a character types, `Backspace` takes one back,
-/// and `Enter` adds the machine. `Esc` goes back to the keys, and so does
-/// `Backspace` once there is nothing to take back; `Ctrl c` closes the menu.
 fn ssh_key(key: &KeyEvent, typed: &mut String) -> Typed {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
         return Typed::Close;
@@ -1109,7 +794,6 @@ fn ssh_key(key: &KeyEvent, typed: &mut String) -> Typed {
     }
 }
 
-/// What a key says to a delete key that asks before it goes ahead.
 #[derive(Debug, PartialEq, Eq)]
 enum Answer {
     Yes,
@@ -1118,8 +802,6 @@ enum Answer {
     Nothing,
 }
 
-/// `y`, or the delete key `asked` again, goes ahead; `n` and `Backspace` go
-/// back to the keys; `Esc` closes the menu.
 fn answer(key: &KeyEvent, asked: char) -> Answer {
     if closes(key) {
         return Answer::Close;
@@ -1134,15 +816,11 @@ fn answer(key: &KeyEvent, asked: char) -> Answer {
     }
 }
 
-/// The entries of the list of `tabs`, on a key each, as far as there are keys
-/// for them.
 fn tab_entries(tabs: &[OtherTab]) -> Vec<Entry> {
     let entry = |(key, tab): (char, &OtherTab)| Entry::Tab { key, name: tab.name.clone() };
     TAB_KEYS.chars().zip(tabs).map(entry).collect()
 }
 
-/// The terminal that names the tab among `tabs` that `key` picks, if any: its
-/// key, with no modifier but `Shift`.
 fn picked(key: &KeyEvent, tabs: &[OtherTab]) -> Option<u32> {
     let KeyCode::Char(c) = key.code else {
         return None;
@@ -1151,8 +829,6 @@ fn picked(key: &KeyEvent, tabs: &[OtherTab]) -> Option<u32> {
     tabs.get(at).map(|tab| tab.pane)
 }
 
-/// A key of the Delete group: the key, which goes ahead pressed again once
-/// it asks, and what it deletes, of `session`.
 #[derive(Clone, Debug)]
 struct Delete {
     key: char,
@@ -1160,69 +836,40 @@ struct Delete {
     scope: Scope,
 }
 
-/// What the Delete group's keys take away: on a session's row or a pane's,
-/// the pane or the session, of `session`; on another machine's header, the
-/// machine, from those luneta lists.
 enum Removes {
-    /// `merged_in` is a directory of the repository the row is in, if any.
     Row { session: Listed, scope: Scope, merged_in: Option<Directory> },
     Machine(Destination),
 }
 
-/// What the menu is for: the row highlighted as it opened, of the machine
-/// its session or pane is on, which what a key opens there is of too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// A session's row, which has no pane.
     Session(Machine, Listed),
     Pane(Machine, PaneRow),
-    /// A machine's header, which has neither a session nor a pane.
     Machine(Machine),
 }
 
-/// A pane's row, as the menu is for it: the directory the pane works in, or
-/// its agent while zellij has not said, the branch checked out there, its
-/// pull request, and what its shell said it ran last, as the daemon last said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
     pub session: Listed,
     pub pane: u32,
     pub cwd: Option<String>,
     pub branch: Option<String>,
-    /// The directory that holds the repository it works in, where git has said.
     pub repository: Option<String>,
-    /// The pull request of that branch, where gh has found one.
     pub pull_request: Option<PullRequest>,
     pub ran: Ran,
 }
 
-/// What the shell in the pane of the menu's row said last through luneta's
-/// hook, as the daemon passed it on: a key that starts an agent on what its
-/// last command printed takes one that ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ran {
-    /// No shell with the hook runs in the pane: one with it says it is ready
-    /// from its first prompt. In an own pane, the shell writes no marks of the
-    /// commands it runs (OSC 133), which its server reads in place of a hook.
     Unhooked,
-    /// A shell with the hook, at its prompt, that has run nothing yet.
     Ready,
-    /// What this luneta cannot read: what a daemon newer than its own says,
-    /// or a command of no words, which the protocol never sends.
     Unknown,
-    /// A command it runs still, by its line, where its shell said it.
     Going(Option<Said>),
-    /// A job it stopped, with `Ctrl z`, which waits to be brought back.
     Stopped(Option<Said>),
-    /// The command it ran last, which ended.
     Ended(Ended),
-    /// The command it ran last, which ended, of which its shell said no line.
     EndedUnsaid,
 }
 
-/// The command a shell ran last, which ended: as `ending` says, where the
-/// shell can say how, at `at`, to the second, which tells it from another
-/// run of the same command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ended {
     pub command: Said,
@@ -1231,7 +878,6 @@ pub struct Ended {
 }
 
 impl Target {
-    /// The machine it is of.
     pub fn machine(&self) -> &Machine {
         match self {
             Target::Session(machine, _) | Target::Pane(machine, _) | Target::Machine(machine) => {
@@ -1240,8 +886,6 @@ impl Target {
         }
     }
 
-    /// Whether it is of an own session, which opens no pane beside another,
-    /// and turns none.
     fn own(&self) -> bool {
         match self {
             Target::Session(_, session) => session.own(),
@@ -1250,7 +894,6 @@ impl Target {
         }
     }
 
-    /// The directory its pane works in, where the daemon has said it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
             Target::Session(..) | Target::Machine(_) => None,
@@ -1258,7 +901,6 @@ impl Target {
         }
     }
 
-    /// The name of the repository its pane works in, where git has said.
     fn repository_name(&self) -> &str {
         match self {
             Target::Pane(_, PaneRow { repository: Some(repository), .. }) => {
@@ -1268,10 +910,6 @@ impl Target {
         }
     }
 
-    /// The repository an issue the issue box files goes to: the one its
-    /// pane works in, where git has said, by the directory the pane works in,
-    /// on its machine. None on a session's row, or a machine's header, which
-    /// work in no repository.
     fn repository(&self) -> Option<Repository> {
         let Target::Pane(on, PaneRow { cwd: Some(cwd), repository: Some(home), .. }) = self else {
             return None;
@@ -1281,7 +919,6 @@ impl Target {
         Some(Repository { on: on.clone(), dir, home, name })
     }
 
-    /// The branch checked out where its pane works.
     pub fn branch(&self) -> Option<&str> {
         match self {
             Target::Session(..) | Target::Machine(_) => None,
@@ -1289,9 +926,6 @@ impl Target {
         }
     }
 
-    /// What luneta's Delete group takes away on the row: its pane, or on a
-    /// session's row, its session; or on another machine's header, the
-    /// machine. None on this one's, which luneta lists always.
     fn removes(&self) -> Option<Removes> {
         match self {
             Target::Session(_, session) => {
@@ -1314,10 +948,6 @@ impl Target {
         }
     }
 
-    /// What a key of the Brief group briefs you on, as `scope` says, by the
-    /// row, of whichever machine: every session of every machine; or on a
-    /// machine's header, its sessions; or the row's session, or the agent in
-    /// its pane.
     fn brief(&self, scope: brief::Scope) -> Briefed {
         match (self, scope) {
             (_, brief::Scope::Every) => Briefed::Every,
@@ -1336,9 +966,6 @@ impl Target {
     }
 }
 
-/// A pane's row, as a key opens what it opens beside the pane: its session,
-/// the pane, and the directory it works in, where a tab or a session opens
-/// too.
 struct Beside {
     session: Listed,
     pane: u32,
@@ -1346,11 +973,6 @@ struct Beside {
 }
 
 impl PaneRow {
-    /// The pane a key starts an agent or opens a pane beside, and the
-    /// directory it works in, where a tab or a session opens too, or why
-    /// there is none: a pane the daemon has said no directory of yet, nor of
-    /// an agent in it, opens nothing, rather than wherever zellij runs, nor
-    /// one it said by no absolute path.
     fn beside(&self) -> Result<Beside, String> {
         let pane = self.pane;
         let Some(cwd) = self.cwd.clone() else {
@@ -1363,9 +985,6 @@ impl PaneRow {
         Ok(Beside { session: self.session.clone(), pane, cwd })
     }
 
-    /// The pull request a key that starts an agent on its checks that failed
-    /// asks of, by its page, beside the pane, or why there is none: one open,
-    /// or a draft, that its daemon says the page of, of its number.
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
         let beside = self.beside()?;
         let pane = beside.pane;
@@ -1390,10 +1009,6 @@ impl PaneRow {
         }
     }
 
-    /// What a key that starts an agent on what the pane's shell printed
-    /// last starts it on, beside the pane, in the directory it works in, or
-    /// why it starts none: the shell must be at its prompt, after a command
-    /// whose end its hook said.
     fn ended(&self) -> Result<(Beside, Ended), String> {
         let beside = self.beside()?;
         let pane = beside.pane;
@@ -1434,21 +1049,13 @@ impl PaneRow {
     }
 }
 
-/// What a key of the New group opens in the menu's session, or an agent a
-/// skill starts. A new session is none of them: luneta goes to that itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Opens {
-    /// `command`, or your shell for none, in a pane beside the pane `beside`.
     Pane { beside: u32, command: Vec<String> },
-    /// A tab of the pane's session, named `name` or as zellij numbers it,
-    /// with `command` in it, or your shell for none.
     Tab { name: Option<String>, command: Vec<String> },
 }
 
 impl Opens {
-    /// An agent that runs `command`, beside the pane `beside` of `session`:
-    /// in a tab of its own, in an own session, which opens no pane beside
-    /// another.
     fn agent(session: &Listed, beside: u32, command: Vec<String>) -> Opens {
         if session.own() {
             Opens::Tab { name: None, command }
@@ -1458,61 +1065,27 @@ impl Opens {
     }
 }
 
-/// What a key of the menu leaves the sidebar to do: the menu open still,
-/// and what it wants asked for, or what is left to do once it closed.
 #[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
 pub enum Did {
     Stays(Menu, Wants),
     Closed(Done),
 }
 
-/// What a menu that stays open wants the sidebar to ask for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wants {
     Nothing,
-    /// The harness picked for the agents the menu starts kept, for every
-    /// luneta.
     Keep(Harness),
-    /// The skills that `cwd` can run in `agent`, for the search box.
     Skills { cwd: String, agent: Harness },
-    /// The harness picked for the agents the menu starts kept, as `Keep`
-    /// does, and the skills `cwd` can run in it, for the search box, which
-    /// waits on them again.
     Refind { cwd: String, agent: Harness },
-    /// What the delete key deletes planned, for `planned`: for a pane, once
-    /// zellij has said what closing it closes: of `session`.
     Plan { session: Listed, scope: Scope },
-    /// What deleting the merged worktrees of the repository `dir` is in
-    /// deletes, for `prunes`.
     Prunes { dir: Directory },
-    /// What would go of the repository `dir` is in deleted where that is
-    /// `agreed`, for `pruned`.
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    /// zellij to open what `opens` says, in `cwd`, in `session`, for luneta
-    /// to take its client there: from its pane `pane`, the menu's row's,
-    /// which it takes the client to first, for a tab of a session it is
-    /// not in.
     Open { session: Listed, pane: u32, cwd: Directory, opens: Opens },
-    /// zellij to list the tabs of `session` other than that of its pane
-    /// `pane`, for `tabs`.
     Tabs { session: Listed, pane: u32 },
-    /// zellij to turn the pane `pane` of `session` as `turn` says, for luneta
-    /// to take its client there.
     Turn { session: Listed, pane: u32, turn: Turn },
-    /// luneta to find where a key of the menu for the pull request, the issue
-    /// or the file goes, and to have its worktree made, for `pulled`.
     Pull(Work, Wanted),
-    /// luneta to keep what the shell in the pane `pane` of `session` printed
-    /// after the line `ended` was typed on, for `printed`.
     Printed { session: Listed, pane: u32, ended: Ended },
-    /// luneta to keep the log of each check that failed on the head of the
-    /// pull request of `page`, for `checked`.
     Checks { page: PullPage },
-    /// zellij to make the session `session`, that starts in `cwd`, for luneta
-    /// to take its client there, and then to open a tab of it in `tab_cwd`,
-    /// named `name`, with `command` in it, or your shell for none, in place
-    /// of the tabs zellij makes it with, for luneta to take its client there
-    /// in turn.
     Make {
         session: SessionName,
         cwd: Directory,
@@ -1522,120 +1095,58 @@ pub enum Wants {
     },
 }
 
-/// What a menu that closed leaves the sidebar to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Done {
     Nothing,
-    /// Say why what a key asked went wrong.
     Wrong(String),
-    /// Take luneta's zellij to a session it makes, on the machine, that
-    /// starts where `Starts` says.
     Start(Machine, Starts),
-    /// Take luneta's client to an own session it makes on this machine, that
-    /// starts where `Starts` says.
     Own(Starts),
-    /// Take luneta's zellij to the pane that has the pull request's branch
-    /// checked out, on the machine.
     Go(Machine, Place),
-    /// Have zellij on the machine do what a delete key planned for a session
-    /// there: for the session luneta's zellij is in, once it has left it.
     Act(Machine, Act),
-    /// Brief you on what the agents it covers are doing.
     Brief(Briefed),
-    /// Open the ask box, for the row the menu was for.
     Ask(Target),
-    /// Open the issue box, for the repository of the row the menu was for.
     Issue(Repository),
-    /// Have lunetad watch the machine ssh reaches by this destination.
     Ssh(Destination),
-    /// Have lunetad stop watching this machine.
     Forget(Destination),
 }
 
-/// What a key of the Brief group briefs you on, by the row the menu was for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Briefed {
-    /// The agents of every session of every machine.
     Every,
-    /// The agents of every session of a machine.
     Machine(Machine),
-    /// The agents of a session of a machine.
     Session(Machine, SessionName),
-    /// The agent in the pane of a session of a machine.
     Agent(Machine, SessionName, u32),
 }
 
-/// What a click on a spot of the menu does: presses the key of an entry, or
-/// one the line of keys names, or picks the skill so named of those its
-/// search finds, as `Enter` does with the cursor on it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
     Key(KeyEvent),
     Skill(Name),
 }
 
-/// The menu at the bottom of the sidebar, for the row highlighted when it
-/// opened, or floating over zellij, for the pane zellij was on.
 pub struct Menu {
-    /// Its number among the menus the sidebar has opened, which what zellij
-    /// answers for it carries.
     number: u64,
     target: Target,
     stage: Stage,
 }
 
 enum Stage {
-    /// The keys of the group open, pressed one after another.
     Choosing(Keys),
-    /// A delete key waits for what it deletes to be planned: for zellij to
-    /// say what closing a pane closes, before it asks, and again before it
-    /// goes ahead once you said yes to `agreed`, what it asked of.
     Planning { keys: Keys, delete: Delete, agreed: Option<Plan> },
-    /// A delete key that asks before it goes ahead: what it would do, and
-    /// what it asks.
     Asking { keys: Keys, delete: Delete, plan: Plan, asks: String },
-    /// `d m` waits to hear what deleting the merged worktrees of the repository
-    /// `dir` is in deletes, before it asks. Keys do nothing but close the menu.
     Sweeping { keys: Keys, dir: Directory },
-    /// What `d m` would delete, for you to say yes to.
     Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
-    /// `d m` deletes the `count` worktrees you said yes to, of the repository
-    /// `dir` is in, or hears that what would go changed. Keys do nothing but close
-    /// the menu, which does not stop it.
     Pruning { keys: Keys, dir: Directory, count: usize },
-    /// zellij opens what a key asked for, in `session`, for luneta to take
-    /// its client there. Keys do nothing but close the menu.
     Opening { keys: Keys, session: Listed },
-    /// A key of the Turn group waits for zellij to list the tabs of `session`
-    /// other than that of its pane `pane`. Keys do nothing but close the menu.
     Listing { keys: Keys, session: Listed, pane: u32 },
-    /// The tabs of `session` the tab of its pane `pane` can turn into, on a
-    /// key each, which you pick one of.
     Picking { keys: Keys, session: Listed, pane: u32, tabs: Vec<OtherTab> },
-    /// zellij turns what a key of the Turn group asked for, in `session`, for
-    /// luneta to take its client there. Keys do nothing but close the menu.
     Turning { keys: Keys, session: Listed },
-    /// The key `last` waits for luneta to keep what the pane's shell
-    /// printed after `ended`, for an agent on it beside the pane. Keys do
-    /// nothing but close the menu.
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
-    /// `c c` waits for luneta to keep the log of each check that failed on
-    /// the head of the pull request of `page`, for an agent on them beside
-    /// the pane. Keys do nothing but close the menu.
     Fetching { keys: Keys, beside: Beside, page: PullPage },
-    /// The menu for `work`, which a paste opened, at `step`, whose agent
-    /// starts in `agent`. Once luneta has found where its keys go, its target
-    /// is there.
     Pull { work: Work, agent: Harness, step: Step },
-    /// The box `n m` opens, with what is typed in it for ssh to reach a
-    /// machine by, and why that is no destination, once `Enter` found it is
-    /// not, until the next key.
     Ssh { keys: Keys, typed: String, wrong: Option<String> },
 }
 
-/// Where a menu waits for zellij to open what a key asked for: in a session
-/// lunetad lists, or in one zellij makes for it, by its name; or to turn what
-/// a key of the Turn group asked for, in a session lunetad lists.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Opening {
     In(Listed),
@@ -1643,31 +1154,18 @@ pub enum Opening {
     Turned(Listed),
 }
 
-/// How far the menu for a pull request, an issue or a file is, with its keys,
-/// `w` and `r`, or `w` and `t`.
 enum Step {
-    /// Its keys wait for one.
     Choosing { wrong: Option<String> },
-    /// A key waits, on what it says after a spinner that turns. Keys do
-    /// nothing but close the menu.
     Waiting(Wait),
 }
 
-/// What a key of the menu for a pull request, an issue or a file waits on.
 enum Wait {
-    /// The key `pull` waits for luneta to find where it goes, and for `wt
-    /// add` to make the worktree.
     Pulling(Pull),
-    /// zellij opens what the key asked for, in this session, for luneta to
-    /// take its client there.
     Opening(Listed),
-    /// zellij makes this session, and opens a tab of it, for luneta to take
-    /// its client there.
     Making(SessionName),
 }
 
 impl Wait {
-    /// What luneta waits on for `work`.
     fn doing(&self, work: &Work) -> String {
         match self {
             Wait::Pulling(pull) => match pull.wanted(Asks::of(work)) {
@@ -1681,10 +1179,6 @@ impl Wait {
 }
 
 impl Menu {
-    /// The menu numbered `number` for `target`, on the group `key` opens, or
-    /// on the first with no key, and what a key that does more than open a
-    /// group leaves the sidebar to do, its keys starting agents in `agent`.
-    /// None, and no menu, for a key the menu has not.
     pub fn open(number: u64, target: Target, key: Option<char>, agent: Picked) -> Option<Did> {
         let keys = Keys::new(&target, agent);
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
@@ -1697,15 +1191,11 @@ impl Menu {
         })
     }
 
-    /// The menu numbered `number` for `target`, on its first group, its keys
-    /// starting agents in `agent`.
     pub fn new(number: u64, target: Target, agent: Picked) -> Menu {
         let keys = Keys::new(&target, agent);
         Menu { number, target, stage: Stage::Choosing(keys) }
     }
 
-    /// The menu numbered `number` for `work`, pasted with the menu for
-    /// `target` open, or the row highlighted, whose agent starts in `agent`.
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
         let step = Step::Choosing { wrong: None };
         Menu { number, target, stage: Stage::Pull { work, agent, step } }
@@ -1719,8 +1209,6 @@ impl Menu {
         &self.target
     }
 
-    /// The pane a delete key waits on, for zellij to say what closing it
-    /// closes, and its session. A session's is planned at once.
     pub fn planning(&self) -> Option<(&Listed, u32)> {
         match &self.stage {
             Stage::Planning { delete: Delete { session, scope: Scope::Pane(pane), .. }, .. } => {
@@ -1743,8 +1231,6 @@ impl Menu {
         }
     }
 
-    /// Where the menu waits for zellij to open what a key asked for, or to
-    /// turn it, while it does.
     pub fn opening(&self) -> Option<Opening> {
         match &self.stage {
             Stage::Opening { session, .. }
@@ -1770,46 +1256,30 @@ impl Menu {
         }
     }
 
-    /// Whether `d m` waits to hear what it would delete.
     pub fn sweeping(&self) -> bool {
         matches!(self.stage, Stage::Sweeping { .. })
     }
 
-    /// Whether `d m` waits for what you said yes to to be deleted.
     pub fn pruning(&self) -> bool {
         matches!(self.stage, Stage::Pruning { .. })
     }
 
-    /// Whether a key of the Turn group waits for zellij to list the other
-    /// tabs.
     pub fn listing(&self) -> bool {
         matches!(self.stage, Stage::Listing { .. })
     }
 
-    /// Whether a key waits for luneta to keep what the pane's shell printed.
     pub fn reading(&self) -> bool {
         matches!(self.stage, Stage::Reading { .. })
     }
 
-    /// Whether `c c` waits for luneta to keep the logs of the checks that
-    /// failed.
     pub fn fetching(&self) -> bool {
         matches!(self.stage, Stage::Fetching { .. })
     }
 
-    /// Whether a key of the menu for a pull request, an issue or a file waits
-    /// for luneta to find where it goes.
     pub fn pulling(&self) -> bool {
         matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
     }
 
-    /// Whether the menu waits on what a key of it started: the work itself,
-    /// as `wt add` makes a worktree, the agent that starts once luneta kept
-    /// what a pane printed or the checks that failed, or zellij opening or
-    /// turning what the key asked for. The sidebar keeps such a menu going
-    /// once the keys leave it, so that what the key started does not end with
-    /// the menu: the tab opens and the agent starts where they would have, and
-    /// the notes say where, while luneta's client goes nowhere.
     pub fn waits(&self) -> bool {
         matches!(
             self.stage,
@@ -1824,8 +1294,6 @@ impl Menu {
         )
     }
 
-    /// What the menu waits on, in words, for the notes while the keys are
-    /// elsewhere: none for what it shows itself while it is open.
     pub fn doing(&self) -> Option<String> {
         match &self.stage {
             Stage::Sweeping { .. } => Some(sweeping(self.target.repository_name())),
@@ -1846,9 +1314,6 @@ impl Menu {
         }
     }
 
-    /// What the menu is for, while it is for what was pasted and a key of it
-    /// is making the worktree: pasting the same link again makes nothing of
-    /// its own meanwhile, which would be a second worktree of one.
     pub fn making(&self) -> Option<&Work> {
         match &self.stage {
             Stage::Pull { work, step: Step::Waiting(Wait::Pulling(_)), .. } => Some(work),
@@ -1872,9 +1337,6 @@ impl Menu {
         }
     }
 
-    /// What the notes say of the menu, once the keys left it and an answer
-    /// left it waiting on keys: what it would have shown, and how to have it
-    /// again.
     pub fn left(&self) -> Option<String> {
         match &self.stage {
             Stage::Pull { work, step: Step::Choosing { wrong: Some(wrong) }, .. } => {
@@ -1904,8 +1366,6 @@ impl Menu {
         }
     }
 
-    /// Types `text`, pasted, on one line, in the box for a machine's
-    /// destination, and says whether that is open to type it in.
     pub fn paste(&mut self, text: &str) -> bool {
         let Stage::Ssh { typed, wrong, .. } = &mut self.stage else {
             return false;
@@ -1915,12 +1375,6 @@ impl Menu {
         true
     }
 
-    /// What `key` does to the menu, and what that leaves the sidebar to do.
-    /// What a key opens, it opens beside the pane of the menu's row, in the
-    /// directory it works in, and the menu waits for zellij to say it has,
-    /// but for a session, which leaves the menu done: on a machine's header,
-    /// one in the home of its user. A key the menu does not list for its row
-    /// does nothing, as `Entry::on` says.
     pub fn key(self, key: &KeyEvent) -> Did {
         let Menu { number, target, stage } = self;
         let stays = |stage: Stage, wants: Wants| {
@@ -2091,8 +1545,6 @@ impl Menu {
                 },
                 None => stays(Stage::Picking { keys, session, pane, tabs }, Wants::Nothing),
             },
-            // `Backspace` goes out of the menu from its first group, and the
-            // menu for a pull request, an issue or a file has no other.
             Stage::Pull { step: Step::Choosing { .. }, .. }
                 if key.code == KeyCode::Backspace && bare(key) =>
             {
@@ -2150,11 +1602,6 @@ impl Menu {
         }
     }
 
-    /// What the key of the Turn group that waits for the other tabs of its
-    /// session does, as `tabs` says, or why zellij did not say: its tab's
-    /// panes turn into those of the tab there is, and the menu waits for
-    /// zellij to turn them, or it lists the tabs there are, for you to pick
-    /// one. With none, nothing turns.
     pub fn tabs(self, tabs: Result<Vec<OtherTab>, String>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Listing { keys, session, pane } = stage else {
@@ -2182,11 +1629,6 @@ impl Menu {
         }
     }
 
-    /// What the delete key the menu waits on does, as `plan` says: asks
-    /// first, or goes ahead, or says why it does nothing. Going ahead after
-    /// you said yes does what you were asked about: the same, ending the
-    /// same agents, doing the same. Once that changed while you read, it
-    /// asks again, while an agent at work would end.
     pub fn planned(self, plan: Result<Plan, String>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Planning { keys, delete, agreed } = stage else {
@@ -2204,8 +1646,6 @@ impl Menu {
         Did::Closed(Done::Act(target.machine().clone(), plan.act))
     }
 
-    /// What `d m` does, now that it heard what it would delete, as `plan` says,
-    /// or why it did not: lists it for you to say yes to.
     pub fn swept(self, plan: Result<prunes::Plan, String>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Sweeping { keys, dir } = stage else {
@@ -2218,8 +1658,6 @@ impl Menu {
         Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
     }
 
-    /// What `d m` does, now that what it would delete has changed from what you
-    /// said yes to, as `plan` says, and nothing went: lists it again.
     pub fn changed(self, plan: prunes::Plan) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Pruning { keys, dir, .. } = stage else {
@@ -2228,17 +1666,6 @@ impl Menu {
         Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
     }
 
-    /// What the key of the menu for a pull request, an issue or a file that
-    /// waits does, now that luneta found where it goes, as `found` says, or
-    /// why it found nothing: on the machine it found it on, the row's or
-    /// another that has a link's repository. `w` takes luneta's zellij to the
-    /// pane that has the
-    /// branch checked out, or opens a tab in the worktree, named for what was
-    /// pasted, in the session that works in its repository, or one luneta
-    /// makes; `r` opens an agent on a review of the pull request beside that
-    /// pane, or in that tab, and `t` one on tackling the issue or the file,
-    /// let read the file where it is. The menu is then for where it opens
-    /// that, and waits for zellij to open it.
     pub fn pulled(self, found: Result<Found, String>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
@@ -2304,8 +1731,6 @@ impl Menu {
                 let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
                 let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
-                // The session is the machine's, as zellij makes it, and the
-                // menu is for that, until it has a pane of it.
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
         }
@@ -2323,20 +1748,12 @@ impl Menu {
         Some(format!("{}'s worktree is {}", work.tab(), work.off_branch(branch.as_deref())?))
     }
 
-    /// What the shell of the menu's row ran, as the daemon says it now: one
-    /// may have ended, or begun, since the menu opened.
     pub fn reran(&mut self, ran: Ran) {
         if let Target::Pane(_, row) = &mut self.target {
             row.ran = ran;
         }
     }
 
-    /// What the key that waits on what the pane's shell printed does, now
-    /// that luneta kept it, as `printed` says, or why it kept nothing: opens
-    /// an agent on it beside the pane, and waits for zellij to open it. One
-    /// that the shell ran another command since, as the daemon says, or
-    /// went, kept what that printed, or some of it, and opens none. One run
-    /// in the moment before the daemon heard of it goes unseen.
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
         let Menu { number, target, stage } = self;
         let Stage::Reading { keys, last, beside: Beside { session, pane, cwd }, ended } = stage
@@ -2365,10 +1782,6 @@ impl Menu {
         Did::Stays(Menu { number, target, stage }, wants)
     }
 
-    /// What `c c` does, now that luneta kept the logs of the checks that
-    /// failed, as `checks` says, or why it kept none: opens an agent on them
-    /// beside the pane, and waits for zellij to open it. Where none failed,
-    /// it opens none, and says so.
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
         let Menu { number: menu, target, stage } = self;
         let Stage::Fetching { keys, beside: Beside { session, pane, cwd }, page } = stage else {
@@ -2399,9 +1812,6 @@ impl Menu {
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
-    /// Fills the search box with what the finder said, while it is open.
-    /// What the finder found for `agent` is for the search box only while
-    /// the menu starts agents in that harness: `Tab` asked for another's.
     pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
         if let Stage::Choosing(keys) = &mut self.stage
             && keys.agent.harness() == agent
@@ -2411,9 +1821,6 @@ impl Menu {
         }
     }
 
-    /// What a click on the skill called `name` in the search box does: what
-    /// `Enter` does with the cursor on it. Nothing where it matches no more,
-    /// nor while the keys do nothing but close the menu.
     pub fn pick(mut self, name: &Name) -> Did {
         if let Stage::Choosing(keys) = &mut self.stage
             && let Some(search) = &mut keys.search
@@ -2424,8 +1831,6 @@ impl Menu {
         Did::Stays(self, Wants::Nothing)
     }
 
-    /// Moves the cursor of the search box `by` skills down, or up, as the
-    /// wheel does over them.
     pub fn scroll(&mut self, by: isize) {
         if let Stage::Choosing(keys) = &mut self.stage
             && let Some(search) = &mut keys.search
@@ -2434,14 +1839,6 @@ impl Menu {
         }
     }
 
-    /// What the menu shows at the bottom of the sidebar, `width` wide, in
-    /// `room` lines at most: a rule that names the groups opened and says
-    /// where the pane works, what the menu shows under it, and the keys that
-    /// go back and close under them. Short of room, what it shows goes first,
-    /// then the rule. And the spots on those lines, as `Shown::lines` says.
-    /// A spinner that turns shows `frame`. Short of room for the keys of the
-    /// group open, the last line under the rule says that `ALL_KEYS` lists
-    /// the rest, as it does there.
     pub fn lines(
         &self,
         width: usize,
@@ -2460,10 +1857,6 @@ impl Menu {
         shown.lines(width, room)
     }
 
-    /// Whether a key of the group open works on what it asked, the menu
-    /// showing that group still, its keys doing nothing but close it: zellij
-    /// plans a delete, opens or turns what the key asked for, or lists the
-    /// tabs to turn into, or luneta keeps what a shell printed.
     pub fn quiet(&self) -> bool {
         matches!(
             self.stage,
@@ -2475,15 +1868,10 @@ impl Menu {
         )
     }
 
-    /// Whether the keys of a group choose, with no search box open: where
-    /// `ALL_KEYS` lists every key, as it types in the search box.
     pub fn lists(&self) -> bool {
         matches!(&self.stage, Stage::Choosing(keys) if keys.search.is_none())
     }
 
-    /// Draws the menu floating at the bottom right of `over`, zellij's side,
-    /// at `now`, as `float` does. The search box takes the most columns, so
-    /// that it keeps its width as you type.
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) -> Drawn {
         let frame = sidebar::frame(now);
         let shown = |width, body_room| self.shown(width, body_room, frame);
@@ -2492,9 +1880,6 @@ impl Menu {
         floated.map_or(Drawn::Nothing, drawn)
     }
 
-    /// Whether its spinner turns: while a key of the menu for a pull request,
-    /// an issue or a file waits for its worktree, and then for zellij to open
-    /// it, and while `d m` waits.
     pub fn turning(&self) -> bool {
         matches!(
             self.stage,
@@ -2504,14 +1889,12 @@ impl Menu {
         )
     }
 
-    /// Whether the search box over the skills is open.
     fn searching(&self) -> bool {
         match &self.stage {
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }
             | Stage::Opening { keys, .. }
             | Stage::Reading { keys, .. } => keys.search.is_some(),
-            // It keeps its width as you type too.
             Stage::Ssh { .. } => true,
             Stage::Asking { .. }
             | Stage::Sweeping { .. }
@@ -2525,14 +1908,6 @@ impl Menu {
         }
     }
 
-    /// What the menu shows `width` wide, with `body_room` lines at most for
-    /// what it shows under the rule. The menu for a pull request, an issue or
-    /// a file is named for it, and says its repository, or the file's path,
-    /// where another says where its pane works. An entry, or a skill, is a
-    /// spot for a click only while the keys choose, as they do nothing else
-    /// but close the menu once a key opens something, or deletes. Once a key
-    /// of the menu for a pull request, an issue or a file is pressed, it shows
-    /// what luneta waits on for it, after the spinner at `frame`.
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self.target.cwd().map_or_default(sidebar::short_cwd);
@@ -2581,8 +1956,6 @@ impl Menu {
                 if let Some(search) = &keys.search {
                     let moves =
                         [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
-                    // The line that names the agent goes under the skills,
-                    // where it leaves room for the term and one of them.
                     let listing = body_room.checked_sub(1).filter(|room| *room > 1);
                     let (mut body, skills) =
                         search_lines(search, width, listing.unwrap_or(body_room));
@@ -2668,10 +2041,6 @@ impl Menu {
     }
 }
 
-/// What the menu shows: the title of the rule over it and where its pane
-/// works, at the rule's right, the lines under the rule, and the keys that go
-/// back and close under them; and the spots on the lines under the rule, by
-/// their place among them, and on the keys' line.
 struct Shown {
     title: String,
     right: String,
@@ -2682,22 +2051,13 @@ struct Shown {
 }
 
 impl Shown {
-    /// The columns it takes past the space each line starts with and one
-    /// after: those of its widest line, and the rule's, with room for all of
-    /// both its title and its right.
     fn takes(&self) -> usize {
         let lines = self.body.iter().chain([&self.footer]);
         let widest = lines.map(|line| line.width() + 1).max().unwrap_or(0);
-        // `─ `, the title, a space and a `─`; and a space, the right, a space
-        // and a last `─`, as `rule` has it.
         let tail = if self.right.is_empty() { 0 } else { self.right.width() + 3 };
         widest.max(4 + self.title.width() + tail)
     }
 
-    /// Its lines, `width` wide, in `room` lines at most: the rule, what it
-    /// shows under it, and the keys under them. Short of room, what it shows
-    /// goes first, then the rule. And the spots on the lines that show, by
-    /// their place among them.
     fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
         let Shown { title, right, body, spots, footer, keys } = self;
         let mut lines = Vec::with_capacity(room);
@@ -2715,11 +2075,6 @@ impl Shown {
     }
 }
 
-/// Draws what `shown` shows, for a width and the lines its body has room
-/// for, floating at the bottom right of `over`, zellij's side: in a box as
-/// wide as that takes, or the `widest` the box can be, within `FLOATING`,
-/// and as tall as its lines, the rule over them its top. Says where the box
-/// is, and the spots in it, where it had the room for one.
 fn float(
     buffer: &mut Buffer,
     over: Rect,
@@ -2728,7 +2083,6 @@ fn float(
 ) -> Option<(Rect, Spots<Choice>)> {
     let (fewest, most) = FLOATING;
     let most = most.min(usize::from(over.width.saturating_sub(2)));
-    // The rule is the box's top, and its bottom takes a line of its own.
     let room = usize::from(over.height.saturating_sub(1));
     if most == 0 || room < 2 {
         return None;
@@ -2737,19 +2091,14 @@ fn float(
         if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
     let (lines, spots) = shown(inner, room - 2).lines(inner, room);
     let (rule, rest) = lines.split_first()?;
-    // Both fit `over`, as `inner` and `lines` were made to.
     let width = u16::try_from(inner + 2).unwrap_or(over.width);
     let height = u16::try_from(lines.len() + 1).unwrap_or(over.height);
     let area = Rect::new(over.right() - width, over.bottom() - height, width, height);
     boxed(buffer, area, rule, rest);
-    // The lines go between the box's sides, from its top down.
     let inside = Rect::new(area.x + 1, area.y, width - 2, height - 1);
     Some((area, spots.placed(inside)))
 }
 
-/// Draws `note` floating at the bottom right of `over`, where the menu over
-/// zellij floats: what went wrong as it did what a key asked, or why it did
-/// not open, which any key or click closes.
 pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
     float(buffer, over, false, |width, _| Shown {
         title: TITLE.to_owned(),
@@ -2761,9 +2110,6 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
     });
 }
 
-/// Draws `lines` in a box that covers `area`, under `rule` between `┌` and
-/// `┐` along its top, each line between `│` and `│`, and `─` along its
-/// bottom, between `└` and `┘`. What it covers is blanked first.
 pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>]) {
     let (Some(inner), Some(last)) = (area.width.checked_sub(2), area.bottom().checked_sub(1)) else {
         return;
@@ -2785,8 +2131,6 @@ pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>
     buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(usize::from(inner))), dim);
 }
 
-/// `text` on as many lines of `width` as it takes, a space in from the edge,
-/// broken between words where it can be.
 pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
@@ -2808,29 +2152,22 @@ pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     lines.collect()
 }
 
-/// What luneta asks gh about the worktrees of `repository`, `d m`.
 fn sweeping(repository: &str) -> String {
     format!("Asking gh about the worktrees of {repository}…")
 }
 
-/// What `d m` does with `count` merged worktrees.
 fn pruning(count: usize) -> String {
     format!("Deleting {}…", merged_worktrees(count))
 }
 
-/// What luneta keeps of what a pane printed, for an agent on it.
 fn reading(ended: &Ended) -> String {
     format!("Reading what `{}` printed…", ended.command.as_str())
 }
 
-/// What luneta asks gh about the checks of the pull request `number`.
 fn fetching(number: NonZeroU32) -> String {
     format!("Asking gh about the checks of #{number}…")
 }
 
-/// What luneta waits on, `doing`, wrapped as `wrap` wraps it, after the
-/// spinner at `frame`, the one a busy agent has: the lines after the first
-/// start under its first word.
 pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Line<'static>> {
     let (spinner, turning) = Mark::Busy.glyph(frame);
     let lines = wrap(doing, width.saturating_sub(2), style).into_iter().enumerate();
@@ -2841,7 +2178,6 @@ pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Lin
     lines.collect()
 }
 
-/// `count` merged worktrees, in words.
 fn merged_worktrees(count: usize) -> String {
     if count == 1 { "1 merged worktree".to_owned() } else { format!("{count} merged worktrees") }
 }
@@ -2856,9 +2192,6 @@ fn asked_of(plan: &prunes::Plan) -> String {
     }
 }
 
-/// What `d m` lists of `plan`, `width` wide, in `room` lines at most: what it
-/// asks, each worktree that goes, biggest first, as far as there is room, and
-/// then why the others stay.
 fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'static>> {
     let style = Style::new().fg(NAME);
     let mut lines = if plan.goes.is_empty() {
@@ -2897,9 +2230,6 @@ fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'stat
     lines
 }
 
-/// The worktrees of `goes`, a line each, in `room` lines at most: its name, its
-/// pull request's number and what it takes up, in columns, and how many more
-/// there are, on the last, where they do not all fit.
 fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'static>> {
     let shown = if goes.len() <= room { goes.len() } else { room.saturating_sub(1) };
     let numbers: Vec<String> = goes.iter().map(|goes| format!("#{}", goes.number)).collect();
@@ -2932,24 +2262,15 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
     lines
 }
 
-/// What the rule over the menu names: the groups opened.
 fn title(keys: &Keys) -> String {
     let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
     if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
 }
 
-/// The legend at the bottom of the sidebar, `width` wide, in `room` lines at
-/// most: under a rule, the keys the top of the sidebar takes, as `Top::of`
-/// leaves them to the menu, and the sidebar's command, each with what it
-/// does. Each is a spot that presses its key, by its line among them.
 pub fn legend(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     listed(TITLE, &Keys::legend(), width, room)
 }
 
-/// What the bottom of the sidebar lists in the legend's place while a key
-/// waits for the next, or `v` or `V` lasts: `keys`, each the keys and what
-/// they do, under a rule that names them `title`, as `legend` lists its own.
-/// Each that is one key is a spot that presses it.
 pub fn shortcuts(
     title: &str,
     keys: &[(Label, &str)],
@@ -2965,14 +2286,10 @@ pub fn shortcuts(
     fitted(title, rows.collect(), width, room)
 }
 
-/// What the bottom of the sidebar lists in the legend's place while `y` waits
-/// for what to yank, as `legend` lists it.
 pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     listed(YANK_NAME, &YANKS, width, room)
 }
 
-/// `entries` under a rule that names them `title`, `width` wide, in `room`
-/// lines at most, each a spot that presses its key, by its line among them.
 fn listed(
     title: &str,
     entries: &[Entry],
@@ -2986,11 +2303,6 @@ fn listed(
     fitted(title, entries.iter().map(line).collect(), width, room)
 }
 
-/// `rows` under a rule that names them `title`, `width` wide, in `room` lines
-/// at most, each a spot that presses its key, where it has one, by its line
-/// among them. Short of room, the last line says that `ALL_KEYS` lists the
-/// rest, and is a spot that presses it; and short of a line for the rule
-/// too, it is all there is.
 fn fitted(
     title: &str,
     rows: Vec<(Line<'static>, Option<KeyEvent>)>,
@@ -3020,21 +2332,13 @@ fn fitted(
     (lines, spots)
 }
 
-/// Every key luneta has, as `ALL_KEYS` lists them at the bottom of the
-/// sidebar, in groups: the moves and folds at the top of the sidebar, its
-/// commands, the menu's keys, and those luneta takes before zellij. And how
-/// far down the list is scrolled.
 #[derive(Debug, Default)]
 pub struct AllKeys {
-    /// The first line of the list on screen.
     first: usize,
-    /// How many lines of the list it had on screen when drawn last, for
-    /// `scroll` to stop at its end.
     room: Cell<usize>,
 }
 
 impl AllKeys {
-    /// Each group, its name and its keys, each the keys and what they do.
     fn groups() -> [(&'static str, Vec<(String, String)>); 4] {
         let named = |keys: &[(Label, &str)]| -> Vec<(String, String)> {
             keys.iter().map(|(label, does)| (label.to_string(), (*does).to_owned())).collect()
@@ -3059,8 +2363,6 @@ impl AllKeys {
         ]
     }
 
-    /// The lines of the whole list, `width` wide: each group's name, and its
-    /// keys under it, what they do in a column of the group's own.
     fn rows(width: usize) -> Vec<Line<'static>> {
         let inner = width.saturating_sub(1);
         let bold = Style::new().add_modifier(Modifier::BOLD);
@@ -3073,17 +2375,11 @@ impl AllKeys {
         rows
     }
 
-    /// Scrolls the list `by` lines down, or up, as far as its last line at
-    /// the bottom, as last drawn, and its first at the top.
     pub fn scroll(&mut self, by: isize) {
         let last = AllKeys::rows(0).len().saturating_sub(self.room.get());
         self.first = self.first.min(last).saturating_add_signed(by).min(last);
     }
 
-    /// The list, `width` wide, in `room` lines at most: under a rule that
-    /// names it, and says how far down it is where it has more than shows,
-    /// as many of its lines as fit from the first scrolled to, and the keys
-    /// it takes, each a spot that presses it.
     pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
         let rows = AllKeys::rows(width);
         let body = room.saturating_sub(2);
@@ -3107,8 +2403,6 @@ impl AllKeys {
     }
 }
 
-/// A spot on the line of each of `entries`, `width` wide, one to a line, that
-/// presses its key.
 fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
     let mut spots = Spots::default();
     for (line, entry) in entries.iter().enumerate() {
@@ -3117,13 +2411,9 @@ fn entry_spots(entries: &[Entry], width: usize) -> Spots<KeyEvent> {
     spots
 }
 
-/// The rule over the menu, `width` wide: its title, and where its pane works
-/// while the rule has room for all of both.
 pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
-    // `─ `, the title, a space and at least one `─` of the rule.
     let head = 2 + 1 + 1;
-    // A space, the right, a space and a last `─`.
     let tail = right.width() + 3;
     let fits = !right.is_empty() && head + title.width() + tail <= width;
     let tail = if fits { tail } else { 0 };
@@ -3144,8 +2434,6 @@ pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// An entry of the menu, `inner` wide past the space it starts with: its key,
-/// and what it does.
 fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
     let key = entry.key().to_string();
     let Entry::Group { name, .. } = entry else {
@@ -3162,8 +2450,6 @@ fn entry_line(entry: &Entry, inner: usize) -> Line<'static> {
     ])
 }
 
-/// A line of a list of keys, `inner` wide past the space it starts with: the
-/// keys, in a column `column` wide, and what they do.
 fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'static> {
     let room = inner.saturating_sub(column + GAP);
     let pad = column.saturating_sub(keys.width()) + GAP;
@@ -3175,18 +2461,10 @@ fn keys_line_of(keys: &str, column: usize, does: &str, inner: usize) -> Line<'st
     ])
 }
 
-/// The line a list of keys short of room ends with, `inner` wide past the
-/// space it starts with: `ALL_KEYS`, which lists those it left out.
 fn all_keys_line(inner: usize) -> Line<'static> {
     keys_line_of(&ALL_KEYS.to_string(), 1, ALL_KEYS_DOES, inner)
 }
 
-/// The line under the keys that start agents, `inner` wide past the space it
-/// starts with: the icon and the name of the harness of `agent`, and that the
-/// agent in the pane picked it, where it did; and after them `<TAB>`, which
-/// picks the next, and what it does. Where the line has no room for all of
-/// it, what `Tab` does goes in fewer words, then in none, then the pane's
-/// part goes, and then `<TAB>`, for the name alone, cut to fit.
 fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
     let name = agents::name(agent.harness());
     let pane = match agent {
@@ -3219,8 +2497,6 @@ fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A key a line of keys names, as `<ESC>`, `<y>` or `<Ctrl r>`, or what
-/// takes more than one, as `<↓↑>` or `<any key>`, which no click presses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hint {
     Esc,
@@ -3231,14 +2507,12 @@ pub enum Hint {
     Char(char),
     Ctrl(char),
     Alt(char),
-    /// The arrows down and up.
     Moves,
     AnyKey,
     AnyOtherKey,
 }
 
 impl Hint {
-    /// How a line of keys names it.
     fn label(self) -> String {
         match self {
             Hint::Esc => "<ESC>".to_owned(),
@@ -3255,7 +2529,6 @@ impl Hint {
         }
     }
 
-    /// The key a click on it presses: none for what takes more than one.
     fn key(self) -> Option<KeyEvent> {
         let (code, modifiers) = match self {
             Hint::Esc => (KeyCode::Esc, KeyModifiers::NONE),
@@ -3272,22 +2545,16 @@ impl Hint {
     }
 }
 
-/// The keys that go back and close, and what each does, in as many words as
-/// `width` has room for: all of them, or else the keys alone.
 pub fn keys_line(width: usize, keys: &[(Hint, &str)]) -> Line<'static> {
     keyed(width, keys).0
 }
 
-/// The line of `keys` that `keys_line` draws, and on it a spot for each key
-/// a click can press: the key, and the words after it that say what it does.
 pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEvent>) {
     let labels: Vec<String> = keys.iter().map(|(hint, _)| hint.label()).collect();
     let spelled = |sep: &str| -> Vec<String> {
         let each = labels.iter().zip(keys);
         each.map(|(label, (_, does))| format!("{label}{sep}{does}")).collect()
     };
-    // Each key, with what it does or alone, and what goes between two; or
-    // else the keys alone, run together.
     let candidates: [(Vec<String>, &str); 4] =
         [(spelled(" - "), ", "), (spelled(" "), "  "), (spelled(" "), " "), (labels.clone(), "/")];
     let room = width.saturating_sub(1);
@@ -3295,7 +2562,6 @@ pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEv
     let (each, joiner) =
         candidates.into_iter().find(fits).unwrap_or_else(|| (labels.clone(), ""));
     let dim = Style::new().add_modifier(Modifier::DIM);
-    // Each key in the accent, and the words between them dimmed.
     let mut spans = vec![Span::raw(" ")];
     let mut spots = Spots::default();
     let mut column = 1;
@@ -3317,12 +2583,6 @@ pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEv
     (Line::from(spans), spots)
 }
 
-/// The search box over the skills, in at most `room` lines `width` wide: what
-/// is typed, and under it the skills that match, best first, as many as
-/// `SEARCH_ROWS` and the room show around the one the cursor is on, or a line
-/// that says why there are none. It keeps the lines the skills found fill,
-/// however many of them match, so the menu keeps its size as you type. Each
-/// skill shown is a spot that picks it, by its line among them.
 fn search_lines(
     search: &Search,
     width: usize,
@@ -3365,9 +2625,6 @@ fn search_lines(
     (lines, spots)
 }
 
-/// A skill in the search box, `width` wide: its name as a prompt runs it,
-/// with the characters the term lit in the accent, and what it does, dimmed,
-/// cut to the room its name leaves. The one the cursor is on is lit.
 fn skill_line(
     name: &str,
     description: &str,
@@ -3379,7 +2636,6 @@ fn skill_line(
     let name = sidebar::cut(&format!("/{name}"), inner);
     let lit = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
     let mut spans = vec![Span::raw(" ")];
-    // The `/` before the name is none of the characters the term lit.
     for (at, c) in name.chars().enumerate() {
         let hit = at > 0 && hits.contains(&(at - 1));
         spans.push(Span::styled(c.to_string(), if hit { lit } else { Style::new().fg(NAME) }));
@@ -3447,8 +2703,6 @@ mod tests {
         KeyEvent::from(KeyCode::Char(key))
     }
 
-    /// What a key on `row()` wants opened: `opens`, from its pane, in the
-    /// directory it works in.
     fn beside_row(opens: Opens) -> Wants {
         Wants::Open { session: listed(), pane: 4, cwd: main_dir(), opens }
     }
@@ -3457,7 +2711,6 @@ mod tests {
         Menu::open(1, target, key, PICKED).expect("a key of the menu")
     }
 
-    /// The menu a key left open, and what it wants asked for.
     fn stays(did: Did) -> (Menu, Wants) {
         match did {
             Did::Stays(menu, wants) => (menu, wants),
@@ -3465,7 +2718,6 @@ mod tests {
         }
     }
 
-    /// What a key that closed the menu left to do.
     fn closed(did: Did) -> Done {
         match did {
             Did::Closed(done) => done,
@@ -3473,14 +2725,10 @@ mod tests {
         }
     }
 
-    /// The text of each line.
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(ToString::to_string).collect()
     }
 
-    /// The list of every key names each key the top of the sidebar moves,
-    /// folds or opens with, as `Top::moves` takes it, and none it does not:
-    /// but `y`, which the Sidebar group names with what it yanks.
     #[test]
     fn the_list_of_every_key_names_the_moves_of_the_top() {
         let named: Vec<char> = MOVES
@@ -3520,13 +2768,11 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command: Vec::new() };
         assert_eq!(wants, Wants::Open { session: listed(), pane: 4, cwd: cwd.clone(), opens });
         assert!(menu.opening().is_some());
-        // Keys do nothing while zellij opens it, but close the menu.
         let (menu, wants) = stays(menu.key(&char('p')));
         assert_eq!(wants, Wants::Nothing);
         assert!(menu.opening().is_some());
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
 
-        // luneta goes to a new session itself.
         let (menu, _) = stays(opened(pane_row(), Some('n')));
         let start = Done::Start(Machine::Local, Starts::In(main_dir()));
         assert_eq!(closed(menu.key(&char('s'))), start);
@@ -3540,8 +2786,6 @@ mod tests {
         OtherTab { pane, name: name.to_owned() }
     }
 
-    /// The menu `t p` leaves waiting for the other tabs of the session of
-    /// `row()`.
     fn listing() -> Menu {
         let (menu, _) = stays(opened(pane_row(), Some(TURN)));
         let (menu, wants) = stays(menu.key(&char('p')));
@@ -3550,9 +2794,6 @@ mod tests {
         menu
     }
 
-    /// `t t` turns the pane of the row into a tab, and the menu waits for
-    /// zellij to, where its keys do nothing but close it. luneta knows
-    /// nothing yet of where a pane works that it turns all the same.
     #[test]
     fn a_key_turns_the_pane_of_the_row_into_a_tab() {
         let unsaid = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
@@ -3575,9 +2816,6 @@ mod tests {
         assert_eq!(closed(menu.key(&esc())), Done::Nothing);
     }
 
-    /// `t p` needs no list where the session has only one other tab, and has
-    /// nothing to turn into where it has none. Keys do nothing but close the
-    /// menu until zellij has said.
     #[test]
     fn a_key_turns_the_tab_of_the_row_into_panes_of_its_only_other_tab() {
         let (menu, wants) = stays(listing().key(&char('1')));
@@ -3596,10 +2834,6 @@ mod tests {
         assert_eq!(closed(listing().key(&esc())), Done::Nothing);
     }
 
-    /// With more than one other tab, the menu lists them on a key each, by
-    /// their names, in the order it was given them, and a key or a click on
-    /// one turns the tab of the row into panes of that. `Backspace` goes back
-    /// to the group, and any other key does nothing.
     #[test]
     fn a_key_picks_the_tab_a_tab_of_the_row_turns_into() {
         let tabs = vec![other_tab(7, "auth"), other_tab(2, "Tab #3")];
@@ -3656,13 +2890,9 @@ mod tests {
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
-        // A key the menu has not opens none.
         assert!(Menu::open(1, pane_row(), Some('x'), PICKED).is_none());
     }
 
-    /// An own session opens no pane beside another, and turns none: its
-    /// pane's menu has no `n p` and no Turn group, and an agent a key starts
-    /// opens in a tab of the session, in the pane's directory.
     #[test]
     fn an_own_session_s_pane_opens_its_agents_in_a_tab_and_turns_none() {
         let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
@@ -3705,8 +2935,6 @@ mod tests {
                 " b  Brief ▸",
             ]
         );
-        // `m` and the keys that move are the sidebar's, and `/` and `u` its
-        // commands.
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
@@ -3721,11 +2949,6 @@ mod tests {
         assert_eq!(Top::of('b'), None);
     }
 
-    /// `c` opens the Skills group, and a key in it starts an agent on its
-    /// skill beside the row's pane, in its directory, with no name, as the
-    /// search's `Enter` does: in the harness the line
-    /// under the keys names, by its icon and its name, which `Tab` switches,
-    /// and wants kept for the next menu. The rule names the group alone.
     #[test]
     fn a_key_of_the_skills_group_starts_an_agent_on_its_skill_in_the_harness_named() {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
@@ -3763,10 +2986,6 @@ mod tests {
         assert!(menu.opening().is_some());
     }
 
-    /// On a pane an agent runs in, the line under the keys says that agent
-    /// picked the harness, until `Tab` picks the next. Where the line has
-    /// less room, what `Tab` does goes in fewer words, then in none, then the
-    /// pane's part goes, and then `<TAB>`.
     #[test]
     fn the_agent_line_says_where_the_pane_s_agent_picked_the_harness() {
         let pi = Picked::ByPane(Harness::Pi);
@@ -3782,8 +3001,6 @@ mod tests {
         assert_eq!(line(&menu, 31), " \u{ec82} claude  <TAB> another agent");
     }
 
-    /// `Tab` switches the harness only where the menu starts agents: its
-    /// first group starts none.
     #[test]
     fn tab_does_nothing_where_the_menu_starts_no_agent() {
         let (menu, _) = stays(opened(pane_row(), None));
@@ -3793,21 +3010,15 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
     }
 
-    /// The command a row's shell ran last: `cargo test`, which failed.
     fn cargo_test() -> Ended {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         Ended { command: said("cargo test"), ending: Some(Ending::Exited(101)), at }
     }
 
-    /// A row whose shell said the command it ran last ended.
     fn ended_row() -> Target {
         Target::Pane(Machine::Local, PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
     }
 
-    /// What luneta kept once the row's shell went on, as the daemon says,
-    /// to another command, or to another run of the same, or went, is not
-    /// what the key was pressed on, and opens no agent. A command that
-    /// ended while the menu was open is one a key starts an agent on.
     #[test]
     fn a_key_for_the_last_command_holds_to_the_run_it_was_pressed_on() {
         let went = |ran: Ran| {
@@ -3831,11 +3042,6 @@ mod tests {
         assert_eq!(wants, Wants::Printed { session: listed(), pane: 4, ended: cargo_test() });
     }
 
-    /// `c f` and `c e` have luneta keep what the command the row's shell ran
-    /// last printed, and once it is kept, start an agent on it beside the
-    /// pane, in its directory, let read the file it is kept in: to fix what
-    /// went wrong, or to explain it. Keys do nothing meanwhile but close the
-    /// menu.
     #[test]
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -3856,7 +3062,6 @@ mod tests {
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
 
-        // pi reads it with no rule, as it asks nothing before a read.
         let pi = Picked::ByPane(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
         let (menu, _) = stays(menu.key(&char('e')));
@@ -3865,7 +3070,6 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command: vec!["pi".to_owned(), prompt.to_owned()] };
         assert_eq!(wants, beside_row(opens));
 
-        // Nothing printed leaves the agent no file to read.
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, _) = stays(menu.key(&char('f')));
         let (_, wants) = stays(menu.printed(Ok(Printed::Nothing)));
@@ -3881,8 +3085,6 @@ mod tests {
         assert_eq!(done, Done::Wrong("menu: what pane 4 printed: zellij: no such pane".to_owned()));
     }
 
-    /// The pull request of `row()`'s branch, open and on GitHub, which `c c`
-    /// asks of.
     fn pull_row(state: State, url: Option<&str>) -> Target {
         let pull_request = Some(PullRequest {
             number: NonZeroU32::new(328).unwrap(),
@@ -3896,9 +3098,6 @@ mod tests {
 
     const PULL: &str = "https://github.com/owner/luneta/pull/328";
 
-    /// The checks of `PULL` that failed on its head, the first `count` of
-    /// `ci / test`, whose log is kept, and `ext`, which has none; and how many
-    /// have yet to end.
     fn failing(count: usize, pending: u32) -> Failing {
         let kept = Kept { file: "/run/luneta/checks/1.log".to_owned(), lines: 40, left_out: 0 };
         let failed = |name: &str, log| checks::Failed { name: name.to_owned(), link: None, log };
@@ -3909,10 +3108,6 @@ mod tests {
         Failing { head: "abc".to_owned(), failed: failed[..count].to_vec(), pending, passed: 1 }
     }
 
-    /// `c c` has luneta keep the log of each check that failed on the head of
-    /// the row's pull request, saying so meanwhile, and once they are kept,
-    /// starts an agent on them beside the pane, in its directory, let read
-    /// each log. Keys do nothing meanwhile but close the menu.
     #[test]
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
         let (menu, _) = stays(opened(pull_row(State::Draft, Some(PULL)), Some('c')));
@@ -3952,9 +3147,6 @@ mod tests {
         );
     }
 
-    /// Only an open pull request, or a draft, whose page its daemon says, as
-    /// the page of its number, has checks to start an agent on: the menu says
-    /// why it starts none on a row with another, or none.
     #[test]
     fn a_key_for_the_checks_needs_an_open_pull_request() {
         let refused = |target: Target| {
@@ -3984,9 +3176,6 @@ mod tests {
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
-    /// Only a shell at its prompt, after a command its hook said the end of,
-    /// or its marks in an own pane, has a last command to start an agent on.
-    /// The menu says why it starts none on another.
     #[test]
     fn a_key_for_the_last_command_needs_a_shell_at_its_prompt_after_one() {
         let refused = |target: Target| {
@@ -4038,9 +3227,6 @@ mod tests {
         );
     }
 
-    /// `a` closes the menu for the sidebar to open the ask box, for the row
-    /// the menu was for, a session's row too: at the top of the sidebar, and
-    /// in the menu's first group.
     #[test]
     fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
         for row in [pane_row(), session_row()] {
@@ -4051,11 +3237,6 @@ mod tests {
         }
     }
 
-    /// `i` closes the menu for the sidebar to open the issue box, for the
-    /// repository the pane of the row works in, by the pane's directory, on
-    /// its machine: at the top of the sidebar, and in the menu's first group.
-    /// A session's row, a machine's header and a pane in no repository, or
-    /// in a directory the daemon has not said, have no `i`.
     #[test]
     fn i_opens_the_issue_box_for_the_repository_of_the_row() {
         let vps = Machine::Remote("vps".parse().unwrap());
@@ -4078,9 +3259,6 @@ mod tests {
         }
     }
 
-    /// `b` opens the Brief group, on any row, and a key in it closes the menu
-    /// for the sidebar to brief you by the row the menu was for: `z` on
-    /// every session, `s` on the row's session, and `h` on what the row is.
     #[test]
     fn the_brief_group_briefs_you_by_the_row_the_menu_is_for() {
         let (menu, _) = stays(opened(session_row(), Some('b')));
@@ -4114,8 +3292,6 @@ mod tests {
         Target::Machine(Machine::Remote("me@vps".parse().unwrap()))
     }
 
-    /// `n o` makes an own session where `n s` makes one: where the pane works,
-    /// or in your home on this machine's header.
     #[test]
     fn n_o_makes_an_own_session_where_n_s_makes_one() {
         let own = |target| closed(stays(opened(target, Some(NEW))).0.key(&char('o')));
@@ -4123,11 +3299,6 @@ mod tests {
         assert_eq!(own(local_header()), Done::Own(Starts::Home));
     }
 
-    /// `n m` opens a box, on any row, for what ssh reaches a machine by: a
-    /// character types, `Backspace` takes one back, and `Enter` adds the
-    /// machine, once what is typed is a destination, and else says why it
-    /// is not, until the next key. `Esc` goes back to the keys, and so does
-    /// `Backspace` with nothing typed.
     #[test]
     fn n_m_opens_a_box_for_a_machine_s_destination() {
         for target in [pane_row(), session_row(), local_header(), remote_header()] {
@@ -4165,12 +3336,6 @@ mod tests {
         }), NEW_NAME);
     }
 
-    /// On another machine's pane, a key opens beside the pane what it opens
-    /// on this machine's, and a session in its directory, which the menu
-    /// stays for, of that machine. The Delete group plans what it deletes as
-    /// on this machine's, and has it deleted on that machine, and the Brief
-    /// group briefs you on its session or its agent. The ask box says it is
-    /// this machine's alone, on another's pane or session.
     #[test]
     fn another_machine_s_row_opens_and_deletes_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
@@ -4233,9 +3398,6 @@ mod tests {
         }
     }
 
-    /// `d m` is offered on a pane's row in a repository, by the directory it
-    /// works in, and nowhere else: not on one git has yet to place, nor a row of
-    /// no directory, nor a machine's header.
     #[test]
     fn the_merged_worktrees_key_is_on_a_row_in_a_repository_alone() {
         let (menu, _) = stays(opened(pane_row(), Some('d')));
@@ -4263,9 +3425,6 @@ mod tests {
         }
     }
 
-    /// What `d m` lists fills what room there is: what it asks, each worktree
-    /// that goes, biggest first as it was planned, why the others stay, and the
-    /// keys. Short of room, it says how many more go.
     #[test]
     fn the_list_says_what_goes_as_far_as_there_is_room_and_why_the_rest_stay() {
         let goes = [("issue-282", 297, 4608), ("dev-check", 293, 916), ("dev-ci", 303, 6)];
@@ -4329,9 +3488,6 @@ mod tests {
         );
     }
 
-    /// `y`, or the key again, tells the row's machine what you were asked about;
-    /// once that changed, it lists it again. Nothing goes at the first answer,
-    /// nor on any other key.
     #[test]
     fn the_list_goes_ahead_on_yes_with_what_it_listed_alone() {
         let (one, two) = (("one", 1, 5), ("two", 2, 5));
@@ -4392,8 +3548,6 @@ mod tests {
         assert_eq!(asked(plan), [" Delete 3 merged worktrees and 2", " remote branches?"]);
     }
 
-    /// With nothing to delete there is no yes to say. What goes wrong says
-    /// nothing went, and while it waits a key but `Esc` does nothing.
     #[test]
     fn nothing_to_delete_asks_nothing() {
         let (menu, _) = stays(opened(pane_row(), Some('d')));
@@ -4425,10 +3579,6 @@ mod tests {
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
     }
 
-    /// On another machine's header, the Delete group forgets the machine,
-    /// and this one's has none, as luneta lists it always; the Brief group
-    /// briefs you on every session of every machine, or on the machine's,
-    /// from any header.
     #[test]
     fn a_machine_s_header_has_the_menu_forget_it() {
         let (menu, _) = stays(opened(remote_header(), Some('d')));
@@ -4455,10 +3605,6 @@ mod tests {
         }
     }
 
-    /// The menu for a session's row or a machine's header lists only the
-    /// keys that work there, each group with those of its own, and none left
-    /// with none. A key it does not list does nothing, at the top of the
-    /// sidebar too, where it opens no menu.
     #[test]
     fn the_menu_lists_only_the_keys_that_work_on_its_row() {
         let root = |target: Target| {
@@ -4559,11 +3705,8 @@ mod tests {
             ["─ Skills ──────── luneta/main ─", " _", " finding skills…"]
         );
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
-        // The one the cursor is on is lit, as the sidebar's row is while it
-        // has the focus, which it has while the search is open.
         let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [Some(LIT), None]);
-        // Under the skills, the line that names the agent, as in the groups.
         assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{ec82} claude  <TAB> another agent");
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
@@ -4579,10 +3722,6 @@ mod tests {
         assert!(menu.opening().is_some());
     }
 
-    /// `Tab` in the search box picks the other harness and has the finder
-    /// asked for its skills, keeping what is typed. What the finder says
-    /// for the harness the box left goes nowhere. `Enter` starts the one
-    /// picked in the harness the line under the skills names.
     #[test]
     fn tab_in_the_search_finds_the_skills_of_the_other_harness() {
         let (mut menu, _) = stays(opened(pane_row(), Some('/')));
@@ -4606,15 +3745,11 @@ mod tests {
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command }));
     }
 
-    /// Each skill the search box shows is a spot on its line that picks it:
-    /// a click starts an agent on it, as `Enter` does with the cursor on it.
-    /// The wheel over them moves the cursor. What is typed is no spot.
     #[test]
     fn a_click_on_a_skill_starts_an_agent_on_it_as_enter_does() {
         let (mut menu, _) = stays(opened(pane_row(), Some('/')));
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
-        // The rule, what is typed, then the skills.
         let (_, spots) = menu.lines(31, 6, 0);
         assert_eq!(spots.at(Position::new(4, 1)), None);
         assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
@@ -4622,8 +3757,6 @@ mod tests {
         menu.scroll(1);
         let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
         assert_eq!(lit, [None, Some(LIT)]);
-        // A skill that no longer matches picks nothing, not the one in its
-        // place.
         let (menu, _) = stays(menu.key(&char('g')));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         assert_eq!(wants, Wants::Nothing);
@@ -4633,15 +3766,11 @@ mod tests {
         let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert!(menu.opening().is_some());
-        // Waiting on zellij, the menu takes no click on a skill.
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
         assert_eq!(wants, Wants::Nothing);
     }
 
-    /// Each key a line of keys names is a spot, with the words after it,
-    /// that presses the key it names, in the words the line has room for;
-    /// what takes more than a key is none.
     #[test]
     fn a_click_on_a_key_a_line_of_keys_names_presses_it() {
         let keys = [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Ctrl('r'), "Rename")];
@@ -4654,7 +3783,6 @@ mod tests {
         let rename = Some(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!([at(31), at(47)], [rename, rename]);
         assert_eq!(at(48), None);
-        // Short of room, the keys alone; and with less, run together.
         let yes_or_delete = [(Hint::Char('y'), "Yes"), (Hint::Delete, "Delete")];
         let (line, spots) = keyed(12, &yes_or_delete);
         assert_eq!(line.to_string(), " <y>/<Del>");
@@ -4668,8 +3796,6 @@ mod tests {
         assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
-    /// What closing pane 4 of `luneta` does, as zellij says what it closes,
-    /// with `agents` at work there.
     fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Result<Plan, String> {
         let session = listed();
         let subject = Subject {
@@ -4692,18 +3818,12 @@ mod tests {
         let (session, whose) = (listed().name().clone(), listed().whose());
         let act = Act::Pane { session, whose, pane: 4 };
         assert_eq!(done, Done::Act(Machine::Local, act));
-        // On a session's row, `d d` deletes the session, which zellij need not
-        // say anything of first.
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Session });
         assert_eq!(menu.planning(), None);
     }
 
-    /// A delete that would end an agent at work asks first. `y`, or the key
-    /// again, plans it again and goes ahead with what you were asked about;
-    /// once that changed, what it closes or the agents it ends, it asks
-    /// again. `n` goes back to the keys.
     #[test]
     fn a_delete_that_would_end_an_agent_at_work_asks_first() {
         let busy = || vec![(4, Doing::Busy)];
@@ -4725,14 +3845,12 @@ mod tests {
         let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy())));
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
-        // Another pane closes with it now: its tab, which it asks of again.
         let tab = || Closes::Tab { id: TabId(2), panes: vec![4, 5] };
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
         assert_eq!(wants, Wants::Nothing);
         let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close its tab? 2 agents, 1", " busy, 1 waiting"]);
-        // The tab is the same, but its other agent went to work as you read.
         let (menu, _) = stays(menu.key(&char('y')));
         let busier = || vec![(4, Doing::Busy), (5, Doing::Busy)];
         let (menu, wants) = stays(menu.planned(plan(tab(), busier())));
@@ -4744,8 +3862,6 @@ mod tests {
         assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
     }
 
-    /// A delete of the session luneta's zellij is in closes the menu as any
-    /// other does: what waits on zellij's client leaving it is the go's.
     #[test]
     fn a_delete_of_the_session_luneta_is_in_closes_the_menu() {
         let (menu, _) = stays(opened(session_row(), Some('d')));
@@ -4765,9 +3881,6 @@ mod tests {
         assert_eq!(done, Done::Act(Machine::Local, leave));
     }
 
-    /// zellij's side, `width` by `height` past `ZELLIJ_X` columns of the
-    /// sidebar's, with what `draw` draws floating over it, as text. Each cell
-    /// of the box is in gruvbox's colours.
     fn floated<R>(
         draw: impl FnOnce(&mut Buffer, Rect) -> R,
         width: u16,
@@ -4776,7 +3889,6 @@ mod tests {
         const ZELLIJ_X: u16 = 10;
         let over = Rect::new(ZELLIJ_X, 0, width, height);
         let mut buffer = Buffer::empty(Rect::new(0, 0, ZELLIJ_X + width, height));
-        // What zellij drew there goes under the box.
         for row in over.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
@@ -4789,14 +3901,10 @@ mod tests {
         (0..height).map(row).collect()
     }
 
-    /// Draws `menu` floating over zellij, its spinner at its first frame.
     fn drawing(menu: &Menu) -> impl FnOnce(&mut Buffer, Rect) -> Drawn + '_ {
         move |buffer, over| menu.draw(buffer, over, UNIX_EPOCH)
     }
 
-    /// The menu over zellij floats at the bottom right of zellij's side, in
-    /// a box as wide as the keys of the group open and the rule over them
-    /// take, and as tall as its lines.
     #[test]
     fn the_menu_floats_at_the_bottom_right_of_zellij_s_side() {
         let menu = Menu::new(1, pane_row(), PICKED);
@@ -4831,12 +3939,10 @@ mod tests {
             format!("{zellij}│{:<41}│", " <BS> - Back, <ESC> - Close"),
             format!("{zellij}└{}┘", "─".repeat(41)),
         ]);
-        // Narrower than the keys take, the box is as wide as zellij's side.
         let narrow = floated(drawing(&menu), 30, 11);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
 
-    /// Where `text` first shows on `buffer`, each cell before it a character.
     fn drawn_at(buffer: &Buffer, text: &str) -> Option<Position> {
         let area = buffer.area;
         (area.top()..area.bottom()).find_map(|y| {
@@ -4848,8 +3954,6 @@ mod tests {
         })
     }
 
-    /// The spot a click on `text` hits, of the menu floating over zellij's
-    /// side, 50 by 10 past 10 columns of the sidebar's: the menu's own.
     fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
         let drawn = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
@@ -4865,9 +3969,6 @@ mod tests {
         Choice::Key(KeyEvent::from(code))
     }
 
-    /// Each entry of the menu floating over zellij is a spot where it is
-    /// drawn that presses its key, and so is each key the line under them
-    /// names, with the words after it. The rule over them is none.
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
         let menu = Menu::new(1, pane_row(), PICKED);
@@ -4882,9 +3983,6 @@ mod tests {
         assert_eq!(clicked(&menu, "<BS> - Back"), Some(pressed(KeyCode::Backspace)));
     }
 
-    /// A delete that asks first takes a click on its keys, and none on what
-    /// it asks; and once it goes ahead, waiting on zellij, the keys do
-    /// nothing but close the menu, and no entry takes a click.
     #[test]
     fn a_click_on_a_delete_asks_first_as_its_key_does() {
         let (menu, _) = stays(opened(pane_row(), Some('d')));
@@ -4897,8 +3995,6 @@ mod tests {
         assert_eq!(clicked(&menu, "Close the pane?"), None);
     }
 
-    /// What went wrong with the menu over zellij floats where it did, in a
-    /// box as wide as what it says takes, over the key that closes it.
     #[test]
     fn a_note_floats_where_the_menu_does() {
         let note = "menu: luneta does not know yet which pane zellij is on; try again in a moment";
@@ -4923,8 +4019,6 @@ mod tests {
         Work::Link(pull_request())
     }
 
-    /// The menu for the pull request, pasted on `row`, its key `key` pressed,
-    /// waiting for luneta to find where it goes.
     fn pulling_on(row: Target, key: char) -> Menu {
         let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
         let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
@@ -4933,21 +4027,14 @@ mod tests {
         menu
     }
 
-    /// The same, pasted on a pane's row of this machine.
     fn pulling(key: char) -> Menu {
         pulling_on(pane_row(), key)
     }
 
-    /// What luneta found, on this machine.
     fn here(ready: Ready) -> Found {
         Found { on: Machine::Local, ready }
     }
 
-    /// A paste opens the menu for the pull request, named for it, with its
-    /// repository where another menu says where its pane works. A key waits
-    /// for luneta to find where it goes and to make the worktree, and says
-    /// so after a spinner that turns, and does nothing else meanwhile, but
-    /// close the menu.
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
         let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
@@ -4982,11 +4069,6 @@ mod tests {
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
     }
 
-    /// `w` opens a tab in the worktree, named for the pull request, in the
-    /// session found, and `r` the same with an agent on a review of it named
-    /// for the branch; or else, where a pane has the branch checked out, `w`
-    /// goes there and `r` opens the agent beside it. The menu is then for
-    /// where it opens, for luneta to take its client there.
     #[test]
     fn a_key_for_a_pull_request_opens_where_luneta_found_it_goes() {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
@@ -5026,10 +4108,6 @@ mod tests {
         assert_eq!((&row.session, row.pane), (&other, 9));
     }
 
-    /// `Tab` in the menu for a pull request picks the next harness, and
-    /// wants it kept, and its line then names that one; `r` then
-    /// starts the review in that one, by its spelling of the skill. A click
-    /// on that line is a `Tab`. Once a key waits, `Tab` does nothing.
     #[test]
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
         let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
@@ -5058,10 +4136,6 @@ mod tests {
         assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd, opens });
     }
 
-    /// A paste of an issue's link opens the menu for the issue, named for it,
-    /// with `t` where the menu for a pull request has `r`. `t` opens a tab in
-    /// the worktree of the issue's branch, named for it, with an agent told in
-    /// words to tackle it, which no skill names.
     #[test]
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
@@ -5139,12 +4213,6 @@ mod tests {
         assert!(menu.pulling());
     }
 
-    /// A paste of a file's path opens the menu for the file, named for it,
-    /// with where the file is where another says its repository. `t` opens a
-    /// tab in the worktree of the file's branch, named for it, with an agent
-    /// told in words to tackle the file by its real path, and let read it
-    /// there, outside the worktree. `w` opens the tab alone. Why luneta found
-    /// nothing says what was pasted, as it was.
     #[test]
     fn the_menu_for_a_file_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let file = || {
@@ -5206,9 +4274,6 @@ mod tests {
         );
     }
 
-    /// Where no session works in the repository, luneta makes one in its
-    /// clone, and the menu waits for zellij to make it and open the tab, and
-    /// says so.
     #[test]
     fn a_session_luneta_makes_for_a_pull_request_opens_its_tab_once_there() {
         let name = SessionName::parse("cdk").unwrap();
@@ -5230,7 +4295,6 @@ mod tests {
         assert_eq!(menu.opening(), Some(Opening::Made(name)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
-        // Why luneta found nothing closes the menu, and says so.
         let why = "no session works in cashubtc/cdk".to_owned();
         assert_eq!(
             closed(pulling('r').pulled(Err(why))),
@@ -5238,10 +4302,6 @@ mod tests {
         );
     }
 
-    /// A link pasted on a row of another machine is found there, and what
-    /// its keys open is that machine's: the pane with the branch, a tab of a
-    /// session there, or a session made there, which the menu is for until
-    /// zellij opens a pane of it.
     #[test]
     fn the_keys_for_a_link_pasted_on_another_machine_s_row_open_there() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
@@ -5267,9 +4327,6 @@ mod tests {
         assert_eq!(menu.target(), &header);
     }
 
-    /// A link found on another machine than the row's opens there, whichever
-    /// row of this machine it was pasted on, a folded session's among them:
-    /// the menu is for that machine from then on, and takes you there.
     #[test]
     fn what_a_key_found_on_another_machine_opens_there_from_any_row() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());

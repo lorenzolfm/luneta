@@ -1,20 +1,10 @@
-//! How a command a shell ran ended, as the shell hook says it to the daemon,
-//! and the daemon to its clients; and the shells, by their names.
-
 use crate::v1::shell::ended;
 
-/// The shells, by their binaries' names, whose name says only that a pane is
-/// at its prompt.
 pub const SHELLS: [&str; 7] = ["bash", "dash", "elvish", "fish", "nu", "sh", "zsh"];
 
-/// How a command ended, where its shell can say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// With this exit status.
     Exited(i32),
-    /// Once `fg` brought it back, with an exit status its shell cannot say,
-    /// as fish cannot after `fg`. The line typed was `fg`, not the command,
-    /// and what it printed before it stopped came before that line.
     Resumed,
 }
 
@@ -27,7 +17,6 @@ impl Ending {
         }
     }
 
-    /// What `to_api` wrote out, read back.
     #[must_use]
     pub fn of_api(ending: &ended::Ending) -> Self {
         match ending {

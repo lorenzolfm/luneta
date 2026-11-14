@@ -1,21 +1,10 @@
-//! What luneta's terminal sends the program in it for a key, the mouse, a
-//! paste or the focus, as an xterm would: luneta reads its own terminal's
-//! input as events, and writes them out again for the modes the program asked
-//! its terminal for. A program that asks for the kitty keyboard protocol has
-//! the keys an xterm cannot tell apart, as `Shift Enter` from `Enter`, as the
-//! protocol's first flag spells them, where luneta's own terminal tells them
-//! apart for luneta.
-
 use alacritty_terminal::term::TermMode;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-/// The numbers xterm sends `F5` to `F12` as, which skip 16 and 22.
 const FUNCTION_NUMBERS: [u8; 8] = [15, 17, 18, 19, 20, 21, 23, 24];
 
-/// The bytes for a key, or none for a key xterm sends nothing for, or its
-/// release.
 pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
     if key.kind == KeyEventKind::Release {
         return None;
@@ -59,7 +48,6 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
         KeyCode::Delete => numbered(3, key.modifiers),
         KeyCode::PageUp => numbered(5, key.modifiers),
         KeyCode::PageDown => numbered(6, key.modifiers),
-        // `F1` to `F4` go after `ESC O` whatever the cursor's mode.
         KeyCode::F(n @ 1..=4) => lettered("\x1bO", char::from(b'P' + n - 1), key.modifiers),
         KeyCode::F(n @ 5..=12) => numbered(FUNCTION_NUMBERS[usize::from(n - 5)], key.modifiers),
         _ => return None,
@@ -67,17 +55,12 @@ pub fn key(key: &KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
     Some(sent)
 }
 
-/// xterm's parameter for the modifiers held with a key that has an escape
-/// sequence of its own: 1, for none, and a bit for each.
 fn parameter(modifiers: KeyModifiers) -> u8 {
     1 + u8::from(modifiers.contains(KeyModifiers::SHIFT))
         + 2 * u8::from(modifiers.contains(KeyModifiers::ALT))
         + 4 * u8::from(modifiers.contains(KeyModifiers::CONTROL))
 }
 
-/// A key xterm sends as a letter, `last`, after `introducer`: `ESC [`, or
-/// `ESC O`. With a modifier held, the letter goes after `ESC [ 1 ;` and the
-/// modifiers' parameter, which only that form has room for.
 fn lettered(introducer: &str, last: char, modifiers: KeyModifiers) -> Vec<u8> {
     let held = parameter(modifiers);
     if held > 1 {
@@ -86,8 +69,6 @@ fn lettered(introducer: &str, last: char, modifiers: KeyModifiers) -> Vec<u8> {
     format!("{introducer}{last}").into_bytes()
 }
 
-/// A key xterm sends as `number` and a `~` after `ESC [`, with the modifiers'
-/// parameter between the two while one is held.
 fn numbered(number: u8, modifiers: KeyModifiers) -> Vec<u8> {
     let held = parameter(modifiers);
     if held > 1 {
@@ -96,14 +77,8 @@ fn numbered(number: u8, modifiers: KeyModifiers) -> Vec<u8> {
     format!("\x1b[{number}~").into_bytes()
 }
 
-/// The bytes the kitty keyboard protocol has for a key that xterm's would not
-/// tell apart, with its first flag, "disambiguate escape codes", the one
-/// zellij asks for: `Esc`, a character typed with a modifier other than
-/// `Shift`, and `Enter`, `Tab` and `Backspace` with any. None for every other
-/// key, which goes as xterm sends it.
 fn kitty(key: &KeyEvent) -> Option<Vec<u8>> {
     let modifiers = key.modifiers;
-    // xterm's parameter, and a bit for `Super`, which kitty's has room for.
     let held = parameter(modifiers) + 8 * u8::from(modifiers.contains(KeyModifiers::SUPER));
     let code = match key.code {
         KeyCode::Esc => 27,
@@ -111,13 +86,11 @@ fn kitty(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Tab if held > 1 => 9,
         KeyCode::BackTab => 9,
         KeyCode::Backspace if held > 1 => 127,
-        // A character with `Shift` alone is the text it types.
         KeyCode::Char(c) if held > 2 || (held == 2 && !modifiers.contains(KeyModifiers::SHIFT)) => {
             u32::from(c.to_ascii_lowercase())
         },
         _ => return None,
     };
-    // `BackTab` is `Tab` with `Shift`, whether or not the terminal says so.
     let held = if key.code == KeyCode::BackTab { 1 + ((held - 1) | 1) } else { held };
     Some(
         if held > 1 { format!("\x1b[{code};{held}u") } else { format!("\x1b[{code}u") }
@@ -125,8 +98,6 @@ fn kitty(key: &KeyEvent) -> Option<Vec<u8>> {
     )
 }
 
-/// The byte a terminal sends for a character typed with `Ctrl`, as xterm
-/// maps them. None for a character it has none for.
 fn control_byte(c: char) -> Option<u8> {
     let Ok(typed) = u8::try_from(c.to_ascii_lowercase()) else {
         return None;
@@ -142,15 +113,10 @@ fn control_byte(c: char) -> Option<u8> {
         b'?' | b'8' => 0x7f,
         _ => return None,
     };
-    // A C0 control, or `DEL`.
     assert!(byte < 0x20 || byte == 0x7f, "{byte:#04x}");
     Some(byte)
 }
 
-/// The bytes for the mouse at `column` and `row` of the program's screen,
-/// from 0, or none when the program does not ask for this kind of event.
-/// With no mouse asked for, the wheel scrolls a full-screen program by the
-/// arrow keys, as the program asks with `ALTERNATE_SCROLL`.
 pub fn mouse(event: MouseEvent, column: u16, row: u16, mode: TermMode) -> Option<Vec<u8>> {
     let wheel = match event.kind {
         MouseEventKind::ScrollUp => Some(('A', 64)),
@@ -194,17 +160,12 @@ pub fn mouse(event: MouseEvent, column: u16, row: u16, mode: TermMode) -> Option
         let last = if released { 'm' } else { 'M' };
         return Some(format!("\x1b[<{code};{x};{y}{last}").into_bytes());
     }
-    // The first encoding: a release has no button, and a place past 223 has no
-    // byte to say it in.
     let code = if released { 3 | (code & !3) } else { code };
     let x = u8::try_from(x + 32).ok()?;
     let y = u8::try_from(y + 32).ok()?;
     Some(vec![0x1b, b'[', b'M', code + 32, x, y])
 }
 
-/// The bytes for text pasted in: bracketed, when the program asks for that,
-/// with any escape taken out of it, so that the text cannot end the bracket
-/// and be read as keys.
 pub fn paste(text: &str, mode: TermMode) -> Vec<u8> {
     if !mode.contains(TermMode::BRACKETED_PASTE) {
         return text.as_bytes().to_vec();
@@ -213,8 +174,6 @@ pub fn paste(text: &str, mode: TermMode) -> Vec<u8> {
     format!("\x1b[200~{text}\x1b[201~").into_bytes()
 }
 
-/// The bytes for the program's terminal taking the focus, or losing it, when
-/// the program asks to be told.
 pub fn focus(gained: bool, mode: TermMode) -> Option<&'static [u8]> {
     if !mode.contains(TermMode::FOCUS_IN_OUT) {
         return None;
@@ -238,7 +197,6 @@ mod tests {
         assert_eq!(pressed(KeyCode::Char('x'), KeyModifiers::ALT), Some(b"\x1bx".to_vec()));
     }
 
-    /// What crossterm reads a control byte as is written back as that byte.
     #[test]
     fn a_control_key_is_the_byte_it_came_as() {
         let control = KeyModifiers::CONTROL;
@@ -284,8 +242,6 @@ mod tests {
         assert_eq!(pressed(KeyCode::Esc, KeyModifiers::NONE), Some(b"\x1b".to_vec()));
     }
 
-    /// The keys xterm cannot tell apart go as kitty spells them to a program
-    /// that asked, and the rest as xterm sends them.
     #[test]
     fn a_program_that_asks_for_kitty_s_keys_has_them() {
         let kitty = TermMode::DISAMBIGUATE_ESC_CODES;

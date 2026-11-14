@@ -1,59 +1,30 @@
-//! The marks a shell puts in what it writes (OSC 133, as `FinalTerm` named
-//! them): where its prompt starts, where a command it runs starts, with its
-//! command line, and where that ends, with its exit status. fish 4 writes
-//! them of itself, and zsh and bash with a terminal's integration.
-//!
-//! ```text
-//! ESC ] 133 ; A [; <option>]… ST               a prompt
-//! ESC ] 133 ; C [; cmdline_url=<percent-encoded>] ST
-//! ESC ] 133 ; C [; cmdline=<text>] ST           a command starts
-//! ESC ] 133 ; D [; <status>] ST                 it ended
-//! ```
-//!
-//! with ST either `ESC \` or BEL, and an ESC alone ends it too. A mark may
-//! come split over two reads. Where an OSC starts and ends is Ghostty's to
-//! say, as it reads the same bytes for the screen: the scanner keeps only the
-//! text between.
-
 use libghostty_vt::terminal::{Boundary, StringEnd};
 use libghostty_vt::{Error, Terminal};
 use percent_encoding::percent_decode;
 
-/// The most bytes of a mark the scanner keeps: one past them says no command
-/// line, as it may hold no more than the start of one.
 const MARK_BYTES_MAX: usize = 16 * 1024;
 
-/// What starts a mark's text.
 const MARK: &[u8] = b"133;";
 
-/// A mark, as the shell wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mark {
     Prompt,
-    /// A command starts, with its line, where the shell said it.
     Command(Option<String>),
-    /// The command ended, with its exit status, where the shell said it.
     Done(Option<i32>),
 }
 
-/// The marks in what a program writes, read as it writes it.
 #[derive(Default)]
 pub struct Marks {
-    /// The OSC being read, where one is.
     osc: Option<Osc>,
 }
 
-/// The text so far of an OSC, as far as it may be a mark.
 #[derive(Default)]
 struct Osc {
     text: Vec<u8>,
-    /// Whether the OSC is past `MARK_BYTES_MAX`.
     over: bool,
 }
 
 impl Marks {
-    /// Writes `bytes`, which follow those written before, to `terminal`,
-    /// and puts each mark they end in `marks`.
     pub fn write(
         &mut self,
         terminal: &mut Terminal<'_, '_>,
@@ -87,7 +58,6 @@ impl Marks {
 }
 
 impl Osc {
-    /// Keeps `bytes` of its text, as far as it may be a mark.
     fn keep(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             let markable = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
@@ -107,8 +77,6 @@ impl Osc {
         }
     }
 
-    /// Ends the OSC, `cancelled` by CAN or SUB or not, and gives its mark
-    /// where it is one.
     fn end(self, cancelled: bool) -> Option<Mark> {
         if cancelled {
             return None;
@@ -117,9 +85,6 @@ impl Osc {
     }
 }
 
-/// The mark `text` says, past its `133;`, where it is one this reads: none
-/// for `B`, where the prompt ends and what you type starts, or another. A
-/// mark `over` the bytes kept says no command line.
 fn mark(text: &[u8], over: bool) -> Option<Mark> {
     let mut fields = text.split(|byte| *byte == b';');
     let kind = fields.next()?;
@@ -168,7 +133,6 @@ mod tests {
         Mark::Command(Some(line.to_owned()))
     }
 
-    /// What fish 4.9 writes around `false; echo 'a b'`, a mark at a time.
     #[test]
     fn fish_s_marks_read_as_its_prompt_command_and_status() {
         let written: &[u8] = b"\x1b]133;A;click_events=1\x1b\\$ \x1b]133;B\x1b\\\
@@ -178,8 +142,6 @@ mod tests {
         assert_eq!(marks, [Mark::Prompt, command("false; echo 'a b'"), Mark::Done(Some(1))]);
     }
 
-    /// A mark split at each byte reads as it does whole, and so does one that
-    /// ends with BEL.
     #[test]
     fn a_mark_reads_the_same_split_at_any_byte() {
         let written: &[u8] = b"x\x1b]133;C;cmdline_url=ls%20-l\x07y\x1b]133;D;0\x1b\\";
@@ -192,8 +154,6 @@ mod tests {
         assert_eq!(read(&bytes), whole);
     }
 
-    /// `cmdline=` takes the rest of the mark, its `;` with it, and the URL
-    /// form decodes as UTF-8, a byte that is none of it taken as U+FFFD.
     #[test]
     fn a_command_line_reads_raw_or_decoded() {
         assert_eq!(read(&[b"\x1b]133;C;cmdline=a; b\x07"]), [command("a; b")]);
@@ -203,7 +163,6 @@ mod tests {
         assert_eq!(read(&[b"\x1b]133;C;aid=3\x07"]), [Mark::Command(None)]);
     }
 
-    /// A status that is no number reads as none, and so does none.
     #[test]
     fn a_status_reads_where_it_is_a_number() {
         assert_eq!(read(&[b"\x1b]133;D;-1\x07"]), [Mark::Done(Some(-1))]);
@@ -212,8 +171,6 @@ mod tests {
         assert_eq!(read(&[b"\x1b]133;D;99999999999\x07"]), [Mark::Done(None)]);
     }
 
-    /// Other OSCs, other escapes, `B`, and a mark called off by CAN are
-    /// none.
     #[test]
     fn what_is_no_mark_reads_as_none() {
         assert_eq!(read(&[b"\x1b]0;133;A\x07\x1b]1330;A\x07\x1b[133;Am"]), []);
@@ -221,9 +178,6 @@ mod tests {
         assert_eq!(read(&[b"\x1b]133;A\x18\x07"]), []);
     }
 
-    /// A mark starts and ends where Ghostty's parse says: an ESC ends it, as
-    /// another escape follows, and a 0x9D in an APC starts one, where in an
-    /// OSC it is the OSC's text.
     #[test]
     fn a_mark_starts_and_ends_where_ghostty_says() {
         assert_eq!(read(&[b"\x1b]133;A\x1b[m"]), [Mark::Prompt]);
@@ -233,8 +187,6 @@ mod tests {
         assert_eq!(read(&[b"\x1b]\x1b]\x9d\x9d\x07\x07"]), []);
     }
 
-    /// A command line past what the scanner keeps reads as none, and the
-    /// marks after it as they are.
     #[test]
     fn a_command_line_too_long_reads_as_none() {
         let line = "a".repeat(MARK_BYTES_MAX);

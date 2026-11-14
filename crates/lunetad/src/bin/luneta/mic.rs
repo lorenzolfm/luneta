@@ -1,29 +1,17 @@
-//! The microphone, while you dictate: what it hears, as the speech model
-//! takes it, `RATE` samples a second of one channel, each from -1 to 1. It is
-//! the system's default input, through cpal: ALSA's on Linux, which `PipeWire`
-//! and `PulseAudio` serve where they run, and `CoreAudio`'s on macOS. It is on
-//! only while you dictate, and nothing of what it hears is kept.
-
 use std::sync::mpsc::Sender;
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{Device, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig};
 
-/// How many samples a second the speech model takes.
 pub const RATE: u32 = 16_000;
 
-/// What the microphone sends, a batch at a time as it hears it: the samples,
-/// or why it stopped.
 pub type Heard = Result<Vec<f32>, String>;
 
-/// The microphone, on for as long as it is kept.
 pub struct Mic {
     _stream: Stream,
 }
 
 impl Mic {
-    /// The default input on, sending what it hears to `heard`, as it hears
-    /// it, or why there is none.
     pub fn open(heard: Sender<Heard>) -> Result<Mic, String> {
         crate::hush::alsa_errors();
         let host = cpal::default_host();
@@ -42,9 +30,6 @@ impl Mic {
     }
 }
 
-/// How `device` is asked to record: as the model takes it, where it can,
-/// as ALSA's default does where `PipeWire` or `PulseAudio` serve it, and else as
-/// it records by default, which `Down` brings to what the model takes.
 fn chosen(device: &Device) -> Result<SupportedStreamConfig, String> {
     let as_taken = device.supported_input_configs().ok().and_then(|mut configs| {
         configs.find_map(|range| {
@@ -60,8 +45,6 @@ fn chosen(device: &Device) -> Result<SupportedStreamConfig, String> {
     }
 }
 
-/// The stream that sends `heard` what `device` hears, of samples of `T`, as
-/// `config` has it record, in what the model takes.
 fn stream<T>(
     device: &Device,
     config: &SupportedStreamConfig,
@@ -78,7 +61,6 @@ where
         move |samples: &[T], _: &_| {
             let mut batch = Vec::with_capacity(samples.len());
             down.push(samples.iter().map(|sample| sample.to_sample::<f32>()), &mut batch);
-            // The dictation it was for is over, and the stream with it.
             let _ = heard.send(Ok(batch));
         },
         move |error| {
@@ -89,23 +71,14 @@ where
     stream.map_err(|error| format!("the microphone does not open: {error}"))
 }
 
-/// What brings samples of `channels` interleaved, `rate` a second, to what
-/// the model takes: the channels of each frame mixed into one, and the
-/// frames brought to `RATE` a second, each the mean of those it stands for,
-/// or the last of them again, from a rate under it.
 #[derive(Debug)]
 struct Down {
     channels: usize,
-    /// How many frames of what is heard each sample taken stands for.
     step: f64,
-    /// The frames heard so far, and where the next sample taken ends.
     frames: u64,
     edge: f64,
-    /// The sum of the frames since the last sample taken, and how many.
     sum: f32,
     summed: u32,
-    /// The channels of the frame being heard, as they come: a batch may end
-    /// in the middle of one.
     frame: Vec<f32>,
 }
 
@@ -116,7 +89,6 @@ impl Down {
         Down { channels, step, frames: 0, edge: step, sum: 0.0, summed: 0, frame: Vec::new() }
     }
 
-    /// Adds to `taken` what `samples` come to.
     fn push(&mut self, samples: impl Iterator<Item = f32>, taken: &mut Vec<f32>) {
         for sample in samples {
             self.frame.push(sample);

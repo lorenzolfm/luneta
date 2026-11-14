@@ -1,7 +1,3 @@
-//! The topics a daemon keeps of its machine's agents, as a window of luneta's
-//! sees them, here and on another machine: what a `claude` of the test's own is
-//! asked, and when, and what comes of it.
-
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -17,13 +13,8 @@ use crate::remote::{hosts, FakeSsh};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
-/// Long enough for a daemon with a prompt to name a topic on to have made its
-/// call: two looks at its agents, a sweep apart.
 const SWEEPS: Duration = Duration::from_secs(5);
 
-/// Has `host`'s `claude` note each call, in `told`, and name a topic for the
-/// words of the prompt it reads on its stdin: on `please-fail`, it fails, and
-/// says why on its stdout, as the real one does.
 fn claude_that_names_topics(host: &Host) {
     let told = told_file(host);
     let text = format!(
@@ -44,13 +35,11 @@ fn told_file(host: &Host) -> PathBuf {
     host.home.path().join("told")
 }
 
-/// What `host`'s `claude` was told, a call each.
 fn calls(host: &Host) -> Vec<String> {
     let told = fs::read_to_string(told_file(host)).unwrap_or_default();
     told.split_inclusive("end-of-call\n").map(str::to_owned).collect()
 }
 
-/// An agent of `host`'s, at work in a pane, from after its daemon started.
 fn agent_at_work(host: &Host) -> Running {
     let agent = process(Some(("work", 3)));
     let sessions = host.home.path().join(".claude/sessions");
@@ -60,7 +49,6 @@ fn agent_at_work(host: &Host) -> Running {
     agent
 }
 
-/// Has `host`'s agent asked `words`, as Claude Code records a prompt.
 fn prompted(host: &Host, words: &str) {
     let project = host.home.path().join(".claude/projects/-w");
     fs::create_dir_all(&project).unwrap();
@@ -69,7 +57,6 @@ fn prompted(host: &Host, words: &str) {
     writeln!(file, "{}", json!({"type": "user", "message": {"content": words}})).unwrap();
 }
 
-/// What `host`'s daemon answers a window of luneta's, which shows it.
 fn seen(host: &Host) -> api::Host {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
@@ -80,17 +67,10 @@ fn seen(host: &Host) -> api::Host {
     })
 }
 
-/// The topic of the agent `ID` in `agents`, where it has one.
 fn topic(agents: &[api::Agent]) -> Option<&str> {
     agents.iter().find(|agent| agent.session_id == ID)?.topic.as_deref()
 }
 
-/// A question asked once, as `luneta sessions` asks, shows no one anything, and
-/// costs no call. A window does, whose rows go by the topic the model names on
-/// each new prompt, without what it wraps one in: one call on each, in your
-/// home, told what you asked on its stdin, and not in its arguments, which any
-/// user of the machine can read. One that fails leaves the topic as it was, the
-/// log says why, and the next prompt asks again.
 #[test]
 fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     let host = Host::new();
@@ -145,12 +125,6 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     assert_eq!(topic(&host.host().agents), Some("Tab order"));
 }
 
-/// The agents of another machine are named there, on that machine's `claude`,
-/// for a window here, whose rows are told the topic through this daemon. A
-/// daemon that watches that machine with no window of its own costs no call,
-/// though it keeps that machine running, and though it and that machine watch
-/// each other, as neither takes the other's word for a window it has none of:
-/// a prompt once the window has gone costs none either.
 #[test]
 fn a_window_here_has_another_machine_name_its_agents_topics() {
     let here = Host::new();
@@ -186,7 +160,6 @@ fn a_window_here_has_another_machine_name_its_agents_topics() {
     assert_eq!(calls(&far).len(), 1);
     assert_eq!(calls(&here), Vec::<String>::new(), "each machine pays for its own");
 
-    // With no window, what the two say of each other soon says no one sees.
     let mut prompts = 0;
     let unseen = Instant::now() + Duration::from_mins(1);
     loop {

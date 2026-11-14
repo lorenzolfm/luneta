@@ -1,12 +1,3 @@
-//! What the CLI has luneta's own multiplexer do, for an agent that drives
-//! luneta from an own pane, or from luneta's ask box while you are in one: it
-//! knows the pane by its ids, which a rename keeps, opens a tab with no
-//! client there, refuses a pane beside another and a turn, which an own
-//! session's tabs have none of yet, takes a client among own sessions and
-//! not across to zellij's, luneta's from its ask box whoever typed last,
-//! closes as it closes in zellij's, and takes no session by a name both
-//! multiplexers run one by.
-
 use std::path::Path;
 use std::process::Output;
 
@@ -18,12 +9,8 @@ use crate::host::{answered, eventually, LUNETA};
 use crate::own::{own, Owned};
 use crate::sessions::session;
 
-/// What a close exits with where it closes nothing, as it was not told yes to
-/// the plan it says.
 const PLANNED: i32 = 3;
 
-/// The variables luneta's own multiplexer gives what runs in the pane `pane`
-/// of the own session `session`.
 fn in_pane(session: api::OwnSession, pane: u32) -> Vec<(&'static str, String)> {
     let made = session.made_at.unwrap();
     let seconds = u128::try_from(made.seconds).unwrap();
@@ -35,27 +22,22 @@ fn in_pane(session: api::OwnSession, pane: u32) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The CLI, run with `args` and `vars`, as an agent runs it.
 fn luneta(owned: &Owned, vars: &[(&str, String)], args: &[&str]) -> Output {
     let mut command = owned.host.vars().command(LUNETA);
     let vars = vars.iter().map(|(name, value)| (*name, value.as_str()));
     answered(command.envs(vars).args(args))
 }
 
-/// What it said, once it did what it was asked.
 fn said(ran: &Output) -> String {
     assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
     String::from_utf8(ran.stdout.clone()).unwrap()
 }
 
-/// Why it did not, once it failed.
 fn why(ran: &Output) -> String {
     assert!(!ran.status.success(), "{}", String::from_utf8_lossy(&ran.stdout));
     String::from_utf8(ran.stderr.clone()).unwrap()
 }
 
-/// The panes of the own session `name`, by their ids, as the host has them,
-/// once it has `count` of them.
 fn panes(owned: &Owned, name: &str, count: usize) -> Vec<u32> {
     eventually(&format!("{name} has {count} panes"), || {
         let panes = session(&owned.host.host(), name)?.panes.clone()?.panes;
@@ -63,7 +45,6 @@ fn panes(owned: &Owned, name: &str, count: usize) -> Vec<u32> {
     })
 }
 
-/// The pane each client of the server is on, by the client's id.
 fn clients_on(owned: &Owned) -> Vec<(u64, u32)> {
     let listing = owned.listing();
     let tabs = listing.sessions.iter().flat_map(|session| &session.tabs);
@@ -71,12 +52,6 @@ fn clients_on(owned: &Owned) -> Vec<(u64, u32)> {
     panes.flat_map(|pane| pane.clients.iter().map(|client| (client.id, pane.id))).collect()
 }
 
-/// A command in an own pane is in it by the ids its server gave the pane and
-/// its session: `here` names it by the session's name now, through a rename,
-/// and says so once the session is gone. The ask box's agent goes by the own
-/// pane the box names in the same way, and by none an older lunetad's box
-/// named: its spelling, of a session named `1:named-then`, reads as this
-/// one's of client 1.
 #[test]
 fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     let owned = Owned::new();
@@ -107,9 +82,6 @@ fn an_own_pane_is_here_by_its_ids_through_a_rename() {
     assert!(gone.contains("which no longer runs"), "{gone}");
 }
 
-/// A tab opens in an own session with no client in it, and says its pane. A
-/// pane does not open beside another there, nor does one turn, as an own
-/// session's tabs hold a pane each: both say so, and change nothing.
 #[test]
 fn a_tab_opens_in_an_own_session_and_no_pane_beside_another_nor_a_turn() {
     let owned = Owned::new();
@@ -136,9 +108,6 @@ fn a_tab_opens_in_an_own_session_and_no_pane_beside_another_nor_a_turn() {
     panes(&owned, "work", 3);
 }
 
-/// A close of an own pane closes its tab, and of an own session, the session,
-/// once told yes to the plan it says: by the session's ids, and what holds
-/// the pane it runs in last.
 #[test]
 fn a_close_in_an_own_session_closes_the_tab_of_a_pane_and_the_session() {
     let owned = Owned::new();
@@ -166,9 +135,6 @@ fn a_close_in_an_own_session_closes_the_tab_of_a_pane_and_the_session() {
     eventually("work is gone", || owned.host.host().sessions.is_empty().then_some(()));
 }
 
-/// `go` takes the client that last came to the own session it runs in to
-/// another own session, or to a pane of one, and back. It takes none across
-/// to zellij's, and says why, as luneta's own client and zellij's are two.
 #[test]
 fn go_takes_a_client_among_own_sessions_and_not_across_to_zellij_s() {
     let owned = Owned::new();
@@ -196,9 +162,6 @@ fn go_takes_a_client_among_own_sessions_and_not_across_to_zellij_s() {
     assert_eq!(clients_on(&owned), [(client, work.pane)]);
 }
 
-/// `go` from luneta's ask box takes luneta's client, which the box names,
-/// not the one that last typed in the session it was asked from, nor the one
-/// that came to it last. Where luneta's client is gone, it takes none.
 #[test]
 fn go_from_the_ask_box_takes_luneta_s_client_whoever_typed_last() {
     let owned = Owned::new();
@@ -226,9 +189,6 @@ fn go_from_the_ask_box_takes_luneta_s_client_whoever_typed_last() {
     assert_eq!(clients_on(&owned), [(other, work.pane)]);
 }
 
-/// A name a zellij session and an own one share, as each multiplexer checks
-/// only its own, names neither to the CLI: a close of it closes nothing, nor
-/// does a tab open in it, and the own session runs on.
 #[test]
 fn a_name_both_multiplexers_run_a_session_by_is_neither_s() {
     let owned = Owned::new();
@@ -247,10 +207,6 @@ fn a_name_both_multiplexers_run_a_session_by_is_neither_s() {
     assert_eq!(owned.listing().sessions.len(), 1);
 }
 
-/// A command in an own pane goes by its session's ids, whatever zellij runs
-/// by the session's name: `here` names its pane, a tab opens in it, a pane
-/// beside another does not, as there alone, and `go` takes its client to
-/// another own session. The name, typed, is still neither's.
 #[test]
 fn an_own_pane_s_session_is_its_own_where_zellij_runs_one_by_its_name() {
     let owned = Owned::new();
@@ -287,8 +243,6 @@ fn an_own_pane_s_session_is_its_own_where_zellij_runs_one_by_its_name() {
     assert_eq!(tabs(&owned), 2);
 }
 
-/// `open session` in an own pane names its session as none of either
-/// multiplexer has it: a name either has is taken.
 #[test]
 fn a_session_opened_from_an_own_pane_takes_no_name_either_multiplexer_has() {
     let owned = Owned::new();
@@ -303,10 +257,6 @@ fn a_session_opened_from_an_own_pane_takes_no_name_either_multiplexer_has() {
     }
 }
 
-/// `open session` in an own pane makes an own session, with your shell, and
-/// takes the client that came last to the session it runs in there. In the
-/// build's sandbox, the user database names a shell that is not there, and
-/// the server makes no session of it.
 #[test]
 fn a_session_opened_from_an_own_pane_is_an_own_one_the_client_goes_to() {
     let owned = Owned::new();

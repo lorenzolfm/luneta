@@ -1,25 +1,3 @@
-//! The ask box: what you want done, in words, for an agent to do with
-//! luneta's commands, as the menu would: "make me a session to work on
-//! floresta", "tackle these four issues in parallel", "close every session
-//! but this one". `a` opens it over zellij, for the row highlighted then.
-//!
-//! What you type goes to `claude -p`, as `lunetad::asks` runs it, on the
-//! highlighted row's machine: luneta runs it for a row of its own, and the
-//! daemon of another machine for a row of that one's, through the daemon
-//! luneta watches. The box shows what the agent runs, and what Claude Code
-//! denied it, and what it says as it goes. Once it is done, what you type
-//! next goes to it on the same Claude session, so that it can ask you
-//! before it closes anything, as the skill has it ask, or which of two
-//! things you meant. A close it runs takes a yes only in the turn after the
-//! one that said its plan, so that your answer comes between them, as Claude
-//! Code runs the close without asking you. Closing the box ends it, and
-//! nothing is kept.
-//!
-//! The agent goes by where you are as each turn starts: the pane luneta's
-//! zellij is on, where that is on the agent's machine, or another machine.
-//! luneta's zellij is the last client to type in its pane as each turn
-//! starts, so that `go` and `open session` move it.
-
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -43,81 +21,48 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint, PaneRow, Target};
 use crate::sidebar::{self, ACCENT};
 
-/// What the rule along the box's top names it.
 const TITLE: &str = "Ask";
 
-/// What a key does to the box, for luneta to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Keyed {
     Nothing,
-    /// Hand what you typed to the agent, with `send`.
     Send,
-    /// Close the box, which gives up the turn the agent is at.
     Close,
 }
 
-/// What a turn of the agent is heard to do: a step at a time, as `claude`
-/// says it, and then that it ended, after which nothing more of it is heard.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Heard {
     Step(Step),
-    /// The turn ended: well, or why not.
     Ended(Result<(), String>),
 }
 
-/// A line of the talk, as the box shows it.
 #[derive(Debug, PartialEq, Eq)]
 enum Said {
-    /// What you asked.
     You(String),
-    /// A command the agent ran, or that Claude Code denied it, by the id of
-    /// the call.
     Ran { id: String, command: String, denied: bool },
-    /// What the agent said.
     Agent(String),
-    /// Why a turn went wrong.
     Wrong(String),
 }
 
-/// Where the agent works.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Works {
-    /// In a directory of this machine's: the highlighted row's pane's, or
-    /// luneta's.
     Here(PathBuf),
-    /// On another machine, in the highlighted row's pane's directory there,
-    /// or else in the home of the user its daemon runs as.
     There { on: Destination, cwd: Option<String> },
 }
 
-/// The ask box over zellij, from when `a` opens it until a key closes it.
 #[derive(Debug)]
 pub struct Ask {
-    /// Its number among the boxes luneta has opened, which what a turn hears
-    /// carries.
     number: u64,
-    /// Where the agent runs, each turn, as the box opened.
     works: Works,
-    /// What the agent is told of the row highlighted as the box opened.
     highlighted: String,
-    /// The Claude session the talk goes on on, once its first turn says.
     session: Option<SessionId>,
-    /// The key of the last turn handed to the agent, which the next is told
-    /// for the turn before it, for a close to take a yes to a plan it said.
     turned: Option<u64>,
     talk: Vec<Said>,
-    /// What you are typing, for the next turn.
     typed: String,
-    /// The turn the agent is at, while it is: dropped, it is given up.
     turn: Option<Asking>,
 }
 
 impl Ask {
-    /// The box numbered `number`, for `target`, the row highlighted as it
-    /// opens: the agent works on its machine, in its pane's directory, or on
-    /// a session's row or a machine's header, in `dir`, luneta's, on this
-    /// machine, and in the home of the user the daemon there runs as on
-    /// another.
     pub fn new(number: u64, target: &Target, dir: &Path) -> Self {
         let works = match target.machine() {
             Machine::Local => {
@@ -143,7 +88,6 @@ impl Ask {
         self.number
     }
 
-    /// The machine the agent runs on.
     pub fn machine(&self) -> Machine {
         match &self.works {
             Works::Here(_) => Machine::Local,
@@ -151,10 +95,6 @@ impl Ask {
         }
     }
 
-    /// What `key` does: `Esc` and `Ctrl c` close the box, whatever the agent
-    /// is doing. While it is at a turn, no other key does anything. Else a
-    /// character types, `Backspace` takes one back, `Ctrl u` takes back all
-    /// of them, and `Enter` sends what you typed, if anything.
     pub fn key(&mut self, key: &KeyEvent) -> Keyed {
         let bare = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let control = key.modifiers == KeyModifiers::CONTROL;
@@ -173,15 +113,12 @@ impl Ask {
         Keyed::Nothing
     }
 
-    /// Types `text`, pasted, on one line, but while the agent is at a turn.
     pub fn paste(&mut self, text: &str) {
         if self.turn.is_none() {
             self.typed.push_str(&plain(text));
         }
     }
 
-    /// Types `text`, as you dictated it, on one line after what you typed, a
-    /// space between them, but while the agent is at a turn.
     pub fn dictated(&mut self, text: &str) {
         if self.turn.is_some() {
             return;
@@ -193,10 +130,6 @@ impl Ask {
         self.typed.push_str(&text);
     }
 
-    /// Hands what you typed to the agent, on a thread of its own, for you
-    /// where `user` says, its agents to start in `agents`, and takes it from
-    /// what you are typing. What the turn hears comes back on `events`, and
-    /// how it ended, as `Due` does.
     pub fn send(&mut self, user: User, agents: Harness, events: &Sender<Event>) {
         if self.turn.is_some() {
             return;
@@ -218,17 +151,14 @@ impl Ask {
             Ok(asked) => asked,
             Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
-        // The next turn comes after this one, which goes to the agent.
         self.turned = Some(turn.key());
         let (number, events) = (self.number, events.clone());
-        // How the turn ended, or else that it ended with no answer.
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
             let ended = ended.and_then(|ended| ended).map_err(|why| format!("ask: {why}"));
             Event::Heard { number, heard: Heard::Ended(ended) }
         });
         self.turn = Some(Asking::on_thread(move |wanted| {
             let hear = |step| {
-                // luneta is on its way out.
                 let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
             };
             let ended = match on {
@@ -238,14 +168,12 @@ impl Ask {
                     Err(why) => Some(Err(format!("{on}: {why}"))),
                 },
             };
-            // Given up, it is owed to a box that is gone.
             if let Some(ended) = ended {
                 due.pay(Ok(ended));
             }
         }));
     }
 
-    /// Takes in what the turn the agent is at heard.
     pub fn heard(&mut self, heard: Heard) {
         match heard {
             Heard::Step(Step::Session(session)) => self.session = Some(session),
@@ -270,17 +198,10 @@ impl Ask {
         }
     }
 
-    /// Whether its spinner turns: while the agent is at a turn.
     pub fn turning(&self) -> bool {
         self.turn.is_some()
     }
 
-    /// Draws it in a box over `over`, zellij's columns, at `now`, as
-    /// `brief::boxed` does. The rule along its top says where the agent
-    /// works, and on which machine, where it is another. Under it, the talk
-    /// so far, and then what you type, or that the agent is at a turn, after
-    /// a spinner that turns, and the keys. Where the box has no room for the
-    /// talk, its start goes, its first line a `…`.
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
         let Some((inner, room)) = brief::room(over) else {
             return;
@@ -308,10 +229,6 @@ impl Ask {
         brief::boxed(buffer, over, TITLE, &right, &lines);
     }
 
-    /// The talk, on lines `inner` wide, and what you type under it, or that
-    /// the agent is at a turn, after the spinner at `frame`. Each of your
-    /// turns has a blank line before it. A command Claude Code denied the
-    /// agent is in red, after a `✗`.
     fn lines(&self, inner: usize, frame: usize) -> Vec<Line<'static>> {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
@@ -349,16 +266,11 @@ impl Ask {
     }
 }
 
-/// `text` on one line: each run of white space, and each character that would
-/// move the cursor or tell the terminal anything, a space.
 fn plain(text: &str) -> String {
     let spaced: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// What the agent is told of `target`, the row highlighted as the box
-/// opened, for words that point at it: a row of the machine the agent runs
-/// on.
 fn highlighted(target: &Target) -> String {
     let row = match target {
         Target::Session(_, listed) => format!("session {}", listed.name()),
@@ -418,7 +330,6 @@ mod tests {
         }
     }
 
-    /// The box `ask` over zellij's columns, `width` by `height`, as text.
     fn shown(ask: &Ask, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
@@ -434,13 +345,10 @@ mod tests {
             .collect()
     }
 
-    /// A turn the agent is at, on a thread that has already ended.
     fn at_a_turn() -> Asking {
         Asking::on_thread(|_| {})
     }
 
-    /// What you dictate goes on the line after what you typed, a space
-    /// between them, but while the agent is at a turn.
     #[test]
     fn what_you_dictate_goes_on_the_line_after_what_you_typed() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
@@ -453,12 +361,6 @@ mod tests {
         assert_eq!(ask.typed, "Open a tab. Then run the tests.");
     }
 
-    /// What you type shows on the box's last line, and `Enter` sends it once
-    /// there is anything to send. While the agent is at its turn, the box
-    /// shows what you asked, what it ran and what it said as it hears it, and
-    /// no key but `Esc` and `Ctrl c` does anything. As the turn ends, what
-    /// Claude Code denied it is marked so. Then you can answer it, and what a
-    /// turn that failed said is in its place.
     #[test]
     fn the_box_shows_the_talk_and_takes_what_you_type_between_turns() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
@@ -482,7 +384,6 @@ mod tests {
         );
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Send);
 
-        // As `send` leaves it, with the turn's thread already gone.
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
         ask.turn = Some(at_a_turn());
         let session = SessionId::parse("7c22").unwrap();
@@ -554,8 +455,6 @@ mod tests {
         assert_eq!(ask.key(&interrupt), Keyed::Close);
     }
 
-    /// A talk longer than the box has room for loses its start, and keeps
-    /// what you type and the keys.
     #[test]
     fn a_talk_too_long_for_the_box_loses_its_start() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
@@ -582,11 +481,6 @@ mod tests {
         );
     }
 
-    /// The agent works on the highlighted row's machine: in its pane's
-    /// directory, or on a session's row or a machine's header, in luneta's on
-    /// this machine, and in the home of the daemon's user on another, as the
-    /// rule along the box's top says. It is told which row that is, of its
-    /// own machine.
     #[test]
     fn the_agent_works_on_the_row_s_machine_where_the_row_is() {
         let top = |ask: &Ask| shown(ask, 40, 7)[1].clone();
@@ -618,9 +512,6 @@ mod tests {
         assert!(header.highlighted.contains(row), "{}", header.highlighted);
     }
 
-    /// A turn that is no turn, as one in a directory by no absolute path,
-    /// says why in the talk, and the box takes what you type again, for a
-    /// turn that comes after the last that went to the agent.
     #[test]
     fn a_turn_that_is_none_says_why() {
         let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));

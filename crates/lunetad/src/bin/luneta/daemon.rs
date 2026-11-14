@@ -1,33 +1,3 @@
-//! lunetad as luneta reaches it: on its socket in the folder, started where
-//! none answers, and started afresh in the place of an older one.
-//!
-//! luneta starts the lunetad beside it, which the same build made, or else
-//! the first on the `PATH`. It starts it detached: in a session of its own,
-//! in `/`, with nothing on its stdin and stdout, and its stderr in a log in
-//! the folder. So it holds nothing of luneta's: a program reads what
-//! `luneta watch` says to its end, and a daemon that held luneta's stdout
-//! would keep it from ever answering.
-//!
-//! Two lunetas that find none in the same moment start one each, and the
-//! folder's lock lets one through. The other ends at once, and both lunetas
-//! reach the one that runs.
-//!
-//! A daemon makes way only for a newer one. Were it to make way for one of
-//! any other build, two lunetas of two builds, each with its lunetad beside
-//! it, would take turns at it for as long as both ask: a program that
-//! watches runs a `luneta watch` for each answer, which knows nothing of the
-//! one before it. Newer is of a later release, or of the same one and built
-//! from a commit made later, as the flake stamps its builds of one: every
-//! commit is of one release until the next, and an install of main would
-//! otherwise keep the daemon of the install before it.
-//!
-//! A daemon that reads zellij's sessions in another folder than luneta's
-//! zellij keeps them in, as one started with another `ZELLIJ_SOCKET_DIR`
-//! does, luneta neither asks nor stops, whatever its version: its sessions
-//! are not luneta's, and one started in its place would leave out those of
-//! every luneta that reaches it, which would take what they kept of those
-//! sessions for gone.
-
 use std::cell::OnceCell;
 use std::env;
 use std::ffi::OsStr;
@@ -52,37 +22,24 @@ use tonic::transport::Channel;
 
 use crate::commands::causes;
 
-/// The daemon's program, by the name the build gives it.
 const LUNETAD: &str = "lunetad";
 
-/// How long luneta waits for a daemon to answer that it started, or that
-/// another luneta is starting, and for one to end that it stopped. One that
-/// starts reads what runs before it answers, which takes it a moment.
 pub const START: Duration = Duration::from_secs(5);
 
-/// How often luneta looks again while it waits.
 pub const LOOK: Duration = Duration::from_millis(20);
 
-/// How large the log grows before luneta empties it: each daemon it starts
-/// writes on at its end.
 const LOG_MAX: u64 = 1024 * 1024;
 
-/// The most of what a daemon that did not start wrote that luneta reads.
 const SAID_MAX: u64 = 4096;
 
-/// How long `lunetad --version` has to answer.
 pub const VERSION_LIMIT: Duration = Duration::from_secs(2);
 
-/// The daemon in a folder that luneta checked, a client of it, and what it said
-/// of itself as luneta checked it.
 pub struct Current {
     pub folder: Folder,
     pub daemon: DaemonClient<Channel>,
     pub info: InfoResponse,
 }
 
-/// A client of the daemon that runs in the folder at `path`, whatever it is, to
-/// say what runs, or why there is none.
 pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, String> {
     let folder = folder::open(path).map_err(|refusal| refusal.to_string())?;
     let folder = folder.ok_or_else(|| none_runs(path))?;
@@ -98,30 +55,17 @@ pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, String> {
     })
 }
 
-/// The daemon that runs in the folder at `path`, or one started where none
-/// does, or in the place of an older one, as an upgrade leaves running, or why
-/// there is none.
 pub async fn current(path: &Path) -> Result<Current, String> {
     let folder = match folder::open(path).map_err(|refusal| refusal.to_string())? {
         Some(folder) => folder,
-        // No daemon has run yet, as one makes the folder as it starts. luneta
-        // makes it first, as it reaches into no folder that it has not
-        // checked.
         None => folder::make(path).map_err(|refusal| refusal.to_string())?,
     };
     let socket = folder.socket();
     let deadline = Instant::now() + START;
     let mut started = Starting::NotYet;
-    // The daemon luneta has stopped, by its pid, and waits to end.
     let mut stopped: Option<u32> = None;
-    // The daemon, by the pid it said, that the kernel said another listens in
-    // the place of: one in another namespace of pids, which says the same
-    // pid again, or one that has ended since it answered, and another
-    // listens in its place, which answers next.
     let mut doubted: Option<u32> = None;
-    // The build of the lunetad luneta starts, once asked.
     let starting = OnceCell::new();
-    // Where luneta's zellij keeps its sessions.
     let own = Zellij::socket_folder().path().to_owned();
     loop {
         let why = match lunetad::connect(&folder).await {
@@ -130,8 +74,6 @@ pub async fn current(path: &Path) -> Result<Current, String> {
                     let info = info.into_inner();
                     let running = Build::of(&info.version, info.built);
                     let (version, pid) = (release::spelled(&info.version, info.built), info.pid);
-                    // A daemon older than the field says no folder, and is
-                    // taken to read luneta's, as before.
                     let reads = info.zellij_folder.as_deref();
                     let reads = reads.map(|reads| Path::new(OsStr::from_bytes(reads)));
                     if stopped == Some(pid) {
@@ -157,8 +99,6 @@ pub async fn current(path: &Path) -> Result<Current, String> {
                                 doubted = Some(pid);
                                 format!("lunetad {version} (pid {pid}) is not the one that listens")
                             },
-                            // Another luneta stopped it, as the sidebars of an
-                            // upgrade do at once.
                             Listener::Gone => {
                                 format!("lunetad {version} (pid {pid}) has ended since it answered")
                             },
@@ -175,11 +115,7 @@ pub async fn current(path: &Path) -> Result<Current, String> {
             },
             Err(error) => format!("{}: {}", socket.display(), causes(&error)),
         };
-        // The folder's lock is not looked at while a daemon luneta started is
-        // starting: it is taken to look, and that daemon could find it taken.
         match &mut started {
-            // One that holds the folder is starting, or ending: luneta waits
-            // for it to answer, or to let the folder go.
             Starting::NotYet => {
                 if !folder::held(&folder).map_err(|refusal| refusal.to_string())? {
                     started = Starting::Started(start(&folder)?);
@@ -187,7 +123,6 @@ pub async fn current(path: &Path) -> Result<Current, String> {
             },
             Starting::Started(daemon) => match daemon.child.try_wait() {
                 Ok(None) => {},
-                // Another holds the folder, and luneta waits on it as above.
                 Ok(Some(ended)) if ended.code() == Some(ANOTHER_RUNS.into()) => {
                     started = Starting::NotYet;
                 },
@@ -220,39 +155,26 @@ pub async fn current(path: &Path) -> Result<Current, String> {
     }
 }
 
-/// What luneta says where no daemon runs in the folder at `path`.
 fn none_runs(path: &Path) -> String {
     format!("no lunetad runs in {}", path.display())
 }
 
-/// Whether `a` and `b` are one folder: by the same path, or by two that lead
-/// to it, as a link and the folder it leads to do.
 fn same_folder(a: &Path, b: &Path) -> bool {
     a == b || fs::canonicalize(a).is_ok_and(|a| fs::canonicalize(b).is_ok_and(|b| a == b))
 }
 
-/// Waits for whatever luneta `started` as it ends, so that one that ends
-/// while luneta runs on is not left a zombie. A thread that does not start
-/// leaves it one.
 fn reap(started: Starting) {
     if let Starting::Started(Started { mut child, .. }) = started {
         let _ = thread::Builder::new().name(LUNETAD.to_owned()).spawn(move || child.wait());
     }
 }
 
-/// How luneta's own part in starting a daemon stands, as it reaches for one.
 enum Starting {
-    /// It starts one once nothing holds the folder.
     NotYet,
-    /// It started this one, which has yet to answer, or to end.
     Started(Started),
-    /// What it started was stopped as it started, as a newer luneta stops an
-    /// older daemon, and starts the next itself. So this one starts no other,
-    /// which that luneta would stop in turn, and only looks for that one.
     Stopped,
 }
 
-/// A lunetad that luneta started, and how long its log was as it did.
 struct Started {
     child: Child,
     log: PathBuf,
@@ -260,8 +182,6 @@ struct Started {
 }
 
 impl Started {
-    /// Why it did not start, as it `ended`: the first line it wrote in its
-    /// log, or else how it ended.
     fn failed(&self, ended: ExitStatus) -> String {
         let said = self.said().unwrap_or_default();
         match said.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -273,7 +193,6 @@ impl Started {
         }
     }
 
-    /// What it wrote in its log, or the most of it that luneta reads.
     fn said(&self) -> io::Result<String> {
         let mut log = File::open(&self.log)?;
         log.seek(SeekFrom::Start(self.from))?;
@@ -283,7 +202,6 @@ impl Started {
     }
 }
 
-/// Starts lunetad, detached, to hold `folder`.
 fn start(folder: &Folder) -> Result<Started, String> {
     let path = folder.path().join(LOG);
     let opened = || {
@@ -308,8 +226,6 @@ fn start(folder: &Folder) -> Result<Started, String> {
     Ok(Started { child, log: path, from })
 }
 
-/// The lunetad that luneta starts: the one beside the file luneta is, which
-/// the same build made, or else the first on the `PATH`.
 fn lunetad() -> PathBuf {
     let beside = env::current_exe()
         .and_then(fs::canonicalize)
@@ -319,13 +235,6 @@ fn lunetad() -> PathBuf {
     beside.unwrap_or_else(|| PathBuf::from(LUNETAD))
 }
 
-/// Whether the daemon of the build `running` makes way for the lunetad that
-/// luneta, of the build `own`, starts, of the build `starting` says: only
-/// where that one is newer than it, and luneta too. A daemon as new as luneta
-/// makes way for none, and so luneta asks that lunetad nothing while it is;
-/// and a lunetad that is no newer than the daemon would be stopped in its
-/// turn by the next luneta of the daemon's build. A daemon whose build luneta
-/// cannot read is older than any.
 fn makes_way(
     running: Option<Build>,
     own: Option<Build>,
@@ -335,7 +244,6 @@ fn makes_way(
     own.is_some_and(older) && starting().is_some_and(older)
 }
 
-/// The build of the lunetad that luneta starts, as it says to `--version`.
 fn build() -> Option<Build> {
     let mut lunetad = Command::new(lunetad());
     lunetad.arg("--version");
@@ -344,22 +252,12 @@ fn build() -> Option<Build> {
     Build::parse(said.trim().strip_prefix(LUNETAD)?.strip_prefix(' ')?)
 }
 
-/// Who listens in the folder, against the pid a daemon said is its own.
 enum Listener {
-    /// The daemon that said it.
     It,
-    /// A process the kernel names otherwise, or not at all, as it does one in
-    /// another namespace of pids.
     Other,
-    /// None that luneta reaches, as the daemon has ended since it answered.
     Gone,
 }
 
-/// Who listens in `folder`, as the kernel says, against `pid`. luneta stops
-/// no process on a daemon's word alone: one in another namespace of pids says
-/// a pid that is another process's here. A daemon it cannot stop, it asks as
-/// it is, but not one that has ended, which would fail it: the kernel names
-/// none, or the one that listens in its place.
 async fn listener(folder: &Folder, pid: u32) -> Listener {
     match lunetad::listening(folder).await {
         Ok(listening) if listening == Some(pid) => Listener::It,
@@ -368,14 +266,10 @@ async fn listener(folder: &Folder, pid: u32) -> Listener {
     }
 }
 
-/// Has the daemon `pid` end, which the kernel says listens in the folder.
-/// SIGTERM ends a daemon of any version, where an older one knows nothing of
-/// how a newer luneta would ask it to.
 fn stop(pid: u32) -> Result<(), String> {
     let id = i32::try_from(pid).ok().and_then(Pid::from_raw);
     let id = id.ok_or_else(|| format!("{LUNETAD} says its pid is {pid}, which none is"))?;
     match rustix::process::kill_process(id, Signal::TERM) {
-        // One that has ended since it answered has nothing to stop.
         Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
         Err(error) => Err(format!("{LUNETAD} (pid {pid}) could not be stopped: {error}")),
     }
@@ -385,13 +279,6 @@ fn stop(pid: u32) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// A daemon makes way for a lunetad of a newer build alone, which a
-    /// luneta of a newer build starts. Of luneta's own release, as one of
-    /// every commit until the next is, a daemon goes by its stamp: an install
-    /// stops the one the install before it left, and the one a cargo build
-    /// of a checkout started, which has none. A cargo build stops neither.
-    /// The release comes first, and a daemon whose build luneta cannot read
-    /// is older than any.
     #[test]
     fn a_daemon_makes_way_for_a_newer_build_alone() {
         let way = |running, own, starting| {

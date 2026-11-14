@@ -1,6 +1,3 @@
-# The directory screen: zoxide frecency, eza preview, and a name nothing holds.
-# Run from the repo root: vhs docs/media/dirs.tape
-
 Output docs/media/dirs.gif
 
 Set Shell "bash"
@@ -21,26 +18,20 @@ Sleep 1s
 Ctrl+j
 Sleep 1500ms
 
-# Two tabs to the directories.
 Tab
 Sleep 1s
 Tab
 Sleep 2500ms
 
-# The preview is eza's own output: icons, colours, directories first.
 Down@600ms 3
 Sleep 2500ms
 
-# Type a path fragment. The filter searches the path, because the path is what you
-# would type at `z`.
 Type@200ms "proj"
 Sleep 2500ms
 
-# The prompt shows the session name you will get, postfix and all.
 Enter
 Sleep 3s
 
-# Detach zellij, which ends luneta.
 Hide
 Ctrl+o
 Type "d"

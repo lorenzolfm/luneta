@@ -1,16 +1,3 @@
-//! Deleting what the menu is for: its pane, or its session. What goes, and
-//! which agents end with it.
-//!
-//! zellij closes a tab with its last pane that holds it open, and a session
-//! with its last tab: luneta's client too, when that is the session luneta's
-//! zellij is in. In a session no client is attached to, it leaves the tab
-//! there with nothing in it instead, and a session with no pane. So a pane
-//! that is the last to hold its tab open closes the tab, and the last to hold
-//! a session's only tab open deletes the session. The session luneta's zellij
-//! is in goes once its client is in another, which keeps the client on
-//! screen throughout, or with the client, where it is its machine's only
-//! one: luneta goes on in another machine's, or ends where none has one.
-
 use std::fmt;
 
 use luneta_protocol::unread::Unplaced;
@@ -22,16 +9,10 @@ use lunetad::mux::TabId;
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};
 
-/// What the menu says of deleting a session while luneta's zellij is on its
-/// way to one: it may be the session luneta is in, or not.
 const MOVING: &str = "menu: zellij has yet to say which session it is in; try again in a moment";
 
-/// What a delete says where luneta cannot tell which agents it ends, before
-/// why.
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
-/// What a key of the menu's Delete group deletes: the terminal of this id,
-/// or the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Pane(u32),
@@ -39,7 +20,6 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// What the menu says the key does.
     pub fn does(self) -> &'static str {
         match self {
             Scope::Pane(_) => "close the pane",
@@ -48,40 +28,29 @@ impl Scope {
     }
 }
 
-/// What a delete deletes, as it is planned: a pane, and what closing it
-/// closes, as zellij listed the session's panes just before; or a session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: u32, closes: Closes },
     Session,
 }
 
-/// Where luneta's zellij is, as deleting a session goes by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seat {
-    /// In the session the delete is for.
     In,
-    /// In another session.
     Elsewhere,
-    /// On its way to the session luneta sent it to, or yet to say which it
-    /// is in: it may be in either.
     Moving,
 }
 
-/// What an agent is doing, as far as deleting it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Doing {
     Idle,
     Busy,
     Waiting,
-    /// A word luneta does not know, or none: it may be at work.
     Unknown,
-    /// A shell, which ends with nothing to lose.
     Shell,
 }
 
 impl From<&Agent> for Doing {
-    /// What an agent is doing, as lunetad says it.
     fn from(agent: &Agent) -> Self {
         match &agent.status {
             Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
@@ -89,7 +58,6 @@ impl From<&Agent> for Doing {
                 Ok(Status::Idle) => Doing::Idle,
                 Ok(Status::Waiting) => Doing::Waiting,
                 Ok(Status::Shell) => Doing::Shell,
-                // A daemon newer than this luneta's.
                 Ok(Status::Unspecified) | Err(_) => Doing::Unknown,
             },
             Some(Reported::OtherStatus(_)) | None => Doing::Unknown,
@@ -97,16 +65,9 @@ impl From<&Agent> for Doing {
     }
 }
 
-/// Why luneta cannot tell which agents a delete ends. A question says it
-/// alike each time it asks, so that `y` goes ahead with what it asked about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Untold {
-    /// lunetad does not answer: what it said last of the agents may be out of
-    /// date.
     Away,
-    /// lunetad cannot read some of Claude Code's session files, nor tell
-    /// which session the process of each runs in, so their agents may be in
-    /// any pane of any session.
     Unplaced(Unplaced),
 }
 
@@ -119,10 +80,6 @@ impl fmt::Display for Untold {
     }
 }
 
-/// What the agents of `session` among `unread` are doing, each by its pane:
-/// those of the session files lunetad cannot read, by where their processes
-/// run, as `unread_seats` gives them. What each is doing no one can tell, so
-/// each may be at work.
 pub fn unread_in<'a>(
     unread: &'a [(&str, u32)],
     session: &'a str,
@@ -130,44 +87,24 @@ pub fn unread_in<'a>(
     unread.iter().filter(move |(at, _)| *at == session).map(|(_, pane)| (*pane, Doing::Unknown))
 }
 
-/// What a delete is for, and what it takes along, as the sidebar knows it.
 #[derive(Debug)]
 pub struct Subject<'a> {
     pub session: &'a Listed,
-    /// Where luneta's zellij is.
     pub seat: Seat,
     pub deletes: Deletes,
-    /// The agents of the session, each by its pane, or why luneta cannot
-    /// tell them.
     pub agents: Result<Vec<(u32, Doing)>, Untold>,
-    /// Where luneta's zellij goes before the session it is in is deleted: the
-    /// newest of the others, which the picker lists first. None for its
-    /// machine's only session, which luneta's zellij ends with.
     pub refuge: Option<Place>,
 }
 
-/// What a delete key asks zellij for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// Close a pane of the session `whose` says.
     Pane { session: SessionName, whose: Whose, pane: u32 },
-    /// Close a tab of the session `whose` says, by its id, and the terminals
-    /// in it, the floating ones too.
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
-    /// Kill the session `whose` says, and delete it, so that
-    /// zellij keeps nothing to bring it back with. A key plans it for a
-    /// session luneta's zellij is not in, or for its machine's only one,
-    /// which luneta's zellij ends with, to go on in another machine's, or
-    /// with luneta, where none has one; `luneta close` for any, as a client
-    /// that ends with its session goes on in another.
     Kill { session: SessionName, whose: Whose },
-    /// Take luneta's zellij to `to`, and kill and delete `session`, which it
-    /// is in, the one `whose` says, once it has left.
     Leave { session: SessionName, whose: Whose, to: Place },
 }
 
 impl Act {
-    /// What it closes, as a question begins.
     fn what(&self) -> String {
         match self {
             Act::Pane { .. } => "Close the pane".to_owned(),
@@ -178,7 +115,6 @@ impl Act {
         }
     }
 
-    /// Whether the terminal `pane` of its session goes with it.
     pub fn takes(&self, pane: u32) -> bool {
         match self {
             Act::Pane { pane: closed, .. } => pane == *closed,
@@ -188,22 +124,12 @@ impl Act {
     }
 }
 
-/// What a delete key does, and the agents it would end, while luneta can tell
-/// them. Two are the same when both do the same and end the same agents,
-/// doing the same.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Plan {
     pub act: Act,
     ending: Result<Ending, Untold>,
 }
 
-/// What deleting what `subject` deletes does, or why it does nothing. The
-/// pane closes, or its tab once nothing else holds the tab open. The last
-/// pane that holds a session's only tab open ends the session with it, and
-/// deletes the session: the session luneta's zellij is in goes once the
-/// client is in another, as it would for a key that deletes it, or with the
-/// client, where it is its machine's only one; and none goes while luneta
-/// cannot tell which session that is.
 pub fn plan(subject: &Subject) -> Result<Plan, String> {
     let (session, whose) = (subject.session.name().clone(), subject.session.whose());
     let act = match &subject.deletes {
@@ -225,7 +151,6 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
     Ok(Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold)))
 }
 
-/// The agents a delete would end, by what they are doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Ending {
     agents: usize,
@@ -250,13 +175,10 @@ impl Ending {
         ending
     }
 
-    /// Whether an agent that would end may be in the middle of something:
-    /// busy, waiting on you, or doing what luneta cannot tell.
     fn at_work(self) -> bool {
         self.busy + self.waiting + self.unknown > 0
     }
 
-    /// As `2 agents, 1 busy`.
     fn says(self) -> String {
         let mut said = vec![match self.agents {
             0 => "no agent".to_owned(),
@@ -277,8 +199,6 @@ impl Ending {
 }
 
 impl Plan {
-    /// What doing `act` does, and the agents it ends among `agents`, those of
-    /// its session by their panes, or why luneta cannot tell them.
     pub fn of(act: Act, agents: Result<&[(u32, Doing)], Untold>) -> Self {
         let ending = agents.map(|agents| {
             Ending::of(agents.iter().filter(|(pane, _)| act.takes(*pane)).map(|(_, doing)| *doing))
@@ -286,11 +206,6 @@ impl Plan {
         Plan { act, ending }
     }
 
-    /// What to ask before going ahead, as `Delete session elo? 2 agents, 1
-    /// busy`. Nothing when luneta knows that no agent busy or waiting on you
-    /// would end: an idle agent or a shell goes without asking, and one whose
-    /// status luneta cannot read asks, as does any delete while luneta cannot
-    /// tell the agents, saying why.
     pub fn question(&self) -> Option<String> {
         match self.ending {
             Ok(ending) if !ending.at_work() => None,
@@ -298,9 +213,6 @@ impl Plan {
         }
     }
 
-    /// The agents it ends, as `2 agents, 1 busy`, or that luneta cannot tell
-    /// them, and why, whether or not the menu would ask: for the CLI too,
-    /// which says what a close ends before it closes anything.
     pub fn ends(&self) -> String {
         match self.ending {
             Ok(ending) => ending.says(),
@@ -319,7 +231,6 @@ mod tests {
         Place::Session(Listed::new("elo", SystemTime::UNIX_EPOCH + Duration::from_secs(9)))
     }
 
-    /// The session the tests delete.
     fn luneta() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(3))
     }
@@ -334,7 +245,6 @@ mod tests {
         Subject { session, seat, deletes, agents, refuge: Some(elsewhere()) }
     }
 
-    /// Pane 4, which closes what zellij says closing it closes.
     fn pane(closes: Closes) -> Deletes {
         Deletes::Pane { pane: 4, closes }
     }
@@ -363,10 +273,6 @@ mod tests {
         assert_eq!(planned(Seat::Elsewhere, Deletes::Session), Ok(kill));
     }
 
-    /// The machine's only session has none there to go to first: it is
-    /// killed with luneta's zellij in it, which goes on in another machine's,
-    /// or ends luneta. It asks first as any session does, by the agents it
-    /// ends.
     #[test]
     fn the_only_session_is_killed_with_luneta_in_it() {
         let luneta = luneta();
@@ -383,9 +289,6 @@ mod tests {
         }
     }
 
-    /// While luneta's zellij is on its way to a session, either session may
-    /// be the one it is in: none goes, as luneta would have to leave it
-    /// first, but a pane that leaves its session open closes.
     #[test]
     fn no_session_goes_while_luneta_is_on_its_way_to_one() {
         let luneta = luneta();
@@ -398,9 +301,6 @@ mod tests {
         assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, whose, pane: 4 }));
     }
 
-    /// An idle agent or a shell goes without asking. A busy agent, one that
-    /// waits on you, and one luneta cannot tell asks, and only those the
-    /// delete ends count.
     #[test]
     fn a_delete_asks_first_only_where_an_agent_at_work_would_end() {
         let agents = vec![

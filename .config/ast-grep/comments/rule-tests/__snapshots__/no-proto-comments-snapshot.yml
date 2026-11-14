@@ -1,0 +1,22 @@
+id: no-proto-comments
+snapshots:
+  /* a */ syntax = "proto3";:
+    labels:
+    - source: /* a */
+      style: primary
+      start: 0
+      end: 7
+  ? |-
+    // a
+    syntax = "proto3";
+  : labels:
+    - source: // a
+      style: primary
+      start: 0
+      end: 4
+  syntax = "proto3"; // a:
+    labels:
+    - source: // a
+      style: primary
+      start: 19
+      end: 23

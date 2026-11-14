@@ -1,0 +1,10 @@
+id: no-vhs-comments
+snapshots:
+  ? |-
+    # a
+    Output a.gif
+  : labels:
+    - source: '# a'
+      style: primary
+      start: 0
+      end: 3

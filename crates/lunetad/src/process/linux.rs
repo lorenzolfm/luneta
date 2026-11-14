@@ -1,5 +1,3 @@
-//! Processes on Linux, through `/proc`.
-
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -16,19 +14,11 @@ fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
 }
 
-/// When `pid` started, in clock ticks after boot, as Claude Code records it.
-/// None for one that ended.
 #[must_use]
 pub fn start(pid: u32) -> Option<String> {
     start_in(&fs::read_to_string(proc(pid, "stat")).ok()?)
 }
 
-/// Field 22 of a process's `stat`, counted from the last `)`, since the name
-/// before it can hold spaces and parentheses. None for one that ended, which
-/// keeps its `stat` until its parent waits for it, in the state `Z` and with one
-/// thread, the last to end. A main thread that ended before the others reads
-/// `Z` too, with more than one, and all of the process has not ended, as `ends`
-/// says.
 fn start_in(stat: &str) -> Option<String> {
     let close = stat.rfind(')')?;
     let mut fields = stat[close + 1..].split_whitespace();
@@ -40,9 +30,6 @@ fn start_in(stat: &str) -> Option<String> {
     fields.nth(1).map(str::to_owned)
 }
 
-/// Waits for `pid` to end, as its pidfd says: it reads as ready once all of the
-/// process has ended, whether or not its parent has waited for it. No process
-/// by that pid has ended, and been waited for.
 pub fn ends(pid: Pid) -> io::Result<()> {
     let process = match pidfd_open(pid, PidfdFlags::empty()) {
         Ok(process) => process,
@@ -54,29 +41,20 @@ pub fn ends(pid: Pid) -> io::Result<()> {
     Ok(())
 }
 
-/// When `pid` started, or less than a clock tick after, but never before it,
-/// nor after now: as long before now as the time since the boot, less the
-/// ticks after the boot that `start` reads, the one it started in counted
-/// whole.
 #[must_use]
 pub fn started(pid: u32) -> Option<SystemTime> {
-    // The kernel counts the whole ticks gone by before the start.
     let ticks = start(pid)?.parse::<u64>().ok()?.checked_add(1)?;
     let per_second = rustix::param::clock_ticks_per_second();
     let secs = ticks.checked_div(per_second)?;
     let nanos = (ticks % per_second * 1_000_000_000).div_ceil(per_second);
     let after_boot = Duration::from_secs(secs) + Duration::from_nanos(nanos);
-    // The time since the boot ahead of now, so that what goes by between the
-    // two makes the start later, and never earlier.
     let since_boot = clock_gettime(ClockId::Boottime);
     let now = SystemTime::now();
     let secs = u64::try_from(since_boot.tv_sec).ok()?;
     let nanos = u32::try_from(since_boot.tv_nsec).ok()?;
-    // One that started in this tick started by now.
     now.checked_sub(Duration::new(secs, nanos).saturating_sub(after_boot))
 }
 
-/// The environment `pid` started with, an entry to a string.
 #[must_use]
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     let raw = fs::read(proc(pid, "environ")).ok()?;
@@ -84,20 +62,12 @@ pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
 }
 
-/// The pids of this system, as Claude Code tells one system's from another's:
-/// `linux:<machine id>:pid:[<namespace>]`, the namespace being the one the
-/// daemon runs in. A container that shares the folder has a namespace of its
-/// own, and another machine that shares it a machine id of its own.
 pub struct Domain {
     machine: Option<String>,
     namespace: Option<String>,
 }
 
 impl Domain {
-    /// The machine id is the one in `/etc/machine-id`, and in no other file:
-    /// Claude Code reads that one alone, and records none without it. A host
-    /// with only `/var/lib/dbus/machine-id`, as one without systemd may be,
-    /// would otherwise have an id of its own that no file of its agents names.
     #[must_use]
     pub fn here() -> Self {
         let machine = fs::read_to_string("/etc/machine-id")
@@ -108,9 +78,6 @@ impl Domain {
         Domain { machine, namespace: namespace.map(|link| link.to_string_lossy().into_owned()) }
     }
 
-    /// Whether a pid recorded under `recorded` is one of this system's. A part
-    /// of it that this system cannot tell of itself, as a sandbox with no
-    /// machine id cannot, is taken to agree; one it can tell must.
     #[must_use]
     pub fn admits(&self, recorded: &str) -> bool {
         let Some(rest) = recorded.strip_prefix("linux:") else {
@@ -128,15 +95,11 @@ impl Domain {
 mod tests {
     use super::start_in;
 
-    /// A `stat` as the kernel writes it, of a process in `state` with `threads`
-    /// threads, whose name holds a `)`.
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
         format!("7 (a) b) {state} {before} {threads} 0 6630522 16 2 18446744073709551615")
     }
 
-    /// A process runs for as long as a thread of it does, whichever ended
-    /// first; one whose last thread has ended has no start.
     #[test]
     fn a_process_has_a_start_until_all_of_it_has_ended() {
         let start = Some("6630522".to_owned());

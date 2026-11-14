@@ -1,6 +1,3 @@
-//! Sessions, their tabs and the panes in them, as the server makes, lists and
-//! ends them.
-
 use luneta_mux::api;
 use tonic::Code;
 
@@ -9,8 +6,6 @@ use crate::host::{
     tabs, watched_until,
 };
 
-/// A session's shell runs on the pane's terminal: what a client types there
-/// reaches it as keys, and what it prints comes back in frames.
 #[test]
 fn a_session_runs_a_shell_that_a_client_types_in() {
     run(async {
@@ -27,9 +22,6 @@ fn a_session_runs_a_shell_that_a_client_types_in() {
     });
 }
 
-/// A server started in a pane of zellij's gives its panes none of zellij's
-/// variables, and names each pane by its own ids, and by when its session was
-/// made, in nanoseconds since the epoch, as the server lists it.
 #[test]
 fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
     run(async {
@@ -55,8 +47,6 @@ fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
     });
 }
 
-/// The watch says each session, tab and pane as it comes and goes. An id is
-/// never given again, and a rename changes the name alone.
 #[test]
 fn a_watch_follows_the_tabs_and_ids_are_never_given_again() {
     run(async {
@@ -90,8 +80,6 @@ fn a_watch_follows_the_tabs_and_ids_are_never_given_again() {
     });
 }
 
-/// A tab closes as its program ends, where it was opened to, and holds the
-/// pane, with how its program ended, where it was not.
 #[test]
 fn a_tab_closes_or_holds_as_its_program_ends() {
     run(async {
@@ -119,9 +107,6 @@ fn a_tab_closes_or_holds_as_its_program_ends() {
     });
 }
 
-/// A pane works where it opened, until its program says it works in another
-/// folder of this machine's: a folder of another machine's is not where it
-/// works.
 #[test]
 fn a_pane_works_where_it_says_on_this_machine() {
     run(async {
@@ -139,7 +124,6 @@ fn a_pane_works_where_it_says_on_this_machine() {
     });
 }
 
-/// No two sessions have a name, as the server makes them or renames them.
 #[test]
 fn a_name_is_one_sessions() {
     run(async {
@@ -158,8 +142,6 @@ fn a_name_is_one_sessions() {
     });
 }
 
-/// Killing the last session tells its client it ended, ends the watch, and
-/// ends the server, which takes its socket away.
 #[test]
 fn the_server_ends_with_its_last_session() {
     run(async {

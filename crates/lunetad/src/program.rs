@@ -1,9 +1,3 @@
-//! Another program the daemon asks something of: zellij what panes a session
-//! has, git how a work tree stands, gh what pull request a branch has; or that
-//! luneta does: lunetad its version, wt a worktree of a pull request.
-//! Each answers on its stdout, and has a time to answer in: one that takes
-//! longer is stuck, and is killed, as one is whose answer is no longer wanted.
-
 use std::convert::Infallible;
 use std::io::{self, Read, Write as _};
 use std::os::unix::process::CommandExt;
@@ -15,27 +9,16 @@ use std::time::{Duration, Instant};
 use rustix::io::Errno;
 use rustix::process::{self, Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus};
 
-/// How often whether a program is still wanted is asked, while it runs, where
-/// it is wanted only for a while; and whether one has ended, where what was
-/// said of it is no end, as macOS says of one that stopped.
 const LOOK: Duration = Duration::from_millis(5);
 
-/// The most of what a program says that the daemon reads. `git status` says a
-/// line for each path with changes, and one that says more than this many
-/// bytes of them has failed: counted short, it would tell a work tree wrong.
 pub const SAID_MAX: u64 = 16 * 1024 * 1024;
 
-/// How a program that was asked something ended.
 pub enum Ran {
-    /// It ended on its own, and said `stdout` and `stderr`.
     Ended { status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8> },
-    /// It had not said all it had to say within its time, and was killed.
     Stuck,
 }
 
 impl Ran {
-    /// What it said on stdout, if it ended with success, or else why not: the
-    /// first line of what it said on stderr, or how it ended.
     pub fn answer(self) -> Result<Vec<u8>, String> {
         match self {
             Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
@@ -46,8 +29,6 @@ impl Ran {
         }
     }
 
-    /// As `answer` says, of a program that can say why it failed on its stdout
-    /// instead, as `claude -p` does.
     pub fn answer_why_on_either(self) -> Result<Vec<u8>, String> {
         match self {
             Ran::Ended { status, stdout, stderr } if !status.success() => {
@@ -59,32 +40,21 @@ impl Ran {
     }
 }
 
-/// The first line of `said` that says anything.
 fn first_line(said: &[u8]) -> Option<String> {
     let said = String::from_utf8_lossy(said);
     said.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned)
 }
 
-/// Runs `command` with nothing on its stdin, for no longer than `limit`. What
-/// it says is read as it says it, so that one that says a lot never waits on
-/// the daemon to read it. The time covers what it says too: a process it
-/// started, that holds its stdout open once it has ended, holds it up no
-/// longer than that. An error when it could not be started, or what it said
-/// could not all be read, as when it said more than the most.
 pub fn run(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     run_up_to(command, limit, SAID_MAX)
 }
 
-/// Runs `command` as `run` does, with `stdin` on its stdin, in place of nothing.
 pub fn run_reading(command: &mut Command, limit: Duration, stdin: Stdio) -> io::Result<Ran> {
     let kills = Kills::Program;
     let Ok((ran, _)) = running::<Infallible>(command, limit, None, kills, stdin, FIRST)?;
     Ok(ran)
 }
 
-/// A stdin that says `words` and ends, said from a thread of its own, as more
-/// of them than a pipe holds wait for a program to read them. Words a program
-/// ended without reading go nowhere.
 pub fn saying(words: &str) -> io::Result<Stdio> {
     let (stdin, mut says) = io::pipe()?;
     let words = words.to_owned();
@@ -94,9 +64,6 @@ pub fn saying(words: &str) -> io::Result<Stdio> {
     Ok(Stdio::from(stdin))
 }
 
-/// Runs `command` as `run` does, where it may say up to `most` bytes on its
-/// stdout, in place of `SAID_MAX`: an error of `ErrorKind::FileTooLarge` where
-/// it said more, as one that hands over a file does, whatever its size.
 pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Result<Ran> {
     let kills = Kills::Program;
     let keeps = Keeps::First { most, over: io::ErrorKind::FileTooLarge };
@@ -104,22 +71,12 @@ pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Resul
     Ok(ran)
 }
 
-/// Runs `command` as `run` does, where it may say any amount on its stdout,
-/// of which the last lines that fit in `most` bytes are kept, and how many
-/// lines it said before them.
 pub fn run_tail(command: &mut Command, limit: Duration, most: u64) -> io::Result<(Ran, u64)> {
     let (kills, keeps) = (Kills::Program, Keeps::Last { most });
     let Ok(ran) = running::<Infallible>(command, limit, None, kills, Stdio::null(), keeps)?;
     Ok(ran)
 }
 
-/// Runs `command` as `run` does, in a session of its own, with no terminal,
-/// and kills what it started with it, where it is stuck. A program that asks
-/// across the network, as git does by ssh, may want a passphrase or a
-/// password, which it asks for on the terminal of its session, whatever its
-/// stdin: on luneta's, it would draw over luneta's screen, and read the keys
-/// typed there. With none, it fails, and says why. What it started, as git
-/// does that wt runs, would run on once it is killed.
 pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     let kills = Kills::Group;
     let (command, stdin) = (alone(command), Stdio::null());
@@ -127,9 +84,6 @@ pub fn run_alone(command: &mut Command, limit: Duration) -> io::Result<Ran> {
     Ok(ran)
 }
 
-/// Runs `command` as `run` does, for as long as `wanted` says what it would
-/// say is still wanted, which it is asked each `LOOK` until it ends: none
-/// once it is not, as it is killed and waited for then, as one stuck is.
 pub fn run_while(
     command: &mut Command,
     limit: Duration,
@@ -138,11 +92,6 @@ pub fn run_while(
     run_while_reading(command, limit, wanted, Stdio::null())
 }
 
-/// Runs `command` as `run_while` does, with `stdin` on its stdin, in place
-/// of nothing. A file handed it there it holds open for as long as it runs,
-/// and a lock on the file with it, past the end of what started it: luneta's
-/// lock on the speech model it fetches is curl's too, so that a curl that
-/// runs on past a luneta killed outright holds it until it ends.
 pub fn run_while_reading(
     command: &mut Command,
     limit: Duration,
@@ -154,36 +103,22 @@ pub fn run_while_reading(
     ran.map(|ran| ran.ok().map(|(ran, _)| ran))
 }
 
-/// What of a program is killed, as it is stuck or no longer wanted.
 #[derive(Clone, Copy)]
 enum Kills {
-    /// The program alone.
     Program,
-    /// The program, and what it started: the group it leads, as `alone` has
-    /// it lead one.
     Group,
 }
 
-/// What of a program's stdout is read: up to `most` bytes, where more is an
-/// error of `over`, or the last of its lines that fit in `most` bytes.
 #[derive(Clone, Copy)]
 enum Keeps {
     First { most: u64, over: io::ErrorKind },
     Last { most: u64 },
 }
 
-/// What was read of a pipe, as `Keeps` says: its bytes, and how many lines
-/// went before them.
 type Said = (Vec<u8>, u64);
 
-/// What `run` reads of a program's stdout.
 const FIRST: Keeps = Keeps::First { most: SAID_MAX, over: io::ErrorKind::FileTooLarge };
 
-/// Runs `command`, as `run_while` does, where it is `wanted` only for a
-/// while, which says what that comes to once it is not, or else as `run`
-/// does, with `stdin` on its stdin, and kills of it what `kills` says. It
-/// reads of its stdout what `keeps` says, and says how many lines went
-/// before what it kept.
 fn running<N>(
     command: &mut Command,
     limit: Duration,
@@ -196,10 +131,6 @@ fn running<N>(
     let mut child =
         command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let heard = hear(&mut child, deadline, wanted, keeps);
-    // Whatever was heard of it, or why nothing could be, what is left of it
-    // is killed, and it is waited for last, so that no kill names a pid let
-    // go. One that could not be killed is let go unwaited for, rather than
-    // waited for with no deadline.
     if !matches!(heard, Ok(Heard::Ended { .. })) {
         kill(&mut child, kills)?;
     }
@@ -213,20 +144,12 @@ fn running<N>(
     })
 }
 
-/// What was heard of a program, before it is waited for.
 enum Heard<N> {
-    /// It ended, and said all it had to say in its time: of its stdout, what
-    /// was kept, and how many lines went before it.
     Ended { stdout: Said, stderr: Vec<u8> },
-    /// It, or what it started that holds its stdout open, went past its
-    /// deadline.
     Stuck,
-    /// It was no longer wanted, and this is what that comes to.
     Unwanted(N),
 }
 
-/// What is heard of `child` until `deadline`, for as long as it is `wanted`,
-/// of its stdout what `keeps` says.
 fn hear<N>(
     child: &mut Child,
     deadline: Instant,
@@ -235,7 +158,6 @@ fn hear<N>(
 ) -> io::Result<Heard<N>> {
     let stdout = child.stdout.take().expect("its stdout is piped");
     let stdout = read(stdout, keeps)?;
-    // What a program says of its failures is no answer that is too large.
     let stderr = child.stderr.take().expect("its stderr is piped");
     let stderr = read(stderr, Keeps::First { most: SAID_MAX, over: io::ErrorKind::Other })?;
     let ended = ends(child)?;
@@ -247,8 +169,6 @@ fn hear<N>(
         if let Some(Err(not)) = wanted.map(|wanted| wanted()) {
             return Ok(Heard::Unwanted(not));
         }
-        // Heard from as it ends, or at its deadline, and where it is wanted
-        // only for a while, each `LOOK` besides, to ask whether it still is.
         let look = if wanted.is_some() { left().min(LOOK) } else { left() };
         match ended.recv_timeout(look) {
             Ok(end) => break end?,
@@ -260,14 +180,11 @@ fn hear<N>(
     }
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
-        // What it started holds its stdout open still.
         return Ok(Heard::Stuck);
     };
     Ok(Heard::Ended { stdout: stdout?, stderr: stderr?.0 })
 }
 
-/// Kills of `child` what `kills` says. One that ended, and is not waited for
-/// yet, takes the signal all the same, and so does the group it leads.
 fn kill(child: &mut Child, kills: Kills) -> io::Result<()> {
     match kills {
         Kills::Program => child.kill(),
@@ -275,23 +192,19 @@ fn kill(child: &mut Child, kills: Kills) -> io::Result<()> {
     }
 }
 
-/// Has `command` lead a session of its own, with no terminal, and a group of
-/// its own in it, numbered as it is.
-#[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
+#[expect(
+    unsafe_code,
+    reason = "std has no safe way to start a command in a session of its own. The closure runs \
+              in the child, between its fork and its exec, where only what a signal handler may \
+              do is safe: `setsid` is a system call alone, and its error holds no memory"
+)]
 pub fn alone(command: &mut Command) -> &mut Command {
-    // SAFETY: the closure runs in the child, between its fork and its exec,
-    // where only what a signal handler may do is safe: `setsid` is a system
-    // call alone, and its error holds no memory.
     unsafe {
         command.pre_exec(|| process::setsid().map(|_| ()).map_err(io::Error::from));
     }
     command
 }
 
-/// Kills the group `child` leads, which ends what it started, as the group
-/// of its session. One that has all ended is no failure: macOS signals none
-/// in it that ended, and says `EPERM` where it signalled none, as where all
-/// that is left of it is `child`, ended and not waited for yet.
 fn kill_group(child: &Child) -> io::Result<()> {
     let pid = Pid::from_child(child);
     match process::kill_process_group(pid, Signal::KILL) {
@@ -301,22 +214,15 @@ fn kill_group(child: &Child) -> io::Result<()> {
     }
 }
 
-/// Whether the program `pid` names has ended, and is not waited for yet, as
-/// `waitid` says at once.
 fn has_ended(pid: Pid) -> bool {
     let now = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
     matches!(process::waitid(WaitId::Pid(pid), now), Ok(Some(status)) if an_end(&status))
 }
 
-/// Whether what `waitid` said of a program is its end: an exit, a kill or a
-/// core dump, and not a stop, which macOS says too.
 fn an_end(status: &WaitIdStatus) -> bool {
     status.exited() || status.killed() || status.dumped()
 }
 
-/// Says once `child` has ended, from a thread of its own, or why that could
-/// not be told. It is left for `child` to be waited for: until then, its pid
-/// is not let go, and the kill at its deadline can name no other process.
 fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
     let pid = Pid::from_child(child);
     let ended = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
@@ -326,20 +232,12 @@ fn ends(child: &Child) -> io::Result<Receiver<io::Result<()>>> {
                 Ok(Some(status)) if an_end(&status) => return Ok(()),
                 Err(Errno::INTR) => {},
                 Err(error) => return Err(error.into()),
-                // What is no end, as macOS says of one that stopped, each
-                // time it is asked until it goes on, where Linux waits for
-                // its end: it is asked again each `LOOK` meanwhile, until it
-                // ends or is killed at its deadline.
                 Ok(_) => thread::sleep(LOOK),
             }
         }
     })
 }
 
-/// What comes out of `pipe` until it closes, read in a thread of its own and
-/// handed over in one piece, as `keeps` says, with how many lines went
-/// before it, or why it could not all be read: an error of `over` where it
-/// is more than the `most` bytes of `Keeps::First`.
 fn read(
     mut pipe: impl Read + Send + 'static,
     keeps: Keeps,
@@ -351,8 +249,6 @@ fn read(
         };
         let mut all = Vec::new();
         let read = (&mut pipe).take(most).read_to_end(&mut all);
-        // What it says past the most is read and let go, so that it is not
-        // kept waiting.
         let past = read.and_then(|_| io::copy(&mut pipe, &mut io::sink()));
         match past {
             Ok(0) => Ok((all, 0)),
@@ -365,9 +261,6 @@ fn read(
     })
 }
 
-/// The last of the lines out of `pipe` until it closes that fit in `most`
-/// bytes, and how many went before them. What it says is let go of as it
-/// comes, so that no more than twice as much is held at once.
 fn last_lines(pipe: &mut impl Read, most: u64) -> io::Result<Said> {
     let most = usize::try_from(most).unwrap_or(usize::MAX);
     let (mut kept, mut before) = (Vec::new(), 0);
@@ -389,8 +282,6 @@ fn last_lines(pipe: &mut impl Read, most: u64) -> io::Result<Said> {
     Ok((kept, before))
 }
 
-/// Lets go of the lines of `kept` before the last that fit in `most` bytes,
-/// and says how many it let go of.
 fn let_go(kept: &mut Vec<u8>, most: usize) -> u64 {
     let cut = kept.len().saturating_sub(most);
     let start = kept[cut..].iter().position(|&byte| byte == b'\n');
@@ -398,14 +289,11 @@ fn let_go(kept: &mut Vec<u8>, most: usize) -> u64 {
     kept.drain(..start).fold(0, |lines, byte| lines + u64::from(byte == b'\n'))
 }
 
-/// What `work` comes to, worked out in a thread of its own and handed over
-/// once it is done.
 fn in_thread<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<Receiver<T>> {
     let (said, heard) = mpsc::sync_channel(1);
     thread::Builder::new().name("program".to_owned()).spawn(move || {
-        // One that stopped waiting has no use for it.
         let _ = said.send(work());
     })?;
     Ok(heard)
@@ -426,8 +314,6 @@ mod tests {
         run_while_reading, saying,
     };
 
-    /// A program reads what it is told to the end, however much more of it
-    /// there is than a pipe holds, and need not read it at all.
     #[test]
     fn a_program_hears_what_it_is_told_and_need_not_listen() {
         let words = "x".repeat(1024 * 1024);
@@ -438,9 +324,6 @@ mod tests {
         assert_eq!(ran.answer(), Ok(Vec::new()));
     }
 
-    /// A program that fails is taken at its word on either stream, its stdout
-    /// first, where `answer` reads only its stderr: `claude -p` says why on its
-    /// stdout.
     #[test]
     fn a_program_that_fails_can_say_why_on_either_stream() {
         let ran = |script: &str| {
@@ -457,10 +340,6 @@ mod tests {
         assert_eq!(ran("echo fine").answer_why_on_either(), Ok(b"fine\n".to_vec()));
     }
 
-    /// A file handed a program on its stdin, and the lock on it with it, is
-    /// held for as long as what the program left running holds it, past the
-    /// end of the program, and of the command that started it: a `sleep` that
-    /// `sh` leaves behind holds it here, as a curl that ran on past luneta.
     #[test]
     fn a_lock_on_what_a_program_reads_is_held_while_it_runs() {
         let scratch = tempfile::tempdir().unwrap();
@@ -481,8 +360,6 @@ mod tests {
         }
     }
 
-    /// A program that says more than the most has failed, rather than been
-    /// read short.
     #[test]
     fn a_program_that_says_too_much_has_failed() {
         let mut says = Command::new("head");
@@ -493,9 +370,6 @@ mod tests {
         assert!(error.to_string().contains("said more than"), "{error}");
     }
 
-    /// A program asked for what can be more than `SAID_MAX` has as much of
-    /// its stdout read as the question says, and more than that is an error
-    /// a question can tell from any other.
     #[test]
     fn a_program_may_say_as_much_as_it_is_asked_for() {
         let most = SAID_MAX + 1;
@@ -512,9 +386,6 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge, "{error}");
     }
 
-    /// A program asked for its last lines has those that fit kept whole, and
-    /// the lines before them counted, however much it said; one that said
-    /// less has all of it kept.
     #[test]
     fn a_program_asked_for_its_last_lines_keeps_them() {
         let tail = |count: &str, most| {
@@ -533,14 +404,8 @@ mod tests {
         assert_eq!(tail("3", 100), ("1\n2\n3\n".to_owned(), 0));
     }
 
-    /// A program is heard from as it ends, about as soon as std's own `output`
-    /// hears from it, which waits for its pipes and its end with no timer: no
-    /// look each few milliseconds holds its answer up.
     #[test]
     fn a_program_is_heard_from_as_it_ends() {
-        // How much longer `run` took than `output`, or none, in rounds of one
-        // of each back to back, so that a machine busy for a while slows both
-        // alike.
         let mut behind: Vec<Duration> = (0..61)
             .map(|_| {
                 let asked = Instant::now();
@@ -552,17 +417,11 @@ mod tests {
                 ran.saturating_sub(asked.elapsed())
             })
             .collect();
-        // A busy machine holds up some rounds of either, where a look would
-        // hold up each round of `run`, until `LOOK` is up: so in the fifth of
-        // rounds it was least behind in, it is level with `output` but for the
-        // threads it starts.
         behind.sort();
         let least = behind[behind.len() / 5];
         assert!(least < Duration::from_millis(1), "{least:?} behind, of {behind:?}");
     }
 
-    /// A program a signal kills, rather than its deadline, is heard from as
-    /// it ends, as one is that exits.
     #[test]
     fn a_program_a_signal_kills_is_heard_from_as_it_ends() {
         let asked = Instant::now();
@@ -575,8 +434,6 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
-    /// A program that does not end in its time is killed and waited for, so
-    /// that it holds the daemon up no longer than that.
     #[test]
     fn a_program_that_does_not_end_in_time_is_stuck() {
         let asked = Instant::now();
@@ -585,8 +442,6 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
-    /// A program whose answer is no longer wanted is killed and waited for
-    /// then, long before its time is up, and says nothing.
     #[test]
     fn a_program_no_longer_wanted_is_killed() {
         let asked = Instant::now();
@@ -596,8 +451,6 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
-    /// A program that stopped is stuck once its time is up, and killed, as
-    /// one that runs on is: macOS says it ended, though it can still go on.
     #[test]
     fn a_program_that_stopped_is_stuck() {
         let asked = Instant::now();
@@ -608,8 +461,6 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     }
 
-    /// A program run alone leads a session of its own, with no terminal to
-    /// ask for a passphrase on, rather than its caller's.
     #[test]
     fn a_program_run_alone_has_a_session_of_its_own() {
         let mut sleep = Command::new("sleep");
@@ -621,10 +472,6 @@ mod tests {
         assert_eq!(session, Ok(pid));
     }
 
-    /// A program run alone that is stuck is killed with what it started, which
-    /// would run on otherwise, as git does that wt runs: one that does not end
-    /// in its time, and one that ended, where what it started holds its stdout
-    /// open past then.
     #[test]
     fn a_program_run_alone_that_is_stuck_is_killed_with_what_it_started() {
         for script in [r#"sleep 30 & echo $! > "$0"; wait"#, r#"sleep 30 & echo $! > "$0""#] {
@@ -636,7 +483,6 @@ mod tests {
             assert!(matches!(ran, Ran::Stuck), "{script}");
             let pid = fs::read_to_string(&started).expect("sh says what it started");
             let pid = Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid");
-            // Gone once the process that took it in has waited for it.
             let gone = Instant::now() + Duration::from_secs(5);
             while process::test_kill_process(pid).is_ok() {
                 assert!(Instant::now() < gone, "what `{script}` started runs on");
@@ -645,26 +491,19 @@ mod tests {
         }
     }
 
-    /// A program run alone that ended, where what it started in a group of
-    /// its own holds its stdout open past its time, is stuck, as one is whose
-    /// own group holds it, and is waited for: macOS signals no group that has
-    /// only the program left in it, ended and not waited for yet.
     #[test]
     fn a_program_run_alone_held_from_outside_its_group_is_stuck_and_waited_for() {
         let dir = tempfile::tempdir().expect("a folder");
         let (ran_as, started) = (dir.path().join("sh"), dir.path().join("started"));
         let mut sh = Command::new("sh");
-        // `set -m` starts the `sleep` in a group of its own.
         sh.args(["-c", r#"echo $$ > "$0"; set -m; sleep 30 & echo $! > "$1""#]);
         let ran = run_alone(sh.arg(&ran_as).arg(&started), Duration::from_millis(500));
         let pid = |path| {
             let pid = fs::read_to_string(path).expect("sh says its pid and what it started");
             Pid::from_raw(pid.trim().parse().expect("a pid")).expect("a pid")
         };
-        // Outside the group, it runs on.
         process::kill_process(pid(&started), Signal::KILL).expect("what sh started runs on");
         assert!(matches!(ran, Ok(Ran::Stuck)), "{:?}", ran.err());
-        // Gone, where one ended and not waited for yet is still there.
         assert!(process::test_kill_process(pid(&ran_as)).is_err(), "sh was not waited for");
     }
 }

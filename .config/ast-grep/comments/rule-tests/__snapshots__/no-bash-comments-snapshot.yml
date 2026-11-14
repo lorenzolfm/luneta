@@ -1,0 +1,41 @@
+id: no-bash-comments
+snapshots:
+  ? |-
+    # a
+    echo
+  : labels:
+    - source: '# a'
+      style: primary
+      start: 0
+      end: 3
+  '#!/usr/bin/env bash':
+    labels:
+    - source: '#!/usr/bin/env bash'
+      style: primary
+      start: 0
+      end: 19
+  ? |-
+    ''
+      #! a
+    ''
+  : labels:
+    - source: '#! a'
+      style: primary
+      start: 5
+      end: 9
+  ? |-
+    ''
+      echo
+      #!/bin/sh
+    ''
+  : labels:
+    - source: '#!/bin/sh'
+      style: primary
+      start: 12
+      end: 21
+  'echo a # b':
+    labels:
+    - source: '# b'
+      style: primary
+      start: 7
+      end: 10

@@ -1,0 +1,10 @@
+id: no-typescript-comments
+valid:
+  - 'const a = "// a";'
+  - "const a = `/* a */`;"
+  - "const a = /a\\/\\/b/;"
+invalid:
+  - "// a\nconst a = 1;"
+  - "const a = 1; // a"
+  - "/** a */\nfunction f() {}"
+  - "f(/* a */);"

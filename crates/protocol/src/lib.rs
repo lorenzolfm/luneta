@@ -1,11 +1,3 @@
-//! What luneta's daemon and its clients both read: the protocol the daemon
-//! answers in, as `proto/luneta/v1` defines it, and what `git status` says of
-//! a work tree, which the daemon asks git and its clients read back from the
-//! protocol. The pull request gh finds of a branch is here too, which only
-//! the daemon asks gh. So are Claude Code's session files the daemon cannot
-//! read, as a delete counts them, and how a command a shell ran ended, as
-//! its hook says.
-
 pub mod git;
 pub mod github;
 pub mod said;
@@ -13,12 +5,6 @@ pub mod shell;
 pub mod tab;
 pub mod unread;
 
-/// The protocol's messages, as prost-build writes them out. The service that
-/// answers with them is the daemon's, and so is the code for it.
-//
-// The code is generated, and reads as prost-build writes it: with the
-// `#[allow]`s of its own that the workspace's lints would have spelled
-// `#[expect]`, and with a reason.
 #[allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,
@@ -30,11 +16,6 @@ pub mod v1 {
 }
 
 impl v1::Agent {
-    /// The harness it runs in, as its daemon says: Claude Code, where it does
-    /// not say, as a daemon older than the word knows no other; and
-    /// `Unspecified` for a number only a newer daemon knows. prost's `harness()`
-    /// is not this: it takes a daemon that does not say for one that says what
-    /// it cannot read.
     #[must_use]
     pub fn runs_in(&self) -> v1::Harness {
         match self.harness {
@@ -43,16 +24,12 @@ impl v1::Agent {
         }
     }
 
-    /// Whether it is the agent a person talks to at a prompt, which each harness
-    /// has a word of its own for. Of a harness only a newer daemon knows, luneta
-    /// cannot tell.
     #[must_use]
     pub fn at_a_prompt(&self) -> bool {
         let word = self.runs_in().prompt_word();
         word.is_some_and(|word| self.entrypoint.as_deref() == Some(word))
     }
 
-    /// Where it runs in zellij, absent when it runs in a pane of no zellij's.
     #[must_use]
     pub fn zellij(&self) -> Option<&v1::Zellij> {
         match &self.pane {
@@ -63,17 +40,12 @@ impl v1::Agent {
 }
 
 impl v1::Session {
-    /// Which multiplexer runs it, as its daemon says in `mux`; or, from a
-    /// daemon older than `mux`, whose sessions are all zellij's, as it says in
-    /// `started_at` and `socket`. What else reads those reads them here.
     #[must_use]
     pub fn multiplexer(&self) -> v1::session::Mux {
         let (started_at, socket) = (self.started_at, self.socket);
         self.mux.unwrap_or(v1::session::Mux::Zellij(v1::ZellijSession { started_at, socket }))
     }
 
-    /// When it started, by its multiplexer: when zellij's server made its
-    /// socket, or the own server made it. None where its daemon says neither.
     #[must_use]
     pub fn started(&self) -> Option<std::time::SystemTime> {
         let at = match self.multiplexer() {
@@ -85,7 +57,6 @@ impl v1::Session {
 }
 
 impl v1::Harness {
-    /// Its word for the agent a person talks to at a prompt.
     #[must_use]
     pub fn prompt_word(self) -> Option<&'static str> {
         match self {
@@ -97,9 +68,6 @@ impl v1::Harness {
 }
 
 impl v1::Name {
-    /// The name, if someone gave it, as `/rename` does: one Claude Code derives
-    /// from the directory, or makes up, is no name a row goes by. A name from
-    /// before Claude Code said who chose it is taken for given.
     #[must_use]
     pub fn given(&self) -> Option<&str> {
         let source = self.source.map(v1::NameSource::try_from);

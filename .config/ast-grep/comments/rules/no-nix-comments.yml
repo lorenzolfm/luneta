@@ -1,0 +1,6 @@
+id: no-nix-comments
+language: nix
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  kind: comment

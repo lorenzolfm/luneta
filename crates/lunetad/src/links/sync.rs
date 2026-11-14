@@ -1,7 +1,3 @@
-//! Brings a worktree to the head of its pull request, before an agent reviews
-//! it. wt moves it, as `wt follow` does, and never one that holds work of its
-//! own. wt follows the branch's upstream, so this checks it came to the head.
-
 use std::path::Path;
 use std::process::Command;
 
@@ -57,7 +53,6 @@ fn remote_of(dir: &str, link: &Link) -> Result<Option<String>, String> {
     }
 }
 
-/// Asks GitHub, as git cannot tell a pull request's base.
 fn viewed(link: &Link) -> Result<Viewed, String> {
     let number = link.number.to_string();
     let repository = format!("{GITHUB}/{}", link.repository());
@@ -95,8 +90,6 @@ fn top(dir: &str) -> Result<String, String> {
     said(&mut git).ok_or_else(|| "git did not say where the worktree's top is".to_owned())
 }
 
-/// A program of its own, alone, as `worktree` runs one: wt says how it goes on
-/// stderr, and git may ask for a passphrase on the terminal of its session.
 fn follow(dir: &str) -> Result<(), String> {
     let mut luneta = Command::new(luneta()?);
     git::local(trusting_no_tree(&mut luneta).args(["follow", dir]));

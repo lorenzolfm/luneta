@@ -1,7 +1,3 @@
-//! `luneta prune`, and what the menu's `d m` asks for: the worktrees of a
-//! repository whose pull requests are merged, as `lunetad::prunes` finds them
-//! on the machine it runs on, and for a far row, on that row's machine.
-
 use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
@@ -24,10 +20,6 @@ use crate::machines::Machine;
 
 const NO_FOLDER: &str = "neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in";
 
-/// Says what deleting the merged worktrees of the repository of `repo`, or of
-/// this directory, deletes, and deletes it where `yes` is the plan it says, or
-/// in luneta's ask box, the plan it said in the turn before. Nothing goes while
-/// lunetad does not say where the panes are.
 pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let turn = match drive::turn_here() {
         Ok(turn) => turn,
@@ -117,7 +109,6 @@ fn said_of(outcomes: &[Outcome]) -> ExitCode {
     if well { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-/// What it takes up, in the words `du -h` has for it.
 pub fn size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * KIB;
@@ -133,7 +124,6 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// `goes`'s line of what the plan deletes: what goes with its worktree.
 fn with_it(goes: &Goes) -> String {
     let branch = &goes.branch;
     match &goes.pushed {
@@ -143,7 +133,6 @@ fn with_it(goes: &Goes) -> String {
     }
 }
 
-/// What the CLI lists of `plan`, a line to each worktree it says of.
 fn listed(plan: &Plan) -> Vec<String> {
     let width = plan.goes.iter().map(|goes| name_of(&goes.worktree).len()).max().unwrap_or(0);
     let goes = plan.goes.iter().map(|goes| {
@@ -162,9 +151,6 @@ fn listed(plan: &Plan) -> Vec<String> {
     goes.chain(kept).chain(unasked).collect()
 }
 
-/// Asks what deleting the merged worktrees of the repository `dir` is in, on
-/// the machine `on`, deletes, for the menu numbered `menu`, on a thread of its
-/// own, and hands back what it says, as `Due` does.
 pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
     let due = Due::new(events, move |plan| Event::Prunes { menu, plan });
     thread::spawn(move || due.pay(planned(&on, &dir)));
@@ -186,9 +172,6 @@ fn local_occupied() -> Result<Occupied, String> {
     commands::occupied(&folder)
 }
 
-/// Deletes what would go of the repository `dir` is in, on the machine `on`,
-/// where that is `agreed`, for the menu numbered `menu`, on a thread of its own,
-/// and hands back what came of that, as `Due` does.
 pub fn delete(
     menu: u64,
     on: Machine,
@@ -210,8 +193,6 @@ fn deleted(on: &Machine, dir: &Directory, agreed: &BTreeSet<Deleting>) -> Result
     }
 }
 
-/// What a note says of `outcomes`, where anything stays that was to go: which,
-/// and why.
 pub fn note(outcomes: &[Outcome]) -> Option<String> {
     let mut stays: Vec<String> = Vec::new();
     let mut gone = 0;
@@ -254,7 +235,6 @@ mod tests {
         Outcome { worktree: format!("/w/{name}"), came }
     }
 
-    /// A note says which stayed and why, and none where everything went.
     #[test]
     fn a_note_names_what_stays() {
         assert_eq!(note(&[outcome("a", Came::Gone)]), None);
@@ -268,8 +248,6 @@ mod tests {
         assert_eq!(said.as_deref(), Some(want));
     }
 
-    /// The list has every worktree, its number and its size, what goes with
-    /// it, and why the rest stay.
     #[test]
     fn the_list_says_what_goes_and_why_the_rest_stay() {
         let goes = |name: &str, pushed, bytes| Goes {

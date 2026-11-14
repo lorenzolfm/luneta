@@ -1,35 +1,24 @@
-//! What runs in front of a pane's terminal, and what its shell says it ran
-//! by its marks (OSC 133), as the server lists them. `/bin/sh` writes the
-//! marks here as fish writes them of itself.
-
 use luneta_mux::api;
 use luneta_mux::api::ran::Is;
 
 use crate::host::{Attached, Server, new_session, run, script, session, size, tabs, watched_until};
 
-/// What writes the mark `$1`, as a shell does.
 const MARK: &str = "m() { printf '\\033]133;%s\\007' \"$1\"; }";
 
-/// The first pane of the first session of `listing`.
 fn pane(listing: &api::Listing) -> Option<&api::Pane> {
     tabs(listing).first().and_then(|tab| tab.panes.first())
 }
 
-/// What the shell of the first pane said.
 fn said(listing: &api::Listing) -> Option<&Is> {
     pane(listing)?.ran.as_ref()?.is.as_ref()
 }
 
-/// Whether the first pane has `program` in front, by its first argument.
 fn in_front(listing: &api::Listing, program: &str) -> bool {
     pane(listing)
         .and_then(|pane| pane.foreground.as_ref())
         .is_some_and(|front| front.argv.first().is_some_and(|first| first == program))
 }
 
-/// What runs `script` in the `bash` on the `PATH`, in `/`, its tab held as
-/// it ends: macOS's `/bin/sh`, a bash 3.2, never comes back from the `fg` of
-/// a job that stops.
 fn bash(script: &str) -> api::Opens {
     let argv = ["bash", "-c", script].map(str::to_owned).to_vec();
     api::Opens {
@@ -39,18 +28,12 @@ fn bash(script: &str) -> api::Opens {
     }
 }
 
-/// Sends `signal` to the job in front of the first pane, which leads its
-/// group.
 fn signal_front(listing: &api::Listing, signal: rustix::process::Signal) {
     let front = pane(listing).and_then(|pane| pane.foreground.as_ref()).unwrap().pid;
     let front = rustix::process::Pid::from_raw(front.cast_signed()).unwrap();
     rustix::process::kill_process_group(front, signal).unwrap();
 }
 
-/// A shell's marks say it is ready, then what it runs and since when, and
-/// how that ended and how long it took. The shell in front, reading a line
-/// of the terminal with the echo off, as a password prompt does, reads as
-/// asking; and what runs in front is the pane's program.
 #[test]
 fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
     run(async {
@@ -88,10 +71,6 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
     });
 }
 
-/// A job in front is what runs in front. Stopped, as `Ctrl z` stops it, as
-/// its shell says it ended, it reads as stopped; `fg` brings it back as what runs, and
-/// its end says it was resumed, whatever status `fg` gave. Once the program
-/// ends, nothing runs in front and its shell says nothing.
 #[test]
 fn a_job_stopped_and_brought_back_reads_as_its_command() {
     run(async {
@@ -142,9 +121,6 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
     });
 }
 
-/// A command of the pane's shell is what runs until that shell says it ended:
-/// the marks of a shell it runs, as over `ssh`, are none of its own, as that
-/// one is in front of the terminal as it writes them.
 #[test]
 fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
     run(async {
@@ -176,9 +152,6 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
     });
 }
 
-/// A job in front under a process that is not, as a shell that `nix develop`
-/// started runs its jobs, is what the command does: one that reads a line
-/// of the terminal asks. macOS says where no process sleeps.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_job_in_front_under_one_that_is_not_reads_as_asking() {

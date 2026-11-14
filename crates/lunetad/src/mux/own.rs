@@ -1,9 +1,3 @@
-//! luneta's own multiplexer: `luneta-mux`, the one server of every own
-//! session of the user, which `server` reaches; and the variables it gives
-//! what runs in its panes, which name the pane by the ids its server gave the
-//! pane and its session. It gives neither id to another, so a rename leaves
-//! them as they are.
-
 use std::ffi::OsString;
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -16,13 +10,10 @@ pub mod api;
 pub mod attach;
 pub mod server;
 
-/// An own session, by the id its server gave it, which it gives no other, and
-/// which a rename keeps. Never 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnId(NonZeroU64);
 
 impl OwnId {
-    /// The session `id` names, or none: 0 names none.
     #[must_use]
     pub fn new(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(OwnId)
@@ -40,13 +31,10 @@ impl fmt::Display for OwnId {
     }
 }
 
-/// A client of the own sessions, by the id its server gave it, which it gives
-/// no other client: luneta's, which a go its ask box asks for takes. Never 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OwnClientId(NonZeroU64);
 
 impl OwnClientId {
-    /// The client `id` names, or none: 0 names none.
     #[must_use]
     pub fn new(id: u64) -> Option<Self> {
         NonZeroU64::new(id).map(OwnClientId)
@@ -64,26 +52,20 @@ impl fmt::Display for OwnClientId {
     }
 }
 
-/// When an own session was made, in nanoseconds since the epoch, as its
-/// server names it in the variables of its panes: never before 1970, nor
-/// past 2554.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnMade(u64);
 
 impl OwnMade {
-    /// The moment `at`, or none before 1970 or past 2554.
     #[must_use]
     pub fn of(at: SystemTime) -> Option<Self> {
         u64::try_from(at.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok().map(OwnMade)
     }
 
-    /// The moment `nanos` nanoseconds after the epoch.
     #[must_use]
     pub fn from_nanos(nanos: u64) -> Self {
         OwnMade(nanos)
     }
 
-    /// The moment `at` says, or why it is none of an own session's.
     pub fn read(at: prost_types::Timestamp) -> Result<Self, String> {
         let at = SystemTime::try_from(at).map_err(|why| why.to_string())?;
         OwnMade::of(at).ok_or_else(|| "a time before 1970, or past 2554".to_owned())
@@ -106,8 +88,6 @@ impl From<OwnMade> for prost_types::Timestamp {
     }
 }
 
-/// An own session as no other is, of its server or of the next, which counts
-/// its ids from 1 again: by the id its server gave it, and when it made it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OwnKey {
     pub id: OwnId,
@@ -115,8 +95,6 @@ pub struct OwnKey {
 }
 
 impl OwnKey {
-    /// The session `own` says, or why it says none: the id 0, or no time it
-    /// was made that an own session's is.
     pub fn of(own: &crate::api::OwnSession) -> Result<Self, String> {
         let id = OwnId::new(own.id).ok_or("own: 0 is no session's id")?;
         let made = own.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
@@ -131,8 +109,6 @@ impl From<OwnKey> for crate::api::OwnSession {
     }
 }
 
-/// A pane of an own session, as no other is: by its session's key, and the id
-/// its server gave it, which it gives no other pane of its sessions. Never 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OwnPane {
     pub session: OwnKey,
@@ -140,14 +116,11 @@ pub struct OwnPane {
 }
 
 impl OwnPane {
-    /// The pane `pane` of `session`, or none: 0 names none.
     #[must_use]
     pub fn new(session: OwnKey, pane: u32) -> Option<Self> {
         NonZeroU32::new(pane).map(|id| OwnPane { session, id })
     }
 
-    /// The pane `own` says, or why it says none: no session, or one that does
-    /// not read, or the pane 0.
     pub fn of(own: &crate::api::Own) -> Result<Self, String> {
         let pane = own.pane;
         let none = || format!("own pane {pane} of no session");
@@ -164,22 +137,14 @@ impl From<OwnPane> for crate::api::Own {
     }
 }
 
-/// What names the session of an own pane, by its id, in the variables of what
-/// runs in it.
 const SESSION_VAR: &str = "LUNETA_MUX_SESSION";
 
-/// What says when the session of an own pane was made, in nanoseconds since
-/// the epoch, in the variables of what runs in it.
 const MADE_VAR: &str = "LUNETA_MUX_MADE";
 
-/// What names an own pane, by its id, in the variables of what runs in it.
 const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
-/// The variables luneta's own multiplexer gives what runs in its panes.
 const PANE_VARS: [&str; 3] = [SESSION_VAR, MADE_VAR, PANE_VAR];
 
-/// The pane `environ`, the variables of a process, name, where they name
-/// its session, when that was made, and its id.
 pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
     let id = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
@@ -188,8 +153,6 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     Some(Named::Own(OwnPane { session: OwnKey { id, made }, id: pane }))
 }
 
-/// The own pane this process runs in, as its variables name it, with its
-/// session: none where it runs in none.
 #[must_use]
 pub fn here() -> Option<OwnPane> {
     let environ: Vec<OsString> = std::env::vars_os()
@@ -206,8 +169,6 @@ pub fn here() -> Option<OwnPane> {
     }
 }
 
-/// Has `command` run without the variables luneta's own multiplexer gives
-/// what runs in its panes.
 pub(crate) fn in_no_pane(command: &mut Command) {
     for name in PANE_VARS {
         command.env_remove(name);
@@ -218,8 +179,6 @@ pub(crate) fn in_no_pane(command: &mut Command) {
 mod tests {
     use super::*;
 
-    /// The variables name an own pane by its ids, each a number and not 0,
-    /// and by when its session was made, and by none of them alone.
     #[test]
     fn the_variables_name_an_own_pane_by_its_ids_and_its_session_s_making() {
         let environ = |entries: &[&str]| -> Vec<OsString> {
@@ -249,8 +208,6 @@ mod tests {
         }
     }
 
-    /// An own pane, as the daemon says it, is of a session that reads, made
-    /// after 1970, and never of the id 0; and it is said as it reads.
     #[test]
     fn an_own_pane_said_reads_as_one_of_a_session_and_not_0() {
         use crate::api::{Own, OwnSession};

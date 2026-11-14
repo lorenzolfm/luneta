@@ -1,7 +1,3 @@
-//! What the shells with luneta's hook say, as `Watch` gives it on each pane:
-//! the line in each shell's file, and what the terminal of a command going
-//! says it does.
-
 use std::fs;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -18,10 +14,6 @@ use serde_json::json;
 use crate::host::{eventually, start, Host};
 use crate::sessions::{listed, session};
 
-/// Has the shell of `pane` of `session` that started in the second `started`
-/// say `line`, as the hook does: written beside its file, and moved into
-/// place. The daemon makes luneta's folder, for itself alone, so it runs
-/// first.
 fn say(host: &Host, session: &str, pane: u32, started: u64, line: &str) {
     let dir = host.runtime.path().join("luneta/commands").join(session);
     fs::create_dir_all(&dir).unwrap();
@@ -30,18 +22,14 @@ fn say(host: &Host, session: &str, pane: u32, started: u64, line: &str) {
     fs::rename(new, dir.join(format!("{pane}.{started}"))).unwrap();
 }
 
-/// A pane of a shell at its prompt, in the first tab, as zellij lists it.
 fn at_home(id: u32) -> serde_json::Value {
     listed(id, "~", (0, "Tab #1"), Some("/home/you"))
 }
 
-/// The second it is, as the hook counts it.
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// What the shell of each pane of `name` says, in the order zellij lists
-/// them, once the daemon has them.
 fn shells(host: &Host, name: &str) -> Option<Vec<Option<api::Shell>>> {
     let panes = session(&host.host(), name)?.panes.clone()?.panes;
     Some(panes.into_iter().map(|pane| pane.shell).collect())
@@ -57,8 +45,6 @@ fn command(shell: &api::Shell) -> &str {
     command.as_deref().expect("the hook says each command")
 }
 
-/// A terminal of the test's own, which no process runs in front of: what the
-/// command going on it does is what its modes say.
 struct Terminal {
     _controller: OwnedFd,
     tty: OwnedFd,
@@ -75,8 +61,6 @@ impl Terminal {
         Terminal { _controller: controller, tty, path: PathBuf::from(path) }
     }
 
-    /// Has it take keys a line at a time, or a key at a time, with the echo
-    /// on or off.
     fn take(&self, lines: bool, echo: bool) {
         let mut modes = termios::tcgetattr(&self.tty).unwrap();
         modes.local_modes.set(LocalModes::ICANON, lines);
@@ -85,13 +69,6 @@ impl Terminal {
     }
 }
 
-/// Each pane has what its shell said last: a command it runs, which its
-/// terminal says works, asks, or has the terminal to itself, as the terminal
-/// comes to say with no word from the shell; a command that ended, and how;
-/// a job stopped; a shell that has run nothing yet. A command going on a
-/// terminal that is gone is no pane's, and a file the hook is still writing
-/// says nothing yet. A line this lunetad cannot read, as a newer hook's, is
-/// no pane's either, and the log says whose file it is.
 #[test]
 fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     let host = Host::new();
@@ -166,11 +143,6 @@ fn a_pane_has_what_its_shell_said_and_a_command_what_its_terminal_says() {
     }
 }
 
-/// A shell is in the session it started in, by the name that session had: a
-/// rename takes it along, and one that started before its session was made
-/// is another session's of that name. The hook counts whole seconds, so the
-/// first shells of a session started in the second it was made, by its
-/// count. A shell started in a pane's shell is the pane's, until it exits.
 #[test]
 fn a_pane_s_shell_is_the_newest_that_started_in_its_session_by_any_name() {
     let host = Host::new();
@@ -203,10 +175,6 @@ fn a_pane_s_shell_is_the_newest_that_started_in_its_session_by_any_name() {
     });
 }
 
-/// A session made under the name of one renamed, while that one runs, has the
-/// shells started in it since: they say the name it has, as the old panes of
-/// the one renamed do. The one renamed keeps the shells that started in it
-/// before.
 #[test]
 fn a_session_that_takes_a_renamed_one_s_name_has_the_shells_started_in_it() {
     let host = Host::new();
@@ -227,8 +195,6 @@ fn a_session_that_takes_a_renamed_one_s_name_has_the_shells_started_in_it() {
     fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();
     eventually("work is called play", || (commands("play")? == old).then_some(()));
 
-    // Past the second the old shell started in, as the hook counts it, so
-    // that it could not be the new session's.
     while now() <= made + 1 {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -240,10 +206,6 @@ fn a_session_that_takes_a_renamed_one_s_name_has_the_shells_started_in_it() {
     assert_eq!(commands("play"), Some(old.to_vec()));
 }
 
-/// A command a shell runs can take its pane to another directory, as `cd`
-/// does, or run in front of it, and zellij writes nothing of either: the
-/// daemon asks about the session again as the shell says it ran one, ahead
-/// of its sweep.
 #[test]
 fn a_session_is_asked_about_again_as_a_shell_in_it_runs_a_command() {
     let host = Host::new();

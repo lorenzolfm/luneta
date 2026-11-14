@@ -1,6 +1,3 @@
-//! Processes on macOS, through sysinfo, which asks the kernel with `sysctl`,
-//! and without code of ours that is unsafe; and their ends, through kqueue.
-
 use std::ffi::OsString;
 use std::io;
 use std::ptr;
@@ -18,32 +15,24 @@ fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) ->
     system.process(pid).map(read)
 }
 
-/// When `pid` started, as Claude Code records it on macOS: the date `ps -o
-/// lstart` prints, in UTC and the C locale.
 #[must_use]
 pub fn start(pid: u32) -> Option<String> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
     Some(lstart(i64::try_from(secs).ok()?))
 }
 
-/// When `pid` started, or less than a second after, and never before: the
-/// whole seconds the kernel says, and the one it started in.
 #[must_use]
 pub fn started(pid: u32) -> Option<SystemTime> {
     let secs = with(pid, ProcessRefreshKind::nothing(), Process::start_time)?;
     UNIX_EPOCH.checked_add(Duration::from_secs(secs.checked_add(1)?))
 }
 
-/// The environment `pid` started with, an entry to a string.
 #[must_use]
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
     with(pid, refresh, |process| process.environ().to_vec())
 }
 
-/// Waits for `pid` to end, as kqueue says. A process that has ended already, or
-/// is gone, kqueue finds none of, as the event it could not add says, in place
-/// of the event it waits for.
 #[expect(
     unsafe_code,
     reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
@@ -55,12 +44,9 @@ pub fn ends(pid: Pid) -> io::Result<()> {
     let mut adding: &[Event] = &[end];
     let mut heard = [end];
     loop {
-        // SAFETY: it asks that the files the events name stay open as long as
-        // the queue, and this event names a process.
         let failure = match unsafe { kevent(&queue, adding, &mut heard[..], None) } {
             Ok(_) if !heard[0].flags().contains(EventFlags::ERROR) => return Ok(()),
             Ok(_) => i32::try_from(heard[0].data()).map_or(Errno::INVAL, Errno::from_raw_os_error),
-            // A call a signal cuts short has added what it was given.
             Err(Errno::INTR) => {
                 adding = &[];
                 continue;
@@ -71,8 +57,6 @@ pub fn ends(pid: Pid) -> io::Result<()> {
     }
 }
 
-/// The pids of this system. macOS has one pid namespace, and Claude Code calls
-/// it `darwin`.
 pub struct Domain;
 
 impl Domain {
@@ -81,7 +65,6 @@ impl Domain {
         Domain
     }
 
-    /// Whether a pid recorded under `recorded` is one of this system's.
     #[must_use]
     #[expect(
         clippy::unused_self,
@@ -92,7 +75,6 @@ impl Domain {
     }
 }
 
-/// `secs` after the epoch, as ctime spells it: `Sun Sep 13 11:49:45 2026`.
 fn lstart(secs: i64) -> String {
     const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] =
@@ -115,8 +97,6 @@ fn lstart(secs: i64) -> String {
     )
 }
 
-/// The year, month and day of `days` after the epoch, by Howard Hinnant's
-/// `civil_from_days`.
 fn civil(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);

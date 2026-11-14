@@ -1,6 +1,3 @@
-//! The screen a pane's program draws on: what it wrote, read as Ghostty reads
-//! it, and what it asked of its terminal, answered.
-
 mod answering;
 mod input;
 
@@ -28,12 +25,8 @@ pub use input::{Click, Wheel};
 use crate::asked::Size;
 use crate::marks::{Mark, Marks};
 
-/// What luneta's server calls itself where a program asks its terminal's name
-/// and version (XTVERSION).
 const NAME: &str = concat!("luneta-mux ", env!("CARGO_PKG_VERSION"));
 
-/// What the server says it is where a program asks (DA1, DA2 and DA3): a
-/// VT220 with colours and a clipboard, as Ghostty says of itself.
 const ATTRIBUTES: DeviceAttributes = DeviceAttributes {
     primary: PrimaryDeviceAttributes::new(
         ConformanceLevel::LEVEL_2,
@@ -52,22 +45,16 @@ const ATTRIBUTES: DeviceAttributes = DeviceAttributes {
     tertiary: TertiaryDeviceAttributes { unit_id: 0 },
 };
 
-/// The most scrollback a screen keeps, in bytes: Ghostty's own default.
 pub const SCROLLBACK_BYTES_MAX: usize = 50_000_000;
 
-/// What a line shows from a column on: nothing, or a grapheme.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Glyph {
-    /// One column that nothing was written to.
     Blank,
-    /// A grapheme of one column, as UTF-8.
     Narrow(String),
-    /// A grapheme of two columns, its own and the one after it, as UTF-8.
     Wide(String),
 }
 
 impl Glyph {
-    /// How many columns the glyph takes.
     #[must_use]
     pub fn columns(&self) -> usize {
         match self {
@@ -77,14 +64,12 @@ impl Glyph {
     }
 }
 
-/// A glyph, in the style it shows in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub glyph: Glyph,
     pub style: Style,
 }
 
-/// A line of the screen, glyph by glyph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     cells: Vec<Cell>,
@@ -92,21 +77,17 @@ pub struct Line {
 }
 
 impl Line {
-    /// The cells of the line, from its first column on.
     #[must_use]
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
 
-    /// Whether the line's last column shows nothing because the wide glyph
-    /// that did not fit in it went on to the next line.
     #[must_use]
     pub fn wraps_wide(&self) -> bool {
         self.wraps_wide
     }
 }
 
-/// Where the cursor is in a view, and how it shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub row: u16,
@@ -115,8 +96,6 @@ pub struct Cursor {
     pub blinking: bool,
 }
 
-/// What a screen of `size` shows, looked at from some rows back in its
-/// scrollback: a line for each of its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct View {
     size: Size,
@@ -125,46 +104,35 @@ pub struct View {
 }
 
 impl View {
-    /// The size of the screen it is a view of.
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
     }
 
-    /// A line for each of its rows, from the top.
     #[must_use]
     pub fn lines(&self) -> &[Line] {
         &self.lines
     }
 
-    /// None where it is hidden, or out of the view.
     #[must_use]
     pub fn cursor(&self) -> Option<Cursor> {
         self.cursor
     }
 }
 
-/// What the screen made of what its program wrote.
 pub struct Written {
-    /// What it answered the program, to be written back to it.
     pub answers: Vec<u8>,
-    /// The marks the program's shell put in it.
     pub marks: Vec<Mark>,
     pub pushed: Pushed,
 }
 
-/// What a write did to the rows of the scrollback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pushed {
-    /// It pushed these rows into it, after those that were there.
     Rows(usize),
-    /// The rows that were there went, or the program went to its other
-    /// screen, so a view back in it is on none of them.
     Lost,
 }
 
 impl Pushed {
-    /// What this write and the `next` one did between them.
     #[must_use]
     pub fn then(self, next: Pushed) -> Pushed {
         match (self, next) {
@@ -173,9 +141,6 @@ impl Pushed {
         }
     }
 
-    /// Where a view `back` rows back in the scrollback, now of `scrollback`
-    /// rows, is after the write: on the rows it was on, or at the top where
-    /// they went. A view at the bottom stays there.
     #[must_use]
     pub fn moved(self, back: usize, scrollback: usize) -> usize {
         if back == 0 {
@@ -189,10 +154,8 @@ impl Pushed {
     }
 }
 
-/// A screen, and what the program asked of its terminal that it answers.
 pub struct Screen {
     answering: Answering,
-    /// The size it was made or last resized to, which no program changes.
     size: Size,
     marks: Marks,
     render: RenderState<'static>,
@@ -202,10 +165,6 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// A blank screen of `size`, which keeps up to `scrollback_bytes` of the
-    /// lines that scroll off its top. It joins graphemes, as Ghostty does
-    /// (mode 2027), until a program turns that off: [`Screen::clusters`] says
-    /// whether it still does.
     pub fn new(size: Size, scrollback_bytes: usize) -> Result<Screen, Error> {
         let mut answering = Answering::new(size, scrollback_bytes)?;
         let (made, answers) = answering.drive(|terminal| {
@@ -228,9 +187,6 @@ impl Screen {
         })
     }
 
-    /// Reads `bytes`, as the program wrote them. A program that sets 80 or
-    /// 132 columns (DECCOLM) has the screen erased, as tmux does, and it
-    /// keeps its size, from the end of the write on.
     pub fn write(&mut self, bytes: &[u8]) -> Result<Written, Error> {
         let (columns, rows) = self.size.get();
         let scanner = &mut self.marks;
@@ -249,9 +205,6 @@ impl Screen {
         Ok(Written { answers, marks, pushed })
     }
 
-    /// Makes the screen `size`, and gives back what it answered the program
-    /// as it did: its new size, where the program asked to be told (mode
-    /// 2048).
     pub fn resize(&mut self, size: Size) -> Result<Vec<u8>, Error> {
         let (columns, rows) = size.get();
         let (resized, answers) =
@@ -261,8 +214,6 @@ impl Screen {
         Ok(answers)
     }
 
-    /// Has the screen answer its program's questions of colour with these,
-    /// none being the terminal's own default.
     pub fn colour(
         &mut self,
         foreground: Option<RgbColor>,
@@ -275,35 +226,27 @@ impl Screen {
         set
     }
 
-    /// The size it was made or last resized to.
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
     }
 
-    /// Whether the screen joins graphemes (mode 2027), which the widths of
-    /// its glyphs follow.
     #[must_use]
     pub fn clusters(&self) -> bool {
         self.mode(Mode::GRAPHEME_CLUSTER)
     }
 
-    /// Whether the program takes the mouse.
     #[must_use]
     pub fn tracks_mouse(&self) -> bool {
         let terminal = self.answering.terminal();
         terminal.is_mouse_tracking().expect("a terminal says whether it tracks the mouse")
     }
 
-    /// Whether the program has the screen hold what it draws until it is done
-    /// (mode 2026).
     #[must_use]
     pub fn syncs(&self) -> bool {
         self.mode(Mode::SYNC_OUTPUT)
     }
 
-    /// Has the screen stop holding what its program draws (mode 2026), as a
-    /// terminal does once the program held it too long.
     pub fn unsync(&mut self) -> Result<(), Error> {
         let (set, answers) = self
             .answering
@@ -316,31 +259,24 @@ impl Screen {
         self.answering.terminal().mode(mode).expect("a terminal says its modes")
     }
 
-    /// How many rows the scrollback has.
     #[must_use]
     pub fn scrollback(&self) -> usize {
         let terminal = self.answering.terminal();
         terminal.scrollback_rows().expect("a terminal says its scrollback")
     }
 
-    /// The title the program last set, or nothing: none where it is not
-    /// UTF-8.
     #[must_use]
     pub fn title(&self) -> Option<String> {
         let title = self.answering.terminal().title().ok()?;
         str::from_utf8(title).ok().map(str::to_owned)
     }
 
-    /// Where the program last said it works (OSC 7), or nothing: none where
-    /// it is not UTF-8.
     #[must_use]
     pub fn pwd(&self) -> Option<String> {
         let pwd = self.answering.terminal().pwd().ok()?;
         str::from_utf8(pwd).ok().map(str::to_owned)
     }
 
-    /// What the screen shows, looked at from `back` rows back in its
-    /// scrollback, which has at least as many.
     pub fn view(&mut self, back: usize) -> Result<View, Error> {
         assert!(back <= self.scrollback(), "{back} rows back");
         if back == 0 {
@@ -358,7 +294,6 @@ impl Screen {
         assert!(answers.is_empty(), "scrolling answered {answers:?}");
     }
 
-    /// The lines the screen shows, and its cursor.
     fn shown(&mut self) -> Result<View, Error> {
         let terminal = self.answering.terminal();
         let (columns, rows) = self.size.get();
@@ -383,26 +318,24 @@ impl Screen {
         Ok(View { size: self.size, lines, cursor })
     }
 
-    /// The lines the screen shows, in their styles, as escape sequences.
     pub fn dumped_screen(&self) -> Result<String, Error> {
         let terminal = self.answering.terminal();
         let corner = |x, y| terminal.grid_ref(Point::Active(Coordinate { x, y }));
         let last = (terminal.cols()? - 1, u32::from(terminal.rows()?) - 1);
         let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
         let mut formatter = Formatter::new(terminal)?;
-        // Only the lines and their styles: a new formatter also writes the
-        // palette ahead of them and the cursor's style and link after.
         formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
-        // SAFETY: both corners are of `terminal`'s active screen, taken from
-        // it just now, and the formatter borrows it as they do.
-        #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, unchecked")]
+        #[expect(
+            unsafe_code,
+            reason = "a formatter takes a range only as a selection, unchecked. Both corners are \
+                      of `terminal`'s active screen, taken from it just now, and the formatter \
+                      borrows it as they do"
+        )]
         unsafe { formatter.set_selection(Some(&shown)) }?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// All the screen was written that it keeps, its scrollback with it: a
-    /// line for each line written, with no styles and no spaces at its end.
     pub fn dumped_text(&self) -> Result<String, Error> {
         let mut formatter = Formatter::new(self.answering.terminal())?;
         formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
@@ -411,8 +344,6 @@ impl Screen {
     }
 }
 
-/// Where the scrollback ended before a write: at the row it tracks, on the
-/// screen that was the program's, or none where it had no rows.
 struct ScrollbackEnd {
     screen: libghostty_vt::screen::Screen,
     last: Option<TrackedGridRef>,
@@ -431,9 +362,6 @@ impl ScrollbackEnd {
         Ok(ScrollbackEnd { screen: terminal.active_screen()?, last })
     }
 
-    /// What went into the scrollback since: the rows after the one it
-    /// tracks, which only the scrollback's pruning takes from it. Lost where
-    /// that row is out of the scrollback, as a reflow may put it.
     fn pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Pushed, Error> {
         if terminal.active_screen()? != self.screen {
             return Ok(Pushed::Lost);
@@ -450,9 +378,6 @@ impl ScrollbackEnd {
     }
 }
 
-/// The line of `column_count` columns that Ghostty holds in `cells`, where a
-/// wide cell is followed by the spacer of its second column, and only the last
-/// column may be the padding a wide cell that went on left.
 fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<Line, Error> {
     let mut line = Line { cells: Vec::with_capacity(column_count), wraps_wide: false };
     let mut column = 0;
@@ -515,23 +440,18 @@ mod tests {
         Size { columns: NonZeroU16::new(columns).unwrap(), rows: NonZeroU16::new(rows).unwrap() }
     }
 
-    /// A screen of `columns` by `rows`, with no scrollback.
     fn screen(columns: u16, rows: u16) -> Screen {
         Screen::new(size(columns, rows), 0).unwrap()
     }
 
-    /// A screen of `columns` by `rows`, which keeps what scrolls off its top.
     fn scrolling(columns: u16, rows: u16) -> Screen {
         Screen::new(size(columns, rows), 10_000).unwrap()
     }
 
-    /// What `screen` answered the program that wrote `bytes`.
     fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
         screen.write(bytes).unwrap().answers
     }
 
-    /// The lines of a screen of 10 by 2 that read `bytes`, which ask it
-    /// nothing.
     fn read(bytes: &str) -> Vec<Line> {
         let mut screen = screen(10, 2);
         assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
@@ -542,8 +462,6 @@ mod tests {
         line.cells().iter().map(|cell| cell.glyph.clone()).collect()
     }
 
-    /// The first glyphs of the first line of a screen of 10 by 2 that read
-    /// `bytes`.
     fn first(bytes: &str, count: usize) -> Vec<Glyph> {
         glyphs(&read(bytes)[0])[..count].to_vec()
     }
@@ -556,34 +474,26 @@ mod tests {
         Glyph::Wide(text.to_owned())
     }
 
-    /// A skin tone joins the emoji before it, in one glyph of two columns, as
-    /// Ghostty draws it, and the next character goes after both.
     #[test]
     fn a_skin_tone_is_one_wide_glyph_with_its_emoji() {
         assert_eq!(first("👍🏽x", 2), [wide("👍🏽"), narrow("x")]);
     }
 
-    /// Emoji joined by zero-width joiners are one grapheme, of two columns.
     #[test]
     fn a_family_of_emoji_is_one_wide_glyph() {
         assert_eq!(first("👨\u{200d}👩\u{200d}👧x", 2), [wide("👨\u{200d}👩\u{200d}👧"), narrow("x")]);
     }
 
-    /// A combining mark goes on the letter before it.
     #[test]
     fn a_combining_mark_is_in_the_glyph_of_its_letter() {
         assert_eq!(first("e\u{301}x", 2), [narrow("e\u{301}"), narrow("x")]);
     }
 
-    /// A space the program wrote shows, where a column nothing was written
-    /// to is blank.
     #[test]
     fn a_written_space_is_not_blank() {
         assert_eq!(first("a b", 4), [narrow("a"), narrow(" "), narrow("b"), Glyph::Blank]);
     }
 
-    /// A wide glyph that reaches the last column goes on to the next line,
-    /// and leaves that column showing nothing.
     #[test]
     fn a_wide_glyph_too_long_for_its_line_wraps() {
         let lines = read("123456789👍");
@@ -592,8 +502,6 @@ mod tests {
         assert_eq!(lines[1].cells()[0].glyph, wide("👍"));
     }
 
-    /// A program that turns off joining graphemes gets an emoji and its skin
-    /// tone as two glyphs, and the screen says it no longer joins them.
     #[test]
     fn a_program_may_turn_off_joining_graphemes() {
         let mut screen = screen(10, 2);
@@ -603,8 +511,6 @@ mod tests {
         assert_eq!(glyphs(&screen.view(0).unwrap().lines()[0])[..2], [wide("👍"), wide("🏽")]);
     }
 
-    /// A program that asks its terminal's name is told luneta's server's, by
-    /// the write that asked it, and by no later one.
     #[test]
     fn a_program_that_asks_the_terminals_name_is_answered() {
         let mut screen = screen(10, 2);
@@ -613,7 +519,6 @@ mod tests {
         assert!(answered(&mut screen, b"x").is_empty(), "an answer is given once");
     }
 
-    /// A screen that held what its program drew stops, as told.
     #[test]
     fn a_screen_stops_holding_what_its_program_draws_as_told() {
         let mut screen = screen(10, 2);
@@ -623,8 +528,6 @@ mod tests {
         assert!(!screen.syncs());
     }
 
-    /// A program that asks what its terminal is (DA1) is told, as fish asks
-    /// before it draws its first prompt.
     #[test]
     fn a_program_that_asks_the_terminals_attributes_is_answered() {
         let mut screen = screen(10, 2);
@@ -632,8 +535,6 @@ mod tests {
         assert_eq!(answer, "\x1b[?62;1;6;22;52c");
     }
 
-    /// A glyph keeps the colour and the weight it was written in, and a
-    /// column erased in a colour is blank in it.
     #[test]
     fn a_glyph_keeps_its_style() {
         let mut screen = screen(4, 1);
@@ -646,8 +547,6 @@ mod tests {
         assert!(matches!(cells[1].style.bg_color, StyleColor::Palette(index) if index.0 == 4));
     }
 
-    /// Looked at from back in the scrollback, the screen shows the lines that
-    /// went off its top, and no cursor, as that is below.
     #[test]
     fn a_view_back_in_the_scrollback_shows_older_lines() {
         let mut screen = scrolling(4, 2);
@@ -663,8 +562,6 @@ mod tests {
         assert_eq!(screen.view(0).unwrap(), live, "the view goes back to the bottom");
     }
 
-    /// A resized screen is the new size, and tells a program that asked to be
-    /// told (mode 2048).
     #[test]
     fn a_resize_answers_a_program_that_asked_to_be_told() {
         let mut screen = screen(10, 2);
@@ -674,8 +571,6 @@ mod tests {
         assert_eq!(screen.size(), size(20, 5));
     }
 
-    /// A folder named in what is not UTF-8 is no folder, and the title
-    /// stays.
     #[test]
     fn a_pwd_that_is_not_utf_8_is_none() {
         let mut screen = screen(10, 2);
@@ -684,8 +579,6 @@ mod tests {
         assert_eq!(screen.pwd(), None);
     }
 
-    /// The text dump has every line written, the scrollback's too, and none of
-    /// their styles. The screen dump has the lines shown, styled.
     #[test]
     fn the_dumps_have_the_text_and_the_screen() {
         let mut screen = scrolling(5, 2);
@@ -695,8 +588,6 @@ mod tests {
         assert_eq!(dumped, "two\r\n\x1b[0m\x1b[38;5;1mred\x1b[0m", "{dumped:?}");
     }
 
-    /// A repeat inside left and right margins, after a text variation
-    /// selector, is read: Ghostty's print once overflowed on it (#384).
     #[test]
     fn a_repeat_after_a_variation_selector_in_margins_is_read() {
         let mut screen = screen(6, 1);
@@ -705,8 +596,6 @@ mod tests {
         assert_eq!(screen.dumped_text().unwrap(), "👍👍👍\u{fe0e}");
     }
 
-    /// A joiner after a repeat inside left and right margins is read:
-    /// Ghostty's print once unwrapped a null on it (#384).
     #[test]
     fn a_joiner_after_a_repeat_in_margins_is_read() {
         let mut screen = screen(5, 2);
@@ -715,8 +604,6 @@ mod tests {
         assert_eq!(screen.dumped_text().unwrap(), "中中   ☺\u{200d}👍");
     }
 
-    /// A program that sets 132 columns (DECCOLM), as it may once it allows
-    /// that (mode 40), has the screen erased, and of the size it had.
     #[test]
     fn a_program_does_not_resize_its_screen() {
         let mut screen = screen(10, 2);
@@ -734,10 +621,6 @@ mod tests {
         assert_eq!(answered(&mut screen, edge), b"\x1b[1;10R");
     }
 
-    /// A write says how many rows it pushed into the scrollback, also where
-    /// the scrollback, at its most, lets go of older ones as it does. Where
-    /// it lets go of the rows that were there, or they are erased, they are
-    /// lost.
     #[test]
     fn a_write_says_the_rows_it_pushed_into_the_scrollback() {
         let mut screen = scrolling(10, 2);
@@ -753,8 +636,6 @@ mod tests {
         assert_eq!(screen.write(b"\x1b[3J").unwrap().pushed, Pushed::Lost);
     }
 
-    /// A program that goes to its other screen loses the rows a client may
-    /// look back at, and on it pushes none.
     #[test]
     fn a_write_to_the_other_screen_loses_the_rows() {
         let mut screen = scrolling(10, 2);
@@ -762,9 +643,6 @@ mod tests {
         assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().pushed, Pushed::Rows(0));
     }
 
-    /// A view back in the scrollback goes back by the rows pushed, as far as
-    /// the scrollback goes, and to its top where the rows it was on were
-    /// lost, by one write or a later one. A view at the bottom stays there.
     #[test]
     fn a_view_back_stays_on_its_rows_or_goes_to_the_top() {
         assert_eq!(Pushed::Rows(3).moved(2, 10), 5);
@@ -776,7 +654,6 @@ mod tests {
         assert_eq!(Pushed::Lost.then(Pushed::Rows(2)), Pushed::Lost);
     }
 
-    /// The marks a shell writes come back from the write that ends them.
     #[test]
     fn a_write_gives_back_the_marks_it_ends() {
         let mut screen = screen(10, 2);

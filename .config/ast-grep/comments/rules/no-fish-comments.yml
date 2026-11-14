@@ -1,0 +1,6 @@
+id: no-fish-comments
+language: fish
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  kind: comment

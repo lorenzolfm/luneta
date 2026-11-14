@@ -1,13 +1,3 @@
-//! The pull request of the branch checked out where each pane works, as
-//! `gh pr view` finds it on GitHub.
-//!
-//! GitHub tells no one as a pull request opens, or is merged, so each branch
-//! is asked about again once gh has rested from it for a sweep, and a branch
-//! it has said nothing of yet at once. gh asks across the network, and each
-//! ask counts against the hourly limit GitHub puts on the user, which every
-//! other gh they run shares: panes on one branch of one repository are one
-//! ask, however many directories of it they work in.
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
@@ -30,48 +20,35 @@ use crate::log;
 use crate::program;
 use crate::watch::Troubles;
 
-/// How long gh has to say: it asks GitHub, across the network.
 const LIMIT: Duration = Duration::from_secs(30);
 
-/// How many branches gh is asked about at once, so that one it does not
-/// answer for in time holds up none of the others.
 const ASKS_AT_ONCE: usize = 4;
 
-/// How gh starts what it says of a branch with no pull request, which is no
-/// failure to the daemon: gh fails the same way at anything else.
 const NONE: [&str; 2] = ["no pull requests found", "GraphQL: Could not resolve to a PullRequest"];
 
-/// The pull request gh found of the branch checked out in a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
-    /// The branch, as it was checked out where gh was asked, when it answered.
     pub branch: String,
     pub pull_request: PullRequest,
 }
 
-/// What gh is asked of a pull request: `--json` takes them so, the checks of
-/// its head with them, which cost no other ask.
 const VIEWED: &str = concat!(
     "number,state,isDraft,url,headRefName,headRefOid,author,headRepository,headRepositoryOwner,",
     "statusCheckRollup",
 );
 
-/// A pull request as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
     number: NonZeroU32,
     state: Stands,
-    /// Whether it is a draft, which a closed one can still be.
     is_draft: bool,
-    /// Its page, of the repository gh found it in.
     url: String,
     head_ref_name: String,
     head_ref_oid: String,
     author: Option<Owner>,
     head_repository: Option<HeadRepository>,
     head_repository_owner: Option<Owner>,
-    /// The checks of its head, as `checks` reads them.
     #[serde(default)]
     status_check_rollup: Option<serde_json::Value>,
 }
@@ -81,7 +58,6 @@ struct HeadRepository {
     name: String,
 }
 
-/// A pull request's state, as GitHub spells it.
 #[derive(Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 enum Stands {
@@ -90,7 +66,6 @@ enum Stands {
     Merged,
 }
 
-/// A pull request, with what tells whose head it is, for `prunes`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pulled {
     pub pull_request: PullRequest,
@@ -124,7 +99,6 @@ fn host_of(url: &str) -> Option<&str> {
     url.split_once("://")?.1.split('/').next().filter(|host| !host.is_empty())
 }
 
-/// What gh wrote of a pull request, or why it does not read.
 fn parse(said: &[u8]) -> Result<Pulled, String> {
     let viewed: Viewed = serde_json::from_slice(said).map_err(|error| error.to_string())?;
     let state = match (viewed.state, viewed.is_draft) {
@@ -214,17 +188,12 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     }))
 }
 
-/// What gh said of the branch it was asked about.
 enum Answer {
-    /// The branch was still checked out as gh answered: the pull request gh
-    /// found of it, or none.
     Stayed(Option<Pulled>),
     Partly {
         own: Option<Pulled>,
         why: String,
     },
-    /// Another branch was checked out by the time gh answered, which git has
-    /// yet to see: what gh said was of that one.
     Moved,
 }
 
@@ -290,16 +259,6 @@ fn in_parent(
     Ok(find(dir, Some(&fork.parent.to_string()))?.filter(|found| !stale(found)))
 }
 
-/// What gh says of the pull request of `branch`, checked out in `dir`: the
-/// one it finds, or none, or that `branch` is no longer checked out there.
-/// When gh did not say, as it is not logged in, or did not answer in time,
-/// what is to be said of it instead.
-///
-/// gh finds it as it does in a shell in `dir`, or else in the repository that
-/// one forks, for a branch git names a head of: by the branch's config for
-/// where it pushes the branch. It reads what is checked out as it starts,
-/// where git can have last looked a sweep before, so what is checked out is
-/// read again once gh has answered.
 fn view(dir: &str, (repository, branch): &Branch, forks: &Forks) -> Result<Answer, String> {
     let own = find(dir, None)?;
     let settled = own.as_ref().is_some_and(|found| found.pull_request.state != State::Closed);
@@ -320,12 +279,8 @@ fn standing(was: Option<PullRequest>, own: Option<PullRequest>) -> Option<PullRe
     }
 }
 
-/// A branch of a repository, by the repository's common directory and the
-/// branch's name.
 type Branch = (String, String);
 
-/// Asks gh for what `prunes` needs of it, which only a sweep you asked for
-/// does: one `view` for each worktree, as `follow` asks of a branch.
 #[derive(Default)]
 pub struct Asker {
     forks: Forks,
@@ -382,7 +337,6 @@ pub enum Based {
     Neither,
 }
 
-/// What is based on `branch` of `repository`, of its newest 100.
 pub fn based_on(dir: &str, repository: &RepositoryName, branch: &str) -> Result<Based, String> {
     let asked = format!("gh pr list of {repository} based on {branch}");
     let mut gh = Command::new("gh");
@@ -403,7 +357,6 @@ pub fn based_on(dir: &str, repository: &RepositoryName, branch: &str) -> Result<
     })
 }
 
-/// Who gh is logged in as on `host`.
 pub fn logged_in(host: &str) -> Result<String, String> {
     let mut gh = Command::new("gh");
     git::local(gh.args(["api", "user", "--hostname", host, "--jq", ".login"]));
@@ -422,9 +375,6 @@ struct Lineage {
     fork: Option<Fork>,
 }
 
-/// What gh said each repository is a fork of, by its common directory, with
-/// the remotes it said it for. An ask holds a repository's lock as gh is asked
-/// about it, so that asks of one repository at once ask gh once.
 #[derive(Default)]
 struct Forks(Mutex<HashMap<String, Arc<Mutex<Option<Lineage>>>>>);
 
@@ -442,49 +392,32 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// How long gh rests from a branch before it is asked about it again.
 #[derive(Clone, Copy, Debug)]
 pub struct Rests {
-    /// From one whose pull request has checks yet to end, as they last
-    /// changed: they are what change, and soon. Twice as long each time they
-    /// come to nothing new, up to `settled`, as a job can wait for hours for
-    /// a runner, or for someone to let it run.
     pub pending: Duration,
-    /// From any other.
     pub settled: Duration,
 }
 
-/// What gh said of a branch the last time it answered: when, and the pull
-/// request it found, if it found one.
 struct Said {
     at: Instant,
     found: Option<PullRequest>,
 }
 
-/// Where gh stands with a branch it has been asked about.
 struct Asked {
-    /// When it is to be asked about again.
     next: Instant,
-    /// How long it rests from it until then.
     rest: Duration,
-    /// What it said the last time it answered, if it has.
     said: Option<Said>,
-    /// How many times it failed to answer since.
     failed: u32,
-    /// What went wrong the last time it was asked about, if anything did.
     trouble: Option<String>,
 }
 
 impl Asked {
-    /// The pull request gh found last, stale where it failed since.
     fn found(&self) -> Option<PullRequest> {
         let found = self.said.as_ref()?.found.clone()?;
         Some(PullRequest { stale: self.failed > 0, ..found })
     }
 }
 
-/// Where gh is with a branch: resting from it, or asking about it, from
-/// where it stood with it before, if it had been asked about it.
 enum Ask {
     Resting(Asked),
     Asking(Option<Asked>),
@@ -505,7 +438,6 @@ impl Ask {
         }
     }
 
-    /// When it is to be asked about again: none while it is.
     fn next(&self) -> Option<Instant> {
         match self {
             Ask::Resting(asked) => Some(asked.next),
@@ -514,17 +446,11 @@ impl Ask {
     }
 }
 
-/// What gh said of a branch, from the thread that asked it.
 struct Answered {
     branch: Branch,
     said: Result<Answer, String>,
 }
 
-/// Where gh stands with a branch once it said `said` of it, from where it
-/// stood with it before, if it had been asked about it: what it found last
-/// stands, as stale, where it failed. One whose checks are pending is asked
-/// about again the soonest, once they changed, and twice as late each time
-/// gh says nothing new of them, as they stay as they were or it fails.
 fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> Asked {
     let now = Instant::now();
     let (before, failed, rested) = match was {
@@ -542,7 +468,6 @@ fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> A
     };
     let (said, trouble, failed, new) = match said {
         Ok(Answer::Stayed(found)) => fresh(of(found), None),
-        // The core wakes the thread once git sees the checkout.
         Ok(Answer::Moved) => (before, None, failed, false),
         Ok(Answer::Partly { own, why }) => {
             let own = of(own);
@@ -565,10 +490,6 @@ fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> A
     Asked { next: now + rest, rest, said, failed, trouble }
 }
 
-/// What to say where the checks of a pull request come to otherwise than
-/// they did the last time gh said them, `was`: with how long it had been, and
-/// how many times gh failed to say them in between, which tells a slow sweep
-/// from a failed one.
 fn checks_changed(
     was: &Said,
     now: Option<&PullRequest>,
@@ -602,13 +523,6 @@ fn checks_changed(
     Some(format!("the checks of {named} went from {before} to {after}{said}{failed}"))
 }
 
-/// Asks gh for the pull request of the branch checked out in each directory
-/// a pane works in, a few at a time, each in a thread of its own, and tells
-/// the core: about each branch once gh has rested from it, by `rests`, and
-/// about one it has said nothing of yet as soon as it is `woken`, before
-/// those left. What gh said of a branch it could not answer for stands, as
-/// stale, until it can. A thread that asked wakes it with `wake` once it has
-/// an answer. It ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     wake: SyncSender<()>,
@@ -620,8 +534,6 @@ pub fn follow(
         let forks = Arc::new(Forks::default());
         let (answer, answers) = mpsc::channel();
         let mut troubles = Troubles::default();
-        // The branch in each directory as the core said it last, and the
-        // directories each branch is checked out in, as git said them then.
         let mut seen = None;
         let mut on = BTreeMap::new();
         loop {
@@ -636,10 +548,6 @@ pub fn follow(
             let due = |asked: &HashMap<Branch, Ask>, branch: &Branch| {
                 asked.get(branch).is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
             };
-            // git says the repository of each directory afresh: one a pane
-            // stays in can be cloned over, with a branch of the same name
-            // checked out. It does so as a branch is due, or the core says
-            // another, and not for an answer alone, as each is.
             if seen.as_ref() != Some(&branches) || on.keys().any(|branch| due(&asked, branch)) {
                 on = located(&branches);
                 seen = Some(branches);
@@ -647,12 +555,10 @@ pub fn follow(
             let asking = |ask: &Ask| matches!(ask, Ask::Asking(_));
             asked.retain(|branch, ask| on.contains_key(branch) || asking(ask));
             forks.retain(|repository| on.keys().any(|(of, _)| of == repository));
-            // A directory that came to a branch gh has said of already.
             if !tell(&core, &on, &asked) {
                 return;
             }
             let mut due: Vec<&Branch> = on.keys().filter(|branch| due(&asked, branch)).collect();
-            // Never asked about before all others, then the one due longest.
             due.sort_by_key(|branch| asked.get(*branch).and_then(Ask::next));
             let free = |asked: &HashMap<Branch, Ask>| {
                 ASKS_AT_ONCE.saturating_sub(asked.values().filter(|ask| asking(ask)).count())
@@ -678,8 +584,6 @@ pub fn follow(
                 };
                 asked.insert(branch.clone(), ask);
             }
-            // What went wrong with one that gh rests from has not gone right
-            // since, and is not said again.
             for trouble in asked.values().filter_map(|ask| ask.asked()?.trouble.clone()) {
                 troubles.say(trouble);
             }
@@ -700,8 +604,6 @@ pub fn follow(
     Ok(())
 }
 
-/// The directories each branch is checked out in, by the repository git
-/// says each directory is of, of `branches`, the branch in each directory.
 fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>> {
     let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
     for (dir, branch) in branches {
@@ -712,8 +614,6 @@ fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>>
     on
 }
 
-/// Tells the core the pull request gh found last for the branch in each
-/// directory `on` has it checked out in. False once the core has stopped.
 fn tell(
     core: &SyncSender<core::Command>,
     on: &BTreeMap<Branch, Vec<String>>,
@@ -763,10 +663,6 @@ mod tests {
         }
     }
 
-    /// Where gh fails to say all of a branch, what it said of it before
-    /// stands as stale, and counts as a failure: unless what it said of the
-    /// fork's stands, which is fresh. One that moved off its branch stays as
-    /// stale as it was.
     #[test]
     fn what_gh_failed_to_say_again_stands_as_stale() {
         let rests = Rests { pending: Duration::from_secs(1), settled: Duration::from_hours(1) };
@@ -800,9 +696,6 @@ mod tests {
         assert_eq!((asked.found(), asked.trouble, asked.failed), (Some(stale), None, 1));
     }
 
-    /// gh rests the shortest from checks yet to end, once they changed, and
-    /// twice as long each time it says nothing new of them, as they stay as
-    /// they were or it fails to say them, up to as long as from any other.
     #[test]
     fn checks_that_stay_pending_are_asked_about_less_and_less_often() {
         let rests = Rests { pending: Duration::from_secs(15), settled: Duration::from_mins(2) };
@@ -832,9 +725,6 @@ mod tests {
         assert_eq!(rested, rests);
     }
 
-    /// What the daemon says as a pull request's checks come to otherwise:
-    /// nothing where they come to the same, or it is another pull request, or
-    /// gh found none before.
     #[test]
     fn a_change_in_the_checks_says_how_long_gh_took_to_see_it() {
         let checks = |pending, failed, passed| Some(Checks { pending, failed, passed });
@@ -912,8 +802,6 @@ mod tests {
         }
     }
 
-    /// The head goes by the repository it is on, on the host of the pull
-    /// request's page: a fork's, deleted since, has none, and a ghost no author.
     #[test]
     fn a_pull_request_says_whose_head_it_is() {
         let viewed = |author: &str, repository: &str, owner: &str| {
@@ -941,10 +829,6 @@ mod tests {
         assert_eq!(unnamed.head_repository, None);
     }
 
-    /// A draft is open: one closed or merged is closed or merged, though
-    /// GitHub still says it is a draft. What does not read, as a state GitHub
-    /// has not spelled before, or a number it does not count, or one with no
-    /// page, is no pull request.
     #[test]
     fn a_pull_request_reads_as_gh_writes_it() {
         let read = |said: &str| parse(said.as_bytes()).map(|pulled| pulled.pull_request);

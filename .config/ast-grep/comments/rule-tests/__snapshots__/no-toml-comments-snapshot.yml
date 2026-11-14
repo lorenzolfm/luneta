@@ -1,0 +1,16 @@
+id: no-toml-comments
+snapshots:
+  ? |-
+    # a
+    key = 1
+  : labels:
+    - source: '# a'
+      style: primary
+      start: 0
+      end: 3
+  'key = 1 # a':
+    labels:
+    - source: '# a'
+      style: primary
+      start: 8
+      end: 11

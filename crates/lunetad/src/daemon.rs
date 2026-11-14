@@ -1,28 +1,3 @@
-//! The daemon: one to a folder, and so one to a user on a host.
-//!
-//! A daemon first takes the folder. It makes it, or checks that the one there
-//! is its user's alone, and then takes the lock in it. Only then does it clear
-//! away a socket that a daemon before it left, which by then it knows is no
-//! running daemon's. The kernel lets go of the lock as the process ends,
-//! however it ends, so that a daemon that crashed never keeps the next one
-//! from starting.
-//!
-//! A daemon lives as long as zellij or luneta's own multiplexer has a
-//! session, or a client watches it: once neither has had a session, and no
-//! client has watched it, for `ALONE`, it ends. It takes its socket away
-//! first, while it still holds the folder, so that a luneta that comes for it
-//! then finds none there, and starts the next.
-//!
-//! So a luneta that watches it keeps it, as it would not if every session
-//! were on another machine. So does the daemon of another machine that
-//! watches this one through `luneta bridge`, which would else reach a daemon
-//! that ended every `ALONE`, and started again for it: but only while that
-//! one is kept, as its `WatchRequest` says, as zellij there has a session, or
-//! a client watches it. And a daemon that is not kept asks the machines it
-//! watches nothing, which could start their daemons again through the
-//! bridge. Two daemons that watched each other would else keep each other
-//! running for good, or start each other again, with no one to watch either.
-
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -105,98 +80,43 @@ use crate::{
     Harness,
 };
 
-/// How often a folder is read again with no word that it changed: for a folder
-/// that has yet to turn up, a file that stays cut short, and an agent's process
-/// whose end could not be waited for. zellij is asked about each session's
-/// panes as often, for what changes in them with no word from zellij or a
-/// shell's hook.
 const SWEEP: Duration = Duration::from_secs(2);
 
-/// How often the shells' files are read again with no word that they changed,
-/// and with them the terminals of the commands that run: a command comes to
-/// wait for you to type without a word to any file.
 const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
-/// How long git rests from a work tree, at the least, before it is asked
-/// about it again with no word that it changed: for a file in a directory new
-/// to git, or a work tree across the network. `git status` reads the whole
-/// tree, which takes a large one a while, and git rests from one for as long
-/// as it took over it.
 const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
 
-/// How long a branch rests from a fetch of its upstream before it is fetched
-/// again: a round trip across the network, of each branch a pane works on.
 const FETCH_SWEEP: Duration = Duration::from_mins(5);
 
-/// How long gh rests from a branch before it is asked about its pull request
-/// again. gh asks GitHub, and each ask counts against the hourly limit that
-/// GitHub puts on the user, and that each gh of theirs shares: it rests longer
-/// from those whose checks have ended, to ask sooner of those that have not.
 const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(2);
 
-/// How long gh rests from a branch whose pull request has checks yet to end,
-/// once they changed: twice as long each time they come to nothing new, up to
-/// `PULL_REQUEST_SWEEP`.
 const PENDING_CHECKS_SWEEP: Duration = Duration::from_secs(15);
 
-/// How often the daemon looks for the files luneta keeps that are past their
-/// day, as nothing else takes away the last of a kind, which holds what a
-/// screenshot shows, and memory on most Linuxes.
 const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
-/// How long `Watch` waits for the host to change before it answers with the
-/// host as it was: within the time a client waits for an answer.
 const WATCH: Duration = Duration::from_secs(4);
 
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
-/// The most questions a client has open at once on one connection, which
-/// HTTP/2 tells it: `luneta` asks one.
 const QUESTIONS_MAX: u32 = 16;
 
-/// The most steps of a turn of the ask box's agent that wait to be handed
-/// on: a turn takes a few dozen, and `claude` waits while the client takes
-/// in this many.
 const STEPS_WAITING: usize = 64;
 
-/// What the daemon says of a turn of the ask box's agent that it ran, and
-/// that ended without saying how.
 const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of it failed";
 
-/// How many of a question's bytes the daemon lets a client have on their way
-/// at once, which HTTP/2 tells it. An image is the one question large enough
-/// to fill a line. What is on its way holds up what comes after it on the
-/// line, and so a ping of the bridge's, which closes the connection, and all
-/// on it, unanswered for five seconds. This much takes a second to cross a
-/// line of 1 Mbit/s, and those five at about 200 kbit/s, below which an image
-/// closes the connection it goes on. It holds an image to about 10 Mbit/s
-/// across a line of 100 ms, which a screenshot does not notice.
 const IN_FLIGHT: u32 = 128 * 1024;
 
-/// How long the daemon runs on once neither zellij nor the own multiplexer
-/// has a session, and no client watches it: long enough that ending the last
-/// one and opening another does not end it.
 const ALONE: Duration = Duration::from_secs(30);
 
-/// How long the daemon waits, as it ends, for its clients to go: as long as
-/// a question takes to answer, at the most, and so long enough for each one
-/// asked already. A client that keeps its connection open for longer, as one
-/// that never says anything, would keep it from ever ending, and holding its
-/// folder, with no socket there to reach it by.
 const DRAIN: Duration = client::ANSWER;
 
-/// A folder that this process's daemon holds, and the socket it listens on
-/// there.
 pub struct Claim {
     folder: PathBuf,
     socket: PathBuf,
-    /// Held for as long as the process runs.
     _lock: File,
 }
 
 impl Claim {
-    /// Takes `folder` for this process's daemon, and makes it if it is not
-    /// there.
     pub fn take(folder: &Path) -> Result<Claim, Refusal> {
         folder::make(folder)?;
         let path = folder.join(LOCK);
@@ -214,7 +134,6 @@ impl Claim {
         let socket = folder.join(SOCKET);
         match fs::remove_file(&socket) {
             Ok(()) => {},
-            // No daemon before this one left a socket.
             Err(error) if error.kind() == ErrorKind::NotFound => {},
             Err(error) => return Err(Refusal::Io(socket, error)),
         }
@@ -227,19 +146,9 @@ impl Claim {
     }
 }
 
-/// Listens on the claim's socket and answers there until zellij has had no
-/// session, and no client has watched it, for `ALONE`. It says on stderr that
-/// it listens once it does, which is how whoever started it can tell that it
-/// is ready: by then it has read what runs, and answers with all of it. Then
-/// it says `unkept`, why what goes wrong is kept in no log, where it is not:
-/// not before, so that the first thing one that does not start says is why,
-/// which luneta reads back. As it ends, it answers what it was asked already,
-/// and no more, and waits for its clients to go for `DRAIN` at the most.
 pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     let started = SystemTime::now();
-    // One wake-up is all a thread that asks on a sweep needs, however many
-    // changes made it.
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
@@ -247,8 +156,6 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
     let core = core::start(wakes)?;
     let (end, ending) = oneshot::channel();
-    // Read once, so that the folders the daemon says it reads are the ones it
-    // does.
     let sockets = Zellij::socket_folder();
     let claude_folder = claude::folder();
     let watchers = Arc::new(Watchers::default());
@@ -277,8 +184,6 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let host = Host { started, sockets, claude_folder, core, watchers, bridges };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
-    // Once the daemon has been alone long enough, or the thread that would say
-    // so has ended, which leaves it blind to zellij.
     let ended = async move {
         if ending.await.is_err() {
             log::say("zellij's sessions are no longer followed, and so lunetad ends");
@@ -290,7 +195,6 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
         }
         let _ = begun.send(());
     };
-    // Bounds of the daemon's own, rather than tonic's, which are none.
     let served = tokio::spawn(
         Server::builder()
             .max_concurrent_streams(QUESTIONS_MAX)
@@ -299,9 +203,6 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
             .add_service(DaemonServer::new(host))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
-    // The daemon has begun to end, or the server has ended on its own, which
-    // lets go of `begun`. Either way, the server ends within `DRAIN`, as it
-    // waits for every connection to close.
     let _ = beginning.await;
     match timeout(DRAIN, served).await {
         Ok(Ok(served)) => served.map_err(io::Error::other),
@@ -314,9 +215,6 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     }
 }
 
-/// Takes away the files luneta keeps in its `folder` that are past their day,
-/// as the daemon starts, which takes in what stayed while none ran, and every
-/// `KEEPS_SWEEP` from then on.
 async fn sweep_keeps(folder: PathBuf) {
     let mut sweeps = tokio::time::interval(KEEPS_SWEEP);
     loop {
@@ -328,21 +226,16 @@ async fn sweep_keeps(folder: PathBuf) {
             keeps::sweep_kind(&folder, printed::FOLDER, now);
             keeps::sweep_kind(&folder, checks::FOLDER, now);
         });
-        // One that panicked has said so in the log, and what it left stays for
-        // the next.
         let _ = swept.await;
     }
 }
 
-/// Since when zellij has had no session, and no client has watched the host,
-/// as the daemon has seen it.
 #[derive(Default)]
 struct Alone {
     since: Option<Instant>,
 }
 
 impl Alone {
-    /// For how long the daemon has been alone, as it is `alone` at `now`.
     fn saw(&mut self, alone: bool, now: Instant) -> Duration {
         if !alone {
             self.since = None;
@@ -353,12 +246,6 @@ impl Alone {
     }
 }
 
-/// Has the core told what Claude Code's files in `claude_folder`, the files of
-/// the shells and of pi's agents in luneta's `folder` and zellij's sockets in
-/// `sockets` say, as they change, and says on `end` once neither zellij nor
-/// the own multiplexer has had a session, as `owns` says of the own sessions,
-/// and none of the `watchers` has watched the host, for `ALONE`. Each look
-/// has them say whether the daemon is kept.
 fn follow(
     core: &SyncSender<Command>,
     folder: &Path,
@@ -408,8 +295,6 @@ fn follow(
     let mut alone = Alone::default();
     let mut end = Some(end);
     let tell = move |scan: mux::Scan| {
-        // Looked at on each look, whether zellij has a session or not, so that
-        // only a client that asked since the look before counts.
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
         let sessions = !scan.alone() || owns.load(Ordering::Relaxed);
@@ -425,7 +310,6 @@ fn follow(
                 "zellij has had no session for {secs}s, nor luneta-mux, nor lunetad a watcher"
             );
             log::say(&format!("{none}, and so lunetad ends"));
-            // The server has ended already, if no one waits for the word.
             let _ = end.send(());
         }
         core.send(Command::Sockets { sockets: scan.sockets, unread: scan.unread }).is_ok()
@@ -435,33 +319,17 @@ fn follow(
     watch::watch("zellij", sockets, RecursiveMode::Recursive, wanted, SWEEP, read, tell)
 }
 
-/// Who watches the host: clients, as luneta, and the daemons of other
-/// machines that watch this one and run for reasons of their own, each as its
-/// `WatchRequest` says. A daemon that does not is no one: two daemons that
-/// watched each other would else keep each other running for good.
 #[derive(Default)]
 struct Watchers {
     clients: Watching,
     daemons: Watching,
-    /// How the daemon stands, as it last looked, or a client has come since.
     standing: tokio::sync::watch::Sender<Standing>,
-    /// luneta's windows that watch the host, each as its `WatchRequest` says.
     windows: Watching,
-    /// The daemons of other machines where one of luneta's windows watches
-    /// them, each as its `WatchRequest` says: a machine's window sees only the
-    /// machines its own daemon watches, and so one hop is as far as it goes,
-    /// and two daemons that watch each other do not keep each other shown.
     far_windows: Watching,
-    /// Whether someone sees this machine's agents, here or on another machine,
-    /// as it last looked, or one has come since: only then is a topic worth its
-    /// call.
     shown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Watchers {
-    /// Counts `waiter`, until what this returns is dropped, among those that
-    /// watch the host, and those that show it where it is one: a daemon that
-    /// runs for no reason of its own is no one.
     fn waits(&self, waiter: Waiter) -> Option<(Waits<'_>, Option<Waits<'_>>)> {
         let (watching, showing, standing) = match waiter {
             Waiter::Daemon(Standing::Idle) => return None,
@@ -471,8 +339,6 @@ impl Watchers {
             Waiter::Window => (&self.clients, Some(&self.windows), Some(Standing::Window)),
         };
         let waits = (Waits::on(watching), showing.map(Waits::on));
-        // A client keeps the daemon at once, so that it need not wait for
-        // the next look for the machines the daemon watches to be reached.
         if let Some(standing) = standing {
             self.standing.send_if_modified(|was| {
                 let before = mem::replace(was, (*was).max(standing));
@@ -486,14 +352,10 @@ impl Watchers {
     }
 }
 
-/// Who waits on `Watch`, as its `WatchRequest` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Waiter {
-    /// A question asked once, as `luneta sessions` asks.
     Client,
-    /// One of luneta's windows.
     Window,
-    /// The daemon of another machine, as it stands.
     Daemon(Standing),
 }
 
@@ -507,10 +369,6 @@ impl Waiter {
     }
 }
 
-/// Whether some watch the host: one waits on `Watch` now, or one has asked
-/// since the daemon last looked. A luneta asks again as soon as it is
-/// answered, and so is always one or the other, on this machine or another,
-/// and so is a daemon that watches this machine from another.
 #[derive(Default)]
 struct Watching {
     waiting: AtomicUsize,
@@ -518,15 +376,12 @@ struct Watching {
 }
 
 impl Watching {
-    /// Whether one watches the host. The next look counts only those that
-    /// ask after this one.
     fn looked(&self) -> bool {
         let asked = self.asked.swap(false, Ordering::Relaxed);
         asked || self.waiting.load(Ordering::Relaxed) > 0
     }
 }
 
-/// One that waits on `Watch`.
 struct Waits<'a>(&'a Watching);
 
 impl<'a> Waits<'a> {
@@ -543,17 +398,12 @@ impl Drop for Waits<'_> {
     }
 }
 
-/// What the daemon answers from.
 struct Host {
     started: SystemTime,
-    /// The folder it reads zellij's sessions in.
     sockets: SocketFolder,
-    /// The folder it reads Claude Code's sessions in, if its environment
-    /// named one.
     claude_folder: Option<PathBuf>,
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
-    /// The daemons of the other machines it watches, while it reaches them.
     bridges: Arc<Bridges>,
 }
 
@@ -583,7 +433,6 @@ impl Daemon for Host {
         let after = request.after;
         let watched = match timeout(WATCH, self.watched(after)).await {
             Ok(watched) => watched,
-            // It waited out its time, with the host as it was.
             Err(_) => self.watched(None).await,
         };
         watched.map(Response::new)
@@ -634,8 +483,6 @@ impl Daemon for Host {
         }
         let sockets = self.sockets.clone();
         let found = task::spawn_blocking(move || {
-            // No session here is one luneta's terminal is a pane of: that
-            // luneta's client is on another machine.
             moves::refuge(&sockets, &seats, moves::before)
         });
         let refuge = |moves::Refuge { session, before, .. }| api::Refuge {
@@ -967,9 +814,6 @@ impl Daemon for Host {
         let listed = task::spawn_blocking(Zellij::exited).await;
         let listed = listed.map_err(|error| unfinished(&error))?;
         let listed = listed.map_err(Status::failed_precondition)?;
-        // An age past what a Duration holds, some 292 billion years, is one
-        // zellij said of no session, as a line that does not read: how many
-        // go so goes in the log.
         let exited = |mux::Exited { name, ago }| {
             Some(Exited { name: name.to_string(), ago: Some(ago.try_into().ok()?) })
         };
@@ -1026,7 +870,6 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on)? {
             return daemon.transcript_ends(reading.asked(None)).await;
         }
-        // With no folder to look in, it finds none.
         let Some(projects) = self.claude_folder.as_ref().map(|it| it.join("projects")) else {
             return Ok(Response::new(TranscriptEndsResponse::default()));
         };
@@ -1044,8 +887,6 @@ impl Daemon for Host {
             let steps = daemon.ask(asked.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(steps)));
         }
-        // The server times out a question as it waits for the answer's
-        // start, which the stream is, and never as it waits for the rest.
         let steps = talked(move |wanted, hear| asked.talk(wanted, hear));
         Ok(Response::new(Box::pin(steps)))
     }
@@ -1066,9 +907,6 @@ impl Daemon for Host {
         request: Request<PasteRequest>,
     ) -> Result<Response<Self::PasteStream>, Status> {
         let (on, pasted) = Pasted::of(request.into_inner()).map_err(Status::invalid_argument)?;
-        // A machine this daemon does not reach never heard the question, which
-        // `Code::Unavailable` would not say: a connection lost after it did
-        // says that too.
         let unasked = |why: Status| Status::failed_precondition(why.message());
         if let Some(mut daemon) = self.bridged(on).map_err(unasked)? {
             let answer = daemon.paste(pasted.asked(None)).await?.into_inner();
@@ -1207,8 +1045,6 @@ impl Daemon for Host {
         if let Some(mut daemon) = self.bridged(on)? {
             let image = Image { on: None, size: size.get() };
             let image = KeepImageRequest { part: Some(Part::Image(image)) };
-            // A question that hangs up here ends what goes there short of
-            // its size, which that daemon keeps no file of.
             let rest = parts.map_while(Result::ok);
             let answer = daemon.keep_image(tokio_stream::once(image).chain(rest)).await?;
             return Ok(Response::new(Box::pin(answer.into_inner())));
@@ -1222,10 +1058,6 @@ impl Daemon for Host {
     }
 }
 
-/// Keeps the image `parts` go on with, of `size` bytes, in luneta's folder,
-/// and says where; or why it kept none, as what is no image's bytes came, or
-/// they did not all come by `images::PATIENCE`. It runs on a thread of its
-/// own, and `handle`'s runtime hears the parts.
 fn kept_image(
     handle: &Handle,
     mut parts: Streaming<KeepImageRequest>,
@@ -1251,7 +1083,6 @@ fn kept_image(
     }
 }
 
-/// The logs of the checks that failed, as `KeepChecks` answers with them.
 fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecksResponse {
     let file = |KeptFile { file, lines, left_out }| PrintedFile {
         path: file,
@@ -1269,11 +1100,6 @@ fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecks
     KeepChecksResponse { head, failed: failed.collect(), pending, passed }
 }
 
-/// What `job` answers, from a thread of its own, as a stream of that answer
-/// alone: one that comes as late as the job takes, as the server times out
-/// a question as it waits for the answer's start, which the stream is. The
-/// stream ends with why there is no answer where the job says so, or where
-/// its thread panicked. A question that hangs up first does not stop it.
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
 where
     T: Send + 'static,
@@ -1285,16 +1111,11 @@ where
             Ok(done) => done,
             Err(error) => Err(unfinished(&error)),
         };
-        // The question hung up.
         let _ = answer.send(done).await;
     });
     ReceiverStream::new(answered)
 }
 
-/// What the daemon says of a machine with nowhere for a key of the menu to
-/// go: `Code::NotFound`, for a luneta to ask its other machines, where this
-/// one has none of the repository; `Code::Aborted`, for it to ask no other,
-/// where the worktree may be made; and `Code::FailedPrecondition` otherwise.
 fn unready(why: Unready) -> Status {
     match why {
         Unready::Nowhere(why) => Status::not_found(why),
@@ -1303,11 +1124,6 @@ fn unready(why: Unready) -> Status {
     }
 }
 
-/// What `talk` hears of a turn of the ask box's agent, a step at a time, as
-/// the daemon hands it on, from a thread of its own, as a turn takes as long
-/// as `claude` does. The stream ends as the turn does: well, or with why
-/// not, or with the daemon saying that its runner of the turn failed. A
-/// question that hangs up gives up the turn, as it is no longer `wanted`.
 fn talked<T>(talk: T) -> ReceiverStream<Result<AskResponse, Status>>
 where
     T: FnOnce(&dyn Fn() -> bool, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
@@ -1315,7 +1131,6 @@ where
     let (heard, steps) = tokio::sync::mpsc::channel(STEPS_WAITING);
     let failed = heard.clone();
     let talking = task::spawn_blocking(move || {
-        // The question hung up, which gives the turn up.
         let wanted = || !heard.is_closed();
         let hear = |step: Step| {
             let _ = heard.blocking_send(Ok(step.answer()));
@@ -1324,8 +1139,6 @@ where
             let _ = heard.blocking_send(Err(Status::failed_precondition(why)));
         }
     });
-    // A turn that panicked dropped what it heard with, which alone would end
-    // the stream as a turn that ended well.
     task::spawn(async move {
         if talking.await.is_err() {
             let _ = failed.send(Err(Status::internal(UNTALKED))).await;
@@ -1334,45 +1147,30 @@ where
     ReceiverStream::new(steps)
 }
 
-/// The clients of `session` here, as zellij lists them now, or why not.
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     let listed = Called::named(session)?.mux().clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 
-/// Which session a question is of, as its `whose` says, or why it is
-/// invalid: it says neither, or a time that is none, or an own session of id 0.
 fn whose_of<W: TryInto<Whose, Error = String>>(whose: Option<W>) -> Result<Whose, Status> {
     let neither = || Status::invalid_argument("whose: neither started_at nor own");
     whose.ok_or_else(neither)?.try_into().map_err(Status::invalid_argument)
 }
 
-/// When a session started, as a question says it, or why it is invalid: it
-/// says no time.
 fn started_of<At: TryInto<SystemTime>>(started_at: Option<At>) -> Result<SystemTime, Status> {
     started_at.and_then(|at| at.try_into().ok()).ok_or_else(|| {
         Status::invalid_argument("started_at: it says no time the session started at")
     })
 }
 
-/// `name`, of the question's `field`, as a session's name zellij takes, or
-/// why the question is invalid: it is not one.
 fn named(field: &str, name: &str) -> Result<SessionName, Status> {
     SessionName::running(name).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
 }
 
-/// `dir`, of the question's `field`, as a directory by its absolute path, or
-/// why the question is invalid: one by a path relative to the daemon's own
-/// directory, or by none, would be read as that one, which is no one's.
 fn directory(field: &str, dir: String) -> Result<Directory, Status> {
     Directory::parse(dir).map_err(|why| Status::invalid_argument(format!("{field}: {why}")))
 }
 
-/// What `request` has zellij open, on the machine it names, or why the
-/// question is invalid: it names a session zellij would not take, or a
-/// directory by no absolute path, or it opens neither a pane nor a tab, or a
-/// tab by an empty name, where an absent one has zellij number it, or alone
-/// since no time there is.
 fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     let OpenRequest { on, session, cwd, command, opens } = request;
     let (session, cwd) = (named("session", &session)?, directory("cwd", cwd)?);
@@ -1393,18 +1191,11 @@ fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
     Ok((on, open))
 }
 
-/// Why what the daemon asked of zellij, or of the finder of skills, or what
-/// it read of Claude Code's transcripts, or where a pasted link's key goes,
-/// did not answer: the thread it was asked on panicked.
 fn unfinished(error: &task::JoinError) -> Status {
     Status::internal(format!("lunetad lost its answer: {error}"))
 }
 
 impl Host {
-    /// The daemon of the machine `on` names, where it names one, which the
-    /// question is handed on to; none for this machine; or why not, as one
-    /// this daemon does not reach now, which it then runs ssh to again at
-    /// once, for the next question to find.
     fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
         let Some(api::On { destination }) = on else {
             return Ok(None);
@@ -1416,9 +1207,6 @@ impl Host {
         daemon.map(Some).ok_or_else(unreached)
     }
 
-    /// Asks the core, and waits for its answer. A core with too many
-    /// questions open has the client told that the daemon is busy, rather
-    /// than wait.
     async fn ask<T>(
         &self,
         question: impl FnOnce(oneshot::Sender<T>) -> Command,
@@ -1435,7 +1223,6 @@ impl Host {
         answered.await.map_err(|_| stopped())
     }
 
-    /// The host once it is no longer as `after` saw it.
     async fn watched(&self, after: Option<api::Version>) -> Result<api::Host, Status> {
         let host = self.ask(|answer| Command::Watch { after, answer }).await?;
         host.ok_or_else(|| Status::resource_exhausted("too many clients wait for the host"))
@@ -1454,9 +1241,6 @@ mod tests {
     use crate::asks::Step;
     use crate::remote::Standing;
 
-    /// A question says who waits, and a daemon that runs for no reason of its
-    /// own is no one, whatever else it says. A daemon says of itself what reads
-    /// back as how it stands.
     #[test]
     fn a_watch_request_says_who_waits() {
         let asked = |kept, shown| Waiter::of(&WatchRequest { after: None, kept, shown });
@@ -1471,10 +1255,6 @@ mod tests {
         }
     }
 
-    /// A client keeps the daemon at once, a window has it say so to the machines
-    /// it watches too, and one client after it does not take that back. A daemon
-    /// of another machine shows the host where it says it has a window, but
-    /// never has this one say it has: one hop is as far as a window goes.
     #[test]
     fn only_a_window_here_is_said_to_other_machines() {
         let watchers = Watchers::default();
@@ -1498,9 +1278,6 @@ mod tests {
         assert_eq!(standing(), Standing::Window);
     }
 
-    /// zellij is alone from the first look that finds no session, and a
-    /// session, however short its life, has it start over: ending the last
-    /// one and opening another does not end the daemon.
     #[test]
     fn zellij_is_alone_from_the_first_look_that_finds_no_session() {
         let start = Instant::now();
@@ -1514,8 +1291,6 @@ mod tests {
         assert_eq!(alone.saw(true, at(70)), Duration::from_secs(30));
     }
 
-    /// A turn whose runner failed ends after the steps it heard, with the
-    /// daemon saying so: not as a turn that ended well.
     #[test]
     fn a_turn_whose_runner_failed_does_not_end_well() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

@@ -1,0 +1,7 @@
+id: no-yaml-comments
+valid:
+  - 'key: "# a"'
+  - "key: |\n  # a"
+invalid:
+  - "# a\nkey: value"
+  - "key: value # a"

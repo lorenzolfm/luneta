@@ -1,8 +1,3 @@
-//! `luneta-mux`: luneta's own multiplexer, one server for every own session of
-//! the user. It listens in luneta's runtime folder until its last session
-//! ends, and ends with `folder::ANOTHER_RUNS` where another server holds the
-//! folder already.
-
 use std::process::ExitCode;
 
 use luneta_mux::{folder, serve};

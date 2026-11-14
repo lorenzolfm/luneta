@@ -1,31 +1,16 @@
-//! The sessions zellij keeps to bring back, which ended, of the machine it
-//! runs on, as its CLI lists them, for luneta's picker to list. luneta asks
-//! them of its own machine, and a daemon of its machine for a luneta on
-//! another, whose picker lists this one's.
-
 use std::time::Duration;
 
 use super::{cli, SessionName};
 use crate::log;
 
-/// What follows the name of a session `list-sessions` lists that ended, and
-/// that zellij keeps to bring back.
 const EXITED: &str = "(EXITED - attach to resurrect)";
 
-/// A session that ended, which zellij keeps to bring back: `switch-session`
-/// and `attach` bring it back, and `delete-session` lets it go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exited {
     pub name: SessionName,
-    /// How long before zellij listed it it was made, as zellij says: to the
-    /// second.
     pub ago: Duration,
 }
 
-/// The sessions zellij keeps to bring back, as `list-sessions` lists them
-/// now, or why it did not list them, as in time: zellij's CLI waits on every
-/// session's server, and one that hangs would hold it up for good. How many
-/// `exited_in` left out goes in the log.
 pub fn exited() -> Result<Vec<Exited>, String> {
     let (exited, left_out) = exited_in(&cli::sessions_listed()?);
     if left_out > 0 {
@@ -34,11 +19,6 @@ pub fn exited() -> Result<Vec<Exited>, String> {
     Ok(exited)
 }
 
-/// The sessions that ended among those `listed` lists, a line each, as
-/// `list-sessions --no-formatting` lists them: `<name> [Created 1day 2h 3m
-/// 4s ago] (EXITED - attach to resurrect)`; and how many of the lines of one
-/// that ended it left out, as they do not read so, or are of a name zellij
-/// would not take.
 fn exited_in(listed: &str) -> (Vec<Exited>, usize) {
     let read = |line: &str| {
         let (name, created) = line.trim_end().rsplit_once(" [Created ")?;
@@ -52,8 +32,6 @@ fn exited_in(listed: &str) -> (Vec<Exited>, usize) {
     (exited, left_out)
 }
 
-/// A time as zellij spells one, `1day 2h 3m 4s`, in whole seconds: what it
-/// says under a second goes, and a unit it has no word for, nothing.
 fn spelled_ago(spelled: &str) -> Option<Duration> {
     let mut secs: u64 = 0;
     for word in spelled.split_whitespace() {
@@ -79,10 +57,6 @@ fn spelled_ago(spelled: &str) -> Option<Duration> {
 mod tests {
     use super::*;
 
-    /// The sessions that ended are read from what `list-sessions` lists,
-    /// with how long ago each was made, to the second; the rest are left
-    /// out: those that run, yours, and a line that does not read, which is
-    /// counted, as one of a session that ended.
     #[test]
     fn the_sessions_that_ended_are_read_from_what_zellij_lists() {
         let listed = "bipa [Created 1day 5h 24m 9s ago] \n\

@@ -1,35 +1,21 @@
-//! The clients attached to a zellij session, as `zellij action list-clients`
-//! lists them: each by its id, and the pane it has the focus on. zellij does
-//! not say whose a client is, and luneta finds its own by its id.
-//!
-//! zellij lists a client that is attached, once, in the tab it is on: one
-//! that left is gone from the list, where `list-panes` keeps the focus it had
-//! (`list_clients_metadata` in zellij-server 0.45.1's
-//! `session_layout_metadata.rs`).
-
 use std::ops::Deref;
 
 use super::{laid, Failure, Laid, PaneId};
 use crate::api;
 use crate::mux::SessionName;
 
-/// The line zellij 0.45 starts its list with, which names its columns.
 const HEADER: &str = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
 
 const ID_COLUMNS: usize = 9;
 const PANE_COLUMNS: usize = 14;
 
-/// A client attached to a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Client {
-    /// Its id, which it keeps while it stays in the session.
     pub id: u32,
-    /// The pane it has the focus on.
     pub pane: PaneId,
 }
 
 impl Client {
-    /// As lunetad says it: by the terminal it is on, none on a plugin's pane.
     #[must_use]
     pub fn to_api(self) -> api::Client {
         api::Client { id: self.id, pane: self.pane.terminal() }
@@ -43,8 +29,6 @@ pub struct Listed {
 }
 
 impl Listed {
-    /// `clients`, as a multiplexer that lists each once by an id of its own
-    /// lists them: in the order of their ids, with none set aside.
     #[must_use]
     pub fn of(mut clients: Vec<Client>) -> Self {
         clients.sort_unstable_by_key(|client| client.id);
@@ -67,10 +51,6 @@ impl Deref for Listed {
     }
 }
 
-/// The clients in what zellij listed, by their ids, or why it does not read.
-/// After the line that names the columns, zellij writes one for each client,
-/// by its id: that id, the pane it has the focus on, as `terminal_3` or
-/// `plugin_2`, and what runs there, which can hold spaces and lines of its own.
 fn parse(said: &str, commands: &[(PaneId, String)]) -> Result<Listed, String> {
     let said = said.trim_start();
     let (header, mut rest) = said.split_once('\n').unwrap_or((said, ""));
@@ -117,35 +97,25 @@ fn pane_named(name: &str) -> Option<PaneId> {
     number("terminal_").map(PaneId::Terminal).or_else(|| number("plugin_").map(PaneId::Plugin))
 }
 
-/// What zellij said as it listed a session's clients, where it reads as such
-/// a list: its rows, as many as zellij wrote. A row may be one that a command
-/// of many lines quotes, which only the session's panes tell.
 pub(super) struct Said {
     said: String,
     rows: Listed,
 }
 
-/// What zellij `said` as it listed clients, or why it is no such list.
 pub(super) fn said(said: &str) -> Result<Said, String> {
     let rows = parse(said, &[]).map_err(|why| unreadable(&why))?;
     Ok(Said { said: said.to_owned(), rows })
 }
 
 impl Said {
-    /// Whether it lists a client: its first row is one, as a command can
-    /// quote only rows after its own.
     pub(super) fn any(&self) -> bool {
         !self.rows.is_empty()
     }
 
-    /// Every row it lists: each client, and each row a command quotes.
     pub(super) fn rows(&self) -> Vec<Client> {
         self.rows.iter().chain(self.rows.set_aside()).copied().collect()
     }
 
-    /// The clients it lists, a row that a command of many lines quotes
-    /// skipped by that command, as zellij lists the panes of `session` now;
-    /// or why it did not list them. Of one row, none is quoted.
     pub(super) fn clients(self, session: &SessionName) -> Result<Listed, Failure> {
         if self.rows.len() + self.rows.set_aside().len() < 2 {
             return Ok(self.rows);
@@ -171,8 +141,6 @@ mod tests {
         parse(said, &[]).map(|listed| listed.to_vec())
     }
 
-    /// As zellij 0.45.1 pads its columns, a plugin's pane with its URL for
-    /// what runs, and a command with spaces in it.
     #[test]
     fn each_client_is_read_by_its_id_and_its_terminal() {
         let said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n\
@@ -263,7 +231,6 @@ mod tests {
         assert_eq!(read(&wide), Ok(vec![Client { id: 1, pane: PaneId::Terminal(1_234_567) }]));
     }
 
-    /// lunetad says no plugin's pane to what reads it, which goes by terminals.
     #[test]
     fn lunetad_says_the_terminal_a_client_is_on_and_no_plugin() {
         let said = |pane| Client { id: 1, pane }.to_api().pane;

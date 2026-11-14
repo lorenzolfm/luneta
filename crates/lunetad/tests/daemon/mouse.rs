@@ -1,7 +1,3 @@
-//! What zellij hears of the mouse and the keys as a press goes down on the
-//! sidebar: a luneta on a terminal of the test's, which sends what a terminal
-//! sends, beside a client of zellij's that notes all it hears.
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixListener;
@@ -11,23 +7,16 @@ use std::thread;
 use crate::host::{eventually, Host, Running};
 use crate::starts::{directory, luneta, runs, spawn_on, terminal, Directory};
 
-/// Cells of the sidebar's title, `─ luneta ─`: its first letter and its last,
-/// further apart than a click's slack.
 const TITLE_START: (u16, u16) = (2, 0);
 const TITLE_END: (u16, u16) = (7, 0);
-/// Cells of zellij's, past the sidebar.
 const OVER_ZELLIJ: (u16, u16) = (60, 5);
 const FURTHER_ON: (u16, u16) = (62, 6);
 
-/// What a terminal sends for `Esc`, and for `Ctrl a`, which gives the keys to
-/// the sidebar and back.
 const ESC: &str = "\x1b[27u";
 const SWAP: &str = "\x1b[97;5u";
 
-/// A key, which a client hearing it tells that it heard all sent before it.
 const END: &str = "k";
 
-/// What a terminal sends for `code` at a cell, ending in `last`: `m` for a release.
 fn report(code: u8, (x, y): (u16, u16), last: char) -> String {
     format!("\x1b[<{code};{};{}{last}", x + 1, y + 1)
 }
@@ -44,8 +33,6 @@ fn release(at: (u16, u16)) -> String {
     report(0, at, 'm')
 }
 
-/// A luneta on a terminal of the test's, drawn, beside a client of zellij's
-/// that hears the mouse.
 struct Window {
     typed: File,
     said: Arc<Mutex<Vec<u8>>>,
@@ -63,7 +50,6 @@ impl Window {
         let typed = File::from(controller.try_clone().unwrap());
         let said = Arc::new(Mutex::new(Vec::new()));
         let reading = Arc::clone(&said);
-        // Read all along, so that nothing waits on a write.
         thread::spawn(move || {
             let mut controller = File::from(controller);
             let mut read = [0; 4096];
@@ -80,7 +66,6 @@ impl Window {
         let mut window =
             Window { typed, said, _luneta: running, _session: session, _directory: dir };
         eventually("luneta draws its sidebar", || window.said().contains("─ luneta").then_some(()));
-        // A click over zellij, again until its client has taken the mouse.
         eventually("zellij's client hears the mouse", || {
             window.send(&format!("{}{}", press(OVER_ZELLIJ), release(OVER_ZELLIJ)));
             host.zellij.heard().contains("\x1b[<0;").then_some(())
@@ -97,12 +82,10 @@ impl Window {
         String::from_utf8_lossy(&self.said.lock().unwrap()).into_owned()
     }
 
-    /// How many times luneta has asked its terminal to copy something.
     fn copies(&self) -> usize {
         self.said().matches("\x1b]52;c;").count()
     }
 
-    /// What zellij's client hears of `sent`, and of `END` after it.
     fn heard(&mut self, host: &Host, sent: &str) -> String {
         let before = host.zellij.heard().len();
         self.send(&format!("{sent}{END}"));
@@ -113,9 +96,6 @@ impl Window {
     }
 }
 
-/// A sweep is copied on luneta's terminal. zellij hears nothing of it, as it
-/// goes over zellij and lets go there too, nor of a key pressed along the way:
-/// the `Esc` that would let go of it can interrupt an agent in a pane.
 #[test]
 fn zellij_hears_nothing_of_a_sweep_on_the_sidebar() {
     let host = Host::new();
@@ -123,7 +103,6 @@ fn zellij_hears_nothing_of_a_sweep_on_the_sidebar() {
 
     let along = [press(TITLE_START), drag(TITLE_END), release(TITLE_END)].concat();
     assert_eq!(window.heard(&host, &along), END);
-    // `luneta`, as OSC 52 spells it.
     assert!(window.said().contains("\x1b]52;c;bHVuZXRh\x07"));
 
     let over = [press(TITLE_START), drag(TITLE_END), drag(OVER_ZELLIJ), release(OVER_ZELLIJ)];
@@ -135,11 +114,6 @@ fn zellij_hears_nothing_of_a_sweep_on_the_sidebar() {
     assert_eq!(window.copies(), 2);
 }
 
-/// A press the sidebar let go of with the button still down, by `Esc` or by the
-/// keys leaving it, is no press of zellij's as the hand goes on over it and lets
-/// go there: zellij takes the first drag it hears of a button it did not hear go
-/// down for a press there, and would click in the pane, focus it, or select what
-/// the release then copies, over what `Esc` was to leave on the clipboard.
 #[test]
 fn a_press_let_go_of_with_the_button_down_is_no_press_of_zellij_s() {
     let host = Host::new();
@@ -153,9 +127,6 @@ fn a_press_let_go_of_with_the_button_down_is_no_press_of_zellij_s() {
     assert_eq!(window.copies(), 0);
 }
 
-/// zellij hears all a button does that it heard go down, though another button
-/// came up meanwhile: left with the first held, a program in a pane would drag
-/// on after it let go.
 #[test]
 fn zellij_hears_a_button_it_heard_go_down_to_its_release() {
     let host = Host::new();
@@ -167,9 +138,6 @@ fn zellij_hears_a_button_it_heard_go_down_to_its_release() {
     assert_eq!(heard.matches('m').count(), 2, "{heard:?}");
 }
 
-/// A window losing the focus lets go of a press on the sidebar, whose release
-/// may go elsewhere and never come: the keys go to zellij again, with the
-/// pointer still, and zellij hears nothing of the rest of the press.
 #[test]
 fn a_window_that_loses_the_focus_lets_go_of_a_press() {
     let host = Host::new();

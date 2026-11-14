@@ -1,0 +1,45 @@
+id: no-rust-comments
+snapshots:
+  ? |-
+    /* a */
+    fn f() {}
+  : labels:
+    - source: /* a */
+      style: primary
+      start: 0
+      end: 7
+  ? |-
+    // a
+    fn f() {}
+  : labels:
+    - source: // a
+      style: primary
+      start: 0
+      end: 4
+  //! a:
+    labels:
+    - source: //! a
+      style: primary
+      start: 0
+      end: 5
+  ? |-
+    /// a
+    fn f() {}
+  : labels:
+    - source: |
+        /// a
+      style: primary
+      start: 0
+      end: 6
+  fn f() { g(/* a */) }:
+    labels:
+    - source: /* a */
+      style: primary
+      start: 11
+      end: 18
+  fn f() {} // a:
+    labels:
+    - source: // a
+      style: primary
+      start: 10
+      end: 14

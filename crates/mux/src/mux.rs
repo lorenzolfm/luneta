@@ -1,10 +1,3 @@
-//! The server's sessions, their tabs and the pane of each, and the clients on
-//! them: one model behind one lock, which every change goes through, and which
-//! tells the watchers of each.
-//!
-//! Ids are counted up from 1 and never given again, so a session, a tab or a
-//! pane keeps its id until it ends, and a rename changes only its name.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,27 +12,19 @@ use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::pane::{self, Busy, Exit, Handle, Out, ToPane, Viewer};
 use crate::pty::{self, Pty};
 
-/// The size a pane starts at, until a client comes to it.
 const FIRST_SIZE: Size = Size {
     columns: std::num::NonZeroU16::new(80).unwrap(),
     rows: std::num::NonZeroU16::new(24).unwrap(),
 };
 
-/// The most sessions a server holds.
 pub const SESSIONS_MAX: usize = 256;
 
-/// The most tabs a server holds, across its sessions: each has a pane, with
-/// its program, its pseudoterminal, two threads and its scrollback.
 pub const TABS_MAX: usize = 1024;
 
-/// The most clients a server holds.
 pub const CLIENTS_MAX: usize = 256;
 
-/// The model, and the watchers of it.
 pub struct Mux {
     model: Mutex<Model>,
-    /// The sessions as they stand, for the watchers: none once the last ended,
-    /// and the server with it.
     listing: watch::Sender<Option<api::Listing>>,
 }
 
@@ -48,12 +33,9 @@ struct Model {
     last: Ids,
     sessions: Vec<Session>,
     clients: BTreeMap<ClientId, Seat>,
-    /// Whether the last session ended, which ends the server: it makes none
-    /// after.
     ended: bool,
 }
 
-/// The last id given of each kind.
 #[derive(Default)]
 struct Ids {
     session: Option<SessionId>,
@@ -65,28 +47,20 @@ struct Ids {
 
 struct Session {
     id: SessionId,
-    /// When the server made it, which `id` tells it from the sessions of
-    /// every other server by.
     made: SystemTime,
     name: SessionName,
     tabs: Tabs,
     last_typed: Option<ClientId>,
 }
 
-/// A session's tabs, in their order and never none, and the one a client
-/// coming to the session goes to.
 struct Tabs {
     tabs: Vec<Tab>,
     current: usize,
 }
 
-/// What became of a session's tabs as one of them closed.
 enum Closed {
-    /// It was none of them.
     Absent,
-    /// It was the last, which stays for the session to end with.
     Last,
-    /// It is out of them, and its clients go to the pane `next`.
     Out { tab: Box<Tab>, next: PaneId },
 }
 
@@ -100,30 +74,22 @@ struct Tab {
 struct Pane {
     id: PaneId,
     title: String,
-    /// Where the program last said it works, on this machine, or else where
-    /// the pane opened.
     cwd: PathBuf,
     program: Program,
     handle: Handle,
 }
 
-/// The program a pane started: it runs, or it ended, in a tab that holds.
 enum Program {
-    /// It runs, with the leader of the group in front of its terminal, and
-    /// what its shell said, as its thread last looked.
     Runs { pid: u32, foreground: Option<api::Foreground>, ran: Option<api::Ran> },
     Ended(Exit),
 }
 
-/// Where a client is, and what it is.
 struct Seat {
     pane: PaneId,
     size: Size,
     colours: Colours,
     out: Out,
-    /// When it came to its pane, by the count of the comings.
     came: u64,
-    /// Dropped as the seat is, which ends the client's stream.
     _gone: oneshot::Sender<()>,
 }
 
@@ -134,13 +100,10 @@ impl Mux {
         Arc::new(Mux { model: Mutex::new(Model::default()), listing })
     }
 
-    /// The sessions as they stand, then each time they change, then none as
-    /// the server ends.
     pub fn watched(&self) -> watch::Receiver<Option<api::Listing>> {
         self.listing.subscribe()
     }
 
-    /// Ends the server where no session was ever made in it.
     pub fn end_if_unused(&self) {
         self.change(|model| {
             if model.sessions.is_empty() {
@@ -153,7 +116,6 @@ impl Mux {
         self.model.lock().expect("a thread panicked while it held the model")
     }
 
-    /// Runs `change` on the model, and tells the watchers what it changed.
     fn change<T>(&self, change: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.lock();
         let changed = change(&mut model);
@@ -232,7 +194,6 @@ impl Mux {
         })
     }
 
-    /// Takes the client `who` names to `to`, and says which it took.
     pub fn go(&self, who: Who, to: Place) -> Result<ClientId, Status> {
         self.change(|model| {
             let client = match who {
@@ -244,7 +205,6 @@ impl Mux {
         })
     }
 
-    /// What reaches pane `pane`.
     pub fn pane(&self, pane: PaneId) -> Result<Handle, Status> {
         Ok(self.lock().pane_at(pane)?.1.pane.handle.clone())
     }
@@ -253,8 +213,6 @@ impl Mux {
         self.lock().listing()
     }
 
-    /// Takes a client in, as `hello` says, with `out` for what goes to it,
-    /// and says its id. Its stream ends as `gone` drops, once it is let go of.
     pub fn attach(
         &self,
         hello: Hello,
@@ -282,13 +240,10 @@ impl Mux {
         })
     }
 
-    /// Lets go of a client that went.
     pub fn detach(&self, client: ClientId) {
         self.change(|model| model.drop_client(client));
     }
 
-    /// What reaches the pane `client` is on, for its input, which `types`
-    /// where it is typing. None where the client was let go of.
     pub fn input(&self, client: ClientId, types: bool) -> Option<Handle> {
         let mut model = self.lock();
         let pane = model.clients.get(&client)?.pane;
@@ -300,8 +255,6 @@ impl Mux {
         Some(handle)
     }
 
-    /// Notes that `client` is now `size`, and gives back what reaches the
-    /// pane it is on. None where the client was let go of.
     pub fn resize(&self, client: ClientId, size: Size) -> Option<Handle> {
         self.change(|model| {
             let seat = model.clients.get_mut(&client)?;
@@ -312,8 +265,6 @@ impl Mux {
         })
     }
 
-    /// Closes the tab of pane `pane`, whose thread failed, whatever it was
-    /// opened to do as its program ends.
     pub fn lost(&self, pane: PaneId) {
         self.change(|model| {
             if let Ok((session, tab)) = model.pane_at(pane) {
@@ -323,8 +274,6 @@ impl Mux {
         });
     }
 
-    /// Notes what pane `pane`'s program last titled it, and where on this
-    /// machine it last said it works, if it did.
     pub fn titled(&self, pane: PaneId, title: String, cwd: Option<PathBuf>) {
         self.change(|model| {
             if let Some(pane) = model.pane_mut(pane) {
@@ -336,7 +285,6 @@ impl Mux {
         });
     }
 
-    /// Notes what runs in front in pane `pane`, and what its shell said.
     pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
         self.change(|model| {
             if let Some(Pane { program: Program::Runs { foreground: was, ran: said, .. }, .. }) =
@@ -347,8 +295,6 @@ impl Mux {
         });
     }
 
-    /// Notes that pane `pane`'s program ended, as `exit` says, and says
-    /// whether the pane went with it.
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
         self.change(|model| {
             let Ok((session, tab)) = model.pane_at(pane) else {
@@ -390,11 +336,6 @@ impl Model {
         Ok(())
     }
 
-    /// A tab named `name` in session `session`, made at the time it says,
-    /// whose pane runs what `opens` says. Its pseudoterminal is opened and its
-    /// program started under the model's lock, so no other pane's program
-    /// starts meanwhile and takes the pseudoterminal's end along before it is
-    /// closed on exec.
     fn tab(
         &mut self,
         mux: &Arc<Mux>,
@@ -477,8 +418,6 @@ impl Model {
             .find(|found| found.id == pane)
     }
 
-    /// The pane a client going to `place` goes to, or why none: a place of a
-    /// session made at another time is of a server before this one.
     fn pane_of_place(&self, place: Place) -> Result<PaneId, Status> {
         let (session, pane) = match place.is {
             Is::Tab(tab) => {
@@ -500,8 +439,6 @@ impl Model {
         self.clients.get(&client).ok_or_else(|| Status::not_found(format!("no client {client}")))
     }
 
-    /// The client that last typed in `session`, or else the one that came to
-    /// it last.
     fn last_typed_in(&self, session: SessionId) -> Result<ClientId, Status> {
         let found = self.session(session)?;
         let on = |client: &ClientId| {
@@ -522,16 +459,12 @@ impl Model {
             })
     }
 
-    /// Takes `client` to the pane of `to`.
     fn take(&mut self, client: ClientId, to: Place) -> Result<(), Status> {
         self.seat(client)?;
         let pane = self.pane_of_place(to)?;
         self.seat_on(client, pane)
     }
 
-    /// Puts `client` on pane `pane`, and tells it so. The client stays where
-    /// it was where the pane it leaves or the pane it goes to has no room in
-    /// its queue, and a client that takes no more messages is let go of.
     fn seat_on(&mut self, client: ClientId, pane: PaneId) -> Result<(), Status> {
         let (session, tab) = self.pane_at(pane).expect("a client is seated on a pane of the model");
         let (session, tab, to) = (session.id, tab.id, tab.pane.handle.clone());
@@ -572,9 +505,6 @@ impl Model {
         Ok(())
     }
 
-    /// Lets go of `client`, which ends its stream. Its pane is told, where it
-    /// is still in the model and its queue has room, and else finds the
-    /// stream ended at its next frame.
     fn drop_client(&mut self, client: ClientId) {
         let Some(seat) = self.clients.remove(&client) else {
             return;
@@ -586,9 +516,6 @@ impl Model {
         }
     }
 
-    /// Closes tab `tab` of session `session`, hangs up its pane, and takes the
-    /// clients on it to the tab before it, or the one after. A session whose
-    /// last tab it was ends.
     fn close(&mut self, session: SessionId, tab: TabId) {
         let Ok(found) = self.session_mut(session) else {
             return;
@@ -615,8 +542,6 @@ impl Model {
         }
     }
 
-    /// Ends session `session`: hangs up its panes, tells its clients and lets
-    /// go of them. The server ends with its last session.
     fn end(&mut self, session: SessionId) {
         let Some(place) = self.sessions.iter().position(|found| found.id == session) else {
             return;
@@ -712,15 +637,11 @@ impl Tabs {
         self.tabs.push(tab);
     }
 
-    /// Makes tab `tab`, which is one of them, the one a client coming goes to.
     fn make_current(&mut self, tab: TabId) {
         let place = self.tabs.iter().position(|found| found.id == tab);
         self.current = place.expect("a tab of the session is made current");
     }
 
-    /// Takes tab `tab` out, where it is one of them and not the last. Its
-    /// clients go to the tab before it, or else the one after, which is
-    /// current where it was.
     fn close(&mut self, tab: TabId) -> Closed {
         let Some(place) = self.tabs.iter().position(|found| found.id == tab) else {
             return Closed::Absent;
@@ -737,7 +658,6 @@ impl Tabs {
     }
 }
 
-/// Refuses one more where `count` already reached `max` of `what`.
 fn refuse_if_full(count: usize, max: usize, what: &str) -> Result<(), Status> {
     if count < max {
         return Ok(());

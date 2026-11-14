@@ -1,14 +1,8 @@
-//! Claude Code's session files that lunetad cannot read, as its answers count
-//! them and say where the process of each runs. What the agent of one is
-//! doing, no one can tell: a delete that would end it asks first, and one
-//! luneta cannot place makes every delete ask.
-
 use std::fmt;
 use std::num::NonZeroU32;
 
 use crate::v1;
 
-/// How many of Claude Code's session files lunetad cannot read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unread(pub NonZeroU32);
 
@@ -18,15 +12,9 @@ impl fmt::Display for Unread {
     }
 }
 
-/// How many of the session files lunetad cannot read it cannot place either,
-/// of how many it cannot read: their agents may be in any pane of any
-/// session. It says both, as the sidebar and the CLI say how many it cannot
-/// read beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unplaced {
-    /// How many it cannot read.
     unread: NonZeroU32,
-    /// How many of those it cannot place.
     unplaced: NonZeroU32,
 }
 
@@ -51,42 +39,29 @@ impl fmt::Display for Unplaced {
 }
 
 impl v1::Host {
-    /// How many of Claude Code's session files lunetad cannot read, if any.
     #[must_use]
     pub fn unread_count(&self) -> Option<Unread> {
         NonZeroU32::new(self.unread).map(Unread)
     }
 
-    /// Where the agents of the session files lunetad cannot read run, as
-    /// `seats` tells them.
     pub fn unread_seats(&self) -> Result<Vec<(&str, u32)>, Unplaced> {
         seats(self.unread, &self.unread_files)
     }
 }
 
 impl v1::ListAgentsResponse {
-    /// How many of Claude Code's session files lunetad cannot read, if any.
     #[must_use]
     pub fn unread_count(&self) -> Option<Unread> {
         NonZeroU32::new(self.unread).map(Unread)
     }
 
-    /// Where the agents of the session files lunetad cannot read run, as
-    /// `seats` tells them.
     pub fn unread_seats(&self) -> Result<Vec<(&str, u32)>, Unplaced> {
         seats(self.unread, &self.unread_files)
     }
 }
 
-/// Where the agent of each of the `unread` session files lunetad cannot read
-/// runs, by its session and its pane, as `files` lists them: one outside
-/// zellij ends with no delete. Or how many luneta cannot place: one whose
-/// session lunetad cannot follow, and each that a daemon older than
-/// `unread_files` counts and does not list. A machine's host, as another's
-/// daemon says it, tells them as this one's does.
 pub fn seats(unread: u32, files: &[v1::UnreadFile]) -> Result<Vec<(&str, u32)>, Unplaced> {
     let listed = u32::try_from(files.len()).unwrap_or(u32::MAX);
-    // A file listed is one it cannot read, counted or not.
     let unread = unread.max(listed);
     let mut unplaced = unread - listed;
     let mut seats = Vec::with_capacity(files.len());
@@ -124,10 +99,6 @@ mod tests {
         Unplaced::new(count(unread), count(unplaced))
     }
 
-    /// Each file is where its process runs, and one outside zellij nowhere a
-    /// delete ends it. One whose session lunetad cannot follow could be in
-    /// any, and so could each one a daemon older than the list counts alone.
-    /// Of how many it cannot read, a file listed counts, whatever the count.
     #[test]
     fn a_file_is_where_its_process_runs_unless_lunetad_cannot_follow_it() {
         let placed = [file(10, Some(("work", Some("play"), 3))), file(11, None)];
@@ -141,8 +112,6 @@ mod tests {
         assert_eq!(seats(1, &lost), Err(unplaced(2, 1)));
     }
 
-    /// The count and the files it cannot place, in words: all of those it
-    /// cannot read, or some of them.
     #[test]
     fn it_says_how_many_files_it_cannot_read_and_place() {
         let one = NonZeroU32::new(1).unwrap();

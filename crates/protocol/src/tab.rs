@@ -1,8 +1,3 @@
-//! A tab's name, as zellij lists it, and the daemon's clients have it from
-//! the daemon.
-
-/// The name of a tab, if someone gave it one: zellij names a tab `Tab #N`
-/// until then.
 #[must_use]
 pub fn named(tab: &str) -> Option<&str> {
     let number = tab.strip_prefix("Tab #");

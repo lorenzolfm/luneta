@@ -1,0 +1,6 @@
+id: no-typescript-comments
+language: typescript
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  kind: comment

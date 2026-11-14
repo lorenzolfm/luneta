@@ -1,6 +1,3 @@
-//! The host as `Watch` gives it: zellij's sessions and their panes, how the
-//! work trees the panes work in stand, and when it answers.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -25,8 +22,6 @@ use serde_json::json;
 use crate::host::{eventually, folder_in, start, Host, LUNETA};
 
 impl Host {
-    /// `luneta watch`, with `--after` as `after` gives it, and how long it
-    /// took to answer.
     fn watch(&self, after: Option<Version>) -> (api::Host, Duration) {
         let mut command = self.vars().command(LUNETA);
         command.arg("watch");
@@ -45,8 +40,6 @@ pub fn session<'a>(host: &'a api::Host, name: &str) -> Option<&'a api::Session> 
     host.sessions.iter().find(|session| session.name == name)
 }
 
-/// A pane as zellij 0.45.1's `list-panes --json` spells it, cut down to what
-/// tells one apart.
 pub fn listed(id: u32, title: &str, tab: (u32, &str), cwd: Option<&str>) -> serde_json::Value {
     json!({
         "id": id,
@@ -81,12 +74,6 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
     }
 }
 
-/// A session is on the host as soon as its socket is, before zellij has said
-/// what panes it has, which takes zellij's own list of sessions about a
-/// second. Its panes are its terminals on screen: a plugin's pane is none,
-/// and a terminal another stands in the place of is off the screen. What
-/// zellij leaves empty, the daemon says nothing of, but what it said before
-/// stands when it says nothing for being busy.
 #[test]
 fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them() {
     let host = Host::new();
@@ -127,9 +114,6 @@ fn a_session_is_there_as_its_socket_is_and_has_its_panes_once_zellij_lists_them(
     assert_eq!(panes.panes[0], pane(3, (0, "Tab #1"), Some("/home/you/work")));
 }
 
-/// zellij writes what it keeps of a session within a second of a pane or a
-/// tab opening or closing, and the daemon asks about the session again as it
-/// does, ahead of its sweep.
 #[test]
 fn a_session_is_asked_about_again_as_zellij_writes_that_it_changed() {
     let host = Host::new();
@@ -152,10 +136,6 @@ fn a_session_is_asked_about_again_as_zellij_writes_that_it_changed() {
     assert!(wrote.elapsed() < Duration::from_secs(1), "{:?}", wrote.elapsed());
 }
 
-/// A session whose server hangs holds the daemon up for as long as it waits
-/// on zellij, and no longer, however often zellij writes what it keeps of
-/// another: that one is asked about before the hung one is due again, though
-/// the hung one, never listed, goes first.
 #[test]
 fn a_session_that_hangs_holds_the_others_up_no_longer_than_it_is_asked_about() {
     let host = Host::new();
@@ -174,8 +154,6 @@ fn a_session_that_hangs_holds_the_others_up_no_longer_than_it_is_asked_about() {
     let opening = Instant::now();
     let done = AtomicBool::new(false);
     thread::scope(|scope| {
-        // As the pane opens, and as zellij is asked about work anew after,
-        // for as long as `eventually` waits at the most.
         scope.spawn(|| {
             for age in 2..80 {
                 if done.load(Ordering::Relaxed) {
@@ -191,12 +169,9 @@ fn a_session_that_hangs_holds_the_others_up_no_longer_than_it_is_asked_about() {
         });
         done.store(true, Ordering::Relaxed);
     });
-    // zellij is given 2s for the panes of stuck, and as long for its clients.
     assert!(opening.elapsed() < Duration::from_secs(7), "{:?}", opening.elapsed());
 }
 
-/// What zellij 0.45 keeps of a session `age` seconds after it began, cut
-/// down: each of its panes, by its id and the position of its tab.
 fn kept(panes: &[(u32, u32)], age: u32) -> String {
     let pane = |&(id, tab): &(u32, u32)| {
         format!("    pane {{\n        id {id}\n        tab_position {tab}\n    }}\n")
@@ -208,10 +183,6 @@ fn client(id: u32, pane: Option<u32>) -> api::Client {
     api::Client { id, pane }
 }
 
-/// A session has its clients once zellij lists them, none at first: each by
-/// its id, and the terminal it has the focus on, or none for a plugin's pane.
-/// One that moves its focus changes the host, and a `Watch` that waits for a
-/// change answers with it.
 #[test]
 fn a_session_has_its_clients_once_zellij_lists_them() {
     let host = Host::new();
@@ -298,10 +269,6 @@ fn clients_wait_for_the_panes_that_say_which_rows_a_command_quotes() {
     assert_eq!(clients.clients, [client(1, Some(0)), client(2, Some(1))]);
 }
 
-/// Where zellij lists two clients or more of a session and does not list its
-/// panes in time, the clients fail as the panes did, at once: zellij is not
-/// asked for them again, which would keep the daemon past the time luneta
-/// waits for it.
 #[test]
 fn clients_fail_at_once_where_their_panes_do_not_answer_in_time() {
     let host = Host::new();
@@ -322,10 +289,6 @@ fn clients_fail_at_once_where_their_panes_do_not_answer_in_time() {
     assert_eq!(failed.message(), "zellij: it did not answer in time");
 }
 
-/// A session whose panes do not list still answers for its clients, and a
-/// client that ended goes on in it: before it comes there, the session has
-/// every row zellij lists, those a command quotes too, so that none of them
-/// is taken for the client that came.
 #[test]
 fn a_client_goes_on_in_a_session_whose_panes_do_not_list() {
     let command = "claude Fix this.\n\nzellij lists:\n7         terminal_4     N/A\nThanks";
@@ -358,13 +321,6 @@ fn a_client_goes_on_in_a_session_whose_panes_do_not_list() {
     assert_eq!(found.ended, Some(Ended::Went(Went { refuge })));
 }
 
-/// What an agent says in a pane's title is on the host, without the glyph the
-/// agent leads it with, so that the frame Claude Code turns there while it
-/// works leaves the host as it was. A bare `Claude Code` is an agent's title
-/// with no topic, and a title that leads with no such glyph, as a shell's, is
-/// no agent's. The pane works nowhere zellij says, so that git's word on where
-/// it works changes the host at no moment the test counts on. The test waits
-/// out two sweeps.
 #[test]
 fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
     let host = Host::new();
@@ -376,8 +332,6 @@ fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
         let panes = session(host, "work")?.panes.clone()?;
         panes.panes[0].titled.clone()
     };
-    // zellij lists the session's clients after its panes, which changes the
-    // host once more as it first does.
     let topic_is = |what: &str, wanted: Option<&str>| {
         eventually(what, || {
             let now = host.host();
@@ -405,10 +359,6 @@ fn an_agent_s_title_is_on_the_host_without_the_frame_it_turns() {
     });
 }
 
-/// What zellij lists that does not read, the daemon says it cannot, and what
-/// zellij listed before stands: a pane that leaves out whether it is a
-/// plugin's, which a default would read as a terminal, and a pane listed
-/// twice. The test waits out two sweeps.
 #[test]
 fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
     let host = Host::new();
@@ -442,15 +392,6 @@ fn what_zellij_lists_that_does_not_read_leaves_what_it_listed_before() {
     }
 }
 
-/// zellij is asked for a session's panes by name, and of two sessions that
-/// share one, as those of zellij versions with contracts of their own can, it
-/// answers for one: the daemon cannot tell which, and gives neither the panes.
-/// A session renamed keeps its panes, whatever zellij says under its new
-/// name, until another comes to share it: then the panes it had would only
-/// go stale, as zellij is no longer asked. The test waits for zellij to be
-/// asked about the session that has a name of its own twice: one not listed
-/// yet is asked about first, so by then the daemon has asked about every
-/// session it means to.
 #[test]
 fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
     let host = Host::new();
@@ -484,9 +425,6 @@ fn sessions_that_share_a_name_have_no_panes_and_a_renamed_one_keeps_its() {
     });
 }
 
-/// A session that no longer shares its name is asked about at once, however
-/// lately it was before it came to share it: its panes went as it did, and
-/// nothing else would have it asked about before the sweep.
 #[test]
 fn a_session_that_no_longer_shares_its_name_is_asked_about_at_once() {
     let host = Host::new();
@@ -510,10 +448,6 @@ fn a_session_that_no_longer_shares_its_name_is_asked_about_at_once() {
     assert!(ended.elapsed() < Duration::from_secs(1), "{:?}", ended.elapsed());
 }
 
-/// A folder of zellij's sockets the daemon cannot read could hold a session
-/// that runs: the host says how many it could not read, so that a client
-/// takes nothing it leaves out for gone, and lists what it holds once it
-/// reads again.
 #[test]
 fn the_host_says_how_many_of_zellij_s_folders_it_could_not_read() {
     let host = Host::new();
@@ -534,9 +468,6 @@ fn the_host_says_how_many_of_zellij_s_folders_it_could_not_read() {
     });
 }
 
-/// git as the test runs it: on the repository at `dir` and no other, as one
-/// that a git hook ran the tests from names, with no config but its own, and
-/// as no one in particular.
 fn git(dir: &Path, args: &[&str]) -> bool {
     let mut git = Command::new("git");
     for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
@@ -562,9 +493,6 @@ fn commit(dir: &Path, file: &str, text: &str) {
     assert!(git(dir, &["commit", "-q", "-m", file]));
 }
 
-/// A work tree with a path of each kind of change, a stash, and a commit its
-/// upstream does not have yet, in the middle of a merge that went wrong. One
-/// more path is modified by its type: a file that is a link now.
 fn changed_every_way(dir: &Path, origin: &Path) {
     assert!(git(origin, &["init", "-q", "--bare", "-b", "main"]));
     assert!(git(dir, &["init", "-q", "-b", "main"]));
@@ -591,11 +519,6 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     fs::write(dir.join("untracked"), "new\n").unwrap();
 }
 
-/// git says how the work tree stands where each pane works: the branch, how
-/// many paths changed in each way, the stashes, and where the branch is from
-/// its upstream. A detached `HEAD` is a checkout of no branch, and a directory
-/// in no repository is outside one, not a checkout with nothing in it. What
-/// git said of a directory goes once no pane works there.
 #[test]
 fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let host = Host::new();
@@ -650,11 +573,6 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     });
 }
 
-/// The daemon counts the lines changed on a branch against the branch its
-/// repository takes as its default, work tree changes included, as a diff of
-/// the pull request would show them: `origin/HEAD` says the default, where
-/// the repository has it. The default branch itself counts none, nor does a
-/// branch with nothing changed on it.
 #[test]
 fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     fn at(dir: &str) -> &Path {
@@ -671,8 +589,6 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
     assert!(git(&work, &["clone", "-q", "--origin", "origin", &origin.display().to_string(), "."]));
     commit(&work, "README", "start\n");
-    // The clone knows the default only once it has heard of the branch it
-    // names: `clone` of an empty repository sets none.
     assert!(git(&work, &["push", "-q", "origin", "main"]));
     assert!(git(&work, &["remote", "set-head", "origin", "main"]));
     let base = ["a\n", "b\n", "c\n"].concat();
@@ -680,8 +596,6 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     assert!(git(&work, &["push", "-q", "origin", "main"]));
     assert!(git(&work, &["switch", "-q", "-c", "issue-299"]));
     commit(&work, "base", "a\nB\n\n");
-    // A change nothing committed holds: `git add -N` has the work tree
-    // counted for it, as a diff of the pull request would show it.
     fs::write(work.join("new"), "d\n").unwrap();
     assert!(git(&work, &["add", "-N", "new"]));
     assert!(git(
@@ -697,9 +611,6 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
 
-    // The lines changed on `issue-299`: `b` became `B` and `c` an empty
-    // line — one added and one deleted of each — and `new` one more added;
-    // none on `main`, which is the repository's default.
     let changed = |dir: &str| {
         host.host().work_trees.iter().find(|tree| tree.dir == dir).and_then(|tree| {
             match tree.stands.as_ref()? {
@@ -718,8 +629,6 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     assert!(!said.iter().any(|line| line.contains("git ")), "git said: {said:?}");
     eventually("git counts none on main", || changed(&other).is_none().then_some(()));
 
-    // A branch made from the default counts what it changed, and one back
-    // on the default counts none.
     assert!(git(at(&other), &["switch", "-q", "-c", "fold"]));
     commit(at(&other), "new", "d\n");
     eventually("git counts the lines changed on fold", || {
@@ -802,10 +711,6 @@ fn luneta_sessions_lists_the_sessions_as_the_sidebar_does() {
     assert_eq!(listed(), ["alpha", "zeta"]);
 }
 
-/// What git will not read is said nothing of, as it could be any repository:
-/// a repository it refuses is not `no repository`, nor a work tree whose index
-/// does not read `no checkout`. Why goes to the log. The directory named last
-/// is asked about last, so once git has said of it, it has been asked of all.
 #[test]
 fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
     let host = Host::new();
@@ -857,8 +762,6 @@ fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
     }
 }
 
-/// What git said of a directory stands once it will not say it again, the
-/// repository with it, as git not answering at all leaves it too.
 #[test]
 fn what_git_said_stands_once_it_will_not_read_the_repository() {
     let host = Host::new();
@@ -882,8 +785,6 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
     assert_eq!(checkout(&host, &cwd), Some(before));
 }
 
-/// How the work tree stands where a pane works in `cwd`, once git has said
-/// that it is a checkout there.
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
     let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
     match tree.stands? {
@@ -892,7 +793,6 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
     }
 }
 
-/// Waits for git to say that `cwd`, where a pane works, is in no work tree.
 fn in_no_work_tree(host: &Host, cwd: &str) {
     eventually("git says the directory is in no work tree", || {
         let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
@@ -900,17 +800,10 @@ fn in_no_work_tree(host: &Host, cwd: &str) {
     });
 }
 
-/// Whether the branch `name` is checked out.
 fn on_branch(name: &'static str) -> impl Fn(&Checkout) -> bool {
     move |it| matches!(&it.head, Some(Head::Branch(branch)) if branch.name == name)
 }
 
-/// Has `change` made, and waits for the work tree to stand as `shows` takes
-/// it to where a pane works in `cwd`: within 4s of the change's start, though
-/// git would not be asked again on its sweep for 5s, as each change comes as
-/// soon as git said the one before. The CI's Mac takes up to 2.7s, with each
-/// test's daemon and gits at once on its 3 cores, and the daemon resting from
-/// git as long as git took before it asks again.
 fn shows_at_once(
     host: &Host,
     cwd: &str,
@@ -924,15 +817,6 @@ fn shows_at_once(
     assert!(started.elapsed() < Duration::from_secs(4), "{what}: {:?}", started.elapsed());
 }
 
-/// git is asked again as the work tree a pane works in changes, well before
-/// its sweep would have it asked: as a file is written in a directory git
-/// tracks, or a directory turns up there, a path is staged, a commit made, a
-/// stash made or dropped, and a branch checked out; as a file is written in a
-/// directory the index has only since a commit, or in one made anew in the
-/// place of one that went; and as another work tree of the repository
-/// fetches where its upstream moved, which touches nothing of this one's own.
-/// Each change comes as soon as git said the one before, when the sweep is
-/// furthest off. The repository keeps its refs as `format` has it.
 fn says_at_once_as_a_work_tree_changes(format: &str) {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
@@ -1020,10 +904,6 @@ fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_a_reftable() {
     says_at_once_as_a_work_tree_changes("reftable");
 }
 
-/// A directory of a work tree that becomes a work tree of its own, as `git
-/// init` makes one there, is watched as that one from then on: a branch
-/// checked out in it, which writes nothing but the `HEAD` in its own git
-/// folder, shows at once.
 #[test]
 fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
     let host = Host::new();
@@ -1044,9 +924,6 @@ fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
     shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
 }
 
-/// A `.git` folder in a directory of a work tree that does not read, as one
-/// another user made there, is passed by as git passes it by: the work tree
-/// is watched all the same, and an edit beside it shows at once.
 #[test]
 fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
     let host = Host::new();
@@ -1071,10 +948,6 @@ fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
     mode(0o755);
 }
 
-/// A directory in no work tree that becomes one, as `git init` makes one
-/// there, is watched as that one from then on: the work tree shows at once,
-/// and so does a branch checked out in it, which writes nothing but the
-/// `HEAD` in its own git folder.
 #[test]
 fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
     let host = Host::new();
@@ -1092,9 +965,6 @@ fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
     shows_at_once(&host, &cwd, "a branch checked out in it", switched, on_branch("other"));
 }
 
-/// A directory in no work tree that is taken away and made again where a
-/// pane works is watched as the one made: git is asked about it again at
-/// once, and a work tree that `git init` makes in it after shows at once.
 #[test]
 fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
     let host = Host::new();
@@ -1135,8 +1005,6 @@ fn a_checkout_taken_away_is_in_no_work_tree() {
     in_no_work_tree(&host, &cwd);
 }
 
-/// A pane that works in a repository's own folder, which git places in no
-/// work tree, has git asked nothing as git writes there, as a commit does.
 #[test]
 fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let host = Host::new();
@@ -1163,9 +1031,6 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     assert_eq!(noted.statuses(), asked, "git was asked as git wrote in its folder");
 }
 
-/// A directory that moves into a work tree, in the place of one git tracks
-/// that moved away, is watched as one made anew there is: an edit in it shows
-/// at once.
 #[test]
 fn git_says_at_once_as_a_directory_moved_into_a_work_tree_changes() {
     let host = Host::new();
@@ -1195,10 +1060,6 @@ fn git_says_at_once_as_a_directory_moved_into_a_work_tree_changes() {
     shows_at_once(&host, &cwd, "an edit in the one moved in", edited, clean);
 }
 
-/// What git ignores, the daemon does not watch, nor where a link among git's
-/// refs leads, which could be anywhere: a build that writes in `target` all
-/// along has git asked nothing, though a link to `target` is among the refs,
-/// and a file that turns up beside it has git asked at once.
 #[test]
 fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     let host = Host::new();
@@ -1234,10 +1095,6 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
     shows_at_once(&host, &cwd, "another that turns up", turns_up("two"), untracked(2));
 }
 
-/// git runs no command that a repository's own config names, though the
-/// daemon asks it about any directory a pane works in, trusted or not: not
-/// the one `core.fsmonitor` names, which git runs as it reads the index, as
-/// it does to say which directories to watch and how the work tree stands.
 #[test]
 fn git_runs_no_command_a_repository_names() {
     let host = Host::new();
@@ -1254,16 +1111,10 @@ fn git_runs_no_command_a_repository_names() {
     let _daemon = start(host.vars()).unwrap();
     eventually("git says how the tree stands", || checkout(&host, &cwd));
     assert!(!ran.exists(), "git ran the command the repository named");
-    // As it would have, let read the index.
     assert!(git(&top, &["ls-files"]));
     assert!(ran.exists(), "git runs no command the repository names here");
 }
 
-/// How far behind its upstream a branch a pane works on is, is of what the
-/// remote has, with no one fetching it but the daemon, which moves no branch
-/// and runs no hook the repository names. A remote that is gone is said once
-/// in the log, and so is a branch the remote deleted, as one that is gone and
-/// not as a failure.
 #[test]
 fn the_behind_count_is_of_what_the_remote_has() {
     let host = Host::new();
@@ -1308,7 +1159,6 @@ fn the_behind_count_is_of_what_the_remote_has() {
     });
     assert_eq!(fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap(), here);
     assert!(!ran.exists(), "the fetch ran the hook the repository names");
-    // As it would have, let move a ref.
     assert!(git(&tree, &["update-ref", "refs/heads/moved", "HEAD"]));
     assert!(ran.exists(), "git runs no hook the repository names here");
 
@@ -1325,9 +1175,6 @@ fn the_behind_count_is_of_what_the_remote_has() {
     assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
 }
 
-/// The daemon fetches no upstream by a way of reaching its remote that the
-/// repository's own config names, as `core.sshCommand`, which git would run,
-/// and says why once.
 #[test]
 fn the_fetch_runs_no_command_a_repository_names() {
     let host = Host::new();
@@ -1359,18 +1206,10 @@ fn the_fetch_runs_no_command_a_repository_names() {
     assert!(!ran.exists(), "the fetch ran the command the repository named");
     let said = fs::read_to_string(&log).unwrap();
     assert_eq!(said.matches(&refused).count(), 1, "{said}");
-    // As it would have, let reach the remote.
     let _ = git(&tree, &["ls-remote", "origin"]);
     assert!(ran.exists(), "git runs no command the repository names here");
 }
 
-/// gh is asked for the pull request of the branch checked out where each pane
-/// works: once for a branch of a repository, however many of its directories
-/// panes work in, and at once as a pane comes to a branch. What gh found of a
-/// branch is no longer a directory's once another is checked out there, and
-/// a branch with no pull request has none, which is no trouble to the daemon.
-/// Each comes with its page, which says the repository its number counts in,
-/// and how the checks of its head stand, as gh says them with it.
 #[test]
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
@@ -1439,8 +1278,6 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
 }
 
-/// A branch gh does not answer for holds up no other: gh is asked about the
-/// others as it hangs, and what it finds of them shows at once.
 #[test]
 fn a_branch_gh_hangs_on_holds_up_no_other() {
     let host = Host::new();
@@ -1470,11 +1307,6 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
     host.gh.answer("stuck");
 }
 
-/// gh is asked again soon about a branch whose pull request has checks yet
-/// to end, as they are what change: in 15s, and in twice that once it said
-/// nothing new of them, as it fails. Where it fails, what it said before
-/// stands, as stale, until it answers again. The daemon says how the checks
-/// changed, and how long it was since gh had said them, failing in between.
 #[test]
 fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
     let host = Host::new();
@@ -1959,11 +1791,6 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     assert!(!said.iter().any(|line| line.contains("gh ")), "{said:?}");
 }
 
-/// gh finds the pull request of the branch checked out as it is asked, which
-/// git can have yet to see: git looks again only every few seconds. What gh
-/// says then is of the branch checked out since, and never shows under the
-/// one before, nor is it trouble to the daemon. Once git sees the checkout,
-/// the new branch has its pull request.
 #[test]
 fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() {
     let host = Host::new();
@@ -1978,8 +1805,6 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
-    // The branch git says is checked out in the tree, and the number of the
-    // pull request listed there.
     let seen = || {
         let host = host.host();
         let tree = host.work_trees.iter().find(|tree| tree.dir == cwd);
@@ -2003,18 +1828,9 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     assert!(!said.iter().any(|line| line.contains("gh pr view")), "{said:?}");
 }
 
-/// `luneta watch` writes out the host at once. With the version it last
-/// wrote, it waits: it answers as soon as the host changes, and with the
-/// host as it was once it has waited four seconds, so that a client that
-/// asks again and again asks no more often than that. Sessions that share a
-/// name, as those of zellij versions with contracts of their own can, leave
-/// the host as it was from one look to the next. The version of another
-/// daemon's, as one that ran before this one, is answered at once.
 #[test]
 fn luneta_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
-    // Each starts in a tick of its own of the clock the kernel dates files
-    // by, as sessions do: three that started as one would be the same.
     let _work: Vec<UnixListener> = (1..=3)
         .map(|version| {
             thread::sleep(Duration::from_millis(20));

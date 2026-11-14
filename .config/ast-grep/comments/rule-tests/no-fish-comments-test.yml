@@ -1,0 +1,9 @@
+id: no-fish-comments
+valid:
+  - "echo '# a'"
+  - 'echo "# a"'
+  - "echo a#b"
+invalid:
+  - "# a\necho"
+  - "echo a # b"
+  - "function f\n    # a\nend"

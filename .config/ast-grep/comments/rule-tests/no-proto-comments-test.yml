@@ -1,0 +1,7 @@
+id: no-proto-comments
+valid:
+  - "syntax = \"proto3\";\noption java_package = \"// a\";"
+invalid:
+  - "// a\nsyntax = \"proto3\";"
+  - "/* a */ syntax = \"proto3\";"
+  - "syntax = \"proto3\"; // a"

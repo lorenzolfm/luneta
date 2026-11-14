@@ -1,16 +1,3 @@
-//! The checks of a pull request's head, as gh says them with the pull
-//! request: how many have yet to end, failed, and did not, for the mark the
-//! sidebar shows beside its number, and the log of each that failed, for the
-//! agent luneta's menu starts on them with `c c`, kept in a file of its own on
-//! the machine the pane is on. luneta keeps them so on its own machine; a
-//! daemon keeps them here for a luneta on another machine, whose menu was for a
-//! pane of this one.
-//!
-//! GitHub lists a pull request's checks as runs of checks, as GitHub Actions
-//! makes one of each job, and statuses, as other services set them. gh fetches
-//! the log of a job of GitHub Actions alone, once the job has ended, while
-//! others of its run go on.
-
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::Command;
@@ -23,36 +10,21 @@ use serde::Deserialize;
 use crate::printed::Kept;
 use crate::{folder, git, keeps, program};
 
-/// The folder the logs are kept in, in luneta's.
 pub(crate) const FOLDER: &str = "checks";
 
-/// How long gh has to say: it asks GitHub, across the network, and a log
-/// comes down whole.
 const LIMIT: Duration = Duration::from_secs(30);
 
-/// How long `kept_failing` takes at the most: the logs come down side by
-/// side, after the pull request, each in `LIMIT`, and a moment to write them.
 pub const FETCHING: Duration = Duration::from_secs(2 * LIMIT.as_secs() + 5);
 
-/// The most lines a file keeps of a log: the last, which say how it failed.
-/// Claude Code reads as many at once.
 const TAIL: usize = 2000;
 
-/// The most logs fetched for one ask: of a pull request with more that
-/// failed, the agent is told the names of the rest alone.
 const LOGS_MAX: usize = 8;
 
-/// Why a check that failed has no log kept, where it is no job's, and where
-/// what fetched it panicked, as the log says.
 const NO_JOB: &str = "it is no job of GitHub Actions, whose log gh fetches";
 const PANICKED: &str = "what fetched its log panicked";
 
-/// What gh 2.97 and later are told to write a log as it is, with the styles
-/// in it, which an older one does not know, and writes so anyway.
 const AS_IT_IS: &str = "--allow-escape-sequences";
 
-/// A check as gh writes it in `statusCheckRollup`: a run of a check, or a
-/// status, or what GitHub has added since, which counts for nothing.
 #[derive(Deserialize)]
 #[serde(tag = "__typename")]
 enum Rolled {
@@ -78,7 +50,6 @@ enum Rolled {
     Other,
 }
 
-/// Where a check stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stands {
     Pending,
@@ -86,21 +57,14 @@ enum Stands {
     Passed,
 }
 
-/// A check, as the agent is told of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Check {
     name: String,
     stands: Stands,
-    /// Its page, where GitHub says one.
     link: Option<String>,
 }
 
 impl Rolled {
-    /// The check, as GitHub said it, or none for what it added since. A run
-    /// that ended passed where it succeeded, was neutral or was skipped, and
-    /// failed in any other way: a conclusion GitHub has not spelled before
-    /// counts as failed, which a look at the log says more of. A status
-    /// failed where it failed or erred.
     fn check(self) -> Option<Check> {
         let given = |link: Option<String>| link.filter(|link| !link.is_empty());
         match self {
@@ -129,9 +93,6 @@ impl Rolled {
     }
 }
 
-/// The checks gh wrote in `statusCheckRollup`, or none where it wrote what
-/// does not read: what GitHub writes of them in a way gh has not before
-/// leaves the pull request as it was, with no checks said.
 fn checks_of(rollup: Option<serde_json::Value>) -> Option<Vec<Check>> {
     let rolled: Vec<Rolled> = match rollup {
         None | Some(serde_json::Value::Null) => Vec::new(),
@@ -140,7 +101,6 @@ fn checks_of(rollup: Option<serde_json::Value>) -> Option<Vec<Check>> {
     Some(rolled.into_iter().filter_map(Rolled::check).collect())
 }
 
-/// How many of `checks` stand each way.
 fn counted(checks: &[Check]) -> Checks {
     let count = |stands| checks.iter().filter(|check| check.stands == stands).count();
     let count = |stands| u32::try_from(count(stands)).unwrap_or(u32::MAX);
@@ -149,13 +109,10 @@ fn counted(checks: &[Check]) -> Checks {
     Checks { pending, failed, passed }
 }
 
-/// How the checks gh wrote with a pull request stand, as `github` reads them.
 pub(crate) fn rolled_up(rollup: Option<serde_json::Value>) -> Option<Checks> {
     checks_of(rollup).as_deref().map(counted)
 }
 
-/// A job of GitHub Actions, by the host and the `<owner>/<repo>` of the
-/// repository it ran in, and its number there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Job {
     host: String,
@@ -164,16 +121,12 @@ struct Job {
 }
 
 impl Job {
-    /// Whether it ran in `repository`, as `<host>/<owner>/<repo>`, which
-    /// GitHub names with no heed to case.
     fn ran_in(&self, repository: &str) -> bool {
         let ran = format!("{}/{}", self.host, self.repository);
         ran.eq_ignore_ascii_case(repository)
     }
 }
 
-/// The job a check's page is of, where it is a job's of GitHub Actions:
-/// `https://<host>/<owner>/<repo>/actions/runs/<run>/job/<job>`.
 fn job_of(link: &str) -> Option<Job> {
     let path = link.strip_prefix("https://")?;
     let path = path.split(['?', '#']).next()?;
@@ -190,9 +143,6 @@ fn job_of(link: &str) -> Option<Job> {
     Some(Job { host: (*host).to_owned(), repository: format!("{owner}/{name}"), id })
 }
 
-/// A pull request's page, `https://<host>/<owner>/<repo>/pull/<n>`, as gh
-/// takes it, the repository it says, as `<host>/<owner>/<repo>`, and the
-/// number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullPage {
     url: String,
@@ -201,7 +151,6 @@ pub struct PullPage {
 }
 
 impl PullPage {
-    /// The pull request of the page `url`, or why it is none.
     pub fn parse(url: &str) -> Result<PullPage, String> {
         let path = url.strip_prefix("https://").ok_or_else(|| format!("{url} is no https page"))?;
         let parts: Vec<&str> = path.split('/').collect();
@@ -231,16 +180,12 @@ impl PullPage {
     }
 }
 
-/// What a check that failed holds of its log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Log {
-    /// Its job's log, its last lines, in a file of its own.
     Kept(Kept),
-    /// Why none was kept, in words.
     Unkept(String),
 }
 
-/// A check that failed: its name, its page, where GitHub says one, and its log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failed {
     pub name: String,
@@ -248,8 +193,6 @@ pub struct Failed {
     pub log: Log,
 }
 
-/// The checks of a pull request's head, as `kept_failing` found them: the
-/// commit, the log of each that failed, and how many others stand each way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failing {
     pub head: String,
@@ -258,10 +201,8 @@ pub struct Failing {
     pub passed: u32,
 }
 
-/// What `kept_failing` asks gh of the pull request.
 const VIEWED: &str = "state,headRefOid,headRepository,headRepositoryOwner,statusCheckRollup";
 
-/// The pull request, as `gh pr view --json` writes what `VIEWED` asks of it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Viewed {
@@ -285,10 +226,6 @@ struct Owner {
     login: String,
 }
 
-/// Asks gh how the pull request of `page` stands now, and the checks of its
-/// head, and keeps the log of each that failed, of those of GitHub Actions
-/// that ran in its repository or its head's, in luneta's runtime folder, or
-/// says why it found none: of one no longer open, nor a draft, none.
 pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     let url = page.url();
     let mut gh = Command::new("gh");
@@ -314,9 +251,6 @@ pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     Ok(keep(&runtime, viewed.head_ref_oid, &checks, &repositories, fetch, SystemTime::now()))
 }
 
-/// What gh says of the log of `job`: its last lines, and how many lines went
-/// before them, or why it gave none. gh asks for the job's log alone, which
-/// GitHub has once the job ended, whatever the others of its run do.
 fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
     let logs = format!("repos/{}/actions/jobs/{}/logs", job.repository, job.id);
     let asked = format!("gh api --hostname {} {logs}", job.host);
@@ -339,9 +273,6 @@ fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
     Ok((log, before))
 }
 
-/// What becomes of the log of a check that failed: its job's fetched, or
-/// none, as it is no job's, or one that ran in another repository than
-/// those it is let fetch from, or one past the first `LOGS_MAX` jobs.
 enum Plan {
     Fetch(Job),
     NoJob,
@@ -349,11 +280,6 @@ enum Plan {
     Past,
 }
 
-/// The checks of `head` that failed, of `checks`, each with its log as
-/// `fetch` gets it, kept in a file of its own in the folder `FOLDER` of
-/// luneta's folder `runtime`, for the first `LOGS_MAX` of their jobs that
-/// ran in one of `repositories`: fetched side by side, so that the ask takes
-/// as long as the slowest.
 fn keep(
     runtime: &Path,
     head: String,
@@ -404,9 +330,6 @@ fn keep(
     Failing { head, failed: failed.collect(), pending, passed }
 }
 
-/// Writes the last `TAIL` lines of `log`, with no styles, in a file of its
-/// own, as `keeps::Draft` keeps it, or says why it kept none: of a log that
-/// had `before` lines before it, those are left out too.
 fn write(runtime: &Path, log: &[u8], before: u64, now: SystemTime) -> Result<Kept, String> {
     let log = String::from_utf8_lossy(log);
     let lines: Vec<String> = log.lines().map(plain).collect();
@@ -428,9 +351,6 @@ fn write(runtime: &Path, log: &[u8], before: u64, now: SystemTime) -> Result<Kep
     Ok(Kept { file: draft.keep()?, lines: lines.len(), left_out })
 }
 
-/// `line` with no styles in it: each control sequence a terminal reads, as
-/// GitHub keeps them in a log, gone, and the mark a file of UTF-8 can start
-/// with.
 fn plain(line: &str) -> String {
     let mut plain = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
@@ -438,7 +358,6 @@ fn plain(line: &str) -> String {
         match c {
             '\u{1b}' if chars.peek() == Some(&'[') => {
                 chars.next();
-                // Parameters and what goes between them, up to the final byte.
                 while chars.next_if(|c| ('\u{20}'..='\u{3f}').contains(c)).is_some() {}
                 chars.next_if(|c| ('\u{40}'..='\u{7e}').contains(c));
             },
@@ -456,7 +375,6 @@ mod tests {
 
     use super::*;
 
-    /// A run of a check, as gh writes it.
     fn run(name: &str, status: &str, conclusion: &str, job: u64) -> String {
         format!(
             r#"{{"__typename":"CheckRun","completedAt":"2026-11-08T11:29:09Z",
@@ -477,10 +395,6 @@ mod tests {
         serde_json::from_str(&format!("[{}]", checks.join(","))).unwrap()
     }
 
-    /// A run passes once it ends well, or neutral, or skipped; it fails once
-    /// it ends any other way, as one cancelled or of a conclusion GitHub has
-    /// not spelled before; and until it ends, it is pending, as a status is
-    /// until it is set. What GitHub lists that is neither counts for nothing.
     #[test]
     fn checks_are_counted_by_how_they_ended() {
         let checks = rollup(&[
@@ -508,8 +422,6 @@ mod tests {
         assert_eq!(rolled_up(Some(unread)), None);
     }
 
-    /// A job's page names the repository it ran in, on its host, and its
-    /// number; any other page names no job.
     #[test]
     fn a_job_s_page_says_where_it_ran() {
         let job = |host: &str, repository: &str, id| {
@@ -538,8 +450,6 @@ mod tests {
         }
     }
 
-    /// Only an `https` page of a pull request is one gh is asked of, and it
-    /// says the number.
     #[test]
     fn only_a_pull_request_s_page_is_asked_of() {
         let url = "https://github.com/owner/repo/pull/328";
@@ -561,8 +471,6 @@ mod tests {
         }
     }
 
-    /// GitHub keeps the styles a step's terminal had in its log, and a mark
-    /// at the start of it, which the file leaves out.
     #[test]
     fn a_log_is_kept_with_no_styles() {
         let styled = "\u{feff}2026 \u{1b}[36;1mnix develop\u{1b}[0m done";
@@ -572,11 +480,6 @@ mod tests {
         assert_eq!(plain("cut \u{1b}["), "cut ");
     }
 
-    /// Each check that failed is listed, in gh's order: one of GitHub Actions
-    /// with its log, its last lines, in a file of its own; any other, one that
-    /// ran in a repository other than those asked of, and one whose log gh did
-    /// not give, with why. Past `LOGS_MAX` jobs, none is fetched, and a check
-    /// of no job counts as none of them.
     #[test]
     fn each_check_that_failed_keeps_its_log() {
         let root = tempfile::tempdir().unwrap();
@@ -659,8 +562,6 @@ mod tests {
         assert!(matches!(failing.failed[LOGS_MAX].log, Log::Kept(_)));
     }
 
-    /// A long log keeps its last `TAIL` lines, and says how many it left out,
-    /// with those gh said before what was read of it, blank ones too.
     #[test]
     fn a_long_log_keeps_its_last_lines() {
         let root = tempfile::tempdir().unwrap();

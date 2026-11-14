@@ -1,16 +1,3 @@
-//! A moment for each pane of each session, the same in every luneta that
-//! shares the ledger's folder, and kept for the next.
-//!
-//! A pane goes by its session, which a zellij session's socket tells: when the
-//! socket was made and its inode, both of which a rename keeps and a session
-//! made again under its name does not; or an own session's server, by when it
-//! made the session and the id it gave it. And by its id, which neither gives
-//! another pane of the session. Its moment is a file in the ledger's folder,
-//! named for the three. A file is written whole, under a name of its writer's own, before
-//! it takes its pane's, so that no luneta reads one halfway written, and two
-//! that write one pane at once each write a file of their own: the last to
-//! take the pane's name holds it.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -24,46 +11,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::state;
 
-/// A session, as a ledger keeps it. Only `new` and `own` make one of a
-/// moment, so a ledger can name every session it has. It is written as its
-/// name, as the order keeps the colour of each by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
 pub enum Session {
-    /// zellij's: when its socket was made, in nanoseconds since the epoch, and
-    /// its inode. Two sockets can be made in one tick of the clock that dates
-    /// them, and a socket made later can take the inode of one gone, but not
-    /// both.
     Zellij { started_ns: u64, socket: NonZeroU64 },
-    /// luneta's own multiplexer's: when its server made it, in nanoseconds
-    /// since the epoch, and its id. The next server counts its ids from 1
-    /// again, but makes none of them in the tick the last made its own.
     Own { made_ns: u64, id: OwnId },
 }
 
-/// What the name of an own session starts with, which no zellij session's
-/// does: a zellij session's starts with a digit.
 const OWN_PREFIX: &str = "own-";
 
 impl Session {
-    /// The zellij session whose socket was made at `started`, or none for one
-    /// made before 1970 or after 2554, which no file can be named for.
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
         Some(Session::Zellij { started_ns: nanos(started)?, socket })
     }
 
-    /// The own session `id`, which its server made at `made`.
     pub fn own(made: OwnMade, id: OwnId) -> Self {
         Session::Own { made_ns: made.nanos(), id }
     }
 
-    /// The session of the socket `id`, or none as `new` says, or for a socket
-    /// of no inode, which no file system gives one.
     pub fn of(id: SocketId) -> Option<Self> {
         Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
 
-    /// When it started: when its socket was made, or its server made it.
     pub fn started(self) -> SystemTime {
         match self {
             Session::Zellij { started_ns, .. } => moment(started_ns),
@@ -71,8 +40,6 @@ impl Session {
         }
     }
 
-    /// Its name: when it started, in nanoseconds since the epoch, and its
-    /// socket's inode, or `OWN_PREFIX` before when it was made and its id.
     fn name(self) -> String {
         match self {
             Session::Zellij { started_ns, socket } => format!("{started_ns}-{socket}"),
@@ -80,7 +47,6 @@ impl Session {
         }
     }
 
-    /// The session `name` is the name of, spelled as `name` spells it.
     fn read(name: &str) -> Option<Self> {
         let session = if let Some(own) = name.strip_prefix(OWN_PREFIX) {
             let (made_ns, id) = own.split_once('-')?;
@@ -108,8 +74,6 @@ impl TryFrom<String> for Session {
     }
 }
 
-/// A pane, as a ledger keeps it. It is written as the name of its file, as
-/// the order keeps the panes you moved by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
 pub struct Key {
@@ -118,22 +82,16 @@ pub struct Key {
 }
 
 impl Key {
-    /// The name of its file: its session's name, and its id.
     fn name(self) -> String {
         format!("{}-{}", self.session.name(), self.pane)
     }
 
-    /// The pane whose file `name` is, if it is one's: spelled as `name`
-    /// spells it. A file still being written is not, nor one a person spelled
-    /// another way, as `+10-3-1` or `010-3-1`, which no luneta writes or
-    /// takes away.
     fn read(name: &str) -> Option<Self> {
         let (session, pane) = name.rsplit_once('-')?;
         let key = Key { session: Session::read(session)?, pane: pane.parse().ok()? };
         (key.name() == name).then_some(key)
     }
 
-    /// The pane whose file `name` is, or was while a luneta wrote it.
     fn of_file(name: &str) -> Option<Self> {
         Key::read(name.split_once('.').map_or(name, |(pane, _)| pane))
     }
@@ -153,7 +111,6 @@ impl TryFrom<String> for Key {
     }
 }
 
-/// `at` in nanoseconds since the epoch, for one from then until 2554.
 fn nanos(at: SystemTime) -> Option<u64> {
     u64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
@@ -162,26 +119,16 @@ fn moment(nanos: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
 }
 
-/// Who the moments of a ledger are kept for.
 enum Shared {
-    /// Every luneta, through this folder.
     Through(PathBuf),
-    /// This luneta alone, as their folder failed them, for this reason.
     Lost(String),
-    /// This luneta alone, as a test's are.
     Alone,
 }
 
 pub struct Ledger {
     moments: BTreeMap<Key, SystemTime>,
-    /// The sessions the folder has files of that do not read as a moment, as
-    /// the last `reload` found them: one a luneta was writing as it ended, or
-    /// one left empty. `forget` takes them away with the rest.
     leftovers: BTreeSet<Session>,
     shared: Shared,
-    /// What this ledger's files are called after their pane while it writes
-    /// them, and no other ledger's are. A pane's name does not read from it,
-    /// so no luneta takes it for a moment.
     unfinished: String,
 }
 
@@ -197,7 +144,6 @@ impl Default for Ledger {
 }
 
 impl Ledger {
-    /// The moments every luneta keeps in `dir`, as they stand.
     pub fn within(dir: PathBuf) -> Self {
         let shared = match fs::create_dir_all(&dir) {
             Ok(()) => Shared::Through(dir),
@@ -208,12 +154,10 @@ impl Ledger {
         ledger
     }
 
-    /// One whose moments are this luneta's alone, for `why`.
     pub fn unshared(why: String) -> Self {
         Ledger { shared: Shared::Lost(why), ..Ledger::default() }
     }
 
-    /// The folder they are shared through, while they are.
     pub fn dir(&self) -> Option<&Path> {
         match &self.shared {
             Shared::Through(dir) => Some(dir),
@@ -221,7 +165,6 @@ impl Ledger {
         }
     }
 
-    /// Why the moments are this luneta's alone, where a folder failed them.
     pub fn lost(&self) -> Option<&str> {
         match &self.shared {
             Shared::Lost(why) => Some(why),
@@ -233,22 +176,15 @@ impl Ledger {
         self.moments.get(&key).copied()
     }
 
-    /// The last moment of any pane of `session`, if it has one.
     pub fn latest(&self, session: Session) -> Option<SystemTime> {
         let panes = Key { session, pane: u32::MIN }..=Key { session, pane: u32::MAX };
         self.moments.range(panes).map(|(_, moment)| *moment).max()
     }
 
-    /// The sessions it keeps a moment of, and those its folder has only
-    /// leftovers of.
     pub fn sessions(&self) -> impl Iterator<Item = Session> + '_ {
         self.moments.keys().map(|key| key.session).chain(self.leftovers.iter().copied())
     }
 
-    /// Keeps `moment` for `key`, for every luneta, or with none takes the
-    /// pane's away. A folder that fails a write, or has no name for it, is
-    /// given up, and the moments are this luneta's from then on, rather than
-    /// undone by the next `reload`.
     pub fn set(&mut self, key: Key, moment: Option<SystemTime>) {
         if let Shared::Through(dir) = &self.shared
             && let Err(why) = write(dir, &self.unfinished, key, moment)
@@ -261,10 +197,6 @@ impl Ledger {
         };
     }
 
-    /// Takes up what the other lunetas kept since, and says whether that
-    /// changed anything. A folder that cannot be read leaves the moments as
-    /// they were, and a file that does not read as one is none, but a
-    /// leftover of its pane's session.
     pub fn reload(&mut self) -> bool {
         let Shared::Through(dir) = &self.shared else {
             return false;
@@ -298,9 +230,6 @@ impl Ledger {
         true
     }
 
-    /// Takes away the moments of every session of `gone`, for every luneta,
-    /// and what was left of them in the folder: a file that does not read as
-    /// a moment, and one a luneta was writing as it ended.
     pub fn forget(&mut self, gone: &BTreeSet<Session>) {
         let keys: Vec<Key> =
             self.moments.keys().filter(|key| gone.contains(&key.session)).copied().collect();
@@ -320,18 +249,12 @@ impl Ledger {
                 continue;
             };
             if Key::of_file(name).is_some_and(|key| gone.contains(&key.session)) {
-                // Another luneta may have taken it away first, and what is
-                // left is no moment either way.
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
 }
 
-/// Keeps `moment` for `key` in `dir`, with `unfinished` ending the name its
-/// file takes while it is written, or with none takes the pane's away. Says
-/// why it could not: the folder failed, or has no name for a moment from
-/// before 1970 or after 2554.
 fn write(dir: &Path, unfinished: &str, key: Key, moment: Option<SystemTime>) -> Result<(), String> {
     let name = key.name();
     let file = dir.join(&name);
@@ -343,7 +266,6 @@ fn write(dir: &Path, unfinished: &str, key: Key, moment: Option<SystemTime>) -> 
             fs::write(&unfinished, format!("{nanos}\n"))
                 .and_then(|()| fs::rename(&unfinished, &file))
         },
-        // Another luneta may have taken it away first.
         None => fs::remove_file(&file).or_else(|error| match error.kind() {
             ErrorKind::NotFound => Ok(()),
             _ => Err(error),
@@ -372,8 +294,6 @@ mod tests {
         ledger.moments.keys().copied().collect()
     }
 
-    /// Two lunetas: what one keeps or takes away, the other has once it
-    /// reloads, and a luneta started later starts with it, to the nanosecond.
     #[test]
     fn a_moment_one_luneta_keeps_is_read_by_every_other_and_the_next() {
         let scratch = tempfile::tempdir().unwrap();
@@ -389,15 +309,12 @@ mod tests {
         assert_eq!(Ledger::within(dir.clone()).get(key(10, 3)), Some(precise));
 
         there.set(key(10, 3), None);
-        // Taken away twice, as two lunetas may before they hear of each other.
         here.set(key(10, 3), None);
         assert!(!here.reload());
         assert_eq!((here.get(key(10, 3)), here.get(key(20, 0))), (None, Some(at(7))));
         assert_eq!((here.lost(), there.lost()), (None, None));
     }
 
-    /// A file that does not read as a moment, or whose name is no pane's as
-    /// a luneta spells it, as one still being written, is none.
     #[test]
     fn only_a_pane_s_file_that_reads_as_a_moment_is_one() {
         let scratch = tempfile::tempdir().unwrap();
@@ -416,9 +333,6 @@ mod tests {
         assert_eq!(keys(&ledger), [key(10, 1)]);
     }
 
-    /// An own session's panes are kept as zellij's are, and apart from those
-    /// of a zellij session of the same numbers, and from the next server's
-    /// session of its id.
     #[test]
     fn an_own_session_s_panes_are_kept_apart_from_others() {
         let scratch = tempfile::tempdir().unwrap();
@@ -437,8 +351,6 @@ mod tests {
         assert_eq!(own.started(), at(10));
     }
 
-    /// Two lunetas that write one pane's moment at the same time, as two do
-    /// that both see you there, both go on sharing it.
     #[test]
     fn two_lunetas_writing_one_pane_at_once_both_go_on_sharing() {
         let scratch = tempfile::tempdir().unwrap();
@@ -464,9 +376,6 @@ mod tests {
         }
     }
 
-    /// A session's last moment is the last of its panes', whichever pane
-    /// that is, and none of another session's, though it started at the same
-    /// moment.
     #[test]
     fn a_session_s_last_moment_is_the_last_of_its_panes() {
         let mut ledger = Ledger::default();
@@ -479,9 +388,6 @@ mod tests {
         assert_eq!(ledger.latest(session_of), Some(at(9)));
     }
 
-    /// A session forgotten takes its panes' moments with it, for every
-    /// luneta, and what a luneta left of them as it ended, and leaves another
-    /// that started at the same moment its own.
     #[test]
     fn a_session_forgotten_takes_its_moments_and_leaves_the_rest() {
         let scratch = tempfile::tempdir().unwrap();
@@ -502,9 +408,6 @@ mod tests {
         assert_eq!(left.map(|file| file.exists()), [false, true]);
     }
 
-    /// A session that only files no luneta reads as a moment are named for,
-    /// one a luneta was writing as it ended and one left empty, is one the
-    /// ledger has, so that it is forgotten with the rest.
     #[test]
     fn a_session_only_leftovers_are_named_for_is_one_to_forget() {
         let scratch = tempfile::tempdir().unwrap();
@@ -520,8 +423,6 @@ mod tests {
         assert_eq!((half.exists(), empty.exists(), ledger.sessions().count()), (false, false, 0));
     }
 
-    /// A folder luneta cannot keep the moments in leaves them to this luneta,
-    /// and says why.
     #[test]
     fn a_folder_that_fails_keeps_the_moments_here() {
         let scratch = tempfile::tempdir().unwrap();
@@ -533,9 +434,6 @@ mod tests {
         assert_eq!(ledger.get(key(10, 1)), Some(at(5)));
     }
 
-    /// A moment the folder has no name for, from before 1970, leaves the
-    /// moments to this luneta, rather than take the pane's away from every
-    /// other.
     #[test]
     fn a_moment_the_folder_cannot_spell_keeps_the_moments_here() {
         let scratch = tempfile::tempdir().unwrap();

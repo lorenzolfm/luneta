@@ -1,13 +1,3 @@
-//! luneta's client of an own session, beside the sidebar in zellij's place:
-//! what it does goes to luneta-mux as events, which the server encodes for
-//! the pane's program as it last asked, and luneta draws the frames the
-//! server sends of the pane the client is on. The server says where the
-//! client is, as it comes and each time it moves.
-//!
-//! The client keeps the last frame's glyphs, each as wide as the server says,
-//! and a drag over them selects their text, as a terminal's does: where the
-//! pane's program takes the mouse, a drag selects only with `Shift` held.
-
 use std::num::NonZeroU16;
 use std::sync::mpsc::Sender;
 
@@ -26,8 +16,6 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::host::Event;
 
-/// What the client last had of the pane it is on: its frame's rows, and
-/// where its cursor is, and whether its program takes the mouse.
 struct Screen {
     size: Size,
     lines: Vec<Line>,
@@ -35,36 +23,27 @@ struct Screen {
     tracks_mouse: bool,
 }
 
-/// A cell of the pane, by its row and its column, from 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Spot {
     pub row: u16,
     pub column: u16,
 }
 
-/// What a drag over the pane selects: from the cell it went down on to the
-/// one it is over, which it shows lit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Selection {
     from: Spot,
     to: Spot,
 }
 
-/// What is selected of the pane the client is on, as it last showed: it goes
-/// as the client leaves the pane, or a frame of another size comes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Selected {
     #[default]
     Nothing,
-    /// The left button is down on it, and it follows the button.
     Dragging(Selection),
-    /// The button let go of it once it had moved off its first cell, which
-    /// copied it, and it stays lit.
     Held(Selection),
 }
 
 impl Selection {
-    /// Its first cell and its last, in the order the text reads.
     fn ends(self) -> (Spot, Spot) {
         if self.to < self.from {
             (self.to, self.from)
@@ -73,15 +52,12 @@ impl Selection {
         }
     }
 
-    /// Whether it holds `spot`.
     fn holds(self, spot: Spot) -> bool {
         let (first, last) = self.ends();
         first <= spot && spot <= last
     }
 }
 
-/// What luneta's client has of the pane it is on, as the server last said:
-/// where it is, the pane's last frame, and what is selected of it.
 #[derive(Default)]
 struct View {
     went: Option<Went>,
@@ -90,9 +66,6 @@ struct View {
 }
 
 impl View {
-    /// Takes in what the server said, but for what ends the client, which
-    /// luneta takes in itself; or says why it does not follow, as `framed`
-    /// says.
     fn heard(&mut self, heard: &Heard) -> Result<(), String> {
         match heard {
             Heard::Went(went) => {
@@ -108,21 +81,12 @@ impl View {
         Ok(())
     }
 
-    /// Takes in `frame`, where it is of the pane the client is on: the rows
-    /// that changed of a frame of the size the last was, or all of them. One
-    /// of another pane, which the client left, is dropped. One that changes
-    /// rows of none it had, or of a frame of another size, does not follow:
-    /// the server sends all the rows of a pane to a client new to it, or of
-    /// a size new to it, and the rows that changed of the last frame sent.
-    /// What was selected of a frame of another size goes.
     fn framed(&mut self, frame: &Frame) -> Result<(), String> {
         if self.went.is_none_or(|went| went.pane.id.get() != frame.pane()) {
             return Ok(());
         }
         let before = self.screen.take();
         let size = before.as_ref().map(|screen| screen.size);
-        // A frame's rows are of its size, as `Frame::new` holds them, so the
-        // rows that changed of a frame of the size the last was are of it.
         let lines = match (frame.rows(), before) {
             (Rows::Whole(lines), _) => lines.clone(),
             (Rows::Changed(rows), Some(screen)) if screen.size == frame.size() => {
@@ -236,24 +200,17 @@ impl View {
     }
 }
 
-/// luneta's client of an own session.
 pub struct Attached {
     attach: Attach,
-    /// Its number, of the programs and clients luneta started, which what the
-    /// server says to it carries.
     number: u64,
-    /// The size it said it is last.
     size: Size,
     view: View,
 }
 
 impl Attached {
-    /// A client, numbered `number`, that says `hello`, and hands what the
-    /// server says to luneta's loop, as `Event::Own`.
     pub fn start(number: u64, hello: Hello, events: &Sender<Event>) -> Attached {
         let events = events.clone();
         let attach = attach::attach(hello, move |heard| {
-            // luneta is on its way out.
             let _ = events.send(Event::Own(number, heard));
         });
         Attached { attach, number, size: hello.size, view: View::default() }
@@ -263,17 +220,12 @@ impl Attached {
         self.number
     }
 
-    /// Takes in what the server said, but for what ends the client, which
-    /// luneta takes in itself. Where it does not follow what the client had,
-    /// luneta gives up on the client, which hears last that it is lost.
     pub fn heard(&mut self, heard: &Heard) {
         if let Err(why) = self.view.heard(heard) {
             self.attach.give_up(format!("luneta-mux said what luneta cannot follow: {why}"));
         }
     }
 
-    /// Says the client is `columns` by `rows` now, where it was not: the pane
-    /// takes the size of the client that last did anything in it.
     pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {
         let size = Size::within(columns, rows);
         if size == self.size {
@@ -283,8 +235,6 @@ impl Attached {
         self.attach.send(to_server::Event::Resize(size.said()));
     }
 
-    /// Sends the pane `key`, as you typed it: none of a key the server has no
-    /// name for. What was selected goes.
     pub fn key(&mut self, key: &KeyEvent) {
         self.view.unselect();
         if let Some(key) = key_said(key) {
@@ -292,90 +242,63 @@ impl Attached {
         }
     }
 
-    /// Pastes `text` in the pane. What was selected goes.
     pub fn paste(&mut self, text: &str) {
         self.view.unselect();
         self.attach.send(to_server::Event::Paste(api::Paste { text: text.to_owned() }));
     }
 
-    /// Tells the pane its window took the focus, or lost it.
     pub fn focus(&self, focused: bool) {
         self.attach.send(to_server::Event::Focus(api::Focus { focused }));
     }
 
-    /// Takes the client to `to`.
     pub fn go(&self, to: To) {
         self.attach.go(to);
     }
 
-    /// Sends the pane what the mouse did at `at`, of its cells. The wheel
-    /// goes to the server, which scrolls the client back where the program
-    /// does not take the mouse.
     pub fn mouse(&self, mouse: MouseEvent, at: Spot) {
         if let Some(mouse) = mouse_said(mouse, at) {
             self.attach.send(to_server::Event::Mouse(mouse));
         }
     }
 
-    /// Whether a press of `mouse` selects, rather than goes to the pane: the
-    /// left button, on a pane whose program does not take the mouse, or with
-    /// `Shift` held.
     pub fn selects(&self, mouse: MouseEvent) -> bool {
         selects(self.view.tracks_mouse(), mouse)
     }
 
-    /// The left button went down at `at`, to select: what was selected goes.
     pub fn select_from(&mut self, at: Spot) {
         self.view.select_from(at);
     }
 
-    /// The button is dragged to `at`, as it selects.
     pub fn select_to(&mut self, at: Spot) {
         self.view.select_to(at);
     }
 
-    /// The button is let go of: the text it selected, which stays lit, where
-    /// it moved off the cell it went down on; or none, and nothing is.
     pub fn selected(&mut self) -> Option<String> {
         self.view.selected()
     }
 
-    /// Lets go of what is selected, and of a selection under way.
     pub fn unselect(&mut self) {
         self.view.unselect();
     }
 
-    /// Draws the pane's last frame into `area` of `buffer`, as much of it as
-    /// `area` holds, with what is selected lit, and says where the cursor is
-    /// on it, if it shows. What `area` holds past the frame shows nothing.
     pub fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
         self.view.draw(buffer, area)
     }
 
-    /// The cursor as the pane's program last styled it: its shape, and
-    /// whether it blinks, as alacritty names them. A hollow block, which
-    /// luneta's terminal draws as its own, before the first frame.
     pub fn cursor_style(&self) -> (CursorShape, bool) {
         self.view.cursor_style()
     }
 }
 
-/// Whether a press of `mouse` selects, on a pane whose program `tracks` the
-/// mouse or not, as `Attached::selects` says.
 fn selects(tracks: bool, mouse: MouseEvent) -> bool {
     mouse.kind == MouseEventKind::Down(MouseButton::Left)
         && (!tracks || mouse.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-/// `at`, made a cell of a frame of `size` where it is past its last row or
-/// column.
 fn within(at: Spot, size: Size) -> Spot {
     Spot { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
 }
 
-/// Draws `glyph` at `at` of a frame drawn into `area` of `buffer`, lit where
-/// it is selected: as wide as the server says, and as nothing where it is
-/// wide and `area` cuts it.
 fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: bool) {
     let columns = glyph.shows.columns();
     let fits = at.column + columns <= area.width;
@@ -409,9 +332,6 @@ fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: bool) {
     }
 }
 
-/// The text `selection` holds of `screen`: each row's, from the first cell to
-/// the last, with no blanks at the end of a row, and a line break between
-/// rows. A wide glyph is in it where either of its columns is.
 fn text(screen: &Screen, selection: Selection) -> String {
     let (first, last) = selection.ends();
     let mut rows = Vec::new();
@@ -440,8 +360,6 @@ fn text(screen: &Screen, selection: Selection) -> String {
     rows.join("\n")
 }
 
-/// The style a glyph is drawn in: the colours a terminal names are left for
-/// luneta's terminal to choose, as its theme does, as `hosted` leaves them.
 fn styled(style: &attach::Style) -> Style {
     let colour = |colour: Option<attach::Colour>| match colour {
         Some(attach::Colour::Palette(index)) => Color::Indexed(index),
@@ -470,7 +388,6 @@ fn styled(style: &attach::Style) -> Style {
     drawn
 }
 
-/// The modifiers held, as the server takes them.
 fn modifiers_said(modifiers: KeyModifiers) -> api::Modifiers {
     api::Modifiers {
         shift: modifiers.contains(KeyModifiers::SHIFT),
@@ -480,10 +397,6 @@ fn modifiers_said(modifiers: KeyModifiers) -> api::Modifiers {
     }
 }
 
-/// `key`, as the server takes it: the key that types a character by the one
-/// it types with no modifier, as far as luneta can tell, and what it types
-/// with `Shift` alone; or a key the server names. None for one it does not,
-/// as a media key's.
 fn key_said(key: &KeyEvent) -> Option<api::Key> {
     use api::Named;
     let press = match key.kind {
@@ -534,7 +447,6 @@ fn key_said(key: &KeyEvent) -> Option<api::Key> {
     Some(api::Key { press: press.into(), modifiers: Some(modifiers), key: Some(said), text })
 }
 
-/// The function key numbered `number`, of the twelve the server names.
 fn function(number: u8) -> Option<api::Named> {
     use api::Named;
     const KEYS: [Named; 12] = [
@@ -554,7 +466,6 @@ fn function(number: u8) -> Option<api::Named> {
     KEYS.get(usize::from(number).checked_sub(1)?).copied()
 }
 
-/// A modifier key, as the server names it: none for one it has no name for.
 fn modifier_named(modifier: ModifierKeyCode) -> Option<api::Named> {
     use api::Named;
     Some(match modifier {
@@ -570,7 +481,6 @@ fn modifier_named(modifier: ModifierKeyCode) -> Option<api::Named> {
     })
 }
 
-/// What the mouse did at `at`, as the server takes it.
 fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
     use api::mouse::Does;
     let button = |button: MouseButton| -> i32 {
@@ -625,7 +535,6 @@ mod tests {
         NonZeroU16::new(count).unwrap()
     }
 
-    /// What the client has of pane 1, which shows `rows`, each of its glyphs.
     fn view(rows: Vec<Vec<Glyph>>) -> View {
         let columns = rows[0].iter().map(|glyph| glyph.shows.columns()).sum();
         let lines: Vec<Line> = rows
@@ -644,9 +553,6 @@ mod tests {
         Spot { row, column }
     }
 
-    /// A selection reads as the text it holds: from its first cell to its
-    /// last, whichever way it was dragged, a wide glyph with either of its
-    /// columns in it, and each row less the blanks it ends in.
     #[test]
     fn a_selection_reads_as_the_text_from_its_first_cell_to_its_last() {
         let blank = || glyph(Shows::Blank);
@@ -662,9 +568,6 @@ mod tests {
         assert_eq!(text(screen, selection(spot(0, 0), spot(0, 1))), "ab");
     }
 
-    /// A wide glyph takes two columns of the frame drawn, as the server says,
-    /// and the second shows nothing of its own; one cut by the area shows as
-    /// nothing at all, and the area past the frame is blank.
     #[test]
     fn a_glyph_is_drawn_as_wide_as_the_server_says() {
         let wide = glyph(Shows::Wide(grapheme("👍🏽")));
@@ -682,9 +585,6 @@ mod tests {
         assert_eq!((cut[(0, 0)].symbol(), cut[(1, 0)].symbol()), ("a", " "));
     }
 
-    /// A key that types a character goes by the one it types with no
-    /// modifier, and says what it types with `Shift`; a named key types
-    /// nothing; and one the server has no name for goes nowhere.
     #[test]
     fn a_key_goes_to_the_server_by_its_name_or_its_character() {
         let said = |code, modifiers| key_said(&KeyEvent::new(code, modifiers));
@@ -702,10 +602,6 @@ mod tests {
         assert_eq!(said(KeyCode::Char('\u{7}'), KeyModifiers::NONE), None);
     }
 
-    /// The left button selects where the program does not take the mouse, and
-    /// with `Shift` held where it does; a selection copies only once it moved
-    /// off the cell it went down on, and a frame of another size takes it
-    /// away.
     #[test]
     fn a_drag_selects_where_the_program_does_not_take_the_mouse() {
         let press = |modifiers| MouseEvent {
@@ -732,9 +628,6 @@ mod tests {
         assert_eq!(view.selected, Selected::Nothing);
     }
 
-    /// The rows that changed of a frame follow the last frame of its size: of
-    /// another size, or with none before, they do not, and what the client
-    /// had stays.
     #[test]
     fn changed_rows_follow_only_a_frame_of_their_size() {
         let mut view = view(vec![vec![narrow("a"), narrow("b")]]);

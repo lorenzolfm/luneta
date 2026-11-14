@@ -1,9 +1,3 @@
-//! What the CLI has zellij do, for an agent that drives luneta: a close says
-//! what goes and which agents end with it, and closes only that, a tab opens
-//! only where it has room, and a session only from one that runs. What goes
-//! by the session it runs in goes by the name lunetad says it has now, and
-//! does nothing where luneta cannot tell which that is.
-
 use std::fs;
 use std::os::unix::net::UnixListener;
 use std::process::Output;
@@ -14,18 +8,14 @@ use crate::agents::{file_for, now_in, process, Host};
 use crate::host::{answered, eventually, start, LUNETA};
 use crate::sessions::listed;
 
-/// The CLI, run with `args` in the pane `here`, as an agent there runs it.
 fn luneta(host: &Host, here: (&str, u32), args: &[&str]) -> Output {
     let mut command = host.vars().command(LUNETA);
     command.env("ZELLIJ_SESSION_NAME", here.0).env("ZELLIJ_PANE_ID", here.1.to_string());
     answered(command.args(args))
 }
 
-/// What a close exits with where it closes nothing, as it was not told yes to
-/// the plan it says.
 const PLANNED: i32 = 3;
 
-/// What a close says it would close, and the plan it tells `--yes` that by.
 fn planned(said: &Output) -> (String, String) {
     assert_eq!(said.status.code(), Some(PLANNED), "{}", String::from_utf8_lossy(&said.stderr));
     let why = String::from_utf8_lossy(&said.stderr);
@@ -34,19 +24,13 @@ fn planned(said: &Output) -> (String, String) {
     (String::from_utf8(said.stdout.clone()).unwrap(), plan)
 }
 
-/// What a close says of the agents it ends while no lunetad runs.
 const UNTOLD: &str = "luneta cannot tell which agents it ends: lunetad does not answer";
 
-/// A close says what each pane and session it is given takes along, and the
-/// agents that end with it, and closes nothing until it is told `--yes`. Then
-/// what holds the pane it runs in goes last, however it was given: the agent
-/// that ran it ends with it.
 #[test]
 fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     let host = Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
     let _play = UnixListener::bind(host.contract().join("play")).unwrap();
-    // The shell in pane 3 keeps the tab open once pane 2 closes.
     let tab = (0, "Tab #1");
     let work = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
     host.lists.list("work", &work);
@@ -82,11 +66,6 @@ fn a_close_says_what_goes_and_closes_it_once_told_yes_where_it_runs_last() {
     assert_eq!(host.lists.closed(), closed);
 }
 
-/// The agent of a session file lunetad cannot read is in the pane its
-/// process runs in, doing what no one can tell: a close of that pane says it
-/// ends it, and lists it by its pid, and a close of another does not. One
-/// whose session lunetad cannot tell may be in any pane: a close says it
-/// cannot tell which agents it ends, and why, and lists those it can tell.
 #[test]
 fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     let host = Host::new();
@@ -120,9 +99,6 @@ fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     );
     assert_eq!(said, plan);
 
-    // In a session no socket is for, which lunetad cannot follow it to. The
-    // close says it cannot read both files, as its stderr does, and cannot
-    // place one of them.
     let lost = process(Some(("gone", 4)));
     host.write(lost.pid(), &unnamed(&lost));
     eventually("the daemon cannot read two files", || (host.list().unread == 2).then_some(()));
@@ -135,9 +111,6 @@ fn a_close_counts_the_agent_of_a_session_file_lunetad_cannot_read() {
     assert_eq!(said, plan);
 }
 
-/// What a close is given in a session closes together: the panes that are
-/// all that holds a tab open close the tab, once, and a session given takes
-/// along the panes of it given too.
 #[test]
 fn a_close_closes_what_it_is_given_in_a_session_together() {
     let host = Host::new();
@@ -164,16 +137,11 @@ fn a_close_closes_what_it_is_given_in_a_session_together() {
     assert_eq!(host.lists.closed(), closed);
 }
 
-/// A close told yes to a plan closes nothing where what it would close is
-/// not that plan now: it says what it would close instead, and the plan to
-/// tell `--yes`. A session made again by the same name is another plan, its
-/// panes numbered as the last one's were.
 #[test]
 fn a_close_closes_only_the_plan_it_was_told_yes_to() {
     let host = Host::new();
     let socket = host.contract().join("work");
     let work = UnixListener::bind(&socket).unwrap();
-    // The session the close runs in.
     let _play = UnixListener::bind(host.contract().join("play")).unwrap();
     let tab = (0, "Tab #1");
     let both = json!([listed(2, "claude", tab, Some("/w")), listed(3, "fish", tab, Some("/w"))]);
@@ -182,8 +150,6 @@ fn a_close_closes_only_the_plan_it_was_told_yes_to() {
     let (said, agreed) = planned(&close(&[]));
     assert_eq!(said, format!("close pane work:2: {UNTOLD}\n"));
 
-    // The shell in pane 3 ends, which leaves pane 2 all that holds the
-    // session's only tab open.
     host.lists.list("work", &json!([listed(2, "claude", tab, Some("/w"))]));
     let (now, _) = planned(&close(&["--yes", &agreed]));
     assert_eq!(now, format!("delete session work: {UNTOLD}\n"));
@@ -197,9 +163,6 @@ fn a_close_closes_only_the_plan_it_was_told_yes_to() {
     assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
-/// zellij makes a tab as big as a client of its session, and one with no room
-/// for its panes in a session with none, where a client sent to it later has
-/// nothing to show. So no tab opens in a session no client is in.
 #[test]
 fn a_tab_opens_only_in_a_session_a_client_is_in() {
     let host = Host::new();
@@ -214,20 +177,15 @@ fn a_tab_opens_only_in_a_session_a_client_is_in() {
     assert!(why.contains("no client is in play"), "{why}");
 }
 
-/// A terminal in the tab `tab`, as zellij lists it.
 fn pane(id: u32, tab: (u32, &str)) -> serde_json::Value {
     listed(id, "fish", tab, Some("/w"))
 }
 
-/// A plugin's pane, as zellij lists it, by an id of the plugins'.
 fn plugin(mut pane: serde_json::Value) -> serde_json::Value {
     pane["is_plugin"] = json!(true);
     pane
 }
 
-/// The session `work`, its panes 1 and 2 in one tab, where zellij moves pane 1
-/// to a tab it opens, as `luneta turn pane work:1` has it do. It runs as long as
-/// what this gives back is held.
 fn pane_to_turn(host: &Host) -> UnixListener {
     let work = UnixListener::bind(host.contract().join("work")).unwrap();
     let (old, new) = ((0, "Tab #1"), (3, "Tab #2"));
@@ -237,34 +195,25 @@ fn pane_to_turn(host: &Host) -> UnixListener {
     work
 }
 
-/// A pane zellij lists as shown over the others of its tab.
 fn fullscreen(mut pane: serde_json::Value) -> serde_json::Value {
     pane["is_fullscreen"] = json!(true);
     pane
 }
 
-/// What has zellij stack `moved` on `root` with no client moved: it focuses the
-/// last it is told to stack, and that is none of the session's.
 fn unfocused(root: &str, moved: &str) -> String {
     format!("--session=work action stack-panes -- {root} {moved} terminal_4294967295")
 }
 
-/// What a command said on its stdout, having gone well.
 fn said(ran: &Output) -> String {
     assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
     String::from_utf8(ran.stdout.clone()).unwrap()
 }
 
-/// What a command said on its stderr, having failed.
 fn why(ran: &Output) -> String {
     assert!(!ran.status.success(), "{}", String::from_utf8_lossy(&ran.stdout));
     String::from_utf8_lossy(&ran.stderr).into_owned()
 }
 
-/// An agent turns the pane it runs in, whose variables zellij must not go by.
-/// It says that pane, which keeps its id. zellij focuses the last pane it is told
-/// to stack, and here that is none of the session's, so that it takes no client
-/// there, and what you type goes on reaching your pane.
 #[test]
 fn a_pane_turns_into_a_tab_and_no_client_moves() {
     let host = Host::new();
@@ -282,9 +231,6 @@ fn a_pane_turns_into_a_tab_and_no_client_moves() {
     assert!(opened.iter().all(|opened| opened.starts_with("- ")), "{opened:?}");
 }
 
-/// A tab with room for a pane but not for one more beside it has zellij stack it
-/// the plain way, as it would have had no room for neither: the pane moves all the
-/// same, and the client zellij takes there goes back.
 #[test]
 fn a_pane_with_little_room_moves_all_the_same_and_the_client_goes_back() {
     let host = Host::new();
@@ -303,9 +249,6 @@ fn a_pane_with_little_room_moves_all_the_same_and_the_client_goes_back() {
     assert_eq!(host.lists.went(), ["--session=work action focus-pane-id terminal_2"]);
 }
 
-/// A client is on the pane that moves, so that it is to go with it, and zellij
-/// is told nothing else to focus: but it takes the client that last typed, here
-/// another. That one goes back, and the turn says of the one it left behind.
 #[test]
 fn a_client_zellij_took_to_a_pane_another_was_on_goes_back() {
     let host = Host::new();
@@ -324,8 +267,6 @@ fn a_client_zellij_took_to_a_pane_another_was_on_goes_back() {
     assert!(warned.contains("may not be on the pane they were on"), "{warned}");
 }
 
-/// Of the panes of a tab, only the one a client is on is stacked for that client
-/// to go with it, and the rest take it no further.
 #[test]
 fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
     let host = Host::new();
@@ -348,9 +289,6 @@ fn a_client_goes_with_its_pane_and_no_further_as_a_tab_turns() {
     assert!(host.lists.went().is_empty(), "{:?}", host.lists.went());
 }
 
-/// A pane leaving its tab ends the fullscreen of another there, and a stand-in
-/// opening in a tab that of a pane there. Each shows so again, once the turn is
-/// over, with nobody moved.
 #[test]
 fn a_turn_shows_fullscreen_again_what_it_ended() {
     let host = Host::new();
@@ -381,9 +319,6 @@ fn a_turn_shows_fullscreen_again_what_it_ended() {
     assert_eq!(host.lists.turned(), [unfocused("terminal_9", "terminal_1"), toggled.to_owned()]);
 }
 
-/// A pane stays out of fullscreen where the turn did not end that, or where it
-/// moved along itself, or where showing it would take a client off its pane:
-/// here one that went with its pane into the tab.
 #[test]
 fn a_turn_leaves_fullscreen_as_it_is_where_it_ended_none_or_would_move_a_client() {
     let (old, new) = ((0, "Tab #1"), (3, "Tab #2"));
@@ -417,8 +352,6 @@ fn a_turn_leaves_fullscreen_as_it_is_where_it_ended_none_or_would_move_a_client(
     assert_eq!(host.lists.turned(), [plain]);
 }
 
-/// A client on the pane that moves goes with it, and one that typed nothing is
-/// not moved: neither has anywhere to go back to.
 #[test]
 fn a_turn_leaves_a_client_zellij_did_not_take_elsewhere() {
     for on in ["terminal_1", "terminal_2"] {
@@ -433,8 +366,6 @@ fn a_turn_leaves_a_client_zellij_did_not_take_elsewhere() {
     }
 }
 
-/// A client goes back to a plugin's pane as to a terminal, by the id it has of
-/// the plugins': here the same as that of the terminal that moved.
 #[test]
 fn a_turn_takes_a_client_back_to_a_plugins_pane() {
     let host = Host::new();
@@ -451,9 +382,6 @@ fn a_turn_takes_a_client_back_to_a_plugins_pane() {
     assert_eq!(host.lists.went(), ["--session=work action focus-pane-id plugin_1"]);
 }
 
-/// A tab whose one tiled pane is a plugin's has it move last, and the client
-/// zellij took ends on it: from a plugin's pane too, which is another pane, and
-/// it goes back there.
 #[test]
 fn a_client_zellij_took_from_a_plugins_pane_to_another_goes_back() {
     let host = Host::new();
@@ -480,9 +408,6 @@ fn a_client_zellij_took_from_a_plugins_pane_to_another_goes_back() {
     assert_eq!(host.lists.went(), ["--session=work action focus-pane-id plugin_5"]);
 }
 
-/// What turned stays turned where a client has no way back, as one that typed
-/// nothing, whose pane left without it: the agent is told, for it to tell the
-/// user.
 #[test]
 fn a_turn_says_where_it_could_not_take_a_client_back() {
     let host = Host::new();
@@ -497,9 +422,6 @@ fn a_turn_says_where_it_could_not_take_a_client_back() {
     assert!(warned.contains("may not be on the pane they were on"), "{warned}");
 }
 
-/// A turn refused before it asked zellij to move anything moved nobody: a client
-/// that goes elsewhere as it runs, the pane it was given too, went there of its
-/// own, and stays there, and the turn says nothing of panes moving.
 #[test]
 fn a_refused_turn_leaves_a_client_that_moves_as_it_runs() {
     let alone: &[&str] = &["turn", "pane", "work:3"];
@@ -525,9 +447,6 @@ fn a_refused_turn_leaves_a_client_that_moves_as_it_runs() {
     }
 }
 
-/// A session no client is in has no room for a tab, and nobody is taken there
-/// to make it, as `open tab` takes nobody. What `lunetad::turns` refuses reaches
-/// the agent as a failure too.
 #[test]
 fn a_pane_that_cannot_turn_into_a_tab_fails_and_says_why() {
     let host = Host::new();
@@ -545,8 +464,6 @@ fn a_pane_that_cannot_turn_into_a_tab_fails_and_says_why() {
     assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
-/// `--into` names a tab by a pane of it. A pane of another session is refused
-/// before anything moves, and so is one of the same tab.
 #[test]
 fn a_tab_turns_into_panes_only_of_another_tab_of_its_session() {
     let host = Host::new();
@@ -566,8 +483,6 @@ fn a_tab_turns_into_panes_only_of_another_tab_of_its_session() {
     assert_eq!(host.lists.turned(), [] as [String; 0]);
 }
 
-/// A tab turns into panes with no client in its session too, as the tab they go
-/// into has its room already, and the tab they left goes.
 #[test]
 fn a_tab_turns_into_panes_where_no_client_is_and_says_the_pane_it_was_given() {
     let host = Host::new();
@@ -583,8 +498,6 @@ fn a_tab_turns_into_panes_where_no_client_is_and_says_the_pane_it_was_given() {
     assert!(closed.contains(&"--session=work action close-tab-by-id 0".to_owned()), "{closed:?}");
 }
 
-/// zellij runs out of room partway: the agent hears how many moved, as those
-/// stay moved, and the client zellij took along goes back all the same.
 #[test]
 fn a_tab_that_turns_only_partly_fails_saying_so_and_the_client_goes_back() {
     let host = Host::new();
@@ -607,12 +520,6 @@ fn a_tab_that_turns_only_partly_fails_saying_so_and_the_client_goes_back() {
     assert_eq!(host.lists.went(), ["--session=work action focus-pane-id terminal_7"]);
 }
 
-/// A pane keeps the name its session had as it opened. Where no session runs
-/// by it now, and no lunetad says where the pane's agents are, luneta cannot
-/// tell which session it runs in, and what goes by that does nothing: a pane
-/// or a tab opens in no session that is gone, a session opens from none,
-/// which would make none and say it had, `go` moves nobody, and a close,
-/// which takes what holds this pane last, closes nothing.
 #[test]
 fn what_goes_by_the_session_it_runs_in_refuses_where_none_runs_by_its_name() {
     let host = Host::new();
@@ -638,22 +545,11 @@ fn what_goes_by_the_session_it_runs_in_refuses_where_none_runs_by_its_name() {
     assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
-/// The CLI, run with `args` by the agent of luneta's ask box, with `vars`:
-/// the pane you asked from, the turn it is at and the one before.
 fn asked(host: &Host, vars: &[(&str, &str)], args: &[&str]) -> Output {
     let mut command = host.vars().command(LUNETA);
     answered(command.envs(vars.iter().copied()).args(args))
 }
 
-/// The agent luneta's ask box runs is in no pane, and goes by the pane you
-/// asked from, as the box names it: it is where `here` says it runs, and
-/// what holds it is what a close takes last. A command in a pane of zellij
-/// that names another for the box's goes by neither, nor does one the box
-/// names a pane for outside a turn. Where the box names none, as it cannot
-/// tell, a close in a turn of it closes nothing, as it could take your pane
-/// first, and `here`, `go`, `open session`, and `open pane` and `open tab`
-/// without a pane or a session to open in, say that it cannot tell, and ask
-/// zellij nothing.
 #[test]
 fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     let host = Host::new();
@@ -715,14 +611,6 @@ fn the_ask_box_s_agent_goes_by_the_pane_it_names() {
     assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
-/// Asked from another machine, where luneta's zellij is, the ask box's
-/// agent goes by no pane of this one's, as none is yours: a close takes a
-/// yes in the turn after its plan, as ever, and keeps no pane for last.
-/// `here`, `go`, `open session`, and `open pane` and `open tab` without a
-/// pane or a session to open in, say why they have none to go by, and ask
-/// zellij nothing. A command in a pane of zellij that the box says was asked
-/// from another machine goes by neither, nor one the box says both of, nor
-/// one it says so of outside a turn, or by anything but luneta's `1`.
 #[test]
 fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
     let host = Host::new();
@@ -776,15 +664,6 @@ fn the_ask_box_s_agent_asked_from_another_machine_goes_by_no_pane_here() {
     assert_eq!(host.lists.opened(), [] as [String; 0]);
 }
 
-/// The ask box's agent runs what it may without anyone asking you, and a
-/// pane runs what it is given: so a pane it opens, or a tab, runs your shell
-/// or Claude Code, as `claude [--name <name>] [<prompt>]`, which asks you or
-/// looks at what it does, in your permission mode, or pi, as `pi [--name
-/// <name>] [<prompt>]`, which asks nothing, only in a turn whose agents start
-/// in pi. Any other command, an option of theirs but `--name`, a prompt that
-/// is a line for your shell, and for pi, one that is a file or a command of
-/// its own, are refused before zellij is asked anything. Out of the box, a
-/// pane runs what it is given.
 #[test]
 fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_claude_or_pi() {
     let host = Host::new();
@@ -801,7 +680,6 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_claude_or_pi() {
         let pi = command.first() == Some(&"pi");
         asked(&host, if pi { &in_a_pi_box } else { &in_the_box }, &args)
     };
-    // The fake zellij opens nothing, and notes what it was asked.
     let last_opened = || host.lists.opened().last().cloned().unwrap_or_default();
     for (what, command) in [
         ("pane", &[][..]),
@@ -861,11 +739,6 @@ fn a_pane_the_ask_box_s_agent_opens_runs_your_shell_claude_or_pi() {
     assert!(last_opened().ends_with(&touch), "{}", last_opened());
 }
 
-/// The ask box names the pane you asked from by its session's name as you
-/// asked, which an agent's pane need not have opened under. So where one
-/// session was renamed, and another made by its old name since, the box's
-/// agent goes by the pane of the one it names, though an agent in the pane of
-/// that id in the one renamed says that name.
 #[test]
 fn the_ask_box_s_agent_goes_by_the_name_the_session_has_now() {
     let host = Host::new();
@@ -889,11 +762,6 @@ fn the_ask_box_s_agent_goes_by_the_name_the_session_has_now() {
     assert!(why.contains("no session runs by that name now"), "{why}");
 }
 
-/// The ask box's agent runs a close without anyone asking you first, and so
-/// a close it runs takes a yes to a plan only in the turn after the one that
-/// said it, with your answer between them: not in the same turn, not in the
-/// first, nor to a plan said out of the box. Out of it, a close takes a yes
-/// to the plan it says.
 #[test]
 fn a_close_in_the_ask_box_takes_a_yes_only_in_the_turn_after_its_plan() {
     let host = Host::new();
@@ -931,10 +799,6 @@ fn a_close_in_the_ask_box_takes_a_yes_only_in_the_turn_after_its_plan() {
     assert!(why.contains("LUNETA_TURN is no key"), "{why}");
 }
 
-/// zellij's variables keep the name a session had as the pane opened, and
-/// lunetad follows a rename. So in an agent's pane whose session was renamed,
-/// and another made by its old name since, the CLI says it runs in the one
-/// renamed, and a close marks the agent's line in it and takes it last.
 #[test]
 fn a_close_takes_the_session_it_runs_in_last_by_the_name_it_has_now() {
     let host = Host::new();
@@ -969,9 +833,6 @@ fn a_close_takes_the_session_it_runs_in_last_by_the_name_it_has_now() {
     assert_eq!(host.lists.closed(), killed);
 }
 
-/// What holds the pane a close runs in goes last, as the agent that ran it
-/// ends with it. Where anything before it failed to close, it stays, so that
-/// the agent can say what failed.
 #[test]
 fn a_close_leaves_what_holds_its_pane_where_anything_before_it_failed() {
     let host = Host::new();
@@ -993,10 +854,6 @@ fn a_close_leaves_what_holds_its_pane_where_anything_before_it_failed() {
     assert_eq!(host.lists.closed(), [] as [String; 0]);
 }
 
-/// zellij keeps nothing of a session in its first second, and fails to
-/// delete a session that young once it has killed it: the close takes it
-/// for deleted. A session zellij finds nothing of, as one that ended since
-/// the plan, is not deleted, and what holds the pane the close runs in stays.
 #[test]
 fn a_close_deletes_a_session_zellij_kills_though_it_kept_nothing_of_it() {
     let host = Host::new();
@@ -1021,10 +878,6 @@ fn a_close_deletes_a_session_zellij_kills_though_it_kept_nothing_of_it() {
     assert_eq!(host.lists.closed(), ["delete-session --force -- play"]);
 }
 
-/// zellij takes away what it keeps of a session before the session's server
-/// has ended, and the server's writer can write it anew meanwhile, which
-/// zellij would bring the session back with: the close lets go of it again
-/// once the server has ended.
 #[test]
 fn a_close_lets_go_again_of_what_the_server_of_a_session_it_deletes_writes_anew() {
     let host = Host::new();
@@ -1039,16 +892,12 @@ fn a_close_lets_go_again_of_what_the_server_of_a_session_it_deletes_writes_anew(
     assert_eq!(host.lists.closed(), ["delete-session --force -- play", "delete-session -- play"]);
 }
 
-/// A session made by the name of one a close deletes, as the close goes, is
-/// another than the one it was told yes to, which zellij would kill all the
-/// same: it stays.
 #[test]
 fn a_close_leaves_a_session_made_by_the_name_of_one_it_deletes_as_it_goes() {
     let host = Host::new();
     let _work = UnixListener::bind(host.contract().join("work")).unwrap();
     let _away = UnixListener::bind(host.contract().join("away")).unwrap();
     let _play = UnixListener::bind(host.contract().join("play")).unwrap();
-    // A close deletes the sessions it is given in the order of their names.
     host.lists.renews("away", "play");
 
     let given = ["close", "away", "play"];

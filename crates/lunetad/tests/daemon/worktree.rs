@@ -1,15 +1,9 @@
-//! `luneta worktree`, which luneta runs to make the worktree of a link pasted
-//! in its sidebar, with wt's code: where the worktree is, on stdout, alone,
-//! or why it made none, last on stderr.
-
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use crate::host::{Vars, LUNETA};
 
-/// git on the repository at `dir`, with no config but its own, as no one in
-/// particular, which must end well.
 pub fn git(dir: &Path, args: &[&str]) {
     let mut git = Command::new("git");
     for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
@@ -27,14 +21,10 @@ pub fn git(dir: &Path, args: &[&str]) {
     assert!(git.status().unwrap().success(), "git {args:?} in {}", dir.display());
 }
 
-/// `luneta worktree` of `branch`, in the repository `dir` is a directory of.
 fn worktree(dir: &Path, branch: &str) -> Output {
     worktree_with(dir, &[branch], None)
 }
 
-/// `luneta worktree` with `words` after `--repo`, in the repository `dir` is
-/// a directory of, with a variable that tells git where a repository is,
-/// `named`, where there is one, and none but it.
 fn worktree_with(dir: &Path, words: &[&str], named: Option<(&str, &Path)>) -> Output {
     let mut luneta = Vars::default().command(LUNETA);
     lunetad::local_git(&mut luneta);
@@ -44,9 +34,6 @@ fn worktree_with(dir: &Path, words: &[&str], named: Option<(&str, &Path)>) -> Ou
     luneta.arg("worktree").arg("--repo").arg(dir).args(words).output().unwrap()
 }
 
-/// A clone as wt makes one, of a repository it makes beside it, `up`, with
-/// the repository bare in `.bare` and `main` checked out beside it, at
-/// `clone`.
 pub fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
     origin(up);
     let (up, bare) = (up.display().to_string(), clone.join(".bare"));
@@ -54,23 +41,15 @@ pub fn cloned_as_wt(scratch: &Path, up: &Path, clone: &Path) {
     git(&bare, &["worktree", "add", "-q", "../main", "main"]);
 }
 
-/// A repository with a commit on `main`, and a branch `feat`, at `dir`.
 fn origin(dir: &Path) {
     git(dir.parent().unwrap(), &["init", "-q", "-b", "main", &dir.display().to_string()]);
     git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
     git(dir, &["branch", "feat"]);
 }
 
-/// A worktree is made beside the others, in a clone as wt makes one, with
-/// the repository bare in `.bare` and `main` checked out beside it, and
-/// where it is is all luneta prints on stdout, whatever wt and git say on
-/// stderr as they go. Asked again, it says the same worktree, which has the
-/// branch already.
 #[test]
 fn a_worktree_is_made_beside_the_others_and_said_alone_on_stdout() {
     let scratch = tempfile::tempdir().unwrap();
-    // As git says the worktree, by its real path, as on macOS, where the
-    // temporary folder is through a link.
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("clone"));
     cloned_as_wt(&scratch, &up, &clone);
@@ -104,9 +83,6 @@ fn who_asks_for_a_branch_gets_no_worktree_that_moved_off_it() {
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
 }
 
-/// In a clone git made, wt would make the worktree in its `.git`: luneta
-/// makes none, prints nothing on stdout, and says why on the last line of
-/// stderr, after `luneta: `, which is what luneta reads of it.
 #[test]
 fn in_a_clone_git_made_none_is_made_and_why_comes_last_on_stderr() {
     let scratch = tempfile::tempdir().unwrap();
@@ -126,10 +102,6 @@ fn in_a_clone_git_made_none_is_made_and_why_comes_last_on_stderr() {
     assert!(!plain.join(".git").join("feat").exists());
 }
 
-/// Where a variable tells git where a repository is, wt's git would read the
-/// one it names, and the clone luneta sees wt made may not be the one wt
-/// makes the worktree in: here, in the `.git` of a clone git made. luneta
-/// makes none, and says why last on stderr.
 #[test]
 fn with_git_told_of_another_repository_none_is_made() {
     let scratch = tempfile::tempdir().unwrap();
@@ -151,8 +123,6 @@ fn with_git_told_of_another_repository_none_is_made() {
     assert!(!clone.join("feat").exists());
 }
 
-/// As for a worktree: wt's git would read the repository the variable names, and
-/// move the branch checked out there.
 #[test]
 fn with_git_told_of_another_repository_nothing_follows() {
     let scratch = tempfile::tempdir().unwrap();
@@ -174,9 +144,6 @@ fn with_git_told_of_another_repository_nothing_follows() {
     assert_eq!(String::from_utf8_lossy(&refused.stderr).lines().last(), Some(why.as_str()));
 }
 
-/// An issue's link with no `https://`, which git would take for a branch's
-/// name, as wt would make a new branch of, is refused as `luneta worktree`
-/// is asked, and no worktree is made.
 #[test]
 fn a_link_with_no_scheme_is_no_branch_s_name() {
     let scratch = tempfile::tempdir().unwrap();
@@ -193,11 +160,6 @@ fn a_link_with_no_scheme_is_no_branch_s_name() {
     assert!(!clone.join("github.com-o-n-issues-14").exists());
 }
 
-/// A name with a `-` first, which git gives no branch, after a `--` as the
-/// agent can put one, makes no worktree and runs nothing: wt refuses it, as
-/// git would take it for an option, and with `--upload-pack` run a command of
-/// the name's, as it does where origin is a path, as here. wt has refused it
-/// since lorenzolfm/wt#18, and luneta is built with a wt as new.
 #[test]
 fn a_name_with_a_dash_first_is_no_branch_s_and_runs_nothing() {
     let scratch = tempfile::tempdir().unwrap();

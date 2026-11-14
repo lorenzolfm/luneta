@@ -1,18 +1,11 @@
-//! Where the daemon listens, and that it is the only one there.
-
 use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
 use crate::host::{info, start, Vars, LUNETA, SOCKET};
 
-/// A case of where the socket goes: given two roots, the variables to start a
-/// daemon with, and the root that should then hold the socket.
 type Case = for<'p> fn(&'p Path, &'p Path) -> (Vars<'p>, &'p Path);
 
-/// The daemon listens in `luneta` under `$XDG_RUNTIME_DIR`, or under `$TMPDIR`
-/// where that is unset or set to nothing, as on macOS, and the CLI looks for
-/// it there by the same rule. The shell hook goes by it too.
 #[test]
 fn the_cli_finds_the_daemon_where_the_variables_say() {
     let cases: [Case; 4] = [
@@ -31,9 +24,6 @@ fn the_cli_finds_the_daemon_where_the_variables_say() {
     }
 }
 
-/// One daemon runs in a folder at a time. The lock that says so goes with the
-/// process however it ends, so that a daemon that crashed and left its socket
-/// behind does not keep the next one from starting.
 #[test]
 fn one_daemon_holds_the_folder_until_it_dies() {
     let root = tempfile::tempdir().unwrap();
@@ -53,8 +43,6 @@ fn one_daemon_holds_the_folder_until_it_dies() {
     assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
 }
 
-/// A folder that is a link, or that other users can reach into, is refused:
-/// in a `TMPDIR` of `/tmp`, anyone could have made it first.
 #[test]
 fn the_daemon_refuses_a_folder_that_is_not_yours_alone() {
     let (linked, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -75,9 +63,6 @@ fn the_daemon_refuses_a_folder_that_is_not_yours_alone() {
     assert!(!open.path().join(SOCKET).exists());
 }
 
-/// The CLI holds the folder to what the daemon does: a socket in a folder that
-/// other users may reach into could be anyone's, and what answers on it need
-/// not be your daemon.
 #[test]
 fn the_cli_refuses_a_folder_that_is_not_yours_alone() {
     let root = tempfile::tempdir().unwrap();

@@ -1,0 +1,30 @@
+id: no-typescript-comments
+snapshots:
+  ? |-
+    /** a */
+    function f() {}
+  : labels:
+    - source: /** a */
+      style: primary
+      start: 0
+      end: 8
+  ? |-
+    // a
+    const a = 1;
+  : labels:
+    - source: // a
+      style: primary
+      start: 0
+      end: 4
+  const a = 1; // a:
+    labels:
+    - source: // a
+      style: primary
+      start: 13
+      end: 17
+  f(/* a */);:
+    labels:
+    - source: /* a */
+      style: primary
+      start: 2
+      end: 9

@@ -1,7 +1,3 @@
-//! The other machines a daemon watches, as its hosts file names them, through
-//! `ssh <destination> luneta bridge`: here, through an ssh of the test's own,
-//! which runs the bridge of another host of the test's.
-
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{self, DirBuilder};
@@ -54,27 +50,11 @@ use crate::host::{
 use crate::sessions::listed;
 use crate::worktree::{cloned_as_wt, git};
 
-/// An `ssh` of a test's own, in a folder to put first on the `PATH` of a
-/// host's daemon, that reaches the test's other hosts by the destinations it
-/// was given for them with `reaches`: it runs `luneta bridge` with their
-/// variables, as ssh runs it on the machine it reaches. Of a destination it
-/// was given none for, it says it cannot resolve it, and ends as ssh does
-/// then, with 255. Nor does it run anything on a terminal, which would mangle
-/// what the daemons say, or where it could ask for a password, which no one
-/// would answer: without `-T` and `BatchMode=yes`, it ends so too. It notes
-/// each time it is run to a destination, for `runs`, each time it could not
-/// resolve one, for `unresolved`, and the pid of each bridge it runs, for
-/// `bridges`. Run with `-t`, as luneta runs a client of a
-/// session there, it runs nothing: it notes the command, for `clients`, and
-/// ends well, as a client that detached does, or as one zellij there dropped
-/// does, as many as a test had it `drops_clients`, or as ssh does that failed,
-/// where a test had it `refuse` clients.
 pub struct FakeSsh {
     to: PathBuf,
 }
 
 impl FakeSsh {
-    /// Writes the `ssh` in `bin`.
     pub fn new(bin: &Path) -> Self {
         let ssh = FakeSsh { to: bin.join("ssh-to") };
         fs::create_dir(&ssh.to).unwrap();
@@ -129,74 +109,56 @@ exec "$to/$destination"
         ssh
     }
 
-    /// Has ssh reach the host whose variables are `vars` as `destination`.
     pub fn reaches(&self, destination: &str, vars: Vars) {
         script(&self.to.join(destination), &bridge(&vars));
     }
 
-    /// Has ssh reach `destination` as `reaches` does, `secs` after it is run,
-    /// as over a slow link.
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
         script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridge(&vars)));
     }
 
-    /// Has ssh wait on `destination` for good, saying nothing, as it does on
-    /// a machine that is off.
     pub fn waits_on(&self, destination: &str) {
         script(&self.to.join(destination), "exec sleep 60\n");
     }
 
-    /// Has a client of a session on `destination` fail from now on, as ssh
-    /// does that loses the machine.
     pub fn refuses_clients(&self, destination: &str) {
         fs::write(self.to.join(format!("{destination}.refused")), "").unwrap();
     }
 
-    /// Has the next `clients` of a session on `destination` end as one zellij
-    /// there dropped does.
     pub fn drops_clients(&self, destination: &str, clients: u32) {
         fs::write(self.to.join("dropped"), DROPPED).unwrap();
         fs::write(self.to.join(format!("{destination}.drops")), clients.to_string()).unwrap();
     }
 
-    /// The command of each client of a session on `destination` that was
-    /// started, in the order they were.
     pub fn clients(&self, destination: &str) -> Vec<String> {
         let clients = fs::read_to_string(self.to.join(format!("{destination}.clients")));
         clients.unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
-    /// Has ssh to `destination` end with `code`, before it reaches lunetad.
     fn ends_with(&self, destination: &str, code: u8) {
         script(&self.to.join(destination), &format!("exit {code}\n"));
     }
 
-    /// Has ssh reach `destination` no more, as one that cannot resolve it.
     fn unreaches(&self, destination: &str) {
         fs::remove_file(self.to.join(destination)).unwrap();
     }
 
-    /// How many times ssh has been run to `destination`.
     fn runs(&self, destination: &str) -> usize {
         let runs = fs::read_to_string(self.to.join(format!("{destination}.runs")));
         runs.unwrap_or_default().lines().count()
     }
 
-    /// How many times ssh to `destination` could not resolve it.
     fn unresolved(&self, destination: &str) -> usize {
         let unresolved = fs::read_to_string(self.to.join(format!("{destination}.unresolved")));
         unresolved.unwrap_or_default().lines().count()
     }
 
-    /// The pids of the bridges ssh has run to `destination`, in turn.
     fn bridges(&self, destination: &str) -> Vec<u32> {
         let path = self.to.join(format!("{destination}.bridges"));
         let bridges = fs::read_to_string(path).unwrap_or_default();
         bridges.lines().map(|pid| pid.parse().unwrap()).collect()
     }
 
-    /// Has what `destination`, as `reaches` has it, says come back through a
-    /// `cat` of its own, for `stalls_answers` to stop.
     fn answers_through_a_cat(&self, destination: &str) {
         let bridge = self.to.join(format!("{destination}.bridge"));
         fs::rename(self.to.join(destination), &bridge).unwrap();
@@ -209,9 +171,6 @@ exec "$to/$destination"
         script(&self.to.join(destination), &text);
     }
 
-    /// Stops what `destination` says on its way back, as a link that goes
-    /// quiet does, while what is asked of it goes on reaching it, until what
-    /// this returns goes.
     fn stalls_answers(&self, destination: &str) -> StalledAnswers {
         let cat = fs::read_to_string(self.to.join(format!("{destination}.cat"))).unwrap();
         let cat = Pid::from_raw(cat.trim().parse().unwrap()).unwrap();
@@ -220,18 +179,14 @@ exec "$to/$destination"
     }
 }
 
-/// The `cat` a machine's answers come back through, stopped. It goes on as
-/// this goes, so that the bridge can end.
 struct StalledAnswers(Pid);
 
 impl Drop for StalledAnswers {
     fn drop(&mut self) {
-        // It ended, with the bridge the daemon gave up on.
         let _ = kill_process(self.0, Signal::CONT);
     }
 }
 
-/// What runs `luneta bridge` as the host whose variables are `vars`.
 fn bridge(vars: &Vars) -> String {
     let bridge = vars.command(LUNETA);
     let (mut unset, mut set) = (String::new(), String::new());
@@ -245,13 +200,10 @@ fn bridge(vars: &Vars) -> String {
     format!("exec env{unset}{set} {} bridge\n", quoted(LUNETA))
 }
 
-/// `text` as the shell reads it as one word, whatever is in it.
 fn quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// Has `host`'s daemon watch the machines `text` names, as its hosts file,
-/// written whole before the daemon can read it.
 pub fn hosts(host: &Host, text: &str) {
     let dir = host.home.path().join(".local/state/luneta");
     fs::create_dir_all(&dir).unwrap();
@@ -260,8 +212,6 @@ pub fn hosts(host: &Host, text: &str) {
     fs::rename(writing, dir.join("hosts")).unwrap();
 }
 
-/// The host of the machine `host`'s daemon watches as `destination`, once
-/// it has reached it and `wanted` takes what it says.
 pub fn reached(
     host: &Host,
     destination: &str,
@@ -276,8 +226,6 @@ pub fn reached(
     })
 }
 
-/// What `host`'s daemon has of the machine it watches as `destination`, once
-/// it is unreached.
 fn unreached(host: &Host, destination: &str) -> remote::Unreached {
     eventually(&format!("{destination} is unreached"), || {
         let remote = host.host().remotes.into_iter().find(|it| it.destination == destination)?;
@@ -288,27 +236,18 @@ fn unreached(host: &Host, destination: &str) -> remote::Unreached {
     })
 }
 
-/// The names of the sessions of the machine `host`, in order.
 fn names(host: &remote::Host) -> Vec<&str> {
     let mut names: Vec<&str> = host.sessions.iter().map(|it| it.name.as_str()).collect();
     names.sort_unstable();
     names
 }
 
-/// Whether the process `pid` has ended, whether or not its parent has
-/// waited for it yet.
 fn ended(pid: u32) -> bool {
     let stat = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
     let stat = String::from_utf8(stat.stdout).unwrap();
     stat.trim().is_empty() || stat.trim().starts_with('Z')
 }
 
-/// A daemon watches each machine its hosts file names, in the file's order,
-/// through ssh: one whose daemon answers, with that daemon's host, as it
-/// changes, and one ssh cannot reach, with why, and that ssh ended so. A
-/// line ssh would take for an option names none, and the daemon says that
-/// it could not read it. `luneta sessions` lists the sessions of each
-/// machine under it, and says so too.
 #[test]
 fn a_daemon_says_each_machine_its_hosts_file_names() {
     let here = Host::new();
@@ -348,7 +287,6 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     assert_eq!(lines[4..], [unread], "{said}");
 }
 
-/// An agent on another machine is heard where you sit, as the agents are.
 #[test]
 fn what_another_machine_is_told_to_say_comes_with_its_host() {
     let here = Host::new();
@@ -367,9 +305,6 @@ fn what_another_machine_is_told_to_say_comes_with_its_host() {
     assert_eq!(here.host().sayings, [], "it is the other machine's to say");
 }
 
-/// A hosts file that does not read leaves the machines it named as they
-/// were, and the daemon says that it could not read it, until it reads
-/// again.
 #[test]
 fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
     let here = Host::new();
@@ -381,7 +316,6 @@ fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
     reached(&here, "far", |_| true);
     assert_eq!(here.host().unread_hosts, Some(0));
 
-    // A folder in its place, which no one can read as a file.
     let file = here.home.path().join(".local/state/luneta/hosts");
     fs::remove_file(&file).unwrap();
     fs::create_dir(&file).unwrap();
@@ -397,8 +331,6 @@ fn a_hosts_file_that_does_not_read_leaves_the_machines_as_they_were() {
     eventually("the file reads", || (here.host().unread_hosts == Some(0)).then_some(()));
 }
 
-/// A machine that leaves the hosts file leaves the daemon's host, and the
-/// bridge to it ends.
 #[test]
 fn a_machine_that_leaves_the_hosts_file_is_watched_no_more() {
     let here = Host::new();
@@ -417,9 +349,6 @@ fn a_machine_that_leaves_the_hosts_file_is_watched_no_more() {
     eventually("the bridge to far ends", || ended(bridges[0]).then_some(()));
 }
 
-/// The daemon of a machine that ends, as one that makes way for a newer one
-/// does, ends the bridge to it, and the daemon that watches the machine runs
-/// ssh again, which starts another there.
 #[test]
 fn a_machine_whose_daemon_ends_is_reached_again() {
     let here = Host::new();
@@ -437,9 +366,6 @@ fn a_machine_whose_daemon_ends_is_reached_again() {
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
 }
 
-/// A question for a machine whose daemon makes way for a newer one, while
-/// ssh to it runs again, is handed on to the newer one, as the machine's
-/// host stands meanwhile, rather than refused.
 #[test]
 fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let here = Host::new();
@@ -468,8 +394,6 @@ fn a_question_while_a_machine_is_reached_again_is_handed_on() {
     let _again = Detached { host: &far, pid: far.host().version.unwrap().pid };
 }
 
-/// A machine whose daemon ends, where ssh no longer reaches, is unreached
-/// since its daemon last answered, as ssh ended that tried it again.
 #[test]
 fn a_machine_ssh_no_longer_reaches_is_unreached_since_it_last_answered() {
     let here = Host::new();
@@ -491,10 +415,6 @@ fn a_machine_ssh_no_longer_reaches_is_unreached_since_it_last_answered() {
     assert!(since <= gone, "unreached since {since:?}, after its daemon ended");
 }
 
-/// Two daemons that watch each other come to rest: each says the other's
-/// host as a machine's, which has neither the other's remotes nor its
-/// version, which would else change each time the other's does, and the
-/// other's each time it does, for as long as both ran.
 #[test]
 fn two_daemons_that_watch_each_other_come_to_rest() {
     let here = Host::new();
@@ -508,8 +428,6 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     reached(&here, "far", |_| true);
     reached(&far, "here", |_| true);
 
-    // The daemon answers with the host as it was once it has not changed
-    // for 4 seconds.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(here.runtime.path()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -528,8 +446,6 @@ fn two_daemons_that_watch_each_other_come_to_rest() {
     });
 }
 
-/// Watches `host`'s daemon until `until`, as a luneta does: asks again as
-/// soon as it answers.
 fn watch_until(host: &Host, until: Instant) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let folder = crate::host::folder_in(host.runtime.path()).unwrap();
@@ -543,10 +459,6 @@ fn watch_until(host: &Host, until: Instant) {
     });
 }
 
-/// A daemon that a client keeps keeps the daemons of the machines it watches
-/// running, however long zellij there has had no session, as a client there
-/// would: `luneta bridge` would else start one again each time one ended.
-/// The test watches the one for longer than the other would run on alone.
 pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     let here = Host::new();
     let far = Host::new();
@@ -562,11 +474,6 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     assert_eq!(ssh.bridges("far").len(), 1);
 }
 
-/// Two daemons that watch each other, which nothing else keeps, end as each
-/// would alone: each says to the other that it runs for no reason of its
-/// own. Nor does either run ssh again as the other ends, which would start
-/// the other's again through its `luneta bridge`, and so on for good. The
-/// test waits it out.
 pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     let here = Host::new();
     let far = Host::new();
@@ -589,16 +496,12 @@ pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
     assert_eq!(to_here.bridges("here").len(), 1);
 }
 
-/// What ssh says of a machine it does not reach goes in the log once, while
-/// each ssh to it says it again: one that stays unreached is run again and
-/// again, for as long as the daemon runs.
 #[test]
 fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     let here = Host::new();
     let ssh = FakeSsh::new(here.zellij.bin());
     hosts(&here, "nowhere\n");
     let mut daemon = start(here.vars()).unwrap();
-    // Watched, so that it is kept, and runs ssh.
     eventually("ssh runs to nowhere a few times", || {
         here.host();
         (ssh.runs("nowhere") >= 3).then_some(())
@@ -610,8 +513,6 @@ fn what_each_ssh_to_a_machine_says_again_is_said_once() {
     assert_eq!(lines, 1, "{said:?}");
 }
 
-/// What `host`'s daemon answers a client that asks to go to a session on
-/// `destination`, which it refuses, as it does not reach it.
 fn refused_go(host: &Host, destination: &str) -> Status {
     let folder = folder_in(host.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -623,10 +524,6 @@ fn refused_go(host: &Host, destination: &str) -> Status {
     })
 }
 
-/// A question for a machine the daemon does not reach is refused, and has
-/// ssh run to it again at once, where the daemon would else wait longer
-/// each time ssh failed: 8 seconds after the fifth. The machine is reached
-/// in moments, for the next question to find.
 #[test]
 fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
     let here = Host::new();
@@ -650,9 +547,6 @@ fn a_question_for_a_machine_not_reached_runs_ssh_to_it_at_once() {
     assert_eq!(ssh.runs("far"), 6);
 }
 
-/// The log says why a machine is unreached once, while each ssh to it fails
-/// alike, and again as why changes, and how long it was unreached once it is
-/// reached.
 #[test]
 fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
     let here = Host::new();
@@ -685,10 +579,6 @@ fn the_log_says_why_a_machine_is_unreached_as_that_changes() {
     assert_eq!(reached, 1, "{said:?}");
 }
 
-/// `luneta ssh` adds a machine to the hosts file, after the machines it
-/// names, and says that lunetad reaches it once one runs; and where one
-/// runs, how its first ssh there went: reached, or not, and why, and it
-/// fails then. A machine the file names already stays named once.
 #[test]
 fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
     let here = Host::new();
@@ -724,37 +614,17 @@ fn luneta_ssh_adds_a_machine_and_says_how_lunetad_reaches_it() {
     assert!(lines[0].starts_with("luneta: elsewhere: unreached: "), "{stderr}");
     let log = here.home.path().join(".local/state/luneta/luneta.log");
     assert_eq!(lines[1], format!("luneta: what ssh said of it is in {}", log.display()));
-    // What ssh said is heard on a thread of its own, as the daemon tells of
-    // its end.
     let said = "elsewhere: ssh: Could not resolve hostname elsewhere";
     eventually("what ssh said is in the log", || {
         fs::read_to_string(&log).ok().filter(|logged| logged.contains(said))
     });
 }
 
-/// A daemon hands what a client asks of another machine to that machine's
-/// daemon, through the bridge it watches it on, which asks zellij there, or
-/// looks there: where to take a client, a session's clients, where a client
-/// goes on once its session ended, a pane or a tab to open, the skills of a
-/// directory, what a pane's shell printed, which it keeps there, what a
-/// terminal shows there, and the name a session for a directory takes
-/// there, and to start it, and what closing a pane closes there, to close
-/// it, and a session to kill, and the sessions that ended there, to let one
-/// go of, and a session to rename, and the ends of transcripts in Claude
-/// Code's folder there. Without a machine, it asks its own; of one it does
-/// not reach, it says so. A question that names a directory by no absolute
-/// path, an empty line typed, a screen of no session, a tab by an empty
-/// name, a tab to close of no terminal, a session to let go of by no name, a
-/// name zellij would make no session of, or a transcript by no session's
-/// id, or more of the transcripts than a brief keeps, or none of them, is
-/// invalid here; no tab opens there in a session no client is in, and
-/// nothing closes there that zellij lists otherwise than the close says.
 #[test]
 fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
-    // A claude there that lists no plugins, whatever this machine has.
     script(&far.zellij.bin().join("claude"), "echo '[]'\n");
     let _work = far.serve("work");
     let tab = listed(4, "", (3, ""), None);
@@ -821,8 +691,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let found = daemon.refuge(detached).await.unwrap().into_inner();
         assert_eq!(found.ended, Some(Ended::Kept(())));
 
-        // A question that names no session, or none the client was in, asks
-        // nothing of zellij, here or there.
         let (at, to) = (String::new(), "play".to_owned());
         let nameless = daemon.go(GoRequest { on: on("far"), at, to, pane: None }).await.unwrap_err();
         assert_eq!(nameless.code(), Code::InvalidArgument, "{nameless:?}");
@@ -895,8 +763,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let untyped = KeepPrintedRequest { on: on("far"), session, pane: 2, typed };
         invalid(daemon.keep_printed(untyped).await.unwrap_err());
 
-        // The logs of a pull request's checks that failed are kept there, as
-        // gh there fetches them, older or not, and none of one merged since.
         let checks = |url: &str| KeepChecksRequest { on: on("far"), url: url.to_owned() };
         let kept = daemon.keep_checks(checks("https://github.com/o/n/pull/328")).await;
         let kept = kept.unwrap().into_inner().message().await.unwrap().unwrap();
@@ -941,9 +807,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let again = format!("api --hostname github.com {logs}");
         assert_eq!(fetching(), [fetched.clone(), fetched, again]);
 
-        // A screen there is dumped there: of the terminal asked, or else of
-        // the one a client coming to the session would be on, as zellij there
-        // lists its panes.
         let dump = |pane| DumpScreenRequest { on: on("far"), session: "work".to_owned(), pane };
         let asked = daemon.dump_screen(dump(Some(2))).await.unwrap().into_inner();
         let shown = daemon.dump_screen(dump(None)).await.unwrap().into_inner();
@@ -953,7 +816,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let nameless = DumpScreenRequest { session: String::new(), ..dump(None) };
         invalid(daemon.dump_screen(nameless).await.unwrap_err());
 
-        // A directory named for a session that runs there takes the name after.
         let work = dir.path().join("work");
         fs::create_dir(&work).unwrap();
         let work = work.to_str().unwrap().to_owned();
@@ -961,13 +823,10 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let named = NameSessionRequest { on: on("far"), dir: Some(work.clone()) };
         let named = daemon.name_session(named).await.unwrap().into_inner();
         assert_eq!((named.name.as_str(), named.dir.as_deref()), ("work-2", Some(work.as_str())));
-        // Just before the daemon there read the names, by its clock.
         let named_at = named.named_at.map(|at| SystemTime::try_from(at).unwrap());
         assert!(named_at.is_some_and(|at| at >= before && at <= SystemTime::now()), "{named_at:?}");
         let relative = NameSessionRequest { on: on("far"), dir: Some("work".to_owned()) };
         invalid(daemon.name_session(relative).await.unwrap_err());
-        // With no directory, it is named there for the home of the daemon's
-        // user there, which is not this machine's.
         let homes = [(on("far"), &far), (None, &here)];
         for (on, host) in homes {
             let home = NameSessionRequest { on, dir: None };
@@ -984,8 +843,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(far.zellij.went().last(), Some(&started));
         assert_eq!(here.zellij.went(), [] as [String; 0]);
 
-        // A name is checked there: one a session there runs by is taken, and
-        // another is free since the daemon there read the names, by its clock.
         let check = |on, name: &str| CheckNameRequest { on, name: name.to_owned() };
         let asked = SystemTime::now();
         let free = daemon.check_name(check(on("far"), "fresh")).await.unwrap().into_inner();
@@ -997,8 +854,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         daemon.check_name(check(None, "work")).await.unwrap();
         invalid(daemon.check_name(check(on("far"), "a/b")).await.unwrap_err());
 
-        // Closing a pane there closes what zellij there lists it closes: the
-        // tab of one in a tab beside another, the session of the only tab's.
         let closes = |session: &str| {
             let session = session.to_owned();
             ClosesRequest { on: on("far"), session, pane: 4 }
@@ -1009,8 +864,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let idle = daemon.closes(closes("idle")).await.unwrap().into_inner().closes;
         let whole = closes_response::Closes::Session(());
         assert_eq!(idle, Some(whole));
-        // What it closes goes while zellij lists it as the close says: a pane
-        // another holds its tab open beside, and a tab with its terminals.
         let close = |session: &str, closes| {
             let started_at = close_request::Whose::StartedAt(SystemTime::UNIX_EPOCH.into());
             let session = session.to_owned();
@@ -1039,8 +892,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         ];
         assert_eq!(far.zellij.closed(), closed_there);
 
-        // A tab there turns into panes of another there, as zellij there lists
-        // them.
         let tabs = OtherTabsRequest { on: on("far"), session: "turning".to_owned(), pane: 4 };
         let tabs = daemon.other_tabs(tabs).await.unwrap().into_inner().tabs;
         assert_eq!(tabs, [other_tabs_response::Tab { pane: 5, name: String::new() }]);
@@ -1062,20 +913,16 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let stand_in = "--session=turning action close-pane --pane-id terminal_9";
         assert_eq!(far.zellij.closed()[2], stand_in);
 
-        // A pane there that a client has to come for says so.
         let session = "held".to_owned();
         let turn = TurnIntoTabRequest { on: on("far"), session, pane: 4, started_at };
         let came = daemon.turn_into_tab(turn).await.unwrap().into_inner().came;
         assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(())));
 
-        // A session there is killed by when it started, as its daemon lists
-        // it, and deleted.
         let kill = |started_at: Option<_>| {
             let started_at = started_at.map(kill_request::Whose::StartedAt);
             KillRequest { on: on("far"), session: "work".to_owned(), whose: started_at }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
-        // What closes in a session there goes by when it started too.
         let held = |started_at: Option<_>| CloseRequest {
             on: on("far"),
             session: "work".to_owned(),
@@ -1090,9 +937,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(far.zellij.closed()[3..], ["delete-session --force -- work"]);
         assert_eq!(here.zellij.closed(), [] as [String; 0]);
 
-        // The sessions that ended there are listed there, each by how long
-        // before zellij listed it it was made, as zellij there says, and one
-        // is let go of there.
         far.keep("old");
         let exited = |on| ListExitedRequest { on };
         let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
@@ -1112,8 +956,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let listed = daemon.list_exited(exited(on("far"))).await.unwrap().into_inner();
         assert_eq!(listed.exited, [] as [list_exited_response::Exited; 0]);
         invalid(daemon.delete_exited(delete("")).await.unwrap_err());
-        // A session there is renamed there, to a name zellij makes a session
-        // of on any machine.
         let rename = |to: &str| {
             let session = "idle".to_owned();
             RenameSessionRequest { on: on("far"), session, to: to.to_owned() }
@@ -1123,8 +965,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         invalid(daemon.rename_session(rename(&"long".repeat(16))).await.unwrap_err());
         assert_eq!(here.zellij.renamed(), [] as [String; 0]);
 
-        // A transcript there is read there, and one not written yet has no
-        // end.
         let (id, unwritten) =
             ("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60", "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b");
         let project = far.home.path().join(".claude/projects/-w");
@@ -1146,13 +986,6 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
     });
 }
 
-/// A `claude` for `host` that takes turns of the ask box: it writes where it
-/// ran and what it was told in `host`'s home, `told` and `words` there, and
-/// says it starts a session, and runs `luneta here`, and says where the user
-/// is. On words that say `please-fail`, it fails as one with no login does;
-/// on `please-be-slow`, it takes six seconds first, longer than a daemon
-/// gives a question; and on `please-get-stuck`, it says it runs `luneta
-/// here`, writes its pid in `stuck` there, and sleeps for a minute.
 fn claude_that_takes_turns(host: &Host) {
     let home = host.home.path().display();
     let text = format!(
@@ -1179,16 +1012,12 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"You are i
     script(&host.zellij.bin().join("claude"), &text);
 }
 
-/// What `claude` there was told as it ran, by `claude_that_takes_turns`, a
-/// line of each, and the words it was told on its stdin.
 fn told(host: &Host) -> (Vec<String>, String) {
     let told = fs::read_to_string(host.home.path().join("told")).unwrap();
     let words = fs::read_to_string(host.home.path().join("words")).unwrap();
     (told.lines().map(str::to_owned).collect(), words)
 }
 
-/// The steps of the turn `request` asks of `daemon`, as it hands them on,
-/// and how the turn ended.
 async fn turn(
     daemon: &mut DaemonClient<Channel>,
     request: AskRequest,
@@ -1207,9 +1036,6 @@ async fn turn(
     }
 }
 
-/// A turn of the ask box asked of `on`, with `words`, in `cwd`, for the user
-/// where `user` says, the first of its talk or else one that goes on with
-/// the session `7c22`, starting agents in pi.
 fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> AskRequest {
     let resumed = (!first).then(|| SessionId::parse("7c22").unwrap());
     let turn = Turn::new(255, (!first).then_some(10)).unwrap();
@@ -1219,14 +1045,6 @@ fn ask(on: &str, cwd: Option<&Path>, words: &str, user: User, first: bool) -> As
     asked.asked(Some(On { destination: on.to_owned() }))
 }
 
-/// A turn of the ask box asked of another machine runs `claude` there: in
-/// the directory it names there, or in the home of the daemon's user there,
-/// for the user in the pane it names there, or on another machine, in the
-/// turn it names, on the session it resumes. The daemon there hands on each
-/// step `claude` says as it says it, and the turn's end: well, or why not.
-/// A question that hangs up gives up the turn, and `claude` there is
-/// killed. One for a machine this daemon does not reach, or for no turn,
-/// runs nothing.
 #[test]
 fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
     let here = Host::new();
@@ -1288,7 +1106,6 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
         let failed = ended.unwrap_err();
         assert_eq!((failed.code(), failed.message()), (Code::FailedPrecondition, "Not logged in"));
 
-        // Hung up as `claude` there runs, the turn is given up there.
         let stuck = ask("far", None, "please-get-stuck", User::Untold, true);
         let mut steps = daemon.ask(stuck).await.unwrap().into_inner();
         for step in [session, ran] {
@@ -1298,7 +1115,6 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
         let stuck = Pid::from_raw(stuck.trim().parse().unwrap()).unwrap();
         assert!(test_kill_process(stuck).is_ok());
         drop(steps);
-        // The runtime sends the hang-up as it runs on.
         let deadline = Instant::now() + Duration::from_secs(10);
         while test_kill_process(stuck).is_ok() {
             assert!(Instant::now() < deadline, "claude there is never killed");
@@ -1320,9 +1136,6 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
     });
 }
 
-/// A turn of the ask box there takes as long as `claude` there does: longer
-/// than a daemon gives a question, which bounds only the time to the
-/// stream's start, and quiet all the while.
 #[test]
 fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     let here = Host::new();
@@ -1348,11 +1161,6 @@ fn a_turn_of_the_ask_box_there_takes_as_long_as_claude_does() {
     });
 }
 
-/// A `claude` for `host` that writes issues: it writes where it ran and the
-/// options it ran with in `host`'s home, `wrote` there, what it was told in
-/// `told` there, and the file of settings it was handed in `settings` there,
-/// and answers with a title, a body and a label. On words
-/// that say `please-fail`, it fails as one with no login does.
 fn claude_that_writes_issues(host: &Host) {
     let home = host.home.path().display();
     let text = format!(
@@ -1374,21 +1182,6 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
     script(&host.zellij.bin().join("claude"), &text);
 }
 
-/// An issue asked of another machine is written there, by `claude` there in
-/// the directory it names there, told the words, and the labels and your last
-/// issues as gh there lists them, and filed there, by gh there in the same
-/// directory, with the title, body and label `claude` wrote: the daemon
-/// answers with its number, title and page. `claude` may read nothing git
-/// ignores there, nor the git directory. Where `claude` or gh fail, it says
-/// why: gh files nothing after a `claude` that failed, and `claude` writes
-/// nothing where gh cannot list. A gh that failed short of GitHub's answer
-/// may have filed one. Each gh is told the repository on
-/// GitHub asked for. A gh that files and does not say the issue's page may
-/// have filed one, which the daemon says apart. One for a directory by no
-/// absolute path, of no words, or for no repository on GitHub is invalid,
-/// and one for a machine this daemon does not reach runs nothing. The
-/// remotes on GitHub of the repository there are listed there, gh's first,
-/// and none of those elsewhere.
 #[test]
 fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     let here = Host::new();
@@ -1515,11 +1308,6 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
     });
 }
 
-/// The directories zoxide knows on another machine are listed there, best
-/// first, each named for the session a luneta makes there now: past the
-/// name of a session that runs there. What is in one is what eza lists
-/// there. A directory by no absolute path is invalid; a machine the daemon
-/// does not reach lists nothing.
 #[test]
 fn another_machine_s_directories_are_listed_there() {
     let here = Host::new();
@@ -1567,25 +1355,20 @@ fn another_machine_s_directories_are_listed_there() {
     });
 }
 
-/// A PNG of `size` bytes, each saying where it is in the image.
 fn png(size: usize) -> Vec<u8> {
     let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
     bytes.extend((bytes.len()..size).map(|at| (at % 251) as u8));
     bytes
 }
 
-/// The first part of an image of `size` bytes kept on the machine `on`.
 fn image_of(on: Option<On>, size: u64) -> KeepImageRequest {
     KeepImageRequest { part: Some(Part::Image(Image { on, size })) }
 }
 
-/// A part of the bytes of an image.
 fn bytes_of(bytes: &[u8]) -> KeepImageRequest {
     KeepImageRequest { part: Some(Part::Bytes(bytes.to_vec())) }
 }
 
-/// What `daemon` answers `parts`, the question that keeps an image: the one
-/// path its stream holds, or why there is none.
 async fn kept_image(
     daemon: &mut DaemonClient<Channel>,
     parts: Vec<KeepImageRequest>,
@@ -1596,17 +1379,6 @@ async fn kept_image(
     Ok(kept.path)
 }
 
-/// An image goes through the bridge to the daemon of the machine it is for,
-/// however much larger it is than the 4 MiB tonic takes in a message, and
-/// that daemon keeps it in a file of its user's alone, by a name Claude Code
-/// reads as an image's. The stream ends after the path. One asked of no
-/// machine is kept by the daemon it is asked of.
-///
-/// An image that ends short of the size it said, or that is more than that,
-/// or that does not start as a PNG does, keeps no file there; nor do one by
-/// no size or by too few to start as one, one over the most that goes, one
-/// with no first part to say what it is, or one for a machine this daemon
-/// does not reach.
 #[test]
 fn an_image_is_kept_on_another_machine_through_the_bridge() {
     let here = Host::new();
@@ -1684,9 +1456,6 @@ fn an_image_is_kept_on_another_machine_through_the_bridge() {
     });
 }
 
-/// A daemon stopped as an image comes, as luneta stops an older one for a
-/// newer, runs nothing on its way out. What had come of the image goes by no
-/// name an image goes by: nothing takes it for a whole one.
 #[test]
 fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
     let host = Host::new();
@@ -1717,11 +1486,6 @@ fn a_daemon_stopped_as_an_image_comes_leaves_no_image_of_it() {
     });
 }
 
-/// The last file of a kind has no other kept after it to take it away, and it
-/// holds what a screenshot shows, in memory on most Linuxes: a daemon that
-/// starts takes away those past their day, as what a killed one left of an
-/// image, and no younger one. What a link in the place of a folder leads to
-/// is no file of luneta's, however old.
 #[test]
 fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
     let (day, hour) = (Duration::from_hours(25), Duration::from_hours(1));
@@ -1757,14 +1521,10 @@ fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
     let outside = file(elsewhere.path().join("past.png"), day);
     let past = file(folder(runtime.join("printed")).join("past.txt"), day);
     let _daemon = start(linked.vars()).unwrap();
-    // The images are looked at first.
     eventually("the file past its day to go", || (!past.exists()).then_some(()));
     assert!(outside.exists(), "a file through a link stays");
 }
 
-/// Where a key goes for `pasted` on the machine `on`, as `daemon` hands on
-/// the one answer its stream holds, by places of the panes `pasted` says; or
-/// why there is none.
 async fn pasted_on(
     daemon: &mut DaemonClient<Channel>,
     on: &str,
@@ -1777,9 +1537,6 @@ async fn pasted_on(
     Ok(pasted.answered(ready).expect("an answer luneta reads"))
 }
 
-/// A clone wt made in `scratch`, of `up` there, for a key of the menu on `host`:
-/// zoxide there knows it, and gh there knows the issue 7 of `o/n`. That is the
-/// repository on GitHub of a remote of the clone, which git takes for `up`.
 fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
     host.gh.issue(7, "https://github.com/o/n/issues/7");
     let (up, clone) = (scratch.join("up"), scratch.join("n"));
@@ -1793,23 +1550,12 @@ fn clone_with_issue_7(host: &Host, scratch: &Path) -> PathBuf {
     clone
 }
 
-/// A link pasted on a row of another machine is found there: gh there asks
-/// GitHub of the issue, git there reads the repository its panes work in,
-/// and `luneta worktree` there makes the issue's branch's worktree, beside
-/// the lunetad there. The key goes to a tab of the session of the pane
-/// that works in the repository, by its place among those luneta said; or,
-/// with none, to a session to make in the clone zoxide knows there, named
-/// for it as the daemon there names it then. A paste asked of a pane by no
-/// absolute path is refused, and one for a machine the daemon does not
-/// reach runs nothing.
 #[test]
 fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
     let scratch = tempfile::tempdir().unwrap();
-    // As git says the worktree, by its real path, as on macOS, where the
-    // temporary folder is through a link.
     let scratch = scratch.path().canonicalize().unwrap();
     let clone = clone_with_issue_7(&far, &scratch);
     let main = clone.join("main").display().to_string();
@@ -1861,14 +1607,6 @@ fn a_link_pasted_on_another_machine_s_row_is_found_and_made_there() {
     });
 }
 
-/// A machine with no session in a link's repository, and whose zoxide knows no
-/// clone of it, says so apart from whatever else goes wrong, through the daemon
-/// that bridges to it, for luneta to ask its other machines. It asks nothing of
-/// GitHub for that, as its gh may be logged out. One with a clone git made says
-/// what stands in the way instead, as does one with a directory git would not
-/// say the remotes of, which may be a clone of it. One that has the repository
-/// goes no further on an issue's number that is a pull request's on GitHub,
-/// whether it has a session there or a pane on its branch.
 #[test]
 fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     let here = Host::new();
@@ -1942,10 +1680,6 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
     });
 }
 
-/// A remote by ssh is of a repository on GitHub under a name ssh's config gives
-/// GitHub, as `ssh -G` says, which reads the config and connects nowhere. What
-/// starts with `-` names no host, as ssh would take it for an option, and ssh is
-/// not asked of it.
 #[test]
 fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
     let host = Host::new();
@@ -2005,9 +1739,6 @@ fn git_said(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(said.stdout).unwrap().trim().to_owned()
 }
 
-/// A clone wt made, whose origin is spelled as GitHub's, as wt reads it, and
-/// reached through an ssh of its own: `up` is `o/n`, and `fork` is `f/n`. Of
-/// `feat`, the branch of `o/n#7`, it has only `origin/feat`.
 fn clone_with_pull_7(host: &Host, scratch: &Path) -> PathBuf {
     let (up, clone) = (scratch.join("up"), scratch.join("n"));
     cloned_as_wt(scratch, &up, &clone);
@@ -2112,8 +1843,6 @@ fn w_leaves_the_worktree_where_it_is() {
     assert_eq!(host.gh.viewed(), [] as [String; 0]);
 }
 
-/// A pane on the branch runs no wt, and syncs all the same. `Code::Aborted` is
-/// what has no other machine make a second worktree.
 #[test]
 fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
     let here = Host::new();
@@ -2157,8 +1886,6 @@ fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
     assert_eq!(here.gh.viewed(), [] as [String; 0]);
 }
 
-/// Nothing has to move, so nothing the worktree holds is in danger, and no wt
-/// has to say what it follows: at the head is the code to review.
 #[test]
 fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
     let host = Host::new();
@@ -2185,8 +1912,6 @@ fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
     assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
 }
 
-/// The sidebar's "this pane has #7" can lag a `git switch main`. wt follows what
-/// is checked out, which is not the pull request.
 #[test]
 fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
     let host = Host::new();
@@ -2388,7 +2113,6 @@ fn r_keeps_the_git_config_of_the_daemon_s_environment() {
     assert_eq!(git_said(&clone.join("feat"), &["rev-parse", "HEAD"]), head);
 }
 
-/// wt names the branch `f-main`, as the clone has a `main` of its own.
 #[test]
 fn r_syncs_a_pull_request_from_a_fork_s_main() {
     let host = Host::new();
@@ -2425,9 +2149,6 @@ fn r_syncs_a_pull_request_from_a_fork_s_main() {
     assert_eq!(git_said(&main, &["rev-parse", "main"]), local_main);
 }
 
-/// A machine that made the worktree, and could not then say where the key goes,
-/// says so apart from a machine that made nothing: it is the one failure that
-/// leaves something behind, and no other machine should make another.
 #[test]
 fn a_machine_that_made_the_worktree_and_went_no_further_says_so_apart() {
     let host = Host::new();
@@ -2450,10 +2171,6 @@ fn a_machine_that_made_the_worktree_and_went_no_further_says_so_apart() {
     assert!(clone.join("issue-7").join(".git").is_file());
 }
 
-/// A machine whose answer stalls on its way back started on the key as it heard
-/// it, and makes the worktree with no one left to hear of it. So what luneta
-/// hears by then says it may have, for no other machine to make a second, though
-/// it comes before the answer's stream does.
 #[test]
 fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
     let here = Host::new();
@@ -2484,17 +2201,6 @@ fn a_machine_whose_answer_stalls_may_have_made_the_worktree() {
     eventually("the worktree on far", || made.is_file().then_some(()));
 }
 
-/// A `.md` file pasted on a row of another machine is read there, and git
-/// there says the repository it is in, untracked in a worktree or not, whose
-/// session the key goes to, by what the pane's directory is in, whatever its
-/// remotes are; gh is not asked. The worktree is of a branch named for it,
-/// after `md-`, from origin's default branch as it is now, not as the clone
-/// last fetched it. Pasted again, it finds that worktree, and a pane that works
-/// in it; and a file named as a branch is finds no worktree of that. A file in
-/// no repository goes by the row's, and a relative path from it, and `~/` is
-/// the home of the machine there, not of this one. A path that names no file,
-/// or one in a clone git made, or in a repository git refuses to read, makes
-/// nothing, and says why.
 #[test]
 fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let here = Host::new();
@@ -2510,7 +2216,6 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
     let plan = plans.join("Sync Rework.md");
     fs::write(&plan, "written down").unwrap();
     let plan = plan.display().to_string();
-    // A commit origin has that the clone has not fetched.
     git(&up, &["commit", "-q", "--allow-empty", "-m", "two"]);
     let tip = rev_parse(&up, "main");
     let _work = far.serve("work");
@@ -2553,14 +2258,11 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         assert_eq!(again.at, At::There(2));
         assert_eq!(again.worktree, worktree);
 
-        // No pane in the repository: a session to make in what holds it.
         let asked = Pasted::new(file(&plan, None), vec![worked("/nowhere/at/all")]);
         let made = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let At::Clone { cwd, name } = made.at else { panic!("no session to make") };
         assert_eq!((cwd.as_str(), name.as_str()), (&*clone.display().to_string(), "n"));
 
-        // In no repository, by the far machine's `~/`: the row's repository,
-        // and the file where it is.
         let home = far.home.path().canonicalize().unwrap();
         fs::write(home.join("errand.md"), "written down").unwrap();
         let asked = Pasted::new(file("~/errand.md", Some(&main)), panes.clone());
@@ -2570,13 +2272,11 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         let real = home.join("errand.md").display().to_string();
         assert_eq!(errand.work, Readied::File { real });
 
-        // From the row, relative.
         let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), panes.clone());
         let relative = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(relative.work, of_plan());
         assert_eq!(relative.worktree, worktree);
 
-        // Named as a branch is: a branch of its own, and none of that one's.
         let named = plans.join("main.md");
         fs::write(&named, "written down").unwrap();
         let asked = Pasted::new(file(&named.display().to_string(), None), panes.clone());
@@ -2584,7 +2284,6 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         assert_eq!(of_main.worktree, clone.join("md-main").display().to_string());
         assert_eq!(of_main.branch.as_deref(), Some("md-main"));
 
-        // A file this machine has, and the far one has not.
         let mine = here.home.path().canonicalize().unwrap().join("mine.md");
         fs::write(&mine, "written down").unwrap();
         let asked = Pasted::new(file("~/mine.md", Some(&main)), panes.clone());
@@ -2614,8 +2313,6 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         );
         assert_eq!(rev_parse_verify(&by_git, "refs/heads/md-plan"), None);
 
-        // In a repository git refuses to read, on a row of one it reads: no
-        // word that the file is in no repository, so nothing of the row's.
         let unread = scratch.join("unread");
         git(&scratch, &["init", "-q", &unread.display().to_string()]);
         git(&unread, &["config", "core.repositoryformatversion", "99"]);
@@ -2729,19 +2426,16 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     });
 }
 
-/// Why the daemon of the machine `far` found nothing for `pasted`.
 async fn refused_there(daemon: &mut DaemonClient<Channel>, pasted: &Pasted) -> String {
     let refused = pasted_on(daemon, "far", pasted).await.unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
     refused.message().to_owned()
 }
 
-/// What git says `what` is, in the repository `dir` is in.
 fn rev_parse(dir: &Path, what: &str) -> String {
     rev_parse_verify(dir, what).expect("what git knows")
 }
 
-/// The same, or none where git knows none.
 fn rev_parse_verify(dir: &Path, what: &str) -> Option<String> {
     let said = Command::new("git")
         .arg("-C")
@@ -2752,12 +2446,6 @@ fn rev_parse_verify(dir: &Path, what: &str) -> Option<String> {
     said.status.success().then(|| String::from_utf8(said.stdout).unwrap().trim().to_owned())
 }
 
-/// A tab asked to open alone in a session of another machine takes the
-/// place there of the tabs zellij made the session with, which go once it
-/// has opened, where the session started then or after, by that machine's
-/// clock. One that started before keeps them, and the answer says so. None
-/// opens in a session no client is in, alone or not: zellij would give it
-/// no room for its panes.
 #[test]
 fn a_tab_there_opens_alone_in_a_session_made_since() {
     let here = Host::new();

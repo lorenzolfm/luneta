@@ -1,0 +1,116 @@
+{ pkgs }:
+let
+  inherit (pkgs) lib;
+  comments = ../.config/ast-grep/comments;
+  grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
+  extensions = {
+    fish = [ "fish" ];
+    proto = [ "proto" ];
+    toml = [ "toml" ];
+    vhs = [ "tape" ];
+  };
+  bashNames = [
+    ".envrc"
+    ".gitignore"
+  ];
+  skipped = [
+    "LICENSE"
+    "*.lock"
+    "*.md"
+    "*.png"
+  ];
+  suppression = "ast-grep" + "-ignore";
+  runBlock = {
+    kind = "block_node";
+    inside = {
+      kind = "block_mapping_pair";
+      has = {
+        field = "key";
+        regex = "^run$";
+      };
+    };
+  };
+  config = pkgs.writeText "comments.yml" (
+    builtins.toJSON {
+      ruleDirs = [ "${comments}/rules" ];
+      testConfigs = [ { testDir = "${comments}/rule-tests"; } ];
+      customLanguages = builtins.mapAttrs (language: extensions: {
+        libraryPath = grammar language;
+        inherit extensions;
+      }) extensions;
+      languageGlobs.bash = bashNames;
+      languageInjections = [
+        {
+          hostLanguage = "nix";
+          rule = {
+            kind = "indented_string_expression";
+            pattern = "$CONTENT";
+          };
+          injected = "bash";
+        }
+        {
+          hostLanguage = "yaml";
+          rule = {
+            kind = "block_scalar";
+            pattern = "$CONTENT";
+            inside = runBlock;
+          };
+          injected = "bash";
+        }
+      ];
+    }
+  );
+in
+pkgs.writeShellApplication {
+  name = "luneta-comments";
+  runtimeInputs = [
+    pkgs.ast-grep
+    pkgs.coreutils
+    pkgs.findutils
+    pkgs.gnugrep
+  ];
+  text = ''
+    status=0
+    found=()
+    while IFS= read -r -d "" path; do
+      if [[ ! -e $path ]]; then
+        continue
+      fi
+      case ''${path##*/} in
+        ${lib.concatStringsSep " | " skipped}) ;;
+        *) found+=("''${path#./}") ;;
+      esac
+    done
+    if (( ''${#found[@]} == 0 )); then
+      echo "luneta-comments: no file to scan was listed on stdin" >&2
+      exit 1
+    fi
+    ast-grep test --config ${config} || status=1
+    inspect="$(mktemp)"
+    trap 'rm -f "$inspect"' EXIT
+    printf '%s\0' "''${found[@]}" |
+      xargs -0 ast-grep scan --error --inspect entity --config ${config} 2>"$inspect" || status=1
+    ruled_file='^sg: entity[|]file[|](.*): language=[^,]*,appliedRuleCount=[1-9][0-9]*$'
+    declare -A ruled=()
+    while IFS= read -r line; do
+      if [[ $line =~ $ruled_file ]]; then
+        ruled[''${BASH_REMATCH[1]}]=1
+      elif [[ $line != "sg: "* ]]; then
+        echo "$line" >&2
+      fi
+    done <"$inspect"
+    for path in "''${found[@]}"; do
+      if [[ -z ''${ruled[$path]-} ]]; then
+        echo "luneta-comments: no rule says what a comment is in $path" >&2
+        status=1
+      fi
+    done
+    if grep -lF -- ${lib.escapeShellArg suppression} "''${found[@]}" >&2; then
+      echo "luneta-comments: the files above turn a rule off with ${suppression}" >&2
+      status=1
+    elif (( $? != 1 )); then
+      status=1
+    fi
+    exit "$status"
+  '';
+}

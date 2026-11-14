@@ -6,11 +6,6 @@ license.workspace = true
 publish = false
 description = "The luneta daemon, and luneta: zellij beside a sidebar of the host, and the CLI that asks the daemon"
 
-# The daemon and its CLI are one package, as they share all there is so far:
-# the transport, and where the daemon listens. The protocol's messages are
-# `luneta-protocol`'s. With no command, the CLI is luneta itself, zellij beside
-# a sidebar, and the dependencies for that are the CLI's alone: the daemon's
-# binary links none of them.
 [[bin]]
 name = "lunetad"
 path = "src/bin/lunetad.rs"
@@ -20,106 +15,47 @@ name = "luneta"
 path = "src/bin/luneta/main.rs"
 
 [dependencies]
-# The terminal zellij's client runs in, beside the sidebar: a pseudoterminal,
-# and a screen that reads what zellij draws there as a terminal emulator does.
-# Alacritty's, which answers what zellij asks of its terminal.
 alacritty_terminal = "0.26.0"
-# What zellij copies goes to luneta's terminal as OSC 52, in base64. Already in
-# the tree by way of alacritty_terminal.
 base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
-# The microphone, while you dictate, and the speakers, while luneta reads
-# aloud: ALSA's defaults on Linux, which PipeWire and PulseAudio serve, and
-# CoreAudio's on macOS.
 cpal = "0.18.2"
-# Sets luneta's terminal's modes. What `input` reads of it are crossterm's keys
-# and mouse, which `keys` and the sidebar take.
 crossterm = "0.29.0"
-# The sidebar's search scores its rows with skim's scorer, as the picker's and
-# the menu's do.
 fuzzy-matcher = { version = "0.3.7", default-features = false }
-# `connect` hands tonic a Unix socket of its own making, so that a path is a
-# path and never has to survive being spelled as a URI.
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 luneta-protocol = { path = "../protocol" }
-# Watches Claude Code's session files and zellij's sockets: inotify on Linux,
-# FSEvents on macOS.
 notify = "8.2.0"
 prost = "0.14.4"
 prost-types = "0.14.4"
-# Runs the voice that reads aloud, on this machine: Phonon, in Rust, on the CPU.
-# `hf` reads its tokenizer. Exact, as it went from 0.4 to 0.6 in ten days, and
-# as `xn`, which it runs on, is named here too for the size of its pool of
-# threads: which only the version `ptts` builds on can be told.
 ptts = { version = "=0.6.0", features = ["hf"] }
-# Draws luneta's frame, and puts on the terminal only what changed in it.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-# For the uid the runtime folder must belong to: std has no safe getuid. And
-# for how a terminal a command runs on takes keys, as `stty` reads it, opened
-# so that it never becomes the daemon's own. And the ticks of a second, and
-# the time since the boot, which a process's start on Linux is counted in.
-# And a session of its own for what luneta runs that may ask on a terminal.
-# And the host's name, which the sidebar calls this machine by. And the far
-# end of the terminal luneta runs zellij's client in, which luneta holds open.
-# And the end of a process that is no child of the daemon's, which a pidfd says
-# on Linux, and kqueue on macOS.
 rustix = { version = "1.1.4", features = ["event", "fs", "param", "process", "pty", "system", "termios", "time"] }
-# Tells luneta's terminal's reader of a resize, as crossterm's did. Already in
-# the tree by way of crossterm.
 signal-hook = "0.3.18"
-# Claude Code's session files are JSON.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The settings the agent that writes an issue runs with, which list what it may
-# not read, in a file of their own, as they may be more than an argument holds.
-# Already in the tree for the tests.
 tempfile = "3.27.0"
-# `process` for a client that reaches the daemon through a command's stdin and
-# stdout, as `ssh <host> luneta bridge`, and `io-util` for the line the bridge
-# says before the daemon's first word.
 tokio = { version = "1.53.1", features = ["io-util", "net", "process", "rt", "sync", "time"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
-# The default features without TLS: the socket is local, and a remote client
-# will come through Tailscale, which encrypts on its own.
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tower = { version = "0.5.3", features = ["util"] }
-# Runs the speech model that writes what you dictate, on this machine:
-# transcribe.cpp, which carries ggml and builds both with cmake, offline, into
-# luneta's binary. Its default feature is Metal, which it turns on for macOS
-# alone. Exact, as a 0.x release of it may change what it runs.
 transcribe-cpp = "=0.4.1"
 unicode-segmentation = "1.13.3"
 unicode-width = { version = "0.2.2", default-features = false }
-# The shell the user database names yours, which a tab luneta opens runs:
-# std has no safe getpwuid, nor rustix any. Its libc is in the tree already.
 uzers = { version = "0.12.2", default-features = false }
 xn = "=0.2.13"
-# Makes the worktree of a pull request or an issue pasted in the sidebar, as
-# `wt add` does: wt's own code, of a commit of its, so that no `wt` need be on
-# the `PATH`, and what wt says of it is luneta's to read, in its own types.
 wt = { git = "https://github.com/lorenzolfm/wt", rev = "a6fee7e0024b5a8f245c3777bbc27543913b22ac" }
 
-# What a process's environment and start are, on macOS. Linux has `/proc` and
-# needs nothing.
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-# Keeps what alsa-lib says of what goes wrong off luneta's terminal, where cpal
-# does not. Already in the tree by way of cpal.
 alsa = "0.11.0"
-# Puts luneta's notifications up on freedesktop's notification server, and
-# hears the clicks on them, over D-Bus: on tokio, which luneta runs already,
-# in place of async-io. macOS has terminal-notifier.
 zbus ={ version = "6.2.1", default-features = false, features = ["proxy", "tokio"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
-# Terminals of the tests' own, for a command going on one, set to take keys as
-# the test has them.
 rustix = { version = "1.1.4", features = ["fs", "pty", "termios"] }
 
 [lints]

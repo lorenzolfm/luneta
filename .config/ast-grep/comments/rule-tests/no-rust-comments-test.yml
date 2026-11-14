@@ -1,0 +1,12 @@
+id: no-rust-comments
+valid:
+  - 'fn f() -> &''static str { "// a" }'
+  - 'fn f() -> &''static str { "/* a */" }'
+  - "#[must_use]\nfn f() {}"
+invalid:
+  - "// a\nfn f() {}"
+  - "/// a\nfn f() {}"
+  - "//! a"
+  - "/* a */\nfn f() {}"
+  - "fn f() {} // a"
+  - "fn f() { g(/* a */) }"
