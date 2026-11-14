@@ -29,12 +29,12 @@ use crate::asked::{Colours, Dumped, Input, Size};
 use crate::frame::{self, Flags};
 use crate::front::Front;
 use crate::id::{ClientId, PaneId};
-use crate::marks::{Mark, Marks};
+use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
-use crate::screen::{Screen, View, Wheel};
+use crate::screen::{Pushed, Screen, View, Wheel};
 
 /// The scrollback each pane keeps, in bytes.
 const SCROLLBACK_BYTES: usize = 10_000_000;
@@ -237,7 +237,7 @@ pub fn start(
         waits(pane, &mut child, &exited, &wake);
     })?;
     thread::Builder::new().name(format!("pane {pane}")).spawn(move || {
-        let screen = match Screen::new(size.columns, size.rows, SCROLLBACK_BYTES) {
+        let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
                 eprintln!("luneta-mux: pane {pane}'s screen could not be made: {error}");
@@ -264,7 +264,6 @@ pub fn start(
             pwd: String::new(),
             host: host(),
             pid,
-            marks: Marks::default(),
             shell: Shell::default(),
             looks: Looks::first(),
             told: Told::default(),
@@ -299,7 +298,6 @@ fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake
 
 /// What a client last got of a pane.
 struct Shown {
-    size: Size,
     view: View,
     flags: Flags,
 }
@@ -355,7 +353,6 @@ struct Thread {
     host: String,
     /// The program's pid, which leads its session.
     pid: u32,
-    marks: Marks,
     shell: Shell,
     looks: Looks,
     told: Told,
@@ -608,10 +605,10 @@ impl Thread {
         let Some(size) = self.watcher(client).map(|watcher| watcher.viewer.size) else {
             return Ok(());
         };
-        if self.screen.size() == (size.columns, size.rows) {
+        if self.screen.size() == size {
             return Ok(());
         }
-        let answers = self.screen.resize(size.columns, size.rows).map_err(io::Error::other)?;
+        let answers = self.screen.resize(size).map_err(io::Error::other)?;
         if let Program::Runs { pty, unread } = &mut self.program {
             pty.resize(size)?;
             unread.extend_from_slice(&answers);
@@ -642,8 +639,8 @@ impl Thread {
 
     /// What the program does with `input`.
     fn does(&mut self, input: Input) -> Result<Does, Error> {
-        let (columns, rows) = self.screen.size();
-        let within = |column: u16, row: u16| column < columns.get() && row < rows.get();
+        let size = self.screen.size();
+        let within = |column, row| size.holds(column, row);
         let screen = &mut self.screen;
         Ok(match input {
             Input::Key { action, key, mods, text, unshifted } => {
@@ -704,17 +701,19 @@ impl Thread {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
         };
-        let before = self.screen.scrollback();
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
+        let mut pushed = Pushed::Rows(0);
         while total < most && unread.len() < UNREAD_BYTES_MAX {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
-                    self.marks.read(&self.buffer[..read], &mut marks);
-                    let answers = self.screen.write(&self.buffer[..read]);
-                    unread.extend_from_slice(&answers);
+                    let written =
+                        self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
+                    unread.extend_from_slice(&written.answers);
+                    marks.extend(written.marks);
+                    pushed = pushed.then(written.pushed);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -740,12 +739,9 @@ impl Thread {
             self.shell.read(marks, now, in_front, job);
         }
         self.dirty = true;
-        let after = self.screen.scrollback();
-        let grown = after.saturating_sub(before);
+        let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
-            if watcher.back > 0 {
-                watcher.back = (watcher.back + grown).min(after);
-            }
+            watcher.back = pushed.moved(watcher.back, scrollback);
         }
         self.synced = match (self.screen.syncs(), self.synced) {
             (true, None) => Some(Instant::now()),
@@ -809,8 +805,6 @@ impl Thread {
         }
         self.framed = Instant::now();
         self.dirty = false;
-        let (columns, rows) = self.screen.size();
-        let size = Size { columns, rows };
         let (clusters, tracks) = (self.screen.clusters(), self.screen.tracks_mouse());
         let scrollback = self.screen.scrollback();
         let mut views: Vec<(usize, View)> = Vec::new();
@@ -829,19 +823,20 @@ impl Thread {
                 .expect("a view from where the client looks, drawn above")
                 .1;
             let flags = Flags { clusters, tracks, back: watcher.back, scrollback };
-            let unchanged = watcher.shown.as_ref().is_some_and(|shown| {
-                (shown.size, shown.flags) == (size, flags) && shown.view == *view
-            });
+            let unchanged = watcher
+                .shown
+                .as_ref()
+                .is_some_and(|shown| shown.flags == flags && shown.view == *view);
             if unchanged {
                 watcher.owed = false;
                 continue;
             }
-            let before = watcher.shown.as_ref().map(|shown| (shown.size, &shown.view));
-            let said = frame::said(self.pane, view, before, size, flags);
+            let before = watcher.shown.as_ref().map(|shown| &shown.view);
+            let said = frame::said(self.pane, view, before, flags);
             let message = api::ToClient { event: Some(api::to_client::Event::Frame(said)) };
             match watcher.viewer.out.try_send(Ok(message)) {
                 Ok(()) => {
-                    watcher.shown = Some(Shown { size, view: view.clone(), flags });
+                    watcher.shown = Some(Shown { view: view.clone(), flags });
                     watcher.owed = false;
                 },
                 Err(TrySendError::Full(_)) => watcher.owed = true,
