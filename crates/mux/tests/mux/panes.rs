@@ -2,7 +2,7 @@ use luneta_mux::api::{self, to_server::Event};
 use tonic::Code;
 
 use crate::host::{
-    Attached, Server, listed, new_session, new_tab, run, script, session, shell, size, tabs,
+    Attached, Server, listed, new_session, new_tab, run, script, session, shell, size, tab, tabs,
     watched_until,
 };
 
@@ -239,6 +239,32 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
         attached
             .until_laid("both panes again", |layout| {
                 !layout.fullscreen && layout.focused == made.pane && layout.panes.len() == 2
+            })
+            .await;
+    });
+}
+
+#[test]
+fn a_client_back_on_a_fullscreen_tab_comes_to_the_pane_that_fills_it() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let made = new_session(&mut mux, "work", shell()).await;
+        let two = new_tab(&mut mux, made.session, shell()).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(80, 24)).await;
+        let second = opened(&mut attached, api::Towards::Right).await;
+        let first = api::Place { is: Some(api::place::Is::Pane(made.pane)), made_at: made.made_at };
+        let mut other = Attached::new(&mut mux, first, size(80, 24)).await;
+        other.send(Event::Go(tab(two.tab, &made))).await;
+        other.until("the other client went to tab two", |other| other.went.tab == two.tab).await;
+        attached.send(Event::Fullscreen(api::Fullscreen {})).await;
+        attached.until_laid("the pane over the whole tab", |layout| layout.fullscreen).await;
+        other.send(Event::Go(tab(made.tab, &made))).await;
+        other.until("the other client came back", |other| other.went.tab == made.tab).await;
+        assert_eq!(other.went.pane, second, "a client comes back to the pane that fills the tab");
+        other
+            .until_laid("the pane still over the whole tab", |layout| {
+                layout.fullscreen && rects(layout) == [(second, rect(0, 0, 80, 24))]
             })
             .await;
     });

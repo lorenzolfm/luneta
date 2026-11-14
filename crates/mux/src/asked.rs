@@ -9,7 +9,7 @@ use tonic::Status;
 
 use crate::api;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
-use crate::layout::{Change, Direction, Towards};
+use crate::layout::{Change, Direction, Order, Towards};
 use crate::screen::{Click, RgbColor, Wheel};
 
 pub const NAME_BYTES_MAX: usize = 255;
@@ -250,14 +250,14 @@ pub enum Opening {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusTo {
     Towards(Direction),
-    TowardsOrTab { forward: bool },
-    Order { forward: bool },
+    TowardsOrTab(Order),
+    InOrder(Order),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveTo {
     Towards(Direction),
-    Order { forward: bool },
+    InOrder(Order),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,7 +270,7 @@ pub enum Act {
     Fullscreen,
     NamePane(Option<Name>),
     NameTab(Name),
-    MoveTab { forward: bool },
+    MoveTab(Order),
     Turn(TurnTo),
 }
 
@@ -296,20 +296,20 @@ fn direction_heard(field: &str, direction: i32) -> Result<Direction, Status> {
     }
 }
 
-fn sideways(field: &str, direction: i32) -> Result<bool, Status> {
+fn sideways(field: &str, direction: i32) -> Result<Order, Status> {
     match direction_heard(field, direction) {
-        Ok(Direction::Left) => Ok(false),
-        Ok(Direction::Right) => Ok(true),
+        Ok(Direction::Left) => Ok(Order::Previous),
+        Ok(Direction::Right) => Ok(Order::Next),
         Ok(Direction::Up | Direction::Down) | Err(_) => {
             Err(refused(field, "is not one of LEFT or RIGHT"))
         },
     }
 }
 
-fn order_heard(field: &str, order: i32) -> Result<bool, Status> {
+fn order_heard(field: &str, order: i32) -> Result<Order, Status> {
     match api::Order::try_from(order) {
-        Ok(api::Order::Next) => Ok(true),
-        Ok(api::Order::Previous) => Ok(false),
+        Ok(api::Order::Next) => Ok(Order::Next),
+        Ok(api::Order::Previous) => Ok(Order::Previous),
         Ok(api::Order::Unspecified) | Err(_) => {
             Err(refused(field, "is not one of NEXT or PREVIOUS"))
         },
@@ -476,11 +476,11 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
             api::focus_pane::To::Towards(towards) => {
                 FocusTo::Towards(direction_heard("focus_pane.towards", towards)?)
             },
-            api::focus_pane::To::TowardsOrTab(towards) => FocusTo::TowardsOrTab {
-                forward: sideways("focus_pane.towards_or_tab", towards)?,
+            api::focus_pane::To::TowardsOrTab(towards) => {
+                FocusTo::TowardsOrTab(sideways("focus_pane.towards_or_tab", towards)?)
             },
             api::focus_pane::To::Order(order) => {
-                FocusTo::Order { forward: order_heard("focus_pane.order", order)? }
+                FocusTo::InOrder(order_heard("focus_pane.order", order)?)
             },
         })),
         Event::ResizePane(resize) => Heard::Act(Act::Resize {
@@ -495,7 +495,7 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
                 MoveTo::Towards(direction_heard("move_pane.towards", towards)?)
             },
             api::move_pane::To::Order(order) => {
-                MoveTo::Order { forward: order_heard("move_pane.order", order)? }
+                MoveTo::InOrder(order_heard("move_pane.order", order)?)
             },
         })),
         Event::Fullscreen(api::Fullscreen {}) => Heard::Act(Act::Fullscreen),
@@ -506,7 +506,7 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
             Heard::Act(Act::NameTab(Name::parse("name_tab.name", name)?))
         },
         Event::MoveTab(api::MoveTab { towards }) => {
-            Heard::Act(Act::MoveTab { forward: sideways("move_tab.towards", towards)? })
+            Heard::Act(Act::MoveTab(sideways("move_tab.towards", towards)?))
         },
         Event::Turn(into) => Heard::Act(Act::Turn(TurnTo::parse("turn", Some(into))?)),
     })

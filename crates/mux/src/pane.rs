@@ -101,17 +101,25 @@ pub struct Viewer {
 #[derive(Clone)]
 pub struct Wanted {
     pub size: Size,
-    pub viewers: Vec<Viewer>,
+    pub viewers: Arc<[Viewer]>,
 }
 
 impl Wanted {
     fn same(&self, other: &Wanted) -> bool {
-        let seen = |wanted: &Wanted| -> Vec<(ClientId, Colours, u64)> {
-            let seen = wanted.viewers.iter();
-            seen.map(|viewer| (viewer.client, viewer.colours, viewer.came)).collect()
+        let same = |one: &Viewer, other: &Viewer| {
+            (one.client, one.colours, one.came) == (other.client, other.colours, other.came)
         };
-        self.size == other.size && seen(self) == seen(other)
+        let viewers = self.viewers.iter().zip(other.viewers.iter());
+        self.size == other.size
+            && self.viewers.len() == other.viewers.len()
+            && viewers.into_iter().all(|(one, other)| same(one, other))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Still,
+    LetGo,
 }
 
 pub enum ToPane {
@@ -185,7 +193,7 @@ pub fn start(
     woken.set_nonblocking(true)?;
     let wake = Wake(Arc::new(wake));
     let closed = Arc::new(AtomicBool::new(false));
-    let (wanted, wants) = watch::channel(Wanted { size, viewers: Vec::new() });
+    let (wanted, wants) = watch::channel(Wanted { size, viewers: Arc::from(Vec::new()) });
     let wanted = Arc::new(wanted);
     let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
     let pid = child.id();
@@ -362,7 +370,9 @@ impl Thread {
                 self.program = Program::Gone;
                 return Ok(());
             }
-            self.want()?;
+            if self.want()? == Held::LetGo {
+                return Ok(());
+            }
             if let Ok(exit) = self.exits.try_recv()
                 && self.exited(exit)?
             {
@@ -471,13 +481,15 @@ impl Thread {
         Ok((readable, near.contains(PollFlags::OUT), woken))
     }
 
-    fn want(&mut self) -> io::Result<()> {
-        if !self.wants.has_changed().unwrap_or(false) {
-            return Ok(());
+    fn want(&mut self) -> io::Result<Held> {
+        match self.wants.has_changed() {
+            Ok(true) => {},
+            Ok(false) => return Ok(Held::Still),
+            Err(_) => return Ok(Held::LetGo),
         }
         let Wanted { size, viewers } = self.wants.borrow_and_update().clone();
         self.watchers.retain(|watcher| viewers.iter().any(|it| it.client == watcher.viewer.client));
-        for viewer in viewers {
+        for viewer in viewers.iter().cloned() {
             if let Some(watcher) =
                 self.watchers.iter_mut().find(|watcher| watcher.viewer.client == viewer.client)
             {
@@ -495,14 +507,16 @@ impl Thread {
             self.watchers.push(Watcher { viewer, back: 0, shown: None, owed: false });
             self.dirty = true;
         }
-        self.resized(size)
+        assert_eq!(self.watchers.len(), viewers.len(), "a watcher for each viewer the model wants");
+        self.resized(size)?;
+        Ok(Held::Still)
     }
 
     fn take(&mut self, message: ToPane) -> io::Result<()> {
         match message {
-            ToPane::Input(client, input) => {
-                self.want()?;
-                self.input(client, input)?;
+            ToPane::Input(client, input) => match self.want()? {
+                Held::Still => self.input(client, input)?,
+                Held::LetGo => {},
             },
             ToPane::Dump(dumped, answer) => {
                 let text = match dumped {

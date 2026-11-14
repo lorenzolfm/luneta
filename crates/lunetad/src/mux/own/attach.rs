@@ -512,6 +512,23 @@ impl Layout {
             Ok(Placed { pane, rect, title: placed.title })
         };
         let panes = layout.panes.into_iter().map(placed).collect::<Result<Vec<_>, _>>()?;
+        let mut ids: Vec<NonZeroU32> = panes.iter().map(|placed| placed.pane).collect();
+        ids.sort_unstable();
+        if let Some([twice, _]) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(format!("a layout lays pane {twice} out twice"));
+        }
+        let cells = |columns: u16, rows: u16| u64::from(columns) * u64::from(rows);
+        let covered = panes.iter().map(|placed| cells(placed.rect.columns, placed.rect.rows));
+        let covered: u64 = covered.sum();
+        let whole = cells(columns, rows);
+        if covered != whole {
+            return Err(format!(
+                "a layout's panes cover {covered} of the {whole} cells of a tab of {columns}x{rows}"
+            ));
+        }
+        if layout.fullscreen && panes.len() != 1 {
+            return Err(format!("a fullscreen layout lays out {} panes", panes.len()));
+        }
         let focused = NonZeroU32::new(layout.focused).ok_or("a layout focuses pane 0")?;
         if !panes.iter().any(|placed| placed.pane == focused) {
             return Err(format!("a layout focuses pane {focused}, which it does not lay out"));
@@ -958,6 +975,14 @@ mod tests {
         assert_eq!(unnamed, "a layout of tab 1 does not name it");
         let nowhere = Layout::heard(layout(vec![placed(4, None)], 4, vec![tabbed(1)]));
         assert_eq!(nowhere.unwrap_err(), "pane 4 is laid nowhere");
+        let twice = vec![placed(4, rect(0, 40)), placed(4, rect(40, 40))];
+        let twice = Layout::heard(layout(twice, 4, vec![tabbed(1)])).unwrap_err();
+        assert_eq!(twice, "a layout lays pane 4 out twice");
+        let half = Layout::heard(layout(vec![placed(4, rect(0, 40))], 4, vec![tabbed(1)]));
+        let uncovered = "a layout's panes cover 960 of the 1920 cells of a tab of 80x24";
+        assert_eq!(half.unwrap_err(), uncovered);
+        let full = api::Layout { fullscreen: true, ..layout(two(), 4, vec![tabbed(1)]) };
+        assert_eq!(Layout::heard(full).unwrap_err(), "a fullscreen layout lays out 2 panes");
     }
 
     #[test]
