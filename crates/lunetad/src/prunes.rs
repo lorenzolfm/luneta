@@ -1,8 +1,3 @@
-//! The worktrees of a repository whose pull requests are merged, and deleting
-//! them once you say so, for the menu's `d m` and for `luneta prune`. It runs
-//! where it is asked, on its own machine, or for a luneta on another through
-//! that machine's daemon, and nothing here deletes anything on its own.
-
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,12 +15,8 @@ use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
 use crate::program;
 
-/// How long a luneta waits to hear what would go: gh asks across the network,
-/// a worktree at a time.
 pub const PLANNING: Duration = Duration::from_mins(5);
 
-/// How long a luneta waits to hear how deleting went: each worktree can hold
-/// many gigabytes of build output.
 pub const DELETING: Duration = Duration::from_mins(30);
 
 const ASKS_AT_ONCE: usize = 8;
@@ -44,7 +35,6 @@ const AN_AGENT: &str = "an agent works in it";
 const RUNS_HERE: &str = "this runs from it";
 const DEFAULT: &str = "it is the default branch";
 
-/// What deleting the merged worktrees of a repository deletes, and what stays.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub repository: String,
@@ -63,11 +53,8 @@ pub struct Goes {
     pub bytes: Option<u64>,
 }
 
-/// The branch on the worktree's push remote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pushed {
-    /// That remote has no such branch, or the worktree's branch has no such
-    /// remote.
     Nowhere,
     Goes(RemoteBranch),
     Stays(String),
@@ -104,7 +91,6 @@ impl Planned {
     }
 }
 
-/// What one of a plan's worktrees came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub worktree: String,
@@ -124,9 +110,6 @@ pub enum Pruned {
     Went(Vec<Outcome>),
 }
 
-/// What a plan does of a worktree, whichever way it is listed and whatever a
-/// worktree takes up, which goes on changing: two plans that say the same are
-/// one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Deleting {
     pub worktree: String,
@@ -148,7 +131,6 @@ impl Plan {
         self.goes.iter().map(Goes::does).collect()
     }
 
-    /// The name the repository goes by: its directory's.
     #[must_use]
     pub fn repository_name(&self) -> &str {
         name_of(&self.repository)
@@ -171,13 +153,11 @@ impl Goes {
     }
 }
 
-/// The last part of a path, as a worktree or a repository goes by it.
 #[must_use]
 pub fn name_of(path: &str) -> &str {
     Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path)
 }
 
-/// Where the panes and the agents of a machine work, as its daemon says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Occupied {
     panes: Vec<PathBuf>,
@@ -185,10 +165,6 @@ pub struct Occupied {
 }
 
 impl Occupied {
-    /// Where `host` says they work, or why that is not all of them: a session
-    /// it may leave out or whose panes it has yet to list, an agent whose session
-    /// file it cannot read and in no pane it can name, or a pane that may run
-    /// something and does not say where, could be in any worktree.
     pub fn of(host: &api::Host) -> Result<Occupied, String> {
         if host.unread_sockets != Some(0) {
             return Err("lunetad did not read all of zellij's folder, and may leave out a session \
@@ -239,13 +215,11 @@ impl Occupied {
     }
 }
 
-/// A worktree as `git worktree list --porcelain -z` lists it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Listed {
     path: String,
     head: String,
     branch: Option<String>,
-    /// The first it lists, which git will not remove.
     main: bool,
     locked: bool,
     prunable: bool,
@@ -287,7 +261,6 @@ fn parse_listed(said: &[u8]) -> Vec<Listed> {
     listed
 }
 
-/// git on the repository whose common directory is `common`, wherever it runs.
 fn on_repository(common: &str) -> Command {
     let mut git = Command::new("git");
     git::local(&mut git).args(["-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false"]);
@@ -329,8 +302,6 @@ fn common_of(dir: &Directory) -> Result<String, String> {
     }
 }
 
-/// Why `listed` stays whatever gh says of it, as things stand now: asked again
-/// of each worktree just before it goes.
 fn stays(
     listed: &Listed,
     all: &[Listed],
@@ -367,8 +338,6 @@ fn stays(
     Ok(runs_here.then_some(RUNS_HERE))
 }
 
-/// Has `ask` answer of each of `items`, a few at a time, as each asks across
-/// the network, with what `state` makes for each thread that asks.
 fn at_once<T: Sync, S, R: Send>(
     items: &[T],
     state: impl Fn() -> S + Sync,
@@ -398,7 +367,6 @@ fn at_once<T: Sync, S, R: Send>(
     answers.into_iter().map(|(_, answer)| answer).collect()
 }
 
-/// Where a push of `branch` goes, as the remote and its name there.
 fn push_target(common: &str, branch: &str) -> Result<Option<RemoteBranch>, String> {
     let mut git = on_repository(common);
     let head = format!("refs/heads/{branch}");
@@ -436,8 +404,6 @@ fn remote_default(common: &str, remote: &str) -> Result<Option<String>, String> 
     Ok(named.map(str::to_owned))
 }
 
-/// The branches of `remote`, each by its name there, at their commits. It asks
-/// with no terminal, as ssh may want a passphrase there.
 fn remote_heads(common: &str, remote: &str) -> Result<HashMap<String, String>, String> {
     let mut git = on_repository(common);
     git.args(["ls-remote", "--heads", "--", remote]);
@@ -467,7 +433,6 @@ fn push_urls(common: &str, remote: &str) -> Result<Vec<String>, String> {
     Ok(urls)
 }
 
-/// What goes of a worktree's branch on its push remote.
 struct Remotes<'a> {
     common: &'a str,
     heads: HashMap<String, Result<HashMap<String, String>, String>>,
@@ -528,9 +493,6 @@ fn bytes_of(worktree: &str) -> Option<u64> {
     kibibytes.checked_mul(1024)
 }
 
-/// What deleting the merged worktrees of the repository `dir` is in deletes,
-/// where the panes and agents of this machine work as `occupied` says, and this
-/// runs in `here`. Or why it cannot tell: nothing is deleted then.
 pub fn plan(dir: &Directory, occupied: &Occupied, here: Option<&Path>) -> Result<Planned, String> {
     let common = common_of(dir)?;
     let repository = git::holder(&common)
@@ -623,8 +585,6 @@ fn others_of(
     })
 }
 
-/// What stays of `merged` as things stand here, into `plan`, and what goes on
-/// to what the network says.
 fn sorted_out<'a>(
     plan: &mut Plan,
     merged: Vec<(OnBranch<'a>, Pulled)>,
@@ -676,9 +636,6 @@ fn sorted_out<'a>(
     Ok(going)
 }
 
-/// Deletes each of what `planned` lists, where it stands as it did for the
-/// plan, whichever way the others go. `occupied` says where the panes and the
-/// agents work just before each.
 pub fn deleted(
     planned: Planned,
     occupied: impl Fn() -> Result<Occupied, String>,
@@ -698,9 +655,6 @@ pub fn deleted(
     plan.goes.into_iter().map(outcome).collect()
 }
 
-/// Plans again in the repository `dir` is in, and deletes that where it deletes
-/// just `agreed`, as `Plan::deletes` has it; else it says what it would delete
-/// now, and deletes nothing.
 pub fn deleted_as_agreed(
     dir: &Directory,
     agreed: &BTreeSet<Deleting>,
@@ -769,7 +723,6 @@ fn far_branch_deleted(common: &str, head: &str, far: &RemoteBranch) -> Result<()
         .map_err(|why| format!("its branch on {remote} stays: {why}"))
 }
 
-/// Deletes the branch of a worktree that went.
 fn branch_deleted(common: &str, goes: &Goes) -> Result<(), String> {
     let mut at = on_repository(common);
     at.args(["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", goes.branch)]);
@@ -921,8 +874,6 @@ impl From<&Pruned> for PruneResponse {
     }
 }
 
-/// What a daemon said came of a `Prune`, or that it does not read: one that says
-/// nothing of a worktree may have deleted it all the same.
 pub fn pruned_of(said: PruneResponse) -> Result<Pruned, String> {
     use api::prune_response::Answer;
     match said.answer {
@@ -947,15 +898,11 @@ fn outcome_of(said: api::prune_response::Outcome) -> Result<Outcome, String> {
     Ok(Outcome { worktree, came })
 }
 
-/// The question that has the daemon of the machine `on` names say what would
-/// go in the repository `dir` is in.
 #[must_use]
 pub fn asked(on: Option<On>, dir: &Directory) -> PrunesRequest {
     PrunesRequest { on, dir: dir.as_str().to_owned() }
 }
 
-/// The question that has that daemon delete what would go, where that is
-/// `agreed`.
 #[must_use]
 pub fn told(on: Option<On>, dir: &Directory, agreed: &BTreeSet<Deleting>) -> PruneRequest {
     PruneRequest {
@@ -988,9 +935,6 @@ mod tests {
         RemoteBranch { remote: "origin".to_owned(), branch: branch.to_owned() }
     }
 
-    /// What a plan does does not go by what a worktree takes up, nor by the
-    /// order of the list, which goes by that. A branch on a remote that goes
-    /// or stays is another plan, but why it stays is not.
     #[test]
     fn two_plans_are_the_same_by_what_they_delete() {
         let (a, b) =
@@ -1009,8 +953,6 @@ mod tests {
         assert_ne!(plan_of(vec![moved]).deletes(), stays("moved").deletes());
     }
 
-    /// The first it lists is the main one, a bare repository's too, which has
-    /// no branch. A path that holds a space or a line is whole.
     #[test]
     fn git_s_list_of_worktrees_reads_as_it_writes_it() {
         let said = "worktree /w/.bare\0bare\0\0\
@@ -1042,8 +984,6 @@ mod tests {
         api::Session { name: name.to_owned(), panes, ..api::Session::default() }
     }
 
-    /// A pane in a directory of a worktree is in it, and one in a directory
-    /// beside it, whose name starts alike, is not. An agent counts too.
     #[test]
     fn a_pane_or_an_agent_in_a_worktree_or_under_it_keeps_it() {
         let host = api::Host {
@@ -1066,8 +1006,6 @@ mod tests {
         assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_PANE));
     }
 
-    /// While the daemon has yet to say where any pane works, that pane could
-    /// be in any worktree.
     #[test]
     fn a_pane_the_daemon_has_yet_to_place_tells_nothing() {
         let host = |session| api::Host {
@@ -1137,9 +1075,6 @@ mod tests {
         }
     }
 
-    /// The branch on a remote goes only where the remote has it at the pull
-    /// request's head, is where that head is, and you wrote the pull request. gh
-    /// is asked who you are only then.
     #[test]
     fn the_branch_on_a_remote_goes_only_at_that_head_and_if_it_is_yours() {
         let ok = |remote: &str, head: &str| {
@@ -1302,7 +1237,6 @@ mod tests {
         assert!(!heads.contains_key("fix"));
     }
 
-    /// Every answer comes back beside what it is of, however few threads ask.
     #[test]
     fn answers_asked_at_once_keep_their_order() {
         let items: Vec<usize> = (0..50).collect();

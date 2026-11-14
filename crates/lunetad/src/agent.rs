@@ -1,7 +1,3 @@
-//! What the daemon knows of an agent, whichever adapter found it: Claude Code's,
-//! or pi's. And what those adapters' files have in common: each agent has one,
-//! named for its pid, that says little.
-
 use std::fs;
 use std::io::{self, ErrorKind, Read as _};
 use std::path::Path;
@@ -15,34 +11,22 @@ use crate::api::agent::Status as Reported;
 use crate::api::agent::WaitingFor as Waits;
 use crate::mux::{Named, Sessions, ZellijPane};
 
-/// The most an agent's file holds that an adapter reads. Each holds a few hundred
-/// bytes: a file past this is no agent's.
 const FILE_BYTES_MAX: u64 = 64 * 1024;
 
-/// An agent that runs on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
     pub pid: u32,
-    /// The harness it runs in, whose adapter found it.
     pub harness: Harness,
-    /// The agent's own id for its session.
     pub session_id: Said,
-    /// Where it works.
     pub cwd: Said,
     pub status: Status,
-    /// When it came to its status, as the agent dates it.
     pub status_since: Option<SystemTime>,
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
-    /// How it was started, in its harness's word, which only its harness tells
-    /// the meaning of: `cli` is Claude Code's for the agent a person talks to at
-    /// a prompt, and `tui` is pi's.
     pub entrypoint: Option<Said>,
-    /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
 }
 
-/// A harness an agent can run in, as the adapter for it knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Harness {
     ClaudeCode,
@@ -50,9 +34,6 @@ pub enum Harness {
 }
 
 impl Harness {
-    /// The harness a request names by `said`: Claude Code where it names none,
-    /// as a luneta older than the field asks for. Or why not, for one this
-    /// lunetad does not know.
     pub fn said(said: Option<i32>) -> Result<Harness, String> {
         match said.map(api::Harness::try_from) {
             None | Some(Ok(api::Harness::ClaudeCode)) => Ok(Harness::ClaudeCode),
@@ -76,18 +57,13 @@ impl Harness {
 pub enum Status {
     Busy,
     Idle,
-    /// It waits on you, for what it says, where it says.
     Waiting(Option<WaitingFor>),
     Shell,
-    /// A word not known here, as the agent wrote it: a newer agent's.
     Other(Said),
-    /// The agent says none.
     Unreported,
 }
 
 impl Status {
-    /// Claude Code's word for it, which luneta's extension for pi speaks too,
-    /// and for what it waits for, where it waits, in any case.
     #[must_use]
     pub fn of(word: Option<&str>, waiting_for: Option<&str>) -> Self {
         let Some(word) = said(word) else {
@@ -103,21 +79,15 @@ impl Status {
     }
 }
 
-/// What an agent waits for, in the words Claude Code says it in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WaitingFor {
-    /// A tool it asks to run, or a plan it asks you to take.
     PermissionPrompt,
-    /// A question of its own, or of a server's.
     InputNeeded,
-    /// One of its own dialogs, which you opened.
     DialogOpen,
-    /// A word not known here, as the agent wrote it.
     Other(Said),
 }
 
 impl WaitingFor {
-    /// Claude Code's word for it, in any case.
     fn of(word: Said) -> Self {
         match word.as_str().to_ascii_lowercase().as_str() {
             "permission prompt" => WaitingFor::PermissionPrompt,
@@ -138,7 +108,6 @@ impl WaitingFor {
     }
 }
 
-/// `word` without the white space around it, where that leaves any.
 fn said(word: Option<&str>) -> Option<Said> {
     Said::new(word?.trim().to_owned())
 }
@@ -146,7 +115,6 @@ fn said(word: Option<&str>) -> Option<Said> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
     pub text: Said,
-    /// Who chose it, when the agent says.
     pub source: Option<Source>,
 }
 
@@ -156,31 +124,24 @@ impl Name {
         api::Name { text: self.text.clone().into(), source }
     }
 
-    /// Whether someone gave it, as a row reads it.
     #[must_use]
     pub fn given(&self) -> bool {
         self.to_api().given().is_some()
     }
 }
 
-/// Who chose a name, in the words Claude Code reads back itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// Someone gave it.
     User,
-    /// Someone gave it.
     Peer,
-    /// Claude Code's own, from the directory.
     Derived,
     Collision,
     Auto,
     Hook,
-    /// A word not known here: a newer Claude Code's.
     Other,
 }
 
 impl Source {
-    /// Claude Code's word for it, in any case.
     #[must_use]
     pub fn of(word: &str) -> Self {
         match word.to_ascii_lowercase().as_str() {
@@ -207,25 +168,13 @@ impl Source {
     }
 }
 
-/// A session file of an agent that does not read, by the process that runs by
-/// the pid it is named for: the agent's, or another that came by the pid
-/// since, as the file cannot say. What the agent is doing, no one can tell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unread {
     pub pid: u32,
-    /// When the process started, or a moment after, and never before: less
-    /// than a clock tick on Linux, less than a second on macOS. So a session
-    /// made a moment before it is not ruled out, and one made a moment after
-    /// may not be, which only leaves its session untold. None where the
-    /// system does not say.
     pub started: Option<SystemTime>,
-    /// The pane its environment names, when it runs in zellij.
     pub pane: Option<Named>,
 }
 
-/// The pid an agent's file is named for: `<pid>.json`, spelled as a harness
-/// spells a pid, which is how it reads one back. Any other file in the folder,
-/// a copy of one too, names no agent.
 pub fn named_pid(path: &Path) -> Option<u32> {
     if path.extension()? != "json" {
         return None;
@@ -235,11 +184,9 @@ pub fn named_pid(path: &Path) -> Option<u32> {
     if pid.to_string() != stem {
         return None;
     }
-    // No agent runs as the kernel's pid 0 or as init's 1.
     (pid > 1).then_some(pid)
 }
 
-/// What a file holds, if it holds no more than an agent's file does.
 pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
     let mut text = Vec::new();
     fs::File::open(path)?.take(FILE_BYTES_MAX + 1).read_to_end(&mut text)?;
@@ -252,28 +199,20 @@ pub fn file_text(path: &Path) -> io::Result<Vec<u8>> {
     }
 }
 
-/// Text an agent's file holds where it must hold some, as `Said`: an empty
-/// string is none.
 pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Error> {
     Said::new(String::deserialize(text)?).ok_or_else(|| serde::de::Error::custom("it is empty"))
 }
 
-/// A time as an agent's file has it, in milliseconds since the epoch.
 #[must_use]
 pub fn moment(millis: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(millis)
 }
 
 impl Agent {
-    /// The agent as the API gives it, in the session `sessions` say its pane
-    /// is in now, with the topic the daemon keeps of it, if it keeps one.
     #[must_use]
     pub fn to_api(&self, sessions: &Sessions, topic: Option<Said>) -> api::Agent {
-        // The adapter takes no file of pid 0 or 1 for an agent's, and leaves
-        // out what is empty: the protocol says it is absent instead.
         assert!(self.pid > 1);
         let known = |status: api::Status| Some(Reported::KnownStatus(status.into()));
-        // What it waits for goes only with a wait.
         let (status, waiting_for) = match &self.status {
             Status::Busy => (known(api::Status::Busy), None),
             Status::Idle => (known(api::Status::Idle), None),
@@ -311,9 +250,6 @@ impl Agent {
 }
 
 impl Unread {
-    /// The file as the API gives it, in the session `sessions` say its pane is
-    /// in now. Where the system does not say when the process started, no
-    /// session made since can be ruled out, and so its session is not told.
     #[must_use]
     pub fn to_api(&self, sessions: &Sessions) -> api::UnreadFile {
         assert!(self.pid > 1);
@@ -330,8 +266,6 @@ impl Unread {
     }
 }
 
-/// The name and the terminal of the zellij pane `named` is, as the API gives
-/// one: none of an own pane.
 fn zellij_of(named: &Named) -> Option<(&str, u32)> {
     match named {
         Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
@@ -343,9 +277,6 @@ fn zellij_of(named: &Named) -> Option<(&str, u32)> {
 mod tests {
     use super::*;
 
-    /// A request that names no harness asks for Claude Code's, as an older
-    /// luneta's does, and one that names a harness only a newer luneta knows,
-    /// or none by name, is refused.
     #[test]
     fn a_request_names_a_harness_this_lunetad_knows() {
         assert_eq!(Harness::said(None), Ok(Harness::ClaudeCode));

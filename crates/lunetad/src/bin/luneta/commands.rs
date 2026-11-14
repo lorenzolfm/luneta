@@ -1,6 +1,3 @@
-//! What the CLI asks lunetad, the daemon of this host, and what it has zellij
-//! do, as `drive` does it.
-
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Read as _, Write as _};
@@ -179,7 +176,6 @@ pub enum Command {
     },
 }
 
-/// A version as `--after` spells it: `<pid>:<seq>`.
 fn version(spelled: &str) -> Result<Version, String> {
     let (pid, seq) = spelled.split_once(':').ok_or("not <pid>:<seq>")?;
     let pid = pid.parse().map_err(|error| format!("the pid: {error}"))?;
@@ -187,7 +183,6 @@ fn version(spelled: &str) -> Result<Version, String> {
     Ok(Version { pid, seq })
 }
 
-/// Asks the daemon in `folder` what `command` asks, or has zellij do it.
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::running(folder), info),
@@ -212,7 +207,6 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
     }
 }
 
-/// Reaches the daemon in `folder` by `reaching`, and has `asking` ask it.
 fn ask<R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
 where
     R: Future<Output = Result<DaemonClient<Channel>, String>>,
@@ -240,8 +234,6 @@ where
     ExitCode::SUCCESS
 }
 
-/// Gives lunetad in `folder` what to read aloud, `text` or else what comes on
-/// stdin, from the pane this runs in, first where `now` says; or has it `stop`.
 fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
     let does = if stop {
         Does::Stop(())
@@ -263,8 +255,6 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
     })
 }
 
-/// What comes on stdin, up to one byte over what lunetad takes, for it to say
-/// that it does not. Or why it does not read.
 fn from_stdin() -> Result<String, String> {
     let limit = BYTES_MAX as u64 + 1;
     let mut read = Vec::new();
@@ -273,9 +263,6 @@ fn from_stdin() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&read).into_owned())
 }
 
-/// The pane this runs in, by the name its session had as it opened, or as you
-/// asked from it in the ask box, for lunetad to say what it is in now: none
-/// outside zellij.
 fn speaker_here() -> Option<Zellij> {
     let (named, pane) = match zellij::here().ok()?? {
         Seat::Opened(ZellijPane { session, pane }) => (session, pane),
@@ -285,8 +272,6 @@ fn speaker_here() -> Option<Zellij> {
     Some(Zellij { named, session: None, pane })
 }
 
-/// Adds `destination` to luneta's hosts file, and says how lunetad's first
-/// ssh to it goes, where one runs: it fails where that does.
 fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
     match machines::add(destination) {
         Ok(Added::Named) => println!("{destination}: added to luneta's hosts file"),
@@ -339,9 +324,6 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
     }
 }
 
-/// What lunetad has of `destination` once its first ssh there reached it or
-/// failed: none where that takes longer than the most ssh is given, and the
-/// hosts file a sweep or two to be read again.
 async fn first_reach(
     mut daemon: DaemonClient<Channel>,
     destination: &Destination,
@@ -357,22 +339,17 @@ async fn first_reach(
         let host = host?.into_inner();
         let named = host.remotes.into_iter().find(|remote| remote.destination == spelled);
         match named.and_then(|remote| remote.reached) {
-            // Not read yet, or not reached yet, or a newer daemon's.
             None | Some(Reached::Reaching(())) => after = host.version,
             reached => return Ok(reached),
         }
     }
 }
 
-/// A runtime for the CLI's one thread, or why there is none.
 pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
     let built = tokio::runtime::Builder::new_current_thread().enable_all().build();
     built.map_err(|error| format!("no runtime: {error}"))
 }
 
-/// The agents lunetad lists, for the CLI to say which a close ends, or why
-/// it does not list them: none runs, or it does not answer. It starts none,
-/// as `agents` does not.
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     let runtime = runtime()?;
     runtime.block_on(async {
@@ -382,15 +359,10 @@ pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     })
 }
 
-/// Where the panes and the agents of this machine work, as lunetad says now, or
-/// why it does not say: none runs, or it does not answer, or it has yet to list
-/// them. It starts none, as `agents` does not.
 pub fn occupied(folder: &Path) -> Result<Occupied, String> {
     Occupied::of(&host(folder)?)
 }
 
-/// The host as the daemon in `folder` says it stands now, or why it does not
-/// say.
 pub fn host(folder: &Path) -> Result<lunetad::api::Host, String> {
     let runtime = runtime()?;
     runtime.block_on(async {
@@ -411,12 +383,6 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// One line to an agent, by its session and pane, as `line` writes it, an
-/// own session's by its name among `own`. Where luneta-mux could not list
-/// them, or lists one that does not read, an agent in one goes by its ids;
-/// and so does one in an own pane lunetad says what does not read of, with
-/// `?` for what it does not say. Why is said once the daemon has listed the
-/// agents: where it has not, its failure is the one said.
 async fn agents(
     mut daemon: DaemonClient<Channel>,
     own: Result<(Vec<Listing>, Vec<String>), Failure>,
@@ -450,10 +416,6 @@ async fn agents(
     Ok(())
 }
 
-/// Where `agent` runs: in zellij, as `seat` says, or in an own session, as
-/// `own_seat` says. Or, where its daemon says an own pane that does not read,
-/// as `?:<pane> (own <session id>)` with `?` for what it does not say, and
-/// why it does not read.
 pub fn seat_of(agent: &Agent, own: &[Listing]) -> Result<String, (String, String)> {
     match &agent.pane {
         Some(agent::Pane::Own(pane)) => {
@@ -466,9 +428,6 @@ pub fn seat_of(agent: &Agent, own: &[Listing]) -> Result<String, (String, String
     }
 }
 
-/// Where an agent runs in the own pane `pane`: as `<session>:<pane>` by the
-/// name its session has among `own`, or as `?:<pane> (own <session id>)`
-/// where `own` has none of its id made then.
 pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
     match own.iter().find(|listed| listed.key() == pane.session) {
         Some(named) => format!("{}:{}", named.name, pane.id),
@@ -476,10 +435,6 @@ pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
     }
 }
 
-/// The pane `pane` of the own session `session`, which goes by no name: `?`
-/// for the name, as `seat` has for a zellij session it cannot tell, so that
-/// no verb reads it as a pane of a session by a name; and `?` for the id of
-/// either where its daemon does not say one.
 fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {
     let id = session.map_or_else(|| "?".to_owned(), |id| id.to_string());
     let pane = pane.map_or_else(|| "?".to_owned(), |id| id.to_string());
@@ -488,9 +443,6 @@ fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {
     seat
 }
 
-/// Where an agent runs in `zellij`, as `<session>:<pane>`: `-` outside
-/// zellij. One whose session was renamed says what it was named, and one whose
-/// session the daemon cannot tell has `?` for one.
 pub fn seat(zellij: Option<&Zellij>) -> String {
     match zellij {
         None => "-".to_owned(),
@@ -504,9 +456,6 @@ pub fn seat(zellij: Option<&Zellij>) -> String {
     }
 }
 
-/// An agent on a line: `seat`, as wide as `width`, its status, its pid, and
-/// its name or else where it works. A status the CLI does not know is the
-/// word Claude Code wrote, and none at all is `?`.
 pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
     let status = match &agent.status {
         Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
@@ -514,7 +463,6 @@ pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
             Ok(Status::Idle) => "idle",
             Ok(Status::Waiting) => "waiting",
             Ok(Status::Shell) => "shell",
-            // A daemon newer than this CLI's.
             Ok(Status::Unspecified) | Err(_) => "?",
         },
         Some(Reported::OtherStatus(word)) => word.as_str(),
@@ -524,28 +472,14 @@ pub fn line(seat: &str, width: usize, agent: &Agent) -> String {
     format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)
 }
 
-/// The agent of a session file lunetad cannot read on a line, as `line` has
-/// an agent: by its pid alone, as what it is doing no one can tell.
 pub fn unread_line(seat: &str, width: usize, file: &UnreadFile) -> String {
     format!("{seat:<width$}  {:<7}  {:>7}  its session file does not read", "?", file.pid)
 }
 
-/// What the CLI says of the session files lunetad cannot read, `unread` of
-/// them, whose agents it does not list.
 pub fn unread(unread: Unread) -> String {
     format!("{unread}, and its log says which")
 }
 
-/// A session to a line, as the sidebar lists them, with its panes under it, each
-/// by its tab and its id: where it works, then what is checked out there and what
-/// changed on it, and the pull request of its branch, and the directory of its
-/// repository. A pane
-/// zellij says no directory of has `-` for one, and a directory git has said
-/// nothing of has nothing after it.
-/// Then each other machine lunetad watches, as its hosts file names it, with
-/// a `/` after it, which no session's name holds, and its sessions under it,
-/// or why it has none; and a word that the file names more than these, or
-/// other machines, where lunetad could not read all of it.
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let asked = WatchRequest { after: None, kept: None, shown: false };
     let host = daemon.watch(asked).await?.into_inner();
@@ -569,7 +503,6 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
                 let why = &unreached.why;
                 println!("{machine}/  (unreached{}: {why})", long.unwrap_or_default());
             },
-            // A newer daemon's.
             None => println!("{machine}/  (does not read)"),
         }
     }
@@ -579,8 +512,6 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// `sessions` in the order of the sidebar's rows on `machine`: oldest first, and
-/// as `order` has them.
 fn as_rows<'a>(
     sessions: &'a [Session],
     machine: Option<&Machine>,
@@ -597,9 +528,6 @@ fn as_rows<'a>(
     rows
 }
 
-/// The `sessions` of a host, with what it says of the `work_trees` and the
-/// `pull_requests` of their panes, as `sessions` says them, each line led by
-/// `indent`.
 fn sessions_of(
     sessions: &[&Session],
     work_trees: &[WorkTree],
@@ -639,12 +567,6 @@ fn sessions_of(
     }
 }
 
-/// How a work tree stands, in words: its branch, or `detached`, and then how
-/// many paths of each kind changed, the stashes, and where the branch is from
-/// its upstream. A directory in no repository says so, and one in a repository
-/// but outside its work trees says that. None for an answer
-/// that leaves out what the protocol says is always there, as a newer
-/// daemon's could.
 fn stands(tree: &WorkTree) -> Option<String> {
     let checkout = match tree.stands.as_ref()? {
         Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
@@ -678,10 +600,6 @@ fn stands(tree: &WorkTree) -> Option<String> {
     Some(said.join(", "))
 }
 
-/// A pull request, in words: its number and its state, and while it is open,
-/// what its checks come to, where it has any, and that gh failed since it
-/// said all that, where it did. None for one that does not read, as a newer
-/// daemon's could send.
 fn pulled(pull_request: &PullRequest) -> Option<String> {
     let pull_request = github::PullRequest::of_api(pull_request)?;
     let state = match pull_request.state {
@@ -700,7 +618,6 @@ fn pulled(pull_request: &PullRequest) -> Option<String> {
     Some(format!("#{} {state}{checks}{old}", pull_request.number))
 }
 
-/// Writes out the host once it is no longer as `after` saw it.
 async fn watch(
     mut daemon: DaemonClient<Channel>,
     after: Option<Version>,
@@ -712,7 +629,6 @@ async fn watch(
     Ok(())
 }
 
-/// `secs` as the two units that say the most of it.
 fn span(secs: u64) -> String {
     let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
     match (hours, minutes) {

@@ -1,16 +1,3 @@
-//! The brief: what the agents are doing, in a few lines a fast model writes,
-//! for coming back to them after a break.
-//!
-//! The sidebar knows where each agent runs, how it stands and the branch it
-//! works on. The end of its transcript says what it is doing: the title Claude
-//! Code gave it, what you last asked of it, and what it said and ran since.
-//! A key of the menu's Brief group asks for a brief of the agents it covers,
-//! by the row highlighted: luneta reads the end of each one's transcript on
-//! the machine it runs on, this one's here and another's through the daemon
-//! there, hands it all to `claude -p` here, and shows what comes back in a
-//! box over zellij, until a key closes it. Nothing is kept: each key asks
-//! again.
-
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,43 +26,25 @@ use crate::menu::{self, Hint};
 use crate::sidebar;
 use crate::zellij::SessionName;
 
-/// The model that writes the brief: a fast one, for a brief in seconds.
 const MODEL: &str = "haiku";
 
-/// How long the model has to write a brief. One takes a few seconds: one that
-/// takes longer than this is stuck, and is killed.
 const WRITING: Duration = Duration::from_mins(2);
 
-/// How long `date` has to say the time.
 const CLOCK: Duration = Duration::from_secs(1);
 
-/// How long a brief given up waits for the thread it is asked on to end, and
-/// `claude` with it: the look at whether it is still wanted, which comes each
-/// few milliseconds, and its end once it is killed.
 const GIVING_UP: Duration = Duration::from_millis(100);
 
-/// What is said of an agent of another harness than Claude Code, to you where
-/// it is all a brief would cover, and to the model where others go with it.
 const ONLY_CLAUDE_CODE: &str = "luneta reads only Claude Code's transcripts so far";
 
-/// The most agents a brief tells of: the transcripts of no more than a
-/// reading takes.
 const MAX_NOTES: usize = 32;
 const _: () = assert!(MAX_NOTES <= IDS_MAX);
 
-/// The most the notes can take, in bytes.
 const NOTES_BYTES: usize = 100 * 1024;
 
-/// What the notes keep of `NOTES_BYTES` for saying which agents they leave
-/// out.
 const LEFT_OUT_BYTES: usize = 4 * 1024;
 
-/// The fewest columns the box takes, where zellij has as many: room for the
-/// lines the model is asked to keep under 100 characters, which then do not
-/// wrap.
 const WIDTH_MIN: u16 = 60;
 
-/// What the model is told, whatever the brief covers.
 const SYSTEM: &str = "You brief a developer who is coming back to their desk after a break. They \
     left Claude Code agents at work in zellij sessions, and want to know at a glance how each \
     is doing. The notes you get say where each agent runs, its status and its branch, and end \
@@ -87,20 +56,14 @@ const SYSTEM: &str = "You brief a developer who is coming back to their desk aft
     to the developer as you. Use only what the notes say, and where they say nothing, say so \
     in a few words rather than guess.";
 
-/// What a key of the Brief group covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// Every session, a line each.
     Every,
-    /// The session of the row highlighted, a line for each agent in it.
     Session,
-    /// The row highlighted: the agent in its pane, in a few lines, or a
-    /// session's row, as `Session` does.
     Highlighted,
 }
 
 impl Scope {
-    /// Each, in the order the Brief group shows them.
     pub const ALL: [Scope; 3] = [Scope::Every, Scope::Session, Scope::Highlighted];
 
     pub const fn key(self) -> char {
@@ -111,7 +74,6 @@ impl Scope {
         }
     }
 
-    /// What the menu says the key does.
     pub const fn does(self) -> &'static str {
         match self {
             Scope::Every => "Every session",
@@ -121,28 +83,18 @@ impl Scope {
     }
 }
 
-/// What a brief covers, once the sidebar has found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Over {
-    /// Every session of each machine lunetad reaches, in the sidebar's
-    /// order, one with no agent in it too; and each machine it does not
-    /// reach now, whose sessions are unknown, with what its header says of
-    /// it.
     Sessions {
         sessions: Vec<(Machine, SessionName)>,
         unknown: Vec<(Destination, &'static str)>,
     },
-    /// Every session of a machine, in the sidebar's order, one with no agent
-    /// in it too.
     Machine(Machine, Vec<SessionName>),
-    /// A session of a machine, a line for each agent in it.
     Session(Machine, SessionName),
-    /// The agent in a pane of a session of a machine, in a few lines.
     Agent(Machine, SessionName, u32),
 }
 
 impl Over {
-    /// Whether the brief covers the agent `note` is of.
     fn covers(&self, note: &Note) -> bool {
         match self {
             Over::Sessions { .. } => true,
@@ -154,8 +106,6 @@ impl Over {
         }
     }
 
-    /// How many steps of what each agent did the notes tell: the fewer
-    /// agents a brief covers, the more of each.
     fn steps(&self) -> usize {
         match self {
             Over::Sessions { .. } | Over::Machine(..) => 4,
@@ -164,7 +114,6 @@ impl Over {
         }
     }
 
-    /// What the model is asked to write.
     fn ask(&self) -> String {
         match self {
             Over::Sessions { unknown, .. } => per_session("open", !unknown.is_empty()),
@@ -184,9 +133,6 @@ impl Over {
     }
 }
 
-/// What the model is asked to write of the sessions the developer has
-/// `open`, a line each, and of machines whose sessions are unknown, where
-/// the notes tell of any: told of none, the model makes one up.
 fn per_session(open: &str, unknown: bool) -> String {
     let unknown = if unknown {
         " Where they say the sessions of a machine are unknown, end with a line that says so."
@@ -209,8 +155,6 @@ fn per_session(open: &str, unknown: bool) -> String {
     )
 }
 
-/// `session`, of the machine `on`, as the notes name it: by its name, and
-/// its machine's where that is another than this one.
 fn session_on(on: &Machine, session: &SessionName) -> String {
     match on {
         Machine::Local => session.to_string(),
@@ -218,7 +162,6 @@ fn session_on(on: &Machine, session: &SessionName) -> String {
     }
 }
 
-/// The machine `on`, as the notes name it.
 fn machine_named(on: &Machine) -> String {
     match on {
         Machine::Local => "this machine".to_owned(),
@@ -226,36 +169,27 @@ fn machine_named(on: &Machine) -> String {
     }
 }
 
-/// What the sidebar knows of an agent, for the brief.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    /// The machine it runs on, whose daemon reads its transcript.
     pub on: Machine,
     pub session: SessionName,
     pub pane: u32,
-    /// What the agent's row in the sidebar is named.
     pub name: String,
     pub status: String,
-    /// Since when it has been in that status, where Claude Code says.
     pub since: Option<SystemTime>,
     pub branch: Option<String>,
     pub cwd: String,
     pub transcript: Transcript,
 }
 
-/// What can be read of an agent's transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transcript {
-    /// The id of its Claude Code session, which names it.
     Named(SessionId),
-    /// It runs in Claude Code, which names none for it.
     Unnamed,
-    /// It runs in another harness, whose transcripts luneta does not read.
     NotRead,
 }
 
 impl Transcript {
-    /// The id that names it, if one does.
     pub fn named(self) -> Option<SessionId> {
         match self {
             Transcript::Named(id) => Some(id),
@@ -264,21 +198,14 @@ impl Transcript {
     }
 }
 
-/// A brief asked for: what it covers, and the agents it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Brief {
     over: Over,
     notes: Vec<Note>,
-    /// What the box says the brief is of.
     title: String,
 }
 
 impl Brief {
-    /// The brief of the agents in `notes` that `over` covers, or what the
-    /// sidebar says when there is none: one of every session says too of
-    /// the machines whose sessions are unknown, which may have some. Two
-    /// agents a session names alike are told apart by their panes, as the
-    /// agent list tells them apart: `luneta/main:4`.
     pub fn new(over: Over, notes: Vec<Note>) -> Result<Self, String> {
         let mut notes: Vec<Note> =
             notes.into_iter().filter(|note| over.covers(note)).collect();
@@ -323,7 +250,6 @@ impl Brief {
             Over::Sessions { .. } => "Brief of every session".to_owned(),
             Over::Machine(on, _) => format!("Brief of every session on {}", machine_named(on)),
             Over::Session(on, session) => format!("Brief of {}", session_on(on, session)),
-            // A pane has one agent at the most.
             Over::Agent(on, session, _) => {
                 format!("Brief of {}, in {}", first.name, session_on(on, session))
             },
@@ -331,21 +257,12 @@ impl Brief {
         Ok(Brief { over, notes, title })
     }
 
-    /// What the box says the brief is of.
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// What the end of its transcript told of each agent the notes have
-    /// room for, in their order, as `read` reads them on the machine each is
-    /// on, each an equal share of what a reading keeps of them all: every
-    /// machine at once, each on a thread of its own, as another's answers
-    /// through two daemons and ssh. Or why it read none: there are more of
-    /// them than a reading takes, as `MAX_NOTES` keeps there from being.
     fn told(&self, read: &Reads<'_>) -> Result<Vec<Told>, String> {
         let mut told: Vec<(usize, Told)> = Vec::new();
-        // The place in the notes of each agent with a transcript, and its
-        // id, by its machine.
         let mut machines: HashMap<&Machine, Vec<(usize, SessionId)>> = HashMap::new();
         for (at, note) in self.notes.iter().take(MAX_NOTES).enumerate() {
             match &note.transcript {
@@ -387,12 +304,6 @@ impl Brief {
         Ok(told.into_iter().map(|(_, told)| told).collect())
     }
 
-    /// What the model is asked, with the notes on each agent and what the
-    /// end of its transcript says of it, as `read` reads them, for as many
-    /// agents as the notes have room for, and how many they leave out, and
-    /// the machines whose sessions are unknown; or why it read none, as
-    /// `told` says. How long each has been in its status is told as of the
-    /// time `now` says once they are read.
     fn prompt(&self, read: &Reads<'_>, now: fn() -> SystemTime) -> Result<String, String> {
         let transcripts = self.told(read)?;
         let now = now();
@@ -439,15 +350,9 @@ impl Brief {
     }
 }
 
-/// What reads the ends of transcripts on a machine: the end of each that
-/// `Reading` reads there, by its session's id, or why it read none there.
 type Reads<'a> =
     dyn Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + 'a;
 
-/// The ends `reading` reads on the machine `on`: this one's in `projects`,
-/// where the daemon said it reads Claude Code's sessions, or none where it
-/// said nothing; another's as its daemon reads them there, through this
-/// one's, or why it read none.
 pub fn read(
     on: &Machine,
     reading: &Reading,
@@ -459,9 +364,6 @@ pub fn read(
     }
 }
 
-/// What the notes say of the agents in `left_out` that they have no room
-/// for, so that a session whose agents they leave out is not taken for one
-/// with none.
 fn leaves_out(left_out: &[Note]) -> String {
     let mut sessions: Vec<String> =
         left_out.iter().map(|note| session_on(&note.on, &note.session)).collect();
@@ -477,8 +379,6 @@ fn leaves_out(left_out: &[Note]) -> String {
 }
 
 impl Note {
-    /// The note as the model reads it at `now`, with what its transcript
-    /// `told`.
     fn written(&self, told: &Told, now: SystemTime) -> String {
         let session = session_on(&self.on, &self.session);
         let mut lines = vec![format!("Agent \"{}\" in session {session}", self.name)];
@@ -502,22 +402,13 @@ impl Note {
     }
 }
 
-/// What the end of an agent's transcript told of it.
 enum Told {
-    /// Claude Code gave no id for its session, or one that names no
-    /// transcript.
     NoId,
-    /// No transcript has its id in the folder its machine's daemon reads
-    /// Claude Code's sessions in: one not written yet, or there was no
-    /// folder to look in.
     NotFound,
-    /// Its machine's daemon read no transcript there, for this reason, as
-    /// lunetad does not reach it now, or is older than the question.
     Unread(String),
     Read(Digest),
 }
 
-/// `text` no longer than `bytes`, cut at a character.
 fn cut_bytes(mut text: String, bytes: usize) -> String {
     if text.len() > bytes {
         let at = (0..=bytes).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
@@ -526,20 +417,12 @@ fn cut_bytes(mut text: String, bytes: usize) -> String {
     text
 }
 
-/// What came of a brief asked for: the time it was asked at, as hours and
-/// minutes, and what the model wrote, or why it wrote nothing.
 #[derive(Debug)]
 pub struct Written {
     at: Option<String>,
     said: Result<String, String>,
 }
 
-/// Asks for `brief`, numbered `number`, on a thread of its own: reads the end
-/// of each transcript it covers, this machine's in `claude_folder`, the
-/// folder the daemon reads Claude Code's sessions in, and another's through
-/// the daemon there, has the model write the brief, and hands back what it
-/// wrote, or why it wrote nothing, as `Due` does. The briefing that shows it
-/// gives it up as it goes, the model with it.
 pub fn ask(
     number: u64,
     brief: Brief,
@@ -556,13 +439,11 @@ pub fn ask(
         let projects = claude_folder.map(|folder| folder.join("projects"));
         let reads = |on: &Machine, reading: &Reading| read(on, reading, projects.as_deref());
         let prompt = brief.prompt(&reads, SystemTime::now);
-        // Given up while another machine's daemon read, it runs no model.
         if !wanted() {
             return;
         }
         let said = match prompt {
             Ok(prompt) => {
-                // Given up, it is owed to a briefing that is gone.
                 let Some(said) = write(&prompt, wanted) else {
                     return;
                 };
@@ -575,28 +456,18 @@ pub fn ask(
     Briefing { number, title, written: None, _asking: asking }
 }
 
-/// The thread something is asked of `claude` on, which gives it up once it
-/// is dropped: `claude` is killed, if it has yet to end, by the time the drop
-/// returns, or else soon after, so that a luneta on its way out leaves none
-/// behind it.
 #[derive(Debug)]
 pub struct Asking {
-    /// Whether it was given up, which the thread looks at.
     given_up: Arc<AtomicBool>,
-    /// Closed as the thread ends.
     ended: Receiver<()>,
 }
 
 impl Asking {
-    /// Runs `ask` on a thread of its own, which it hands whether what it
-    /// asks is still wanted, to look at as it goes: until the asking is
-    /// dropped.
     pub fn on_thread(ask: impl FnOnce(&dyn Fn() -> bool) + Send + 'static) -> Self {
         let given_up = Arc::new(AtomicBool::new(false));
         let (going, ended) = mpsc::channel();
         let looked_at = Arc::clone(&given_up);
         thread::spawn(move || {
-            // Dropped as the thread ends, which the drop waits for.
             let _going: Sender<()> = going;
             ask(&|| !looked_at.load(Ordering::Relaxed));
         });
@@ -611,7 +482,6 @@ impl Drop for Asking {
     }
 }
 
-/// The time as `date` says it, in hours and minutes.
 fn clock() -> Option<String> {
     let mut date = Command::new("date");
     date.arg("+%H:%M");
@@ -620,11 +490,6 @@ fn clock() -> Option<String> {
     (!time.is_empty()).then_some(time)
 }
 
-/// What the model wrote on `prompt`, or why it wrote nothing, or none where
-/// it was killed as no longer `wanted`. It runs with no tools, and in safe
-/// mode, so that none of your hooks, `CLAUDE.md` or MCP servers come into it,
-/// and with no zellij in its environment, so that the daemon places it in no
-/// pane.
 fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, String>> {
     let ran = one_answer(MODEL, SYSTEM, prompt).and_then(|(mut claude, told)| {
         program::run_while_reading(&mut claude, WRITING, wanted, told)
@@ -632,8 +497,6 @@ fn write(prompt: &str, wanted: &dyn Fn() -> bool) -> Option<Result<String, Strin
     ran.transpose().map(wrote)
 }
 
-/// What the model wrote, as `claude` `ran`, or why it wrote nothing: a brief
-/// that says nothing would read as one with nothing to tell.
 fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
     match ran {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => {
@@ -643,7 +506,6 @@ fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
             }
             Ok(said)
         },
-        // What it said goes on either, as it fails.
         Ok(Ran::Ended { status, stdout, stderr }) => {
             let said = [stderr, stdout].map(|said| String::from_utf8_lossy(&said).trim().to_owned());
             let said = said.into_iter().find(|said| !said.is_empty());
@@ -659,15 +521,10 @@ fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
     }
 }
 
-/// A brief over zellij, from when it is asked until a key closes it, which
-/// gives it up.
 #[derive(Debug)]
 pub struct Briefing {
-    /// Its number among the briefs luneta has asked for, which what comes of
-    /// it carries.
     number: u64,
     title: String,
-    /// What came of it, once it has.
     written: Option<Written>,
     _asking: Asking,
 }
@@ -677,14 +534,10 @@ impl Briefing {
         self.number
     }
 
-    /// What came of it.
     pub fn written(&mut self, written: Written) {
         self.written = Some(written);
     }
 
-    /// Whether `key` closes it: any key once it is written. While it is
-    /// asked, a key you press is not the one that closes it once it shows,
-    /// and `Esc` and `Ctrl c` alone close it, unwritten.
     pub fn closes(&self, key: &KeyEvent) -> bool {
         let gives_up = match key.code {
             KeyCode::Esc => key.modifiers.is_empty(),
@@ -694,22 +547,14 @@ impl Briefing {
         self.written.is_some() || gives_up
     }
 
-    /// Whether a click closes it: once it is written, a click anywhere does.
     pub fn clicked(&self) -> bool {
         self.written.is_some()
     }
 
-    /// Whether its spinner turns: until it is written.
     pub fn turning(&self) -> bool {
         self.written.is_none()
     }
 
-    /// Draws it in a box over `over`, zellij's columns, at `now`, as `boxed`
-    /// does. The rule along its top says what it is a brief of, and once it
-    /// is written, when it was asked. Under it, what the model wrote, or why
-    /// it wrote nothing, or that it is asked, after a spinner that turns, and
-    /// then the keys that close it. What the box has no room for is cut, its
-    /// last line a `…`.
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
         let Some((inner, room)) = room(over) else {
             return;
@@ -740,24 +585,16 @@ impl Briefing {
     }
 }
 
-/// The columns inside a box over `over`, zellij's, and the lines it has room
-/// for, inside its edges: across most of zellij's columns, and no fewer than
-/// `WIDTH_MIN` where zellij has as many. None where it has no room for one.
 pub fn room(over: Rect) -> Option<(usize, usize)> {
     let (inner, room) = (width(over).checked_sub(2)?, over.height.checked_sub(2)?);
     Some((usize::from(inner), usize::from(room)))
 }
 
-/// How wide a box over `over` is, edges and all.
 fn width(over: Rect) -> u16 {
     let share = u16::try_from(u32::from(over.width) * 7 / 10).unwrap_or(over.width);
     share.max(WIDTH_MIN).min(over.width)
 }
 
-/// Draws `lines` in a box over `over`, zellij's columns, as wide as `room`
-/// says, in their middle, and as tall as the lines, as many as it has room
-/// for, with what was there gone. The rule along its top says `title`, and
-/// `right` at its end where it has room.
 pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &[Line<'_>]) {
     let Some((inner, room)) = room(over) else {
         return;
@@ -771,10 +608,6 @@ pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &
     menu::boxed(buffer, area, &menu::rule(title, right, inner), lines);
 }
 
-/// `text` on lines `width` wide, a space in from the edge: each of its lines
-/// broken between words where it is too long, and its blank ones kept. A
-/// character that would move the cursor, or tell the terminal anything, is a
-/// space.
 pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for line in text.lines() {
@@ -818,7 +651,6 @@ mod tests {
         }
     }
 
-    /// Three minutes after each note's agent came to its status.
     fn now() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_mins(3)
     }
@@ -827,14 +659,11 @@ mod tests {
         SessionName::parse(session).expect("a session's name")
     }
 
-    /// A brief of every session of this machine, named `sessions`, in order.
     fn every(sessions: &[&str]) -> Over {
         let sessions = sessions.iter().map(|it| (Machine::Local, named(it))).collect();
         Over::Sessions { sessions, unknown: Vec::new() }
     }
 
-    /// What reads the ends of this machine's transcripts, as luneta reads
-    /// them in `projects`.
     fn read_here(
         projects: &Path,
     ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, String>, String> + Sync + '_
@@ -842,25 +671,11 @@ mod tests {
         move |on, reading| read(on, reading, Some(projects))
     }
 
-    /// What reads no end of a transcript, on any machine.
     #[expect(clippy::unnecessary_wraps, reason = "it is a `Reads`")]
     fn none_read(_: &Machine, _: &Reading) -> Result<HashMap<SessionId, String>, String> {
         Ok(HashMap::new())
     }
 
-    /// What the model reads of each agent: what the sidebar knows of it, and
-    /// what the end of its transcript says, as luneta reads it in Claude
-    /// Code's projects. The title is the last one, and what you last asked
-    /// the later of the last prompt Claude Code recorded and the last one you
-    /// typed: it records a prompt some records after you type it. The steps
-    /// are the last few, oldest first, by what a tool was for over what it
-    /// ran. The record the end starts partway into, a subagent's records,
-    /// what Claude thought and what a tool answered are left out, and so is
-    /// what Claude Code typed in tags of its own or in your place where you
-    /// stopped it. A transcript not found says so, and so does an agent
-    /// Claude Code names none for. Two agents a session names alike are told
-    /// apart by their panes, and an agent of another session named alike is
-    /// not.
     #[test]
     fn the_notes_tell_each_agent_by_the_end_of_its_transcript() {
         let fold = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -955,11 +770,6 @@ Its transcript is unknown: Claude Code names none for it.
         );
     }
 
-    /// A brief keeps no more than `TAILS_BYTES` of the transcripts it covers
-    /// together, however many agents it covers. What it keeps is of the
-    /// records the notes tell of, so that what Claude Code asked of the API,
-    /// which takes most of the end of a transcript, leaves room for what each
-    /// agent did last.
     #[test]
     fn a_brief_reads_a_share_of_each_transcript_of_what_the_notes_tell() {
         let projects = tempfile::tempdir().expect("a directory");
@@ -1011,11 +821,6 @@ Its transcript is unknown: Claude Code names none for it.
         }
     }
 
-    /// A brief tells of as many agents as it has room for, in the order the
-    /// sidebar gives them, and says how many it leaves out and in which
-    /// sessions, so that the model does not call a session whose agents it
-    /// left out empty: past `MAX_NOTES` agents, and past `NOTES_BYTES` of
-    /// notes.
     #[test]
     fn a_brief_says_how_many_agents_it_has_no_room_for() {
         let note = |session: &str, pane: usize, name: String| Note {
@@ -1044,16 +849,6 @@ Its transcript is unknown: Claude Code names none for it.
         }
     }
 
-    /// Each agent is told of on its machine: one of another machine's in
-    /// its session there, as "<session> on <machine>", by what that
-    /// machine's daemon read of its transcript. Each machine is asked for
-    /// its own transcripts alone, all at once, each an equal share of what
-    /// a reading keeps of them all; one whose daemon read none says why, and
-    /// a machine lunetad does not reach is told of as one whose sessions are
-    /// unknown. Agents named alike in sessions named alike, but of two
-    /// machines, are not told apart by their panes. A brief of a machine
-    /// covers its agents alone. With no agent where lunetad reaches, a brief
-    /// of every session says whose sessions are unknown.
     #[test]
     fn the_notes_tell_each_agent_on_its_machine() {
         let ids = [
@@ -1133,8 +928,6 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
         );
 
         assert!(prompt.contains("sessions of a machine are unknown, end with"), "{prompt}");
-        // With no machine of unknown sessions, it asks of none: asked anyway, the
-        // model makes one up.
         let of_nixos = Brief::new(Over::Machine(nixos(), Vec::new()), notes.clone());
         let of_nixos = of_nixos.expect("a brief").prompt(&none_read, now).expect("a reading");
         assert_eq!(of_nixos.matches("\nAgent \"").count(), 2);
@@ -1157,9 +950,6 @@ Its transcript was not read: me@vps: lunetad did not answer in 6s
         assert_eq!(Brief::new(nowhere, Vec::new()).err().as_deref(), Some(said));
     }
 
-    /// A brief tells the model of an agent of another harness by what its row
-    /// shows, and that its transcript is not read: it is no agent gone missing,
-    /// nor a session with none.
     #[test]
     fn a_brief_tells_of_an_agent_of_another_harness_without_its_transcript() {
         let of = |pane: u32, name: &str, transcript: Transcript| Note {
@@ -1195,9 +985,6 @@ Its transcript is unknown: Claude Code names none for it.
         );
     }
 
-    /// What `claude` wrote is the brief, and a run that wrote nothing but
-    /// blanks is none: an empty box would read as a brief with nothing to
-    /// tell.
     #[test]
     fn a_run_of_claude_that_wrote_nothing_is_no_brief() {
         let ended = |stdout: &str| {
@@ -1209,18 +996,14 @@ Its transcript is unknown: Claude Code names none for it.
         assert_eq!(wrote(ended(" \n\n")), Err("brief: claude wrote nothing".to_owned()));
     }
 
-    /// The brief numbered `number`, of `title`, asked on a thread that has
-    /// already ended.
     fn asked(number: u64, title: &str) -> Briefing {
         let asking = Asking { given_up: Arc::default(), ended: mpsc::channel().1 };
         Briefing { number, title: title.to_owned(), written: None, _asking: asking }
     }
 
-    /// The box over zellij's columns, `width` by `height`, as text.
     fn shown(briefing: &Briefing, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        // What zellij drew there goes under the box.
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
@@ -1237,9 +1020,6 @@ Its transcript is unknown: Claude Code names none for it.
         KeyEvent::from(code)
     }
 
-    /// While the brief is asked, its box says so, and only `Esc` closes it,
-    /// unwritten. Once it is written, the box shows what the model wrote,
-    /// and when it was asked, and any key or a click closes it.
     #[test]
     fn a_brief_shows_over_zellij_until_a_key_closes_it() {
         let mut briefing = asked(1, "Brief of every session");
@@ -1282,8 +1062,6 @@ Its transcript is unknown: Claude Code names none for it.
         assert!(!briefing.turning());
     }
 
-    /// What the box has no room for is cut, with the keys that close it
-    /// kept, and what went wrong is said in its place.
     #[test]
     fn a_brief_too_long_for_its_box_is_cut_and_one_that_failed_says_why() {
         let mut briefing = asked(1, "Brief of luneta");

@@ -1,0 +1,21 @@
+id: no-rust-doc-attributes
+valid:
+  - "#[doc(hidden)]\npub fn f() {}"
+  - "#[must_use = \"a\"]\npub fn f() -> u8 { 1 }"
+  - "#[cfg_attr(test, doc(hidden))]\npub fn f() {}"
+  - "#[cfg_attr(test, derive(Debug))]\npub struct S;"
+  - "#[a(doc = \"a\")]\nfn f() {}"
+  - "m![doc = 1];"
+  - "macro_rules! m { () => { #[a(doc = \"a\")] fn f() {} }; }"
+invalid:
+  - "#[doc = \"a\"]\nfn f() {}"
+  - "#![doc = \"a\"]"
+  - "#[doc = concat!(\"a\", \"b\")]\nfn f() {}"
+  - "#[doc = include_str!(\"a.md\")]\nfn f() {}"
+  - "#[cfg_attr(test, doc = \"a\")]\nfn f() {}"
+  - "#![cfg_attr(test, doc = \"a\")]"
+  - "#[cfg_attr(test, derive(Debug), doc = \"a\")]\nstruct S;"
+  - "#[cfg_attr(test, cfg_attr(unix, doc = \"a\"))]\nfn f() {}"
+  - "macro_rules! m { ($t:expr) => { #[doc = $t] fn f() {} }; }"
+  - "macro_rules! m { ($t:expr) => { #![doc = $t] }; }"
+  - "macro_rules! m { () => { #[cfg_attr(test, doc = \"a\")] fn f() {} }; }"

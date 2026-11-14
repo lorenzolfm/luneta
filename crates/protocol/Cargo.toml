@@ -6,8 +6,6 @@ license.workspace = true
 publish = false
 description = "What luneta's daemon and its clients both read: the protocol, and git's status"
 
-# The messages alone, without the transport. The daemon writes out the
-# service on top of these, in `crates/lunetad`.
 [dependencies]
 prost = "0.14.4"
 prost-types = "0.14.4"

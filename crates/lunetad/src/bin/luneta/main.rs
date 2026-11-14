@@ -1,8 +1,3 @@
-//! luneta: zellij, beside a sidebar of every session on this host and what
-//! runs in each, and the CLI that asks lunetad, the daemon of this host, and
-//! has zellij open, move and close what the sidebar's menu does, for the
-//! agent of its ask box among others.
-
 mod agents;
 mod alerts;
 mod aloud;
@@ -72,8 +67,6 @@ use lunetad::{folder, release};
 use crate::zellij::SessionName;
 
 #[derive(Parser)]
-// Named, or clap would name it for its package, and `--version` would say
-// `lunetad`.
 #[command(
     name = "luneta",
     version = release::SAID.as_str(),
@@ -173,7 +166,6 @@ fn main() -> ExitCode {
         return host::run(session, cli.own, folder);
     };
     let command = match command {
-        // It asks no lunetad, and so needs no folder to find one in.
         Command::Worktree { repo, of } => return pull::make(&repo, &of),
         Command::Follow { dir } => return pull::follow(&dir),
         Command::FetchUpstream { dir, branch } => return pull::fetch_upstream(&dir, &branch),

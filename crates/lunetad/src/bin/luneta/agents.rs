@@ -1,13 +1,3 @@
-//! The coding agent a key of the menu starts, in a harness luneta knows:
-//! Claude Code or pi. The key says what the agent is to do, a skill or a task
-//! in words, and the harness how it is told: how a skill is spelled, how the
-//! agent is named, and what it may read without asking you first.
-//!
-//! The harness is the one you picked last, in any luneta on the host, kept
-//! for the next in the file `luneta/agent` of `$XDG_STATE_HOME`, or of
-//! `~/.local/state` where that is not set: `Tab` in the menu picks the next.
-//! On a pane an agent runs in, the menu starts the next in that one's harness.
-
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -21,11 +11,8 @@ use notify::RecommendedWatcher;
 use crate::host::Event;
 use crate::state;
 
-/// The name of the file the harness is kept in.
 const FILE: &str = "agent";
 
-/// What the menu names `harness` by: the program it runs, which is what the
-/// file it is kept in says too.
 pub const fn name(harness: Harness) -> &'static str {
     match harness {
         Harness::ClaudeCode => "claude",
@@ -33,8 +20,6 @@ pub const fn name(harness: Harness) -> &'static str {
     }
 }
 
-/// The harness that runs the program `program`, by the name `name` gives it,
-/// if luneta knows it.
 pub fn named(program: &str) -> Option<Harness> {
     match program {
         "claude" => Some(Harness::ClaudeCode),
@@ -43,8 +28,6 @@ pub fn named(program: &str) -> Option<Harness> {
     }
 }
 
-/// The harness `Tab` picks after `harness`, as it goes round those luneta
-/// knows.
 pub const fn next(harness: Harness) -> Harness {
     match harness {
         Harness::ClaudeCode => Harness::Pi,
@@ -52,13 +35,9 @@ pub const fn next(harness: Harness) -> Harness {
     }
 }
 
-/// The harness the menu starts agents in, and what picked it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Picked {
-    /// The agent in the pane the menu is for runs in it.
     ByPane(Harness),
-    /// You did, last, in any luneta on the host; or nobody has yet, and it is
-    /// Claude Code.
     ByYou(Harness),
 }
 
@@ -69,14 +48,11 @@ impl Picked {
         }
     }
 
-    /// What `Tab` picks after it: the next harness, which you picked.
     pub const fn next(self) -> Picked {
         Picked::ByYou(next(self.harness()))
     }
 }
 
-/// How `harness` runs the skill named `skill`: Claude Code by `/<name>`, and
-/// pi by `/skill:<name>`.
 pub fn spelled(harness: Harness, skill: &str) -> String {
     match harness {
         Harness::ClaudeCode => format!("/{skill}"),
@@ -84,7 +60,6 @@ pub fn spelled(harness: Harness, skill: &str) -> String {
     }
 }
 
-/// The harness an agent runs in, as its daemon says, if luneta knows it.
 pub fn of(agent: &api::Agent) -> Option<Harness> {
     match agent.runs_in() {
         api::Harness::ClaudeCode => Some(Harness::ClaudeCode),
@@ -93,10 +68,6 @@ pub fn of(agent: &api::Agent) -> Option<Harness> {
     }
 }
 
-/// An agent in `harness` on the skill named `skill`, as a command line,
-/// given `given` after it, as what the skill is asked. It is given no name,
-/// so that its row follows its topic, as a name would hold the row for good.
-/// Claude Code runs a skill by `/<name>`, and pi by `/skill:<name>`.
 pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Vec<String> {
     let spelled = spelled(harness, skill);
     let prompt = match given {
@@ -106,11 +77,6 @@ pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Vec<Strin
     vec![name(harness).to_owned(), prompt]
 }
 
-/// An agent in `harness` on `words`, as a command line, let read `files`
-/// with no question asked: luneta keeps what a shell printed, and the logs
-/// of checks, outside the directory the agent works in, where Claude Code
-/// asks first. It asks for a file no rule can name. pi asks nothing before a
-/// read.
 pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Vec<String> {
     let mut command = vec![name(harness).to_owned()];
     if harness == Harness::ClaudeCode {
@@ -118,7 +84,6 @@ pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Vec<String> 
         if !rules.is_empty() {
             command.push("--allowedTools".to_owned());
             command.extend(rules);
-            // The flag takes every word after it as another tool, up to this.
             command.push("--".to_owned());
         }
     }
@@ -126,14 +91,6 @@ pub fn on_words(harness: Harness, words: String, files: &[&str]) -> Vec<String> 
     command
 }
 
-/// The rule that lets Claude Code read the file by the path `file` from the
-/// root, and no other, but for one whose name differs by its case alone, which
-/// a rule takes no account of; or none where no rule can name it alone. A rule
-/// names a path from the root with another `/` before it, as a glob: `\` makes
-/// `*`, `[` or `]` itself, and it takes four to make a `\`, as Claude Code reads
-/// the rule, and then the glob. Nothing makes a `?` itself. `--allowedTools`
-/// cuts its word at a space or a comma outside parentheses, which any `)`
-/// leaves it outside of, and a line is another glob.
 fn read_rule(file: &str) -> Option<String> {
     let mut rule = String::from("Read(/");
     let mut inside = true;
@@ -154,12 +111,9 @@ fn read_rule(file: &str) -> Option<String> {
     Some(rule)
 }
 
-/// The harness you picked last, as every luneta on the host keeps it.
 #[derive(Debug)]
 pub struct Kept {
     harness: Harness,
-    /// The file it is shared through. Without one, it is this luneta's
-    /// alone: a test's, or one with nowhere to keep it.
     file: Option<PathBuf>,
 }
 
@@ -170,8 +124,6 @@ impl Default for Kept {
 }
 
 impl Kept {
-    /// The harness every luneta on the host shares, as it stands, and why
-    /// its file could not be read, where it could not.
     pub fn shared() -> (Self, Option<String>) {
         match state::path(FILE) {
             Ok(file) => Kept::within(file),
@@ -179,8 +131,6 @@ impl Kept {
         }
     }
 
-    /// The harness shared through `file`, as it stands: Claude Code, where
-    /// none is kept yet. Its folder is made, for it to be watched.
     pub fn within(file: PathBuf) -> (Self, Option<String>) {
         if let Err(error) = file.parent().map_or(Ok(()), fs::create_dir_all) {
             return (Kept::default(), Some(format!("{}: {error}", file.display())));
@@ -194,13 +144,10 @@ impl Kept {
         self.harness
     }
 
-    /// The file it is shared through, while it is.
     pub fn file(&self) -> Option<&Path> {
         self.file.as_deref()
     }
 
-    /// Takes up the harness as another luneta kept it since. A file that
-    /// names none luneta knows leaves it as it was, and says why.
     pub fn reload(&mut self) -> Result<(), String> {
         let Some(file) = &self.file else {
             return Ok(());
@@ -220,9 +167,6 @@ impl Kept {
         }
     }
 
-    /// Keeps `harness` for every luneta, or says why it cannot. It is written
-    /// whole under a name of this luneta's own before it takes the file's,
-    /// so that no luneta reads it halfway written.
     pub fn keep(&mut self, harness: Harness) -> Result<(), String> {
         self.harness = harness;
         let Some(file) = &self.file else {
@@ -240,8 +184,6 @@ impl Kept {
     }
 }
 
-/// Tells luneta's loop each time the harness is kept, by another luneta or
-/// by this one, for as long as the watcher it returns is kept.
 pub fn watch(file: &Path, events: Sender<Event>) -> notify::Result<RecommendedWatcher> {
     state::watch_file(file, events, || Event::Agent)
 }
@@ -270,10 +212,6 @@ mod tests {
         );
     }
 
-    /// Claude Code is let read the file by a rule that names it alone, as a
-    /// glob would name others, whatever the path holds, and told of it as it
-    /// is. A path no rule can name gets none, and Claude Code asks first. pi
-    /// needs no rule.
     #[test]
     fn an_agent_is_let_read_the_file_by_a_rule_that_names_it_alone() {
         for (file, rule) in [
@@ -312,7 +250,6 @@ mod tests {
         }
     }
 
-    /// A harness is known by the name of the program it runs, and by no other.
     #[test]
     fn a_harness_is_known_by_its_program_s_name() {
         for harness in [Harness::ClaudeCode, Harness::Pi] {
@@ -321,8 +258,6 @@ mod tests {
         assert_eq!(named("codex"), None);
     }
 
-    /// The harness picked in one luneta is the next one's, and one that
-    /// reloads takes it up. None kept yet is Claude Code.
     #[test]
     fn the_harness_picked_is_kept_for_every_luneta() {
         let scratch = tempfile::tempdir().unwrap();
@@ -338,10 +273,6 @@ mod tests {
         assert_eq!(two.harness(), Harness::Pi);
     }
 
-    /// A file that names no harness luneta knows, as one a newer luneta
-    /// wrote, leaves the harness as it was and says why, and the next pick
-    /// writes over it. One with no folder to be in says why, and a pick
-    /// holds in this luneta alone.
     #[test]
     fn a_file_that_names_no_harness_says_why() {
         let scratch = tempfile::tempdir().unwrap();

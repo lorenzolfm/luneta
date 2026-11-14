@@ -1,19 +1,11 @@
-//! What is in a directory of the machine eza runs on, as eza lists it, for
-//! luneta's picker to show. luneta asks it of its own machine, and a daemon
-//! of its machine for a luneta on another, whose picker shows one of this.
-
 use std::io;
 use std::process::Command;
 use std::time::Duration;
 
 use crate::{program, Directory};
 
-/// How long eza has to list what is in a directory.
 const ANSWER: Duration = Duration::from_secs(2);
 
-/// What eza is asked to list a directory as: an entry a line, the hidden
-/// ones too, directories first, each in its colour, after its icon, and with
-/// a `/` after a directory.
 const LIST: [&str; 7] = [
     "--oneline",
     "--almost-all",
@@ -24,9 +16,6 @@ const LIST: [&str; 7] = [
     "--no-quotes",
 ];
 
-/// What is in the directory `path`, as eza lists it, an entry a line, in
-/// colour; or why eza did not list it. eza says why it cannot read a
-/// directory on stderr, and may end with success all the same.
 pub fn listed(path: &Directory) -> Result<String, String> {
     let path = path.as_str();
     let mut eza = Command::new("eza");
@@ -43,9 +32,6 @@ pub fn listed(path: &Directory) -> Result<String, String> {
     Ok(listed)
 }
 
-/// Why eza did not list `path`, from what it said on stderr: its first line,
-/// less the path, and less the error's number, as `"/tmp/x": No such file or
-/// directory (os error 2)` says `No such file or directory`.
 fn refusal(path: &str, stderr: &str) -> Option<String> {
     let line = stderr.lines().find(|line| !line.trim().is_empty())?;
     let line = line.replace(path, "");
@@ -55,12 +41,10 @@ fn refusal(path: &str, stderr: &str) -> Option<String> {
     (!line.is_empty()).then(|| line.to_owned())
 }
 
-/// `text` up to the last `marker` in it, or all of it.
 fn before<'a>(text: &'a str, marker: &str) -> &'a str {
     text.rfind(marker).map_or(text, |at| &text[..at])
 }
 
-/// Why eza could not be run.
 fn unrun(error: &io::Error) -> String {
     if error.kind() == io::ErrorKind::NotFound {
         return "eza is not on the PATH".to_owned();
@@ -72,7 +56,6 @@ fn unrun(error: &io::Error) -> String {
 mod tests {
     use super::*;
 
-    /// What eza says as it fails, less the path and the error's number.
     #[test]
     fn a_refusal_keeps_the_reason_and_not_the_path() {
         let said = |stderr: &str| refusal("/tmp/x", stderr);

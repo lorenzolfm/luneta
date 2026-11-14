@@ -1,0 +1,10 @@
+id: no-yaml-run-comments
+valid:
+  - "run: |\n  echo \"# a\""
+  - "run: |\n  echo\n  #[a]"
+  - "other: |\n  echo\n  # a"
+  - "run: |\n  cat <<EOF\n  #!/bin/sh\n  EOF"
+invalid:
+  - "run: |\n  echo\n  # a"
+  - "steps:\n  - run: >-\n      echo\n      # a"
+  - "run: |\n  echo\n  #! a"

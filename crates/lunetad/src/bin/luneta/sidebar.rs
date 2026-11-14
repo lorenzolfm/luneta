@@ -1,47 +1,3 @@
-//! The sidebar: every session on the host, the panes in each, and what the
-//! agent in each pane is doing, or the command its shell runs, as the daemon
-//! says, beside the zellij luneta runs. A row takes zellij's client there, and
-//! `▌` marks the pane it is on. `•` dots a pane where something finished since
-//! you were last there, and one you marked unread, and `u` takes the dot away
-//! or gives it. A click on the number of a row's pull request copies its link,
-//! as `y p` does the highlighted row's, and `o` opens that in your browser. The
-//! menu opens at its bottom, for the row highlighted, or
-//! floats over zellij, for the pane zellij is on, and its Brief group asks
-//! for a brief of the agents by that row, or that pane, as its `a` asks for
-//! the ask box. Its title along the top is in the accent while it has the
-//! keys, and dim while zellij or a box over zellij has them. Collapsed, it
-//! keeps only what it counts of the dots, the agents at work and those in a
-//! shell.
-//!
-//! The rows go oldest session first, until you move them, and each session's
-//! panes in the order of their tabs, until you move those too, a bracket down
-//! the left joining the panes of a tab that sit next to each other. Each
-//! session has a colour of its own, as a
-//! browser's group of tabs has, which its name sits on and its brackets are
-//! drawn in. `v` selects the highlighted row's session, `j` and `k` grow the
-//! selection among its machine's sessions, and `J` and `K` move the sessions
-//! it holds, as a visual selection does in vim; and the mouse drags a session
-//! by its row. A session moves among its machine's alone. On a machine's
-//! header, `v` and the mouse move the machines so, each with every row under
-//! it. `V` picks a pane, or its tab, which `J` and `K` move among the rows of
-//! its machine's sessions, under another session too, as the mouse drags it
-//! by its row, or a tab by its bracket. That moves its row alone: zellij
-//! moves no pane between sessions, so the pane stays in its own, where a row
-//! goes and what the menu does on it is done, and a pane under another
-//! session has its bracket, or a mark down the gutter, in its own session's
-//! colour. The order, the panes moved and the colours are kept for every
-//! luneta, and the next.
-//!
-//! Over the sessions, a header for each machine: this one, by its host's
-//! name, and each machine luneta's hosts file names, which lunetad watches
-//! through ssh. They go this one first, and the others as the file names
-//! them, until you move them, and each one's sessions as this one's do. A
-//! machine folds as a session does, and `h` on a session folded already
-//! folds its machine. One lunetad does not reach is a dimmed header that says
-//! why in a word, and in the notes while it is highlighted. Another machine's
-//! rows go there as this one's do, and their dots and folds are kept as this
-//! one's are.
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -111,19 +67,13 @@ use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
 use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Turned, Within, OWN_TURNS};
 
-/// How many columns the sidebar takes until its edge is dragged.
 pub const COLUMNS: u16 = 32;
 
-/// How long a key that waits for the next leaves the bottom as it was before
-/// it shows what can come next, as which-key waits in neovim: two keys typed
-/// faster draw nothing between them.
 pub const PAUSE: Duration = Duration::from_millis(200);
 
-/// What the bottom says `g` waits for, under a rule that names it `GO`.
 const GO: &str = "Go";
 const GO_KEYS: [(Label, &str); 1] = [(Label::char('g'), "First row")];
 
-/// What the bottom says the keys do while `v` selects.
 const SELECTED_KEYS: [(Label, &str); 4] = [
     (Label::Two('j', 'k'), "Grow"),
     (Label::Two('J', 'K'), "Move"),
@@ -131,129 +81,64 @@ const SELECTED_KEYS: [(Label, &str); 4] = [
     (Label::code(KeyCode::Esc), "Done"),
 ];
 
-/// What the bottom says the keys do while `V` picks a pane, or its tab.
 const PICKED_KEYS: [(Label, &str); 3] = [
     (Label::Two('J', 'K'), "Move"),
     (Label::char('V'), "Tab, then done"),
     (Label::code(KeyCode::Esc), "Done"),
 ];
 
-/// How long the notes say a pull request's link was copied, where no key takes
-/// that back sooner: a click on its number can leave the keys with zellij.
 const COPIED_SHOWS: Duration = Duration::from_secs(3);
 
-/// The fewest columns the sidebar is dragged to, where the terminal has twice
-/// as many: enough for a session's name on its row.
 pub const NARROWEST: u16 = 16;
 
-/// How many columns the sidebar takes collapsed: a count's glyph, two digits
-/// of it, and the edge.
 pub const COLLAPSED: u16 = 4;
 
-/// What marks the pane luneta's zellij is on, in its first column, whether
-/// the sidebar has the focus or not.
 const HERE_MARK: &str = "▌";
-/// The dot of a pane where something finished since you were last there, or
-/// that you marked unread, before its mark; and on a folded session's row, of
-/// one of its panes.
 const NEW: &str = "•";
 const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
-/// What follows the name of an own session, in its row, with a space either
-/// side.
 const OWN_MARK: &str = " ◇ ";
-/// What runs along a machine's header, where a session's row has `RULE`.
 const MACHINE_RULE: &str = "═";
-/// Nerd Fonts' `fa-desktop`, before a machine's name on its header, one
-/// column wide as the icons of panes are.
 const COMPUTER: &str = "\u{f108}";
-/// What runs down the sidebar's last column, its edge, between it and zellij,
-/// open or collapsed.
 const EDGE: &str = "│";
-/// What joins the panes of a tab that holds more than one, down the column
-/// after the mark of the pane luneta's zellij is on: from the first line of
-/// the first pane, by each line between, to the last line of the last.
 const BRACKET_TOP: &str = "╭";
 const BRACKET_SIDE: &str = "│";
 const BRACKET_FOOT: &str = "╰";
-/// What runs down that column by a pane alone of its tab under another
-/// session than its own, in its own session's colour.
 const ELSEWHERE: &str = "┆";
-/// The column of the sidebar the bracket is on, after the mark's: a press on
-/// either lifts the tab, as the mark is a cell wide and a hand is not.
 const BRACKET_COLUMN: u16 = 1;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// How long the spinner shows each of its frames.
 pub const SPIN: Duration = Duration::from_millis(100);
-/// How long what the mouse lifted is held on the first line of the rows, or
-/// on their last, for each line they scroll under it.
 pub const SCROLL: Duration = Duration::from_millis(60);
 
-/// The colour of what wants you: an agent that waits for you, and the session
-/// luneta's zellij is in; and of the sidebar's title while it has the keys.
 pub const ACCENT: Color = gruvbox::PURPLE;
-/// The colour of a session's name where it has no colour of its own, as in
-/// the picker.
 pub const NAME: Color = gruvbox::AQUA;
-/// The colour of an agent at work, and of what the rule over a menu or the
-/// search says at its right.
 pub const TAG: Color = gruvbox::YELLOW;
-/// The colour of what went wrong: the notes at the bottom that say so, the
-/// box over zellij that says so for the menu there, and the rule of the
-/// sidebar collapsed, which has no room for them, while the daemon does not
-/// answer.
 pub const ERROR: Color = gruvbox::RED;
-/// The background of the highlight while the sidebar has the focus, on the
-/// row the keys took it to.
 pub const LIT: Color = gruvbox::BG2;
-/// The background of the highlight while it rests on your pane, the sidebar
-/// without the focus: a step softer, as `▌` marks that row already.
 const RESTING: Color = gruvbox::BG1;
 
-/// How many columns a mark takes: one, as each glyph of `Mark` does. Each
-/// pane's row keeps that many for one, whether it has one or not.
 const MARK: usize = 1;
 
-/// The column a pane's label starts at, and the branch under it: past the
-/// indent, the mark and the icon, and a space after each of those two.
 const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
-/// How long a command runs before its row says it runs, and says how it
-/// ended once it does: an `ls` is no news.
 const LONG: Duration = Duration::from_secs(1);
 
-/// What the sidebar says as the menu cannot float over zellij for the pane
-/// zellij is on, as it does not know which that is: it has yet to hear.
 const NO_HERE_PANE: &str = "menu: luneta does not know yet which pane zellij is on; try again in a \
                             moment";
-/// luneta cannot tell its zellij's client from the others of the session.
 const UNSURE_PANE: &str = "menu: luneta cannot tell yet which of the session's clients is its own; \
                            go to a pane from the sidebar";
-/// zellij has the focus on a plugin's pane.
 const PLUGIN_PANE: &str = "menu: zellij is on a plugin's pane; the menu opens over a terminal's";
-/// The daemon lists more than one session of the name zellij is in.
 const TWIN_SESSIONS: &str = "menu: lunetad lists more than one session of the name zellij is in, \
                              and luneta cannot tell which it is";
 
-/// A session as the sidebar tells it from another of its name: zellij
-/// versions with sockets of their own can each run one under it, and an own
-/// session can have it as well. A zellij session's start and its socket tell
-/// it from every other, and an own session's id and when its server made it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Listed {
     name: SessionName,
-    /// The session, as the news keeps it, which says when it started.
     kept: ledger::Session,
 }
 
 impl Listed {
-    /// `session`, or none for one with no start or no socket, or an own one
-    /// with no id or no time it was made, as a daemon of another build's lists,
-    /// or with a start no file of the news can be named for, before 1970, or
-    /// with a name zellij refuses, which luneta can neither go to nor fold. Its
-    /// start is the one `Session::started` reads, as `luneta sessions` sorts
-    /// by, of the multiplexer `Session::multiplexer` says.
     fn of(session: &Session) -> Option<Self> {
         let name = SessionName::running(&session.name).ok()?;
         let started = session.started()?;
@@ -271,7 +156,6 @@ impl Listed {
         &self.name
     }
 
-    /// The own session it is, as no other is, or none for one of zellij's.
     pub fn own_key(&self) -> Option<OwnKey> {
         match self.kept {
             ledger::Session::Zellij { .. } => None,
@@ -281,41 +165,32 @@ impl Listed {
         }
     }
 
-    /// Which session it is past its name, as a question to close or kill
-    /// it says.
     pub fn whose(&self) -> Whose {
         self.own_key().map_or_else(|| Whose::Zellij(self.kept.started()), Whose::Own)
     }
 
-    /// Which session it is, as an agent is seated in it.
     pub fn at(&self) -> Where<'_> {
         self.own_key().map_or_else(|| Where::Zellij(self.name.as_str()), Where::Own)
     }
 
-    /// Whether luneta's own multiplexer runs it.
     pub fn own(&self) -> bool {
         self.own_key().is_some()
     }
 
-    /// Whether luneta's zellij is in it, where it is in the session named
-    /// `here`: in no own session, whose name a zellij session can have too.
     pub fn is_here(&self, here: Option<&str>) -> bool {
         !self.own() && here == Some(self.name.as_str())
     }
 
-    /// Its pane `pane`, as the news keeps it.
     fn key(&self, pane: u32) -> Key {
         Key { session: self.kept, pane }
     }
 
-    /// A session of the tests', whose socket is the first there is.
     #[cfg(test)]
     pub fn new(name: &str, started: SystemTime) -> Self {
         let kept = ledger::Session::new(started, NonZeroU64::MIN).unwrap();
         Listed { name: SessionName::parse(name).unwrap(), kept }
     }
 
-    /// An own session of the tests', of id `id`, made at `made`.
     #[cfg(test)]
     pub fn new_own(name: &str, made: SystemTime, id: u64) -> Self {
         let id = lunetad::mux::own::OwnId::new(id).unwrap();
@@ -324,23 +199,11 @@ impl Listed {
     }
 }
 
-/// The session luneta sent its zellij to itself, which stands for the one
-/// zellij is in until zellij titles luneta's terminal once it is there.
-/// zellij sends a title only as it changes, in a tab, whichever client it
-/// goes to: a client that comes to a tab whose title went to another, or to
-/// it before, gets none, and its terminal keeps the last session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Sent {
-    /// Until the client is there, a title of another session is of the one it
-    /// is leaving.
     Going {
         session: String,
-        /// The session the client leaves for this one, which it may be in still
-        /// until it is there. None for one that starts there, as luneta's first
-        /// does, and one that takes the place of a client that ended.
         from: Option<Leaving>,
-        /// The number of the look that finds the client there, by which what
-        /// comes back of a go luneta sent it on before is told from this one's.
         look: Option<u64>,
     },
     Landed { session: String },
@@ -354,19 +217,12 @@ impl Sent {
     }
 }
 
-/// The session luneta's zellij leaves for the one it was sent to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Leaving {
     session: String,
-    /// Whether it ends once the client has left it, as where the menu
-    /// deletes the session luneta's zellij is in. The sidebar says so for as
-    /// long as the go lasts, and no longer: zellij not taking the client
-    /// there, or the client ending on its way, ends the go.
     ends: bool,
 }
 
-/// What a row stands for, by which the highlight keeps to it as rows come and
-/// go.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Place {
     Session(Listed),
@@ -374,8 +230,6 @@ pub enum Place {
 }
 
 impl Place {
-    /// The name of its session. zellij's CLI goes to a session by its name
-    /// alone, and to its own version's of two that share one.
     pub fn session(&self) -> &str {
         self.listed().name.as_str()
     }
@@ -387,7 +241,6 @@ impl Place {
         }
     }
 
-    /// Its session.
     pub fn listed(&self) -> &Listed {
         match self {
             Place::Session(session) | Place::Pane(PanePlace { session, .. }) => session,
@@ -395,18 +248,12 @@ impl Place {
     }
 }
 
-/// A pane of a session, by which an agent is told from the others, and the
-/// pane luneta's zellij is on.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PanePlace {
     pub session: Listed,
     pub pane: u32,
 }
 
-/// luneta's client of an own session, as its server says where it is: on its
-/// way to this session, as no other is, until the server says; and then on
-/// this pane, as this client, by the id the server took it in by, which the
-/// ask box names to its agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnSeat {
     Coming(OwnKey),
@@ -414,7 +261,6 @@ pub enum OwnSeat {
 }
 
 impl OwnSeat {
-    /// The session it is in, or on its way to.
     #[must_use]
     pub fn session(self) -> OwnKey {
         match self {
@@ -423,7 +269,6 @@ impl OwnSeat {
         }
     }
 
-    /// The pane it is on, once its server has said.
     #[must_use]
     pub fn on(self) -> Option<OwnPane> {
         match self {
@@ -433,11 +278,9 @@ impl OwnSeat {
     }
 }
 
-/// What luneta runs beside the sidebar, as the sidebar follows it.
 #[derive(Debug)]
 enum Beside {
     Zellij(ZellijSide),
-    /// luneta's client of an own session, in zellij's place.
     Own(OwnSeat),
 }
 
@@ -447,21 +290,12 @@ impl Default for Beside {
     }
 }
 
-/// What the sidebar has of luneta's zellij, as zellij's client is beside it.
 #[derive(Debug, Default)]
 struct ZellijSide {
-    /// The title zellij gives luneta's terminal: the name of the session it
-    /// is in, and then ` | ` and the title of the pane it has the focus on,
-    /// when that has one.
     title: Option<String>,
-    /// The session luneta sent its zellij to, until zellij titles luneta's
-    /// terminal after.
     sent: Option<Sent>,
 }
 
-/// The agent in the pane luneta's zellij is on, that you can name a skill to:
-/// where it is, the directory its skills are found for, and the harness it
-/// runs in, which finds them and spells them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HereAgent {
     pub on: Machine,
@@ -471,9 +305,6 @@ pub struct HereAgent {
     pub harness: agents::Harness,
 }
 
-/// What a row stands for, by which the highlight keeps to it as rows come and
-/// go: a machine's header, or a session or a pane of this machine's, or of
-/// another's, where luneta's zellij goes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Spot {
     Machine(Machine),
@@ -482,7 +313,6 @@ pub enum Spot {
 }
 
 impl Spot {
-    /// `place`, of `machine`.
     fn on(machine: &Machine, place: Place) -> Spot {
         match machine {
             Machine::Local => Spot::Local(place),
@@ -498,7 +328,6 @@ impl Spot {
         }
     }
 
-    /// Its session, or its pane, but for a machine's header.
     fn place(&self) -> Option<&Place> {
         match self {
             Spot::Machine(_) => None,
@@ -507,31 +336,17 @@ impl Spot {
     }
 }
 
-/// What goes on in a pane, as its row marks it: what its agent is doing, or
-/// the command its shell runs, or ran last.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mark {
-    /// An agent that waits for you, or a command that waits for you to type.
     Waiting,
-    /// An agent done, which you have seen since it finished, or see: it is
-    /// in the pane luneta's zellij is on.
     Idle,
-    /// An agent that finished since you were last in its pane.
     Finished,
-    /// An agent at work, or a command.
     Busy,
     Shell,
-    /// A word the daemon passed on as Claude Code wrote it, by its initial as
-    /// a capital, which takes the one column a mark does.
     Other(char),
-    /// An agent that says nothing, or nothing a mark can show in its column.
     Unreported,
-    /// A command that ended with an exit status of 0.
     Passed,
-    /// A command that ended with any other.
     Failed,
-    /// A command that ended, its shell not saying how, as fish does not after
-    /// `fg`.
     Ran,
 }
 
@@ -552,13 +367,10 @@ impl Mark {
         }
     }
 
-    /// Whether it says that something finished since you were last in its
-    /// pane: an agent, or a command, which shows how it ended until then.
     fn is_news(&self) -> bool {
         matches!(self, Mark::Finished | Mark::Passed | Mark::Failed | Mark::Ran)
     }
 
-    /// Its glyph, which the spinner shows at `frame`, and its style.
     pub fn glyph(&self, frame: usize) -> (String, Style) {
         let style = Style::new();
         match self {
@@ -577,19 +389,14 @@ impl Mark {
     }
 }
 
-/// The initial of `word` as a capital, if it takes one column: the first
-/// letter of a capital of two, as `ß`'s `SS`. A letter two wide, or a mark
-/// that sits on the letter before it, would put the label off its column.
 fn initial(word: &str) -> Option<char> {
     let initial = word.chars().next()?.to_uppercase().next()?;
     (initial.width() == Some(MARK)).then_some(initial)
 }
 
-/// What a pane's row marks, as it shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Marked {
     mark: Mark,
-    /// Since when it has been doing what it does, or since it ended.
     since: Option<SystemTime>,
 }
 
@@ -599,11 +406,6 @@ impl Marked {
         Marked { mark: Mark::of(agent), since }
     }
 
-    /// The mark of the command `shell` runs, or ran last, at `now`, and the
-    /// command, where the shell said it. One that runs has the spinner, or the dot of an agent that
-    /// waits for you while it waits for you to type, once it has run for
-    /// `LONG`; and one that ended says how, if it ran that long. One that takes
-    /// the terminal over has none while you use it, nor has a job stopped.
     fn of_shell(shell: &Shell, now: SystemTime) -> Option<(Self, Option<&str>)> {
         let (mark, since, command) = match shell.doing.as_ref()? {
             Doing::Going(going) => {
@@ -634,7 +436,6 @@ impl Marked {
         Some((Marked { mark, since: Some(since) }, command))
     }
 
-    /// When the command it marks ended, if it did.
     fn ended(&self) -> Option<SystemTime> {
         match self.mark {
             Mark::Passed | Mark::Failed | Mark::Ran => self.since,
@@ -643,55 +444,41 @@ impl Marked {
     }
 }
 
-/// What a pane's row shows of what goes on in it.
 struct Shows<'a> {
-    /// What its agent is doing, or else the command its shell runs, or ran.
     marked: Option<Marked>,
-    /// That command, by which its row is named.
     ran: Option<&'a str>,
-    /// Whether you marked it unread.
     unread: bool,
 }
 
 impl Shows<'_> {
-    /// Whether its row has the dot.
     fn dotted(&self) -> bool {
         dotted(self.unread, self.marked.as_ref())
     }
 }
 
-/// Whether a pane's row has the dot: something finished in it since you were
-/// last there, as its mark says, or you marked it unread.
 fn dotted(unread: bool, marked: Option<&Marked>) -> bool {
     unread || marked.is_some_and(|marked| marked.mark.is_news())
 }
 
-/// The dot of `NEW`, and its style.
 fn dot() -> Span<'static> {
     Span::styled(NEW, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }
 
-/// A moment the shell hook said, which it counts in whole seconds: the last
-/// moment of its second, so that a command never ran longer than it did.
 fn told(at: Option<impl TryInto<SystemTime>>) -> Option<SystemTime> {
     at?.try_into().ok()?.checked_add(Duration::from_millis(999))
 }
 
-/// What `shell`, a shell with luneta's hook, said it ran, for the menu.
 fn ran(shell: &Shell) -> Ran {
     let ran = match shell.doing.as_ref() {
         Some(Doing::Going(going)) => said(going.command.as_ref(), Ran::Going),
         Some(Doing::Stopped(stopped)) => said(stopped.command.as_ref(), Ran::Stopped),
         Some(Doing::Ended(ended)) => ended_last(ended),
         Some(Doing::Ready(())) => Some(Ran::Ready),
-        // A daemon newer than this luneta's.
         None => None,
     };
     ran.unwrap_or(Ran::Unknown)
 }
 
-/// What `ran` makes of the command line the daemon says, where the shell
-/// said one. None of one with no words, which lunetad never sends.
 fn said(command: Option<&String>, ran: impl FnOnce(Option<Said>) -> Ran) -> Option<Ran> {
     match command {
         None => Some(ran(None)),
@@ -699,8 +486,6 @@ fn said(command: Option<&String>, ran: impl FnOnce(Option<Said>) -> Ran) -> Opti
     }
 }
 
-/// What a shell said it ran last, which ended, for the menu. None of one
-/// with no words, or with no moment it ended, which lunetad always says.
 fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<Ran> {
     let at = SystemTime::try_from(ended.at?).ok()?;
     let ending = ended.ending.as_ref().map(Ending::of_api);
@@ -710,7 +495,6 @@ fn ended_last(ended: &lunetad::api::shell::Ended) -> Option<Ran> {
     })
 }
 
-/// When the command going in `shell` will have run for `LONG`.
 fn long_at(shell: &Shell) -> Option<SystemTime> {
     match shell.doing.as_ref()? {
         Doing::Going(going) => told(going.since)?.checked_add(LONG),
@@ -718,29 +502,20 @@ fn long_at(shell: &Shell) -> Option<SystemTime> {
     }
 }
 
-/// A row of the sidebar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Row {
-    /// A machine's header, over its sessions.
     Machine {
         machine: Machine,
-        /// What it goes by: this machine's host's name, or another's
-        /// destination, as luneta's hosts file spells it.
         name: String,
         heads: Heads,
     },
     Session {
         machine: Machine,
         session: Listed,
-        /// The characters of its name a search found.
         hits: Vec<usize>,
         under: Under,
-        /// Whether luneta's zellij is in it.
         here: bool,
-        /// Its colour, which its name sits on.
         colour: Color,
-        /// How many of its agents wait for you, whether one of its panes has
-        /// the dot, and whether one is at work.
         waiting: usize,
         dot: bool,
         busy: bool,
@@ -749,31 +524,18 @@ enum Row {
         machine: Machine,
         session: Listed,
         pane: u32,
-        /// Whether luneta's zellij is on it.
         here: bool,
-        /// Whether you marked it unread.
         unread: bool,
         marked: Option<Marked>,
-        /// The icon of what runs in it, if that has one.
         icon: Option<&'static str>,
         label: String,
-        /// The characters of its label a search found.
         hits: Vec<usize>,
-        /// The branch checked out where it works, if one is.
         checkout: Option<Checkout>,
-        /// Where it sits among the panes listed of its tab next to it, if it
-        /// shares it, or that it is alone of them under another session, and
-        /// the colour of its own session, which the gutter is drawn in.
         bracket: Option<(Bracket, Color)>,
-        /// Whether what is being read aloud comes from it.
         speaks: bool,
     },
 }
 
-/// Where a pane's row sits among the rows of the panes that share its tab,
-/// next to it, which a bracket down the gutter joins: the first, the last, or
-/// one between. Or alone of them, under another session than its own, which
-/// the gutter marks too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bracket {
     First,
@@ -783,8 +545,6 @@ enum Bracket {
 }
 
 impl Bracket {
-    /// Where the pane `at` of the `count` listed of its tab sits among them:
-    /// none for a pane alone in its tab.
     fn of(at: usize, count: usize) -> Option<Bracket> {
         match at {
             _ if count < 2 => None,
@@ -795,24 +555,14 @@ impl Bracket {
     }
 }
 
-/// The branch checked out where a pane works, as its row shows it under its
-/// label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Checkout {
     branch: String,
-    /// How its work tree stands, as starship shows it.
     status: String,
-    /// How many lines changed on the branch, against the branch its
-    /// repository takes as its default. None where nothing changed, on that
-    /// branch itself, or where its daemon is older than the count.
     changed: Option<Changed>,
-    /// Its pull request, if it has one to show.
     pull_request: Option<Numbered>,
 }
 
-/// How many lines changed on a branch, as its branch's line shows them:
-/// `+120 -34`, the added in green and the deleted in red, as diffs are
-/// coloured, and either left out where it is none.
 fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
     let (added, deleted) = (changed.added(), changed.deleted());
     let mut spans = Vec::new();
@@ -829,9 +579,6 @@ fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
     (spans, width)
 }
 
-/// A pull request, as its branch's line shows it: its number, in the colour
-/// of its state, and after it a mark for what its checks come to, while it is
-/// open, grey where gh failed since it said them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Numbered {
     number: Number,
@@ -840,19 +587,13 @@ struct Numbered {
     stale: bool,
 }
 
-/// A pull request's number on its branch's line: its link says it where it has
-/// one, so that what the row shows and what a click copies are of one pull
-/// request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Number {
     Linked(Box<Link>),
-    /// Its daemon says no link of this number on GitHub: older than the link,
-    /// or on another host, or with what does not read as one.
     Unlinked(NonZeroU32),
 }
 
 impl Numbered {
-    /// How its branch's line shows it.
     fn shown(&self) -> String {
         match &self.number {
             Number::Linked(link) => link.tab(),
@@ -860,7 +601,6 @@ impl Numbered {
         }
     }
 
-    /// Its link, where it has one.
     fn link(&self) -> Option<&Link> {
         match &self.number {
             Number::Linked(link) => Some(link),
@@ -882,7 +622,6 @@ impl Row {
         }
     }
 
-    /// How many lines it takes: a pane in a repository has its branch under it.
     fn height(&self) -> usize {
         match self {
             Row::Pane { checkout: Some(_), .. } => 2,
@@ -890,11 +629,6 @@ impl Row {
         }
     }
 
-    /// Whether the highlight stops on it: a pane, or a session that stands in
-    /// for its panes, folded or with none to list, and a machine's header
-    /// that stands in for its sessions so, or for none lunetad has. A
-    /// session's row heads its panes, and is no place to go, nor is a
-    /// machine's header that heads its sessions.
     fn stops(&self) -> bool {
         match self {
             Row::Machine { heads: Heads::Sessions { under, .. }, .. }
@@ -904,52 +638,32 @@ impl Row {
     }
 }
 
-/// What a session's row has under it, or a machine's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Under {
-    /// Its rows: a session's panes, or a machine's sessions, or the ones of
-    /// them a search finds.
     Rows,
-    /// None, as it is folded.
     Folded,
-    /// None, as zellij has listed none, or lunetad has none of the machine.
     Empty,
 }
 
-/// What a machine's header stands over.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Heads {
-    /// None of its sessions, as lunetad has none of them to say, for this
-    /// reason.
     Away(Away),
-    /// Its sessions, as lunetad says them.
     Sessions {
         under: Under,
-        /// How many of its agents wait for you, whether one of its panes has
-        /// the dot, and whether one is at work.
         waiting: usize,
         dot: bool,
         busy: bool,
-        /// Whether luneta's zellij is in one of its sessions.
         here: bool,
     },
 }
 
-/// The sessions of another machine's that luneta's zellij may go on in,
-/// newest first, one at least, as `Sidebar::refuges_away` lists them; or
-/// why it goes on in none of them.
 pub type Refuges = Result<Vec<SessionName>, NoRefuge>;
 
-/// Why luneta's zellij goes on in none of another machine's sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoRefuge {
-    /// lunetad listed none of them when it last said, but own ones.
     NoneListed,
-    /// Each of them may hold luneta's own terminal, as `may_hold` says.
     Held,
-    /// The first ssh to it runs.
     Reaching,
-    /// lunetad does not reach it, for what this says in a word.
     Unreached(&'static str),
 }
 
@@ -964,14 +678,9 @@ impl fmt::Display for NoRefuge {
     }
 }
 
-/// Why a machine's header lists none of its sessions: lunetad has none of
-/// them to say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Away {
-    /// The first ssh to it runs.
     Reaching,
-    /// ssh failed to reach lunetad there since `since`, or lost it: what
-    /// stopped it, in a word for the header, and why, in words for the notes.
     Unreached { since: Option<SystemTime>, word: &'static str, why: String },
 }
 
@@ -989,14 +698,12 @@ impl Away {
             Some(Stopped::Silent(())) => "no answer",
             Some(Stopped::Lost(())) => "lost",
             Some(Stopped::Unwatched(())) => "not watched",
-            // A newer daemon's.
             None => "unreached",
         };
         let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
         Away::Unreached { since, word, why: unreached.why.clone() }
     }
 
-    /// What the header says of it, and since when, where that is known.
     fn said(&self) -> (&'static str, Option<SystemTime>) {
         match self {
             Away::Reaching => ("reaching…", None),
@@ -1005,35 +712,23 @@ impl Away {
     }
 }
 
-/// What a machine's daemon says of it, as its rows show it: this one's host,
-/// or another's, which comes without its version or its remotes.
 struct Seen<'a> {
     sessions: &'a [Session],
     agents: &'a [Agent],
     work_trees: &'a [lunetad::api::WorkTree],
     pull_requests: &'a [lunetad::api::PullRequest],
     unread_sockets: Option<u32>,
-    /// How many of Claude Code's session files its daemon cannot read, and
-    /// where the process of each runs, as far as it can tell.
     unread: u32,
     unread_files: &'a [UnreadFile],
-    /// What it last said to read aloud.
     sayings: &'a [Saying],
 }
 
 impl Seen<'_> {
-    /// Where the agents of the session files its daemon cannot read run, as
-    /// `luneta_protocol::unread::seats` tells them.
     fn unread_seats(&self) -> Result<Vec<(&str, u32)>, unread::Unplaced> {
         unread::seats(self.unread, self.unread_files)
     }
 }
 
-/// Each machine lunetad says of: this one, of which it always says; the
-/// others, in the order of luneta's hosts file, with what each one's daemon
-/// says of it, or why it says nothing; and how many of those it says of are
-/// left out, as lunetad never sends them, but one of another build might:
-/// one whose destination does not read, and one named a second time.
 struct Machines<'a> {
     here: Seen<'a>,
     others: Vec<(Destination, Result<Seen<'a>, Away>)>,
@@ -1041,8 +736,6 @@ struct Machines<'a> {
 }
 
 impl<'a> Machines<'a> {
-    /// Each, this one first, with what its daemon says of it, or why it
-    /// says nothing.
     fn each(self) -> impl Iterator<Item = (Machine, Result<Seen<'a>, Away>)> {
         let others = self.others.into_iter();
         let others = others.map(|(destination, seen)| (Machine::Remote(destination), seen));
@@ -1050,9 +743,6 @@ impl<'a> Machines<'a> {
     }
 }
 
-/// A machine, as the rows list it: what its daemon says of it, or why it
-/// says nothing, and its sessions, each with what tells it from another of
-/// its name, in the order of their rows.
 struct Arranged<'a> {
     machine: Machine,
     reached: Result<Seen<'a>, Away>,
@@ -1060,10 +750,6 @@ struct Arranged<'a> {
 }
 
 impl<'a> Machines<'a> {
-    /// Each, in the order of the rows, as `order` has them: the machines it
-    /// has first, and the rest as `each` goes, each with its sessions, those
-    /// `order` has first, and the rest oldest first. And how many of their
-    /// sessions `Listed` leaves out.
     fn arranged(self, order: &Order) -> (Vec<Arranged<'a>>, usize) {
         let mut unlisted = 0;
         let mut arranged: Vec<Arranged<'a>> = self
@@ -1086,7 +772,6 @@ impl<'a> Machines<'a> {
     }
 }
 
-/// Each machine lunetad says of in `host`, as `Machines` has them.
 fn machines(host: &Host) -> Machines<'_> {
     let here = Seen {
         sessions: &host.sessions,
@@ -1135,63 +820,25 @@ fn machines(host: &Host) -> Machines<'_> {
     Machines { here, others, left_out }
 }
 
-/// What the sidebar asks of luneta.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Asked {
-    /// Nothing: draw again, at most.
     Nothing,
-    /// What deleting the merged worktrees of the repository `dir` is in, on
-    /// `on`, deletes, for the menu numbered `menu`.
     Prunes { menu: u64, on: Machine, dir: Directory },
-    /// What would go of the repository `dir` is in, on `on`, deleted where that
-    /// is `agreed`, for the menu numbered `menu`.
     Prune { menu: u64, on: Machine, dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    /// Take zellij's client to `place`, on `on`.
     Go { on: Machine, place: Place },
-    /// Take the focus from zellij, as a click on the sidebar does.
     Take,
-    /// Put this on the clipboard of luneta's terminal.
     Copy(Link),
-    /// Put this, which a sweep of the mouse selected, on that clipboard.
     CopyText(String),
-    /// Open this page in the browser of the machine luneta runs on.
     Browse(Link),
-    /// Give the focus back to zellij.
     Leave,
-    /// Ask zellij on `on` what closing the pane `pane` of `session` closes,
-    /// for the menu numbered `menu` to plan its delete by.
     Closes { menu: u64, on: Machine, session: SessionName, pane: u32 },
-    /// Have zellij on `on` do what a delete key planned for a session there.
     Delete { on: Machine, act: Act },
-    /// Have zellij on `on` open this, for the menu numbered `menu`, which
-    /// takes its client there once zellij says what it opened.
     Open { menu: u64, on: Machine, open: Open },
-    /// Take zellij's client to `place`, on `on`, first, and have zellij there
-    /// open this once it is there: a tab of another session, which may have
-    /// no client to make room for it.
     OpenThere { menu: u64, on: Machine, place: Place, open: Open },
-    /// Ask zellij on `on` which tabs of `session` are not that of its pane
-    /// `pane`, for the menu numbered `menu` to turn that tab into.
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
-    /// Have zellij on `on` turn the pane `turned` as `turn` says, for the menu
-    /// numbered `menu`, which takes its client there once zellij says it did.
-    /// A session with no client to make room for a tab has it come there
-    /// first, while what stays takes it nowhere.
     Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
-    /// Take zellij's client to a session it makes on `on`, that starts where
-    /// `starts` says, named for that directory as the picker's directories
-    /// name it, with a `-2` where a session has that name: one that runs, or
-    /// one that ended, which zellij keeps to bring back, as zellij there says
-    /// then.
     Start { on: Machine, starts: Starts },
-    /// Take luneta's client to an own session it makes on this machine, that
-    /// starts as `starts` says, named as `Start` names one.
     StartOwn { starts: Starts },
-    /// Take zellij's client to a session it makes on `on`, `session`, that
-    /// starts in `cwd`, and have zellij open a tab of it once it is there, in
-    /// `tab_cwd`, named `name`, with `command` in it, or your shell for none,
-    /// in place of the tabs zellij makes it with, for the menu numbered
-    /// `menu`, which takes its client there once zellij says what it opened.
     Make {
         menu: u64,
         on: Machine,
@@ -1201,36 +848,18 @@ pub enum Asked {
         name: String,
         command: Vec<String>,
     },
-    /// Find where a key of the menu numbered `menu`, for `work`, pasted on a
-    /// row of `on`, goes among its panes `worked`, or else on the first of
-    /// `others` that has what it is of, and have its worktree made there.
     Pull { menu: u64, on: Machine, work: Work, wanted: Wanted, worked: Vec<Worked>, others: Others },
-    /// Find the skills that `cwd`, on `on`, can run in `agent`, for the menu
-    /// numbered `menu`.
     Find { menu: u64, on: Machine, cwd: String, agent: agents::Harness },
-    /// Keep what the shell in the pane `pane` of `session`, on `on`, printed
-    /// after the line `command` was last run on, there, for the menu
-    /// numbered `menu`.
     Printed { menu: u64, on: Machine, session: SessionName, pane: u32, ended: menu::Ended },
-    /// Keep the log of each check that failed on the head of the pull request
-    /// of `page`, on `on`, for the menu numbered `menu`.
     Checks { menu: u64, on: Machine, page: checks::PullPage },
-    /// Have the model write this brief, and show it.
     Brief(Brief),
-    /// Open the ask box, for this row.
     Ask(Target),
-    /// Open the issue box, for this repository.
     Issue(Repository),
-    /// Add the machine ssh reaches by this destination to luneta's hosts
-    /// file, for lunetad to watch.
     Ssh(Destination),
-    /// Take this machine out of luneta's hosts file, for lunetad to stop
-    /// watching it.
     Forget(Destination),
 }
 
 impl Asked {
-    /// The menu an answer to what is asked goes to, if any.
     fn menu(&self) -> Option<u64> {
         match self {
             Asked::Prunes { menu, .. }
@@ -1264,37 +893,24 @@ impl Asked {
     }
 }
 
-/// Where the sidebar holds a menu that waits on what a key of it asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Held {
-    /// Open, with the keys, or floating over zellij.
     Open,
-    /// In `working`, after the keys left it.
     Kept,
 }
 
-/// The rows the top of the sidebar takes, as `top` draws them.
 const HEADER: usize = 3;
 
-/// Where the keys go, as the sidebar sees it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Keys {
-    /// To zellij: the highlight rests on its pane.
     #[default]
     Zellij,
     Sidebar,
-    /// To a brief or the ask box the sidebar asked for, or a note over
-    /// zellij of what went wrong, which gives them back as it closes: the
-    /// sidebar stays as it stands, highlight and all.
     Lent,
-    /// To the sidebar's menu, floating over zellij, until it closes: back to
-    /// the sidebar where `lent`, which stays as it stands meanwhile, or else
-    /// to zellij.
     Menu { lent: bool },
 }
 
 impl Keys {
-    /// Whether the keys are the sidebar's, or come back to it.
     fn held(self) -> bool {
         match self {
             Keys::Sidebar | Keys::Lent | Keys::Menu { lent: true } => true,
@@ -1303,10 +919,6 @@ impl Keys {
     }
 }
 
-/// What the rule along the top counts, of the rows: the sessions, the agents
-/// in their panes that wait for you, the panes with the dot, and the agents
-/// that are at work and that are in a shell, a folded session's among them.
-/// And every pane of the sessions, which the search counts what it finds of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Counts {
     sessions: usize,
@@ -1320,153 +932,67 @@ struct Counts {
 #[derive(Default)]
 pub struct Sidebar {
     host: Option<Host>,
-    /// What this machine goes by on its header: its host's name.
     this: String,
-    /// Why the daemon does not answer, while it does not.
     away: Option<String>,
-    /// What runs beside the sidebar: zellij's client, with what the sidebar
-    /// has of it, or luneta's own client of an own session.
     beside: Beside,
-    /// The machine luneta's zellij's client runs on, whose sessions `beside`
-    /// and `own` are of.
     on: Machine,
-    /// The sessions folded, by name.
     folds: Folds,
-    /// What you saw in each pane, and the panes you marked unread.
     news: News,
-    /// The order the rows go in, as you moved them.
     order: Order,
-    /// The harness you picked last for the agents the menu starts.
     agent: Kept,
-    /// The pane luneta's zellij is on, as the rows were last built.
     here_key: Option<Key>,
-    /// When what finished last in each pane did, as the rows were last built.
     finished: HashMap<Key, SystemTime>,
     rows: Vec<Row>,
     counts: Counts,
-    /// How many sessions the daemon lists with no start or no socket, which
-    /// the rows leave out, as they tell sessions apart by both, or with a
-    /// name zellij refuses.
     unlisted: usize,
-    /// How many machines the daemon says of that the rows leave out, as
-    /// `machines` does.
     unlisted_machines: usize,
-    /// Which client of its session is luneta's zellij, and the pane it is on,
-    /// as of when it last ran beside the sidebar: it knows nothing while an
-    /// own client is in its place.
     own: OwnClient,
     keys: Keys,
-    /// The row of the pane luneta's zellij is on, or of its session, while
-    /// that one is folded, or of this machine, while that one is. The
-    /// highlight rests on it while the sidebar does not have the focus.
     here_row: Option<Spot>,
-    /// The row the keys took the highlight to, from `here_row` as the
-    /// sidebar took the focus, or a click to.
     cursor: Option<Spot>,
-    /// What the key before waits for the next to finish, or the list of
-    /// every key it opened. Any other key drops it, `Esc` doing nothing else,
-    /// and so do a click, the wheel, a paste that opens the menu and the
-    /// focus going.
     pending: Pending,
-    /// What the bottom holds back of the menu a group's key opened, showing
-    /// nothing in its place.
     holds: Holds,
-    /// What `v` and the left button do to the order of the machines and
-    /// their sessions, and `V` and the left button to the order of the
-    /// panes.
     moving: Moving,
-    /// Where each machine's panes show, under which of its sessions, as the
-    /// rows were last built: folded ones, and those a search leaves out, too.
     placed: Vec<(Machine, Vec<Headed>)>,
-    /// The `here_row` the view last scrolled to show while the sidebar did
-    /// not have the focus, after which the wheel can scroll it out of sight.
     revealed: Option<Spot>,
-    /// The first line of the rows on screen.
     top: usize,
-    /// What it drew last, for a sweep to read.
     page: Page,
-    /// How that was laid out.
     laid: Layout,
-    /// How many lines the rows had on screen when last drawn, under the rule
-    /// along the top and over the notes at the bottom, which a click on
-    /// either side of is not on.
     room: usize,
-    /// The last thing that went wrong, until the next key.
     notice: Option<String>,
-    /// The number of the pull request whose link was copied last, and when,
-    /// for the notes to say, until the next key or `COPIED_SHOWS` from then.
     copied: Option<(NonZeroU32, SystemTime)>,
-    /// The machine an image is on its way to, once that takes a while.
     image_going: Option<Destination>,
-    /// What is being read aloud, or what that waits for.
     aloud: Option<aloud::Shown>,
-    /// The buttons on its line, as last drawn: none on the sidebar collapsed.
     aloud_buttons: Spots<aloud::Button>,
-    /// What went wrong as the menu floated over zellij, for luneta to say
-    /// there, where you look, and the sidebar collapsed has no room for.
     said: Option<String>,
-    /// The search, while it is open.
     search: Option<Search>,
-    /// The menu, while it is open.
     menu: Option<Menu>,
-    /// What keys of menus started that outlive them, while they run: the
-    /// menus' own, each by its number, kept as the keys leave the menu, so
-    /// that what a key made or moved finishes, and what it opens opens,
-    /// wherever the keys went. Two can run at once, as two links pasted one
-    /// after the other. The notes say what each waits on until it is done.
     working: BTreeMap<u64, Menu>,
-    /// The issues the issue box sent, while they are written and filed, each
-    /// by the number of its box, with the name of its repository: the notes
-    /// say each, after a spinner that turns, until gh has filed it, or why
-    /// not.
     filing: BTreeMap<u64, String>,
-    /// What the last issue filed is, by its number and its title, as its link
-    /// is on the clipboard, for the notes to say until the next key.
     filed: Option<String>,
-    /// How many menus the sidebar has opened. A menu takes the next number
-    /// as it opens, which what zellij answers for it carries.
     menus: u64,
-    /// What a delete took away, and the row the highlight goes to once it is
-    /// gone.
     closing: Option<Closing>,
-    /// When the sidebar was last drawn: the rows are built for then, by which
-    /// a command has run long enough to show, or has yet to.
     drawn: Option<SystemTime>,
-    /// The soonest a command that runs, and has yet to show, will have run
-    /// long enough to: the rows are built again once it has.
     due: Option<SystemTime>,
 }
 
-/// What a delete takes away: the row the highlight was on, which goes, and
-/// the row it goes to once that is gone, the first after it that stays.
 #[derive(Debug)]
 struct Closing {
     gone: Spot,
     after: Option<Spot>,
 }
 
-/// What a key waits for the next to finish, one at a time: `gg` or `y p`; or
-/// the legend or the list of every key `?` opened, which take the next key the
-/// same way. The bottom shows what `First` and `Yank` wait for from `shows`,
-/// and until then what it showed before the key.
 #[derive(Debug, Default)]
 enum Pending {
     #[default]
     Nothing,
-    /// `Top::AllKeys` was pressed: the legend shows until the next key.
     Legend,
-    /// `Top::First` was pressed, which moves the highlight to the first row
-    /// once pressed again.
     First { shows: SystemTime },
-    /// `Top::Yank` was pressed, which waits for what to yank.
     Yank { shows: SystemTime },
-    /// `?` was pressed in the legend, or in the menu: the list shows in the
-    /// legend's place, `j` and `k` scroll it, and any other key closes it.
     AllKeys(AllKeys),
 }
 
 impl Pending {
-    /// When the bottom shows what it waits for, where that is the next key.
     fn shows(&self) -> Option<SystemTime> {
         match self {
             Pending::First { shows } | Pending::Yank { shows } => Some(*shows),
@@ -1475,74 +1001,41 @@ impl Pending {
     }
 }
 
-/// How a key came: typed, maybe blind, or off keys the bottom showed, which you
-/// read, for what it waits for to show at once.
 #[derive(Clone, Copy, Debug)]
 enum Came {
     Typed,
     Read,
 }
 
-/// What the bottom holds back of the menu, by its number, showing nothing in
-/// its place: nothing of a menu with another number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Holds {
     #[default]
     Nothing,
-    /// A group's key at the top opened the menu: until then, after which the
-    /// bottom shows its group.
     Until(u64, SystemTime),
-    /// The next key came before that, and the menu works on what it asked,
-    /// still showing the group it was pressed in: until the menu shows
-    /// something else, or closes, so the group never shows.
     Quiet(u64),
 }
 
-/// What `v` and the left button do to the order of the machines and their
-/// sessions, what `V` and the left button move to another session, and what
-/// the left button selects of the text: one thing at a time, so that no
-/// selection lasts under a row the mouse lifted.
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
     Still,
-    /// `v` selected `anchor`: the selection holds it, the highlight's
-    /// session, or machine, and those between, each with its rows.
     Selected(Movable),
-    /// `V` picked a pane, or its tab, for `J` and `K` to move.
     Picked(Picked),
-    /// The left button is down on the sidebar at `at`, on luneta's terminal:
-    /// a click once it lets go on the line it went down on. On a row that
-    /// lifts, `lifts` says what is there, which goes with the mouse once that
-    /// moves a line. It sweeps, from anywhere else, or once it moves past the
-    /// cells around `at`.
     Down { at: Position, lifts: Option<Lifting> },
     Lifted(Lift),
-    /// The left button drags over the text, which is copied as it lets go.
     Sweeping(Sweep),
-    /// What it copied shows until the next click, or until what it showed on
-    /// may have moved from under it, as `Layout` tells.
     Swept(Sweep, Layout),
 }
 
-/// How the sidebar laid out what it drew: which rows and notes, on which lines.
-/// Another layout has other text on the cells a sweep is on, which is not what
-/// it copied. A row's own text changing is no other layout: a spinner turns on
-/// it each frame, and a sweep over one would show for no longer than that.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Layout {
     area: Rect,
-    /// The line of the rows at the top.
     top: usize,
-    /// The rows, in the order they show, each with how many lines it takes.
     rows: Vec<(Spot, usize)>,
-    /// How many lines go along the bottom, and what the notes among them say.
     bottom: usize,
     notes: Vec<String>,
 }
 
-/// What moves, with the rows under it: a machine, among the machines, or a
-/// session, among those of its machine, and never to another's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Movable {
     Machine(Machine),
@@ -1550,8 +1043,6 @@ enum Movable {
 }
 
 impl Movable {
-    /// What moves by the row of `spot`: a machine's header, or a session's
-    /// row. A pane's row moves nothing.
     fn of(spot: Spot) -> Option<Movable> {
         match spot {
             Spot::Machine(machine) => Some(Movable::Machine(machine)),
@@ -1565,7 +1056,6 @@ impl Movable {
         }
     }
 
-    /// Its row.
     fn spot(&self) -> Spot {
         match self {
             Movable::Machine(machine) => Spot::Machine(machine.clone()),
@@ -1576,9 +1066,6 @@ impl Movable {
     }
 }
 
-/// What a move moves among, in the order of their rows, each by what the
-/// order keeps it by, with the rows it spans: the machines, or the sessions
-/// of one machine, by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Spans {
     Machines(Vec<(Machine, Range<usize>)>),
@@ -1586,7 +1073,6 @@ enum Spans {
 }
 
 impl Spans {
-    /// How many there are.
     fn len(&self) -> usize {
         match self {
             Spans::Machines(machines) => machines.len(),
@@ -1594,7 +1080,6 @@ impl Spans {
         }
     }
 
-    /// The rows each spans, in their order.
     fn rows(&self) -> Vec<Range<usize>> {
         match self {
             Spans::Machines(machines) => machines.iter().map(|(_, rows)| rows.clone()).collect(),
@@ -1602,8 +1087,6 @@ impl Spans {
         }
     }
 
-    /// They, with those `taken` put back before the one at `to` of those
-    /// left, or after the last of them.
     fn moved(&self, taken: Range<usize>, to: usize) -> Spans {
         match self {
             Spans::Machines(machines) => Spans::Machines(moved(machines, taken, to)),
@@ -1614,9 +1097,6 @@ impl Spans {
     }
 }
 
-/// What the left button lifts by a row: a machine or a session, which moves
-/// among its kind, or a pane, or its tab, which moves among the panes of its
-/// machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Lifting {
     Moved(Movable),
@@ -1624,7 +1104,6 @@ enum Lifting {
 }
 
 impl Lifting {
-    /// The row it was lifted by.
     fn spot(&self) -> Spot {
         match self {
             Lifting::Moved(movable) => movable.spot(),
@@ -1633,10 +1112,6 @@ impl Lifting {
     }
 }
 
-/// A pane of a session of `machine`, or the panes of its tab next to it, as
-/// `whole` says, which move among the panes of the machine, under any of its
-/// sessions, and never another's: what `V` picks, or the mouse lifts by its
-/// row, or a tab by its bracket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Picked {
     machine: Machine,
@@ -1645,23 +1120,17 @@ struct Picked {
 }
 
 impl Picked {
-    /// Its row: that of the pane it was picked by.
     fn spot(&self) -> Spot {
         Spot::on(&self.machine, Place::Pane(self.place.clone()))
     }
 }
 
-/// How much of its tab a pane moves with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Whole {
-    /// Itself alone.
     Pane,
-    /// The panes of its tab next to it, under the session it shows under.
     Tab,
 }
 
-/// A session of a machine, as the rows list it, with the panes that show
-/// under it, in their order, folded or not, each with its tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Headed {
     session: Listed,
@@ -1669,17 +1138,12 @@ struct Headed {
     panes: Vec<(PanePlace, u32)>,
 }
 
-/// Where what moves among the panes of a machine goes: under its session
-/// `under`, of those `placed` has, before the pane at `before` of those it
-/// has left there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Gap {
     under: usize,
     before: usize,
 }
 
-/// Where panes the mouse lifted land: those `held` under the session `under`
-/// go to `gap`, and their `rows` show after the row `after` till then.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Landing {
     under: usize,
@@ -1689,84 +1153,55 @@ struct Landing {
     rows: Range<usize>,
 }
 
-/// What the mouse lifted by its row, which goes where the mouse takes it,
-/// with the rows under it, once it lets go.
 #[derive(Debug)]
 struct Lift {
     lifted: Lifting,
-    /// The line of the sidebar the mouse is on.
     line: u16,
-    /// Whether the mouse is over the sidebar. Let go anywhere else, the row
-    /// goes back.
     over: bool,
-    /// When the rows last scrolled under it, while it is held on the first
-    /// line of them, or the last.
     scrolled: Option<Instant>,
 }
 
-/// The search, while it is open.
 enum Search {
-    /// Nothing typed: the rows under it are the rows without it.
     Empty,
-    /// What is typed narrows the rows, and `seek` until the highlight has gone
-    /// to the row that matches it best.
     Typed { term: String, seek: bool },
 }
 
-/// Where the highlight is, as the sidebar is drawn, by the index of its row.
 #[derive(Clone, Copy)]
 enum Highlight {
-    /// On `LIT`, where the keys took it, while the sidebar has the focus.
-    /// None while there is no row to take it to.
     Lit(Option<usize>),
-    /// On `RESTING`, on the row of the pane luneta's zellij is on, while the
-    /// sidebar does not have the focus.
     Resting(usize),
-    /// Nowhere: the sidebar does not have the focus, and no row is the pane's.
     Off,
 }
 
 impl Sidebar {
-    /// The sidebar, with the sessions `folds` has folded, what `news` has of
-    /// what you saw and marked, the rows in `order`, and the harness `agent`
-    /// keeps for the agents the menu starts, on a machine that goes by `this`.
     pub fn new(folds: Folds, news: News, order: Order, agent: Kept, this: String) -> Self {
         Sidebar { this, folds, news, order, agent, ..Sidebar::default() }
     }
 
-    /// Takes up the harness for the agents the menu starts as it is kept
-    /// now, as another luneta picked it.
     pub fn reagent(&mut self) {
         if let Err(why) = self.agent.reload() {
             log::say(&format!("agent: {why}"));
         }
     }
 
-    /// Takes up the folds as they are kept now, as another luneta left them.
     pub fn refold(&mut self) {
         if self.folds.reload() {
             self.rebuild();
         }
     }
 
-    /// Takes up what you saw and marked as it is kept now, as another luneta
-    /// left it.
     pub fn reread(&mut self) {
         if self.news.reload() {
             self.rebuild();
         }
     }
 
-    /// Takes up the order of the rows as it is kept now, as another luneta
-    /// left it.
     pub fn reorder(&mut self) {
         if self.order.reload() {
             self.rebuild();
         }
     }
 
-    /// The daemon says the host stands as `host`. A look to ask zellij for,
-    /// as luneta's zellij comes to a session.
     pub fn heard(&mut self, host: Host) -> Option<Look> {
         self.host = Some(host);
         self.away = None;
@@ -1779,10 +1214,6 @@ impl Sidebar {
         look
     }
 
-    /// What the daemon lists of the sessions of the machine luneta's zellij
-    /// is on, as `own` reads them at `at`, which may find luneta's client in
-    /// a session it went to with no go of luneta's, or that it left the one
-    /// it was in for one luneta cannot tell. Whether either.
     fn hear_own(&mut self, at: Instant) -> bool {
         if matches!(self.beside, Beside::Own(_)) {
             return false;
@@ -1798,9 +1229,6 @@ impl Sidebar {
         self.followed(found) || self.own.astray().is_some() != astray
     }
 
-    /// `own` found luneta's client in `found`, which it is in until zellij
-    /// titles luneta's terminal, or it is astray, and in no session the
-    /// sidebar knows of. Whether it found it.
     fn followed(&mut self, found: Option<String>) -> bool {
         let astray = self.own.astray().is_some();
         let Beside::Zellij(seen) = &mut self.beside else {
@@ -1822,16 +1250,6 @@ impl Sidebar {
         true
     }
 
-    /// Time went by, to `now` by the host's clock and `at` by luneta's own,
-    /// with luneta's window `watched`, as it has the focus. What luneta saw
-    /// of its zellij's client may have stood long enough against the
-    /// daemon's list for that list to be the newer. The client may have
-    /// stayed on its pane long enough for you to have been there, whether the
-    /// sidebar shows or not: it has been on the pane, and the window has had
-    /// the focus, since the first tick that found both. And the daemon may
-    /// have left a session out of its lists for long enough for what was kept
-    /// of it to go. And what the mouse lifted may have been held on the first
-    /// line of the rows, or the last, long enough for them to scroll.
     pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
         self.hold(at);
         let over = |then: SystemTime| now.duration_since(then).is_ok_and(|it| it >= COPIED_SHOWS);
@@ -1852,13 +1270,6 @@ impl Sidebar {
         }
     }
 
-    /// The sessions that run, as the daemon lists them now, of each machine,
-    /// or none where it does not answer, and what it said last stands. A
-    /// machine's list may leave out one that runs where its daemon could not
-    /// read all of zellij's folder, or does not say whether it could, as one
-    /// older than the count; or it lists one the news cannot tell from
-    /// another; or lunetad has nothing of the machine, as one it does not
-    /// reach.
     fn live(&self) -> Option<Lists> {
         let host = self.host.as_ref()?;
         if self.away.is_some() {
@@ -1877,9 +1288,6 @@ impl Sidebar {
         Some(live)
     }
 
-    /// The daemon does not answer, for `why`, which the log has as it
-    /// changes: luneta asks again in a moment, and once a second at the most.
-    /// What it said last stands.
     pub fn lost(&mut self, why: String) {
         if self.away.as_ref() != Some(&why) {
             log::say(&format!("lunetad: {why}"));
@@ -1887,13 +1295,6 @@ impl Sidebar {
         self.away = Some(why);
     }
 
-    /// zellij titled luneta's terminal `title`. A look to ask zellij for, as
-    /// its client comes to a session, which unfolds where zellij took it
-    /// there itself.
-    ///
-    /// The title cannot tell apart two sessions whose names start alike
-    /// before a ` | `: zellij's own switch to `odd | name`, which the daemon
-    /// has yet to list, reads as one to `odd`, which unfolds instead.
     pub fn titled(&mut self, title: String) -> Option<Look> {
         let Beside::Zellij(seen) = &mut self.beside else {
             return None;
@@ -1901,8 +1302,6 @@ impl Sidebar {
         if seen.title.as_ref() == Some(&title) {
             return None;
         }
-        // Of the session luneta sent its zellij to, which unfolded as it was
-        // sent.
         let sent_there = seen.sent.as_ref().is_some_and(|sent| in_session(&title, sent.session()));
         if sent_there || !matches!(seen.sent, Some(Sent::Going { .. })) {
             seen.sent = None;
@@ -1920,15 +1319,10 @@ impl Sidebar {
         look
     }
 
-    /// luneta sends its zellij to `session`, which it is in from now on, as
-    /// far as the sidebar knows, and which unfolds: you go to a session for
-    /// its panes. A look for zellij to answer once it is there.
     pub fn sending(&mut self, session: &SessionName) -> Option<Look> {
         self.send(session, false)
     }
 
-    /// luneta sends its zellij to `session`, as `sending` says, and the
-    /// session it leaves `ends` once it has left it.
     fn send(&mut self, session: &SessionName, ends: bool) -> Option<Look> {
         self.unfold(session);
         let session = session.as_str();
@@ -1946,11 +1340,6 @@ impl Sidebar {
         look
     }
 
-    /// A client of `session` takes the place of luneta's zellij's, which
-    /// ended: it is in that session or none, which unfolds. A look for zellij
-    /// to answer once it is there. luneta has yet to find it there, in the
-    /// session it followed the one before to as well, as one on its way that
-    /// ended.
     pub fn rejoining(&mut self, session: &SessionName) -> Look {
         self.unfold(session);
         let session = session.as_str();
@@ -1963,8 +1352,6 @@ impl Sidebar {
         look
     }
 
-    /// The session luneta sent its zellij to, while zellij has yet to take
-    /// its client there.
     pub fn going(&self) -> Option<&str> {
         match self.sent()? {
             Sent::Going { session, .. } => Some(session),
@@ -1995,11 +1382,6 @@ impl Sidebar {
         }
     }
 
-    /// zellij did not take luneta's zellij to the session it was sent to on
-    /// the go that `look` was to find it there: it is in the one it left
-    /// still, until zellij titles the terminal, which it may never do where
-    /// the client came to a tab that had that title. A look at the one it is
-    /// in still.
     pub fn stayed(&mut self, look: u64) -> Option<Look> {
         if !self.sent_on(look) {
             return None;
@@ -2015,12 +1397,6 @@ impl Sidebar {
         look
     }
 
-    /// zellij answered a look so. One that says what it listed before
-    /// luneta's zellij came, of the go luneta sent it on last, is from once
-    /// it had. One that finds zellij did not take it to the pane luneta sent
-    /// it to says so: zellij moved another client, the last to type in the
-    /// session, or none. Whether it found luneta's zellij in the session it
-    /// was sent to, as zellij listed it there just now.
     pub fn looked(&mut self, looked: Looked) -> bool {
         let landed = looked.before.is_some() && self.land(looked.number);
         let listed = self.own.session().and_then(|session| clients(self.on_sessions(), session));
@@ -2036,10 +1412,6 @@ impl Sidebar {
         landed
     }
 
-    /// A look at the session luneta's zellij is in, for after something else
-    /// may have taken its client elsewhere, as the ask box's agent can: none
-    /// while it is on its way, or luneta does not know which session it is
-    /// in.
     pub fn look_again(&mut self) -> Option<Look> {
         if self.going().is_some() {
             return None;
@@ -2047,9 +1419,6 @@ impl Sidebar {
         self.own.again()
     }
 
-    /// A look at the session luneta's zellij is in, once the daemon no longer
-    /// lists its client there, which luneta is sure of, as zellij is to say
-    /// whether it left: none while it is on its way elsewhere.
     pub fn doubted(&mut self) -> Option<Look> {
         if self.going().is_some() {
             return None;
@@ -2057,27 +1426,18 @@ impl Sidebar {
         self.own.doubted()
     }
 
-    /// The session luneta's zellij left with no go of luneta's, for one
-    /// luneta cannot tell, while it cannot.
     pub fn astray(&self) -> Option<&str> {
         self.own.astray()
     }
 
-    /// luneta takes its zellij to `place`. A look to ask zellij for once it
-    /// has: in the session it is in, or the one it goes to.
     pub fn went(&mut self, place: &Place) -> Option<Look> {
         self.goes(place, false)
     }
 
-    /// luneta takes its zellij out of the session it is in, to `place` in
-    /// another, and deletes that session once it has left it, which the
-    /// sidebar says until then. A look to ask zellij for once it is there.
     pub fn leaving(&mut self, place: &Place) -> Option<Look> {
         self.goes(place, true)
     }
 
-    /// luneta takes its zellij to `place`, as `went` says, and the session
-    /// it leaves for another `ends` once it has left it.
     fn goes(&mut self, place: &Place, ends: bool) -> Option<Look> {
         let listed = clients(self.on_sessions(), place.session()).map(<[Client]>::to_vec);
         let now = Instant::now();
@@ -2088,7 +1448,6 @@ impl Sidebar {
             Place::Session(_) => None,
         };
         if self.here() == Some(place.session()) {
-            // A search goes to the panes of a folded session too.
             if let Some(under) = &shows_under {
                 self.unfold(under);
             }
@@ -2098,23 +1457,12 @@ impl Sidebar {
         if let Some(under) = &shows_under {
             self.unfold(under);
         }
-        // The client is on the pane as it comes to the other session.
         self.send(&place.listed().name, ends)
     }
 
-    /// The sidebar takes the keys, or gives them back. The keys take the
-    /// highlight on from where luneta's zellij is, and it goes back there as
-    /// they leave. A search lasts while the sidebar has them: one left open
-    /// would keep the rows it hides out of sight. So do the menu, a selection
-    /// and what the mouse lifted, which goes back. A brief or the menu over
-    /// zellij lent the keys leaves all of it as it stands. The menu over
-    /// zellij lasts while its box has the keys, and closes as the box gives
-    /// them up. What a key of a menu started goes on past the menu, as
-    /// `working` says.
     pub fn focus(&mut self, keys: Keys) {
         if self.floats() && !matches!(keys, Keys::Menu { .. }) {
             self.close_menu();
-            // What luneta did not take to say over zellij goes to the notes.
             if let Some(said) = self.said.take() {
                 self.notice = Some(said);
             }
@@ -2142,21 +1490,14 @@ impl Sidebar {
         self.keep_working(menu);
     }
 
-    /// Closes the menu numbered `menu`, and keeps nothing of it: luneta did not
-    /// do what it asked, and said why.
     pub fn drop_menu(&mut self, menu: u64) {
         self.menu.take_if(|open| open.number() == menu);
     }
 
-    /// Whether what a key of a menu started still goes on, after the keys left
-    /// it: a spinner among the notes turns while it does.
     fn working_on(&self) -> bool {
         self.working.values().any(Menu::turning)
     }
 
-    /// What the notes say of `session`, which has no client for a tab luneta
-    /// would open there once luneta's zellij is in it, which a menu the keys
-    /// left behind may not do: what to press to have the tab.
     fn busy_said(session: &SessionName) -> String {
         format!(
             "menu: nothing opened: no client is in {session}, and zellij makes a tab with no \
@@ -2164,9 +1505,6 @@ impl Sidebar {
         )
     }
 
-    /// What the notes say of `place`, which a key of a menu that closed while
-    /// it ran opened: where it is, as luneta names a pane, so that it can be
-    /// gone to from anywhere, and that the tab it opened is not lost.
     fn opened_said(place: &Place) -> String {
         let session = place.session();
         match place.pane() {
@@ -2175,9 +1513,6 @@ impl Sidebar {
         }
     }
 
-    /// What the notes say of `place`, which a key of a menu that closed while
-    /// it ran would have taken zellij's client to, as the worktree it is on was
-    /// there already: where it is, and that nobody went.
     fn went_said(place: &Place) -> String {
         let session = place.session();
         match place.pane() {
@@ -2186,29 +1521,17 @@ impl Sidebar {
         }
     }
 
-    /// Keeps what a key of `menu` started going, once the menu closes: the
-    /// work, or the agent that starts once luneta hears what it waits on, is
-    /// the sidebar's from then on, so that closing the menu does not end it.
-    /// A menu that waits on nothing keeps nothing.
     fn keep_working(&mut self, menu: Option<Menu>) {
         if let Some(menu) = menu.filter(Menu::waits) {
             self.working.insert(menu.number(), menu);
         }
     }
 
-    /// The menu a key of which luneta heard of, numbered `menu`, where it waits
-    /// on it, as `keep` says, and where the sidebar held it: the one open, which
-    /// the key leaves open, or the one that closed while what its key started
-    /// went on. It takes the menu off the sidebar, for luneta to take what the
-    /// key asked for on from it. None where no menu of that number waits on
-    /// it, as where luneta heard of one it never opened, or of one whose wait
-    /// another key ended.
     fn take_waited(&mut self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<(Menu, Held)> {
         let (waited, held, ()) = self.take_seen(menu, |it| keep(it).then_some(()))?;
         Some((waited, held))
     }
 
-    /// As `take_waited` does, with what `see` sees of the menu it takes.
     fn take_seen<T>(
         &mut self,
         menu: u64,
@@ -2222,17 +1545,12 @@ impl Sidebar {
         self.working.remove(&menu).map(|it| (it, Held::Kept, seen))
     }
 
-    /// Where the sidebar holds the menu numbered `menu`, while it waits on
-    /// what a key of it asked for, as `keep` says: an answer to one luneta no
-    /// longer waits on goes nowhere.
     fn holds(&self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<Held> {
         let open = self.menu.as_ref().filter(|it| it.number() == menu).map(|it| (it, Held::Open));
         let (it, held) = open.or_else(|| Some((self.working.get(&menu)?, Held::Kept)))?;
         keep(it).then_some(held)
     }
 
-    /// A look for the session zellij's client is in, as `here` says, if it
-    /// has come to it since luneta last followed it.
     fn arrived(&mut self) -> Option<Look> {
         let here = self.here()?.to_owned();
         if self.own.session() == Some(here.as_str()) {
@@ -2241,13 +1559,6 @@ impl Sidebar {
         Some(self.came(&here))
     }
 
-    /// A client of `session` on `machine` takes the place of luneta's
-    /// zellij's: one luneta starts there as it goes to another machine, or
-    /// back, or as the one it had there ended. The machine is where luneta's
-    /// zellij is from now on, and the client is in that session or none, as
-    /// `rejoining` says. What luneta knew of the client before, and the title
-    /// zellij gave its terminal, are another's. A look for zellij there to
-    /// answer once it is there.
     pub fn swapping(&mut self, machine: &Machine, session: &SessionName) -> Look {
         self.on = machine.clone();
         self.beside = Beside::Zellij(ZellijSide::default());
@@ -2255,10 +1566,6 @@ impl Sidebar {
         self.rejoining(session)
     }
 
-    /// A client of the own session `session` takes the place of luneta's
-    /// zellij's, or of its client of another own session: it is on this
-    /// machine, and in that session, which unfolds, once its server says it
-    /// is. What luneta knew of zellij's client, and its title, are another's.
     pub fn attaching(&mut self, session: OwnKey) {
         self.on = Machine::Local;
         self.beside = Beside::Own(OwnSeat::Coming(session));
@@ -2267,8 +1574,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// luneta's client of an own session is on `pane` now, as `client`, as
-    /// its server says, which unfolds its session where it went to another.
     pub fn went_own(&mut self, pane: OwnPane, client: OwnClientId) {
         let was = self.own_seat().map(OwnSeat::session);
         assert!(was.is_some(), "only a client of an own session goes among them");
@@ -2279,7 +1584,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// Where luneta's client of an own session is, while it is one.
     pub fn own_seat(&self) -> Option<OwnSeat> {
         match self.beside {
             Beside::Zellij(_) => None,
@@ -2287,7 +1591,6 @@ impl Sidebar {
         }
     }
 
-    /// What the sidebar has of luneta's zellij, while its client is beside it.
     fn zellij(&self) -> Option<&ZellijSide> {
         match &self.beside {
             Beside::Zellij(seen) => Some(seen),
@@ -2302,26 +1605,20 @@ impl Sidebar {
         }
     }
 
-    /// The session luneta sent its zellij to, as `ZellijSide::sent` says.
     fn sent(&self) -> Option<&Sent> {
         self.zellij()?.sent.as_ref()
     }
 
-    /// The own session `key` of this machine's, as the daemon lists it, if
-    /// it does: not while it lists one its server made before, of the id.
     pub fn own_listed(&self, key: OwnKey) -> Option<Listed> {
         let (sessions, _) = oldest_first(self.local_sessions());
         let mut listed = sessions.into_iter().map(|(listed, _)| listed);
         listed.find(|listed| listed.own_key() == Some(key))
     }
 
-    /// The sessions the daemon lists of this machine, as it last said.
     fn local_sessions(&self) -> &[Session] {
         self.host.as_ref().map_or(&[], |host| &host.sessions)
     }
 
-    /// Unfolds the own session `key`, and this machine, as `unfold` does,
-    /// where the daemon lists it.
     fn unfold_own(&mut self, key: OwnKey) {
         if let Some(listed) = self.own_listed(key) {
             self.folds.set(Fold::Machine(&Machine::Local), false);
@@ -2329,9 +1626,6 @@ impl Sidebar {
         }
     }
 
-    /// Where a client of the own sessions goes to be at `place`, an own
-    /// session's or one of its panes: to its tab, as the daemon lists it, for
-    /// a pane. Or why luneta does not know which that is.
     pub fn own_target(&self, place: &Place) -> Result<To, String> {
         let listed = place.listed();
         let session = listed.own_key();
@@ -2345,9 +1639,6 @@ impl Sidebar {
         Ok(To::Tab { session, tab })
     }
 
-    /// Whether luneta's client is in `listed`, of the machine it is on, where
-    /// zellij's is in the session named `here`: as no other is, for an own
-    /// client.
     fn seats_here(own_seat: Option<OwnSeat>, listed: &Listed, here: Option<&str>) -> bool {
         match own_seat {
             Some(seat) => listed.own_key() == Some(seat.session()),
@@ -2355,35 +1646,24 @@ impl Sidebar {
         }
     }
 
-    /// luneta's zellij came to `session`, or is back in it, as zellij did not
-    /// take it out. A look for zellij to answer once it is there.
     fn came(&mut self, session: &str) -> Look {
         let listed = clients(self.on_sessions(), session).map(<[Client]>::to_vec);
         self.own.came(session, listed.as_deref(), Instant::now())
     }
 
-    /// Unfolds `session`, of the machine luneta's zellij is on, and that
-    /// machine, as luneta's zellij goes to it. It goes from the folder whether
-    /// this luneta has it folded or not: another may have folded it since
-    /// this one last heard.
     fn unfold(&mut self, session: &SessionName) {
         self.folds.set(Fold::Machine(&self.on), false);
         self.folds.set(Fold::Session(&self.on, session), false);
     }
 
-    /// What zellij last titled luneta's terminal, which titles its window.
     pub fn terminal_title(&self) -> Option<&str> {
         self.zellij()?.title.as_deref()
     }
 
-    /// The machine luneta's zellij's client runs on: this one until a client
-    /// on another takes its place, as `swapping` says.
     pub fn on(&self) -> &Machine {
         &self.on
     }
 
-    /// The sessions the daemon lists of the machine luneta's zellij is on, as
-    /// it last said: none while it says none of that machine.
     fn on_sessions(&self) -> &[Session] {
         let Some(host) = &self.host else {
             return &[];
@@ -2399,12 +1679,6 @@ impl Sidebar {
         }
     }
 
-    /// The session zellij's client is in: the one luneta sent it to, or found
-    /// it in, until zellij titles luneta's terminal after; none while it is
-    /// astray; or else by its title: the longest name of a zellij session the
-    /// daemon knows that the title is, or starts with before a ` | `, as a
-    /// session's name can hold one too. Until the daemon says, what comes
-    /// before the first.
     pub fn here(&self) -> Option<&str> {
         let seen = self.zellij()?;
         if let Some(sent) = &seen.sent {
@@ -2424,13 +1698,6 @@ impl Sidebar {
             .or_else(|| Some(title.split_once(" | ").map_or(title, |(session, _)| session)))
     }
 
-    /// Where you are, for the ask box's agent on `machine` to go by: on
-    /// another machine while luneta's zellij is; or else on the pane
-    /// luneta's zellij is on, by its session's name now, while it is on its
-    /// way to no session, and on a pane, not a plugin's; or on the pane of an
-    /// own session luneta's client of one is on, as its server says, by the
-    /// session's key and its name now, with which client that is, for a go
-    /// to take it whoever typed last; or where luneta cannot tell.
     pub fn user(&self, machine: &Machine) -> User {
         if self.on != *machine {
             return User::Away;
@@ -2454,10 +1721,6 @@ impl Sidebar {
         }
     }
 
-    /// The sessions zellij's client may be in: the one luneta sent it to,
-    /// and the one it left, until it is there; or else the one it is in, as
-    /// `here` says. A name zellij makes no session of, as of a title that
-    /// names none, is of none it is in.
     pub fn seats(&self) -> Vec<SessionName> {
         let seats: Vec<&str> = match self.sent() {
             Some(Sent::Going { session, from, .. }) => {
@@ -2468,16 +1731,6 @@ impl Sidebar {
         seats.into_iter().filter_map(|seat| SessionName::running(seat).ok()).collect()
     }
 
-    /// The sessions of the other machines but those `tried`, where luneta's
-    /// zellij goes on once the machine it was on has none left: each
-    /// machine's newest first, as the picker lists them, the machines as
-    /// their headers are, and none of them own, as zellij's client attaches
-    /// to none of those. Where luneta's own terminal may be `within`
-    /// another machine's zellij, a session that may hold it is left out, as
-    /// `may_hold` says: a client of it would show luneta in itself, and each
-    /// key typed in it would go round again. Or why it goes on in none of
-    /// one's, as where lunetad does not reach it, or listed none of its
-    /// sessions when it last said, or only those that may hold luneta.
     pub fn refuges_away(
         &self,
         tried: &[Destination],
@@ -2492,7 +1745,6 @@ impl Sidebar {
             (Machine::Remote(destination.clone()), destination, seen)
         });
         let mut others: Vec<_> = others.collect();
-        // In the order of their headers, as you moved them.
         self.order.machines(&mut others, |(machine, ..)| machine);
         let refuges = others.into_iter().map(|(_, destination, seen)| {
             let refuges = match seen {
@@ -2522,15 +1774,10 @@ impl Sidebar {
         refuges.collect()
     }
 
-    /// What you saw in each pane, as this luneta knows it.
     pub fn news(&self) -> &News {
         &self.news
     }
 
-    /// The pane luneta's zellij is on, in the one session of the name it is
-    /// in: both as luneta last followed its client, so that the pane is one
-    /// of that session's, whose ids another session has too. Or else why the
-    /// sidebar does not know it, as the menu says.
     fn here_place(&self) -> Result<PanePlace, &'static str> {
         if let Some(seat) = self.own_seat() {
             let pane = seat.on().ok_or(NO_HERE_PANE)?.id.get();
@@ -2551,10 +1798,6 @@ impl Sidebar {
         }
     }
 
-    /// The agent started at a prompt in the pane luneta's zellij is on, of a
-    /// harness luneta knows, if one is there, as luneta last followed its
-    /// client. A `claude -p` that a shell started is no agent to talk to: the
-    /// shell has the keys.
     pub fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
         let seen = self.seen(&self.on)?;
@@ -2571,7 +1814,6 @@ impl Sidebar {
         })
     }
 
-    /// The machine whose header the highlight is on, if it is on one.
     pub fn on_header(&self) -> Option<Machine> {
         match self.cursor.as_ref()? {
             Spot::Machine(machine) => Some(machine.clone()),
@@ -2579,9 +1821,6 @@ impl Sidebar {
         }
     }
 
-    /// What the picker lists, as the sidebar knows each machine now: where
-    /// luneta's zellij is, and what runs on this machine and on each other
-    /// that lunetad reaches, as `runs` lists it.
     pub fn listing(&self) -> Listing {
         let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
@@ -2602,12 +1841,6 @@ impl Sidebar {
         listing
     }
 
-    /// What runs on each machine lunetad watches, for the notifications, or
-    /// nothing before lunetad has said: on this machine and on each other it
-    /// reaches, the agents in the panes zellij there has listed, and the
-    /// sessions it has listed the panes of, and those it has not yet. One it
-    /// does not reach just now is away, and one it no longer watches is not
-    /// among them.
     pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
         let host = self.host.as_ref()?;
         let here = self.whereabouts();
@@ -2627,9 +1860,6 @@ impl Sidebar {
         Some(each.map(|(machine, seen)| (machine.clone(), reach(&machine, seen))).collect())
     }
 
-    /// Where luneta's zellij is, as far as the sidebar knows: on the machine
-    /// its client runs on, in the session `here` says, and on its pane there
-    /// while that is of the session it is in, as `user` takes it too.
     pub fn whereabouts(&self) -> Option<Here> {
         if let Some(seat) = self.own_seat() {
             let on = Machine::Local;
@@ -2647,10 +1877,6 @@ impl Sidebar {
         })
     }
 
-    /// The machine of the agent in the pane luneta's zellij is on, as far as
-    /// the sidebar knows, where that is another machine: none on this one,
-    /// nor on a pane with no agent, nor where the sidebar does not know the
-    /// pane.
     pub fn far_agent(&self) -> Option<&Destination> {
         let Machine::Remote(on) = &self.on else {
             return None;
@@ -2663,11 +1889,6 @@ impl Sidebar {
         seated(seen.agents, seen.sessions).contains_key(&seat).then_some(on)
     }
 
-    /// What runs on `machine`, as its daemon says in `seen`, for the picker:
-    /// every session newest first, each with its panes in the order of their
-    /// tabs, and the agents in them, those of the session luneta's zellij is
-    /// in first, where `here` says it is in one of these, then those of the
-    /// others newest first, each session's in the order their panes opened.
     fn runs(&self, machine: &Machine, seen: &Seen<'_>, here: Option<&Here>) -> Runs {
         let here = here.filter(|here| here.on() == machine);
         let here_key = here.and_then(Here::pane).map(|place| place.session.key(place.pane));
@@ -2712,23 +1933,16 @@ impl Sidebar {
                 place: Place::Session(listed),
             });
         }
-        // Those of the session luneta's zellij is in first, and the rest as
-        // they are.
         let here = here.map(Here::session);
         runs.agents.sort_by_key(|seated| here != Some(seated.place.session.name().as_str()));
         runs
     }
 
-    /// What each machine lunetad watches last said to read aloud, for `aloud`,
-    /// or nothing before lunetad has said: none of one it does not reach now.
-    /// One it no longer watches is not among them.
     pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
         let each = machines(self.host.as_ref()?).each();
         Some(each.map(|(on, seen)| (on, seen.ok().map(|seen| seen.sayings.to_vec()))).collect())
     }
 
-    /// Shows what is being read aloud, on a line and on the row of the pane it
-    /// comes from.
     pub fn aloud(&mut self, shown: Option<aloud::Shown>) {
         if self.aloud != shown {
             self.aloud = shown;
@@ -2736,41 +1950,29 @@ impl Sidebar {
         }
     }
 
-    /// The buttons on the line of what is being read aloud, as last drawn.
     pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
         &self.aloud_buttons
     }
 
-    /// Says what went wrong, in the notes until the next key, and in the log.
     pub fn notify(&mut self, notice: String) {
         log::say(&notice);
         self.notice = Some(notice);
     }
 
-    /// Takes what `notify` said out of the notes, for what it was said of has
-    /// been tried again.
     pub fn clear_notice(&mut self) {
         self.notice = None;
     }
 
-    /// Takes `notice` out of the notes, for it is no longer so, where they say
-    /// that and nothing else.
     pub fn unsay(&mut self, notice: &str) {
         if self.notice.as_deref() == Some(notice) {
             self.notice = None;
         }
     }
 
-    /// Says in the notes that the issue of the box numbered `number` is being
-    /// written and filed in `repository`, until `filed` says what came of it.
     pub fn filing(&mut self, number: u64, repository: &str) {
         self.filing.insert(number, repository.to_owned());
     }
 
-    /// Says in the notes what came of the issue of the box numbered `number`,
-    /// in `repository`: its number and title, as gh filed it, until the next
-    /// key; or why gh filed none, or may have, which says your words are in
-    /// the issue box again.
     pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
         self.filing.remove(&number);
         match filed {
@@ -2789,14 +1991,10 @@ impl Sidebar {
         }
     }
 
-    /// Says in the notes that an image is on its way to the machine `to`, or
-    /// no longer says so, with none. The sidebar collapsed says so by its rule.
     pub fn image_going(&mut self, to: Option<Destination>) {
         self.image_going = to;
     }
 
-    /// Says what went wrong with what the menu did: in the notes, or over
-    /// zellij while the menu floats there, and in the log.
     fn say(&mut self, notice: String) {
         log::say(&notice);
         if self.floats() {
@@ -2806,30 +2004,15 @@ impl Sidebar {
         }
     }
 
-    /// What went wrong as the menu floated over zellij, for luneta to say
-    /// there, once.
     pub fn said(&mut self) -> Option<String> {
         self.said.take()
     }
 
-    /// Whether a spinner turns: the rule along the top has one while an agent
-    /// on the rows is at work, and so does the sidebar collapsed; and the
-    /// menu has one while what a key of it waits on is at work, as the notes
-    /// do while what a key started after the keys left it goes on, and while
-    /// an issue is filed.
     pub fn turning(&self) -> bool {
         let menus = self.menu.as_ref().is_some_and(Menu::turning);
         self.counts.busy > 0 || menus || self.working_on() || !self.filing.is_empty()
     }
 
-    /// Makes the rows again from what the daemon said last.
-    ///
-    /// While the search holds something typed, only the rows that match it
-    /// are kept, in their order, and a session with them, unfolded. A session
-    /// found by its name keeps all its panes. The highlight goes to the best
-    /// match as what is typed changes, and stays on its row otherwise. A
-    /// session that matches best by its name has it on the pane of it that
-    /// matches best, or else on its first.
     fn rebuild(&mut self) {
         let here_pane = self.here_place().ok();
         let aloud = self.aloud.as_ref().and_then(aloud::Shown::from);
@@ -2840,8 +2023,6 @@ impl Sidebar {
         let own_seat = self.own_seat();
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
-        // Each machine, and the sessions of each lunetad lists, in the order
-        // you moved them to.
         let listed = machines(host);
         let unlisted_machines = listed.left_out;
         let (mut arranged, mut unlisted) = listed.arranged(&self.order);
@@ -2850,10 +2031,6 @@ impl Sidebar {
             sessions.map(|(listed, _)| listed.kept).collect::<Vec<ledger::Session>>()
         };
         let mut running = running_of(&arranged);
-        // What the daemon said last, while it does not answer, can list a
-        // session that has ended since, whose colour another luneta gave up.
-        // A colour kept takes up the order as another luneta left it, which
-        // the rows go in.
         if self.away.is_none() && self.order.colour_sessions(&running) {
             (arranged, unlisted) = machines(host).arranged(&self.order);
             running = running_of(&arranged);
@@ -2876,7 +2053,6 @@ impl Sidebar {
             }
         };
         for Arranged { machine, reached, sessions } in arranged {
-            // The machine luneta's zellij is on, which has its pane.
             let on = machine == self.on;
             let name = match &machine {
                 Machine::Local => self.this.clone(),
@@ -2884,7 +2060,6 @@ impl Sidebar {
             };
             let reached = match reached {
                 Ok(reached) => reached,
-                // A search finds none of its sessions.
                 Err(_) if finder.is_some() => continue,
                 Err(away) => {
                     rows.push(Row::Machine { machine, name, heads: Heads::Away(away) });
@@ -2892,11 +2067,8 @@ impl Sidebar {
                 },
             };
             let machine_folded = self.folds.contains(Fold::Machine(&machine));
-            // A search looks inside a folded machine too.
             let listing_sessions = finder.is_some() || !machine_folded;
             let head = rows.len();
-            // Its header, which takes what its sessions say once they are
-            // made.
             let heads = Heads::Sessions {
                 under: Under::Empty,
                 waiting: 0,
@@ -2912,8 +2084,6 @@ impl Sidebar {
                 reached.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
             let pull_requests = pull_requests(reached.pull_requests);
             counts.sessions += sessions.len();
-            // Each session's colour, which its name sits on, and the gutter of
-            // its panes is drawn in, under whichever session they show.
             let hues: Vec<Color> = (&mut colours).take(sessions.len()).map(hue).collect();
             let placed = placed(&self.order, &sessions);
             let agent = |owner: usize, pane: u32| {
@@ -2933,11 +2103,6 @@ impl Sidebar {
                     folded: folded || machine_folded,
                     panes: under.collect(),
                 });
-                // A pane's agent, or else the command its shell runs, by which
-                // its row is named, and whether its row has the dot. What
-                // finished in the pane luneta's zellij is on is no news: you
-                // see it. A command that ended shows until you have seen it
-                // end.
                 let mut by_pane: Vec<Shows> = Vec::with_capacity(panes.len());
                 for (owner, pane) in &panes {
                     let key = sessions[*owner].0.key(pane.id);
@@ -2990,12 +2155,7 @@ impl Sidebar {
                     .as_ref()
                     .and_then(|finder| finder.session(listed.name.as_str()))
                     .unzip();
-                // A search looks inside a folded session too.
                 let listing = if finder.is_some() || !folded { panes } else { Vec::new() };
-                // The rows of the panes listed, each by its session and its
-                // tab, made once its bracket is known: it joins the panes
-                // listed of a tab next to each other, as a search can leave
-                // some of them out, and a move take one away.
                 let mut shown = Vec::with_capacity(listing.len());
                 let listing = listing.into_iter().zip(by_pane);
                 for ((owner, pane), Shows { marked, ran, unread }) in listing {
@@ -3005,9 +2165,6 @@ impl Sidebar {
                         checkout(&tree, pull_requests.get(cwd))
                     });
                     let command = pane.command.as_deref();
-                    // An agent's pane runs its harness, whatever its terminal
-                    // has in front. It goes by the agent, as the label does,
-                    // and not by the mark: a mark need not be an agent's.
                     let program = agent(owner, pane.id)
                         .and_then(|agent| icons::agent(agent.runs_in()))
                         .or_else(|| command.and_then(icons::program));
@@ -3016,8 +2173,6 @@ impl Sidebar {
                         None => label(agent(owner, pane.id), pane),
                     };
                     let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
-                    // An agent's pane is found by where the agent works, as
-                    // its row and the picker say it.
                     let dir =
                         agent(owner, pane.id).map_or(cwd, |agent| Some(agent_dir(agent, pane)));
                     let tab = &pane.tab_name;
@@ -3074,9 +2229,6 @@ impl Sidebar {
                     dot: dots > 0,
                     busy: busy > 0,
                 });
-                // The pane of the session that matches best, which a session
-                // found by its name hands the highlight on to. With none, its
-                // row hands it on to its first pane.
                 let mut lead: Option<(usize, Fit)> = None;
                 let tabs: Vec<(usize, u32)> = shown.iter().map(|(tab, ..)| *tab).collect();
                 for (((owner, _), row, found), (at, count)) in shown.into_iter().zip(runs(&tabs)) {
@@ -3098,7 +2250,6 @@ impl Sidebar {
             }
             placed_all.push((machine.clone(), headed));
             let listed_any = rows.len() > head + 1;
-            // A search keeps the header of a machine it finds sessions of.
             if finder.is_some() && !listed_any {
                 rows.truncate(head);
                 continue;
@@ -3128,8 +2279,6 @@ impl Sidebar {
         self.finished = finished;
         let here_spot = here_pane.map(|place| Spot::on(&self.on, Place::Pane(place)));
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
-        // A selection, and what the mouse lifted, go with the row they
-        // started on.
         let gone = |spot: Spot| self.row_of(&spot).is_none();
         match &self.moving {
             Moving::Selected(movable)
@@ -3146,7 +2295,6 @@ impl Sidebar {
             },
             _ => {},
         }
-        // The highlight goes past what a delete took away, once it is gone.
         if let Some(closing) = &self.closing {
             let gone = &closing.gone;
             if self.cursor.as_ref() == Some(gone) && self.rows.iter().all(|row| row.spot() != *gone)
@@ -3159,17 +2307,12 @@ impl Sidebar {
         self.settle(best.map(|(at, _)| at), seek);
     }
 
-    /// The row that stands for `spot`: its own, or its session's, once that
-    /// is folded, or its machine's, once that is.
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
         let rows = [Some(spot.clone()), self.heading(spot), Some(Spot::Machine(spot.machine()))];
         let listed = |spot: &Spot| self.rows.iter().any(|row| row.spot() == *spot);
         rows.into_iter().flatten().find(listed)
     }
 
-    /// The session whose row heads that of `spot`: a pane's, the session it
-    /// shows under as the rows were last built, which a move can make another
-    /// than its own; a session's, itself. None for a machine's header.
     fn heads<'a>(&'a self, spot: &'a Spot) -> Option<&'a Listed> {
         let pane = match spot.place()? {
             Place::Session(session) => return Some(session),
@@ -3180,21 +2323,14 @@ impl Sidebar {
         Some(under.map_or(&pane.session, |headed| &headed.session))
     }
 
-    /// The row of the session that `heads` the row of `spot`.
     fn heading(&self, spot: &Spot) -> Option<Spot> {
         Some(Spot::on(&spot.machine(), Place::Session(self.heads(spot)?.clone())))
     }
 
-    /// The index of the row of `spot`, while it has one.
     fn row_of(&self, spot: &Spot) -> Option<usize> {
         self.rows.iter().position(|row| row.spot() == *spot)
     }
 
-    /// Puts the highlight back on a row it stops on: the one it was on, or
-    /// else the one where that was, or else the row that matches the search
-    /// `best`. It goes to that one first while it `seek`s it. A pane gone, or
-    /// folded away, leaves the highlight on its session, and a session folded
-    /// away with its machine, on the machine's header.
     fn settle(&mut self, best: Option<usize>, seek: bool) {
         let held = self.cursor.as_ref().and_then(|spot| self.row_of(&self.row_for(spot)?));
         let at = if seek { best.or(held) } else { held.or(best) };
@@ -3203,9 +2339,6 @@ impl Sidebar {
         self.cursor = stop.map(|index| self.rows[index].spot());
     }
 
-    /// Whether the highlight stops on the row `at`: while a selection of
-    /// machines lasts, a machine's header; while one of sessions does, a
-    /// session's of their machine; and otherwise one that `Row::stops`.
     fn stops(&self, at: usize) -> bool {
         let row = &self.rows[at];
         match &self.moving {
@@ -3224,13 +2357,9 @@ impl Sidebar {
 
     fn cursor_index(&self) -> Option<usize> {
         let spot = self.cursor.as_ref()?;
-        // Each time the rows are built, `settle` puts the highlight on one of
-        // them, and `step` and a click move it only onto one.
         Some(self.row_of(spot).expect("the highlight is on a row"))
     }
 
-    /// Moves the highlight `by` rows it stops on, down or up, and no further
-    /// than the ends. It no longer waits for a delete to take its row away.
     fn step(&mut self, by: isize) {
         self.closing = None;
         let stops: Vec<usize> = (0..self.rows.len()).filter(|at| self.stops(*at)).collect();
@@ -3245,8 +2374,6 @@ impl Sidebar {
         self.cursor = Some(self.rows[stops[next]].spot());
     }
 
-    /// Moves the highlight to the last row it stops on, or the first. It no
-    /// longer waits for a delete to take its row away.
     fn end(&mut self, last: bool) {
         self.closing = None;
         let mut stops = self.rows.iter().filter(|row| row.stops());
@@ -3256,8 +2383,6 @@ impl Sidebar {
         }
     }
 
-    /// Folds the session of the highlighted row the other way, or the machine
-    /// of its header.
     fn toggle(&mut self) {
         let Some(spot) = &self.cursor else {
             return;
@@ -3270,12 +2395,6 @@ impl Sidebar {
         self.fold(!folded);
     }
 
-    /// Folds the session of the highlighted row, or unfolds it, or on a
-    /// machine's header, the machine. A session's row that is folded already
-    /// folds its machine, as `h` goes a level up. The highlight goes to the
-    /// row of what folds. The header of a machine lunetad has nothing of has
-    /// nothing under it to fold, and its fold stays as it was, for when
-    /// lunetad has its sessions.
     fn fold(&mut self, folded: bool) {
         let Some(spot) = self.cursor.clone() else {
             return;
@@ -3302,13 +2421,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// The pane listed after the one luneta's zellij is on, of the machine it
-    /// is on, and from the last back to the first: where `Alt Tab` goes, which
-    /// never takes it to another machine. None where that pane is the only
-    /// one listed. From a folded session, or a pane no row lists, as a
-    /// plugin's or one luneta is not sure its zellij is on, it is the pane
-    /// listed after the session's row, and from a session no row lists, the
-    /// first.
     pub fn next_pane(&self) -> Option<Place> {
         let here = self.here_row.as_ref().and_then(|spot| self.row_of(spot));
         let start = here.or_else(|| {
@@ -3332,20 +2444,10 @@ impl Sidebar {
         (Some(next) != here).then_some(place)
     }
 
-    /// What a key does while the sidebar has the focus, or the left button is
-    /// down on it, pressed at `now`. The left button down on the sidebar takes
-    /// every key, which leaves the notes as they are, and `Esc` lets go of what
-    /// it holds: what it lifted goes back, and a click is no longer one. The
-    /// menu takes every key while it is open. Without it, a character does what
-    /// `Top::of` says, which the legend goes by too, and one it has not is the
-    /// menu's. What a key that waits for the next shows of it shows once
-    /// `PAUSE` passed, or at once from the legend, which you read.
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         self.key_from(key, now, Came::Typed)
     }
 
-    /// What `key` does, pressed at `now`, as `key` says, where what it waits
-    /// for shows as `came` says.
     fn key_from(&mut self, key: &KeyEvent, now: SystemTime, came: Came) -> Asked {
         if self.pressed() {
             if key.code == KeyCode::Esc {
@@ -3363,8 +2465,6 @@ impl Sidebar {
             (Came::Read, _) | (_, Pending::Legend) => now,
             (Came::Typed, _) => now + PAUSE,
         };
-        // `Esc` and `Ctrl c` close a menu, and what a key of it started goes on
-        // wherever the keys went, as it does as they leave it for zellij.
         if menu::closes(key) && self.menu.as_ref().is_some_and(Menu::waits) {
             self.close_menu();
             return Asked::Nothing;
@@ -3424,7 +2524,6 @@ impl Sidebar {
             KeyCode::Left => self.fold(true),
             KeyCode::Right => self.fold(false),
             KeyCode::Enter => return self.go(),
-            // As in vim, it only takes the `g` or the `y` back.
             KeyCode::Esc if pending.shows().is_some() => {},
             KeyCode::Esc => return Asked::Leave,
             KeyCode::Char(menu::YANK_PULL) if matches!(pending, Pending::Yank { .. }) => {
@@ -3445,7 +2544,6 @@ impl Sidebar {
                 Some(Top::Command(Command::Reorder)) => self.select(),
                 Some(Top::Command(Command::MovePane)) => self.pick_pane(),
                 Some(Top::Command(Command::Open)) => return self.browse(),
-                // Without a selection, there is nothing to move.
                 Some(Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
@@ -3460,8 +2558,6 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    /// Whether the bottom, at `now`, still holds back `menu`, as `Holds`
-    /// says.
     fn menu_paused(&self, menu: &Menu, now: SystemTime) -> bool {
         match self.holds {
             Holds::Nothing => false,
@@ -3470,8 +2566,6 @@ impl Sidebar {
         }
     }
 
-    /// How long from `now` until the bottom shows what a key waits for, for
-    /// luneta to draw it then; none while it waits for nothing, or shows it.
     pub fn due(&self, now: SystemTime) -> Option<Duration> {
         let menu = match (self.holds, &self.menu) {
             (Holds::Until(number, shows), Some(menu)) if menu.number() == number => Some(shows),
@@ -3481,10 +2575,6 @@ impl Sidebar {
         shows.duration_since(now).ok()
     }
 
-    /// What a key does while `all`, the list of every key, is open: `j` and
-    /// `k` and the arrows scroll it, and `Esc` and `?` close it, doing nothing
-    /// else. Any other key closes it too, and does what it does without it,
-    /// for which it is None.
     fn all_keys_key(&mut self, mut all: AllKeys, key: &KeyEvent) -> Option<Asked> {
         let by = match key.code {
             KeyCode::Down | KeyCode::Char('j') => 1,
@@ -3497,8 +2587,6 @@ impl Sidebar {
         Some(Asked::Nothing)
     }
 
-    /// The link of the pull request the highlighted row shows the number of;
-    /// or why there is none.
     fn highlighted_link(&self) -> Result<Link, String> {
         let row = self.cursor.as_ref().and_then(|spot| self.row_of(spot));
         let Some(Row::Pane { checkout: Some(Checkout { pull_request: Some(numbered), .. }), .. }) =
@@ -3511,8 +2599,6 @@ impl Sidebar {
         })
     }
 
-    /// `y p`: copies the link of the highlighted row's pull request, at `now`,
-    /// or says why there is none.
     fn yank(&mut self, now: SystemTime) -> Asked {
         match self.highlighted_link() {
             Ok(link) => self.copy(link, now),
@@ -3523,15 +2609,11 @@ impl Sidebar {
         }
     }
 
-    /// Has luneta copy `link`, at `now`, which the notes say, as a copy shows
-    /// nothing on its own.
     fn copy(&mut self, link: Link, now: SystemTime) -> Asked {
         self.copied = Some((link.number(), now));
         Asked::Copy(link)
     }
 
-    /// `o`: has luneta open the highlighted row's pull request in your
-    /// browser, or says why there is none.
     fn browse(&mut self) -> Asked {
         match self.highlighted_link() {
             Ok(link) => Asked::Browse(link),
@@ -3542,21 +2624,12 @@ impl Sidebar {
         }
     }
 
-    /// What a click on the number of a pull request does, at `now`, on
-    /// whichever row: copies its link and nothing else, wherever the keys and
-    /// the highlight are. It drops what the key before waits for, as any
-    /// click does.
     pub fn number_clicked(&mut self, link: Link, now: SystemTime) -> Asked {
         self.notice = None;
         self.pending = Pending::Nothing;
         self.copy(link, now)
     }
 
-    /// What a key does while a selection lasts: `j` and `k` move its end at
-    /// the highlight, `J` and `K` move the sessions, or the machines, it
-    /// holds, and `v` and `Esc` end it, `Esc` doing nothing else, as in vim.
-    /// Any other key ends it too, and does what it does without one, for
-    /// which it is None.
     fn selected_key(&mut self, key: &KeyEvent) -> Option<Asked> {
         match key.code {
             KeyCode::Down => self.step(1),
@@ -3579,11 +2652,6 @@ impl Sidebar {
         Some(Asked::Nothing)
     }
 
-    /// Selects, for `J` and `K` to move, the session of the highlighted row,
-    /// of whichever machine, with the sessions of that machine `j` and `k`
-    /// grow the selection to, each with its panes; or on a machine's header,
-    /// the machine, with the machines `j` and `k` grow it to, each with every
-    /// row under its header.
     fn select(&mut self) {
         let Some(spot) = self.cursor.clone() else {
             return;
@@ -3595,8 +2663,6 @@ impl Sidebar {
         self.moving = Moving::Selected(movable);
     }
 
-    /// Ends the selection, or what `V` picked, the highlight on a row it
-    /// stops on without one.
     fn unselect(&mut self) {
         if let Moving::Selected(_) | Moving::Picked(_) = self.moving {
             self.moving = Moving::Still;
@@ -3604,11 +2670,6 @@ impl Sidebar {
         }
     }
 
-    /// What a key does while `V` picked a pane, or its tab: `J` and `K`, `j`
-    /// and `k` and the arrows, move it a row down or up, as `shift_panes`
-    /// does; `V` takes up its tab, or ends; and `Esc` ends, doing nothing
-    /// else. Any other key ends it too, and does what it does without it, for
-    /// which it is None.
     fn picked_key(&mut self, key: &KeyEvent) -> Option<Asked> {
         match key.code {
             KeyCode::Down => self.shift_panes(1),
@@ -3630,9 +2691,6 @@ impl Sidebar {
         Some(Asked::Nothing)
     }
 
-    /// Picks the pane of the highlighted row, of whichever machine, for `J`
-    /// and `K` to move. A session's row, or a machine's header, picks
-    /// nothing.
     fn pick_pane(&mut self) {
         let Some(spot) = self.cursor.clone() else {
             return;
@@ -3644,8 +2702,6 @@ impl Sidebar {
         self.moving = Moving::Picked(picked);
     }
 
-    /// `V` again: what `V` picked takes up the rest of its tab next to it,
-    /// where it has any, or else ends.
     fn widen(&mut self) {
         let Moving::Picked(picked) = &self.moving else {
             return;
@@ -3659,16 +2715,11 @@ impl Sidebar {
         self.moving = Moving::Picked(tab);
     }
 
-    /// The panes of `machine`, under each of its sessions, as the rows were
-    /// last built.
     fn placed_of(&self, machine: &Machine) -> &[Headed] {
         let placed = self.placed.iter().find(|(it, _)| it == machine);
         placed.map_or(&[], |(_, headed)| headed.as_slice())
     }
 
-    /// Where what `picked` moves is: under which session of its machine, by
-    /// its index among them, and which of the panes there it is, its pane or
-    /// the panes of its tab next to it.
     fn held(&self, picked: &Picked) -> Option<(usize, Range<usize>)> {
         let placed = self.placed_of(&picked.machine);
         let (under, at) = placed.iter().enumerate().find_map(|(under, headed)| {
@@ -3688,7 +2739,6 @@ impl Sidebar {
         Some((under, start..end))
     }
 
-    /// The rows of what `picked` moves, next to each other.
     fn picked_rows(&self, picked: &Picked) -> Option<Range<usize>> {
         let (under, held) = self.held(picked)?;
         let panes = &self.placed_of(&picked.machine)[under].panes[held];
@@ -3699,13 +2749,6 @@ impl Sidebar {
         Some(row(&first.0)?..row(&last.0)? + 1)
     }
 
-    /// Moves what `V` picked `by` rows down, or up, and no further than the
-    /// first pane of its machine, or the last: among the panes of the session
-    /// it shows under, and on past the last of them to the first under the
-    /// next session, or past the first to after the last under the one
-    /// before. It goes past a folded session. It moves among the panes as the
-    /// order is kept now, as `shift` does, and stays picked, for the next
-    /// move.
     fn shift_panes(&mut self, by: isize) {
         self.reorder();
         let Moving::Picked(picked) = &self.moving else {
@@ -3726,10 +2769,6 @@ impl Sidebar {
         }
     }
 
-    /// Moves the panes `held` of those under the session `under` of
-    /// `machine`'s to `gap`, keeps where they show now for every luneta, and
-    /// builds the rows again so. A session left with its own panes alone, in
-    /// the order of their tabs, keeps none, as one never moved.
     fn keep_panes(&mut self, machine: &Machine, under: usize, held: Range<usize>, gap: Gap) {
         let mut placed = self.placed_of(machine).to_vec();
         let taken: Vec<(PanePlace, u32)> = placed[under].panes.drain(held).collect();
@@ -3751,12 +2790,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// Moves what the selection holds `by` places down, or up, and no
-    /// further than the ends, among the rows as the order is kept now: a
-    /// move another luneta made stays, though this one has yet to hear of
-    /// it, or never will, as one whose watcher failed. A session goes no
-    /// further than the first of its machine's, or the last. They stay
-    /// selected, for the next move.
     fn shift(&mut self, by: isize) {
         self.reorder();
         let Some((spans, held)) = self.selected() else {
@@ -3768,8 +2801,6 @@ impl Sidebar {
         }
     }
 
-    /// What the selection moves among, and which of them it holds, while it
-    /// lasts.
     fn selected(&self) -> Option<(Spans, Range<usize>)> {
         let Moving::Selected(anchor) = &self.moving else {
             return None;
@@ -3781,8 +2812,6 @@ impl Sidebar {
         Some((spans, from.min(to)..from.max(to) + 1))
     }
 
-    /// What `movable` moves among: the machines, or the sessions of its
-    /// machine.
     fn spans(&self, movable: &Movable) -> Spans {
         match movable {
             Movable::Machine(_) => Spans::Machines(self.machines_spanned()),
@@ -3792,8 +2821,6 @@ impl Sidebar {
         }
     }
 
-    /// The machines, each with the rows it spans: its header, and every row
-    /// under it, up to the next machine's.
     fn machines_spanned(&self) -> Vec<(Machine, Range<usize>)> {
         let headers = self.rows.iter().enumerate().filter_map(|(at, row)| match row {
             Row::Machine { machine, .. } => Some((at, machine)),
@@ -3805,10 +2832,6 @@ impl Sidebar {
         spanned.map(|((start, machine), end)| ((*machine).clone(), *start..end)).collect()
     }
 
-    /// The sessions of `machine`, each by its name, with the rows it spans:
-    /// its own and its panes', up to the next session's, or the next
-    /// machine's header. Sessions of one name next to each other go as one,
-    /// as the order goes by name, and cannot move one without the other.
     fn sessions(&self, machine: &Machine) -> Vec<(String, Range<usize>)> {
         let spanned = self.machines_spanned().into_iter().find(|(it, _)| it == machine);
         let Some((_, span)) = spanned else {
@@ -3827,8 +2850,6 @@ impl Sidebar {
         spanned.map(|((start, name), end)| ((*name).to_owned(), *start..end)).collect()
     }
 
-    /// Keeps `spans`, the machines or the sessions of one, in their order
-    /// now, for every luneta, and builds the rows again in it.
     fn keep(&mut self, spans: Spans) {
         match spans {
             Spans::Machines(machines) => {
@@ -3843,9 +2864,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// The rows, by their index, in the order they show while `spans`, as
-    /// `landing` has them, go in theirs: those before them, they so, and
-    /// those after.
     fn landed(&self, spans: &[Range<usize>]) -> Vec<usize> {
         let start = spans.iter().map(|span| span.start).min().unwrap_or(0);
         let end = spans.iter().map(|span| span.end).max().unwrap_or(0);
@@ -3853,12 +2871,6 @@ impl Sidebar {
         (0..start).chain(moved).chain(end..self.rows.len()).collect()
     }
 
-    /// Where `lift` lands as things stand: what it moves among, in the order
-    /// they take once the mouse lets go, and the rows the lifted one spans,
-    /// with a session those of its name next to it, which go with it. It
-    /// lands where its row is nearest to the line the mouse holds it on, a
-    /// session among those of its machine alone, and goes back while the
-    /// mouse is off the sidebar.
     fn landing(&self, movable: &Movable, line: u16, over: bool) -> Option<(Spans, Range<usize>)> {
         let at = self.row_of(&movable.spot())?;
         let spans = self.spans(movable);
@@ -3869,14 +2881,8 @@ impl Sidebar {
             return Some((spans, lifted));
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
-        // The line the lifted rows start on: the mouse holds the row it
-        // lifted, under any session of its name it goes with.
         let above = HEADER + lines(lifted.start..at);
         let top = (self.top + usize::from(line)) as isize - above as isize;
-        // The line each place among the others starts on, with the lifted
-        // rows out of them, and the line after the last: from where the
-        // first of them starts, under the header of their machine for
-        // sessions.
         let mut line = lines(0..rows[0].start);
         let mut gaps = Vec::with_capacity(rows.len());
         for (index, span) in rows.iter().enumerate() {
@@ -3891,18 +2897,11 @@ impl Sidebar {
         Some((spans.moved(from..from + 1, to), lifted))
     }
 
-    /// Where the panes the mouse lifted land, with the pointer on the line
-    /// `line` of the sidebar, `over` it or not: at the gap whose line is
-    /// nearest to the one the pointer holds them on, among the rows as they
-    /// lie with them out, and where they are while the pointer is off the
-    /// sidebar.
     fn pane_landing(&self, picked: &Picked, line: u16, over: bool) -> Option<Landing> {
         let (under, held) = self.held(picked)?;
         let rows = self.picked_rows(picked)?;
         let placed = self.placed_of(&picked.machine);
         let spot = |place: Place| self.row_of(&Spot::on(&picked.machine, place));
-        // The row a gap shows after: its session's, or the pane's before it,
-        // of those left there.
         let after = |gap: &Gap| {
             let headed = &placed[gap.under];
             let Some(before) = gap.before.checked_sub(1) else {
@@ -3920,11 +2919,8 @@ impl Sidebar {
             return Some(landing(here, after(&here)?));
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
-        // The line the lifted rows start on: the mouse holds the row it
-        // lifted, under any of its tab it lifted too.
         let above = HEADER + lines(rows.start..self.row_of(&picked.spot())?);
         let top = (self.top + usize::from(line)) as isize - above as isize;
-        // The line they would start on after the row `after`, with them out.
         let starts = |after: usize| {
             let before = lines(0..after + 1);
             let out = if rows.end <= after { lines(rows.clone()) } else { 0 };
@@ -3939,9 +2935,6 @@ impl Sidebar {
         nearest.map(|(gap, after)| landing(gap, after))
     }
 
-    /// What the left button lifts by the row `at`, pressed on its column
-    /// `column`: a machine by its header, a session by its row, and a pane by
-    /// its row, or its tab by the bracket that joins it to the others.
     fn lifting(&self, at: usize, column: u16) -> Option<Lifting> {
         let Row::Pane { machine, session, pane, bracket, .. } = &self.rows[at] else {
             return Movable::of(self.rows[at].spot()).map(Lifting::Moved);
@@ -3952,8 +2945,6 @@ impl Sidebar {
         Some(Lifting::Panes(Picked { machine: machine.clone(), place, whole }))
     }
 
-    /// Opens the menu for the highlighted row, on the group `key` opens, or on
-    /// the first with no key. A key the menu has not opens nothing.
     fn open_menu(&mut self, key: Option<char>) -> Asked {
         let Some(target) = self.target() else {
             return Asked::Nothing;
@@ -3966,13 +2957,10 @@ impl Sidebar {
         self.menu_did(did)
     }
 
-    /// The harness you picked last for the agents the menu starts.
     pub fn agent(&self) -> agents::Harness {
         self.agent.harness()
     }
 
-    /// Keeps `harness` for the agents the menu starts, for every luneta, or
-    /// says why it is this luneta's alone.
     fn keep_agent(&mut self, harness: agents::Harness) {
         if let Err(why) = self.agent.keep(harness) {
             let name = agents::name(harness);
@@ -3980,8 +2968,6 @@ impl Sidebar {
         }
     }
 
-    /// The harness the menu for `target` starts agents in: that of the agent
-    /// in its pane, where one runs, or else the one you picked last.
     fn agent_for(&self, target: &Target) -> agents::Picked {
         match self.harness_in(target) {
             Some(harness) => agents::Picked::ByPane(harness),
@@ -3989,8 +2975,6 @@ impl Sidebar {
         }
     }
 
-    /// The harness of the agent in the pane of `target`, where one runs that
-    /// luneta knows the harness of.
     fn harness_in(&self, target: &Target) -> Option<agents::Harness> {
         let Target::Pane(machine, row) = target else {
             return None;
@@ -4001,7 +2985,6 @@ impl Sidebar {
         seats.get(&(row.session.at(), shown.id)).and_then(|agent| agents::of(agent))
     }
 
-    /// What the menu is for, as it opens on the highlighted row.
     fn target(&self) -> Option<Target> {
         let spot = self.cursor.clone()?;
         self.row_of(&spot)?;
@@ -4014,10 +2997,6 @@ impl Sidebar {
         }
     }
 
-    /// What the menu is for, as it opens on `place`, of `machine`: for a
-    /// pane, the directory it works in, or its agent, as its row says it,
-    /// the branch checked out there, its pull request, and what its shell
-    /// said it ran last. A session has none of them, having no pane.
     fn target_at(&self, machine: &Machine, place: Place) -> Target {
         let (session, pane) = match place {
             Place::Session(session) => return Target::Session(machine.clone(), session),
@@ -4047,16 +3026,11 @@ impl Sidebar {
         Target::Pane(machine.clone(), row)
     }
 
-    /// What the shell in the pane `pane` of `session`, of `machine`, said it
-    /// ran last, as the daemon passed it on.
     fn ran_in(&self, machine: &Machine, session: &Listed, pane: u32) -> Ran {
         let shell = self.pane_of(machine, session, pane).and_then(|shown| shown.shell.as_ref());
         shell.map_or(Ran::Unhooked, ran)
     }
 
-    /// The open menu's row is a pane's whose shell may have ended a
-    /// command, or begun one, since the menu opened, as the daemon says now:
-    /// the menu has what it ran from it.
     fn reran(&mut self) {
         let Some(Target::Pane(machine, row)) = self.menu.as_ref().map(Menu::target) else {
             return;
@@ -4067,12 +3041,6 @@ impl Sidebar {
         }
     }
 
-    /// Opens the menu for the pane luneta's zellij is on, on its first group,
-    /// in the place of one open at the bottom, to float over zellij once the
-    /// keys are its own. None opens while the sidebar does not know which
-    /// pane that is: why, for luneta to say over zellij, and in the log.
-    /// What went wrong before goes from the notes, as it does for any key the
-    /// sidebar takes.
     pub fn float_menu(&mut self) -> Result<(), &'static str> {
         self.notice = None;
         let place = Place::Pane(self.here_place().inspect_err(|why| log::say(why))?);
@@ -4084,16 +3052,6 @@ impl Sidebar {
         Ok(())
     }
 
-    /// Opens the menu for the pull request or the issue `text` is the link
-    /// of, or the `.md` file it is the path of, if it is one, in the place of
-    /// the menu open, over zellij or at the bottom of the sidebar, or else at
-    /// the bottom, for the row highlighted: its keys act on the machine of
-    /// that row, as every key of the menu does, or on another that has a
-    /// link's repository, where that one has none of it. A file is looked for
-    /// once a key is pressed, as only the row's machine can say, and a relative
-    /// path goes from where the row works. Other text does nothing, as a
-    /// paste did before. What is pasted in the box for a machine's
-    /// destination goes in it, a link too.
     pub fn paste(&mut self, text: &str) {
         if self.menu.as_mut().is_some_and(|menu| menu.paste(text)) {
             return;
@@ -4102,15 +3060,11 @@ impl Sidebar {
             Some(menu) => Some(menu.target().clone()),
             None => self.target(),
         };
-        // A directory by no absolute path, as an agent's session file may say,
-        // is none to go from: a relative path says so, once a key is pressed.
         let from = target.as_ref().and_then(Target::cwd);
         let from = from.and_then(|from| Directory::parse(from.to_owned()).ok());
         let Some(work) = Work::parse(text, from) else {
             return;
         };
-        // A link pasted again while what the first paste asked for runs makes
-        // nothing of its own: what runs says where it is in the notes.
         let making = std::iter::once(self.menu.as_ref())
             .chain(self.working.values().map(Some))
             .flatten()
@@ -4132,14 +3086,10 @@ impl Sidebar {
         self.menu = Some(Menu::pull(self.menus, target, work, self.agent.harness()));
     }
 
-    /// The menu, while it floats over zellij.
     pub fn floating(&self) -> Option<&Menu> {
         self.menu.as_ref().filter(|_| self.floats())
     }
 
-    /// What a click on `choice` of the menu numbered `menu` does: what its
-    /// key does, or `Enter` with the cursor on its skill. Nothing where that
-    /// menu closed since it drew, as what zellij answers it goes nowhere then.
     pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
         if self.menu.as_ref().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
@@ -4150,13 +3100,6 @@ impl Sidebar {
         }
     }
 
-    /// What a click on the key `key` of the keys `keyed` at the bottom does:
-    /// what the key does, while those keys show there still, and the sidebar
-    /// has the keys. Nothing once something took their place since they
-    /// drew, or the keys went elsewhere: the search stays open under a box
-    /// over zellij, but its keys are the box's, and the menu floating there
-    /// would take an `Enter` meant for the search. What it waits for shows at
-    /// once.
     pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: SystemTime) -> Asked {
         let there = match self.bottom(now) {
             Bottom::Legend | Bottom::Yank | Bottom::Keys(..) | Bottom::AllKeys(_) => {
@@ -4171,9 +3114,6 @@ impl Sidebar {
         self.key_from(key, now, Came::Read)
     }
 
-    /// What `Enter` does with the cursor of the menu's search box on the
-    /// skill called `name`, as a key would, which drops a `g` pressed before
-    /// it and what went wrong before.
     fn pick(&mut self, name: &Name) -> Asked {
         self.notice = None;
         self.pending = Pending::Nothing;
@@ -4183,21 +3123,16 @@ impl Sidebar {
         self.menu_did(menu.pick(name))
     }
 
-    /// Moves the cursor of the search box of the menu numbered `menu` `by`
-    /// skills, as the wheel does over them, while that menu is open.
     pub fn scroll_menu(&mut self, menu: u64, by: isize) {
         if let Some(open) = self.menu.as_mut().filter(|open| open.number() == menu) {
             open.scroll(by);
         }
     }
 
-    /// Whether the menu floats over zellij, rather than standing at the
-    /// bottom of the sidebar: it does while the keys are its own there.
     fn floats(&self) -> bool {
         matches!(self.keys, Keys::Menu { .. })
     }
 
-    /// What the daemon last said of `machine`, where it said anything of it.
     fn seen(&self, machine: &Machine) -> Option<Seen<'_>> {
         let machines = machines(self.host.as_ref()?);
         match machine {
@@ -4208,25 +3143,16 @@ impl Sidebar {
         }
     }
 
-    /// The pane `id` of the session `listed`, of `machine`, as the daemon
-    /// last said.
     fn pane_of(&self, machine: &Machine, listed: &Listed, id: u32) -> Option<&Pane> {
         let sessions = self.seen(machine)?.sessions;
         let session = sessions.iter().find(|it| Listed::of(it).as_ref() == Some(listed))?;
         session.panes.iter().flat_map(|panes| &panes.panes).find(|pane| pane.id == id)
     }
 
-    /// Keeps the menu a key left open, if any, does what the key left the
-    /// sidebar to do, and asks luneta for what that takes.
     fn menu_did(&mut self, did: Did) -> Asked {
         self.menu_did_after(Held::Open, did)
     }
 
-    /// As `menu_did` does, for a key of a menu `held` says is still open, or
-    /// else was closed while what its key started went on: what it opened
-    /// opens where it would have, but it takes luneta's client nowhere, as you
-    /// went somewhere else as it ran. One closed stays kept while luneta waits
-    /// on an answer for it, and the notes say what it would have shown else.
     fn menu_did_after(&mut self, held: Held, did: Did) -> Asked {
         let (menu, wants) = match did {
             Did::Stays(menu, wants) => (menu, wants),
@@ -4249,9 +3175,6 @@ impl Sidebar {
                     },
                     Done::Own(starts) => Asked::StartOwn { starts },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
-                    // You went to work elsewhere as it ran: the notes say
-                    // where it is, and it takes you nowhere from where you
-                    // are, which would cut what you type.
                     Done::Go(_, place) => {
                         let said = Self::went_said(&place);
                         self.say(said);
@@ -4283,8 +3206,6 @@ impl Sidebar {
         asked
     }
 
-    /// What luneta is asked for what the menu numbered `number`, of `on`,
-    /// wants, held as `held` says.
     fn menu_wants(&mut self, held: Held, number: u64, on: Machine, wants: Wants) -> Asked {
         match wants {
             Wants::Nothing => Asked::Nothing,
@@ -4301,17 +3222,12 @@ impl Sidebar {
                 let open = Open::Pane { session: session.name, beside, cwd, command };
                 Asked::Open { menu: number, on, open }
             },
-            // A tab needs a client of its session to make room for it. The
-            // session luneta's zellij is in has one, and another opens it once
-            // luneta's zellij is there, on that session's machine: its last
-            // client may have left since lunetad listed them.
             Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
                 let place = Place::Pane(PanePlace { session, pane });
                 let session = place.listed().name().clone();
                 let tab = Tab { cwd, name, command };
                 let opened = Open::Tab { session: session.clone(), tab, alone_since: None };
                 let here = self.going().is_none() && self.on == on;
-                // An own session's server opens a tab with no client there.
                 let opens_now = if place.listed().own() {
                     true
                 } else {
@@ -4322,9 +3238,6 @@ impl Sidebar {
                 } else if held == Held::Open {
                     Asked::OpenThere { menu: number, on, place, open: opened }
                 } else {
-                    // The tab opens there only once luneta's zellij is, which
-                    // would take it from what you went on to: the notes say
-                    // what to press to have it.
                     self.say(Self::busy_said(&session));
                     Asked::Nothing
                 }
@@ -4352,9 +3265,6 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            // A session luneta makes is one it takes zellij's client to, which
-            // a menu the keys left is not to do from what you went on to: the
-            // notes say what to press to have it, as the worktree is made.
             Wants::Make { session, cwd, tab_cwd, name, command } if held == Held::Open => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
             },
@@ -4378,8 +3288,6 @@ impl Sidebar {
         }
     }
 
-    /// The menu planned what its delete key deletes so: what it asks of
-    /// luneta.
     fn planned(&mut self, plan: Result<Plan, String>) -> Asked {
         let Some(menu) = self.menu.take() else {
             return Asked::Nothing;
@@ -4387,8 +3295,6 @@ impl Sidebar {
         self.menu_did(menu.planned(plan))
     }
 
-    /// `d m` of the menu numbered `menu` heard what it would delete, as `plan`
-    /// says, or why it did not: the menu goes on, while it waits on it.
     pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
         let Some((waiting, held)) = self.take_waited(menu, Menu::sweeping) else {
             return Asked::Nothing;
@@ -4399,17 +3305,11 @@ impl Sidebar {
         self.menu_did_after(held, waiting.swept(plan))
     }
 
-    /// `d m` of the menu numbered `menu` heard what came of what it was told to
-    /// delete, as `pruned` says, or why it did not hear. Where what would go has
-    /// changed, nothing went, and it lists that again, while it waits on it. Else
-    /// the menu closes, while it waits on it, and a note says what stays.
     pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
         let waiting = self.take_waited(menu, Menu::pruning);
         match pruned {
             Ok(prunes::Pruned::Changed(plan)) => {
                 log_unasked(&plan);
-                // A menu that closed while it waited is no longer what you are
-                // on: the notes say nothing went, and why.
                 if let Some((waiting, Held::Open)) = waiting {
                     return self.menu_did_after(Held::Open, waiting.changed(plan));
                 }
@@ -4425,9 +3325,6 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    /// luneta found where the key of the menu numbered `menu`, for a pull
-    /// request, an issue or a file, goes, as `found` says, or why it found
-    /// nothing: the menu goes on, while it waits on it.
     pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
         let Some((waiting, held)) = self.take_waited(menu, Menu::pulling) else {
             return Asked::Nothing;
@@ -4438,9 +3335,6 @@ impl Sidebar {
         self.menu_did_after(held, waiting.pulled(found))
     }
 
-    /// luneta kept what the pane of the menu numbered `menu` printed, as
-    /// `printed` says, or why it kept nothing: the menu goes on, while it
-    /// waits on it.
     pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
         let Some((waiting, held)) = self.take_waited(menu, Menu::reading) else {
             return Asked::Nothing;
@@ -4448,9 +3342,6 @@ impl Sidebar {
         self.menu_did_after(held, waiting.printed(printed))
     }
 
-    /// luneta kept the logs of the checks that failed on the pull request of
-    /// the menu numbered `menu`, as `checks` says, or why it kept none: the
-    /// menu goes on, while it waits on them.
     pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
         let Some((waiting, held)) = self.take_waited(menu, Menu::fetching) else {
             return Asked::Nothing;
@@ -4458,15 +3349,6 @@ impl Sidebar {
         self.menu_did_after(held, waiting.checked(checks))
     }
 
-    /// Every pane of `on` the daemon says a directory of, in the order of the
-    /// rows, for luneta to find where a key of the menu for a pull request
-    /// goes: where each works, as its row says, the pull request of the
-    /// branch checked out there, by its page, and whether luneta's zellij is
-    /// in its session. A daemon older than the page says none of one. Of
-    /// this machine, none while lunetad has said nothing; of another, why
-    /// luneta knows none: lunetad does not reach it, as it last said, and a
-    /// key found among none would make a session for the link there, which
-    /// one of its sessions may work in.
     fn worked(&self, on: &Machine) -> Result<Vec<Worked>, String> {
         let Some(seen) = self.seen(on) else {
             return match on {
@@ -4480,7 +3362,6 @@ impl Sidebar {
         let agents = seated(seen.agents, seen.sessions);
         let pulls = pull_requests(seen.pull_requests);
         let (mut sessions, _) = oldest_first(seen.sessions);
-        // In the order you moved them to, as their rows go.
         self.order.sessions(on, &mut sessions, |(listed, _)| listed.name.as_str());
         let mut worked = Vec::new();
         for (listed, session) in sessions {
@@ -4504,10 +3385,6 @@ impl Sidebar {
         Ok(worked)
     }
 
-    /// Each machine other than `on`, in the order of the rows, with what
-    /// `worked` says of it, for a key of the menu for a link where `on` has
-    /// none of its repository: where it works, or why luneta knows none of
-    /// its panes.
     fn others(&self, on: &Machine) -> Others {
         let Some(host) = &self.host else {
             return Vec::new();
@@ -4523,11 +3400,6 @@ impl Sidebar {
             .collect()
     }
 
-    /// What deleting what `deletes` deletes of `listed`, of the machine
-    /// `on`, does, as the sidebar knows that machine now: for the menu, and
-    /// for the picker. Nothing goes of another machine lunetad last said it
-    /// does not reach, whether or not lunetad answers now: luneta knows none
-    /// of its sessions, nor which one to leave for first.
     pub fn plan(&self, on: &Machine, listed: &Listed, deletes: Deletes) -> Result<Plan, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
@@ -4535,8 +3407,6 @@ impl Sidebar {
         close::plan(&self.subject(on, listed, deletes))
     }
 
-    /// What the menu says of a key that acts on `on`, another machine, while
-    /// lunetad does not reach it: none where it does, or `on` is this one.
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
         match on {
             Machine::Remote(destination) if self.seen(on).is_none() => {
@@ -4546,19 +3416,12 @@ impl Sidebar {
         }
     }
 
-    /// What the delete is for, as the sidebar knows it: `listed`, of the
-    /// machine `on`, where luneta's zellij is, and what it `deletes`.
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
         let session = listed.name().as_str();
         let seat = match (self.own_seat(), self.going(), self.here()) {
-            // In a session of another machine's, which this one's go on
-            // without.
             (_, None, _) if self.on != *on => Seat::Elsewhere,
-            // An own client is where its server says.
             (Some(seat), ..) if listed.own_key() == Some(seat.session()) => Seat::In,
             (Some(_), ..) => Seat::Elsewhere,
-            // zellij's is in no own session, whose name a zellij session can
-            // have too.
             _ if listed.own() => Seat::Elsewhere,
             (None, None, here @ Some(_)) if listed.is_here(here) => Seat::In,
             (None, None, Some(_)) => Seat::Elsewhere,
@@ -4567,8 +3430,6 @@ impl Sidebar {
         let mut agents = Err(Untold::Away);
         let mut refuge: Option<Listed> = None;
         if let Some(seen) = self.seen(on) {
-            // What lunetad said last of the agents may be out of date while it
-            // does not answer: one may have gone to work, or started since.
             if self.away.is_none() {
                 agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread| {
                     let seated = seated(seen.agents, seen.sessions);
@@ -4579,10 +3440,6 @@ impl Sidebar {
                     doing.chain(close::unread_in(&unread, session)).collect()
                 });
             }
-            // The newest of the machine's other sessions, which the picker
-            // lists first: of either kind on this one, and of zellij's on
-            // another, as luneta goes to no own session there. zellij goes to
-            // a session by its name, so none of zellij's of this one's.
             let (sessions, _) = oldest_first(seen.sessions);
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
             let local = *on == Machine::Local;
@@ -4596,16 +3453,6 @@ impl Sidebar {
         Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
 
-    /// Asks for a brief of what the menu's row `briefed` it on: every
-    /// session of every machine, in the rows' order, or a machine's, or a
-    /// session, or the agent in a pane. An agent is told of as its row shows
-    /// it, a folded session's or machine's too, by the name, the status and
-    /// the branch on its row, and by its machine, whose daemon reads its
-    /// transcript. A machine lunetad does not reach now is told of as one
-    /// whose sessions are unknown. With no agent there, or none whose
-    /// transcript luneta can read, or no word of its machine, as of one it
-    /// does not reach, or no longer watches, the sidebar says so where the
-    /// menu was.
     fn brief(&mut self, briefed: Briefed) -> Asked {
         let Some(host) = &self.host else {
             return Asked::Nothing;
@@ -4619,7 +3466,6 @@ impl Sidebar {
                 Err(away) => unknown.push((destination, away.said().0)),
             }
         }
-        // In the order of their rows, as you moved them.
         self.order.machines(&mut reached, |(machine, _)| machine);
         let mut every: Vec<(Machine, SessionName)> = Vec::new();
         let mut notes = Vec::new();
@@ -4685,8 +3531,6 @@ impl Sidebar {
         }
     }
 
-    /// Has zellij on `on` do what a delete key planned, and the highlight go
-    /// past the rows it takes away, once they are gone.
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
         let takes_place = |place: &Place| match (&act, place.pane()) {
             (Act::Pane { session, pane, .. }, Some(at)) => {
@@ -4716,13 +3560,6 @@ impl Sidebar {
         Asked::Delete { on, act }
     }
 
-    /// zellij opened the terminal `opened` for the menu numbered `menu`, or
-    /// says why it did not. luneta takes its client there while the menu is
-    /// still what you are on: the menu over zellij still waits on it, or the
-    /// menu closed, and what a key started went on, which opens what it opens
-    /// where it would have, but takes luneta's client nowhere from what you
-    /// went on to. A session zellij made for it is the one the daemon lists by its name, as
-    /// it does by the time zellij opens a tab of it.
     pub fn opened(&mut self, menu: u64, opened: Result<u32, String>) -> Asked {
         let Some((waiting, held, opening)) = self.take_seen(menu, Menu::opening) else {
             return Asked::Nothing;
@@ -4764,10 +3601,6 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    /// What came of zellij turning the tab of the pane `pane` of the menu
-    /// numbered `menu` into panes of another: luneta goes to the pane, once all
-    /// moved. Once some did, the menu says how many went, not that none did,
-    /// and luneta stays where it is, as the pane may have stayed too.
     pub fn turned_into_panes(
         &mut self,
         menu: u64,
@@ -4786,17 +3619,10 @@ impl Sidebar {
         }
     }
 
-    /// Where the sidebar holds the menu numbered `menu`, while it still waits
-    /// for zellij to open what a key asked for, or to turn it: one the keys
-    /// left behind still does, which opens it where it would have, and takes
-    /// luneta's client nowhere.
     pub fn waits_on(&self, menu: u64) -> Option<Held> {
         self.holds(menu, |it| it.opening().is_some())
     }
 
-    /// zellij said which tabs the tab of the pane of the menu numbered `menu`
-    /// can turn into, or why it could not: the menu goes on, while it waits
-    /// on it.
     pub fn tabs(&mut self, menu: u64, tabs: Result<Vec<OtherTab>, String>) -> Asked {
         let Some((waiting, held)) = self.take_waited(menu, Menu::listing) else {
             return Asked::Nothing;
@@ -4804,9 +3630,6 @@ impl Sidebar {
         self.menu_did_after(held, waiting.tabs(tabs))
     }
 
-    /// zellij said what closing the pane of the menu numbered `menu` closes,
-    /// or why it could not: the menu plans its delete key by it, while it
-    /// waits on it.
     pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
         let waiting = self.menu.as_ref().filter(|it| it.number() == menu);
         let Some(((session, pane), on)) =
@@ -4822,19 +3645,12 @@ impl Sidebar {
         self.planned(plan)
     }
 
-    /// The finder found `skills` for the menu numbered `menu`, or says why it
-    /// found none, for its search box.
     pub fn found(&mut self, menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String>) {
         if let Some(open) = self.menu.as_mut().filter(|it| it.number() == menu) {
             open.found(agent, skills);
         }
     }
 
-    /// Marks the highlighted pane read at `now`, as going there would, while
-    /// its row has the dot, whatever gave it the dot. Otherwise marks it
-    /// unread, so that its row has the dot until you go there again: a visit
-    /// any luneta is on already started before now, and the next starts
-    /// after.
     fn toggle_unread(&mut self, now: SystemTime) {
         let Some(spot) = &self.cursor else {
             return;
@@ -4853,9 +3669,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// What a key does while the search is open, with `term` typed in it:
-    /// every character types, `j` and `h` too. `Esc` closes it, and so does
-    /// `Backspace` once there is nothing left to take back, as in less and vim.
     fn search_key(&mut self, key: &KeyEvent, mut term: String) -> Asked {
         match key.code {
             KeyCode::Down => self.step(1),
@@ -4878,7 +3691,6 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    /// What is typed in the search, while it is open.
     fn search(&self) -> Option<&str> {
         self.search.as_ref().map(|search| match search {
             Search::Empty => "",
@@ -4886,9 +3698,6 @@ impl Sidebar {
         })
     }
 
-    /// Opens the search with `term` in it, or puts `term` in the open one.
-    /// The highlight goes to the row that matches it best. An empty `term`
-    /// narrows nothing.
     fn find(&mut self, term: String) {
         let search =
             if term.is_empty() { Search::Empty } else { Search::Typed { term, seek: true } };
@@ -4896,18 +3705,12 @@ impl Sidebar {
         self.rebuild();
     }
 
-    /// Closes the search, and brings back every row, the highlight on the row
-    /// it was on.
     fn close_search(&mut self) {
         if self.search.take().is_some() {
             self.rebuild();
         }
     }
 
-    /// Goes to the highlighted row, on this machine or another. Going
-    /// anywhere closes the search, so that the sidebar you come back to shows
-    /// every row. A machine's header is no place to go, and folds the other
-    /// way.
     fn go(&mut self) -> Asked {
         let Some(spot) = self.cursor.clone() else {
             return Asked::Nothing;
@@ -4925,20 +3728,7 @@ impl Sidebar {
         }
     }
 
-    /// What the mouse does over the sidebar, drawn in `area`. A click, the
-    /// left button let go on the line it went down on, on a pane goes there,
-    /// and on a session's `▾` or `▸` folds it. A session with no panes under
-    /// it, folded or not, goes to the session. A click on the notes goes
-    /// nowhere, as the rows under them are not on screen. A click that goes
-    /// nowhere takes the focus, as any other button does. The left button
-    /// lifts the session whose row it went down on, or the machine whose
-    /// header, once the mouse moves a line, and lets go of it where it shows;
-    /// anywhere else, or moving along the line first, it sweeps over the text,
-    /// which it copies as it lets go; and the wheel scrolls.
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
-        // A click or the wheel drops a `g` or a `y` pressed before it, as a key
-        // does.
-        // The pointer moving does not: luneta hears every move.
         if matches!(
             mouse.kind,
             MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
@@ -4967,9 +3757,6 @@ impl Sidebar {
             MouseEventKind::Down(_) => Asked::Take,
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
             MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area),
-            // The button let go where luneta did not hear it, as outside its
-            // window: what it lifted goes back, and what it swept is not
-            // copied. A selection is the keys'.
             MouseEventKind::Moved => {
                 self.let_go();
                 Asked::Nothing
@@ -4978,14 +3765,6 @@ impl Sidebar {
         }
     }
 
-    /// The mouse moves with the left button down: what it lifted goes with
-    /// it, and a session pressed on its row, or a machine on its header, is
-    /// lifted once the mouse moves a line, and takes the focus, for `Esc` to
-    /// put it back. What is typed in the search lifts none: it leaves out of
-    /// sight the places it could take. What lifts nothing sweeps, once the
-    /// mouse is past the cells around where it went down: a hand that clicks
-    /// moves a little, as desktops allow it a few pixels, and that is a click
-    /// all the same.
     fn drag(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let line = mouse.row.saturating_sub(area.y);
         let over = (area.left()..area.right()).contains(&mouse.column);
@@ -5017,12 +3796,6 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    /// The left button lets go: a press that is on the line it went down on
-    /// is a click there, and what it lifted lands where it shows, the
-    /// highlight on it, among the rows as the order is kept now, as `shift`
-    /// moves them. What it swept is copied, as it shows on the last frame, and
-    /// shows on; over nothing but blanks nothing is copied, and nothing shows on
-    /// to say that it was.
     fn release(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
         match std::mem::take(&mut self.moving) {
@@ -5060,7 +3833,6 @@ impl Sidebar {
                 self.moving = Moving::Swept(sweep, self.laid.clone());
                 Asked::CopyText(text)
             },
-            // A selection is the keys', and no press of the sidebar's.
             kept @ (Moving::Selected(_) | Moving::Picked(_) | Moving::Swept(..)) => {
                 self.moving = kept;
                 Asked::Nothing
@@ -5069,18 +3841,12 @@ impl Sidebar {
         }
     }
 
-    /// A click at `at`, on luneta's terminal. One on a machine's header folds
-    /// it the other way, wherever on the line it is, but while a search is
-    /// typed.
     fn click(&mut self, at: Position, area: Rect) -> Asked {
         let Some(index) = self.line_of(at.y, area).and_then(|line| self.row_at(line)) else {
             return Asked::Take;
         };
         let row = &self.rows[index];
         let spot = row.spot();
-        // What is typed shows the rows it finds whatever the folds, so there
-        // a fold would show only once the search closes. An empty search
-        // keeps them.
         let typed = matches!(self.search, Some(Search::Typed { .. }));
         if matches!(row, Row::Machine { .. }) {
             if !typed {
@@ -5090,14 +3856,12 @@ impl Sidebar {
             return Asked::Take;
         }
         if matches!(row, Row::Session { .. }) {
-            // There the triangle is the name's.
             let on_triangle = at.x.saturating_sub(area.x) <= 2;
             if on_triangle && !typed {
                 self.cursor = Some(spot);
                 self.toggle();
                 return Asked::Take;
             }
-            // The name of a session that lists its panes is no place to go.
             if !row.stops() {
                 return Asked::Take;
             }
@@ -5109,48 +3873,32 @@ impl Sidebar {
         }
     }
 
-    /// The line of all the rows that the line `y` of luneta's terminal shows
-    /// of them, with the sidebar in `area`: none on the title or the rule
-    /// along the top, nor on the notes at the bottom.
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
         let line = usize::from(y.saturating_sub(area.y));
         let shown = line.checked_sub(HEADER).filter(|line| *line < self.room)?;
         Some(self.top + shown)
     }
 
-    /// Whether the left button is down on the sidebar, which has what the
-    /// mouse does until it lets go, wherever the mouse goes.
     pub fn pressed(&self) -> bool {
         matches!(self.moving, Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_))
     }
 
-    /// Drops what a sweep left showing, as the next click does, wherever that
-    /// is.
     pub fn unsweep(&mut self) {
         if let Moving::Swept(..) = self.moving {
             self.moving = Moving::Still;
         }
     }
 
-    /// Lets go of what the left button holds on the sidebar, as a release it
-    /// never hears: what it lifted goes back, the press is no click, and what
-    /// it swept is not copied. A selection is the keys', and stays.
     pub fn let_go(&mut self) {
         if self.pressed() {
             self.moving = Moving::Still;
         }
     }
 
-    /// Whether the rows scroll under what the mouse lifted, as `hold` scrolls
-    /// them.
     pub fn scrolling(&self) -> bool {
         self.pull() != 0
     }
 
-    /// Which way the rows scroll under what the mouse lifted, as it holds it
-    /// on their first line, or above, or on their last, or below: up while
-    /// there are lines above the first, and down while there are below the
-    /// last.
     fn pull(&self) -> isize {
         let Moving::Lifted(lift) = &self.moving else {
             return 0;
@@ -5164,8 +3912,6 @@ impl Sidebar {
         isize::from(down) - isize::from(up)
     }
 
-    /// Scrolls the rows a line under what the mouse lifted, as it holds it on
-    /// their first line or their last, at `at`, once each `SCROLL`.
     fn hold(&mut self, at: Instant) {
         let by = self.pull();
         let Moving::Lifted(lift) = &mut self.moving else {
@@ -5182,12 +3928,10 @@ impl Sidebar {
         self.top = self.top.saturating_add_signed(by);
     }
 
-    /// How many lines all the rows take.
     fn lines(&self) -> usize {
         self.rows.iter().map(Row::height).sum()
     }
 
-    /// The row on `line` of all the rows, if one is.
     fn row_at(&self, line: usize) -> Option<usize> {
         let mut start = 0;
         for (at, row) in self.rows.iter().enumerate() {
@@ -5200,7 +3944,6 @@ impl Sidebar {
         None
     }
 
-    /// Where the highlight is, and which of its two it is.
     fn highlight(&self) -> Highlight {
         if self.keys.held() {
             return Highlight::Lit(self.cursor_index());
@@ -5209,7 +3952,6 @@ impl Sidebar {
         row.map_or(Highlight::Off, Highlight::Resting)
     }
 
-    /// Scrolls so that the row `at` shows on `room` lines.
     fn reveal(&mut self, at: usize, room: usize) {
         let start: usize = self.rows[..at].iter().map(Row::height).sum();
         let end = start + self.rows[at].height();
@@ -5218,23 +3960,12 @@ impl Sidebar {
         } else if end > self.top + room {
             self.top = end.saturating_sub(room);
         }
-        // The row shows whole, where it fits.
         if end - start <= room {
             assert!(self.top <= start);
             assert!(end <= self.top + room);
         }
     }
 
-    /// Draws the sidebar into `area`, the highlight on its row: where the keys
-    /// took it while the sidebar has the focus, over the rows of each session
-    /// or machine a selection holds, and on the pane luneta's zellij is on
-    /// while it does not, softer, which the view scrolls to show as the pane
-    /// changes. What the mouse lifted has it, where it lands, the others
-    /// making room for it. Its last column is the edge, drawn as the title's
-    /// rule is.
-    /// What the mouse swept shows reversed over it all.
-    /// Says the spots on the menu at its bottom, or on the legend, and on the
-    /// numbers of the pull requests on its rows.
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) -> Drawn {
         self.drawing(now);
         let width = usize::from(area.width.saturating_sub(1));
@@ -5265,7 +3996,6 @@ impl Sidebar {
         let lifted = landing.is_some() || panes_landing.is_some();
         match highlight {
             Highlight::Lit(at) => {
-                // The mouse scrolls the rows under what it lifted.
                 if let Some(at) = at
                     && !lifted
                 {
@@ -5309,10 +4039,7 @@ impl Sidebar {
             (None, None) => (0..self.rows.len()).collect::<Vec<_>>(),
         };
         let mut drawn: Vec<Line<'static>> = Vec::new();
-        // Where each number is, by its line among all those of the rows. None
-        // takes a click under what the mouse lifted.
         let mut numbers = Vec::new();
-        // And where each cut's `…` is, by the same.
         let mut cuts = Vec::new();
         let mut rows = Vec::with_capacity(order.len());
         for at in order {
@@ -5358,8 +4085,6 @@ impl Sidebar {
                 cut_spots.add(HEADER + line - self.top, column..column + 1, took);
             }
         }
-        // The rows and the notes go short of the edge, the notes along the
-        // bottom.
         let inside = inside(area);
         if matches!(&self.moving, Moving::Swept(_, under) if *under != laid) {
             self.moving = Moving::Still;
@@ -5376,13 +4101,6 @@ impl Sidebar {
         }
     }
 
-    /// Draws the sidebar collapsed into `area`: a rule along the top, and
-    /// under it the counts of `tallies` that are not 0, one to a line, each cut
-    /// to the room it has, and a pause of what is read aloud, which you cannot
-    /// hear, as the icon of its button. Its last column is the edge, as the
-    /// sidebar's is. The rule is in `ERROR` while the daemon does not answer, or
-    /// `NAME` while an image is on its way, as the note that says so is, which
-    /// the strip has no room for.
     pub fn draw_collapsed(&mut self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
         self.drawing(now);
         self.unsweep();
@@ -5409,8 +4127,6 @@ impl Sidebar {
         put(buffer, area, &lines, self.framing());
     }
 
-    /// Builds the rows again, as the sidebar is drawn at `now`, where a
-    /// command has run long enough by then to show.
     fn drawing(&mut self, now: SystemTime) {
         self.drawn = Some(now);
         if self.due.is_some_and(|due| due <= now) {
@@ -5418,14 +4134,10 @@ impl Sidebar {
         }
     }
 
-    /// The top of the sidebar, over the rows: its title, its rule, and a
-    /// blank line.
     fn top(&self, width: usize, frame: usize) -> [Line<'static>; HEADER] {
         [self.title(width), self.header(width, frame), Line::default()]
     }
 
-    /// How the title's rule and the edge are drawn: in `ACCENT` while the
-    /// sidebar has the keys, and dim while zellij or a box over it has them.
     fn framing(&self) -> Style {
         match self.keys {
             Keys::Sidebar => Style::new().fg(ACCENT),
@@ -5435,8 +4147,6 @@ impl Sidebar {
         }
     }
 
-    /// The first line: `menu::TITLE` on a rule out to the edge, drawn as
-    /// `framing` says, the word bold while the sidebar has the keys.
     fn title(&self, width: usize) -> Line<'static> {
         let rule = self.framing();
         let name =
@@ -5450,9 +4160,6 @@ impl Sidebar {
         ])
     }
 
-    /// The rule under the title: how many sessions the rows list, how many
-    /// agents on them wait for you, how many panes have the dot, and how many
-    /// agents are at work, and how many are in a shell.
     fn header(&self, width: usize, frame: usize) -> Line<'static> {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Counts { sessions, waiting, .. } = self.counts;
@@ -5487,15 +4194,6 @@ impl Sidebar {
         Line::from(spans)
     }
 
-    /// What goes at the bottom of a sidebar `height` tall: why the daemon
-    /// does not answer, the sessions it lists that the rows leave out, the
-    /// session files of Claude Code's it cannot read, what went wrong last,
-    /// which pull request's link was copied, and the menu while it is open, or
-    /// else the search while that is, or else the legend while `?` opened it.
-    /// The menu, the search and the legend leave the rows a line. And what has
-    /// the mouse there, the menu or the keys of the search or the legend, with
-    /// the spots on it by their line among the notes, and the buttons of what
-    /// is being read aloud by theirs. A spinner on the menu shows `frame`.
     fn notes(
         &self,
         width: usize,
@@ -5571,9 +4269,6 @@ impl Sidebar {
             let going = format!("Going to {session}; this session ends once you are there");
             notes.say(&going, width, Style::new().fg(NAME));
         }
-        // What a key of a menu started goes on after the keys left it, and
-        // says so here until it is done, after a spinner that turns, as the
-        // menu said it while it had the keys.
         for working in self.working.values() {
             if let Some(doing) = working.doing() {
                 notes.lines.extend(menu::waiting(&doing, width, Style::new().fg(NAME), frame));
@@ -5619,13 +4314,6 @@ impl Sidebar {
         (notes, spotted, buttons)
     }
 
-    /// The search at the bottom, in at most `room` lines `width` wide, as a
-    /// group of the menu stands there: a rule that names it, and once
-    /// something is typed, counts the panes it finds of every pane; what is
-    /// typed; and the keys it takes, a spot on each that presses it, while the
-    /// sidebar has the keys: under a box over zellij they are the box's, and
-    /// the search shows none, as the legend shows none there. Short of room,
-    /// it leaves out the keys, and then the rule.
     fn searching(
         &self,
         search: &Search,
@@ -5633,8 +4321,6 @@ impl Sidebar {
         room: usize,
     ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
         let (term, counted) = match search {
-            // Nothing typed narrows nothing: a folded session's panes stay out
-            // of the rows, uncounted.
             Search::Empty => ("", String::new()),
             Search::Typed { term, .. } => {
                 let found = self.rows.iter().filter(|row| matches!(row, Row::Pane { .. }));
@@ -5655,9 +4341,6 @@ impl Sidebar {
         (lines, spots.down(at))
     }
 
-    /// Why lunetad does not reach the machine of the header the keys took the
-    /// highlight to, while they are the sidebar's, as the header says it in a
-    /// word.
     fn unreached(&self) -> Option<String> {
         if self.keys != Keys::Sidebar {
             return None;
@@ -5670,13 +4353,6 @@ impl Sidebar {
         }
     }
 
-    /// What the sidebar shows under its rows at `now`: the menu while it is
-    /// open there, or else the search while that is, or else, while the
-    /// sidebar has the keys, the legend or the list of every key while `?`
-    /// opened it, or what `g` or `y` waits for while it does, or the keys of a
-    /// selection or a move while it lasts, or else nothing. A menu a group's
-    /// key opened, and what `g` and `y` wait for, show from when `Holds` and
-    /// `Pending` say, and what showed before the key until then.
     fn bottom(&self, now: SystemTime) -> Bottom<'_> {
         if let Some(menu) = self.menu.as_ref().filter(|_| !self.floats()) {
             if self.menu_paused(menu, now) { Bottom::Nothing } else { Bottom::Menu(menu) }
@@ -5708,25 +4384,16 @@ impl Sidebar {
     }
 }
 
-/// What the sidebar shows under its rows, at the bottom of its notes.
 enum Bottom<'a> {
     Menu(&'a Menu),
-    /// The search, as it stands.
     Search(&'a Search),
     Legend,
-    /// What `y` waits for, in the legend's place.
     Yank,
-    /// What the keys do, under a rule so named, in the legend's place: what
-    /// `g` waits for, or the keys of a selection or a move.
     Keys(&'static str, &'static [(Label, &'static str)]),
-    /// The list of every key, in the legend's place.
     AllKeys(&'a AllKeys),
     Nothing,
 }
 
-/// The counts the sidebar keeps collapsed, each by the glyph of what it
-/// counts, which the spinner shows at `frame`, and its style: how many panes
-/// have the dot, and how many agents are at work, and how many are in a shell.
 fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     let dot = dot();
     [
@@ -5736,20 +4403,14 @@ fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     ]
 }
 
-/// The column of the edge of a sidebar drawn into `area`, its last, where it
-/// has any: where it is drawn, and where a press takes it to drag.
 pub fn edge(area: Rect) -> Option<u16> {
     area.width.checked_sub(1).map(|last| area.x + last)
 }
 
-/// A sidebar's `area` short of its edge, where its rows and notes go.
 fn inside(area: Rect) -> Rect {
     Rect { width: area.width.saturating_sub(1), ..area }
 }
 
-/// Puts `lines` into `area` of `buffer`, one to each of its lines, with what
-/// was there before gone, and the edge down its last column in `framing`, on
-/// every line of it, however few `lines` there are.
 fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>], framing: Style) {
     buffer.set_style(area, Style::reset().fg(gruvbox::FG1));
     for (line, y) in lines.iter().zip(area.top()..area.bottom()) {
@@ -5762,22 +4423,15 @@ fn put(buffer: &mut Buffer, area: Rect, lines: &[Line<'static>], framing: Style)
     }
 }
 
-/// What is typed in a search, `width` wide, before a `_` for the cursor, its
-/// end where it is too long. What it is typed in names it a search: the
-/// rule over it, or the box around it.
 pub fn query(term: &str, width: usize) -> Line<'static> {
     let typed = tail(&format!("{term}_"), width.saturating_sub(1));
     Line::from(vec![Span::raw(" "), Span::styled(typed, Style::new().fg(ACCENT))])
 }
 
-/// Whether zellij's `title` for a terminal can be of the session `name`: it is
-/// the name, or starts with it before a ` | `.
 pub fn in_session(title: &str, name: &str) -> bool {
     title.strip_prefix(name).is_some_and(|rest| rest.is_empty() || rest.starts_with(" | "))
 }
 
-/// The clients the daemon lists of the session called `name` of `sessions`,
-/// unless another runs under that name too, which it lists none of either.
 fn clients<'a>(sessions: &'a [Session], name: &str) -> Option<&'a [Client]> {
     let mut named = sessions.iter().filter(|session| session.name == name);
     let (Some(session), None) = (named.next(), named.next()) else {
@@ -5786,10 +4440,6 @@ fn clients<'a>(sessions: &'a [Session], name: &str) -> Option<&'a [Client]> {
     session.clients.as_ref().map(|clients| clients.clients.as_slice())
 }
 
-/// The pull request of the branch checked out in each directory a daemon
-/// says one of, of `pull_requests`, by the directory: as the rows show it,
-/// and as a key of the menu for one finds where it goes. None of one with no
-/// number or state, or a state of a newer daemon's.
 fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, PullRequest> {
     pull_requests
         .iter()
@@ -5797,11 +4447,6 @@ fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, P
         .collect()
 }
 
-/// The other machines of `host` that luneta has yet to hear enough of to
-/// choose among their sessions, as `Sidebar::refuges_away` does: those lunetad
-/// has yet to reach or give up on, and, where luneta's own terminal may be
-/// `within` another machine's zellij, those with a session whose panes zellij
-/// there has yet to list, which `may_hold` goes by.
 pub fn unheard(host: &Host, within: Within) -> Vec<Destination> {
     let others = machines(host).others.into_iter();
     let unheard = others.filter(|(_, seen)| match seen {
@@ -5815,14 +4460,8 @@ pub fn unheard(host: &Host, within: Within) -> Vec<Destination> {
     unheard.map(|(destination, _)| destination).collect()
 }
 
-/// The programs that bring a terminal of another machine's into a pane: ssh,
-/// and luneta, which runs ssh beside its sidebar for another machine's
-/// session.
 const CARRIERS: [&str; 2] = ["ssh", "luneta"];
 
-/// Whether `session`, of another machine's, may hold luneta's own terminal in
-/// one of its panes: one of them runs one of `CARRIERS`, or runs what zellij
-/// there has yet to say, or zellij there has yet to list its panes.
 fn may_hold(session: &Session) -> bool {
     let Some(panes) = &session.panes else {
         return true;
@@ -5834,9 +4473,6 @@ fn may_hold(session: &Session) -> bool {
     })
 }
 
-/// The sessions the daemon lists, as the sidebar tells them apart, oldest
-/// first, so that a row never moves under your eye or your mouse but as you
-/// move it; and how many it lists that `Listed` leaves out.
 fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
     let mut listed: Vec<(Listed, &Session)> = sessions
         .iter()
@@ -5849,9 +4485,6 @@ fn oldest_first(sessions: &[Session]) -> (Vec<(Listed, &Session)>, usize) {
     (listed, unlisted)
 }
 
-/// Where the panes of `sessions`, a machine's in the order of their rows,
-/// show, as `order` has them: under each, its own and those moved there, each
-/// with the index of its own session in `sessions`.
 fn placed<'a>(order: &Order, sessions: &[(Listed, &'a Session)]) -> Vec<Vec<(usize, &'a Pane)>> {
     let mut keyed = Vec::with_capacity(sessions.len());
     for (at, (listed, session)) in sessions.iter().enumerate() {
@@ -5864,9 +4497,6 @@ fn placed<'a>(order: &Order, sessions: &[(Listed, &'a Session)]) -> Vec<Vec<(usi
     order.placed(&keyed)
 }
 
-/// Where the panes `held` of those under the session `under` of `placed` can
-/// go, in the order of the rows: under each session that is not folded, or
-/// that one, before each pane of those it has left, and after the last.
 fn gaps(placed: &[Headed], under: usize, held: &Range<usize>) -> Vec<Gap> {
     let mut gaps = Vec::new();
     for (at, headed) in placed.iter().enumerate() {
@@ -5879,8 +4509,6 @@ fn gaps(placed: &[Headed], under: usize, held: &Range<usize>) -> Vec<Gap> {
     gaps
 }
 
-/// Where each of `tabs` sits among those of its tab next to it, and how many
-/// those are.
 fn runs<T: PartialEq>(tabs: &[T]) -> Vec<(usize, usize)> {
     let mut runs = Vec::with_capacity(tabs.len());
     let mut start = 0;
@@ -5892,8 +4520,6 @@ fn runs<T: PartialEq>(tabs: &[T]) -> Vec<(usize, usize)> {
     runs
 }
 
-/// The rows, by their index, of `count`, in the order they show while those
-/// `carried` show after the row `after`, as they land there.
 fn set_down(count: usize, carried: &Range<usize>, after: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..count).filter(|at| !carried.contains(at)).collect();
     let place = order.iter().position(|at| *at == after).map_or(order.len(), |place| place + 1);
@@ -5901,8 +4527,6 @@ fn set_down(count: usize, carried: &Range<usize>, after: usize) -> Vec<usize> {
     order
 }
 
-/// `items` with those `taken` put back before the one at `to` of those left,
-/// or after the last of them.
 fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
     let left = items.iter().enumerate().filter(|(at, _)| !taken.contains(at));
     let mut moved: Vec<T> = left.map(|(_, item)| item.clone()).collect();
@@ -5910,8 +4534,6 @@ fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
     moved
 }
 
-/// What can be read of `agent`'s transcript: Claude Code's alone, by its id.
-/// Another harness's id is no name of one of its.
 fn transcript(agent: &Agent) -> Transcript {
     match agent.runs_in() {
         Harness::ClaudeCode => {
@@ -5921,19 +4543,10 @@ fn transcript(agent: &Agent) -> Transcript {
     }
 }
 
-/// Where an agent works, as its row, the picker and a search say it: where
-/// zellij says its pane works, which its branch is found by, or else, while
-/// zellij has not said, where its harness says.
 fn agent_dir<'a>(agent: &'a Agent, pane: &'a Pane) -> &'a str {
     pane.cwd.as_deref().unwrap_or(&agent.cwd)
 }
 
-/// What a pane's row is named. Its agent goes by the name someone gave it, or
-/// else by the topic the daemon keeps of it, or else by the topic the daemon
-/// reads in the title Claude Code gives its pane; or else by its tab, if someone
-/// named it, or else by where it works. A program goes by its command line, the
-/// program by its binary's name, and a shell at its prompt by its tab, if someone
-/// named it, as an agent does, or else by its directory's last two parts.
 fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     if let Some(agent) = agent {
         let titled = pane.titled.as_ref().and_then(|titled| titled.topic.as_deref());
@@ -5958,10 +4571,6 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
     }
 }
 
-/// The mark of `agent`, in the pane of `key`, as its row shows it, and when
-/// it finished, where it is done: what it is doing, or that it finished since
-/// you were last in its pane, but in the pane luneta's zellij is on, `here`,
-/// where you see it.
 fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
     let mut marked = Marked::of(agent);
     let done = marked.since.filter(|_| marked.mark == Mark::Idle);
@@ -5971,7 +4580,6 @@ fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Op
     (marked, done)
 }
 
-/// What an agent is doing, in the word Claude Code says it in, for the brief.
 fn status_word(agent: &Agent) -> String {
     match &agent.status {
         Some(Reported::KnownStatus(known)) => match Status::try_from(*known) {
@@ -5986,12 +4594,10 @@ fn status_word(agent: &Agent) -> String {
     }
 }
 
-/// The name of an agent's session, if someone gave it one.
 fn given_name(agent: &Agent) -> Option<&str> {
     agent.name.as_ref()?.given()
 }
 
-/// A directory as luneta shows one: its last two parts.
 pub fn short_cwd(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match parts.as_slice() {
@@ -6001,16 +4607,10 @@ pub fn short_cwd(path: &str) -> String {
     }
 }
 
-/// How well a row matches a search: a row that shows what is typed itself
-/// beats any other, and then the higher score wins.
 pub type Fit = (bool, i64);
 
-/// What is typed in a search, and the matcher the sidebar and the picker
-/// find their rows with.
 pub struct Finder<'a> {
     matcher: SkimMatcherV2,
-    /// The matcher, but for a match at the start of a text, which counts as
-    /// one at the start of any word in it.
     anywhere: SkimMatcherV2,
     term: &'a str,
 }
@@ -6022,18 +4622,10 @@ impl<'a> Finder<'a> {
         Finder { matcher: SkimMatcherV2::default(), anywhere, term }
     }
 
-    /// A session by its name: how well it fits, and the characters of the
-    /// name the search found.
     fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
         self.find(name, &[])
     }
 
-    /// A pane by its row, its branch, its tab and the directory it, or its
-    /// agent, works in: how well the best of them fits, and the characters of
-    /// its `label` the search found. A tab zellij named `Tab #N` is no name to
-    /// find, and a directory is its last two parts, as a shell's row shows it:
-    /// a whole path has the letters for a few typed ones to land on nearly any
-    /// of it.
     fn pane(
         &self,
         label: &str,
@@ -6045,12 +4637,6 @@ impl<'a> Finder<'a> {
         self.find(label, &[branch, tab::named(tab_name), cwd.as_deref()])
     }
 
-    /// What is typed against what a row shows, and against what else the row
-    /// goes by, of which it need not have each: how well the best of them
-    /// fits, and the characters of what the row shows that the search found.
-    /// None light up where something else fits better, but for its start:
-    /// `review` fits a session named `review` better than its agent's row
-    /// `docs (review:4)` only by starting it, and lights up in the row.
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
         let exact = shown == self.term;
         let best = |matcher: &SkimMatcherV2| {
@@ -6086,9 +4672,6 @@ fn repository_of(tree: &WorkTree) -> Option<String> {
     }
 }
 
-/// The branch checked out in a work tree, how the tree stands, how many lines
-/// changed on the branch, and its `pull_request`, or none for a detached
-/// `HEAD` or a directory in no repository.
 fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
     let WorkTree::Checkout {
         head: Head::Branch { name, upstream, changed },
@@ -6107,12 +4690,6 @@ fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Check
     })
 }
 
-/// A pull request as its branch's line shows it, in the colour of its state,
-/// which gh lists it in: green while it is open, grey while it is a draft, and
-/// purple once it is merged. A closed one is none. What its daemon says of its
-/// page is taken only as this pull request's link: another machine's says it,
-/// and the clipboard and the browser take what they are handed. One open, or
-/// a draft, has what its checks come to, where its daemon says them.
 fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     let colour = match pull_request.state {
         State::Open => gruvbox::GREEN,
@@ -6128,9 +4705,6 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
     Some(Numbered { number, colour, checks, stale: pull_request.stale })
 }
 
-/// The mark after a pull request's number for what its checks come to, as
-/// GitHub marks them, in its colour: one failed, one has yet to end, or each
-/// passed. A stale one is grey, as they may have come to more since.
 fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     let (mark, colour) = match verdict {
         Verdict::Failing => ("✗", gruvbox::RED),
@@ -6141,9 +4715,6 @@ fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     Span::styled(mark, Style::new().fg(colour))
 }
 
-/// The glyph of each kind of change there is, then the one for where the
-/// branch stands against its upstream, where it has one: what starship's
-/// `git_status` shows, with its default glyphs and in its order.
 fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String {
     let kinds = [
         (changes.conflicted, '='),
@@ -6165,7 +4736,6 @@ fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String
     glyphs
 }
 
-/// How long ago `since` was, in the unit that says the most of it.
 pub fn age(since: SystemTime, now: SystemTime) -> String {
     let secs = now.duration_since(since).unwrap_or(Duration::ZERO).as_secs();
     match secs {
@@ -6177,8 +4747,6 @@ pub fn age(since: SystemTime, now: SystemTime) -> String {
     }
 }
 
-/// The frame the spinner shows at `now`: the same on every row, and the next
-/// one each `SPIN`.
 pub fn frame(now: SystemTime) -> usize {
     let since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO);
     let turns = since.as_millis() / SPIN.as_millis();
@@ -6186,28 +4754,18 @@ pub fn frame(now: SystemTime) -> usize {
     usize::try_from(turns % frames).expect("a frame of the spinner's")
 }
 
-/// Where the number of a pull request with a link is, on the lines of a row, for
-/// a click to copy that link.
 struct NumberAt<'a> {
-    /// Which of them it is on.
     line: usize,
     columns: Range<usize>,
     link: &'a Link,
 }
 
-/// Where the `…` of a text cut short is, on the lines of a row, for a sweep over
-/// it to copy what it stands for.
 struct CutAt {
-    /// Which of them it is on.
     line: usize,
     column: usize,
-    /// What the cut took of the text, with no control character, as a row draws
-    /// none: one that shows nowhere is not to hide in a paste.
     took: String,
 }
 
-/// Where the `…` is of `text` as `cut` cuts it to `room`, drawn from the column
-/// `column` of the line `line`: nowhere, while all of it shows.
 fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
     let shown = cut(text, room);
     if shown == text {
@@ -6218,23 +4776,16 @@ fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> 
     Some(CutAt { line, column: column + cells(kept), took })
 }
 
-/// The lines a row is drawn on, and what the row has on them that the mouse goes
-/// by.
 struct RowLines<'a> {
     lines: Vec<Line<'static>>,
-    /// Its number that takes a click.
     number: Option<NumberAt<'a>>,
-    /// Its texts cut short.
     cuts: Vec<CutAt>,
 }
 
-/// The lines a row is drawn on, `width` wide.
 fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines<'_> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Machine { name, heads: Heads::Away(away), .. } => {
-            // Dimmed, with nothing under it: what stopped lunetad reaching
-            // it, and since when.
             let (word, since) = away.said();
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
@@ -6263,8 +4814,6 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let cuts = cut_at(0, 5, name, room).into_iter().collect();
             let name = cut(name, room);
             let rule = width.saturating_sub(5 + name.width() + 1 + reserve + 1);
-            // Folded, its rule says luneta's zellij is in one of its
-            // sessions, as the session's own row would.
             let rule_style = if *here && folded { Style::new().fg(ACCENT) } else { dim };
             let bold = Style::new().add_modifier(Modifier::BOLD);
             let mut spans = vec![
@@ -6287,14 +4836,9 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
-            // The name sits on the session's colour, with a space either side,
-            // as a browser draws the name of a group of tabs.
             let chip = Style::new().fg(gruvbox::BG0).bg(*colour);
             let own = session.own();
             let own_width = if own { OWN_MARK.width() } else { 0 };
-            // What the row has past the name and the rule: the margin, the
-            // fold, the chip's two spaces, the mark, the badge and the last
-            // column. The rule takes what the name leaves of the room.
             let fixed = 4 + own_width + reserve + 1;
             let room = width.saturating_sub(fixed);
             let bold = chip.add_modifier(Modifier::BOLD);
@@ -6325,8 +4869,6 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let age = since.map_or_default(|since| age(since, now));
             let speaker = if *speaks { aloud::MARK.width() + 1 } else { 0 };
             let reserve = speaker + if age.is_empty() { 0 } else { age.width() + 1 };
-            // A pane with no mark, of an agent or of a command, is dimmed,
-            // and its icon is drawn as its label is.
             let label_style = match mark {
                 Some(Mark::Waiting) => Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 Some(_) => Style::new(),
@@ -6377,20 +4919,12 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
     }
 }
 
-/// Which end of a text a cut keeps: its start, as `cut` keeps it, or its
-/// end, as `tail` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
     Start,
     End,
 }
 
-/// `text` cut to `room` columns, as `cut` or `tail` cuts it by what it
-/// `keep`s, in `style`, and how wide that is. The characters of `text` at
-/// `hits`, which a search found, light up in the accent, but are underlined
-/// on a text in the accent already, or on a colour of its own, as no colour
-/// reads on every one. None of those the cut took lights up, nor the `…`
-/// that stands for them.
 pub fn lit(
     text: &str,
     room: usize,
@@ -6408,8 +4942,6 @@ pub fn lit(
         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
     };
     let (whole, count, all) = (shown == text, shown.chars().count(), text.chars().count());
-    // Where in `text` the character at `at` of `shown` is: nowhere, for the
-    // `…`.
     let place = |at: usize| match keep {
         _ if whole => Some(at),
         Keep::Start => (at + 1 < count).then_some(at),
@@ -6427,8 +4959,6 @@ pub fn lit(
     (spans, shown.width())
 }
 
-/// What a session's row ends in: how many of its agents wait for you, or else
-/// the dot, while it is `dotted`, or else the spinner, while it is `spinning`.
 fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<Span<'static>> {
     if waiting > 0 {
         let (dot, style) = Mark::Waiting.glyph(frame);
@@ -6444,8 +4974,6 @@ fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<S
     None
 }
 
-/// What a session's colour is drawn in, as a browser colours its groups of
-/// tabs: its name sits on it, and the brackets of its tabs are drawn in it.
 fn hue(colour: Colour) -> Color {
     match colour {
         Colour::Blue => gruvbox::BLUE,
@@ -6457,8 +4985,6 @@ fn hue(colour: Colour) -> Color {
     }
 }
 
-/// The first column of a pane's lines: `HERE_MARK` on the pane luneta's
-/// zellij is on, `here`.
 fn margin(here: bool) -> Span<'static> {
     if here {
         Span::styled(HERE_MARK, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
@@ -6467,10 +4993,6 @@ fn margin(here: bool) -> Span<'static> {
     }
 }
 
-/// The column after a pane's mark, on its line `at` of the `height` it
-/// takes: the bracket that joins it to the panes of its tab, where it sits
-/// among them as it `sits`, or the mark of one alone of them under another
-/// session, in its own session's colour, or else blank.
 fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'static> {
     let Some((sits, colour)) = bracket else {
         return Span::raw(" ");
@@ -6484,13 +5006,6 @@ fn gutter(bracket: Option<(Bracket, Color)>, at: usize, height: usize) -> Span<'
     Span::styled(glyph, Style::new().fg(colour))
 }
 
-/// The line under a pane's row, `width` wide: the branch checked out where it
-/// works, under its label, then how many lines changed on the branch, then
-/// the number of its pull request, with the mark of its checks, and how its
-/// work tree stands. The branch is cut to leave the other three whole. The
-/// mark of the pane luneta's zellij is on, `here`, runs down it too, and the
-/// `gutter` after it. And the columns the number is on, as the line has it,
-/// for a click to go by, and the room the branch had, for a sweep over it.
 fn checkout_line(
     here: bool,
     gutter: Span<'static>,
@@ -6505,9 +5020,6 @@ fn checkout_line(
         .map(|numbered| Span::styled(numbered.shown(), Style::new().fg(numbered.colour)));
     let numbered = checkout.pull_request.as_ref();
     let mark = numbered.and_then(|it| Some(verdict_mark(it.checks?, it.stale)));
-    // What comes after the branch, and the spaces between its parts: the
-    // lines changed, the number with the mark of its checks, and how the
-    // work tree stands.
     let held = changed.as_ref().map_or(0, |(_, wide)| wide + 1)
         + number.as_ref().map_or(0, |number| number.content.width() + 1)
         + mark.as_ref().map_or(0, Span::width);
@@ -6538,8 +5050,6 @@ fn checkout_line(
     (Line::from(spans), columns, room)
 }
 
-/// `text` cut to `room` columns, with a `…` for what it took. What shows as one
-/// stays whole, and counts as wide as it shows.
 pub fn cut(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
@@ -6560,8 +5070,6 @@ pub fn cut(text: &str, room: usize) -> String {
     kept
 }
 
-/// `text` cut to its last `room` columns, with a `…` for what it took, as `cut`
-/// cuts.
 pub fn tail(text: &str, room: usize) -> String {
     if text.width() <= room {
         return text.to_owned();
@@ -6582,9 +5090,6 @@ pub fn tail(text: &str, room: usize) -> String {
     format!("…{}", &text[start..])
 }
 
-/// What goes at the bottom of the sidebar: its lines, those of them that go on
-/// from the line above, as `wrapped` breaks a note too long for one, and what
-/// each note says.
 #[derive(Debug, Default)]
 struct Notes {
     lines: Vec<Line<'static>>,
@@ -6593,7 +5098,6 @@ struct Notes {
 }
 
 impl Notes {
-    /// Puts `text` on as many lines of `width` as it takes.
     fn say(&mut self, text: &str, width: usize, style: Style) {
         let lines = wrapped(text, width, style);
         let start = self.lines.len();
@@ -6603,7 +5107,6 @@ impl Notes {
     }
 }
 
-/// `text` on as many lines of `width` as it takes, a space in from the edge.
 pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
@@ -6655,7 +5158,6 @@ mod tests {
         }
     }
 
-    /// A session whose socket has the inode of the second it started at.
     fn session(name: &str, started: i64, panes: Vec<Pane>) -> Session {
         Session {
             name: name.to_owned(),
@@ -6667,7 +5169,6 @@ mod tests {
         }
     }
 
-    /// An own session of id `id`, which its server made at `made`.
     fn own_session(name: &str, id: u64, made: i64, panes: Vec<Pane>) -> Session {
         let made_at = Some(Timestamp { seconds: made, nanos: 0 });
         Session {
@@ -6680,8 +5181,6 @@ mod tests {
         }
     }
 
-    /// The agent `agent` says, in the pane `pane` of the own session `id`,
-    /// which its server made at `made`.
     fn in_own(agent: Agent, id: u64, made: i64, pane: u32) -> Agent {
         let made_at = Some(Timestamp { seconds: made, nanos: 0 });
         let session = Some(api::OwnSession { id, made_at });
@@ -6694,13 +5193,10 @@ mod tests {
         Listed { name: session_name(name), kept }
     }
 
-    /// The pane `pane` of the session `name` that started at `started`.
     fn pane_of(name: &str, started: u64, pane: u32) -> Place {
         Place::Pane(PanePlace { session: listed(name, started), pane })
     }
 
-    /// The pane `pane` of the own session `name`, of id `id`, which its
-    /// server made at `made`.
     fn own_pane_of(name: &str, id: u64, made: u64, pane: u32) -> Place {
         let made = SystemTime::UNIX_EPOCH + Duration::from_secs(made);
         Place::Pane(PanePlace { session: Listed::new_own(name, made, id), pane })
@@ -6710,30 +5206,22 @@ mod tests {
         SessionName::parse(name).unwrap()
     }
 
-    /// What the sidebar asks of luneta for the menu numbered `menu`: zellij
-    /// here, to say what closing the pane `pane` of `session` closes.
     fn closes_here(menu: u64, session: &str, pane: u32) -> Asked {
         Asked::Closes { menu, on: Machine::Local, session: session_name(session), pane }
     }
 
-    /// What the sidebar asks of luneta for a delete key: zellij here, to do
-    /// `act`.
     fn delete_here(act: Act) -> Asked {
         Asked::Delete { on: Machine::Local, act }
     }
 
-    /// What takes luneta's zellij to `place`, of this machine.
     fn go_here(place: Place) -> Asked {
         Asked::Go { on: Machine::Local, place }
     }
 
-    /// A sidebar on a machine that goes by `mac`.
     fn fresh() -> Sidebar {
         Sidebar { this: "mac".to_owned(), ..Sidebar::default() }
     }
 
-    /// The pane or the session of this machine's the highlight is on, if it
-    /// is on one.
     fn cursor(sidebar: &Sidebar) -> Option<Place> {
         match sidebar.cursor.as_ref()? {
             Spot::Local(place) => Some(place.clone()),
@@ -6741,12 +5229,10 @@ mod tests {
         }
     }
 
-    /// Whether this machine's session `name` is folded.
     fn folded(sidebar: &Sidebar, name: &str) -> bool {
         sidebar.folds.contains(Fold::Session(&Machine::Local, &session_name(name)))
     }
 
-    /// Folds this machine's session `name`, as another luneta would.
     fn fold(sidebar: &mut Sidebar, name: &str) {
         sidebar.folds.set(Fold::Session(&Machine::Local, &session_name(name)), true);
     }
@@ -6788,17 +5274,11 @@ mod tests {
         }
     }
 
-    /// The sidebar drawn `width` columns wide and `height` tall, with the
-    /// focus or without.
     fn drawn(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Buffer {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
         drawn_at(sidebar, focused, width, height, now)
     }
 
-    /// The sidebar as `drawn` draws it, at `now`. Each cell is in gruvbox's
-    /// colours, on the terminal's background or, on the highlight, the one
-    /// that says whether the sidebar has the focus; and focused, the softer
-    /// one, on the row a move lands on.
     fn drawn_at(
         sidebar: &mut Sidebar,
         focused: bool,
@@ -6815,8 +5295,6 @@ mod tests {
         buffer
     }
 
-    /// The sidebar collapsed, `height` tall, as it is drawn at `now`. Each
-    /// cell is in gruvbox's colours, on the terminal's background.
     fn collapsed(sidebar: &mut Sidebar, height: u16, now: SystemTime) -> Buffer {
         let area = Rect::new(0, 0, COLLAPSED, height);
         let mut buffer = Buffer::empty(area);
@@ -6825,10 +5303,6 @@ mod tests {
         buffer
     }
 
-    /// Holds each cell of `buffer` to gruvbox's colours, on one of
-    /// `backgrounds`, or on a session's colour in gruvbox's background, as a
-    /// session's name is: a colour named at a call site, as `Color::Red`, or a
-    /// line drawn without `fg1`, would be the terminal's.
     fn in_gruvbox(buffer: &Buffer, backgrounds: &[Color]) {
         for cell in buffer.content() {
             assert!(gruvbox::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
@@ -6838,13 +5312,10 @@ mod tests {
         }
     }
 
-    /// The sidebar `width` columns wide and `height` tall, as text, up to its
-    /// edge.
     fn screen(sidebar: &mut Sidebar, focused: bool, width: u16, height: u16) -> Vec<String> {
         seen(sidebar, focused, width, height).0
     }
 
-    /// The sidebar as `screen` draws it, and the lines the highlight is on.
     fn seen(
         sidebar: &mut Sidebar,
         focused: bool,
@@ -6855,7 +5326,6 @@ mod tests {
         seen_at(sidebar, focused, width, height, now)
     }
 
-    /// The sidebar as `seen` draws it, at `now`.
     fn seen_at(
         sidebar: &mut Sidebar,
         focused: bool,
@@ -6876,8 +5346,6 @@ mod tests {
         (lines, lit)
     }
 
-    /// Two sessions, whose rows have Claude's icon, `\u{ec82}`, neovim's,
-    /// `\u{e6ae}`, and a terminal's, `\u{e795}`.
     fn two_sessions() -> Sidebar {
         let mut sidebar = fresh();
         sidebar.heard(host(
@@ -6917,10 +5385,6 @@ mod tests {
         );
     }
 
-    /// A bracket down the column after `▌` joins the panes of a tab that
-    /// holds more than one, from the first line of the first, down the branch
-    /// under one, to the last line of the last. A pane alone in its tab has
-    /// none, nor has one a search lists alone of its tab, as for `c` here.
     #[test]
     fn a_bracket_joins_the_panes_that_share_a_tab() {
         let panes = vec![
@@ -6956,30 +5420,18 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar), [" ▾ s", "       less c", "       less d"]);
     }
 
-    /// Each session has a colour of its own, which its name sits on, with a
-    /// space either side, and which the brackets of its tabs are drawn in. It
-    /// keeps it as a session before it ends, as it is renamed, and while the
-    /// daemon's list may leave it out; and once it has ended, the next to
-    /// start takes it.
     #[test]
     fn a_session_has_a_colour_of_its_own_and_keeps_it() {
-        // The backgrounds of `count` cells of the line `line` of the rows
-        // under this machine's header, from the column `from` on, and the
-        // colour of its bracket.
         let top = HEADER + 1;
         let backgrounds = |buffer: &Buffer, line: usize, from: u16, count: u16| {
             (from..from + count).map(|x| buffer[(x, (top + line) as u16)].bg).collect::<Vec<_>>()
         };
         let bracket = |buffer: &Buffer, line: usize| buffer[(1, (top + line) as u16)].fg;
-        // The sessions `named`, each of a tab of two panes, by their names
-        // and starts, as a daemon lists them that could not read
-        // `unread_sockets` of zellij's folder.
         let listing = |named: &[(&str, i64)], unread_sockets| {
             let shared = || vec![pane(1, 0, "/w/a", "less"), pane(2, 0, "/w/a", "less")];
             let sessions = named.iter().map(|(name, at)| session(name, *at, shared()));
             Host { unread_sockets, ..host(sessions.collect(), Vec::new()) }
         };
-        // The colours the names of the first `count` sessions sit on.
         let names = |sidebar: &mut Sidebar, count: usize| {
             let buffer = drawn(sidebar, false, 32, 20);
             (0..count).map(|at| backgrounds(&buffer, at * 3, 3, 1)[0]).collect::<Vec<_>>()
@@ -6995,9 +5447,6 @@ mod tests {
         assert_eq!([bracket(&buffer, 4), bracket(&buffer, 5)], [y, y]);
         assert_eq!(backgrounds(&buffer, 6, 3, 1), [p]);
 
-        // The daemon leaves a out of lists it could not read all of zellij's
-        // folder for, as d starts, for longer than `GONE`: a keeps its
-        // colour, and d takes one no other has.
         sidebar.heard(listing(&[("b", 2), ("c", 3), ("d", 4)], Some(1)));
         tick(&mut sidebar, 160_000);
         tick(&mut sidebar, 175_000);
@@ -7005,8 +5454,6 @@ mod tests {
         tick(&mut sidebar, 176_000);
         assert_eq!(names(&mut sidebar, 4), [b, y, p, a]);
 
-        // b is renamed e, and keeps its colour. a ends, and gives its up once
-        // the daemon has not listed it for `GONE`, for f to take.
         sidebar.heard(listing(&[("e", 2), ("c", 3), ("d", 4)], Some(0)));
         tick(&mut sidebar, 180_000);
         tick(&mut sidebar, 190_000);
@@ -7015,9 +5462,6 @@ mod tests {
         assert_eq!(bracket(&drawn(&mut sidebar, false, 32, 20), 10), b);
     }
 
-    /// While the daemon does not answer, what it said last gives no colour to
-    /// keep: a session it lists may have ended since, and another luneta
-    /// given its colour up.
     #[test]
     fn a_list_that_stands_gives_no_colour_to_keep() {
         let scratch = tempfile::tempdir().unwrap();
@@ -7032,9 +5476,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"sessions": []}"#);
     }
 
-    /// A colour kept for a session that starts takes up a move another
-    /// luneta made, which this one has yet to hear of, and the rows go in it
-    /// then, rather than once something else builds them again.
     #[test]
     fn a_colour_kept_takes_up_a_move_made_elsewhere() {
         let scratch = tempfile::tempdir().unwrap();
@@ -7054,8 +5495,6 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar), [" ▾ b", " ▾ a", " ▾ c"]);
     }
 
-    /// The first line says `luneta`, in the accent, the word bold, while the
-    /// sidebar has the keys, and dim while zellij has them.
     #[test]
     fn the_title_is_in_the_accent_while_the_sidebar_has_the_keys() {
         let mut sidebar = two_sessions();
@@ -7071,14 +5510,10 @@ mod tests {
         {
             assert_eq!(screen(&mut sidebar, focused, 32, 3)[0], "─ luneta ──────────────────────");
             let buffer = drawn(&mut sidebar, focused, 32, 3);
-            // The first `─`, the word's `l` and the last `─`.
             assert_eq!([0, 2, 30].map(|x| look(&buffer, x)), [rule, word, rule], "{focused}");
         }
     }
 
-    /// A brief the sidebar asked for has the keys until it closes: the title
-    /// is dim, and the legend `?` opened gone, while the highlight stays where
-    /// the keys left it, for them to come back to, and the legend with it.
     #[test]
     fn a_brief_lent_the_keys_dims_the_title_and_keeps_the_highlight() {
         let mut sidebar = two_sessions();
@@ -7099,7 +5534,6 @@ mod tests {
         sidebar.key(&KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), moment(160_000));
         let cursor = sidebar.cursor.clone();
         let (titled, lit, fg, dim) = draw(&mut sidebar);
-        // The title and the legend's rule.
         assert_eq!((titled, fg, dim, lit.is_empty()), (2, ACCENT, false, false));
         sidebar.focus(Keys::Lent);
         assert_eq!(draw(&mut sidebar), (1, lit.clone(), gruvbox::FG1, true));
@@ -7108,9 +5542,6 @@ mod tests {
         assert_eq!(sidebar.cursor, cursor);
     }
 
-    /// The rule along the top counts the agents on the rows, a folded
-    /// session's among them, and none that no row holds. Those in a shell
-    /// are counted dim, as their mark is.
     #[test]
     fn the_top_rule_counts_the_agents_the_rows_hold() {
         let mut sidebar = fresh();
@@ -7139,11 +5570,6 @@ mod tests {
         );
     }
 
-    /// Collapsed, the sidebar keeps under its rule only the counts of the
-    /// panes with the dot, of the agents at work and of those in a shell, and
-    /// none of the agents that wait for you. A count is cut to the columns it
-    /// has before the edge, and a command counts once it has run a second, as
-    /// on the rule along the top.
     #[test]
     fn collapsed_the_sidebar_keeps_the_dots_the_work_and_the_shells() {
         let mut sidebar = fresh();
@@ -7162,9 +5588,6 @@ mod tests {
         assert_eq!(strip(&mut sidebar, moment(161_000)), ["───", "", "•1", "⠋1", "$1…", ""]);
     }
 
-    /// Collapsed, the sidebar has no room for the note that says lunetad does
-    /// not answer, so its rule turns the note's colour until lunetad answers
-    /// again, and is drawn as the open sidebar's rule is otherwise.
     #[test]
     fn collapsed_the_sidebar_reddens_its_rule_while_lunetad_does_not_answer() {
         let mut sidebar = fresh();
@@ -7177,7 +5600,6 @@ mod tests {
         let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 1);
         assert_eq!(rule(&mut sidebar), open);
         sidebar.lost("gone".to_owned());
-        // The note, ` lunetad: gone`, takes the last line.
         let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
         assert_eq!(buffer[(1, 5)].symbol(), "l");
         let note = look(&buffer, 1, 5);
@@ -7187,9 +5609,6 @@ mod tests {
         assert_eq!(rule(&mut sidebar), open);
     }
 
-    /// Collapsed, the sidebar has no room for the note that says an image is
-    /// on its way either, so its rule turns that note's colour while it goes;
-    /// but for lunetad not answering, which says more.
     #[test]
     fn collapsed_the_sidebar_tints_its_rule_while_an_image_goes() {
         let mut sidebar = fresh();
@@ -7202,7 +5621,6 @@ mod tests {
         let open = look(&drawn(&mut sidebar, false, COLUMNS, 6), 0, 1);
         assert_eq!(rule(&mut sidebar), open);
         sidebar.image_going(Some("far".parse().unwrap()));
-        // The note, ` image on its way to far`, takes the last line.
         let buffer = drawn(&mut sidebar, false, COLUMNS, 6);
         assert_eq!(buffer[(1, 5)].symbol(), "i");
         let note = look(&buffer, 1, 5);
@@ -7215,10 +5633,6 @@ mod tests {
         assert_eq!(rule(&mut sidebar), open);
     }
 
-    /// The sidebar's last column is its edge, open or collapsed: a `│` down
-    /// every line, on the terminal's background beside the highlight too, and
-    /// drawn as the title's rule is, in the accent while the sidebar has the
-    /// keys, and dim while zellij or a brief has them.
     #[test]
     fn the_sidebar_ends_in_an_edge_in_the_accent_while_it_has_the_keys() {
         let mut sidebar = two_sessions();
@@ -7244,11 +5658,6 @@ mod tests {
         assert_eq!(edge(&collapsed(&mut sidebar, 10, moment(160_000))), vec![dim; 10]);
     }
 
-    /// A daemon of another build can list a session with no start, or with
-    /// no socket, which the sidebar cannot tell from another, or with a name
-    /// zellij refuses, which luneta can neither go to nor fold. A name longer
-    /// than luneta makes one is zellij's to refuse: where the user's id is
-    /// short, it makes one of 66 bytes.
     #[test]
     fn a_session_with_no_start_or_socket_or_a_refused_name_is_left_out_and_said() {
         let mut sidebar = fresh();
@@ -7268,12 +5677,6 @@ mod tests {
         assert_eq!(lines[7], " llij refuses, not listed");
     }
 
-    /// An own session is listed beside zellij's, by when its server made it,
-    /// with `◇` after its name, and an agent in one of its panes in that
-    /// pane, but not one of the session of its id that a server before made.
-    /// One with no id, or no time it was made, is left out as one of zellij's
-    /// with no start is. A zellij session's `mux` says its start over the
-    /// fields beside it.
     #[test]
     fn an_own_session_is_listed_with_its_mark_and_its_agents() {
         let mut sidebar = fresh();
@@ -7301,12 +5704,6 @@ mod tests {
         assert!(buffer[(mark, 6)].modifier.contains(Modifier::DIM));
     }
 
-    /// `▌` marks the pane luneta's zellij is on, down the line of its branch
-    /// too, with the focus or without. While the sidebar does not have the
-    /// focus, the highlight rests on that pane; once it has, the highlight
-    /// goes with the keys, and comes back as the sidebar gives the focus
-    /// back. A click on another pane leaves it on yours, as `▌` is, until
-    /// luneta's zellij is there.
     #[test]
     fn the_highlight_rests_on_your_pane_until_the_sidebar_has_the_focus() {
         let mut sidebar = fresh();
@@ -7337,8 +5734,6 @@ mod tests {
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lines[6..8], ["▌    \u{e6ae} nvim src/main.rs", "▌      main"]);
         assert_eq!(lit, [6, 7]);
-        // Four lines of rows, which scroll a line for the pane to show
-        // whole, and stay so once the focus goes.
         let (_, lit) = seen(&mut sidebar, true, 32, 7);
         assert_eq!(lit, [5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
@@ -7368,11 +5763,6 @@ mod tests {
         assert_eq!(cursor(&sidebar), older);
     }
 
-    /// `G` and `End` take the highlight to the last row, and `gg` and `Home`
-    /// to the first. A key between the two `g`s drops the first, with `Ctrl`
-    /// too, and so do the wheel, a click and the focus going, but not the
-    /// pointer moving. `Esc` after a `g` does nothing else, and leaves the
-    /// sidebar pressed again.
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
         let mut sidebar = two_sessions();
@@ -7381,7 +5771,6 @@ mod tests {
         let second = Some(pane_of("older", 10, 2));
         let last = Some(pane_of("newer", 20, 1));
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        // Shift and all, as a terminal sends it as text.
         let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let g = key(KeyCode::Char('g'));
         sidebar.key(&shift_g, moment(160_000));
@@ -7399,17 +5788,14 @@ mod tests {
             sidebar.key(&pressed, moment(160_000));
         }
         assert_eq!(cursor(&sidebar), second);
-        // Tall enough for newer's row to show.
         let area = Rect::new(0, 0, 32, 8);
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 0, 0), area);
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), second);
-        // luneta hears every move of the pointer.
         sidebar.mouse(mouse(MouseEventKind::Moved, 0, 0), area);
         sidebar.key(&g, moment(160_000));
         assert_eq!(cursor(&sidebar), first);
-        // The triangle folds newer, and the highlight goes to its row.
         sidebar.key(&g, moment(160_000));
         assert_eq!(click(&mut sidebar, 1, 7, area), Asked::Take);
         let folded = Some(Place::Session(listed("newer", 20)));
@@ -7424,8 +5810,6 @@ mod tests {
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
     }
 
-    /// zellij versions with sockets of their own can each run a session under
-    /// one name, and the daemon lists them both, with no panes.
     #[test]
     fn the_highlight_goes_on_past_a_second_session_of_a_name() {
         let mut sidebar = fresh();
@@ -7462,8 +5846,6 @@ mod tests {
         assert_eq!(sidebar.rows.len(), 6);
     }
 
-    /// `Alt Tab` goes to the pane listed after the one luneta's zellij is on,
-    /// across sessions, and from the last back to the first.
     #[test]
     fn the_next_pane_is_the_one_listed_after_luneta_s() {
         let older = |pane| pane_of("older", 10, pane);
@@ -7478,17 +5860,12 @@ mod tests {
             sidebar.went(&on);
             assert_eq!(sidebar.next_pane(), Some(next), "{case}");
         }
-        // On a pane no row lists, as a plugin's, or one luneta is not sure
-        // its zellij is on; and in a session no row lists.
         let mut sidebar = two_sessions();
         assert_eq!(sidebar.next_pane(), Some(older(1)));
         sidebar.titled("gone".to_owned());
         assert_eq!(sidebar.next_pane(), Some(older(1)));
     }
 
-    /// Back in a session zellij titles nothing for, luneta's zellij goes on
-    /// from where luneta sent it, and not from the session of the title, whose
-    /// clients are another's.
     #[test]
     fn the_next_pane_follows_luneta_s_zellij_past_a_stale_title() {
         let mut sidebar = two_sessions();
@@ -7506,20 +5883,13 @@ mod tests {
         sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
         let newer = pane_of("newer", 20, 1);
         assert_eq!(sidebar.next_pane(), Some(newer.clone()));
-        // The only pane listed is luneta's own.
         sidebar.went(&newer);
         assert_eq!(sidebar.next_pane(), None);
     }
 
-    /// Going to a folded session unfolds it, whichever way luneta's zellij
-    /// goes: from the sidebar or the menu, by zellij's own switch, which the
-    /// title follows, or as a client takes the place of one that ended. Its
-    /// panes are listed, so `Alt Tab` goes on to the next of them, and not to
-    /// the next session's.
     #[test]
     fn going_to_a_folded_session_unfolds_it() {
         let older = |pane| pane_of("older", 10, pane);
-        // luneta's zellij in newer, and older folded.
         let away = || {
             let mut sidebar = two_sessions();
             sidebar.titled("newer | fish".to_owned());
@@ -7540,8 +5910,6 @@ mod tests {
         assert_eq!(sidebar.next_pane(), Some(older(1)));
     }
 
-    /// A go zellij does not make leaves luneta's zellij in the session it was
-    /// in, which it did not go to: folded there, it stays folded.
     #[test]
     fn a_go_zellij_does_not_make_keeps_the_session_luneta_stays_in_folded() {
         let mut sidebar = two_sessions();
@@ -7552,10 +5920,6 @@ mod tests {
         assert!(folded(&sidebar, "older"));
     }
 
-    /// zellij titles luneta's terminal with the session's name and a ` | `,
-    /// which a name can hold too: the title of `odd | name`, which the daemon
-    /// has yet to list, reads as `odd`'s. Starting `odd | name` unfolds it,
-    /// and leaves `odd` folded.
     #[test]
     fn going_to_a_session_named_with_a_bar_unfolds_it_alone() {
         let mut sidebar = fresh();
@@ -7580,14 +5944,11 @@ mod tests {
         assert_eq!(cursor(&sidebar), Some(pane_of("older", 10, 1)));
     }
 
-    /// Focused, on fewer lines than its rows take, the sidebar scrolls them
-    /// to keep the highlight on screen as it moves down, and back up.
     #[test]
     fn the_rows_scroll_to_keep_the_highlight_on_screen() {
         let mut sidebar = two_sessions();
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
-        // Two lines, under the title and the rule along the top.
         let shown = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 5)[3..5].to_vec();
         assert_eq!(
             shown(&mut sidebar),
@@ -7607,9 +5968,6 @@ mod tests {
         MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
     }
 
-    /// A click at `column` and `row` on the sidebar drawn in `area`: what the
-    /// left button asks as it lets go there, having asked nothing as it went
-    /// down.
     fn click(sidebar: &mut Sidebar, column: u16, row: u16, area: Rect) -> Asked {
         let down = mouse(MouseEventKind::Down(MouseButton::Left), column, row);
         assert_eq!(sidebar.mouse(down, area), Asked::Nothing);
@@ -7631,9 +5989,6 @@ mod tests {
         assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older));
     }
 
-    /// A search with nothing typed keeps the folds, and the triangle folds as
-    /// it does without one. Once something is typed, it is the name's, and a
-    /// machine's header folds nothing.
     #[test]
     fn a_click_on_the_triangle_folds_until_a_search_is_typed() {
         let mut sidebar = two_sessions();
@@ -7653,8 +6008,6 @@ mod tests {
         assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
     }
 
-    /// A session zellij has yet to list the panes of stands in for them, as a
-    /// folded one does, for a click as for `Enter`.
     #[test]
     fn a_click_on_a_session_with_no_panes_goes_there() {
         let mut sidebar = fresh();
@@ -7669,8 +6022,6 @@ mod tests {
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(x));
     }
 
-    /// The notes at the bottom stand over the rows that would be there, which
-    /// a click on them does not go to.
     #[test]
     fn a_click_on_the_notes_goes_nowhere() {
         let mut sidebar = two_sessions();
@@ -7697,11 +6048,6 @@ mod tests {
         assert_eq!(sidebar.here(), Some("oddly"));
     }
 
-    /// zellij sends a client no title as it comes back to a tab that had the
-    /// same title before. So the session luneta sends its zellij to is the
-    /// one it is in, until zellij titles the terminal once it is there; a
-    /// title of the session it leaves can come on the way. A session zellij
-    /// did not take it to leaves it in the one the title names.
     #[test]
     fn the_session_is_the_one_luneta_sent_zellij_to_until_a_title_after() {
         let mut sidebar = two_sessions();
@@ -7724,8 +6070,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
-    /// luneta's zellij is alone in `older`, as zellij and then the daemon
-    /// list it, and nobody is in `newer`.
     fn alone_in_older() -> Sidebar {
         let mut sidebar = two_sessions();
         let came = sidebar.rejoining(&session_name("older"));
@@ -7736,7 +6080,6 @@ mod tests {
         sidebar
     }
 
-    /// The daemon lists these clients of `newer` and `older`.
     fn listing(sidebar: &mut Sidebar, newer: &[Client], older: &[Client]) {
         let mut host = sidebar.host.clone().unwrap();
         host.sessions[0].clients = Some(Clients { clients: newer.to_vec() });
@@ -7744,8 +6087,6 @@ mod tests {
         sidebar.heard(host);
     }
 
-    /// zellij answers the look luneta asks for, once the daemon no longer
-    /// lists its zellij's client in `older`, with no client there.
     fn left_older(sidebar: &mut Sidebar) {
         assert_eq!(sidebar.astray(), None);
         let look = sidebar.doubted().expect("luneta asks zellij whether its client left");
@@ -7753,11 +6094,6 @@ mod tests {
         sidebar.looked(Looked { number: look.number, went: None, clients: vec![], before: None });
     }
 
-    /// Something other than luneta takes its zellij's client from `older` to
-    /// `newer`, as the ask box's agent can, and zellij titles luneta's
-    /// terminal nothing there. Once the daemon lists the client there, and
-    /// zellij no longer in `older`, luneta's zellij is in `newer`, and a go to
-    /// a pane there moves it within that session.
     #[test]
     fn a_client_another_moved_is_where_the_daemon_lists_it_come() {
         let mut sidebar = alone_in_older();
@@ -7772,9 +6108,6 @@ mod tests {
         assert_eq!((look.session.as_str(), sidebar.going()), ("newer", None));
     }
 
-    /// The daemon lists luneta's zellij's client in `newer`, where something
-    /// other than luneta took it, before it lists `older` without it: it is
-    /// the one that came there all the same.
     #[test]
     fn a_client_another_moved_can_be_listed_where_it_came_first() {
         let mut sidebar = alone_in_older();
@@ -7787,10 +6120,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.astray()), (Some("newer"), None));
     }
 
-    /// luneta sends its zellij to `newer`, which it is in already, as something
-    /// other than luneta took it there, and zellij lists no client come. The
-    /// look at `older` after does not find it there either, and the daemon
-    /// lists it in `newer`.
     #[test]
     fn a_go_that_finds_no_client_come_looks_for_it() {
         let mut sidebar = alone_in_older();
@@ -7804,9 +6133,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.astray()), (Some("newer"), None));
     }
 
-    /// Two clients came to `newer` as luneta's left `older`, and luneta cannot
-    /// tell which is its own: it is in no session the sidebar knows of, until
-    /// zellij titles luneta's terminal.
     #[test]
     fn a_client_luneta_cannot_find_is_in_no_session_until_a_title() {
         let mut sidebar = alone_in_older();
@@ -7819,9 +6145,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.astray()), (Some("newer"), None));
     }
 
-    /// A client that comes back to a tab after its connection dropped gets no
-    /// title, as zellij sent the one before it that title already. A go that
-    /// zellij does not take leaves it in the session it came to all the same.
     #[test]
     fn a_go_zellij_does_not_take_leaves_an_untitled_client_where_it_came() {
         let mut sidebar = two_sessions();
@@ -7833,9 +6156,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
-    /// luneta sends its zellij to another session, and then to a third
-    /// before it is there. What comes back of the first go says nothing of
-    /// the second: neither that the client is there, nor that it stayed.
     #[test]
     fn what_comes_back_of_an_earlier_go_says_nothing_of_the_last() {
         let mut sidebar = two_sessions();
@@ -7895,9 +6215,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
-    /// A shell at its prompt goes by its tab, if someone named it, as an agent
-    /// does, and else by its directory; a program by its command, whatever the
-    /// tab.
     #[test]
     fn a_pane_is_named_for_what_runs_in_it() {
         let named = |command: &str| label(None, &pane(3, 0, "/w/luneta/main", command));
@@ -7913,12 +6230,6 @@ mod tests {
         assert_eq!(tabbed(unsaid), "review");
     }
 
-    /// An agent goes by the name someone gave it, then by the topic the daemon
-    /// keeps of it, then by the title Claude Code gives its pane, then by its
-    /// tab if someone named it, then by where it works: where its pane works, or
-    /// else, while zellij has not said, where Claude Code says. An agent's title
-    /// with no topic, as a bare `Claude Code`, is passed over, and so is
-    /// zellij's `Tab #N`.
     #[test]
     fn an_agent_goes_by_its_name_then_its_topic_then_its_tab_then_its_directory() {
         let titled = |topic: Option<&str>, tab: &str| Pane {
@@ -7938,7 +6249,6 @@ mod tests {
         assert_eq!(label(Some(&unnamed), &untitled(" ")), "w/x");
         let unsaid = Pane { cwd: None, ..untitled("Tab #1") };
         assert_eq!(label(Some(&unnamed), &unsaid), "luneta/main");
-        // A name Claude Code gave the session itself is none a row goes by.
         let mut derived = agent("s", 1, Status::Idle, Some("luneta-main"));
         let source = Some(NameSource::Derived.into());
         derived.name = derived.name.map(|name| api::Name { source, ..name });
@@ -7950,11 +6260,6 @@ mod tests {
         assert_eq!(label(Some(&kept(&derived)), &titled(None, "review")), "Session folds");
     }
 
-    /// The icon of what runs in a pane has a column of its own, so that every
-    /// label starts at the same column, and a program with none leaves it
-    /// blank. An agent's is Claude's, whatever its terminal has in front, and
-    /// `sudo` gives way to what it runs, though the row goes by its command.
-    /// A shell the row is named for the directory of has a terminal's.
     #[test]
     fn a_pane_s_icon_says_what_runs_in_it_in_a_column_of_its_own() {
         let mut sidebar = fresh();
@@ -7984,10 +6289,6 @@ mod tests {
         );
     }
 
-    /// An agent's icon is its harness's: pi's, or Claude's from a daemon that
-    /// says none, older than the word, whose every agent is Claude Code's. Of
-    /// a harness only a newer daemon knows, it is what the terminal has in
-    /// front, as luneta has no icon for the agent.
     #[test]
     fn an_agent_s_icon_is_its_harness_s() {
         let mut sidebar = fresh();
@@ -8006,10 +6307,6 @@ mod tests {
         );
     }
 
-    /// A word an agent says that luneta does not know is marked by its
-    /// initial, as a capital, in the one column a mark takes, so that its
-    /// label starts where every other does. An initial that takes another
-    /// number of columns marks it as one that says nothing.
     #[test]
     fn a_word_an_agent_says_is_marked_in_the_one_column_a_mark_takes() {
         let words = ["compacting", "ßa", "日本", "\u{301}a"];
@@ -8021,7 +6318,6 @@ mod tests {
         let panes = (1..=4).map(|id| pane(id, id, "/w/a", "claude")).collect();
         let agents = words.into_iter().zip(1..).map(|(word, id)| says(id, word)).collect();
         sidebar.heard(host(vec![session("s", 10, panes)], agents));
-        // Up to the label's first letter, a character to a column.
         let start = |line: &String| line.chars().take(8).collect::<String>();
         let lines = screen(&mut sidebar, false, 32, 9);
         assert_eq!(
@@ -8030,21 +6326,14 @@ mod tests {
         );
     }
 
-    /// A pane with no agent in it is dimmed, its icon with its label.
     #[test]
     fn a_pane_with_no_agent_in_it_is_dimmed() {
         let mut sidebar = two_sessions();
         let buffer = drawn(&mut sidebar, false, 32, 8);
-        // The icon and the label's first letter, on the agent's row and on
-        // nvim's under it.
         let dim = |y: u16| [5_u16, 7].map(|x| buffer[(x, y)].modifier.contains(Modifier::DIM));
         assert_eq!((dim(5), dim(6)), ([false, false], [true, true]));
     }
 
-    /// The daemon cannot follow an agent to the session it is in when the
-    /// session was renamed before the daemon started. Its row is the pane of
-    /// its id that works where it does, in the one zellij session that lists
-    /// one: an own session's pane holds no zellij agent.
     #[test]
     fn an_agent_the_daemon_cannot_follow_sits_where_its_pane_works() {
         let mut lost = agent("gone", 1, Status::Waiting, Some("fold"));
@@ -8067,8 +6356,6 @@ mod tests {
         let lines = screen(&mut sidebar, false, 32, 6);
         assert_eq!(lines[5], "   ● \u{ec82} fold                 1m");
 
-        // Two sessions list a pane of its id where it works, and the agent
-        // runs inside a shell: the one whose pane it titled holds it.
         let titled = Pane {
             titled: Some(api::Titled { topic: None }),
             ..pane(1, 0, "/w/luneta/main", "fish")
@@ -8081,9 +6368,6 @@ mod tests {
         assert_eq!(held.keys().collect::<Vec<_>>(), [&(Where::Zellij("renamed"), 1)]);
     }
 
-    /// What a pane runs tells of Claude Code's agents alone. So a pi agent the
-    /// daemon cannot follow, of two sessions that list a pane of its id where
-    /// it works, gets no row. It takes none from a Claude Code agent's pane.
     #[test]
     fn a_pi_agent_the_daemon_cannot_follow_takes_no_claude_code_pane() {
         let lost = Agent {
@@ -8119,8 +6403,6 @@ mod tests {
         );
     }
 
-    /// A pane holds a pi agent at a prompt, by pi's word for that, before one
-    /// that started first and runs on its own.
     #[test]
     fn a_pane_holds_the_pi_agent_started_at_a_prompt() {
         let of = |name: &str, mode: &str, started: i64| Agent {
@@ -8135,9 +6417,6 @@ mod tests {
         assert_eq!(name.map(|name| name.text.as_str()), Some("prompt"));
     }
 
-    /// The agent at a prompt goes by its harness's own word, as a word means
-    /// nothing apart from it. A daemon that says no harness is older than any but
-    /// Claude Code's, and luneta knows no word of one only a newer daemon knows.
     #[test]
     fn an_agent_is_at_a_prompt_by_its_harness_s_word() {
         let (claude, pi) = (Some(Harness::ClaudeCode.into()), Some(Harness::Pi.into()));
@@ -8160,8 +6439,6 @@ mod tests {
         }
     }
 
-    /// A pane at its prompt, in `/w/luneta/main`, whose shell said `doing`,
-    /// in a tab of its own.
     fn in_shell(id: u32, doing: Doing) -> Pane {
         Pane { shell: Some(Shell { doing: Some(doing) }), ..pane(id, id, "/w/luneta/main", "fish") }
     }
@@ -8179,10 +6456,6 @@ mod tests {
         Doing::Ended(Ended { command: Some(command.to_owned()), at, ending, took })
     }
 
-    /// What a shell said it ran is read as it comes from the daemon, with or
-    /// without its line: a command of no words, which lunetad never sends,
-    /// and a shell that says nothing this luneta knows, as a newer lunetad's
-    /// would, are unknown.
     #[test]
     fn what_a_shell_said_it_ran_is_read_as_it_comes() {
         let said = |doing| ran(&Shell { doing: Some(doing) });
@@ -8207,17 +6480,6 @@ mod tests {
         assert_eq!(said(Doing::Ready(())), Ran::Ready);
     }
 
-    /// A command in a shell has an agent's marks, its row named for it: the
-    /// spinner while it works, the dot of an agent that waits for you while
-    /// it waits for you to type, and once it ends, how it ended, with the dot
-    /// of what you have yet to see. The rule along the top counts them with
-    /// the agents. One that takes the terminal
-    /// over has no mark while you use it, nor has a job stopped, nor one that
-    /// ended within a second, nor a shell that has run nothing yet. The hook
-    /// counts whole seconds, and a command is
-    /// dated to the last moment of its second. The icon goes by what zellij
-    /// says runs in the pane, as for any other: here a shell's, `\u{e795}`,
-    /// and neovim's, `\u{e6ae}`.
     #[test]
     fn a_command_has_an_agent_s_marks_and_its_row_is_named_for_it() {
         let mut sidebar = fresh();
@@ -8271,27 +6533,19 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_millis(millis)
     }
 
-    /// luneta's own clock as the host's says `now`: as long after one moment
-    /// of it as `now` is after the epoch.
     fn steady(now: SystemTime) -> Instant {
         static START: LazyLock<Instant> = LazyLock::new(Instant::now);
         *START + now.duration_since(SystemTime::UNIX_EPOCH).unwrap()
     }
 
-    /// Time went by, to `moment(millis)` by both clocks, with luneta's window
-    /// focused.
     fn tick(sidebar: &mut Sidebar, millis: u64) {
         sidebar.ticked(moment(millis), steady(moment(millis)), true);
     }
 
-    /// Whether the cell on line `y` at column `x` is dimmed, drawn at `now`.
     fn dimmed(sidebar: &mut Sidebar, x: u16, y: u16, now: SystemTime) -> bool {
         drawn_at(sidebar, false, 32, 7, now)[(x, y)].modifier.contains(Modifier::DIM)
     }
 
-    /// The picker gets an agent's directory as luneta shows one, its last two
-    /// parts: its pane's, or else, while zellij has not said where the pane
-    /// works, the agent's own.
     #[test]
     fn the_picker_gets_an_agents_directory_as_its_last_two_parts() {
         let mut sidebar = fresh();
@@ -8305,13 +6559,6 @@ mod tests {
         assert_eq!(dirs, ["luneta/pr-12", "luneta/main"]);
     }
 
-    /// An agent that finished, and a command that ended, have the dot until
-    /// luneta's zellij stays on their panes for a second, a folded session
-    /// the dot of one of its panes, and the rule along the top counts them.
-    /// Seen, the agent's `✓` is dimmed, and the command's row goes back to
-    /// its shell; the picker marks the agent as its row does. On the pane
-    /// luneta's zellij is on, an end is no news: you see it. A pane it only
-    /// passed through keeps the dot.
     #[test]
     fn what_finished_has_the_dot_until_you_stay_in_its_pane() {
         let mut sidebar = fresh();
@@ -8382,9 +6629,6 @@ mod tests {
         assert_eq!(seen[6], "     \u{e795} luneta/main");
     }
 
-    /// `u` marks the highlighted pane unread, and gives its row the dot, with
-    /// nothing new in it, and on the pane luneta's zellij is on, until it
-    /// leaves and comes back for a second. `u` again takes the mark away.
     #[test]
     fn u_marks_a_pane_unread_until_you_come_back_to_it() {
         let mut sidebar = two_sessions();
@@ -8413,8 +6657,6 @@ mod tests {
         assert_eq!(nvim(&mut sidebar, moment(168_000)), "▌    \u{e6ae} nvim src/main.rs");
     }
 
-    /// The session `s` of the tests of the dot: an agent that came to `idle`
-    /// at 100 in pane 1, and a shell in pane 3.
     fn idle_agent() -> Host {
         host(
             vec![session(
@@ -8426,16 +6668,11 @@ mod tests {
         )
     }
 
-    /// The row of the agent of `idle_agent`, once the sidebar ticks at `now`
-    /// with luneta's window `watched`.
     fn agent_row(sidebar: &mut Sidebar, now: SystemTime, watched: bool) -> String {
         sidebar.ticked(now, steady(now), watched);
         seen_at(sidebar, false, 32, 6, now).0[4].clone()
     }
 
-    /// luneta's zellij on a pane while luneta's window does not have the
-    /// focus is not you there: what finished there keeps the dot, until you
-    /// look for a second.
     #[test]
     fn a_pane_is_yours_only_while_luneta_s_window_has_the_focus() {
         let mut sidebar = fresh();
@@ -8458,9 +6695,6 @@ mod tests {
         assert_eq!(agent_row(&mut sidebar, moment(170_000), true), seen);
     }
 
-    /// `u` on a row with the dot marks its pane read, as going there would,
-    /// whatever gave it the dot: the agent's `✓` is dimmed. `u` again marks
-    /// it unread, and the dot comes back, and once more takes it away.
     #[test]
     fn u_marks_a_pane_with_the_dot_read() {
         let mut sidebar = fresh();
@@ -8486,9 +6720,6 @@ mod tests {
         assert!(dimmed(&mut sidebar, 3, 4, moment(161_000)));
     }
 
-    /// Two sessions whose servers made their sockets in one tick of the
-    /// clock, and so started at one moment, keep what you saw in each apart:
-    /// their sockets tell them apart.
     #[test]
     fn sessions_that_started_at_once_keep_their_dots_apart() {
         let mut sidebar = fresh();
@@ -8515,9 +6746,6 @@ mod tests {
         );
     }
 
-    /// A session the daemon leaves out of a list, as a rename made while it
-    /// reads zellij's folder can, keeps what you saw in it. One it has not
-    /// listed for `GONE` has it no more, should it come back.
     #[test]
     fn a_session_left_out_of_a_list_keeps_what_you_saw_until_it_is_gone() {
         let mut sidebar = fresh();
@@ -8539,11 +6767,6 @@ mod tests {
         }
     }
 
-    /// A list the daemon may have left a session out of takes nothing of
-    /// what you saw in it, however long it stands: what it said last, while
-    /// it does not answer, as a session may have started since; one it
-    /// could not read all of zellij's folder for; and one from a daemon older
-    /// than the count, which does not say whether it could.
     #[test]
     fn a_session_a_list_falls_short_of_keeps_what_you_saw() {
         let short: [fn(&mut Sidebar); 3] = [
@@ -8576,8 +6799,6 @@ mod tests {
         }
     }
 
-    /// A command shows once it has run for a second, with no word from the
-    /// daemon since it started.
     #[test]
     fn a_command_shows_once_it_has_run_a_second() {
         let mut sidebar = fresh();
@@ -8591,7 +6812,6 @@ mod tests {
         assert!(sidebar.turning());
     }
 
-    /// Starship's `git_status`, with the defaults.
     #[test]
     fn the_work_tree_shows_what_starship_shows() {
         let changes =
@@ -8602,9 +6822,6 @@ mod tests {
         assert_eq!(glyphs(&Changes::default(), 0, None), "");
     }
 
-    /// A branch's pull request follows it, in the colour gh lists its state
-    /// in, and a branch too long for both gives way to the number and to how
-    /// the work tree stands. A closed one shows nothing.
     #[test]
     fn a_branch_shows_the_number_of_its_pull_request_in_its_state_s_colour() {
         let panes = ["/w/a", "/w/b", "/w/c", "/w/d"];
@@ -8651,25 +6868,15 @@ mod tests {
         assert_eq!(colour(10), Some(gruvbox::GREY));
     }
 
-    /// The lines changed on a branch sit between its name and the number of
-    /// its pull request: the added in green, the deleted in red, as diffs are
-    /// coloured. None where the branch is the repository's default, or its
-    /// daemon is too old to say, or where nothing changed, so the line stays
-    /// as it is for a pane at rest. A branch too long gives way to them, as
-    /// it does to the number and to how the work tree stands.
     #[test]
     fn a_branch_shows_the_lines_changed_on_it() {
         let panes = ["/w/a", "/w/b", "/w/c", "/w/d", "/w/e", "/w/f"];
         let panes = panes.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
-        // (dir, branch, how many lines changed as its daemon counts them,
-        // its pull request's number, or none where it has none)
         let checkouts = [
             ("/w/a", "issue-299", Some((120, 34)), 328),
             ("/w/b", "fix", Some((7, 0)), 12),
             ("/w/c", "tidy", Some((0, 5)), 13),
-            // The repository's default branch, which its daemon counts none
-            // on.
             ("/w/d", "main", None, 14),
             ("/w/e", "handoff-eng-11259-and-more", Some((9, 8)), 4321),
             ("/w/f", "gone", None, 0),
@@ -8717,10 +6924,6 @@ mod tests {
             buffer[(x, y)].fg
         };
         let first = 6;
-        // `fix` has only added lines and `tidy` only deleted ones, so each
-        // mark says its own count's colour. A branch's name can hold a `-`
-        // of its own, as `handoff-eng…` does, so the marks are found from the
-        // start of the line on, and each after the `+` before it.
         let added = (0..34).find(|x| buffer[(*x, first)].symbol() == "+").expect("the mark");
         assert_eq!(buffer[(added, first)].fg, gruvbox::GREEN);
         assert_eq!(colour(first, added, "-"), gruvbox::RED);
@@ -8728,12 +6931,6 @@ mod tests {
         assert_eq!(colour(first + 4, 0, "-"), gruvbox::RED);
     }
 
-    /// An open pull request, or a draft, has a mark after its number for
-    /// what its checks come to, in its colour: one failed, one has yet to end,
-    /// or each passed. One with no checks, or whose daemon is too old to say
-    /// them, has none, and so does a merged one, whatever its checks did. A
-    /// branch too long gives way to the mark too. Where gh failed since it
-    /// said them, the mark is grey.
     #[test]
     fn an_open_pull_request_shows_what_its_checks_come_to() {
         use luneta_protocol::github::Checks;
@@ -8803,10 +7000,6 @@ mod tests {
         assert_eq!(tail("日本語", 4), "…語");
     }
 
-    /// A name lit for a room is never wider than the room, at any room, as a
-    /// session's row has its rule take what the name leaves: with
-    /// wide characters, joined ones, a selector, a ligature, halfwidth sound
-    /// marks, combining ones and control characters.
     #[test]
     fn a_lit_name_fits_its_room() {
         let family = "👩\u{200d}👩\u{200d}👧";
@@ -8829,10 +7022,6 @@ mod tests {
         }
     }
 
-    /// What shows as one stays whole, and counts as wide as it shows, in the
-    /// columns a cut has and in those a line of text wraps at: `⚠️` is a
-    /// character and a selector that widens it to two columns, and a family is
-    /// three people joined into two columns.
     #[test]
     fn a_cut_or_a_wrap_goes_by_what_shows_as_one() {
         let family = "👩\u{200d}👩\u{200d}👧";
@@ -8848,7 +7037,6 @@ mod tests {
         assert_eq!(lines, [" ab", " ⚠️c", " d"]);
     }
 
-    /// Sessions to search, each pane named for what it runs.
     fn searched() -> Sidebar {
         let mut sidebar = fresh();
         sidebar.heard(host(
@@ -8878,49 +7066,35 @@ mod tests {
         sidebar
     }
 
-    /// Types `text` into the sidebar, a key for each character.
     fn type_in(sidebar: &mut Sidebar, text: &str) {
         for c in text.chars() {
             sidebar.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), moment(160_000));
         }
     }
 
-    /// The lines of the rows the sidebar shows, focused, with no rule after a
-    /// session's name: those under this machine's header down to the blank
-    /// above the legend.
     fn rows_shown(sidebar: &mut Sidebar) -> Vec<String> {
         let lines = screen(sidebar, true, 32, 28);
         let rows = lines[sessions_from(&lines)..].iter().take_while(|line| !line.is_empty());
         rows.map(|line| line.trim_end_matches(['─', ' ']).to_owned()).collect()
     }
 
-    /// The line the sessions of `mac`, the machine of `fresh`, start on, as
-    /// the sidebar draws them: under its header, where it has one.
     fn sessions_from(lines: &[String]) -> usize {
         let header = lines.get(HEADER).is_some_and(|line| line.starts_with(" ▾ \u{f108} mac ═"));
         HEADER + usize::from(header)
     }
 
-    /// The last line of the sidebar, focused: the keys the search takes, or
-    /// else the last of the menu.
     fn bottom(sidebar: &mut Sidebar) -> String {
         screen(sidebar, true, 32, 18)[17].clone()
     }
 
-    /// Whether the sidebar, focused, shows the search.
     fn searching(sidebar: &mut Sidebar) -> bool {
         screen(sidebar, true, 32, 18).iter().any(|line| line.starts_with("─ Search ─"))
     }
 
-    /// The search at the bottom of the sidebar, focused: its rule, what is
-    /// typed, and the keys it takes.
     fn search_shown(sidebar: &mut Sidebar) -> Vec<String> {
         screen(sidebar, true, 32, 16)[13..].to_vec()
     }
 
-    /// A session found by its name keeps all its panes, the highlight on the
-    /// one of them that matches best, or else on the first, though the name
-    /// matches better. The rule along the top counts what the search hides.
     #[test]
     fn a_search_keeps_the_rows_that_match_where_they_were() {
         let bipa = pane_of("bipa", 10, 3);
@@ -8941,9 +7115,6 @@ mod tests {
         }
     }
 
-    /// A tab zellij named, and the parts of a directory a row leaves out,
-    /// find nothing. An agent's pane zellij has not said the directory of is
-    /// found by where the agent works.
     #[test]
     fn a_pane_is_found_by_its_branch_its_named_tab_and_its_directory() {
         let mut notes = pane(1, 0, "/w/a", "nvim a");
@@ -8979,8 +7150,6 @@ mod tests {
         assert_eq!(found("loren"), [" no match"]);
     }
 
-    /// Closed by `Esc`, by `Enter` going to the row, or by zellij taking the
-    /// keys.
     #[test]
     fn a_search_opens_a_folded_session_until_it_closes() {
         for close in [Some(KeyCode::Esc), Some(KeyCode::Enter), None] {
@@ -9003,9 +7172,6 @@ mod tests {
         }
     }
 
-    /// A search goes to a pane of the folded session luneta's zellij is in,
-    /// which unfolds as it goes. Folded there, the session stays so while
-    /// luneta's zellij does.
     #[test]
     fn going_to_a_pane_found_in_luneta_s_folded_session_unfolds_it() {
         let mut sidebar = searched();
@@ -9021,11 +7187,6 @@ mod tests {
         assert_eq!(rows_shown(&mut sidebar)[..2], [" ▾ bipa", "       a-p-i-x"]);
     }
 
-    /// Every character types, `j` and `h` too, where the keys were, under a
-    /// rule that names the search, over the keys it takes. Once something is
-    /// typed, the rule counts the panes it finds, of every pane. A long
-    /// search shows its end. `Backspace` takes a character back, and closes
-    /// the search once there is none.
     #[test]
     fn what_is_typed_shows_where_the_keys_were() {
         let mut sidebar = searched();
@@ -9050,10 +7211,6 @@ mod tests {
         assert_eq!(search_shown(&mut sidebar)[1], " …ry-long-search-for-something_");
     }
 
-    /// The keys under the search are spots that press them while it is open:
-    /// `<ESC>` closes it. What is typed is no spot, and a click on a key of
-    /// the search once it closed does nothing, where `Enter` would go to the
-    /// highlighted row.
     #[test]
     fn a_click_on_a_key_under_the_search_presses_it_while_it_is_open() {
         let mut sidebar = searched();
@@ -9074,10 +7231,6 @@ mod tests {
         assert!(!searching(&mut sidebar));
     }
 
-    /// The search stays open under a box over zellij, but without the keys
-    /// under it, which are the box's, as the legend goes. A click on one drawn
-    /// before the box opened does nothing: `Enter` would go to the
-    /// highlighted row from under a brief, and to the menu floating there.
     #[test]
     fn the_search_has_no_keys_under_a_box() {
         let mut sidebar = searched();
@@ -9099,9 +7252,6 @@ mod tests {
         assert_eq!(search_shown(&mut sidebar)[1], " pix_");
     }
 
-    /// What a search found of a pane's label lights up as the picker lights
-    /// it, and of a session's name, underlined on its colour, as no colour
-    /// reads on every session's.
     #[test]
     fn a_search_lights_what_it_found_of_each_row() {
         let mut sidebar = searched();
@@ -9121,25 +7271,18 @@ mod tests {
         assert_eq!(marked(zed + 2, lit), "zed");
     }
 
-    /// Of a text cut short, none of what the cut took lights up, nor the `…`
-    /// that stands for it, whichever end the cut keeps: the picker keeps a
-    /// directory's.
     #[test]
     fn what_the_cut_took_lights_nothing() {
         let (plain, hit) = (Style::new(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
         let (spans, wide) = lit("pix outflow", 8, Keep::Start, &[0, 7], plain);
         assert_eq!(spans, [Span::styled("p", hit), Span::styled("ix out…", plain)]);
         assert_eq!(wide, 8);
-        // The `…` stands for the `e` too, and the `i` lights up past it.
         let (spans, wide) = lit("/w/luneta/main", 8, Keep::End, &[6, 12], plain);
         let (cut, n) = (Span::styled("…ta/ma", plain), Span::styled("n", plain));
         assert_eq!(spans, [cut, Span::styled("i", hit), n]);
         assert_eq!(wide, 8);
     }
 
-    /// What a search found of a text in the accent already, as a waiting
-    /// agent's is in the sidebar and the picker, is underlined: it would not
-    /// show in the accent.
     #[test]
     fn a_hit_on_a_text_in_the_accent_is_underlined() {
         let accent = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
@@ -9154,13 +7297,10 @@ mod tests {
 
     const LINK: &str = "https://github.com/owner/repo/pull/246";
 
-    /// What `LINK` reads as.
     fn link() -> Link {
         Link::parse(LINK).expect("a link")
     }
 
-    /// The branch `branch` checked out in `dir`, with `pull` for its pull
-    /// request, as lunetad says them in `work_trees` and `pull_requests`.
     fn checked_out(
         work_trees: &mut Vec<api::WorkTree>,
         pull_requests: &mut Vec<api::PullRequest>,
@@ -9181,9 +7321,6 @@ mod tests {
         }
     }
 
-    /// The panes of a session `s`, by their id: 1 on a branch with a pull
-    /// request, 2 with one from a daemon too old to say its link, 3 with one
-    /// that is closed, and 4 with none.
     fn pulls() -> Sidebar {
         let dirs = ["/w/a", "/w/b", "/w/c", "/w/d"];
         let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
@@ -9200,19 +7337,11 @@ mod tests {
         sidebar
     }
 
-    /// The columns of the line `y` a click hits a pull request's number on,
-    /// by `drawn`.
     fn number_spot(drawn: &Drawn, y: u16) -> Vec<u16> {
         let hits = |x: &u16| matches!(drawn.at(Position::new(*x, y)), Some(Hit::Number(_)));
         (0..64).filter(hits).collect()
     }
 
-    /// An issue the issue box sent shows among the notes as it is filed,
-    /// after a spinner that turns, and what came of it once gh says: its
-    /// number and title, in no colour of what went wrong, until the next
-    /// key, whatever the time; or why none was filed, which says the box has
-    /// your words again, and why one may have been, which says to look before
-    /// you send them. Two filed at once show each.
     #[test]
     fn an_issue_shows_in_the_notes_as_it_is_filed_and_then_what_came_of_it() {
         let mut sidebar = two_sessions();
@@ -9260,10 +7389,6 @@ mod tests {
         ]);
     }
 
-    /// `y` waits for what to yank, which the bottom of the sidebar lists, and
-    /// `p` copies the link of the highlighted row's pull request. A note says
-    /// so, as a copy shows nothing, in no colour of what went wrong, until the
-    /// next key, or a while after: a click may leave the keys with zellij.
     #[test]
     fn y_p_copies_the_highlighted_row_s_link_and_a_note_says_so() {
         let mut sidebar = pulls();
@@ -9295,9 +7420,6 @@ mod tests {
         assert_eq!(sidebar.copied, None);
     }
 
-    /// `Esc` after `y` only drops it, as after a lone `g`. Any other key
-    /// drops it and does what it does, and so does a click: `p` then has
-    /// nothing to finish.
     #[test]
     fn y_waits_for_one_key_and_esc_only_drops_it() {
         let mut sidebar = pulls();
@@ -9321,14 +7443,11 @@ mod tests {
         sidebar.mouse(mouse(MouseEventKind::ScrollUp, 10, 4), area);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
 
-        // The pointer moving is no click: luneta hears every move.
         sidebar.key(&char('y'), now);
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), area);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
     }
 
-    /// A click on the `y` of the legend `?` opened presses it, and on the `p`
-    /// that takes the legend's place copies, as the keys do.
     #[test]
     fn a_click_on_y_then_on_p_copies() {
         let mut sidebar = pulls();
@@ -9342,9 +7461,6 @@ mod tests {
         assert_eq!(copied, Asked::Copy(link()));
     }
 
-    /// `y p` and `o` go by the number the row shows: where it shows none, or
-    /// one whose daemon did not say its link, they only leave a note. A
-    /// session's row has none, and neither does a machine's header.
     #[test]
     fn the_keys_only_leave_a_note_on_a_row_with_no_link() {
         let none = "no pull request on this row";
@@ -9370,8 +7486,6 @@ mod tests {
         }
     }
 
-    /// A pull request numbered 5, as its daemon says it, with `said` for its
-    /// page, on the branch of the pane 1 of a session `s`.
     fn pull_said(said: &str) -> Sidebar {
         let panes = vec![pane(1, 1, "/w/a", "fish")];
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
@@ -9384,11 +7498,6 @@ mod tests {
         sidebar
     }
 
-    /// What a daemon says of a page goes no further than its row unless it
-    /// reads as the link of that very number, as another machine's says it,
-    /// and the clipboard and the browser take what they are handed. The row
-    /// shows its number all the same, which takes no click, and the keys only
-    /// leave a note.
     #[test]
     fn a_page_that_is_not_the_link_of_the_number_stays_on_the_row() {
         let now = moment(160_000);
@@ -9417,8 +7526,6 @@ mod tests {
         }
     }
 
-    /// What is copied and opened is the link as luneta spells it again, with
-    /// nothing of what came after its number.
     #[test]
     fn a_page_that_reads_is_taken_as_luneta_spells_it() {
         let now = moment(160_000);
@@ -9429,9 +7536,6 @@ mod tests {
         assert_eq!(link.url(), "https://github.com/owner/repo/pull/5");
     }
 
-    /// `o` opens the link of the highlighted row, and neither it nor `y p`
-    /// asks anything of another machine: its daemon said the link, and luneta
-    /// runs where you sit.
     #[test]
     fn o_and_y_p_take_another_machine_s_link_too() {
         let mut sidebar = pulls();
@@ -9458,11 +7562,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(far_link));
     }
 
-    /// The number is a spot of its own, on exactly the columns it is drawn
-    /// on, whatever keeps it there: a branch cut short, of wide characters,
-    /// and how its work tree stands. The rest of its line is the pane's. It
-    /// takes a click wherever the keys are. One with no link is the pane's
-    /// too, and so is the line of a row with none.
     #[test]
     fn the_number_of_a_pull_request_is_a_spot_of_its_own() {
         let mut sidebar = pulls();
@@ -9482,7 +7581,6 @@ mod tests {
             let area = Rect::new(0, 0, 32, 32);
             let mut buffer = Buffer::empty(area);
             let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
-            // The columns of `number`, by the cells it is drawn in.
             let columns = |y: u16, number: &str| {
                 let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
                 let start = cells.windows(number.len()).position(|it| it.concat() == number);
@@ -9500,33 +7598,25 @@ mod tests {
         }
     }
 
-    /// A number scrolled off the rows takes no click, and neither does what
-    /// is drawn over the line it would be on; nor one under a session the
-    /// mouse lifted, whose rows make room for it.
     #[test]
     fn a_number_out_of_sight_takes_no_click() {
         let mut sidebar = pulls();
         sidebar.focus(Keys::Zellij);
-        // Four lines of rows, under the title, its rule and a blank: the
-        // machine's header, the session's row, and the pane's two.
         let area = Rect::new(0, 0, 32, 7);
         let mut buffer = Buffer::empty(area);
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
 
-        // Scrolled past #246's line, as far as #7's, which has no link.
         sidebar.top = 4;
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         assert_eq!((0..7).flat_map(|y| number_spot(&drawn, y)).count(), 0);
 
-        // A note takes #246's line.
         sidebar.top = 0;
         sidebar.notify("something went wrong".to_owned());
         let drawn = sidebar.draw(&mut buffer, area, moment(160_000));
         assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
         sidebar.notice = None;
 
-        // Lifted, by the session's row.
         let area = Rect::new(0, 0, 32, 24);
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 4), area);
@@ -9536,8 +7626,6 @@ mod tests {
         assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
     }
 
-    /// A note that is no longer so goes by its words, and leaves another that
-    /// is there in its place, as what went wrong as luneta started.
     #[test]
     fn a_note_no_longer_so_goes_and_leaves_any_other() {
         let mut sidebar = fresh();
@@ -9549,9 +7637,6 @@ mod tests {
         assert_eq!(sidebar.notice, None);
     }
 
-    /// A click on a number copies its link and does nothing else: the
-    /// highlight and the keys stay, and so does what the row's own click
-    /// would do. It drops a `y` pressed before it, as any click does.
     #[test]
     fn a_click_on_a_number_copies_and_does_nothing_else() {
         let mut sidebar = pulls();
@@ -9571,8 +7656,6 @@ mod tests {
         sidebar.number_clicked(link(), now);
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
     }
-    /// Each line of the sidebar drawn 32 by 19, from the line `from` down, as
-    /// text, and what a click a few columns into it hits.
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
         let area = Rect::new(0, 0, 32, 20);
         let mut buffer = Buffer::empty(area);
@@ -9586,15 +7669,10 @@ mod tests {
         Hit::Keys(Keyed::Legend, char(c))
     }
 
-    /// A click on the menu numbered 1 that presses `code`.
     fn on_menu(code: KeyCode) -> Hit {
         Hit::Menu(1, Choice::Key(KeyEvent::from(code)))
     }
 
-    /// Each entry of the legend `?` opened is a spot where it is drawn, that
-    /// presses its key, and so is each of the menu once that opens it at the
-    /// bottom, and the keys under them. The rows are none: a click there goes
-    /// as before.
     #[test]
     fn a_click_on_the_legend_or_the_menu_under_it_presses_its_key() {
         let mut sidebar = two_sessions();
@@ -9636,9 +7714,6 @@ mod tests {
         ]);
     }
 
-    /// A click on the legend that comes once the menu took its place, as the
-    /// legend's `d` opened the Delete group there, does nothing: the group's
-    /// own `d` deletes what the highlighted row is for.
     #[test]
     fn a_click_on_the_legend_once_the_menu_took_its_place_does_nothing() {
         let mut sidebar = two_sessions();
@@ -9654,16 +7729,10 @@ mod tests {
         assert_ne!(deleted, Asked::Nothing);
     }
 
-    /// Whether the sidebar, focused and 32 by 20, drawn at `at`, shows a line
-    /// that starts with `start`.
     fn shows_at(sidebar: &mut Sidebar, at: SystemTime, start: &str) -> bool {
         seen_at(sidebar, true, 32, 20, at).0.iter().any(|line| line.starts_with(start))
     }
 
-    /// A group's key at the top leaves the bottom as it was for `PAUSE`, after
-    /// which luneta is due to draw again, and then shows its group. The
-    /// group's key typed fast after it draws no group at all, while zellij
-    /// plans what it deletes.
     #[test]
     fn a_group_shows_once_a_pause_passes_and_never_when_typed_fast() {
         let mut sidebar = two_sessions();
@@ -9688,9 +7757,6 @@ mod tests {
         assert_eq!(sidebar.due(later), None);
     }
 
-    /// A lone `g` shows, once `PAUSE` passed, what a second one does, as `y`
-    /// shows what it yanks; and `v` and `V` show their keys while they last,
-    /// each a spot that presses it where it is one key.
     #[test]
     fn a_lone_g_a_selection_and_a_move_show_their_keys() {
         let mut sidebar = two_to_move();
@@ -9724,8 +7790,6 @@ mod tests {
         ]);
     }
 
-    /// The legend shows only once `?` opened it, until the next key: `Esc`
-    /// does nothing else, a group's key shows its group at once.
     #[test]
     fn question_mark_opens_the_legend_and_the_next_key_closes_it() {
         let mut sidebar = two_sessions();
@@ -9761,9 +7825,6 @@ mod tests {
         assert!(!shows_at(&mut sidebar, now, legend));
     }
 
-    /// `?` in the legend lists every key in its place, in groups, under a
-    /// rule that says how far down it shows; `j` and `k` scroll it as far as
-    /// its ends, and `Esc` closes it, doing nothing else.
     #[test]
     fn question_mark_in_the_legend_lists_every_key_and_esc_closes_it() {
         let mut sidebar = two_sessions();
@@ -9814,9 +7875,6 @@ mod tests {
         assert_eq!(sidebar.cursor, here);
     }
 
-    /// A legend short of room keeps its last line for `?`, which lists the
-    /// keys it left out, and a click there presses it; so does the menu at
-    /// the bottom, where `?` closes it for the list.
     #[test]
     fn a_list_of_keys_short_of_room_ends_in_the_key_that_lists_them_all() {
         let mut sidebar = two_sessions();
@@ -9847,10 +7905,6 @@ mod tests {
         assert!(matches!(sidebar.pending, Pending::AllKeys(_)));
     }
 
-    /// A press on the rows, as a drag that may end in a question starts,
-    /// closes the legend and the list of every key, as a paste that opens the
-    /// menu does: neither stands under what came since, to show again once
-    /// that goes with no key.
     #[test]
     fn a_press_or_a_paste_closes_the_legend_and_the_list_of_every_key() {
         let mut sidebar = two_sessions();
@@ -9877,8 +7931,6 @@ mod tests {
         }
     }
 
-    /// The pause a group's key holds its menu back for is that menu's: a link
-    /// pasted inside it opens a menu of its own, which shows at once.
     #[test]
     fn a_link_pasted_in_a_group_s_pause_shows_its_menu_at_once() {
         let mut sidebar = two_sessions();
@@ -9891,9 +7943,6 @@ mod tests {
         assert_eq!(sidebar.due(soon), None);
     }
 
-    /// The skills the menu's search finds at the bottom of the sidebar are
-    /// spots that pick them: a click on one starts an agent on it, as
-    /// `Enter` does with the cursor on it.
     #[test]
     fn a_click_on_a_skill_of_the_menu_under_the_rows_starts_an_agent_on_it() {
         let mut sidebar = two_sessions();
@@ -9921,7 +7970,6 @@ mod tests {
             (" /tigerstyle", on("tigerstyle")),
             (" \u{ec82} claude, the pane's  <TAB>", tab),
         ]);
-        // A click on the skill of a menu that closed since does nothing.
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
@@ -9931,10 +7979,6 @@ mod tests {
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
 
-    /// A key of the menu starts an agent in the harness of the one in the
-    /// row's pane, and on a pane with none, in the one picked last, which
-    /// `Tab` picks, for this menu and every next one, and keeps for the
-    /// next luneta.
     #[test]
     fn the_menu_starts_agents_in_the_pane_s_harness_or_else_the_one_picked_last() {
         let scratch = tempfile::tempdir().unwrap();
@@ -9977,10 +8021,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
     }
 
-    /// A key of the menu opens it at the bottom, for the highlighted row, and
-    /// what it opens is where luneta goes, once zellij says what it opened. A
-    /// tab of another session opens once luneta's zellij is there, whatever
-    /// lunetad says of its clients: the last may have left since.
     #[test]
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = two_sessions();
@@ -10003,7 +8043,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
         let opened = pane_of("older", 10, 7);
         assert_eq!(sidebar.opened(1, Ok(7)), go_here(opened));
-        // What zellij answers a menu that is gone takes luneta nowhere.
         assert_eq!(sidebar.opened(1, Ok(8)), Asked::Nothing);
 
         let client = Client { id: 9, pane: None };
@@ -10022,10 +8061,6 @@ mod tests {
         assert!(sidebar.menu.is_none());
     }
 
-    /// An own session's server opens a tab with no client there, so a key of
-    /// the menu opens one at once, from any session, and luneta goes there, as
-    /// it goes where the menu opens anything; one that opened once the menu
-    /// closed takes luneta nowhere, and the notes say where it is.
     #[test]
     fn a_tab_of_an_own_session_opens_at_once_and_luneta_goes_there() {
         let mut sidebar = fresh();
@@ -10053,10 +8088,6 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("menu: opened own:9")), "{lines:?}");
     }
 
-    /// A delete key on an own session's row kills it by its id: a session made
-    /// since that took its name stays. luneta's zellij is in no own session,
-    /// so it kills it while luneta cannot tell which session its zellij is in
-    /// too.
     #[test]
     fn an_own_session_is_deleted_by_its_id() {
         let mut sidebar = fresh();
@@ -10079,10 +8110,6 @@ mod tests {
         assert_eq!(delete(&mut sidebar), delete_here(kill));
     }
 
-    /// An own session of the name of the zellij session luneta's zellij is in
-    /// is another: luneta's zellij is not in it, and a delete key on its row
-    /// kills it where it is, and asks of its own agent alone, not of the
-    /// zellij one's.
     #[test]
     fn an_own_session_named_as_the_zellij_one_here_is_another() {
         let mut sidebar = fresh();
@@ -10109,12 +8136,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('y'), moment(160_000)), delete_here(kill));
     }
 
-    /// luneta's client of an own session is where its server says, and in
-    /// no zellij session of that name: the ask box's agent is told that pane,
-    /// once the server says which. A delete of its session leaves for the
-    /// newest other session of this machine, of either kind, and deletes it
-    /// once luneta is there; one of the zellij session of the name goes at
-    /// once.
     #[test]
     fn an_own_client_is_where_its_server_says_and_leaves_its_session_to_delete_it() {
         let mut sidebar = fresh();
@@ -10151,9 +8172,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
     }
 
-    /// luneta's client of an own session is in it as no other is: a session
-    /// of its id that another server made, as the daemon may list for a
-    /// while, is not where it is.
     #[test]
     fn an_own_client_is_in_no_session_of_its_id_made_another_time() {
         let mut sidebar = fresh();
@@ -10169,9 +8187,6 @@ mod tests {
         assert_eq!(sidebar.here_place(), Ok(PanePlace { session: new, pane: 1 }));
     }
 
-    /// A key of the Turn group is for the highlighted row, of whatever session,
-    /// and what it turns is where luneta goes, once zellij says it did. Only
-    /// the menu waiting on the tabs goes on with them.
     #[test]
     fn a_key_of_the_turn_group_turns_the_pane_of_the_highlighted_row() {
         let mut sidebar = two_sessions();
@@ -10203,9 +8218,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some("menu: not turned: zellij found no room"));
     }
 
-    /// Every pane moved takes luneta to the row's. Some moved says how many,
-    /// and not that nothing turned, and takes it nowhere, as that pane may be
-    /// among the rest. A menu closed since hears nothing of it.
     #[test]
     fn what_came_of_turning_a_tab_is_said_as_it_was() {
         let waiting = || {
@@ -10237,11 +8249,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some(said));
     }
 
-    /// A pull request's link pasted with the sidebar's keys opens the menu
-    /// for it at the bottom, and other text does nothing. A key hands luneta
-    /// every pane that says where it works, in the order of the rows, to find
-    /// where it goes. A session luneta makes for it is where luneta goes, by
-    /// its name, once zellij has opened its tab.
     #[test]
     fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
@@ -10302,17 +8309,11 @@ mod tests {
         assert_eq!(sidebar.opened(1, Ok(3)), go_here(opened));
     }
 
-    /// A key of the menu for a pasted link starts what it starts, and the keys
-    /// leaving the menu does not end it: the sidebar keeps the menu, and what
-    /// it waits on, once the menu closes. The answer opens what it opens, and
-    /// starts the agent, where it would have, but takes luneta's client only
-    /// where the keys still are: the notes say where it opened, else.
     #[test]
     fn what_a_key_of_a_pasted_link_started_goes_on_once_the_keys_leave_the_menu() {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
         let link = || Link::parse(page).unwrap();
         let number = 1;
-        // The menu for the link pasted, `r` pressed, which waits for it.
         let pulling = || {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
@@ -10330,16 +8331,12 @@ mod tests {
             Ready { at, worktree, branch: None, moved_off: false, work }
         };
 
-        // The keys go to zellij: the menu closes, and the notes say what runs.
         let mut sidebar = pulling();
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 32, 17);
         assert!(lines.iter().any(|line| line.contains("Syncing #5…")), "{lines:?}");
-        // And what the key asked for goes on from there: it opens the tab, and
-        // starts the agent there, taking nobody anywhere. It waits on zellij to
-        // open the tab still, which the notes say where it did.
         let found = || Found { on: Machine::Local, ready: ready() };
         let asked = sidebar.pulled(number, Ok(found()));
         assert!(matches!(asked, Asked::Open { .. } | Asked::OpenThere { .. }), "{asked:?}");
@@ -10348,14 +8345,10 @@ mod tests {
         assert!(sidebar.working.is_empty());
         assert_eq!(sidebar.notice.as_deref(), Some("menu: opened older:7"));
 
-        // Where the keys are still the menu's, it takes luneta's client there,
-        // as it did before.
         let mut sidebar = pulling();
         let asked = sidebar.pulled(number, Ok(found()));
         assert!(matches!(asked, Asked::Open { .. } | Asked::OpenThere { .. }), "{asked:?}");
 
-        // Where a pane has the branch already, `w` would take you there, and
-        // the keys left: the notes say where the pane is, and nobody moves.
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         sidebar.paste(page);
@@ -10379,9 +8372,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some("menu: older:4 has it; nobody went"));
     }
 
-    /// A tab the key of a pasted link opened while the keys left the menu is
-    /// still the tab to go to: luneta hears of it, says where it is, and
-    /// takes nobody there.
     #[test]
     fn a_tab_a_pasted_link_s_key_opened_while_the_keys_left_says_where_it_is() {
         let mut sidebar = two_sessions();
@@ -10404,7 +8394,6 @@ mod tests {
             on: Machine::Local,
             open,
         });
-        // The keys go elsewhere as zellij opens it.
         sidebar.focus(Keys::Zellij);
         assert_eq!(sidebar.waits_on(number), Some(Held::Kept));
         assert_eq!(sidebar.opened(number, Ok(7)), Asked::Nothing);
@@ -10412,9 +8401,6 @@ mod tests {
         assert_eq!(sidebar.waits_on(number), None);
     }
 
-    /// `Esc` closes the menu a key of which waits, as it does one whose keys
-    /// only choose, and what the key started goes on either way: the menu is
-    /// no longer yours, but the work is luneta's.
     #[test]
     fn esc_closes_a_menu_that_waits_and_what_it_started_goes_on() {
         let mut sidebar = two_sessions();
@@ -10427,7 +8413,6 @@ mod tests {
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000)), Asked::Nothing);
         assert!(sidebar.menu.is_none());
         assert!(sidebar.working.contains_key(&number));
-        // A menu whose keys only choose keeps nothing: `Esc` ends it.
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "m");
@@ -10437,9 +8422,6 @@ mod tests {
         assert!(sidebar.working.is_empty());
     }
 
-    /// A link pasted again while what its first paste asked for goes on makes
-    /// nothing of its own: the notes say it is on its way, rather than open a
-    /// second menu that would make a second worktree of one link.
     #[test]
     fn a_link_pasted_again_while_its_worktree_goes_on_makes_nothing_of_its_own() {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
@@ -10450,7 +8432,6 @@ mod tests {
             panic!("no job for the key");
         };
         let number = sidebar.menu.as_ref().map_or(0, Menu::number);
-        // Pasted again with the menu still open: still the menu it was.
         sidebar.paste(page);
         assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(number));
         sidebar.focus(Keys::Zellij);
@@ -10460,13 +8441,10 @@ mod tests {
         sidebar.paste(page);
         assert!(sidebar.menu.is_none());
         assert_eq!(sidebar.notice.as_deref(), Some("#5 is on its way"));
-        // Another link makes its own.
         sidebar.paste("https://github.com/lorenzolfm/luneta/issues/6");
         assert!(sidebar.menu.is_some());
     }
 
-    /// The same link pasted again while its menu only chooses opens it again,
-    /// as nothing is on its way yet.
     #[test]
     fn a_link_pasted_again_before_a_key_opens_its_menu_again() {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
@@ -10479,8 +8457,6 @@ mod tests {
         assert!(sidebar.working.is_empty());
     }
 
-    /// A menu that waits, in whose place another opens, as a link pasted or
-    /// `Alt a` opens one, goes on, as it does when the keys leave it.
     #[test]
     fn a_menu_that_waits_goes_on_when_another_takes_its_place() {
         let waiting = || {
@@ -10506,8 +8482,6 @@ mod tests {
         assert!(sidebar.working.contains_key(&1));
     }
 
-    /// An answer that ends a menu the keys left ends only that one: the menu
-    /// open meanwhile stays, and a key of it that waits gets its answer.
     #[test]
     fn a_kept_menu_s_last_answer_leaves_the_open_menu_alone() {
         let mut sidebar = two_sessions();
@@ -10534,8 +8508,6 @@ mod tests {
         assert!(matches!(asked, Asked::Open { menu: 2, .. }), "{asked:?}");
     }
 
-    /// A menu luneta could not take its client on for, which said why, keeps
-    /// nothing: the answer owed to it goes nowhere, and why stays in the notes.
     #[test]
     fn a_menu_luneta_did_not_go_for_keeps_nothing() {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
@@ -10559,12 +8531,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some("zellij has yet to come to its session"));
     }
 
-    /// A `.md` file's path pasted opens the menu for the file, whether or not
-    /// it names a file, which a key finds out on the machine of the row. It
-    /// goes by the directory the row highlighted works in. A row that works in
-    /// none, as a session's, opens the menu all the same: an absolute path
-    /// needs no directory, and a relative one says so once a key is pressed.
-    /// Text that names no `.md` file does nothing.
     #[test]
     fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
@@ -10667,10 +8633,6 @@ mod tests {
         }
     }
 
-    /// A row that says where it works by no absolute path, as an agent's
-    /// session file may, whose pane zellij has not said the directory of,
-    /// works in none a file's path can go from: read from luneta's own, it
-    /// would name some other file.
     #[test]
     fn a_row_by_no_absolute_path_is_no_directory_for_a_file_s_path() {
         let mut sidebar = fresh();
@@ -10687,9 +8649,6 @@ mod tests {
         assert_eq!(Some(work), Work::parse("docs/plan.md", None));
     }
 
-    /// The menu on an agent's row whose pane zellij has not said the
-    /// directory of yet is for where the agent works, as the row says it, and
-    /// opens beside the agent there.
     #[test]
     fn the_menu_on_an_agent_is_for_where_its_row_says_it_works() {
         let mut sidebar = fresh();
@@ -10708,11 +8667,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), pane);
     }
 
-    /// The menu on a shell's row is for the command its shell said it ran
-    /// last: `c f` has luneta keep what that printed, and once kept, opens
-    /// an agent on it beside the pane, as it does for a menu the keys left
-    /// behind, which the notes say where. On a shell whose command runs
-    /// still, the menu says why it starts none.
     #[test]
     fn the_menu_on_a_shell_s_row_starts_an_agent_on_its_last_command() {
         let mut sidebar = fresh();
@@ -10746,9 +8700,6 @@ mod tests {
         let why = "menu: pane 2 runs `make` still, and what it prints is not over";
         assert_eq!(sidebar.notice.as_deref(), Some(why));
 
-        // The menu has what the row's shell ran as the daemon says it now: a
-        // command that ends while it is open is one to start an agent on, and
-        // one the shell goes on from as luneta reads it starts none.
         type_in(&mut sidebar, "c");
         let shells = |busy: Doing| {
             let failed = in_shell(1, ended("cargo test", Some(101), 3000));
@@ -10767,8 +8718,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some(why));
     }
 
-    /// The keys left the menu of a shell's row after `c f`: what luneta kept
-    /// still opens the agent beside the pane, and the notes say where it is.
     #[test]
     fn a_last_command_s_agent_opens_where_the_keys_left_the_menu() {
         let mut sidebar = fresh();
@@ -10789,11 +8738,6 @@ mod tests {
         assert!(sidebar.working.is_empty());
     }
 
-    /// A menu the keys left goes on only while luneta waits on an answer for
-    /// it: where what its key wants next is not asked, as a session luneta
-    /// would make, a tab of a session luneta's zellij is not in, or the tabs
-    /// to pick from, the sidebar keeps nothing of it, no spinner turns for it,
-    /// and the notes say why.
     #[test]
     fn a_kept_menu_whose_next_ask_is_not_made_keeps_nothing() {
         let page = "https://github.com/lorenzolfm/luneta/pull/5";
@@ -10843,9 +8787,6 @@ mod tests {
         assert!(sidebar.working.is_empty());
     }
 
-    /// `t` on a pasted issue whose worktree moved off its branch starts no
-    /// agent, which the menu says while it is open: once the keys left it,
-    /// the notes say so.
     #[test]
     fn a_kept_menu_that_starts_no_agent_on_a_worktree_moved_off_says_so() {
         let page = "https://github.com/lorenzolfm/luneta/issues/5";
@@ -10870,13 +8811,6 @@ mod tests {
         assert!(notice.ends_with(tail), "{notice}");
     }
 
-    /// The menu floats over zellij for the pane luneta's zellij is on,
-    /// wherever the highlight is, and in a folded session too, and the
-    /// sidebar stands meanwhile as it does under a brief. Its keys open beside
-    /// that pane, where it works and for the branch checked out there, and
-    /// what they open is where luneta goes, as for the menu at the bottom.
-    /// None floats until the sidebar knows which pane zellij is on, and it
-    /// says why. It closes with its box.
     #[test]
     fn the_menu_floats_over_zellij_for_the_pane_zellij_is_on() {
         let mut sidebar = fresh();
@@ -10905,12 +8839,10 @@ mod tests {
         let clients = vec![Client { id: 1, pane: Some(1) }];
         sidebar.looked(Looked { number: look.number, went: None, clients, before: None });
 
-        // The highlight on the newer session's pane, and the older folded.
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "hjj");
         assert!(folded(&sidebar, "older"));
         assert_eq!(cursor(&sidebar), Some(pane_of("newer", 20, 1)));
-        // The sidebar as it stands, the keys where they are.
         let standing = |sidebar: &mut Sidebar| {
             let area = Rect::new(0, 0, 32, 14);
             let mut buffer = Buffer::empty(area);
@@ -10954,15 +8886,10 @@ mod tests {
         let pane = Open::Pane { session: older, beside: 1, cwd, command };
         let pane = Asked::Open { menu: 2, on: Machine::Local, open: pane };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), pane);
-        // zellij has the keys again, which the sidebar never held meanwhile.
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
     }
 
-    /// What you say can name a skill only to an agent started at a prompt in
-    /// the pane luneta's zellij is on, of that agent's directory as zellij
-    /// says it, and of its harness, which finds its skills: not to a shell,
-    /// nor to one where a shell ran `claude -p`.
     #[test]
     fn the_agent_here_is_the_one_in_the_pane_luneta_s_zellij_is_on() {
         let on_pane = |id: u32| {
@@ -11000,12 +8927,6 @@ mod tests {
         assert_eq!(on_pane(4), Some(here));
     }
 
-    /// What goes wrong with what the menu over zellij does is said over
-    /// zellij, where you look, and the sidebar collapsed has no room for:
-    /// luneta takes it once, and it stays out of the notes, but for what
-    /// luneta did not take as the box gave up the keys. The menu at the bottom
-    /// says it in the notes. What went wrong before goes from the notes as the
-    /// menu floats, and one that cannot float says why.
     #[test]
     fn the_menu_over_zellij_says_over_zellij_what_went_wrong() {
         let mut sidebar = fresh();
@@ -11045,12 +8966,6 @@ mod tests {
         assert_eq!(sidebar.float_menu(), Err(TWIN_SESSIONS));
     }
 
-    /// The Brief group's keys brief you by the row the menu was for: `b z` on
-    /// every session, in the rows' order, as you moved them too, `b s` on the
-    /// row's session, and `b h` on the agent in the row's pane, or on a
-    /// session's row, on its session. An agent is told of by its row's name,
-    /// its status and its branch, a folded session's too. With none there,
-    /// the sidebar says so.
     #[test]
     fn the_brief_s_keys_brief_you_by_the_row_the_menu_was_for() {
         let mut sidebar = two_sessions();
@@ -11095,14 +9010,12 @@ mod tests {
             assert_eq!(sidebar.key(&char(key), moment(160_000)), brief(over), "{key}");
             assert!(sidebar.menu.is_none(), "{key}");
         }
-        // nvim's pane has no agent, and the newer session none.
         sidebar.step(1);
         type_in(&mut sidebar, "bh");
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agent in this pane"));
         sidebar.step(1);
         type_in(&mut sidebar, "bs");
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents in newer"));
-        // Folded, the older session's row stands for its panes.
         sidebar.step(-2);
         type_in(&mut sidebar, "h");
         assert_eq!(cursor(&sidebar), Some(Place::Session(listed("older", 10))));
@@ -11110,19 +9023,13 @@ mod tests {
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(session()));
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(every()));
-        // The older session moved under the newer one.
         type_in(&mut sidebar, "vJb");
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), brief(here(["newer", "older"])));
     }
 
-    /// `b` on what only pi's agents cover leaves a note: luneta does not read
-    /// their transcripts, and an id of pi's names none of Claude Code's. On a
-    /// session with agents of both, the brief goes on, and tells of pi's by
-    /// its row alone.
     #[test]
     fn a_brief_of_pi_s_agents_alone_leaves_a_note() {
         let mut sidebar = fresh();
-        // Each id one of a transcript's could be, whichever harness's it is.
         let (of_pi_id, of_claude_id) = ("01a05a24-2bcb-7198", "7c22-5d4c-3b2a");
         let of_pi = |agent: Agent| Agent {
             harness: Some(Harness::Pi.into()),
@@ -11172,8 +9079,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), brief);
     }
 
-    /// `b z` briefs you on every session in the rows' order, as you moved
-    /// the machines and the sessions of each.
     #[test]
     fn the_brief_goes_in_the_order_you_moved_the_rows_to() {
         let mut sidebar = fresh();
@@ -11208,14 +9113,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('z'), moment(160_000)), Asked::Brief(every));
     }
 
-    /// The Brief group's keys brief you on another machine's agents as on
-    /// this one's: `b z` on every session of every machine, in the rows'
-    /// order, and on each machine lunetad does not reach as one whose
-    /// sessions are unknown; `b s` and `b h` on a machine's header on its
-    /// sessions, this one's too; and on its session's row or its pane's, on
-    /// the session or the agent there. Of a machine lunetad no longer
-    /// reaches, or no longer watches, the sidebar says so; and with no agent
-    /// where it reaches, it says whose sessions are unknown.
     #[test]
     fn the_brief_s_keys_brief_you_on_every_machine_s_agents() {
         let mut sidebar = fresh();
@@ -11254,7 +9151,6 @@ mod tests {
         sidebar.cursor = Some(Spot::Machine(Machine::Local));
         type_in(&mut sidebar, "bs");
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents on this machine"));
-        // The menu opened while lunetad reached nixos.
         sidebar.cursor = Some(Spot::Remote(nixos(), pane));
         type_in(&mut sidebar, "b");
         let mut host = machines();
@@ -11268,7 +9164,6 @@ mod tests {
         let nowhere = "brief: no agents to brief you on; lunetad does not reach nixos, me@vps, pi \
                        now";
         assert_eq!(sidebar.notice.as_deref(), Some(nowhere));
-        // The menu opened while luneta's hosts file named nixos.
         sidebar.heard(machines());
         sidebar.cursor = Some(Spot::Machine(on()));
         type_in(&mut sidebar, "b");
@@ -11278,17 +9173,11 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some("brief: lunetad does not reach nixos now"));
     }
 
-    /// While lunetad does not answer, what it said last of the agents may be
-    /// out of date; and while it cannot read one of Claude Code's session
-    /// files, nor tell where its process runs, the file's agent may be in any
-    /// pane. The sidebar says so at its bottom, and a delete asks first,
-    /// whatever it ends, saying why, and `y` goes ahead.
     #[test]
     fn a_delete_asks_first_while_luneta_cannot_tell_the_agents() {
         let unread = "lunetad cannot read 1 of Claude Code's session files";
         let unplaced = format!("{unread}, nor tell where its agent runs");
         let away: fn(&mut Sidebar) = |sidebar| sidebar.lost("gone".to_owned());
-        // As a daemon older than its list of the files says it.
         let unreadable: fn(&mut Sidebar) = |sidebar| {
             let host = sidebar.host.clone().expect("the sidebar has heard the host");
             sidebar.heard(Host { unread: 1, ..host });
@@ -11318,10 +9207,6 @@ mod tests {
         }
     }
 
-    /// The agent of a session file lunetad cannot read is in the pane its
-    /// process runs in, as lunetad says: what it is doing no one can tell,
-    /// so a delete that ends it asks first, and one that does not goes at
-    /// once. The sidebar says at its bottom that a file does not read.
     #[test]
     fn a_delete_asks_first_where_an_agent_s_session_file_does_not_read() {
         for (pane, asks) in [(1, true), (7, false)] {
@@ -11351,8 +9236,6 @@ mod tests {
         }
     }
 
-    /// `d d` plans by what zellij says closing the pane closes, and the
-    /// highlight goes to the row after it once the pane is gone.
     #[test]
     fn a_delete_goes_by_what_zellij_closes_and_the_highlight_past_it() {
         let mut sidebar = two_sessions();
@@ -11378,9 +9261,6 @@ mod tests {
         assert_eq!(cursor(&sidebar), Some(pane_of("newer", 20, 1)));
     }
 
-    /// A delete that would end an agent at work asks first, and `y` asks
-    /// zellij again before it goes ahead. The session luneta's zellij is in
-    /// goes once it is in the newest of the others.
     #[test]
     fn a_delete_that_ends_an_agent_at_work_asks_and_looks_again() {
         let mut sidebar = two_sessions();
@@ -11413,11 +9293,6 @@ mod tests {
         assert!(sidebar.menu.is_none());
     }
 
-    /// As luneta's zellij leaves the session a delete kills, the sidebar says
-    /// where it goes, with the keys or without, until zellij titles it there
-    /// or says it stayed. A client that ended on its way leaves nothing to
-    /// say: the one that takes its place goes nowhere, whichever session it
-    /// is in, and what zellij says late of the go changes nothing.
     #[test]
     fn the_sidebar_says_where_a_delete_goes_while_it_goes() {
         let going = |sidebar: &mut Sidebar, focused: bool| {
@@ -11449,10 +9324,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("older"), None));
     }
 
-    /// While luneta's zellij is on its way to a session, it may be in that
-    /// one or the one it leaves: a key that would kill either says so, and
-    /// kills neither, rather than luneta's own with it, or wait for ever on a
-    /// go that zellij would not be sent. Once it is there, it does.
     #[test]
     fn no_session_goes_while_luneta_s_zellij_is_on_its_way_to_one() {
         let mut sidebar = two_sessions();
@@ -11470,7 +9341,6 @@ mod tests {
             assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
             assert!(moving(&sidebar));
         }
-        // Nor does its last pane close it.
         type_in(&mut sidebar, "d");
         let closes = closes_here(3, "newer", 1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
@@ -11485,10 +9355,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
     }
 
-    /// luneta's zellij may be in either session while it goes from one to
-    /// the other, and is in the one it went to once zellij titles it there.
-    /// A client that takes the place of one that ended is in its session or
-    /// none, whatever the one before was in.
     #[test]
     fn luneta_s_zellij_may_be_in_either_session_while_on_its_way() {
         let mut sidebar = two_sessions();
@@ -11504,10 +9370,6 @@ mod tests {
         assert_eq!(sidebar.seats(), seats(&["older"]));
     }
 
-    /// A client that takes the place of one that ended on its way to a
-    /// session is one luneta has yet to find, in that session too: zellij
-    /// sends it no title where the tab had the same one before, and luneta
-    /// looks for it, and has it there once zellij lists it.
     #[test]
     fn a_client_that_rejoins_where_the_last_was_going_is_looked_for() {
         let mut sidebar = two_sessions();
@@ -11520,8 +9382,6 @@ mod tests {
         assert_eq!((sidebar.here(), sidebar.going()), (Some("newer"), None));
     }
 
-    /// The highlight goes to the best match as what is typed changes, and
-    /// stays where it is moved to as the daemon says more.
     #[test]
     fn the_highlight_seeks_the_best_match_only_as_the_search_changes() {
         let mut sidebar = searched();
@@ -11535,8 +9395,6 @@ mod tests {
         assert_eq!(cursor(&sidebar), pane(3));
     }
 
-    /// The rows the sidebar draws under this machine's header, focused, with
-    /// no rule after a session's name, and which of them the highlight is on.
     fn drawn_rows(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
         let (lines, lit) = seen(sidebar, true, 32, 28);
         let from = sessions_from(&lines);
@@ -11545,13 +9403,6 @@ mod tests {
         (rows, lit.iter().map(|y| usize::from(*y) - from).collect())
     }
 
-    /// `v` selects the session of the highlighted row, `j` and `k` grow the
-    /// selection from session to session, and `J` and `K` move what it holds,
-    /// each session with its panes, no further than the ends, while it stays
-    /// selected, whatever the mouse does with no button down. The order
-    /// outlasts the daemon's next list. `Esc` only ends the selection, the
-    /// highlight going on from its end to a row it stops on without one, and
-    /// leaves the sidebar after. With no selection, `K` moves nothing.
     #[test]
     fn v_selects_sessions_that_shifted_j_and_k_move() {
         let mut sidebar = searched();
@@ -11560,7 +9411,6 @@ mod tests {
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, (0..6).collect::<Vec<_>>());
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
-        // Shift and all, as a terminal sends it as text.
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         sidebar.key(&shifted('J'), moment(160_000));
         sidebar.key(&shifted('J'), moment(160_000));
@@ -11580,8 +9430,6 @@ mod tests {
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
     }
 
-    /// `v` selects a folded session from its row, and any other key ends the
-    /// selection and does what it does: `Enter` goes.
     #[test]
     fn a_folded_session_is_selected_from_its_row() {
         let mut sidebar = searched();
@@ -11595,10 +9443,6 @@ mod tests {
         assert!(matches!(sidebar.moving, Moving::Still));
     }
 
-    /// A press on a session's row lifts the session once the mouse moves a
-    /// line, and takes the focus: it shows where it lands, lit, with its
-    /// panes, the others making room. Let go, it stays where it showed, for
-    /// the daemon's next list too.
     #[test]
     fn a_session_dragged_lands_where_it_shows() {
         let mut sidebar = searched();
@@ -11606,7 +9450,6 @@ mod tests {
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
 
-        // notes's row, under bipa's, past zed's.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 8), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 13), area), Asked::Take);
         let last = [" ▾ zed", "     \u{eb31} htop", "       z-e-d", "       less logs", " ▾ notes"];
@@ -11618,7 +9461,6 @@ mod tests {
         sidebar.heard(searched().host.unwrap());
         assert_eq!(&drawn_rows(&mut sidebar).0[4..9], last);
 
-        // zed's row, under bipa's, to the top.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 8), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
@@ -11626,16 +9468,12 @@ mod tests {
         assert_eq!(rows[..5], [" ▾ zed", "     \u{eb31} htop", "       z-e-d", "       less logs", " ▾ bipa"]);
     }
 
-    /// A session lifted goes back where it was once let go off the sidebar,
-    /// on `Esc`, and once the mouse moves with no button down, after a
-    /// release luneta did not hear. Off the sidebar, it shows where it was.
     #[test]
     fn a_session_lifted_goes_back_off_the_sidebar_or_on_esc() {
         let mut sidebar = searched();
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        // zed's row, to the top.
         let lift_zed = |sidebar: &mut Sidebar| {
             sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
             sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
@@ -11658,9 +9496,6 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
-    /// While the left button is down on the sidebar, it has the keys: `v`
-    /// selects nothing under the session it lifts, nor `n` opens the menu.
-    /// `Esc` lets go, so that the release is no click.
     #[test]
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
@@ -11668,7 +9503,6 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        // zed's row, to the top.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 10), area);
         type_in(&mut sidebar, "vn");
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area);
@@ -11683,8 +9517,6 @@ mod tests {
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 5), area), Asked::Nothing);
     }
 
-    /// What is typed in the search narrows the rows, and a press on a
-    /// session's row lifts nothing.
     #[test]
     fn a_search_typed_lifts_no_session() {
         let mut sidebar = searched();
@@ -11700,28 +9532,23 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
-    /// The sidebar drawn into `area`, with the keys where they are.
     fn framed(sidebar: &mut Sidebar, area: Rect) -> Buffer {
         let mut buffer = Buffer::empty(area);
         sidebar.draw(&mut buffer, area, moment(160_000));
         buffer
     }
 
-    /// The cells of `buffer` drawn reversed.
     fn reversed(buffer: &Buffer) -> Vec<(u16, u16)> {
         let on = |at: &Position| buffer[*at].modifier.contains(Modifier::REVERSED);
         buffer.area.positions().filter(on).map(|at| (at.x, at.y)).collect()
     }
 
-    /// The left button down at `from`, dragged to `to`, on the sidebar as drawn
-    /// last into `area`.
     fn dragged(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) {
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), from.0, from.1), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), to.0, to.1), area);
     }
 
-    /// What the left button asks, down at `from`, dragged to `to` and let go.
     fn swept(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) -> Asked {
         dragged(sidebar, area, from, to);
         sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1), area)
@@ -11731,11 +9558,6 @@ mod tests {
         Asked::CopyText(text.to_owned())
     }
 
-    /// A drag copies what it went over as it lets go, and goes nowhere: along
-    /// a pane's row, the way back, and over lines, from any line of the sidebar.
-    /// It has the mouse over zellij too, and copies only the sidebar's column.
-    /// Over nothing but blanks, there is nothing to copy, and nothing stays
-    /// reversed to say that there was.
     #[test]
     fn a_drag_copies_what_it_went_over_as_it_lets_go() {
         let mut sidebar = searched();
@@ -11744,14 +9566,12 @@ mod tests {
         let here = sidebar.cursor.clone();
         assert_eq!(swept(&mut sidebar, area, (7, 5), (13, 5)), copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (13, 5), (9, 5)), copied("p-i-x"));
-        // Let go further on than it was last heard to drag.
         dragged(&mut sidebar, area, (7, 5), (9, 5));
         let up = sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), 13, 5), area);
         assert_eq!(up, copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (2, 0), (8, 0)), copied("luneta"));
         assert_eq!(sidebar.cursor, here);
 
-        // Along its line first: straight off it, the mouse lifts the pane.
         dragged(&mut sidebar, area, (9, 5), (11, 5));
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 40, 6), area);
@@ -11764,9 +9584,6 @@ mod tests {
         assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
-    /// A hand that clicks moves a little: a press let go on its line within a
-    /// cell of where it went down is a click, one further along is a sweep, and
-    /// one let go a line off within a cell is neither, and copies nothing.
     #[test]
     fn a_click_is_a_click_though_the_hand_moves_a_cell() {
         let mut sidebar = searched();
@@ -11779,9 +9596,6 @@ mod tests {
         assert_eq!(swept(&mut sidebar, area, (10, 5), (11, 6)), Asked::Nothing);
     }
 
-    /// On what lifts, a drag along the line first sweeps, and goes on over
-    /// other lines with nothing lifted; straight off the line it lifts, as ever,
-    /// and a hand that moved a cell along it on the way lifts all the same.
     #[test]
     fn a_drag_along_a_session_s_row_sweeps_and_one_off_it_lifts() {
         let mut sidebar = searched();
@@ -11795,7 +9609,6 @@ mod tests {
         assert_eq!(up, copied(&format!("bipa {}\n       a-p", "─".repeat(22))));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
-        // This machine's header.
         assert_eq!(swept(&mut sidebar, area, (5, 3), (7, 3)), copied("mac"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
@@ -11804,9 +9617,6 @@ mod tests {
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 11, 9), area), Asked::Take);
     }
 
-    /// What is swept shows reversed from the frame after it moves, through the
-    /// frames and the daemon's answers after it lets go, a row's own text
-    /// changing among them, however the pointer moves then, until the next click.
     #[test]
     fn a_sweep_shows_reversed_until_the_next_click() {
         let mut sidebar = searched();
@@ -11829,8 +9639,6 @@ mod tests {
         assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
-    /// What `searched` lists, with its first pane another: its row takes as
-    /// many lines, on the same line, whichever pane it is.
     fn first_pane_is(id: u32, command: &str) -> Host {
         let mut listed = searched().host.unwrap();
         let first = &mut listed.sessions[0].panes.as_mut().unwrap().panes[0];
@@ -11839,10 +9647,6 @@ mod tests {
         listed
     }
 
-    /// Once what shows under a sweep may be other than what it copied, it goes:
-    /// the wheel, a pane that came, another pane or note on as many lines, a row
-    /// taking a line more, `?` bringing the legend, another width, the
-    /// sidebar collapsed.
     #[test]
     fn a_sweep_goes_once_the_text_moves_from_under_it() {
         let area = Rect::new(0, 0, 32, 26);
@@ -11893,9 +9697,6 @@ mod tests {
         }
     }
 
-    /// `Esc`, or the pointer moving with no button down after a release luneta
-    /// did not hear, lets go of what is swept: it shows no more, the notes stay,
-    /// and its release, if it comes, copies nothing.
     #[test]
     fn a_sweep_let_go_otherwise_copies_nothing() {
         let area = Rect::new(0, 0, 32, 26);
@@ -11922,8 +9723,6 @@ mod tests {
         }
     }
 
-    /// A sweep over the notes at the bottom has each as it was said, though it
-    /// wrapped, and each to a line of its own, whatever else takes lines there.
     #[test]
     fn a_sweep_has_each_note_as_it_was_said() {
         let mut sidebar = searched();
@@ -11935,14 +9734,10 @@ mod tests {
         sidebar.lost(why.to_owned());
         sidebar.notify(notice.to_owned());
         framed(&mut sidebar, area);
-        // Two lines of two notes, at the bottom.
         let said = format!(" lunetad: {why}\n {notice}");
         assert_eq!(swept(&mut sidebar, area, (0, 22), (30, 25)), copied(&said));
     }
 
-    /// Where a sweep has the `…` of a machine's, a session's or a pane's text
-    /// cut short, it copies what the cut took, whichever line of the rows has it
-    /// on screen now. Short of the `…`, it copies what shows.
     #[test]
     fn a_sweep_has_a_text_cut_short_whole() {
         let long = "a-text-too-long-for-the-sidebar";
@@ -11969,13 +9764,10 @@ mod tests {
 
         sidebar.mouse(mouse(MouseEventKind::ScrollDown, 7, 5), area);
         framed(&mut sidebar, area);
-        // The branch, its row three lines further up now.
         let branch = format!("{long} #246");
         assert_eq!(swept(&mut sidebar, area, (7, 3), (22, 3)), copied(&branch));
     }
 
-    /// A `…` is found where it is drawn, past a sound mark that takes a cell of
-    /// its own.
     #[test]
     fn a_sweep_finds_the_cut_past_a_halfwidth_sound_mark() {
         let long = "\u{ff8a}\u{ff9e}-a-text-too-long-for-the-sidebar";
@@ -11986,9 +9778,6 @@ mod tests {
         assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(long));
     }
 
-    /// What a cut took shows nowhere, so that a control character in it would go
-    /// unseen on the clipboard, as a line break that a paste into a shell runs.
-    /// It comes out as a row would draw it, with none.
     #[test]
     fn a_sweep_has_no_control_character_of_what_a_cut_took() {
         let cwd = "/w/a-directory-too-long-for-the-sidebar\necho hidden\x1b[201~\tend";
@@ -12000,13 +9789,9 @@ mod tests {
         assert_eq!(swept(&mut sidebar, area, (7, 5), (22, 5)), copied(whole));
     }
 
-    /// A session lifted and held on the last line of the rows scrolls them a
-    /// line each `SCROLL`, as far as the last row, and on the first line,
-    /// back.
     #[test]
     fn a_session_held_on_the_edge_scrolls_the_rows() {
         let mut sidebar = searched();
-        // Four lines of rows, under the rule.
         let area = Rect::new(0, 0, 32, 7);
         let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 7)[HEADER].clone();
         assert_eq!(first(&mut sidebar), format!(" ▾ \u{f108} mac {}", "═".repeat(21)));
@@ -12026,17 +9811,12 @@ mod tests {
         for millis in (120..=600).step_by(60) {
             tick(&mut sidebar, millis);
         }
-        // The last four rows: bipa's, as it lands last.
         assert_eq!(first(&mut sidebar), " ▾ bipa ──────────────────────");
         assert!(!sidebar.scrolling());
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
         assert_eq!(tick(&mut sidebar, 660), "       less logs");
     }
 
-    /// `Ctrl v` is for an agent on another machine: one in the pane luneta's
-    /// zellij is on there, as its client is followed. A shell beside it there
-    /// keeps its own, and so does an agent on this machine, in a pane by the
-    /// same number of a session by the same name.
     #[test]
     fn a_far_agent_is_one_in_the_pane_zellij_is_on_there() {
         let mut sidebar = fresh();
@@ -12071,12 +9851,10 @@ mod tests {
         assert_eq!(sidebar.far_agent(), None, "its agent ended");
     }
 
-    /// The machine lunetad watches as `destination`, as it says it has it.
     fn remote(destination: &str, reached: Reached) -> api::Remote {
         api::Remote { destination: destination.to_owned(), reached: Some(reached) }
     }
 
-    /// A machine lunetad reached, with `sessions` and `agents`.
     fn up(sessions: Vec<Session>, agents: Vec<Agent>) -> Reached {
         Reached::Host(remote::Host {
             sessions,
@@ -12090,7 +9868,6 @@ mod tests {
         })
     }
 
-    /// A machine ssh could not get into, since the second `since`.
     fn down(since: i64) -> Reached {
         Reached::Unreached(remote::Unreached {
             since: Some(Timestamp { seconds: since, nanos: 0 }),
@@ -12105,10 +9882,6 @@ mod tests {
         "nixos".parse().unwrap()
     }
 
-    /// This machine, `mac`, with a session `main`, and the machines its
-    /// lunetad watches: `nixos`, with a session `main` of its own, whose
-    /// agent waits for you; `me@vps`, which ssh does not get into; and `pi`,
-    /// which the first ssh to runs still.
     fn machines() -> Host {
         let nixos = up(
             vec![session("main", 20, vec![pane(1, 0, "/w/b", "claude")])],
@@ -12124,10 +9897,6 @@ mod tests {
         }
     }
 
-    /// A header heads each machine's sessions, this one first, by its name,
-    /// and the others as luneta's hosts file names them. One lunetad does
-    /// not reach says why in a word, dimmed, and since when; and one it is
-    /// reaching, that it is. The rule along the top counts every machine's.
     #[test]
     fn a_header_heads_each_machine_s_sessions_this_one_first() {
         let mut sidebar = fresh();
@@ -12149,17 +9918,11 @@ mod tests {
                 "",
             ]
         );
-        // The names of nixos, which lunetad reaches, and of me@vps.
         let buffer = drawn(&mut sidebar, false, 32, 12);
         let dim = |y: u16| buffer[(3, y)].modifier.contains(Modifier::DIM);
         assert_eq!((dim(6), dim(9)), (false, true));
     }
 
-    /// `h` on another machine's pane folds its session, and on that folded
-    /// session folds its machine, the highlight going to its header, which
-    /// then says what its sessions want of you. A fold of another machine's
-    /// session is its own: this one's session of its name stays as it was.
-    /// `l` unfolds the machine, and so do `Enter` and a click on its header.
     #[test]
     fn h_on_a_folded_session_folds_its_machine() {
         let mut sidebar = fresh();
@@ -12197,10 +9960,6 @@ mod tests {
         assert!(sidebar.folds.contains(Fold::Machine(&machine)));
     }
 
-    /// Folded, a machine's header says what its sessions hold, as a session's
-    /// row does: the dot, where something finished in one of its panes; or else
-    /// the spinner, where an agent of its is at work; and neither otherwise. Its
-    /// rule turns the accent where luneta's zellij is in one of its sessions.
     #[test]
     fn a_folded_machine_s_header_says_what_its_sessions_hold() {
         let holding = |status, in_it| {
@@ -12226,7 +9985,6 @@ mod tests {
         assert_eq!(header(Status::Busy), format!(" ▸ \u{f108} nixos {} ⠋", "═".repeat(17)));
         assert_eq!(header(Status::Shell), format!(" ▸ \u{f108} nixos {}", "═".repeat(19)));
 
-        // Just past the name, in the machine's rule.
         let rule = |in_it| {
             let mut sidebar = holding(Status::Shell, in_it);
             let lines = screen(&mut sidebar, false, 32, 12);
@@ -12237,10 +9995,6 @@ mod tests {
         assert_eq!(rule(true), ACCENT);
     }
 
-    /// `d m` on a far row asks that machine what it would delete, and `y` tells
-    /// it what you agreed to. Where it would delete something else now, the menu
-    /// lists that, or a note says nothing went once the menu has been closed.
-    /// What stays is said in a note too.
     #[test]
     fn d_m_on_a_far_row_goes_by_that_machine_and_a_note_says_what_stays() {
         let mut host = machines();
@@ -12312,12 +10066,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some(note));
     }
 
-    /// Another machine's rows go there, as this one's do: `Enter` and a click
-    /// on its pane ask luneta to take its zellij there. The menu on its pane
-    /// is for that pane, of that machine, which opens what a key opens. `u`
-    /// takes the dot from its pane as from this machine's. A link pasted on
-    /// its row opens the menu for the link on that pane, of that machine, as
-    /// every key of the menu acts there.
     #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
@@ -12364,11 +10112,6 @@ mod tests {
         assert_eq!(pasted, Some(&Target::Pane(on, PaneRow { ran: Ran::Unhooked, ..row })));
     }
 
-    /// A link pasted on another machine's row is found among that machine's
-    /// panes, as lunetad says of them, though luneta's zellij is in none of
-    /// them, being on this machine. The session made for it is made there,
-    /// and the tab it opens is where luneta goes, on that machine, though
-    /// this one has a session of that name.
     #[test]
     fn a_link_pasted_on_another_machine_s_row_makes_its_session_there() {
         let mut sidebar = fresh();
@@ -12408,10 +10151,6 @@ mod tests {
         assert_eq!(sidebar.opened(number, Ok(3)), Asked::Go { on, place: opened });
     }
 
-    /// A link pasted on a row of a machine that has none of its repository,
-    /// a folded session's as any other, hands luneta the panes of the other
-    /// machines too, in the order of the rows. What luneta finds on one of
-    /// them opens there, and takes luneta's zellij there.
     #[test]
     fn a_link_found_on_another_machine_than_the_row_s_opens_there() {
         let mut sidebar = fresh();
@@ -12457,10 +10196,6 @@ mod tests {
         assert_eq!(sidebar.opened(number, Ok(9)), Asked::Go { on: nixos, place: opened });
     }
 
-    /// A key of the menu for a link pasted on the row of a machine lunetad
-    /// does not reach finds nothing there: luneta knows none of its panes,
-    /// one of which may work in the repository. The menu closes, and says
-    /// why.
     #[test]
     fn a_link_pasted_on_a_machine_lunetad_does_not_reach_finds_nothing() {
         let mut sidebar = fresh();
@@ -12475,11 +10210,6 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some(why));
     }
 
-    /// `d d` on another machine's pane asks zellij there what closing it
-    /// closes, and asks first by that machine's agents: the agent there waits
-    /// for you, though this machine's session of that name runs none in its
-    /// pane. `y` has zellij there close it, and the highlight goes past its
-    /// row once it is gone.
     #[test]
     fn another_machine_s_pane_closes_there_by_its_agents() {
         let mut sidebar = fresh();
@@ -12513,11 +10243,6 @@ mod tests {
         assert_eq!(sidebar.cursor, Some(fix(2)));
     }
 
-    /// `d s` on the session of another machine's that luneta's zellij is in
-    /// takes it first to the newest of that machine's other sessions, never
-    /// to this machine's, and has the session killed there once it has left.
-    /// That machine's only session is killed with luneta's zellij in it,
-    /// which goes on as it does once its session there ends.
     #[test]
     fn another_machine_s_session_luneta_is_in_goes_once_it_left_for_one_there() {
         let mut sidebar = fresh();
@@ -12547,14 +10272,6 @@ mod tests {
         assert_eq!(delete(&mut sidebar), Asked::Delete { on, act: kill });
     }
 
-    /// Where the machine luneta's zellij is on has no session left, it goes
-    /// on in another's: as their headers are, but those it tried, each
-    /// machine's newest first, of zellij's, as zellij's client attaches to
-    /// no own session. One lunetad does not reach, or is reaching, or that
-    /// has no session of zellij's, says why it is passed over. Where luneta's
-    /// own terminal may be in a pane of another machine's zellij, a session
-    /// that may hold it is passed over: one with a pane that runs ssh, or a
-    /// luneta, or whose panes zellij there has yet to list.
     #[test]
     fn with_no_session_left_zellij_goes_on_in_another_machine_s_newest() {
         let mut sidebar = fresh();
@@ -12585,8 +10302,6 @@ mod tests {
         assert_eq!(sidebar.refuges_away(&tried, Within::MaybeAway), [vps, held, far]);
     }
 
-    /// zellij goes on by the machines as the sidebar's headers have them, as
-    /// you moved them, and not as the hosts file names them.
     #[test]
     fn zellij_goes_on_by_the_machines_as_you_moved_them() {
         let mut sidebar = fresh();
@@ -12599,11 +10314,6 @@ mod tests {
         assert_eq!(order, ["nixos", "pi", "me@vps"]);
     }
 
-    /// luneta has heard all it needs of a machine once lunetad has its
-    /// sessions, or has given up on it, and has yet to hear of one the first
-    /// ssh to runs. Where its terminal may be in another machine's zellij,
-    /// it has yet to hear of one too whose panes are unlisted, as they say
-    /// whether a session may hold it.
     #[test]
     fn luneta_waits_for_machines_lunetad_is_reaching() {
         let mut host = machines();
@@ -12615,10 +10325,6 @@ mod tests {
         assert_eq!(unheard(&host, Within::MaybeAway), [pi, far]);
     }
 
-    /// A delete on another machine's row that waits on your yes deletes
-    /// nothing there once lunetad no longer reaches that machine, and says
-    /// so, whether or not lunetad answers since: luneta knows none of that
-    /// machine's sessions.
     #[test]
     fn a_delete_on_a_machine_lunetad_no_longer_reaches_deletes_nothing() {
         for answers in [true, false] {
@@ -12628,7 +10334,6 @@ mod tests {
             sidebar.focus(Keys::Sidebar);
             sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
             type_in(&mut sidebar, "d");
-            // Its agent waits for you.
             assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
             host.remotes[0] = remote("nixos", down(100));
             sidebar.heard(host);
@@ -12641,14 +10346,6 @@ mod tests {
         }
     }
 
-    /// luneta's zellij on another machine, once a client of a session there
-    /// takes the place of its own, is in that machine's session, though this
-    /// one has one of its name: the pane it is on there has the mark, and
-    /// `Alt Tab` goes among that machine's panes, never to this one's. The
-    /// menu over zellij is for that pane, of that machine, and the picker has
-    /// luneta's zellij there too, on that pane. A tab of this machine's opens
-    /// once luneta's zellij is in its session, as one of another session's of
-    /// the same machine does.
     #[test]
     fn luneta_s_zellij_on_another_machine_is_in_that_machine_s_session() {
         let mut sidebar = fresh();
@@ -12699,10 +10396,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), there);
     }
 
-    /// The picker lists the machines lunetad reaches, by this one's name,
-    /// each with its sessions and their agents, and none it is reaching or
-    /// does not reach. The highlight on a machine's header is on that
-    /// machine, and on a row of it, on none.
     #[test]
     fn the_picker_lists_the_machines_lunetad_reaches() {
         let mut sidebar = fresh();
@@ -12724,9 +10417,6 @@ mod tests {
         assert_eq!(sidebar.on_header(), None);
     }
 
-    /// `n s` on a machine's header starts a session on that machine, in the
-    /// home of its user there; on one lunetad does not reach now, or is
-    /// reaching, it starts none, and says so.
     #[test]
     fn n_s_on_a_machine_s_header_starts_a_session_in_its_home() {
         let mut sidebar = fresh();
@@ -12747,8 +10437,6 @@ mod tests {
         }
     }
 
-    /// What is pasted in the box `n m` opens goes in it, on one line, and a
-    /// link too, rather than opening the menu for the link.
     #[test]
     fn what_is_pasted_in_the_box_for_a_machine_goes_in_it() {
         let mut sidebar = fresh();
@@ -12764,8 +10452,6 @@ mod tests {
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Ssh(link.parse().unwrap()));
     }
 
-    /// The header of a machine lunetad does not reach says why in the notes
-    /// while the keys have the highlight on it.
     #[test]
     fn an_unreached_machine_says_why_in_the_notes_while_highlighted() {
         let mut sidebar = fresh();
@@ -12782,9 +10468,6 @@ mod tests {
         assert!(!screen(&mut sidebar, false, 96, 24).contains(&why.to_owned()));
     }
 
-    /// A machine lunetad names twice, or by what is no destination, as only a
-    /// lunetad of another build might, is listed once, or not, and the notes
-    /// say how many are left out.
     #[test]
     fn a_machine_named_twice_or_by_no_destination_is_left_out_and_said() {
         let mut sidebar = fresh();
@@ -12806,9 +10489,6 @@ mod tests {
         );
     }
 
-    /// The header of a machine lunetad does not reach has nothing under it
-    /// to fold: `h`, `l`, `Space`, `Enter` and a click leave its fold as it
-    /// was, for when lunetad reaches it.
     #[test]
     fn an_unreached_machine_s_fold_stays_as_it_was() {
         let mut sidebar = fresh();
@@ -12830,10 +10510,6 @@ mod tests {
         }
     }
 
-    /// `n m` on a row the menu opens on, this machine's or a machine's
-    /// header, opens a box for what ssh reaches a machine by, and `Enter` has
-    /// luneta add it, once it is a destination. `d d` on another machine's
-    /// header has luneta forget it, and on this one's says it cannot.
     #[test]
     fn the_menu_adds_a_machine_from_any_row_and_forgets_one_from_its_header() {
         let mut sidebar = fresh();
@@ -12859,7 +10535,6 @@ mod tests {
         let forget = Asked::Forget("me@vps".parse().unwrap());
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), forget);
 
-        // This machine's header stops the highlight once it is folded.
         type_in(&mut sidebar, "ggkhh");
         assert_eq!(sidebar.cursor, Some(Spot::Machine(Machine::Local)));
         type_in(&mut sidebar, "d");
@@ -12868,8 +10543,6 @@ mod tests {
         assert_eq!(sidebar.notice, None);
     }
 
-    /// This machine, `mac`, with the sessions `main` and `work`, and the
-    /// machines of `machines`, `nixos` with a session `dev` after its `main`.
     fn two_each() -> Host {
         let mut host = machines();
         host.sessions.push(session("work", 30, vec![pane(1, 0, "/w/c", "fish")]));
@@ -12880,11 +10553,6 @@ mod tests {
         host
     }
 
-    /// `v` moves the sessions of any machine, each among its own: the last
-    /// of this machine's moves no further than the next machine's header,
-    /// nor the first of another's than its own, and the other machines'
-    /// sessions stay where they were under theirs. The order outlasts the
-    /// daemon's next list.
     #[test]
     fn each_machine_s_sessions_move_among_themselves() {
         let mut sidebar = fresh();
@@ -12897,7 +10565,6 @@ mod tests {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         sidebar.key(&esc, moment(160_000));
 
-        // nixos's dev, from its pane, over its main and no further.
         type_in(&mut sidebar, "Gkk");
         assert_eq!(sidebar.cursor, Some(Spot::Remote(nixos(), pane_of("dev", 40, 1))));
         type_in(&mut sidebar, "vKK");
@@ -12911,9 +10578,6 @@ mod tests {
         assert_eq!(names_listed(&sidebar), ["work", "main", "dev", "main"]);
     }
 
-    /// Another machine's session lifted by its row shows, and lands, among
-    /// that machine's alone: held over this machine's, first of its own, and
-    /// over the machines after, last.
     #[test]
     fn another_machine_s_session_dragged_lands_among_its_own() {
         let mut sidebar = fresh();
@@ -12921,14 +10585,12 @@ mod tests {
         let area = Rect::new(0, 0, 32, 27);
         screen(&mut sidebar, true, area.width, area.height);
         let left = MouseButton::Left;
-        // dev's row, under nixos's main, up over mac's.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 11), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 4), area), Asked::Take);
         let (lines, lit) = seen(&mut sidebar, true, 32, 27);
         assert_eq!((lines[9].as_str(), lit), (" ▾ dev ───────────────────────", vec![9, 10]));
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 4), area);
         assert_eq!(names_listed(&sidebar), ["main", "work", "dev", "main"]);
-        // dev, now nixos's first, down past every machine.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 9), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 16), area);
         assert_eq!(seen(&mut sidebar, true, 32, 27).1, [11, 12]);
@@ -12939,7 +10601,6 @@ mod tests {
         assert_eq!(rows[9], " ▸ \u{f108} me@vps · unreachable   1m");
     }
 
-    /// The names of the machines the rows list, in their order.
     fn machines_listed(sidebar: &Sidebar) -> Vec<&str> {
         let rows = sidebar.rows.iter();
         rows.filter_map(|row| match row {
@@ -12949,17 +10610,11 @@ mod tests {
         .collect()
     }
 
-    /// `v` on a machine's header selects the machine, this one too: `j` and
-    /// `k` grow the selection from header to header, and `J` and `K` move
-    /// what it holds, each machine with every row under its header, lit, no
-    /// further than the ends. The order outlasts the daemon's next list, and
-    /// `Esc` ends the selection.
     #[test]
     fn v_on_a_machine_s_header_moves_the_machine() {
         let mut sidebar = fresh();
         sidebar.heard(machines());
         sidebar.focus(Keys::Sidebar);
-        // This machine's main, folded, then the machine.
         type_in(&mut sidebar, "hh");
         assert_eq!(sidebar.cursor, Some(Spot::Machine(Machine::Local)));
         type_in(&mut sidebar, "vJ");
@@ -12980,10 +10635,6 @@ mod tests {
         assert!(matches!(sidebar.moving, Moving::Still));
     }
 
-    /// A machine's header lifts the machine once the mouse moves a line,
-    /// with every row under it, lit, and it lands where it shows, this one
-    /// too. Let go on the line it went down on, it is a click, which folds
-    /// the machine.
     #[test]
     fn a_machine_dragged_by_its_header_lands_where_it_shows() {
         let mut sidebar = fresh();
@@ -12991,7 +10642,6 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         screen(&mut sidebar, true, area.width, area.height);
         let left = MouseButton::Left;
-        // nixos's header, to the top.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area), Asked::Take);
         let (lines, lit) = seen(&mut sidebar, true, 32, 26);
@@ -13000,7 +10650,6 @@ mod tests {
         sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
         assert_eq!(machines_listed(&sidebar), ["nixos", "mac", "me@vps", "pi"]);
 
-        // mac's header, now under nixos's rows, to the bottom.
         screen(&mut sidebar, true, area.width, area.height);
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 12), area);
@@ -13013,8 +10662,6 @@ mod tests {
         assert_eq!(machines_listed(&sidebar), ["nixos", "me@vps", "pi", "mac"]);
     }
 
-    /// A search looks through every machine's sessions, a folded machine's
-    /// too, and keeps the header of each machine it finds rows of.
     #[test]
     fn a_search_finds_another_machine_s_rows_under_its_header() {
         let mut sidebar = fresh();
@@ -13034,10 +10681,6 @@ mod tests {
         assert_eq!(lines[HEADER + 3], "");
     }
 
-    /// What you saw of another machine's pane, as `u` marks it read, stays
-    /// while lunetad lists its session, and while it does not reach the
-    /// machine, for longer than `GONE`: its sessions may run still. Once
-    /// lunetad lists the machine with the session gone for `GONE`, it goes.
     #[test]
     fn what_you_saw_on_another_machine_outlasts_its_being_unreached() {
         let mut sidebar = fresh();
@@ -13077,9 +10720,6 @@ mod tests {
         assert_eq!(row(&mut sidebar), new);
     }
 
-    /// While lunetad does not reach another machine, what you saw in this
-    /// one's sessions goes as ever, once it has not listed one for `GONE`:
-    /// only that machine's sessions may run unlisted.
     #[test]
     fn what_you_saw_here_goes_while_another_machine_is_unreached() {
         let mut sidebar = fresh();
@@ -13099,7 +10739,6 @@ mod tests {
         assert_eq!(agent_row(&mut sidebar, moment(183_500), true), new);
     }
 
-    /// The names of the sessions the rows list, in their order.
     fn names_listed(sidebar: &Sidebar) -> Vec<&str> {
         let rows = sidebar.rows.iter();
         rows.filter_map(|row| match row {
@@ -13109,14 +10748,10 @@ mod tests {
         .collect()
     }
 
-    /// A move is made to the rows as the order is kept now, though this
-    /// luneta has yet to hear of a move made elsewhere, or never will, as one
-    /// whose watcher failed: by the keys or by the mouse, it undoes none.
     #[test]
     fn a_move_keeps_one_made_elsewhere_unheard() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("order");
-        // A luneta that takes up the order only as it moves a session.
         let deaf = || {
             let order = Order::within(file.clone());
             let (folds, news, agent) = (Folds::default(), News::default(), Kept::default());
@@ -13126,15 +10761,11 @@ mod tests {
             sidebar
         };
         let (mut here, mut there) = (deaf(), deaf());
-        // zed to the top, there.
         type_in(&mut there, "GvKK");
         assert_eq!(names_listed(&there), ["zed", "bipa", "notes"]);
-        // notes up one, here, which lists bipa, notes and zed still.
         type_in(&mut here, "jjjvK");
         assert_eq!(names_listed(&here), ["zed", "notes", "bipa"]);
 
-        // zed to the bottom, there, by its row, as it lists bipa over notes
-        // still.
         let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut there);
         let left = MouseButton::Left;
@@ -13145,10 +10776,6 @@ mod tests {
         assert_eq!(names_listed(&deaf()), ["notes", "bipa", "zed"]);
     }
 
-    /// Sessions of one name move together, as the order goes by name: by the
-    /// later of them as by the first, past a session at a time, by the keys or
-    /// by the mouse. Apart, as the daemon lists them oldest first, the one
-    /// moved goes beside the other.
     #[test]
     fn sessions_of_a_name_move_together() {
         let mut sidebar = fresh();
@@ -13162,14 +10789,12 @@ mod tests {
             Vec::new(),
         ));
         sidebar.focus(Keys::Sidebar);
-        // The later x, up beside the first, and down with it, both lit.
         type_in(&mut sidebar, "jjvK");
         assert_eq!(names_listed(&sidebar), ["x", "x", "y", "z"]);
         type_in(&mut sidebar, "J");
         assert_eq!(names_listed(&sidebar), ["y", "x", "x", "z"]);
         assert_eq!(drawn_rows(&mut sidebar).1, [2, 3]);
 
-        // The later x, by its row, under z, the first with it.
         let area = Rect::new(0, 0, 32, 22);
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 6), area);
@@ -13179,8 +10804,6 @@ mod tests {
         assert_eq!(names_listed(&sidebar), ["y", "z", "x", "x"]);
     }
 
-    /// What is being read aloud has a line at the bottom, and a mark on the
-    /// row of the pane it comes from, and on no other.
     #[test]
     fn what_is_read_aloud_has_a_line_and_a_mark_on_its_row() {
         let panes = vec![pane(1, 0, "/one", "one"), pane(2, 0, "/two", "two")];
@@ -13205,9 +10828,6 @@ mod tests {
         assert_eq!(marked(&mut sidebar), [""; 0]);
     }
 
-    /// A click on an icon on the line of what is read aloud hits what it shows,
-    /// and the icon that pauses gives way to the one that goes on, however
-    /// narrow the sidebar; and the sidebar collapsed has neither.
     #[test]
     fn the_buttons_of_what_is_read_aloud_are_where_they_show() {
         let reading = |paused| {
@@ -13246,8 +10866,6 @@ mod tests {
         }
     }
 
-    /// The sidebar collapsed has no line of what is read aloud, and what plays
-    /// you can hear: a pause is all it has to say.
     #[test]
     fn a_pause_shows_on_the_sidebar_collapsed() {
         let marked = |shown| {
@@ -13265,10 +10883,6 @@ mod tests {
         }
     }
 
-    /// Two sessions to move panes among: work, the older, with a shell alone
-    /// in its tab, and a tab named auth that holds a shell and an agent at its
-    /// prompt; and play, with a shell alone. The sidebar has the keys, on the
-    /// first pane.
     fn two_to_move() -> Sidebar {
         let mut sidebar = fresh();
         sidebar.heard(two_to_move_host());
@@ -13276,7 +10890,6 @@ mod tests {
         sidebar
     }
 
-    /// What the daemon lists for `two_to_move`.
     fn two_to_move_host() -> Host {
         let auth = |pane: Pane| Pane { tab_name: "auth".to_owned(), ..pane };
         let work = vec![
@@ -13297,7 +10910,6 @@ mod tests {
         KeyEvent::from(KeyCode::Enter)
     }
 
-    /// The rows each line shows, by the end of its text, and which are lit.
     fn ends_shown(sidebar: &mut Sidebar) -> (Vec<String>, Vec<usize>) {
         let (rows, lit) = drawn_rows(sidebar);
         let end = |row: &String| row.rsplit(' ').next().unwrap_or_default().to_owned();
@@ -13308,12 +10920,6 @@ mod tests {
         rows.iter().map(|row| (*row).to_owned()).collect()
     }
 
-    /// `V` picks the highlighted pane, lit, and `J` and `K`, as `j` and `k`,
-    /// move it a row down or up, past the last pane of its session to the
-    /// first under the next session, and no further than the last of them.
-    /// It stays picked until `Esc`, and where it moved for the daemon's next
-    /// list too. It moves its row alone: `Enter` on it goes to its pane, in
-    /// its own session, and nothing asks zellij to move it.
     #[test]
     fn v_picks_a_pane_that_j_and_k_move_among_the_rows() {
         let mut sidebar = two_to_move();
@@ -13341,10 +10947,6 @@ mod tests {
         assert_eq!(sidebar.key(&enter(), moment(160_000)), go_here(pane_of("work", 10, 1)));
     }
 
-    /// A pane under another session than its own has its own session's colour
-    /// down the gutter, and a tab whose panes no longer sit next to each other
-    /// has a bracket for each run of them. It folds with the session it shows
-    /// under, which `h` on its row folds.
     #[test]
     fn a_pane_moved_keeps_its_own_session_s_colour_and_folds_where_it_shows() {
         let mut sidebar = two_to_move();
@@ -13372,9 +10974,6 @@ mod tests {
         assert_eq!(cursor(&sidebar), Some(Place::Session(listed("play", 20))));
     }
 
-    /// `V` again takes up the rest of the pane's tab next to it, which moves
-    /// whole; and once more ends. A pane alone in its tab has no rest to take
-    /// up, and ends.
     #[test]
     fn v_again_takes_up_the_pane_s_tab() {
         let mut sidebar = two_to_move();
@@ -13390,8 +10989,6 @@ mod tests {
         assert!(matches!(sidebar.moving, Moving::Still));
     }
 
-    /// A move goes past a folded session, and with none to go to past it,
-    /// goes nowhere. Any other key ends it, and does what it does.
     #[test]
     fn a_pane_moves_past_a_folded_session() {
         let mut sidebar = two_to_move();
@@ -13406,8 +11003,6 @@ mod tests {
         assert!(sidebar.news.is_unread(listed("work", 10).key(3)));
     }
 
-    /// Once the session a pane shows under has ended, it shows under its own
-    /// again, with the panes of its tab, or before those of the tabs after it.
     #[test]
     fn a_pane_goes_back_to_its_own_session_once_the_other_ends() {
         let mut sidebar = two_to_move();
@@ -13419,8 +11014,6 @@ mod tests {
         assert_eq!(ends_shown(&mut sidebar).0, ["work", "w/a", "auth", "fold"]);
     }
 
-    /// A pane that opens after a move goes with the panes of its tab, under
-    /// its own session, whether that session's panes moved or not.
     #[test]
     fn a_pane_that_opens_after_a_move_goes_with_its_tab() {
         let mut sidebar = two_to_move();
@@ -13435,9 +11028,6 @@ mod tests {
         assert_eq!(ends_shown(&mut sidebar).0, rows);
     }
 
-    /// A session whose panes are back in the order of their tabs, its own
-    /// alone, keeps no order of them: it follows its tabs again, as zellij
-    /// moves them.
     #[test]
     fn panes_put_back_follow_their_tabs_again() {
         let mut sidebar = two_to_move();
@@ -13451,8 +11041,6 @@ mod tests {
         assert_eq!(ends_shown(&mut sidebar).0, ["work", "auth", "fold", "w/a", "play", "w/p"]);
     }
 
-    /// Going to a pane unfolds the session it shows under, where a move put
-    /// it under another than its own: from another session, and from its own.
     #[test]
     fn going_to_a_moved_pane_unfolds_where_it_shows() {
         let mut sidebar = two_to_move();
@@ -13469,12 +11057,6 @@ mod tests {
         }
     }
 
-    /// A press on a pane's row lifts it once the mouse goes straight off its
-    /// line, and takes the focus, and one on the bracket of its tab lifts the
-    /// tab: what it lifted shows, lit, where it lands, the nearest place among
-    /// the panes, under any session of its machine, and lands there as it
-    /// lets go. Off the sidebar, it goes back. Along its line first, it sweeps
-    /// the text.
     #[test]
     fn a_pane_dragged_lands_where_it_shows() {
         let mut sidebar = two_to_move();
@@ -13503,7 +11085,6 @@ mod tests {
         assert_eq!(ends_shown(&mut sidebar).0, first);
         assert_eq!(cursor(&sidebar), Some(pane_of("work", 10, 1)));
 
-        // auth's bracket, to after w/a.
         sidebar.mouse(mouse(MouseEventKind::Down(left), 1, line(1)), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 1, line(3)), area);
         let (rows, lit) = ends_shown(&mut sidebar);

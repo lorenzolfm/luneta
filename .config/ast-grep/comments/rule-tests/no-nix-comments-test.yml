@@ -1,0 +1,8 @@
+id: no-nix-comments
+valid:
+  - '"# a"'
+  - "''\n  echo\n''"
+invalid:
+  - "# a\n1"
+  - "/* a */ 1"
+  - "1 # a"

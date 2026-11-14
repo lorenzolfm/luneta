@@ -1,6 +1,3 @@
-//! A host of a test's own: the variables a daemon finds everything by, folders
-//! for them to name, and the daemon itself.
-
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -21,25 +18,14 @@ pub const LUNETAD: &str = env!("CARGO_BIN_EXE_lunetad");
 
 pub const LUNETA: &str = env!("CARGO_BIN_EXE_luneta");
 
-/// Where the socket is, under the root a variable names. The shell hook keeps
-/// its commands beside it, in the same `luneta`.
 pub const SOCKET: &str = "luneta/lunetad.sock";
 
-/// Where zellij 0.45 keeps its cache, in the home.
 const CACHE: &str = if cfg!(target_os = "macos") {
     "Library/Caches/org.Zellij-Contributors.Zellij"
 } else {
     ".cache/zellij"
 };
 
-/// The variables that the daemon and the CLI find their folders by: their
-/// own, their state's, where the log is, Claude Code's and zellij's, its
-/// cache among them. `None` leaves one unset, so that nothing a test runs
-/// ever reads the folders of whoever runs the tests. `bin` comes
-/// first on the `PATH`, for a test's own programs to stand in for those of
-/// whoever runs the tests, and git reads no config of theirs either. Nothing
-/// runs in a pane of theirs: zellij's names of one are left out, and the
-/// one luneta's ask box gives its agent, with the turn it is at.
 #[derive(Clone, Copy, Default)]
 pub struct Vars<'a> {
     pub runtime: Option<&'a Path>,
@@ -107,8 +93,6 @@ impl<'a> Vars<'a> {
     }
 }
 
-/// What zellij's client writes as its server drops it, as zellij 0.45.1 words it,
-/// on the screen it leaves once zellij's own is down. Then it ends well.
 pub const DROPPED: &str = "
 Your zellij client lost connection to the zellij server.
 
@@ -125,17 +109,12 @@ There are a few things you can try now:
     - Try using a faster (maybe GPU-accelerated) terminal emulator
 ";
 
-/// Puts a program at `to`, a copy of `from`. A process of its own writes it,
-/// so that the test's never holds it open to write: a process that another
-/// test starts meanwhile would take that along until it runs its program,
-/// and until then the copy would not run, as its file is busy.
 pub fn install(from: &Path, to: &Path) {
     let mut install = Command::new("install");
     let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
     assert!(installed.success(), "{} was not installed at {}", from.display(), to.display());
 }
 
-/// Writes a shell script at `path`.
 pub fn script(path: &Path, text: &str) {
     let draft = path.with_extension("draft");
     fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
@@ -163,44 +142,6 @@ fn shared_copy(text: &str) -> PathBuf {
     copy
 }
 
-/// A `zellij` of a test's own, in a folder to put first on the `PATH`, that
-/// lists the panes of a session as a test has it: what it wrote with `list`.
-/// It lists the session's clients too, as the test wrote them with `clients`,
-/// and none until it has, and as `lists_clients_into`, `stacks_clients_into`
-/// and `focuses_clients_into` have them move. It moves none as it stacks a pane
-/// with one that is none of the session's last, and stacks nothing so in a session
-/// a test had `leave_little_room`. A stand-in it opened it stacks for `tucked`,
-/// with no pane moved. Of a session it was given no panes for, it says there is no such session, as zellij does. It notes each session
-/// the daemon asks it for the panes of, for `asked`, and each pane, tab and
-/// session it is asked to close, for `closed`, and closes nothing; in a session
-/// a test had it `refuse`, it fails to, as zellij can. Of one a test had it `hang`, it
-/// lists nothing, and answers nothing. It deletes a session as zellij does:
-/// takes its socket away, as its server does once killed, and what it keeps
-/// of it in the home, which a session a test had `rewrites` has back at
-/// once; and one a test had `unkept` or `gone` as zellij deletes those. As it
-/// deletes one a test had `renews`, another session is made by a name. It
-/// lets go of what it keeps of one with no socket, as of one that ended. It
-/// notes each go it is asked to take, for `went`, and takes none. It notes
-/// each pane and tab it is asked to open, with the pane it is asked from, for
-/// `opened`, opens none, and says it opened `terminal_9`, or the tab `3`,
-/// after which it lists the panes a test wrote with `opens_into`, if any. It
-/// dumps a pane as the text a test had it `dumps` for its session. It lists
-/// each session it keeps how it was laid out of in the home, and that has no
-/// socket, as one that ended, which a test had it `keep`, made an hour, two
-/// minutes and three seconds before. It notes each rename it is asked for,
-/// for `renamed`, and renames nothing. It notes each client that is started,
-/// with `attach`, for `attached`, which ends at once as one that detached
-/// does, or as one zellij dropped does, as many as a test had it
-/// `drops_clients`, or fails, as a test had it `refuses_clients`, or stays and
-/// notes all it hears, as a test had it `listen`, for `heard`, or stays a while,
-/// and is listed from then on, as a test had it `stays_for`, or is not, as it had
-/// it `stays_unlisted_for`. A pane closing
-/// can cut a call of a session short, once, as a test had it `silences` or
-/// `unreaches` it, or hand it another call's answer, as a test had it
-/// `answers_another`. It fails to
-/// list a session's panes by tab, as a test had it `unlays` them, until it
-/// `lays` them again, or hangs as it lists them, as a test had it
-/// `hangs_laying` them. It knows no other command.
 pub struct FakeZellij {
     bin: TempDir,
 }
@@ -425,7 +366,6 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         zellij
     }
 
-    /// The folder to put first on the `PATH`.
     pub fn bin(&self) -> &Path {
         self.bin.path()
     }
@@ -434,14 +374,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.bin.path().join("panes")
     }
 
-    /// The sessions zellij has been asked about, in the order it was asked.
     pub fn asked(&self) -> Vec<String> {
         self.lines("asked")
     }
 
-    /// Waits for zellij to be asked about the panes of `session` once more,
-    /// and returns as soon as it is: the daemon asks again a sweep later at
-    /// the soonest, with no word that anything changed.
     pub fn asked_again(&self, session: &str) {
         let times = || self.asked().iter().filter(|asked| *asked == session).count();
         let before = times();
@@ -452,32 +388,22 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         }
     }
 
-    /// What zellij has been asked to close, each as its arguments were, in
-    /// the order it was asked.
     pub fn closed(&self) -> Vec<String> {
         self.lines("closed")
     }
 
-    /// Where zellij has been asked to take a client, each as its arguments
-    /// were, in the order it was asked.
     pub fn went(&self) -> Vec<String> {
         self.lines("went")
     }
 
-    /// Each client of zellij's that was started, as its arguments were, in
-    /// the order they were.
     pub fn attached(&self) -> Vec<String> {
         self.lines("attached")
     }
 
-    /// Has each client of zellij's stay from now on, while its terminal does: it
-    /// asks for the mouse, as zellij's does, shows on the screen, and notes all
-    /// it hears.
     pub fn listen(&self) {
         fs::write(self.panes().join("listen"), "").unwrap();
     }
 
-    /// Has the next `clients` of zellij's end as one zellij dropped does.
     pub fn drops_clients(&self, clients: u32) {
         fs::write(self.panes().join("dropped"), DROPPED).unwrap();
         fs::write(self.panes().join("drops"), clients.to_string()).unwrap();
@@ -496,12 +422,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         !self.panes().join("stays").exists()
     }
 
-    /// Has each client of zellij's fail from now on, as it says why.
     pub fn refuses_clients(&self) {
         fs::write(self.panes().join("refused-clients"), "").unwrap();
     }
 
-    /// All that a client of zellij's heard, since one had it `listen`.
     pub fn heard(&self) -> String {
         match fs::read(self.panes().join("heard")) {
             Ok(heard) => String::from_utf8_lossy(&heard).into_owned(),
@@ -514,37 +438,26 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("asked-clients").iter().filter(|asked| *asked == session).count()
     }
 
-    /// Each pane and tab zellij was asked to open, in the order it was
-    /// asked, after the pane it was asked from, or `-`.
     pub fn opened(&self) -> Vec<String> {
         self.lines("opened")
     }
 
-    /// Each pane zellij was asked to stack, float or embed, as its arguments
-    /// were, in the order it was asked.
     pub fn turned(&self) -> Vec<String> {
         self.lines("turned")
     }
 
-    /// Each stack of a stand-in zellij was asked for under a pane that moved,
-    /// which is what leaves that pane one like any other, in the order it was
-    /// asked.
     pub fn tucked(&self) -> Vec<String> {
         self.lines("tucked")
     }
 
-    /// Each rename zellij was asked for, as its arguments were, in the order
-    /// it was asked.
     pub fn renamed(&self) -> Vec<String> {
         self.lines("renamed")
     }
 
-    /// Has zellij dump `text` of any pane of `session` from now on.
     pub fn dumps(&self, session: &str, text: &str) {
         self.write(&format!("{session}.dump"), text);
     }
 
-    /// The lines of the file `name`, none while there is none.
     fn lines(&self, name: &str) -> Vec<String> {
         match fs::read_to_string(self.panes().join(name)) {
             Ok(said) => said.lines().map(str::to_owned).collect(),
@@ -553,37 +466,22 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         }
     }
 
-    /// Has zellij list `panes` for the session `session` from now on, as
-    /// `list-panes --json` spells them. The file is written whole before
-    /// zellij can read it.
     pub fn list(&self, session: &str, panes: &serde_json::Value) {
         self.write(&format!("{session}.json"), &panes.to_string());
     }
 
-    /// Has zellij list `panes` for the session `session` once it has opened
-    /// the next tab there, as `list` would, with that tab, `3`, among them.
     pub fn opens_into(&self, session: &str, panes: &serde_json::Value) {
         self.write(&format!("{session}.opened.json"), &panes.to_string());
     }
 
-    /// Has zellij list `panes` for the session `session` once it has stacked
-    /// the `nth` pane there, from the first, as `list` would. Past the last
-    /// of these, it lists what it did, as it does where it has no room.
     pub fn stacks_into(&self, session: &str, nth: u32, panes: &serde_json::Value) {
         self.write(&format!("{session}.stacks.{nth}"), &panes.to_string());
     }
 
-    /// Has the next `action`, a command of `zellij action`, in `session` end
-    /// well with nothing said, as a pane closing cuts one short, though what it
-    /// asked for goes on.
     pub fn silences(&self, session: &str, action: &str) {
         self.write(&format!("{session}.{action}.silent"), "");
     }
 
-    /// Has the next `action`, a command of `zellij action`, in `session` end
-    /// having asked nothing, as a pane closing keeps one from reaching its
-    /// session's server. zellij's CLI then says so by how many `others` of its
-    /// sessions answered: with two or more it lists them, and ends well.
     pub fn unreaches(&self, session: &str, action: &str, others: usize) {
         let gone = format!("Session '{session}' not found. The following sessions are active:");
         let ends = match others {
@@ -594,16 +492,10 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.write(&format!("{session}.{action}.once"), &ends);
     }
 
-    /// Has the next `action`, a command of `zellij action`, in `session` end
-    /// well saying `said`, the answer to another call: zellij answers by the id
-    /// of a connection, and gives the id of one that ended to the next.
     pub fn answers_another(&self, session: &str, action: &str, said: &str) {
         self.write(&format!("{session}.{action}.once"), &format!("echo '{said}'; exit 0"));
     }
 
-    /// Has zellij list `clients` for the session `session` from now on, each
-    /// an id and a pane as `list-clients` spells them, `terminal_3` or
-    /// `plugin_2`, and padded as zellij 0.45.1 pads them.
     pub fn clients(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.clients"), &clients_said(clients));
     }
@@ -612,93 +504,58 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.write(&format!("{session}.clients"), said);
     }
 
-    /// Has zellij list `clients` for the session `session` once it has listed
-    /// its panes, as `clients` would, as a client moves of its own as it does.
     pub fn lists_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.listed.clients"), &clients_said(clients));
     }
 
-    /// Has zellij list `clients` for the session `session` once it has stacked
-    /// a pane there, as `clients` would, as it moves the client that last typed
-    /// to it. That is the last pane it is told to stack, so one that is none of
-    /// the session's moves nobody.
     pub fn stacks_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.stacked.clients"), &clients_said(clients));
     }
 
-    /// Has zellij find room in `session` for a pane to stack, but not for one
-    /// that is none of the session's beside it, which counts as a pane of the
-    /// stack: it stacks neither, and says nothing of it.
     pub fn leave_little_room(&self, session: &str) {
         self.write(&format!("{session}.tight"), "");
     }
 
-    /// Has zellij list `clients` for the session `session` once it has moved
-    /// the focus there, as `clients` would.
     pub fn focuses_clients_into(&self, session: &str, clients: &[(u32, &str)]) {
         self.write(&format!("{session}.focused.clients"), &clients_said(clients));
     }
 
-    /// Has zellij fail from now on to list the panes of the session `session`
-    /// by tab, as `list-panes --json` does, till it `lays` them again.
     pub fn unlays(&self, session: &str) {
         self.write(&format!("{session}.unlaid"), "");
     }
 
-    /// Has zellij hang from now on as it lists the panes of the session
-    /// `session` by tab, as `list-panes --json` does, and answer the rest.
     pub fn hangs_laying(&self, session: &str) {
         self.write(&format!("{session}.laid.hung"), "");
     }
 
-    /// Has zellij list the panes of the session `session` by tab again, once
-    /// it `unlays` them.
     pub fn lays(&self, session: &str) {
         fs::remove_file(self.panes().join(format!("{session}.unlaid"))).unwrap();
     }
 
-    /// Has zellij fail from now on to close any pane, tab or session of the
-    /// session `session`, and note none of them.
     pub fn refuse(&self, session: &str) {
         self.write(&format!("{session}.refused"), "");
     }
 
-    /// Has zellij kill the session `session` from now on and keep nothing of
-    /// it, as it does a session that ran for less than a second: it says it
-    /// kills it, notes it, and fails to delete it.
     pub fn unkept(&self, session: &str) {
         self.write(&format!("{session}.unkept"), "");
     }
 
-    /// Has zellij write what it keeps of the session `session` anew from now
-    /// on as it deletes it, as the server's writer does where it ticks
-    /// before the server has ended.
     pub fn rewrites(&self, session: &str) {
         self.write(&format!("{session}.rewrites"), "");
     }
 
-    /// Has a session be made by the name `other` from now on as zellij
-    /// deletes the session `session`: the socket of `other` tells of a start
-    /// since, as the socket of one made by its name does.
     pub fn renews(&self, session: &str, other: &str) {
         self.write(&format!("{session}.renews"), other);
     }
 
-    /// Has zellij find nothing of the session `session` from now on, as of
-    /// one that ended and that it keeps nothing of: it fails to delete it, and
-    /// notes nothing.
     pub fn gone(&self, session: &str) {
         self.write(&format!("{session}.gone"), "");
     }
 
-    /// Has zellij answer nothing from now on of what it is asked to list of
-    /// the session `session`, for longer than the daemon waits, as the
-    /// server of one that hangs does.
     pub fn hang(&self, session: &str) {
         self.write(&format!("{session}.hung"), "");
     }
 
-    /// Writes `text` to the file `name`, whole before zellij can read it.
     fn write(&self, name: &str, text: &str) {
         let path = self.panes().join(name);
         let writing = path.with_extension("writing");
@@ -707,7 +564,6 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
     }
 }
 
-/// What zellij says as it lists `clients`, each an id and a pane.
 fn clients_said(clients: &[(u32, &str)]) -> String {
     let mut said = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND\n".to_owned();
     for (id, pane) in clients {
@@ -716,31 +572,11 @@ fn clients_said(clients: &[(u32, &str)]) -> String {
     said
 }
 
-/// A `gh` of a test's own, beside its `zellij`, that finds the pull request
-/// of the branch checked out where it runs as a test has it: what it wrote
-/// with `open` for the branch's name, whatever the repository. Of a branch it
-/// was given none for, it says there is none, as gh does. It notes the branch
-/// of each pull request it is asked for, for `asked`. Given a branch with
-/// `switch`, it checks that out first, the next time it is asked. It views an
-/// issue by its number as `gh issue view` does, for its page alone, which a
-/// test wrote with `issue`, and notes what it was asked, for `issues`; of an
-/// issue it was given none for, it says GitHub has none. It views a pull
-/// request by its number for its branches, which a test wrote with `pull`, and
-/// notes what it was asked, for `viewed`. Its `api` says what a test wrote with
-/// `api`. Its `repo view` says the parent a test wrote with `fork_of`, and with
-/// `GH_REPO` set it finds what a test wrote with `open_in`. Of a branch whose
-/// upstream is `refs/pull/<number>/head` that it has none for, it says it can
-/// resolve no such number, as gh does. Its `pr list --base` says what a test
-/// wrote with `based_on` or `merged_into`, or none, and notes what it was asked.
-/// Of a branch a test had it `hang` on, it answers nothing until it has it
-/// `answer`, and of one it had it `fail` on, it fails as one logged out does,
-/// until it has it `mend`. It knows no other command.
 pub struct FakeGh {
     pulls: PathBuf,
 }
 
 impl FakeGh {
-    /// Writes the `gh` in `bin`, where the test's `zellij` is.
     fn new(bin: &Path) -> Self {
         let gh = FakeGh { pulls: bin.join("pulls") };
         fs::create_dir(&gh.pulls).unwrap();
@@ -850,9 +686,6 @@ exec cat "$said"
         gh
     }
 
-    /// Has gh check out `branch` where it is asked next, before it reads what
-    /// is checked out there: as one checks it out in a shell just before gh
-    /// is asked, where git has yet to see it.
     pub fn switch(&self, branch: &str) {
         fs::write(self.pulls.join("switch"), branch).unwrap();
     }
@@ -873,7 +706,6 @@ exec cat "$said"
         fs::remove_file(self.pulls.join(format!("{branch}.fails"))).unwrap();
     }
 
-    /// The branches gh has been asked about, in the order it was asked.
     pub fn asked(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("asked")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
@@ -882,13 +714,10 @@ exec cat "$said"
         }
     }
 
-    /// Has gh say `page` of the issue numbered `number` from now on, as `gh
-    /// issue view --json url --jq .url` writes it, of whichever repository.
     pub fn issue(&self, number: u32, page: &str) {
         fs::write(self.pulls.join(format!("issue-{number}")), format!("{page}\n")).unwrap();
     }
 
-    /// What gh has been asked of issues, in the order it was asked.
     pub fn issues(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("issues")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
@@ -910,9 +739,6 @@ exec cat "$said"
         }
     }
 
-    /// Has gh say `rollup` of the checks of the pull request numbered
-    /// `number`, in `state`, at `head`, as `gh pr view <page> --json
-    /// state,headRefOid,statusCheckRollup` writes it, of whichever repository.
     pub fn checks(&self, number: u32, state: &str, head: &str, rollup: &serde_json::Value) {
         let said = serde_json::json!({
             "state": state,
@@ -922,24 +748,18 @@ exec cat "$said"
         fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
     }
 
-    /// Has gh say `log` of the job numbered `job`.
     pub fn log(&self, job: u64, log: &str) {
         fs::write(self.pulls.join(format!("log-{job}")), log).unwrap();
     }
 
-    /// Has gh be one older than 2.97, which knows no `--allow-escape-sequences`.
     pub fn old(&self) {
         fs::write(self.pulls.join("old"), "").unwrap();
     }
 
-    /// Has gh fail to list labels and issues from now on, and say `why` as it
-    /// does.
     pub fn refuse_lists(&self, why: &str) {
         fs::write(self.pulls.join("lists-fail"), format!("{why}\n")).unwrap();
     }
 
-    /// Where gh has listed labels and issues, and what it was asked, a line
-    /// each, in the order it was asked.
     pub fn listed(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("listed")) {
             Ok(listed) => listed.lines().map(str::to_owned).collect(),
@@ -948,19 +768,14 @@ exec cat "$said"
         }
     }
 
-    /// Has `gh issue create` fail from now on, and say `why` as it does.
     pub fn refuse_issues(&self, why: &str) {
         fs::write(self.pulls.join("create-fails"), format!("{why}\n")).unwrap();
     }
 
-    /// Has `gh issue create` file the issue from now on, and say `said` of it
-    /// in place of its page.
     pub fn say_on_create(&self, said: &str) {
         fs::write(self.pulls.join("create-says"), said).unwrap();
     }
 
-    /// Where gh last filed an issue, what it was asked, and the body it read
-    /// on its stdin, a line each and then the body's: none if it filed none.
     pub fn created(&self) -> Option<Vec<String>> {
         match fs::read_to_string(self.pulls.join("created")) {
             Ok(created) => Some(created.lines().map(str::to_owned).collect()),
@@ -969,8 +784,6 @@ exec cat "$said"
         }
     }
 
-    /// What gh has been asked of checks and their logs, in the order it was
-    /// asked.
     pub fn checked(&self) -> Vec<String> {
         match fs::read_to_string(self.pulls.join("checked")) {
             Ok(asked) => asked.lines().map(str::to_owned).collect(),
@@ -983,8 +796,6 @@ exec cat "$said"
         fs::write(self.pulls.join("api"), said).unwrap();
     }
 
-    /// Has gh find `said` for `branch` from now on, as `gh pr view --json`
-    /// writes it. The file is written whole before gh can read it.
     pub fn open(&self, branch: &str, said: &serde_json::Value) {
         let path = self.pulls.join(format!("{branch}.json"));
         let writing = path.with_extension("writing");
@@ -1032,8 +843,6 @@ exec cat "$said"
     }
 }
 
-/// `said` with the head gh always says of a pull request, where a test left it
-/// out as nothing it looks at.
 fn with_head(branch: &str, said: &serde_json::Value) -> serde_json::Value {
     let mut said = said.clone();
     let fields = said.as_object_mut().unwrap();
@@ -1042,16 +851,11 @@ fn with_head(branch: &str, said: &serde_json::Value) -> serde_json::Value {
     said
 }
 
-/// A `git` of a test's own, beside its `zellij`, that runs the git of whoever
-/// runs the tests, and notes each `git status` it is asked for, for
-/// `statuses`.
 pub struct NotedGit {
     notes: PathBuf,
 }
 
 impl NotedGit {
-    /// Writes the `git` in `bin`, in the place of the one first on the
-    /// `PATH` of the tests.
     fn new(bin: &Path) -> Self {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let git = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|it| it.is_file());
@@ -1069,16 +873,11 @@ exec "{git}" "$@"
         );
         let path = bin.join("git");
         shared_script(&path, &text);
-        // Run once here, and not first in the daemon's first ask: macOS looks
-        // a program over the first time it runs, which took that ask a quarter
-        // of a second more, and the daemon rests from a directory as long as
-        // its last ask took before it asks again on a change.
         let ran = Command::new(&path).arg("--version").stdout(Stdio::null()).status().unwrap();
         assert!(ran.success(), "the git of the test's own does not run");
         noted
     }
 
-    /// How many times git has been asked how a work tree stands.
     pub fn statuses(&self) -> usize {
         match fs::read_to_string(&self.notes) {
             Ok(notes) => notes.lines().count(),
@@ -1088,9 +887,6 @@ exec "{git}" "$@"
     }
 }
 
-/// The folders of a host of a test's own: the daemon's, zellij's sockets,
-/// and a home with zellij's cache in it, with a zellij that lists the panes
-/// the test gives it, and a gh that finds the pull requests it gives it.
 pub struct Host {
     pub runtime: TempDir,
     pub sockets: TempDir,
@@ -1114,7 +910,6 @@ impl Host {
         host
     }
 
-    /// Has the daemon's git note each `git status` it runs, from now on.
     pub fn note_git(&self) -> NotedGit {
         NotedGit::new(self.zellij.bin())
     }
@@ -1129,51 +924,39 @@ impl Host {
         }
     }
 
-    /// The folder zellij 0.45 writes what it keeps of each session in, in
-    /// its cache in the home.
     fn metadata(&self) -> PathBuf {
         self.home.path().join(CACHE).join("contract_version_1/session_info")
     }
 
-    /// Puts a file where zellij keeps what it keeps of each session, so that
-    /// no one can read which sessions it keeps.
     pub fn hide_kept_sessions(&self) {
         fs::remove_dir_all(self.metadata()).unwrap();
         fs::write(self.metadata(), "").unwrap();
     }
 
-    /// Has zellij write `text` as what it keeps of `session`, in place, as
-    /// zellij does.
     pub fn write_metadata(&self, session: &str, text: &str) {
         let dir = self.metadata().join(session);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("session-metadata.kdl"), text).unwrap();
     }
 
-    /// Has zellij keep how `session` was laid out, in place, to bring it
-    /// back from, as it keeps one that ended.
     pub fn keep(&self, session: &str) {
         let dir = self.metadata().join(session);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("session-layout.kdl"), "layout {\n}\n").unwrap();
     }
 
-    /// The daemon's folder.
     pub fn folder(&self) -> PathBuf {
         self.runtime.path().join("luneta")
     }
 
-    /// The folder zellij 0.45 keeps its sessions' sockets in.
     pub fn contract(&self) -> PathBuf {
         self.sockets.path().join("contract_version_1")
     }
 
-    /// A session's server, by the socket it listens on.
     pub fn serve(&self, session: &str) -> UnixListener {
         UnixListener::bind(self.contract().join(session)).unwrap()
     }
 
-    /// The host, as the daemon answers a first look.
     pub fn host(&self) -> api::Host {
         let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1185,13 +968,10 @@ impl Host {
     }
 }
 
-/// The folder in `runtime` that a daemon reaches, if one has made it.
 pub fn folder_in(runtime: &Path) -> Option<Folder> {
     folder::open(&runtime.join("luneta")).unwrap()
 }
 
-/// A process of a test's, killed as it goes out of scope, as a crash would end
-/// it: with no chance to clear up after itself.
 pub struct Running {
     child: Child,
 }
@@ -1205,18 +985,14 @@ impl Running {
         self.child.id()
     }
 
-    /// Kills it, and leaves it for later to be waited for, as a parent busy
-    /// with something else does: it has ended, and the system still lists it.
     pub fn kill(&mut self) {
         self.child.kill().unwrap();
     }
 
-    /// Its stdin and stdout, which it was spawned with piped.
     pub fn piped(&mut self) -> (ChildStdin, ChildStdout) {
         (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())
     }
 
-    /// How it ended, if it does within `limit`.
     pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
         let deadline = Instant::now() + limit;
         loop {
@@ -1238,13 +1014,9 @@ impl Drop for Running {
     }
 }
 
-/// A daemon that said it listens.
 pub struct Daemon {
     process: Running,
-    /// What the daemon has said, a line at a time.
     said: Vec<String>,
-    /// What it says next, which a thread of the test's reads as it comes, so
-    /// that it always has somewhere to go.
     heard: Receiver<String>,
 }
 
@@ -1253,12 +1025,10 @@ impl Daemon {
         self.process.pid()
     }
 
-    /// How it ended, if it does within `limit`.
     pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
         self.process.ended_within(limit)
     }
 
-    /// All the daemon has said, once `wait` has passed.
     pub fn said_after(&mut self, wait: Duration) -> &[String] {
         let deadline = Instant::now() + wait;
         loop {
@@ -1271,8 +1041,6 @@ impl Daemon {
     }
 }
 
-/// Starts a daemon, and waits for it to say that it listens. One that ends
-/// first has refused to run, and gives how it ended and all it said.
 pub fn start(vars: Vars) -> Result<Daemon, (ExitStatus, String)> {
     start_as(vars.command(LUNETAD))
 }
@@ -1298,10 +1066,6 @@ pub fn start_as(mut lunetad: Command) -> Result<Daemon, (ExitStatus, String)> {
     Err((process.child.wait().unwrap(), said.join("\n")))
 }
 
-/// How `command` ended and what it wrote, once it has ended and what it
-/// writes to has closed, as a program reads what `luneta watch` says: a
-/// process it left running that held either would keep it from ever
-/// answering.
 pub fn answered(command: &mut Command) -> Output {
     let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (tell, heard) = mpsc::channel();
@@ -1310,7 +1074,6 @@ pub fn answered(command: &mut Command) -> Output {
     output.expect("it never answered, or what it left running holds what it writes").unwrap()
 }
 
-/// What `luneta info` says, run with `vars`.
 pub fn info(vars: Vars) -> String {
     let output = vars.command(LUNETA).arg("info").output().unwrap();
     let said = String::from_utf8(output.stdout).unwrap();
@@ -1319,8 +1082,6 @@ pub fn info(vars: Vars) -> String {
     said
 }
 
-/// What `check` finds, once it finds it: the daemon reads what changes in a
-/// thread of its own, and a test sees the change some moments after making it.
 pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

@@ -1,0 +1,93 @@
+id: no-yaml-run-comments
+snapshots:
+  ? |-
+    run: |
+      echo
+      # a
+  : labels:
+    - source: |-
+        |
+          echo
+          # a
+      style: primary
+      start: 5
+      end: 19
+    - source: run
+      style: secondary
+      start: 0
+      end: 3
+    - source: |-
+        run: |
+          echo
+          # a
+      style: secondary
+      start: 0
+      end: 19
+    - source: |-
+        |
+          echo
+          # a
+      style: secondary
+      start: 5
+      end: 19
+  ? |-
+    run: |
+      echo
+      #! a
+  : labels:
+    - source: |-
+        |
+          echo
+          #! a
+      style: primary
+      start: 5
+      end: 20
+    - source: run
+      style: secondary
+      start: 0
+      end: 3
+    - source: |-
+        run: |
+          echo
+          #! a
+      style: secondary
+      start: 0
+      end: 20
+    - source: |-
+        |
+          echo
+          #! a
+      style: secondary
+      start: 5
+      end: 20
+  ? |-
+    steps:
+      - run: >-
+          echo
+          # a
+  : labels:
+    - source: |-
+        >-
+              echo
+              # a
+      style: primary
+      start: 16
+      end: 39
+    - source: run
+      style: secondary
+      start: 11
+      end: 14
+    - source: |-
+        run: >-
+              echo
+              # a
+      style: secondary
+      start: 11
+      end: 39
+    - source: |-
+        >-
+              echo
+              # a
+      style: secondary
+      start: 16
+      end: 39

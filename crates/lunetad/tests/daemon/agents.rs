@@ -1,6 +1,3 @@
-//! The agents the daemon finds: Claude Code's session files, the processes
-//! they name, and the zellij panes those run in.
-
 use std::collections::HashSet;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
@@ -23,9 +20,6 @@ use tempfile::TempDir;
 
 use crate::host::{eventually, start, FakeZellij, Running, Vars, LUNETA};
 
-/// The folders of a host of a test's own: the daemon's, a home with Claude
-/// Code's session files in it, and zellij's sockets, with a zellij that lists
-/// no panes.
 pub struct Host {
     runtime: TempDir,
     home: TempDir,
@@ -60,33 +54,26 @@ impl Host {
         self.home.path().join(".claude/sessions")
     }
 
-    /// Where the daemon's folder is made.
     pub fn runtime(&self) -> &Path {
         self.runtime.path()
     }
 
-    /// pi's folder, which pi makes as it first runs.
     pub fn pi_folder(&self) -> PathBuf {
         self.home.path().join(".pi/agent")
     }
 
-    /// The folder zellij 0.45 keeps its sessions' sockets in.
     pub fn contract(&self) -> PathBuf {
         self.zellij.path().join("contract_version_1")
     }
 
-    /// Where Claude Code keeps the session file of the agent whose pid is `pid`.
     fn file_of(&self, pid: u32) -> PathBuf {
         self.sessions().join(format!("{pid}.json"))
     }
 
-    /// Writes a session file as Claude Code does, for the agent whose pid is
-    /// `pid`.
     pub fn write(&self, pid: u32, file: &serde_json::Value) {
         fs::write(self.file_of(pid), file.to_string()).unwrap();
     }
 
-    /// What the daemon answers.
     pub fn list(&self) -> ListAgentsResponse {
         let folder =
             crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
@@ -97,7 +84,6 @@ impl Host {
         })
     }
 
-    /// The host, as the daemon answers a first look.
     pub fn host(&self) -> api::Host {
         let folder =
             crate::host::folder_in(self.runtime.path()).expect("no daemon has made its folder");
@@ -109,18 +95,15 @@ impl Host {
         })
     }
 
-    /// What the daemon lists.
     pub fn agents(&self) -> Vec<Agent> {
         self.list().agents
     }
 
-    /// The agent the daemon lists for the session `id`.
     pub fn agent(&self, id: &str) -> Option<Agent> {
         self.agents().into_iter().find(|agent| agent.session_id == id)
     }
 }
 
-/// A process to stand for an agent, in the pane `pane` names, if any.
 pub fn process(pane: Option<(&str, u32)>) -> Running {
     let mut command = Command::new("sleep");
     command.arg("600").env_remove("ZELLIJ_SESSION_NAME").env_remove("ZELLIJ_PANE_ID");
@@ -130,8 +113,6 @@ pub fn process(pane: Option<(&str, u32)>) -> Running {
     Running::spawn(&mut command)
 }
 
-/// When `pid` started, as Claude Code records it on Linux: field 22 of its
-/// `stat` (proc(5)), counted from the `)` that ends its name.
 #[cfg(target_os = "linux")]
 fn started(pid: u32) -> String {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
@@ -139,8 +120,6 @@ fn started(pid: u32) -> String {
     after.split_whitespace().nth(19).unwrap().to_owned()
 }
 
-/// When `pid` started, as Claude Code records it on macOS: `ps -o lstart`, in
-/// UTC and the C locale.
 #[cfg(target_os = "macos")]
 fn started(pid: u32) -> String {
     let output = Command::new("/bin/ps")
@@ -153,15 +132,11 @@ fn started(pid: u32) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Now, in the whole milliseconds Claude Code dates an agent's start in, and
-/// rounded up: never before a socket made ahead of it.
 fn now() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_millis()).unwrap() + 1
 }
 
-/// A session file for the agent `id`, whose process is `pid` and started at
-/// `start`, written as the agent starts.
 fn file(id: &str, pid: u32, start: &str, status: &str) -> serde_json::Value {
     json!({
         "pid": pid,
@@ -178,12 +153,10 @@ fn file(id: &str, pid: u32, start: &str, status: &str) -> serde_json::Value {
     })
 }
 
-/// The file of a process that runs, as it starts.
 pub fn file_for(id: &str, process: &Running, status: &str) -> serde_json::Value {
     file_of_pid(id, process.pid(), status)
 }
 
-/// The file of the process `pid`, which runs, as it starts.
 pub fn file_of_pid(id: &str, pid: u32, status: &str) -> serde_json::Value {
     file(id, pid, &started(pid), status)
 }
@@ -192,22 +165,14 @@ fn zellij(named: &str, session: Option<&str>, pane: u32) -> Zellij {
     Zellij { named: named.to_owned(), session: session.map(str::to_owned), pane }
 }
 
-/// The session the daemon says an agent's pane is in now, if it says one.
 pub fn now_in(agent: &Agent) -> Option<&str> {
     agent.zellij().and_then(|zellij| zellij.session.as_deref())
 }
 
-/// A status the daemon knows, as it lists it.
 fn known(status: Status) -> Reported {
     Reported::KnownStatus(status.into())
 }
 
-/// A file stands for an agent only while a process with its pid runs and
-/// started when the file says: a file outlives the process that crashed, a pid
-/// comes back as another process's, and a container that shares the folder
-/// writes pids of a namespace of its own. The pid is the one the file is named
-/// for, so a copy of a file is no second agent. The pane is the one the
-/// process's environment names, and an agent outside zellij has none.
 #[test]
 fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
     let host = Host::new();
@@ -254,11 +219,6 @@ fn the_daemon_lists_the_agents_whose_files_name_a_live_process() {
     assert_eq!((listed[0].cwd.as_str(), entrypoint), ("/home/you/work", Some("cli")));
 }
 
-/// What Claude Code says in words the daemon knows, it lists as those; a word
-/// it does not know comes through as Claude Code wrote it, and what Claude
-/// Code does not say, the daemon does not either: a status it does not date
-/// has no date, though the file says when the session started. What an agent
-/// waits for comes with a wait alone.
 #[test]
 fn the_daemon_says_what_claude_code_says_and_no_more() {
     let host = Host::new();
@@ -310,12 +270,6 @@ fn the_daemon_says_what_claude_code_says_and_no_more() {
     );
 }
 
-/// The daemon follows the files as Claude Code writes them, with no one asking
-/// it to look. A file read in the middle of a write says what it said before,
-/// so that its agent does not blink out of the list, and one read in the
-/// middle of the write that makes it is not yet counted as one the daemon
-/// cannot read. A file taken away takes its agent, and so does a process that
-/// crashes and leaves its file.
 #[test]
 fn the_daemon_follows_the_files_as_they_change() {
     let host = Host::new();
@@ -333,8 +287,6 @@ fn the_daemon_follows_the_files_as_they_change() {
     let asking = |agent: &Agent| agent.status == waits && agent.waiting_for == asks;
     eventually("one waits", || host.agent("one").filter(asking));
 
-    // `two`'s new status shows once the daemon has read the folder again, and
-    // that read finds `one` half written, and `three` half made.
     let whole = file("one", one.pid(), &one_start, "idle").to_string();
     fs::write(host.file_of(one.pid()), &whole[..whole.len() / 2]).unwrap();
     let made = file_for("three", &three, "busy").to_string();
@@ -355,10 +307,6 @@ fn the_daemon_follows_the_files_as_they_change() {
     eventually("two is gone", || host.agent("two").is_none().then_some(()));
 }
 
-/// An agent that crashes says no word to the folder, and leaves its file. It
-/// leaves the list as its process ends, whether its parent has waited for it
-/// yet or not, and not at the next sweep, which is two seconds off: each is
-/// killed just after the read that found it, as the daemon started or since.
 #[test]
 fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
     let host = Host::new();
@@ -393,14 +341,6 @@ fn an_agent_that_crashes_leaves_the_list_as_it_ends() {
     }
 }
 
-/// A file that does not read for longer than a write takes is cut short for
-/// good, or in a shape of a newer Claude Code's, or no session file at all: a
-/// folder by a session file's name, one too long to be one, or one that
-/// names no session or no directory. Its agent leaves the list, rather than
-/// stay in it as it was, and the daemon counts the file as one it cannot
-/// read, so that an empty list is not taken for no agents. It counts it while
-/// a process runs by the file's pid, and not once that one has crashed and
-/// left the file behind.
 #[test]
 fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     let host = Host::new();
@@ -416,7 +356,6 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     shape["procStart"] = json!({ "ticks": started(newer.pid()) });
     host.write(newer.pid(), &shape);
     fs::create_dir(host.file_of(folder.pid())).unwrap();
-    // JSON a session file's parser would take, but for the spaces ahead of it.
     let padded = " ".repeat(64 * 1024) + &file_for("long", &long, "busy").to_string();
     fs::write(host.file_of(long.pid()), padded).unwrap();
     host.write(unnamed.pid(), &file_for("", &unnamed, "busy"));
@@ -439,11 +378,6 @@ fn a_file_the_daemon_cannot_read_is_counted_and_not_kept() {
     eventually("five files are unread", || (host.list().unread == 5).then_some(()));
 }
 
-/// A file that does not read as the daemon starts is counted in its first
-/// answer, as what the daemon knows is whole before it answers anyone. Each
-/// is listed by where its process runs: in the session its environment
-/// names, which the daemon follows through a rename as it does an agent's, by
-/// when the process started, or outside zellij.
 #[test]
 fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     let host = Host::new();
@@ -471,9 +405,6 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     assert_eq!(moved, zellij("work", Some("play"), 3));
 }
 
-/// A file that does not read is counted while a process runs by its pid, and
-/// stops being counted as that process ends, and not at the next sweep, two
-/// seconds off: it is killed just after the read that found it.
 #[test]
 fn a_file_that_does_not_read_stops_being_counted_as_its_process_ends() {
     let host = Host::new();
@@ -491,10 +422,6 @@ fn a_file_that_does_not_read_stops_being_counted_as_its_process_ends() {
     assert!(took < Duration::from_secs(1), "it stayed counted for {took:?}");
 }
 
-/// A folder that never stops changing is read anyway: the daemon waits for a
-/// burst of changes to settle before it reads, but only so long. The test
-/// writes a file beside the session files every few milliseconds, more often
-/// than the folder ever settles, and meanwhile changes an agent's status.
 #[test]
 fn a_folder_that_never_settles_is_read_anyway() {
     let host = Host::new();
@@ -520,9 +447,6 @@ fn a_folder_that_never_settles_is_read_anyway() {
     churn.join().unwrap();
 }
 
-/// A folder the daemon cannot read, it says it cannot, and says so once: it
-/// reads the folder again every sweep, and a line for each would bury the
-/// rest of what it says. The test waits out more than two sweeps.
 #[test]
 fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     let host = Host::new();
@@ -539,9 +463,6 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     assert_eq!(host.agents(), [] as [Agent; 0]);
 }
 
-/// zellij renames a session by moving its socket to the new name. The daemon
-/// sees it, and an agent whose environment still names the old session is in
-/// the renamed one.
 #[test]
 fn a_renamed_session_takes_its_agents_with_it() {
     let host = Host::new();
@@ -558,10 +479,6 @@ fn a_renamed_session_takes_its_agents_with_it() {
     assert_eq!(moved.zellij(), Some(&zellij("work", Some("play"), 2)));
 }
 
-/// A session made under the name another was renamed from does not take that
-/// one's agents: the agent started before it was made, and so its pane did
-/// not open in it. An agent started after both, whose environment names the
-/// name, could be in either, and the daemon does not guess which.
 #[test]
 fn a_session_that_takes_a_name_does_not_take_the_agents_it_had() {
     let host = Host::new();
@@ -585,17 +502,12 @@ fn a_session_that_takes_a_name_does_not_take_the_agents_it_had() {
     assert_eq!(host.agent("older").unwrap().zellij(), Some(&zellij("work", Some("play"), 2)));
 }
 
-/// A rename from before the daemon started, it never saw: the name the agent's
-/// environment holds does not lead to the session made under it since, which
-/// is younger than the agent.
 #[test]
 fn a_name_taken_before_the_daemon_started_leads_nowhere() {
     let host = Host::new();
     let _server = UnixListener::bind(host.contract().join("work")).unwrap();
     let agent = process(Some(("work", 2)));
     let mut said = file_for("agent", &agent, "idle");
-    // A second ago, so that the session made next is younger by more than the
-    // millisecond Claude Code dates a start to.
     said["startedAt"] = json!(now() - 1_000);
     host.write(agent.pid(), &said);
     fs::rename(host.contract().join("work"), host.contract().join("play")).unwrap();

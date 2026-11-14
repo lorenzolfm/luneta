@@ -1,7 +1,3 @@
-//! What clients ask of the server, read once, where it comes in: each message
-//! of the protocol parsed into the server's own types, or refused with the
-//! field that would not parse named.
-
 use std::fmt;
 use std::num::NonZeroU16;
 use std::path::PathBuf;
@@ -15,24 +11,18 @@ use crate::api;
 use crate::id::{ClientId, SessionId, TabId};
 use crate::screen::{Click, RgbColor, Wheel};
 
-/// The most bytes a name has.
 pub const NAME_BYTES_MAX: usize = 255;
 
-/// The most columns a size has, and the most rows: more than any screen
-/// shows.
 pub const SIDE_MAX: u16 = 1000;
 
-/// A refusal of what `field` said, and why.
 pub(crate) fn refused(field: &str, why: impl fmt::Display) -> Status {
     Status::invalid_argument(format!("{field} {why}"))
 }
 
-/// What `field` holds, which must be there.
 fn present<T>(field: &str, value: Option<T>) -> Result<T, Status> {
     value.ok_or_else(|| refused(field, "is missing"))
 }
 
-/// A size in cells, of 1 to `SIDE_MAX` each way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
     pub columns: NonZeroU16,
@@ -58,13 +48,11 @@ impl Size {
         api::Size { columns: self.columns.get().into(), rows: self.rows.get().into() }
     }
 
-    /// The columns and the rows, as numbers.
     #[must_use]
     pub fn get(self) -> (u16, u16) {
         (self.columns.get(), self.rows.get())
     }
 
-    /// Whether `column` and `row`, from 0, are within it.
     #[must_use]
     pub fn holds(self, column: u16, row: u16) -> bool {
         let (columns, rows) = self.get();
@@ -72,8 +60,6 @@ impl Size {
     }
 }
 
-/// A session's name, or a tab's: not empty, of at most `NAME_BYTES_MAX`
-/// bytes, and with no control characters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name(String);
 
@@ -91,7 +77,6 @@ impl Name {
         Ok(Name(name))
     }
 
-    /// The name `Tab #<place>`, from 1.
     #[must_use]
     pub fn numbered(place: usize) -> Name {
         Name(format!("Tab #{place}"))
@@ -103,9 +88,6 @@ impl Name {
     }
 }
 
-/// A session's name: a name, as a tab's is, that is also one luneta reads
-/// as a session's, as it reads zellij's: not only whitespace, not `.` or
-/// `..`, and with no `/`. luneta leaves a session of another name out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionName(Name);
 
@@ -130,7 +112,6 @@ impl SessionName {
     }
 }
 
-/// What a new tab's pane runs, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
     pub cwd: PathBuf,
@@ -138,14 +119,12 @@ pub struct Opens {
     pub ends: Ends,
 }
 
-/// What a pane runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Runs {
     Shell,
     Program { program: String, args: Vec<String> },
 }
 
-/// What becomes of a tab as what its pane runs ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ends {
     Closes,
@@ -190,15 +169,12 @@ impl Opens {
     }
 }
 
-/// A session, on the tab a client coming there goes to, or a tab: of the
-/// session made when `made` says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
     pub is: Is,
     pub made: SystemTime,
 }
 
-/// What a place is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Is {
     Session(SessionId),
@@ -221,7 +197,6 @@ impl Place {
     }
 }
 
-/// The client a `Go` takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Who {
     Client(ClientId),
@@ -241,7 +216,6 @@ impl Who {
     }
 }
 
-/// What a dump of a pane has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dumped {
     Screen,
@@ -260,7 +234,6 @@ impl Dumped {
     }
 }
 
-/// The colours of a client's terminal, none where it did not say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Colours {
     pub foreground: Option<RgbColor>,
@@ -293,7 +266,6 @@ impl Colours {
     }
 }
 
-/// What a client says first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hello {
     pub to: Place,
@@ -301,7 +273,6 @@ pub struct Hello {
     pub colours: Colours,
 }
 
-/// What a client says after its `Hello`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
     Input(Input),
@@ -309,7 +280,6 @@ pub enum Heard {
     Go(Place),
 }
 
-/// What a client's user does in the pane it is on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     Key {
@@ -337,15 +307,12 @@ pub enum Input {
 }
 
 impl Input {
-    /// Whether it is typing, as a `Go` to the client that last typed in a
-    /// session counts it.
     #[must_use]
     pub fn types(&self) -> bool {
         matches!(self, Input::Key { .. } | Input::Paste(_))
     }
 }
 
-/// A client's first message, which must be its `Hello`.
 pub fn hello(api::ToServer { event }: api::ToServer) -> Result<Hello, Status> {
     let Some(api::to_server::Event::Hello(hello)) = event else {
         return Err(refused("event", "is not hello, as the first must be"));
@@ -357,7 +324,6 @@ pub fn hello(api::ToServer { event }: api::ToServer) -> Result<Hello, Status> {
     })
 }
 
-/// A client's message after its first.
 pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
     use api::to_server::Event;
     Ok(match present("event", message.event)? {
@@ -457,8 +423,6 @@ fn named_key(named: i32) -> Result<keys::Key, Status> {
     })
 }
 
-/// The key that types `character` with no modifier held, on a US layout, as
-/// the keyboard's encoder names keys: none for one that layout has no key of.
 fn character_key(character: char) -> keys::Key {
     use keys::Key;
     const LETTERS: [Key; 26] = [
@@ -571,7 +535,6 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
 mod tests {
     use super::*;
 
-    /// A time a session was made at.
     fn at() -> prost_types::Timestamp {
         prost_types::Timestamp { seconds: 60, nanos: 0 }
     }
@@ -580,8 +543,6 @@ mod tests {
         Size::parse("resize", Some(api::Size { columns, rows }))
     }
 
-    /// A size of no columns or rows, or of more than `SIDE_MAX`, is refused,
-    /// and the refusal names the field.
     #[test]
     fn a_size_is_of_1_to_1000_and_a_refusal_names_the_field() {
         assert_eq!(size(80, 24).unwrap().columns.get(), 80);
@@ -593,7 +554,6 @@ mod tests {
         assert_eq!(missing.message(), "hello.size is missing");
     }
 
-    /// A name is not empty, not too long, and has no control character.
     #[test]
     fn a_name_is_held_to_its_rules() {
         assert_eq!(Name::parse("name", "work".to_owned()).unwrap().as_str(), "work");
@@ -604,8 +564,6 @@ mod tests {
         assert_eq!(Name::parse("name", "src/main".to_owned()).unwrap().as_str(), "src/main");
     }
 
-    /// A session's name is held to a name's rules, and to those luneta reads
-    /// a session's name by, which a tab's is not.
     #[test]
     fn a_session_s_name_is_one_luneta_reads() {
         let parsed = |name: &str| SessionName::parse("name", name.to_owned());
@@ -624,8 +582,6 @@ mod tests {
         }
     }
 
-    /// What a new tab runs is said in full: where, what, and what becomes of
-    /// it as that ends.
     #[test]
     fn opens_needs_an_absolute_cwd_a_program_and_an_end() {
         let opens = |cwd: &str, runs, ends: api::Ends| {
@@ -651,7 +607,6 @@ mod tests {
         }
     }
 
-    /// A key is a named key or a character's, and says how it was pressed.
     #[test]
     fn a_key_is_parsed_into_the_encoders_words() {
         let key = |press: api::Press, key, text: &str| {
@@ -688,7 +643,6 @@ mod tests {
         );
     }
 
-    /// The first message is a hello, and only the first.
     #[test]
     fn only_the_first_message_is_a_hello() {
         let hello_said = api::ToServer {
@@ -716,7 +670,6 @@ mod tests {
         );
     }
 
-    /// A wheel only turns, and a button is one of the three.
     #[test]
     fn the_mouse_says_what_it_did() {
         let mouse = |does| mouse_heard(api::Mouse { modifiers: None, column: 3, row: 4, does });

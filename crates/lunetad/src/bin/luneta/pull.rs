@@ -1,15 +1,3 @@
-//! A pull request's link, or an issue's, or a `.md` file's path, pasted in
-//! luneta, and where the key of the menu it opens goes for it, as
-//! `lunetad::links` finds it: on the machine of the row it was pasted on,
-//! among that machine's panes, as the sidebar knows them. Where that machine
-//! has no session in a link's repository and no clone of it, on the first of
-//! the other machines that has either: the link says what it is of, and only
-//! a machine that has it can act on it. A file's path is of the row's machine
-//! alone. luneta finds it for a row of its own machine, and
-//! the daemon of another for one of that machine's, through the daemon
-//! luneta watches. `luneta worktree` is the program that makes the
-//! worktree, of wt's code, wherever luneta has it made.
-
 use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -24,9 +12,6 @@ use crate::host::Event;
 use crate::machines::Machine;
 use crate::sidebar::Listed;
 
-/// A pane as the sidebar knows it, for luneta to find where a key of the
-/// menu goes: its session and its id, and where it `works`, as
-/// `links::Worked` says. The sidebar hands them in the order of its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
     pub session: Listed,
@@ -34,31 +19,18 @@ pub struct Worked {
     pub works: links::Worked,
 }
 
-/// What luneta found for a key of the menu, as `links::Ready` says, with
-/// each pane by its session and its id, as the sidebar knows it.
 pub type Ready = links::Ready<(Listed, u32)>;
 
-/// What luneta found for a key of the menu, and the machine it found it on,
-/// which that key acts on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub on: Machine,
     pub ready: Ready,
 }
 
-/// The machines other than the row's, in the order of the rows, each with the
-/// panes the sidebar knows of it, or why it knows none.
 pub type Others = Vec<(Machine, Result<Vec<Worked>, String>)>;
 
-/// What this machine goes by in a note, beside the others' destinations.
 const THIS: &str = "this machine";
 
-/// Finds where a key of the menu numbered `menu` goes for `work`, pasted on a
-/// row of the machine `on`, among the panes the sidebar knows of it, `worked`,
-/// or else of the machines `others`, as `first_found` says, and has the
-/// worktree made there, as `wanted`, on a thread of its own; and hands back
-/// what it found, or why it found nothing, as `Due` does. luneta finds it on
-/// its own machine, and the daemon of another machine there.
 pub fn prepare(
     menu: u64,
     on: Machine,
@@ -72,8 +44,6 @@ pub fn prepare(
     thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, asked)));
 }
 
-/// Where a key of the menu goes on the machine `on`, by what that machine
-/// says of `pasted`.
 fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> {
     match on {
         Machine::Local => pasted.ready(),
@@ -85,15 +55,6 @@ fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> 
     }
 }
 
-/// Where a key of the menu goes for `work`, by what `ask` has each machine
-/// say: the machine `on`, among `worked`; and, of a link, where that has
-/// neither a session in its repository nor a clone of it, each of `others`
-/// in turn, until one has either. Anything else that goes wrong on `on` ends
-/// it: that machine has the repository, or may. One of `others` that made
-/// nothing is passed over, and said only if none has it; it is in the log
-/// otherwise. One that may have made the worktree ends it too. Each is asked
-/// after the last answers, as the first that has it makes a worktree there,
-/// and no other should.
 fn first_found(
     on: Machine,
     work: &Work,
@@ -109,7 +70,6 @@ fn first_found(
         let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted))?;
         match ready.placed(&panes) {
             Ok(ready) => Ok(Found { on, ready }),
-            // It made the worktree by now.
             Err(_) => Err(Unready::InDoubt(match &on {
                 Machine::Local => UNASKED.to_owned(),
                 Machine::Remote(destination) => format!("{destination}: {UNASKED}"),
@@ -157,8 +117,6 @@ fn first_found(
     Err(std::iter::once(note).chain(failed).collect::<Vec<_>>().join("; "))
 }
 
-/// `why`, as a note says it among those of other machines: of another machine
-/// than this, it says which already.
 fn naming(machine: &Machine, why: String) -> String {
     match machine {
         Machine::Local => format!("{THIS}: {why}"),
@@ -166,15 +124,8 @@ fn naming(machine: &Machine, why: String) -> String {
     }
 }
 
-/// Why luneta does not go where lunetad found a key goes: to a pane it was
-/// not asked of.
 const UNASKED: &str = "lunetad says the key goes to a pane luneta did not ask of";
 
-/// Makes a worktree `of` a branch or a pull request, in the repository `repo`
-/// is a directory of, as `links::made` does, and prints where it is, or where
-/// one of the branch is already, on stdout, where nothing else is: wt prints
-/// nothing there, and has git print on stderr. Or prints why it made none,
-/// after `links::WHY`, on stderr, after what wt and git say there as they go.
 pub fn make(repo: &str, of: &Of) -> ExitCode {
     match links::made(repo, of) {
         Ok(worktree) => {
@@ -188,8 +139,6 @@ pub fn make(repo: &str, of: &Of) -> ExitCode {
     }
 }
 
-/// Brings the worktree in `dir` to its upstream branch, as `links::followed`
-/// does. Or prints why it did not, as `make` does.
 pub fn follow(dir: &str) -> ExitCode {
     match links::followed(dir) {
         Ok(()) => ExitCode::SUCCESS,
@@ -200,9 +149,6 @@ pub fn follow(dir: &str) -> ExitCode {
     }
 }
 
-/// Fetches the upstream branch of `branch`, of the repository `dir` is in, as
-/// `links::fetched_upstream` does, and prints the word for what wt found. Or
-/// prints why it did not, as `make` does.
 pub fn fetch_upstream(dir: &str, branch: &str) -> ExitCode {
     match links::fetched_upstream(dir, branch) {
         Ok(found) => {
@@ -237,14 +183,12 @@ mod tests {
         Work::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap())
     }
 
-    /// A pane of its machine's session `main` that works in `dir`.
     fn pane(id: u32, dir: &str) -> Worked {
         let works = links::Worked { dir: dir.to_owned(), pull: None, here: false };
         let session = Listed::new("main", SystemTime::UNIX_EPOCH + Duration::from_secs(1));
         Worked { session, pane: id, works }
     }
 
-    /// What a machine says where its pane of the place `at` is where a key goes.
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
         let worktree = "/w/x".to_owned();
@@ -255,9 +199,6 @@ mod tests {
         Err(Unready::Nowhere("no session works in cashubtc/cdk".to_owned()))
     }
 
-    /// What `first_found` finds of `work`, pasted on a row of this machine,
-    /// with the machines of `others`, each answering as `say` has it; and the
-    /// machines it asked, in the order it asked them.
     fn asking(
         work: &Work,
         others: Others,
@@ -279,9 +220,6 @@ mod tests {
         (Machine::Remote(destination), Ok(panes))
     }
 
-    /// A machine that has the repository is where the key goes, by its own
-    /// panes, and no other is asked, so that no other makes a worktree. The
-    /// row's goes first.
     #[test]
     fn the_row_s_machine_goes_first_and_the_first_that_has_it_ends_the_search() {
         let others = vec![remote(far(), vec![pane(7, "/f")])];
@@ -291,9 +229,6 @@ mod tests {
         assert_eq!(ready.at, At::Session((pane(1, "/m").session, 1)));
     }
 
-    /// A row of a machine that has neither a session in the repository nor a
-    /// clone of it goes to the next that has either, in the order given, and
-    /// the key acts on that machine, by the pane it said.
     #[test]
     fn a_row_of_a_machine_that_has_none_of_the_repository_goes_to_the_next_that_does() {
         let others = vec![
@@ -325,9 +260,6 @@ mod tests {
         }
     }
 
-    /// What goes wrong on the row's machine ends the search: it says what
-    /// stands in the way there, as a clone git made, and going elsewhere
-    /// would hide it.
     #[test]
     fn what_goes_wrong_on_the_row_s_machine_goes_no_further() {
         let others = vec![remote(far(), vec![pane(7, "/f")])];
@@ -338,10 +270,6 @@ mod tests {
         assert_eq!(asked, [Machine::Local]);
     }
 
-    /// With no other machine, the note says what the row's said, by itself.
-    /// With others, it names each that has none of it, and says why of each
-    /// that did not answer, a machine lunetad does not reach among them,
-    /// which is not asked.
     #[test]
     fn the_note_names_the_machines_it_tried() {
         let alone = asking(&link(), Vec::new(), |_| nowhere()).0;
@@ -368,8 +296,6 @@ mod tests {
         assert_eq!(asked, [Machine::Local, Machine::Remote(far())]);
     }
 
-    /// One of the others that fails is passed over for one that has it. This
-    /// machine, among the others of a row of another, is named in the note.
     #[test]
     fn another_machine_that_fails_is_passed_over() {
         let others = vec![
@@ -393,9 +319,6 @@ mod tests {
         assert_eq!(said, Err(note.to_owned()));
     }
 
-    /// One of the others that may have made the worktree ends the search, so
-    /// that the next makes no second one: as it says so, or as it says a pane
-    /// luneta did not ask of, having made it. What others said is in the note.
     #[test]
     fn a_machine_that_may_have_made_the_worktree_ends_the_search() {
         let others = || {
@@ -421,7 +344,6 @@ mod tests {
         assert!(said.unwrap_err().starts_with(&format!("far: {UNASKED}; it may have")));
         assert_eq!(asked, [Machine::Local, Machine::Remote(far())]);
 
-        // This machine, among the others of a row of another, is named.
         let others = vec![(Machine::Local, Ok(vec![pane(1, "/m")])), remote(vps(), Vec::new())];
         let on = Machine::Remote(far());
         let said = first_found(on, &link(), Wanted::AsItIs, Vec::new(), others, |on, _| match on {
@@ -431,8 +353,6 @@ mod tests {
         assert!(said.unwrap_err().starts_with("this machine: no answer; it may have"));
     }
 
-    /// A file's path is of the row's machine alone: one of its name elsewhere
-    /// is no file of this.
     #[test]
     fn a_file_goes_to_no_other_machine() {
         let file = Work::File(links::File::parse("/w/plan.md", None).unwrap());
@@ -442,7 +362,6 @@ mod tests {
         assert_eq!(asked, [Machine::Local]);
     }
 
-    /// A pane no one asked of is no place to go, and says so, by its machine.
     #[test]
     fn a_pane_luneta_did_not_ask_of_is_no_place_to_go() {
         let on = Machine::Remote(far());

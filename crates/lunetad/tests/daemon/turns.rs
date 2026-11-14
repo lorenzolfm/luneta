@@ -1,10 +1,3 @@
-//! What zellij is asked to move a pane into a tab of its own, or the panes of
-//! a tab into another, as the daemon answers `TurnIntoTab`, `TurnIntoPanes` and
-//! `OtherTabs`: zellij's CLI has no command for it, and what it does lies in
-//! the order of what it is asked, as those are measured against a real zellij.
-//! Any floating asked for shows in `turned` here: zellij drops a pane it has no
-//! room to float, so no move may ask for it.
-
 use std::time::SystemTime;
 
 use lunetad::api::other_tabs_response::Tab;
@@ -20,7 +13,6 @@ use tonic::{Code, Status};
 use crate::host::{folder_in, start, Host};
 use crate::sessions::listed;
 
-/// A terminal of the session, in the tab `tab`, as zellij lists it.
 fn pane(id: u32, tab: (u32, &str)) -> Value {
     listed(id, "fish", tab, Some("/w"))
 }
@@ -35,7 +27,6 @@ fn plugin(mut pane: Value) -> Value {
     pane
 }
 
-/// Has the daemon of `host` answer what `asked` asks of it.
 fn asking<T>(host: &Host, asked: impl AsyncFnOnce(DaemonClient<Channel>) -> T) -> T {
     let _daemon = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
@@ -46,14 +37,10 @@ fn asking<T>(host: &Host, asked: impl AsyncFnOnce(DaemonClient<Channel>) -> T) -
     })
 }
 
-/// When the session started, as a question says it. No socket lists `work` in
-/// most of these, so no session took its name.
 fn long_ago() -> prost_types::Timestamp {
     SystemTime::UNIX_EPOCH.into()
 }
 
-/// What the daemon of `host` answers as it is asked to turn the terminal
-/// `pane` of `work` into a tab.
 fn into_tab(host: &Host, pane: u32) -> Result<Option<TabCame>, Status> {
     let session = "work".to_owned();
     let asked = TurnIntoTabRequest { on: None, session, pane, started_at: Some(long_ago()) };
@@ -62,8 +49,6 @@ fn into_tab(host: &Host, pane: u32) -> Result<Option<TabCame>, Status> {
     })
 }
 
-/// What the daemon of `host` answers as it is asked to turn the tab of the
-/// terminal `pane` of `work` into panes of the tab of the terminal `beside`.
 fn into_panes(host: &Host, pane: u32, beside: u32) -> Result<Option<PanesCame>, Status> {
     let session = "work".to_owned();
     let asked =
@@ -85,31 +70,24 @@ fn action(said: &str) -> String {
     format!("--session=work action {said}")
 }
 
-/// A stand-in as zellij is asked to open one in the tab `tab`.
 fn stand_in(tab: u32) -> String {
     opened_as(tab, "luneta stand-in")
 }
 
-/// What opens the second stand-in of a pane no client is taken to, in the tab `tab`.
 fn second_stand_in(tab: u32) -> String {
     opened_as(tab, "luneta second stand-in")
 }
 
-/// A pane named `name` as zellij is asked to open a stand-in in the tab `tab`.
 fn opened_as(tab: u32, name: &str) -> String {
     let flags = "--no-focus --close-on-exit";
     let said = format!("new-pane --tab-id {tab} {flags} --name={name} -- sleep 10");
     format!("- {}", action(&said))
 }
 
-/// What has zellij stack `pane` on the stand-in it opened: its fake says each
-/// is `terminal_9`.
 fn on_stand_in(pane: &str) -> String {
     action(&format!("stack-panes -- terminal_9 {pane}"))
 }
 
-/// What has zellij stack `pane` on the stand-in it opened with no client moved:
-/// it focuses the last it is told to stack, and that is none of the session's.
 fn unfocused(pane: &str) -> String {
     action(&format!("stack-panes -- terminal_9 {pane} terminal_4294967295"))
 }
@@ -118,11 +96,6 @@ fn stand_in_closed() -> String {
     action("close-pane --pane-id terminal_9")
 }
 
-/// A pane moves onto what a tab made for it holds, which then closes. The tab
-/// is named as the one it left, and moves no client, whatever the name starts
-/// with, as zellij's CLI takes no `-` for a value it does not find joined to its
-/// option. What holds it in the meanwhile ends on its own, and closes it, where
-/// luneta is gone by then.
 #[test]
 fn a_pane_turns_into_a_tab_named_as_the_one_it_left() {
     for name in ["auth", "-work"] {
@@ -145,10 +118,6 @@ fn a_pane_turns_into_a_tab_named_as_the_one_it_left() {
     }
 }
 
-/// A pane stacked with no client taken to it has all the room of the stack, and
-/// closing a stand-in of one row would leave it a stack of one, which zellij
-/// splits for nothing after it. A second stand-in takes the room from it, and goes
-/// after the first, which leaves it a pane like any other.
 #[test]
 fn a_pane_no_client_is_taken_to_ends_a_pane_like_any_other() {
     let host = Host::new();
@@ -169,9 +138,6 @@ fn a_pane_no_client_is_taken_to_ends_a_pane_like_any_other() {
     assert_eq!(host.zellij.closed(), [first, stand_in_closed()]);
 }
 
-/// A tab zellij opened as a pane closing cut its answer short is asked for
-/// again, not said to have failed: the first holds only a stand-in, which ends
-/// on its own, and the tab with it.
 #[test]
 fn a_tab_a_closing_pane_cut_the_answer_of_is_asked_for_again() {
     let host = Host::new();
@@ -189,9 +155,6 @@ fn a_tab_a_closing_pane_cut_the_answer_of_is_asked_for_again() {
     assert_eq!(host.zellij.turned(), [action("stack-panes -- terminal_4 terminal_1")]);
 }
 
-/// zellij says nothing of a stack it has no room for: the pane stays where it
-/// was, and what holds the tab made for it closes, which takes the tab along.
-/// luneta closes no tab: one late to land there would end with it.
 #[test]
 fn a_pane_zellij_finds_no_room_for_stays_and_only_its_stand_in_closes() {
     let host = Host::new();
@@ -202,14 +165,11 @@ fn a_pane_zellij_finds_no_room_for_stays_and_only_its_stand_in_closes() {
 
     refused(&into_tab(&host, 1).unwrap_err(), "no room for terminal_1 in tab 3");
 
-    // A tab zellij numbered gives no name to the one made for its pane.
     let opened = "- --session=work action new-tab --no-focus --close-on-exit -- sleep 10";
     assert_eq!(host.zellij.opened(), [opened]);
     assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_4")]);
 }
 
-/// zellij says nothing of a pane that ended either: it is not said to have had
-/// no room, and what holds the tab made for it closes all the same.
 #[test]
 fn a_pane_that_ends_as_it_turns_into_a_tab_is_said_to_have_gone() {
     let host = Host::new();
@@ -224,8 +184,6 @@ fn a_pane_that_ends_as_it_turns_into_a_tab_is_said_to_have_gone() {
     assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_4")]);
 }
 
-/// What stays asks zellij for nothing: no tab opens beside a pane that has
-/// nothing to do, whatever clients its session has.
 #[test]
 fn what_stays_opens_no_tab() {
     let tab = (0, "Tab #1");
@@ -241,8 +199,6 @@ fn what_stays_opens_no_tab() {
     }
 }
 
-/// zellij makes a tab with no room for its panes in a session no client is
-/// in: the answer has a client come first, and nothing has moved.
 #[test]
 fn a_session_no_client_is_in_has_one_come_first() {
     let host = Host::new();
@@ -255,10 +211,6 @@ fn a_session_no_client_is_in_has_one_come_first() {
     assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
-/// The panes of a tab go one at a time onto a stand-in opened for each in the
-/// tab of the terminal picked, which then closes and leaves it tiled, the
-/// floating ones ahead of the last tiled one, whose leaving would end them. None
-/// floats on the way. A client's zellij closes the tab they left of itself.
 #[test]
 fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
     let host = Host::new();
@@ -279,7 +231,6 @@ fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
 
     assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-    // One for each, and another for each that no client went to.
     let (first, second) = (stand_in(1), second_stand_in(1));
     let opened = [first.clone(), second.clone(), first.clone(), first, second];
     assert_eq!(host.zellij.opened(), opened);
@@ -288,8 +239,6 @@ fn the_panes_of_a_tab_turn_into_panes_of_another_tiled() {
     assert_eq!(host.zellij.closed(), vec![stand_in_closed(); 5]);
 }
 
-/// A session no client is in lists the tab its panes left on, with nothing in
-/// it, as zellij closes one only as it draws for a client: luneta closes it.
 #[test]
 fn a_session_no_client_is_in_loses_the_tab_they_left_too() {
     let host = Host::new();
@@ -303,9 +252,6 @@ fn a_session_no_client_is_in_loses_the_tab_they_left_too() {
     assert_eq!(host.zellij.closed(), closed);
 }
 
-/// A pane zellij finds no room for stops the rest, with what came before it
-/// tiled where it went, its stand-in gone, and the tab that still holds it
-/// staying. The answer says how many moved, as some did.
 #[test]
 fn a_pane_zellij_finds_no_room_for_stays_in_its_tab_and_the_answer_says_some_moved() {
     let host = Host::new();
@@ -321,12 +267,9 @@ fn a_pane_zellij_finds_no_room_for_stays_in_its_tab_and_the_answer_says_some_mov
     assert_eq!(came, Some(PanesCame::Partly(Partly { moved: 1, of: 3, why })));
     let stacked = [unfocused("terminal_1"), unfocused("terminal_2"), on_stand_in("terminal_2")];
     assert_eq!(host.zellij.turned(), stacked);
-    // The first moved, with a second stand-in, and the last did not.
     assert_eq!(host.zellij.closed(), vec![stand_in_closed(); 3]);
 }
 
-/// With no room for the first, nothing moved, which is a refusal and no answer
-/// of how many did.
 #[test]
 fn a_tab_zellij_finds_no_room_for_moves_nothing() {
     let host = Host::new();
@@ -339,8 +282,6 @@ fn a_tab_zellij_finds_no_room_for_moves_nothing() {
     assert_eq!(host.zellij.closed(), [stand_in_closed()]);
 }
 
-/// A pane that ended on its way is no reason to stop, nor to say that zellij
-/// had no room: the rest go, and all that were there have moved.
 #[test]
 fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
     let host = Host::new();
@@ -355,8 +296,6 @@ fn a_pane_that_ends_on_its_way_does_not_stop_the_rest() {
     assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1"), unfocused("terminal_2")]);
 }
 
-/// A pane closing cuts the answer of a stand-in short, which opens all the same:
-/// it is found by its name, and no second opens to stand in the tab till it ends.
 #[test]
 fn a_stand_in_whose_answer_was_cut_short_is_found_by_its_name() {
     let host = Host::new();
@@ -375,8 +314,6 @@ fn a_stand_in_whose_answer_was_cut_short_is_found_by_its_name() {
     assert_eq!(host.zellij.closed(), [action("close-pane --pane-id terminal_8")]);
 }
 
-/// A session of `work` whose one pane in the tab of terminal 1 moves to the tab
-/// of terminal 3 once zellij stacks it, with a client there.
 fn one_pane_to_move() -> Host {
     let host = Host::new();
     let (from, to) = ((0, "Tab #1"), (1, "Tab #2"));
@@ -386,11 +323,6 @@ fn one_pane_to_move() -> Host {
     host
 }
 
-/// Each move closes a stand-in, and zellij cuts other calls short as a pane
-/// closes: one that waits ends well with nothing said, though what it asked for
-/// goes on, and one yet to reach it asked nothing, which it says as many ways as
-/// other sessions answered it, one of them ending well. Each is asked again, so
-/// that what came of it is said as it was, and a stack that did go goes once.
 #[test]
 fn calls_a_closing_pane_cuts_short_are_asked_again() {
     for others in 0..=2 {
@@ -404,14 +336,11 @@ fn calls_a_closing_pane_cuts_short_are_asked_again() {
 
         assert_eq!(into_panes(&host, 1, 3).unwrap(), PANES_DONE);
 
-        // The first opened all the same, and ends on its own.
         assert_eq!(host.zellij.opened(), [stand_in(1), stand_in(1)]);
         assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1")]);
     }
 }
 
-/// A call can hear what one a closing pane cut short was to, where that ended
-/// well and said something: only what reads as its own answer is one.
 #[test]
 fn an_answer_meant_for_another_call_is_not_taken_for_this_one() {
     let host = one_pane_to_move();
@@ -424,8 +353,6 @@ fn an_answer_meant_for_another_call_is_not_taken_for_this_one() {
     assert_eq!(host.zellij.turned(), [on_stand_in("terminal_1")]);
 }
 
-/// What closes a stand-in, or the tab that panes left, is asked again too where
-/// it asked nothing: it ends well with two other sessions to list.
 #[test]
 fn closes_that_reached_no_server_are_asked_again() {
     let host = Host::new();
@@ -441,8 +368,6 @@ fn closes_that_reached_no_server_are_asked_again() {
     assert_eq!(host.zellij.closed(), closed);
 }
 
-/// The terminal a tab was picked by may have closed by the key: nothing moves,
-/// and no stand-in opens.
 #[test]
 fn a_tab_picked_by_a_terminal_that_closed_since_moves_nothing() {
     let host = Host::new();
@@ -455,9 +380,6 @@ fn a_tab_picked_by_a_terminal_that_closed_since_moves_nothing() {
     assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
-/// zellij numbers panes from 0 for each server, so a session that took the name
-/// since has panes of the same ids: nothing of it moves, and zellij is asked
-/// for nothing. A question that says no start says nothing of which it means.
 #[test]
 fn a_session_that_took_the_name_since_stays() {
     let host = Host::new();
@@ -487,8 +409,6 @@ fn a_session_that_took_the_name_since_stays() {
     assert_eq!(host.zellij.turned(), [] as [String; 0]);
 }
 
-/// The tabs a tab can turn into are told by a terminal in each and their names,
-/// and a pane that is gone has no tab to leave out.
 #[test]
 fn the_other_tabs_are_told_by_a_terminal_and_their_names() {
     let host = Host::new();

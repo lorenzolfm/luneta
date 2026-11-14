@@ -1,24 +1,3 @@
-//! What a pane's shell says it runs, by its marks, and what the server saw
-//! of it: as luneta's fish hook (`shell/luneta.fish`) says it of a zellij
-//! pane's shell, by the same rules.
-//!
-//! - A shell is ready from its first prompt until it runs a command.
-//! - Only the mark of a command's end ends it: a prompt while it runs is its
-//!   own, as fish's `read` draws one with the shell's line editor.
-//! - `exec` gives the pane to another program, and nothing would say how
-//!   what it runs ends: the shell says nothing from there on.
-//! - A shell says a job it stopped with `Ctrl z` ended, with a status of 0:
-//!   the job whose group the server last saw in front, and stands stopped as
-//!   the shell says it ended, stopped.
-//! - `fg` brings the last job back, which is what runs. Its shell cannot say
-//!   how that ends, as the status it says is `fg`'s.
-//! - Only the shell's own marks count, as only its own hook writes the hook's
-//!   file. A prompt or an end is its own where its group is in front of the
-//!   terminal as it is read, or where it marks a command after it, as it
-//!   does running a line typed ahead; a command, where it has drawn a prompt
-//!   and runs none. What a command prints is none of its marks: a shell over
-//!   `ssh`, or one `nix develop` started, writes its own.
-
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api;
@@ -26,16 +5,11 @@ use crate::front::Front;
 use crate::marks::Mark;
 use crate::process::Group;
 
-/// The most jobs stopped that a shell is followed by, the oldest let go of
-/// past them.
 const STOPPED_MAX: usize = 64;
 
-/// A pane's shell, as its marks say it.
 #[derive(Default)]
 pub struct Shell {
     ran: Option<Ran>,
-    /// The jobs it stopped, by their groups, with their commands, the last
-    /// stopped the last.
     stopped: Vec<(Group, Option<String>)>,
 }
 
@@ -49,15 +23,11 @@ enum Ran {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Going {
-    /// The command line, on one line, where the shell said one.
     command: Option<String>,
     since: SystemTime,
     started: Instant,
-    /// Whether the line typed was `fg`, which says nothing of how the job
-    /// it brought back ends.
     resumes: bool,
     front: Front,
-    /// The group of the shell's job that the server last saw in front.
     seen: Option<Group>,
 }
 
@@ -67,15 +37,12 @@ enum Ending {
     Resumed,
 }
 
-/// A process group's leader, as the kernel says it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
     Runs,
     Stopped,
 }
 
-/// When something was said: by the clock, for what it says, and by the
-/// instant, for how long it took.
 #[derive(Clone, Copy, Debug)]
 pub struct Now {
     pub at: SystemTime,
@@ -90,10 +57,6 @@ impl Now {
 }
 
 impl Shell {
-    /// Takes in those of `marks` that are the shell's, read at `now` in the
-    /// order written, with its group `in_front` of the terminal or not as they
-    /// were read, and what a process group's leader is: stopped or not, or
-    /// else gone.
     pub fn read(
         &mut self,
         marks: Vec<Mark>,
@@ -114,8 +77,6 @@ impl Shell {
         }
     }
 
-    /// Takes in `mark`, which the shell wrote at `now`, with what a process
-    /// group's leader is: stopped or not, or else gone.
     fn marked(&mut self, mark: Mark, now: Now, job: impl Fn(Group) -> Option<Job>) {
         match mark {
             Mark::Prompt => {
@@ -174,15 +135,11 @@ impl Shell {
         }
     }
 
-    /// Whether a command runs.
     #[must_use]
     pub fn going(&self) -> bool {
         matches!(self.ran, Some(Ran::Going(_)))
     }
 
-    /// Takes in what the server saw in front of the pane's terminal while a
-    /// command runs: the group `group`, of which `program`'s is the shell's,
-    /// and what that does.
     pub fn saw(&mut self, group: Group, program: u32, front: Front) {
         if let Some(Ran::Going(going)) = &mut self.ran {
             going.front = front;
@@ -192,13 +149,11 @@ impl Shell {
         }
     }
 
-    /// The shell's program ended: it says no more.
     pub fn gone(&mut self) {
         self.ran = None;
         self.stopped.clear();
     }
 
-    /// What the shell said, as the protocol says it.
     #[must_use]
     pub fn said(&self) -> Option<api::Ran> {
         use api::ran::{Ended, Going, Is, Ready, Resumed, Stopped};
@@ -233,8 +188,6 @@ impl Going {
     }
 }
 
-/// Whether `line` runs `exec`: as a command of its own, or after `;`, `&`,
-/// `|`, `and`, `or` or `not`.
 fn execs(line: &str) -> bool {
     line.split([';', '&', '|']).any(|command| {
         let joining = |word: &&str| matches!(*word, "and" | "or" | "not");
@@ -243,7 +196,6 @@ fn execs(line: &str) -> bool {
     })
 }
 
-/// Whether `line` is `fg`, with or without a job named.
 fn is_fg(line: &str) -> bool {
     line.split_whitespace().next() == Some("fg")
 }
@@ -282,7 +234,6 @@ mod tests {
         Ran::Stopped { command: Some(command.to_owned()), at }
     }
 
-    /// The command line of the command going in `shell`.
     fn going(shell: &Shell) -> Option<&str> {
         let Some(Ran::Going(going)) = &shell.ran else { panic!("{:?}", shell.ran) };
         going.command.as_deref()
@@ -290,13 +241,10 @@ mod tests {
 
     const NONE_STOPPED: fn(Group) -> Option<Job> = |_| None;
 
-    /// The job of each group, stopped where `stopped` says.
     fn stopped_if(stopped: fn(u32) -> bool) -> impl Fn(Group) -> Option<Job> {
         move |group| Some(if stopped(group.leader()) { Job::Stopped } else { Job::Runs })
     }
 
-    /// Ready at its first prompt, a command runs from its mark, on one line,
-    /// and ends with its status at its own; a prompt after keeps what it ran.
     #[test]
     fn a_command_goes_from_its_mark_and_ends_at_its_own() {
         let now = shell_at(Instant::now());
@@ -319,10 +267,6 @@ mod tests {
         assert_eq!(shell.ran, Some(make));
     }
 
-    /// A prompt while a command runs is the command's own, as fish's `read`
-    /// draws one, and the command runs on to the mark of its end; and one
-    /// whose shell said no line, or an empty one, and no status, says
-    /// neither.
     #[test]
     fn a_prompt_while_a_command_runs_is_its_own() {
         let now = shell_at(Instant::now());
@@ -341,7 +285,6 @@ mod tests {
         assert_eq!(going(&shell), None);
     }
 
-    /// `exec` leaves the shell saying nothing, in each place it may be typed.
     #[test]
     fn exec_leaves_the_shell_saying_nothing() {
         for line in ["exec fish", "  exec", "cd /; exec nvim", "true && exec x", "not exec x"] {
@@ -357,9 +300,6 @@ mod tests {
         }
     }
 
-    /// A job seen in front that stands stopped as its shell says it ended
-    /// stopped; `fg` brings it back as what runs, and its end says it was
-    /// resumed, whatever status `fg` gave.
     #[test]
     fn a_job_stopped_is_stopped_and_fg_brings_it_back() {
         let now = shell_at(Instant::now());
@@ -379,8 +319,6 @@ mod tests {
         assert_eq!(going(&shell), Some("fg"));
     }
 
-    /// A job that ended, though seen in front, ended; and `fg` skips a
-    /// stopped job that is gone since, and names one with `fg %1` as typed.
     #[test]
     fn fg_brings_back_the_last_job_that_still_stands_stopped() {
         let now = shell_at(Instant::now());
@@ -402,8 +340,6 @@ mod tests {
         assert_eq!(shell.ran, Some(ended(Some("true"), 7, Some(Ending::Status(0)), 1)));
     }
 
-    /// A job `fg %1` brought back and stopped again stands stopped once, by
-    /// the name it had, and `fg` brings it back by that name.
     #[test]
     fn a_job_stopped_again_stands_stopped_once_by_its_name() {
         let now = shell_at(Instant::now());
@@ -421,9 +357,6 @@ mod tests {
         assert_eq!(shell.stopped, []);
     }
 
-    /// A job that leads the group of one stopped before, which ended since,
-    /// stands stopped by its own name, and in that one's place: the kernel
-    /// gave the group's number to it.
     #[test]
     fn a_job_in_a_group_of_one_gone_stands_stopped_by_its_own_name() {
         let now = shell_at(Instant::now());
@@ -438,9 +371,6 @@ mod tests {
         assert_eq!(shell.stopped, [(Group(40), Some("less x".to_owned()))]);
     }
 
-    /// The marks of a shell the command runs are none of the pane's: neither
-    /// a prompt nor an end while another group is in front, nor a command
-    /// while one runs. Its own end, in front, ends what it runs.
     #[test]
     fn the_marks_of_what_a_command_runs_are_none_of_the_shell_s() {
         let now = shell_at(Instant::now());
@@ -453,9 +383,6 @@ mod tests {
         assert_eq!(shell.ran, Some(ended(Some("ssh host"), 4, Some(Ending::Status(255)), 3)));
     }
 
-    /// A shell that writes no marks says nothing of those of a shell it runs,
-    /// as over `ssh`, read as you type to that one; and a command marked with
-    /// no prompt of its own before it is none of its.
     #[test]
     fn a_shell_of_no_marks_says_nothing_of_another_s() {
         let now = shell_at(Instant::now());
@@ -468,9 +395,6 @@ mod tests {
         assert_eq!(shell.said(), None);
     }
 
-    /// A line typed ahead of the shell's first prompt runs as it draws it:
-    /// that prompt, read with the command in front, is its own, as the mark
-    /// of the command follows it.
     #[test]
     fn a_line_typed_ahead_of_the_first_prompt_runs() {
         let now = shell_at(Instant::now());
@@ -479,9 +403,6 @@ mod tests {
         assert_eq!(going(&shell), Some("claude"));
     }
 
-    /// A line typed ahead runs as the last ends: the shell's end of that one,
-    /// read with the next already in front, is its own, as the mark of the
-    /// next command follows it.
     #[test]
     fn a_line_typed_ahead_ends_the_last_and_runs() {
         let now = shell_at(Instant::now());
@@ -496,7 +417,6 @@ mod tests {
         assert_eq!(shell.ran, Some(ended(Some("vim"), 5, Some(Ending::Status(0)), 2)));
     }
 
-    /// Its program gone, the shell says nothing.
     #[test]
     fn a_shell_gone_says_nothing() {
         let mut shell = Shell::default();

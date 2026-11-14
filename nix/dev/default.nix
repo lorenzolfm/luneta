@@ -10,9 +10,6 @@
 let
   inherit (pkgs) lib;
 
-  # What every command that runs the tests needs, so that the two that do — `test`
-  # and `mutants` — cannot drift apart: the tools above, the shells the tests spawn
-  # by name, and the text tools their fakes are written in.
   testKit =
     buildTools
     ++ testTools

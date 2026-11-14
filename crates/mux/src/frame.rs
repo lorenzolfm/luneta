@@ -1,11 +1,7 @@
-//! A pane's view in the protocol's words: a frame of its rows, its cursor and
-//! the modes a client mirrors.
-
 use crate::api;
 use crate::id::PaneId;
 use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
 
-/// What a frame says of the pane besides its rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
     pub clusters: bool,
@@ -14,9 +10,6 @@ pub struct Flags {
     pub scrollback: usize,
 }
 
-/// The frame of pane `pane` that shows `view` to a client that last got
-/// `before`: the rows that changed since, or all of them where it got none
-/// of this size.
 #[must_use]
 pub fn said(pane: PaneId, view: &View, before: Option<&View>, flags: Flags) -> api::Frame {
     let size = view.size();

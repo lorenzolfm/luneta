@@ -1,10 +1,3 @@
-//! lunetad, the daemon that holds what luneta knows of a host, and what its
-//! CLI needs to reach it.
-//!
-//! One daemon runs for each user on a host. It listens on a Unix socket in
-//! luneta's runtime folder, where the shell hook keeps its files too, which it
-//! reads, and answers in the protocol that `proto/luneta/v1` defines.
-
 mod agent;
 pub mod api;
 pub mod asks;

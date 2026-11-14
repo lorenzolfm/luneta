@@ -1,8 +1,3 @@
-//! luneta attached to an own session, in zellij's place beside the sidebar: a
-//! luneta on a terminal of the test's, with the real daemon and the real
-//! `luneta-mux` it starts, whose pane runs your shell. What luneta draws is
-//! read back as a terminal would show it.
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::sync::{Arc, Mutex};
@@ -23,14 +18,10 @@ use crate::own::{own, Owned};
 use crate::sessions::session;
 use crate::starts::{directory, luneta, on_terminal, runs, spawn_on, terminal, Directory};
 
-/// What a shell is typed, in any shell: it prints `own-42`, which what is
-/// typed does not show.
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
-/// What it prints.
 const PRINTED: &str = "own-42";
 
-/// A luneta on a terminal of the test's, and all it wrote there.
 struct Window {
     typed: File,
     said: Arc<Mutex<Vec<u8>>>,
@@ -38,13 +29,11 @@ struct Window {
 }
 
 impl Window {
-    /// luneta, run in `dir` with `args`, once it draws its sidebar.
     fn open(host: &Host, dir: &Directory, args: &[&str]) -> Window {
         let (controller, tty) = terminal();
         let typed = File::from(controller.try_clone().unwrap());
         let said = Arc::new(Mutex::new(Vec::new()));
         let reading = Arc::clone(&said);
-        // Read all along, so that nothing waits on a write.
         thread::spawn(move || {
             let mut controller = File::from(controller);
             let mut read = [0; 4096];
@@ -68,7 +57,6 @@ impl Window {
         self.typed.write_all(sent.as_bytes()).unwrap();
     }
 
-    /// The lines luneta's terminal shows now, of 120 columns.
     fn screen(&self) -> Vec<String> {
         let said = self.said.lock().unwrap().clone();
         let mut screen = Term::new(Config::default(), &TermSize::new(120, 40), VoidListener);
@@ -86,8 +74,6 @@ impl Window {
         self.screen().iter().any(|line| line.contains(text))
     }
 
-    /// Where `text` shows on the screen, as its row and the column it starts
-    /// at, both from 0, once it does.
     fn spot_of(&self, text: &str) -> (usize, usize) {
         eventually(&format!("luneta shows {text:?}"), || {
             let screen = self.screen();
@@ -98,7 +84,6 @@ impl Window {
         })
     }
 
-    /// What luneta has asked its terminal to copy, each in its turn.
     fn copied(&self) -> Vec<String> {
         let said = String::from_utf8_lossy(&self.said.lock().unwrap()).into_owned();
         let copies = said.split("\x1b]52;c;").skip(1);
@@ -111,23 +96,14 @@ impl Window {
     }
 }
 
-/// How many clients the own session `name` has, as the host lists it.
 fn clients(owned: &Owned, name: &str) -> Option<usize> {
     Some(session(&owned.host.host(), name)?.clients.clone()?.clients.len())
 }
 
-/// What a terminal sends for the left button at the cell at `row` and
-/// `column`, from 0: `M` and 0 for a press, 32 for a drag, and `m` for a
-/// release.
 fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
     format!("\x1b[<{code};{};{}{last}", column + 1, row + 1)
 }
 
-/// `luneta --own` attaches to the own session named for its directory,
-/// beside the sidebar, which lists it: what is typed goes to the pane's
-/// shell, and what the shell prints shows. A drag over it copies it, as the
-/// shell takes no mouse. The pane runs `sh`: a build's sandbox has no login
-/// shell of its user's to make one with.
 #[test]
 fn luneta_own_attaches_to_its_session_and_shows_what_its_shell_prints() {
     let owned = Owned::new();
@@ -157,8 +133,6 @@ fn luneta_own_attaches_to_its_session_and_shows_what_its_shell_prints() {
     });
 }
 
-/// A session of zellij's has the name `luneta --own` would take, and luneta
-/// makes no own session of it: the two kinds share their names.
 #[test]
 fn luneta_own_refuses_a_name_a_session_of_zellij_s_has() {
     let owned = Owned::new();
@@ -172,12 +146,9 @@ fn luneta_own_refuses_a_name_a_session_of_zellij_s_has() {
     let host = owned.host.host();
     let named = host.sessions.iter().filter(|session| session.name == "project");
     assert!(named.clone().all(|session| own(session).is_none()), "{:?}", host.sessions);
-    // As the daemon has asked zellij for them by now, or has yet to.
     assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
 }
 
-/// As the own session luneta is in ends, the newest session of this machine
-/// takes its place, of either kind: an own one newer than zellij's.
 #[test]
 fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
     let owned = Owned::new();
@@ -199,9 +170,6 @@ fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
     assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
 }
 
-/// luneta goes from a session of zellij's to an own one, as the picker picks
-/// it, and back: its own client takes the place of zellij's, and zellij's the
-/// place of its own, which the own session lets go of.
 #[test]
 fn luneta_goes_from_zellij_s_session_to_an_own_one_and_back() {
     let owned = Owned::new();
@@ -212,7 +180,6 @@ fn luneta_goes_from_zellij_s_session_to_an_own_one_and_back() {
     let dir = directory("project");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("the sidebar lists mine", || window.shows("mine").then_some(()));
-    // `Ctrl j`, as a terminal that speaks kitty's keys sends it.
     window.send("\x1b[106;5umine\r");
     eventually("luneta is mine's client", || (clients(&owned, "mine")? == 1).then_some(()));
     window.send("\x1b[106;5uproject\r");
@@ -222,9 +189,6 @@ fn luneta_goes_from_zellij_s_session_to_an_own_one_and_back() {
     eventually("mine lets go of luneta", || (clients(&owned, "mine")? == 0).then_some(()));
 }
 
-/// `d s` on the own session luneta is in takes luneta to the newest other
-/// session, an own one here, on the stream it has, and kills the session once
-/// luneta is there.
 #[test]
 fn a_delete_of_the_own_session_luneta_is_in_goes_on_in_the_newest_and_kills_it() {
     let owned = Owned::new();
@@ -234,7 +198,6 @@ fn a_delete_of_the_own_session_luneta_is_in_goes_on_in_the_newest_and_kills_it()
     eventually("luneta is in first", || (clients(&owned, "first")? == 1).then_some(()));
     owned.make("newer").unwrap();
     eventually("the sidebar lists newer", || window.shows("newer").then_some(()));
-    // `Ctrl a`, which gives the sidebar the keys, on the row of luneta's pane.
     window.send("\x1b[97;5uds");
     eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
     eventually("first is gone", || session(&owned.host.host(), "first").is_none().then_some(()));

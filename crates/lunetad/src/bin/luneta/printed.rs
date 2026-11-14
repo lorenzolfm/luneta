@@ -1,9 +1,3 @@
-//! What the command a shell ran last printed, for the agent that the menu's
-//! `c f` or `c e` starts beside it, to fix what went wrong or explain it, as
-//! `lunetad::printed` keeps it, on the machine the shell's pane is on. The
-//! command line and how it ended are what luneta's shell hook said, through
-//! the daemon: zellij keeps the text alone, and the hook sees none of it.
-
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -18,9 +12,6 @@ use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::Ended;
 
-/// What an agent is told of `printed`: `asks`, what it is asked to do, then
-/// the command that `ended`, and how, where its shell can say, and where what
-/// it printed is: for a job `fg` brought back, what it printed after that.
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     let cannot = "with an exit status my shell cannot say";
     let (how, after, line) = match ended.ending {
@@ -65,10 +56,6 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     format!("{asks} In my shell, `{}` {how}. {printed}", ended.command.as_str())
 }
 
-/// Has zellij on `on` dump the terminal `pane` of `session`, and keeps what
-/// it printed after the line the command that `ended` was last typed on,
-/// there, for the menu numbered `menu`, on a thread of its own, and hands
-/// back what it kept, or why it kept nothing, as `Due` does.
 pub fn read(
     menu: u64,
     on: &Machine,
@@ -90,9 +77,6 @@ pub fn read(
     });
 }
 
-/// The line the command that `ended` was typed on, as the hook says it: `fg`,
-/// for a job that `fg` brought back, or the command, which the hook says for
-/// either.
 fn typed(ended: &Ended) -> Said {
     match ended.ending {
         Some(Ending::Resumed) => Said::new("fg".to_owned()).expect("`fg` is no empty line"),
@@ -106,14 +90,10 @@ mod tests {
 
     use super::*;
 
-    /// `command`, which ended as `ending` says.
     fn ended(command: &str, ending: Option<Ending>) -> Ended {
         Ended { command: Said::new(command.to_owned()).unwrap(), ending, at: UNIX_EPOCH }
     }
 
-    /// The line a command was typed on is the command, as the hook says it,
-    /// and for a job `fg` brought back, `fg`, as typed in front of anything
-    /// after it, as `fg %1`.
     #[test]
     fn a_job_brought_back_was_typed_as_fg() {
         let typed = |ended: Ended| typed(&ended).as_str().to_owned();
@@ -123,10 +103,6 @@ mod tests {
         assert_eq!(typed(ended("fg %1", Some(Ending::Resumed))), "fg");
     }
 
-    /// The agent is told what the command was and how it ended, and where
-    /// what it printed is, or that it printed nothing, and how much of it
-    /// that is; or, where luneta is not sure where it starts, or found no
-    /// line it was run on, where all the screen is.
     #[test]
     fn the_agent_is_told_the_command_how_it_ended_and_where_what_it_printed_is() {
         let file = "/run/luneta/printed/1.txt".to_owned();
@@ -176,7 +152,6 @@ mod tests {
              printed nothing."
         );
 
-        // A job `fg` brought back printed after it.
         let resumed = ended("cargo build", Some(Ending::Resumed));
         let told = |printed: Printed| prompt(&printed, "Fix this.", &resumed);
         let ran = "Fix this. In my shell, `cargo build` ended once I brought it back with `fg`, \

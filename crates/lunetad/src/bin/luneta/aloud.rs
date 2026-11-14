@@ -1,26 +1,3 @@
-//! What luneta reads aloud, on the machine you sit at: what `luneta say` gave
-//! the daemon of any machine it watches, as the host says it, and what you
-//! selected, by `Alt u`. While anything plays, `Alt u` pauses it and has it go
-//! on, and `Alt Shift u` stops it, and lets go of what waits. What plays waits
-//! while you dictate too, or the microphone would write the agent's words into
-//! your prompt.
-//!
-//! One luneta of a machine reads, the one that puts its notifications up, as
-//! two would talk over each other; and those keys in another have it do so. A
-//! luneta over ssh reads nothing: its speakers are not where you sit. What came
-//! before a machine's first answer says nothing, as it does with notifications.
-//!
-//! What waits is read in the order it came, with the oldest let go of past
-//! `WAITING`, and what has waited past `STALE`, naming the session as the
-//! speaker changes. What `--now` gave goes before all of it, and only the last
-//! of those, as it would have cut off the one before. A pause is yours, and
-//! holds what `--now` gave too: what waited through it no longer goes for its
-//! age, and nor does what comes behind that, with `WAITING` the limit of them.
-//! The sidebar has a line of what is being read, with a button for each of those
-//! keys, and a mark on its agent's row: no box, as a box would take the keys. The
-//! sidebar collapsed has no room for the line, and shows only a pause, as what
-//! plays you can hear.
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -46,50 +23,33 @@ use crate::sidebar::{cut, ACCENT, NAME};
 use crate::spots::Spots;
 use crate::voice::{self, Reading, Voice};
 
-/// The key that reads what you selected, and pauses what plays or has it go on.
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('u'), KeyModifiers::ALT);
 
-/// The key that stops what plays and lets go of what waits, as kitty's keys
-/// say it.
 pub const STOPS: (KeyCode, KeyModifiers) =
     (KeyCode::Char('u'), KeyModifiers::ALT.union(KeyModifiers::SHIFT));
 
-/// Whether `chord` is `STOPS`: `u` as kitty's keys say it, and `U` as a
-/// terminal without them types it.
 pub fn stops((code, modifiers): (KeyCode, KeyModifiers)) -> bool {
     matches!(code, KeyCode::Char('u' | 'U')) && modifiers == STOPS.1
 }
 
-/// The mark of what is being read, `md-volume_high` of the Nerd Fonts.
 pub const MARK: &str = "\u{f057e}";
 
-/// The button that pauses what plays, `md-pause` of the Nerd Fonts.
 pub const PAUSE: &str = "\u{f03e4}";
 
-/// The button that has what is paused go on, `md-play`.
 pub const PLAY: &str = "\u{f040a}";
 
-/// The button that stops what plays, `md-stop`.
 pub const STOP: &str = "\u{f04db}";
 
-/// How wide a button is, of what a click hits: its icon, and a column each side
-/// of it, as an icon alone is hard to hit.
 const BUTTON: usize = 3;
 
-/// A button on the sidebar's line of what is being read. Each does what it
-/// shows, or nothing: one drawn before things changed never does the opposite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
-    /// Pauses what plays.
     Pause,
-    /// Has what is paused go on.
     GoOn,
-    /// Stops what plays, and lets go of what waits.
     Stop,
 }
 
 impl Button {
-    /// What it shows.
     fn icon(self) -> &'static str {
         match self {
             Button::Pause => PAUSE,
@@ -99,42 +59,27 @@ impl Button {
     }
 }
 
-/// The most that wait to be read: an agent's handoff is a few, and each of five
-/// agents at work has one or two.
 const WAITING: usize = 16;
 
-/// How much of what is being read the sidebar holds on to, more than its line
-/// has room for.
 const SHOWN_CHARS: usize = 200;
 
-/// Whose something to read is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Whose {
-    /// Yours, by `Alt u`.
     Selection,
-    /// `luneta say`'s on a machine, from a pane there, if it ran in one.
     Said { on: Machine, speaker: Option<Zellij> },
 }
 
-/// What a session is to be called, of the pane `speaker`: what its daemon says
-/// it is now, or else what the pane knows it by.
 fn called(speaker: &Zellij) -> &str {
     speaker.session.as_deref().unwrap_or(&speaker.named)
 }
 
-/// What the sidebar shows of what goes on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shown {
-    /// What is being read, on one line, and whether you paused it.
     Reading { whose: Whose, text: String, paused: bool },
-    /// What waits waits for the model, of which this many bytes are in, and
-    /// whether you paused it.
     Fetching { got: u64, paused: bool },
 }
 
 impl Shown {
-    /// The pane this comes from, for the mark on its row: its machine, the
-    /// session it is in, where its daemon could tell, and its id.
     pub fn from(&self) -> Option<(&Machine, &str, u32)> {
         let Shown::Reading { whose: Whose::Said { on, speaker: Some(speaker) }, .. } = self else {
             return None;
@@ -142,17 +87,12 @@ impl Shown {
         Some((on, speaker.session.as_deref()?, speaker.pane))
     }
 
-    /// Whether you paused it.
     pub fn paused(&self) -> bool {
         match self {
             Shown::Reading { paused, .. } | Shown::Fetching { paused, .. } => *paused,
         }
     }
 
-    /// The sidebar's line of it, `width` wide, its buttons at its right, and
-    /// where they are on it. They go by what is drawn, whatever it says, and
-    /// a button whose icon does not fit has no spot, so that a click hits what
-    /// it is on, or nothing.
     pub fn line(&self, width: usize) -> (Line<'static>, Spots<Button>) {
         let room = width.saturating_sub(2 * BUTTON);
         let mut line = self.said(room);
@@ -171,7 +111,6 @@ impl Shown {
         (line, spots)
     }
 
-    /// What it says on that line, in `width`.
     fn said(&self, width: usize) -> Line<'static> {
         let mark = Span::styled(MARK, Style::new().fg(ACCENT));
         let room = width.saturating_sub(2);
@@ -193,7 +132,6 @@ impl Shown {
                 let rest = room.saturating_sub(who.width() + 3);
                 let name = Span::styled(who, Style::new().fg(NAME));
                 let mut said = vec![mark, Span::raw(" "), name];
-                // Short of room for any of it, it would push the buttons along.
                 if rest > 0 {
                     said.push(Span::styled(format!(" · {}", cut(text, rest)), dim));
                 }
@@ -203,43 +141,33 @@ impl Shown {
     }
 }
 
-/// How many columns `line` takes when drawn, up to `width`: `Line::width` counts
-/// the control characters an agent's words can hold, which are not drawn.
 fn drawn_width(line: &Line<'_>, width: usize) -> usize {
     let width = u16::try_from(width).unwrap_or(u16::MAX);
     let mut buffer = Buffer::empty(Rect::new(0, 0, width, 1));
     usize::from(buffer.set_line(0, 0, line, width).0)
 }
 
-/// What waits to be read.
 #[derive(Debug)]
 struct Waiting {
     whose: Whose,
     text: String,
-    /// When it came, what its age is told from: none once it has waited on you,
-    /// through a pause or behind what did, as its age is then your doing.
     came: Option<SystemTime>,
 }
 
 impl Waiting {
-    /// Whether it has waited too long, at `now`.
     fn stale(&self, now: SystemTime) -> bool {
         self.came.is_some_and(|came| now.duration_since(came).is_ok_and(|age| age > STALE))
     }
 }
 
-/// What is being read.
 #[derive(Debug)]
 struct Now {
     number: u64,
     whose: Whose,
-    /// On one line, for the sidebar.
     text: String,
-    /// Dropped, it stops.
     _reading: Reading,
 }
 
-/// What is to be read next: as it is to be said, and as it came.
 #[derive(Debug, PartialEq)]
 struct Next {
     spoken: String,
@@ -247,36 +175,18 @@ struct Next {
     text: String,
 }
 
-/// What is being read, what waits, and what was heard of each machine, with
-/// no thread, sound or model in it.
 #[derive(Debug, Default)]
 struct Queue {
-    /// What goes before all that waits, by `--now`.
     at_once: Option<Waiting>,
-    /// What waits its turn, oldest first, as all that is taken goes in at the
-    /// back: what is let go of from the front is the oldest.
     in_turn: VecDeque<Waiting>,
     now: Option<Now>,
-    /// The number of the last read.
     numbered: u64,
-    /// The session whose name was said last, of the last that named one: none
-    /// after what came from no session.
     named: Option<(Machine, String)>,
-    /// The last heard of each machine, by the daemon that numbered it: a
-    /// machine here has answered, with nothing said yet if none.
     heard: HashMap<Machine, Option<(u32, u64)>>,
-    /// Whether you paused what is being read, and what waits: until you have
-    /// them go on, or nothing is left of them.
     paused: bool,
 }
 
 impl Queue {
-    /// Takes in what each machine lunetad watches last said, as `machines` has
-    /// it, as of `at`: none of one it does not reach now, which keeps where it
-    /// was. A machine left out, which it no longer watches, begins again. What
-    /// a machine says in its first answer came before luneta heard it, and
-    /// goes unread, and so does all of it where this luneta does not `read`,
-    /// which it leaves behind, and reads on from once it does.
     fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool, at: SystemTime) {
         let watched: HashSet<&Machine> = machines.iter().map(|(on, _)| on).collect();
         self.heard.retain(|on, _| watched.contains(on));
@@ -301,8 +211,6 @@ impl Queue {
         }
     }
 
-    /// Takes in what `on` said at `at`. One that does nothing luneta knows
-    /// comes of a newer daemon.
     fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
@@ -317,9 +225,6 @@ impl Queue {
         }
     }
 
-    /// `waiting` waits behind the rest, and the oldest goes where too many do.
-    /// Behind what waited on you, it waits on you too: it would have been read
-    /// by now but for the pause.
     fn after(&mut self, mut waiting: Waiting) {
         if self.in_turn.back().is_some_and(|last| last.came.is_none()) {
             waiting.came = None;
@@ -330,15 +235,11 @@ impl Queue {
         }
     }
 
-    /// `waiting` is next, in place of one that had not begun, which it would
-    /// have cut off, and what is being read stops.
     fn first(&mut self, waiting: Waiting) {
         self.at_once = Some(waiting);
         self.now = None;
     }
 
-    /// What is being read stops, and what waits goes, and with them any pause
-    /// of them: what is said after this plays.
     fn stop(&mut self) {
         self.now = None;
         self.at_once = None;
@@ -346,10 +247,6 @@ impl Queue {
         self.paused = false;
     }
 
-    /// Pauses what is being read and what waits, where there is any, as of `at`:
-    /// a pause of nothing would keep what is said next silent, with no line to
-    /// say why. What had waited too long by then goes, as it would have with no
-    /// pause, or going on would bring it back.
     fn pause(&mut self, at: SystemTime) {
         if !self.paused {
             self.at_once.take_if(|waiting| waiting.stale(at));
@@ -358,10 +255,6 @@ impl Queue {
         }
     }
 
-    /// Has what you paused go on. You had what waits wait, so its age no longer
-    /// counts, however long it takes to read: one deadline for all of it would
-    /// lose the last of it, an agent's handoff, where it takes over `STALE`. What
-    /// you did not pause did not wait on you.
     fn unpause(&mut self) {
         if self.paused {
             self.paused = false;
@@ -370,20 +263,14 @@ impl Queue {
         }
     }
 
-    /// Whether anything waits to be read.
     fn waits(&self) -> bool {
         self.at_once.is_some() || !self.in_turn.is_empty()
     }
 
-    /// Whether anything is being read, or waits to be.
     fn busy(&self) -> bool {
         self.now.is_some() || self.waits()
     }
 
-    /// What to read next, at `now`, of what has not waited too long, led by
-    /// the name of its session where the speaker changed: the name is all
-    /// there is to tell a voice from another by. Nothing waits too long during
-    /// a pause, after which `unpause` has its age no longer count.
     fn next(&mut self, now: SystemTime) -> Option<Next> {
         loop {
             let next = self.at_once.take().or_else(|| self.in_turn.pop_front())?;
@@ -406,10 +293,6 @@ impl Queue {
         }
     }
 
-    /// The reading numbered `number` ended: whether that is what is being read,
-    /// and so what waits is next. What was stopped before it ended has said
-    /// all it had to. A pause ends with the last of what it held: what comes
-    /// after that was not what you paused.
     fn ended(&mut self, number: u64) -> bool {
         let reading = self.now.as_ref().is_some_and(|now| now.number == number);
         if reading {
@@ -420,31 +303,18 @@ impl Queue {
     }
 }
 
-/// Whether `saying` came after `seen`: another daemon's, which counts afresh,
-/// came after what the one before it said.
 fn later(saying: &Saying, seen: Option<(u32, u64)>) -> bool {
     seen.is_none_or(|(pid, number)| saying.pid != pid || saying.number > number)
 }
 
-/// Whether `c` is drawn, and not said: what a terminal program draws its frames
-/// and marks with, as Claude Code does, which `ptts` would take for words, and
-/// a font's icons. Letters, digits and punctuation are not.
 fn drawn(c: char) -> bool {
     matches!(u32::from(c),
-        // Arrows, and symbols of math and of technical drawing, as `⏺` and `⎿`.
         0x2190..=0x21FF | 0x2300..=0x23FF
-        // Box drawing, blocks and shapes.
         | 0x2500..=0x25FF
-        // Symbols, dingbats, as `✳`, and braille, as a spinner's.
         | 0x2600..=0x28FF
-        // The Nerd Fonts' icons.
         | 0xE000..=0xF8FF | 0xF0000..=0xF_FFFD)
 }
 
-/// What a pane drew, as a selection has it, as it is to be read: without what
-/// frames and marks it, each row of a box a sentence, and the end of a
-/// paragraph the end of a sentence. `ptts` joins the lines a pane breaks at its
-/// width, and takes it from there, numbers and symbols and all.
 fn plain(selected: &str) -> String {
     let mut plain = String::new();
     for line in selected.lines() {
@@ -464,24 +334,16 @@ fn plain(selected: &str) -> String {
     plain
 }
 
-/// What luneta reads aloud, from the first thing it has to read until it ends.
 pub struct Aloud {
     queue: Queue,
-    /// The thread that runs the voice, from the first thing it reads on.
     voice: Option<Voice>,
-    /// The fetch of the model, while it is on its way.
     fetching: Option<Fetching>,
-    /// Whether the model is in, once luneta has found that it is.
     fetched: bool,
-    /// Whether you dictate.
     dictating: bool,
-    /// Has what plays wait, while you dictate, or have it paused: the end of
-    /// either leaves the other as it is.
     held: Arc<AtomicBool>,
     events: Sender<Event>,
 }
 
-/// The fetch of the model, and how many bytes of it are in.
 struct Fetching {
     _asking: Asking,
     got: u64,
@@ -500,15 +362,11 @@ impl Aloud {
         }
     }
 
-    /// Takes in what each machine said, as `Queue::hear` does, and reads what
-    /// is next.
     pub fn hear(&mut self, machines: Vec<(Machine, Option<Vec<Saying>>)>, read: bool) {
         self.queue.hear(machines, read, SystemTime::now());
         self.go_on();
     }
 
-    /// `Alt u`: pauses what plays or has it go on, where anything does, and
-    /// else reads `selected`. Or why it reads nothing.
     pub fn key(&mut self, selected: Option<&str>) -> Result<(), &'static str> {
         if self.queue.busy() {
             self.press(if self.queue.paused { Button::GoOn } else { Button::Pause });
@@ -522,8 +380,6 @@ impl Aloud {
         Ok(())
     }
 
-    /// Does what `button` does. One drawn before what it was for ended does
-    /// nothing, as what you selected is not what you clicked it for.
     pub fn press(&mut self, button: Button) {
         match button {
             Button::Pause => self.queue.pause(SystemTime::now()),
@@ -533,28 +389,21 @@ impl Aloud {
         self.keep_held();
     }
 
-    /// Has what plays wait while you dictate, as `dictating` says, and go on
-    /// after, unless you paused it.
     pub fn hold(&mut self, dictating: bool) {
         self.dictating = dictating;
         self.keep_held();
     }
 
-    /// Has what plays wait for as long as anything has it wait.
     fn keep_held(&self) {
         self.held.store(self.dictating || self.queue.paused, Ordering::Relaxed);
     }
 
-    /// The reading numbered `number` ended as `ended` says, and what waits is
-    /// next: or why it went wrong, while it was what was being read.
     pub fn ended(&mut self, number: u64, ended: Result<(), String>) -> Option<String> {
         let reading = self.queue.ended(number);
         self.go_on();
         ended.err().filter(|_| reading)
     }
 
-    /// Takes in how the fetch of the model goes: once it is in, what waits is
-    /// next, and where it did not come, what waits goes, and why not.
     pub fn fetch_went(&mut self, fetched: Fetched) -> Option<String> {
         match fetched {
             Fetched::Got(got) => {
@@ -580,15 +429,11 @@ impl Aloud {
         }
     }
 
-    /// Reads what is next, where nothing is being read. What comes next of what
-    /// you paused starts paused.
     fn go_on(&mut self) {
         self.read_next();
         self.keep_held();
     }
 
-    /// Reads what is next, where nothing is being read, once the model is in,
-    /// which what waits has fetched.
     fn read_next(&mut self) {
         if self.queue.now.is_some() || !self.queue.waits() {
             return;
@@ -612,7 +457,6 @@ impl Aloud {
         self.queue.now = Some(Now { number, whose, text, _reading: reading });
     }
 
-    /// What the sidebar shows of it.
     pub fn shown(&self) -> Option<Shown> {
         let paused = self.queue.paused;
         if let Some(Now { whose, text, .. }) = &self.queue.now {
@@ -667,7 +511,6 @@ mod tests {
         vec![(Machine::Local, Some(sayings))]
     }
 
-    /// A queue that has heard from this machine, and from `far` where named.
     fn hearing() -> Queue {
         let mut queue = Queue::default();
         let quiet = vec![(Machine::Local, Some(Vec::new())), (far(), Some(Vec::new()))];
@@ -679,7 +522,6 @@ mod tests {
         std::iter::from_fn(|| queue.next(at(0))).map(|next| next.spoken).collect()
     }
 
-    /// Something being read, which says when it was cut off.
     fn reading(queue: &mut Queue, number: u64) -> Quiet {
         let (reading, quiet) = Reading::new(Arc::default());
         let whose = Whose::Selection;
@@ -687,7 +529,6 @@ mod tests {
         quiet
     }
 
-    /// A window that opens does not read out what was said before it.
     #[test]
     fn what_a_machine_said_before_its_first_answer_says_nothing() {
         let mut queue = Queue::default();
@@ -697,7 +538,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["after"]);
     }
 
-    /// Each answer lists what was said lately, and what is read is read once.
     #[test]
     fn what_was_heard_is_read_once() {
         let mut queue = hearing();
@@ -717,8 +557,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["old", "new"]);
     }
 
-    /// A machine out of reach keeps its place, and one forgotten does not:
-    /// what it said while it was forgotten came before its next first answer.
     #[test]
     fn a_machine_away_keeps_its_place_and_one_forgotten_begins_again() {
         let mut queue = hearing();
@@ -731,8 +569,6 @@ mod tests {
         assert!(!queue.busy());
     }
 
-    /// The window that does not hold the lock keeps up, and on taking the lock
-    /// reads on from there.
     #[test]
     fn a_luneta_that_does_not_read_leaves_behind_what_it_heard() {
         let mut queue = hearing();
@@ -764,7 +600,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["first", "next"]);
     }
 
-    /// What is to go first is no one's oldest, however many come behind it.
     #[test]
     fn past_the_most_that_wait_what_goes_first_stays() {
         let mut queue = hearing();
@@ -777,8 +612,6 @@ mod tests {
         assert_eq!(read[1], "3");
     }
 
-    /// Two in one answer end as they do in two: the second would have cut off
-    /// the first.
     #[test]
     fn what_goes_first_takes_the_place_of_one_that_has_not_begun() {
         let mut queue = hearing();
@@ -800,8 +633,6 @@ mod tests {
         assert!(!queue.busy());
     }
 
-    /// What was to go first has waited too long as all else has, and what is
-    /// behind it is next.
     #[test]
     fn what_was_to_go_first_goes_once_it_has_waited_too_long() {
         let mut queue = hearing();
@@ -842,7 +673,6 @@ mod tests {
         );
     }
 
-    /// One name on two machines is two speakers.
     #[test]
     fn a_session_of_that_name_on_another_machine_is_another_speaker() {
         let mut queue = hearing();
@@ -854,7 +684,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["main. here", "main. there"]);
     }
 
-    /// A Mac that slept does not read out what it had waiting when it did.
     #[test]
     fn what_has_waited_too_long_is_not_read() {
         let mut queue = hearing();
@@ -875,8 +704,6 @@ mod tests {
         assert!(!queue.busy());
     }
 
-    /// `Aloud` with something being read, and with no voice to read what comes
-    /// next: and what has it keep quiet.
     fn aloud_reading() -> (Aloud, Quiet) {
         let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
         let (reading, quiet) = Reading::new(Arc::clone(&aloud.held));
@@ -885,8 +712,6 @@ mod tests {
         (aloud, quiet)
     }
 
-    /// `Alt u` pauses what plays and has it go on, and does not read what is
-    /// selected meanwhile.
     #[test]
     fn the_key_pauses_what_plays_and_has_it_go_on() {
         let (mut aloud, quiet) = aloud_reading();
@@ -900,9 +725,6 @@ mod tests {
         assert!(!aloud.queue.waits());
     }
 
-    /// Each has what plays wait until it is over, whichever ends first: closing
-    /// the dictation box does not start what you paused, and going on while you
-    /// dictate does not play into the microphone.
     #[test]
     fn a_pause_and_dictating_each_hold_what_plays_until_both_are_over() {
         let (mut aloud, quiet) = aloud_reading();
@@ -918,8 +740,6 @@ mod tests {
         assert!(!held());
     }
 
-    /// Whichever way it stops, what is said next plays: a pause that outlived
-    /// what it paused would keep it silent, with no line to say why.
     #[test]
     fn a_pause_ends_with_what_it_paused() {
         let ended: [fn(&mut Aloud); 3] = [
@@ -941,8 +761,6 @@ mod tests {
         }
     }
 
-    /// A button drawn just before what plays ended does not read what is
-    /// selected, nor pause what comes next.
     #[test]
     fn a_button_with_nothing_left_to_do_does_nothing() {
         let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
@@ -953,8 +771,6 @@ mod tests {
         }
     }
 
-    /// One drawn before the pause changed does not do the opposite of what it
-    /// shows.
     #[test]
     fn a_button_drawn_before_a_change_does_what_it_shows_or_nothing() {
         let (mut aloud, quiet) = aloud_reading();
@@ -965,8 +781,6 @@ mod tests {
         assert!(quiet.held.load(Ordering::Relaxed), "what is paused stays paused");
     }
 
-    /// What `--stop` said before more was said ends the pause in the order said:
-    /// what came after it plays.
     #[test]
     fn what_is_said_after_a_stop_is_not_paused() {
         let mut queue = hearing();
@@ -978,8 +792,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["after the stop"]);
     }
 
-    /// `--now` takes the place of what is paused, and waits with it: an agent
-    /// does not talk over the pause you asked for.
     #[test]
     fn what_goes_first_does_not_end_a_pause() {
         let mut queue = hearing();
@@ -991,9 +803,6 @@ mod tests {
         assert_eq!(spoken(&mut queue), ["first"]);
     }
 
-    /// All that waited through a pause is read, each thing taking longer than
-    /// `STALE` to read: one deadline for all of it would lose the last of it,
-    /// the handoff an agent ended on.
     #[test]
     fn what_waited_through_a_pause_is_all_read_however_long_it_takes() {
         let mut queue = hearing();
@@ -1016,9 +825,6 @@ mod tests {
         assert_eq!(read[WAITING], last.to_string());
     }
 
-    /// What is said behind what waited through a pause would have been read by
-    /// now but for the pause, and is read too; and once that is all read, what
-    /// is said next has an age of its own again.
     #[test]
     fn what_comes_behind_what_waited_through_a_pause_is_read_too() {
         let mut queue = hearing();
@@ -1034,9 +840,6 @@ mod tests {
         assert_eq!(queue.next(late), None, "it waited on nothing of yours");
     }
 
-    /// What had waited too long as you paused goes, as it would have with no
-    /// pause: a Mac that woke does not read out an hour of updates for two taps
-    /// of a key. What had not stays.
     #[test]
     fn a_pause_does_not_bring_back_what_had_waited_too_long() {
         let mut queue = hearing();
@@ -1051,8 +854,6 @@ mod tests {
         assert_eq!(queue.next(later), None);
     }
 
-    /// With only what had waited too long, there is nothing to pause, and a
-    /// pause of it would keep what is said next silent.
     #[test]
     fn a_pause_of_only_what_had_waited_too_long_is_none() {
         let mut queue = hearing();
@@ -1062,8 +863,6 @@ mod tests {
         assert!(!queue.busy());
     }
 
-    /// A button drawn before the pause, clicked long into it, lets go of nothing
-    /// that waited through it.
     #[test]
     fn pausing_what_is_paused_lets_go_of_nothing() {
         let mut queue = hearing();
@@ -1075,9 +874,6 @@ mod tests {
         assert_eq!(queue.in_turn.len(), 1);
     }
 
-    /// What you paused is still there to go on, where what the pause held ends
-    /// past `STALE`: as speakers that went, a `--now` with no words to say, or a
-    /// model that came late, and the pause goes on with it.
     #[test]
     fn nothing_goes_stale_during_a_pause() {
         let mut queue = hearing();
@@ -1089,8 +885,6 @@ mod tests {
         assert_eq!(queue.next(at(2) + STALE * 5).map(|next| next.spoken).as_deref(), Some("rest"));
     }
 
-    /// What you did not pause did not wait on you: a button drawn before its
-    /// pause ended gives it no more time.
     #[test]
     fn going_on_with_nothing_paused_gives_what_waits_no_more_time() {
         let mut queue = hearing();
@@ -1099,9 +893,6 @@ mod tests {
         assert_eq!(queue.next(at(2) + STALE), None);
     }
 
-    /// A click hits the button whose icon it is on, or nothing, at any width,
-    /// down to where one icon fits or none does, and whatever an agent's words
-    /// hold: an icon never shows on the other's spot, nor a spot with no icon.
     #[test]
     fn a_click_hits_the_icon_it_is_on_at_any_width_and_of_any_text() {
         let texts = [
@@ -1137,7 +928,6 @@ mod tests {
         }
     }
 
-    /// Control characters are not drawn, and leave no gap after the buttons.
     #[test]
     fn what_is_not_drawn_does_not_push_the_buttons_along() {
         for text in ["\u{1b}[31mFAIL\u{1b}[0m", "a\u{7}b\u{7}c"] {
@@ -1151,8 +941,6 @@ mod tests {
         }
     }
 
-    /// The sidebar as it starts, of its width less its edge, has room for how
-    /// far the fetch of the model got, its buttons and all.
     #[test]
     fn the_fetch_says_how_far_it_got_at_the_width_the_sidebar_starts_at() {
         let shown = Shown::Fetching { got: 12_000_000, paused: false };
@@ -1162,7 +950,6 @@ mod tests {
         assert!(said.contains(&far), "{said}");
     }
 
-    /// A terminal that speaks kitty's keys, and one that types them.
     #[test]
     fn alt_shift_u_stops_as_either_kind_of_terminal_says_it() {
         let both = KeyModifiers::ALT | KeyModifiers::SHIFT;
@@ -1206,8 +993,6 @@ mod tests {
         assert_eq!(line(untold), format!("{MARK} old · the tests pass"));
     }
 
-    /// A row is marked only where the daemon said what session its pane is in:
-    /// the name a pane knows its session by may be another's now.
     #[test]
     fn what_comes_from_a_session_not_told_marks_no_row() {
         let shown = |speaker| {
@@ -1219,8 +1004,6 @@ mod tests {
         assert_eq!(shown(pane("old", None)).from(), None);
     }
 
-    /// A pane's session is named by what its daemon says it is now, and is the
-    /// same speaker whichever name that goes by.
     #[test]
     fn a_session_not_told_goes_by_the_name_the_pane_knows_it_by() {
         let mut queue = hearing();

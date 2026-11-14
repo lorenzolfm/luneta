@@ -1,5 +1,3 @@
-//! A folder watched for whoever reads it, to read it again as it changes.
-
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -14,26 +12,12 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{log, process};
 
-/// How long a folder is let settle after a change before it is read: a file
-/// written in a few pieces makes a word for each, and one read covers them all.
 const SETTLE: Duration = Duration::from_millis(25);
 
-/// The longest a folder is let settle: one that never stops changing is read
-/// anyway, as often as this.
 const SETTLE_MAX: Duration = Duration::from_millis(250);
 
 const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 
-/// Reads with `read`, and hands what it read to `tell`: once before this
-/// returns, so that what the daemon knows is whole before it answers anyone,
-/// and then from a thread of its own whenever something in `dir` changes at
-/// a path that `wanted` takes, and at least every `sweep` besides, for what
-/// changes without a word to the folder. `dir` is watched before that first
-/// read, or what changed after it would wait for the sweep. The thread ends
-/// once `tell` says that no one listens.
-///
-/// A folder that is not there yet is read on the sweep alone, and watched once
-/// it turns up.
 pub fn watch<T: 'static>(
     name: &str,
     dir: PathBuf,
@@ -46,9 +30,6 @@ pub fn watch<T: 'static>(
     watch_ending(name, dir, mode, wanted, sweep, read, |_| Vec::new(), tell)
 }
 
-/// `watch`, where `pids` says, by their pids, which processes what a read found
-/// holds for: each one's end has it read again, as one that crashes says no
-/// word to the folder.
 pub fn watch_ending<T: 'static>(
     name: &str,
     dir: PathBuf,
@@ -59,8 +40,6 @@ pub fn watch_ending<T: 'static>(
     pids: fn(&T) -> Vec<u32>,
     mut tell: impl FnMut(T) -> bool + Send + 'static,
 ) -> io::Result<()> {
-    // One wake-up is all a read needs, however many changes made it, so the
-    // channel holds one at most.
     let (changed, heard) = mpsc::sync_channel(1);
     let mut ends = Ends::new(changed.clone());
     let mut read = move || {
@@ -92,8 +71,6 @@ pub fn watch_ending<T: 'static>(
     Ok(())
 }
 
-/// A watcher of `dir`, or none, which leaves the folder to the sweep. One
-/// that cannot watch a folder that is there says why.
 pub fn watching(
     dir: &Path,
     mode: RecursiveMode,
@@ -111,9 +88,6 @@ pub fn watching(
     }
 }
 
-/// A watcher that says so on `changed` when anything in `dir` changes that a
-/// read could find. A watcher that goes wrong is a change too, as a read is
-/// how the daemon finds out what it missed.
 fn watcher(
     dir: &Path,
     mode: RecursiveMode,
@@ -130,24 +104,15 @@ fn watcher(
     Ok(watcher)
 }
 
-/// Says on `changed` that a read is due.
 fn wake(changed: &SyncSender<()>) {
     match changed.try_send(()) {
-        // A full channel holds a wake-up already, and one that no one hears is
-        // the thread's that has ended.
         Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
     }
 }
 
-/// The processes that reads named, each with a thread of its own that waits
-/// for it to end and then says on `changed` that a read is due.
 struct Ends {
     changed: SyncSender<()>,
-    /// Each thread, by the pid of its process. One that is done stays for as
-    /// long as reads name its pid: reads that go on naming one that just ended,
-    /// or one it could not wait for, start no other.
     hearing: HashMap<u32, JoinHandle<()>>,
-    /// What went wrong in starting a thread.
     troubles: Troubles,
 }
 
@@ -156,10 +121,6 @@ impl Ends {
         Ends { changed, hearing: HashMap::new(), troubles: Troubles::default() }
     }
 
-    /// Hears out each of `pids`, the processes a read named, that it is not
-    /// hearing out yet. A thread waits on for its process whether or not reads
-    /// name it any more: one whose file goes for a while has the same end when
-    /// the file comes back.
     fn hear(&mut self, pids: &[u32]) {
         self.hearing.retain(|pid, thread| !thread.is_finished() || pids.contains(pid));
         for &pid in pids {
@@ -182,15 +143,10 @@ impl Ends {
     }
 }
 
-/// What the daemon says of a process whose end it cannot wait for.
 fn unheard(pid: u32, error: &io::Error) -> String {
     format!("the end of process {pid} is left to the sweep: {error}")
 }
 
-/// Whether `event` can change what a read finds. A read's own access to the
-/// folder cannot, or the reads that follow a change would make changes of
-/// their own; nor can a change at paths that `wanted` does not take. One that
-/// names no path could be of anything.
 pub fn worth_a_read(event: &Event, wanted: impl Fn(&Path) -> bool) -> bool {
     if event.kind.is_access() {
         return false;
@@ -198,7 +154,6 @@ pub fn worth_a_read(event: &Event, wanted: impl Fn(&Path) -> bool) -> bool {
     event.paths.is_empty() || event.paths.iter().any(|path| wanted(path))
 }
 
-/// Whether `error` is the folder's not being there yet.
 pub fn missing(error: &notify::Error) -> bool {
     match &error.kind {
         notify::ErrorKind::PathNotFound => true,
@@ -207,8 +162,6 @@ pub fn missing(error: &notify::Error) -> bool {
     }
 }
 
-/// Waits out a burst of changes, until `SETTLE` has passed without one, but no
-/// longer than `SETTLE_MAX` in all.
 pub fn settle(heard: &Receiver<()>) {
     let deadline = Instant::now() + SETTLE_MAX;
     while Instant::now() < deadline {
@@ -219,7 +172,6 @@ pub fn settle(heard: &Receiver<()>) {
     }
 }
 
-/// The paths in `dir`. A folder that is not there yet holds none.
 pub fn listed(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -229,19 +181,13 @@ pub fn listed(dir: &Path) -> io::Result<Vec<PathBuf>> {
     entries.map(|entry| Ok(entry?.path())).collect()
 }
 
-/// What went wrong in reading a folder, each said once while it keeps going
-/// wrong: a folder is read again every sweep.
 #[derive(Default)]
 pub struct Troubles {
-    /// What went wrong in the read before, and was said then.
     said: HashSet<String>,
-    /// What has gone wrong in this read so far.
     now: HashSet<String>,
 }
 
 impl Troubles {
-    /// Says that `what` went wrong, unless it went wrong in the read before,
-    /// or has been said in this one.
     pub fn say(&mut self, what: String) {
         if !self.said.contains(&what) && !self.now.contains(&what) {
             log::say(&what);
@@ -249,8 +195,6 @@ impl Troubles {
         self.now.insert(what);
     }
 
-    /// Ends a read. What went wrong in it is said again once it has gone right
-    /// in between.
     pub fn done(&mut self) {
         self.said = mem::take(&mut self.now);
     }
@@ -262,16 +206,10 @@ mod tests {
 
     use super::*;
 
-    /// How long a test waits for a wake-up that is not to come.
     const QUIET: Duration = Duration::from_millis(100);
 
-    /// How long a test waits for one that is.
     const HEARD: Duration = Duration::from_secs(5);
 
-    /// A process is heard out once, however many reads name it: its end wakes
-    /// the reader, and a read that still names it, begun as it ended, wakes no
-    /// one. Once reads have stopped naming it, one that names the pid again
-    /// names another process, as a pid comes back.
     #[test]
     fn a_process_wakes_the_reader_as_it_ends_and_no_more() {
         let (changed, heard) = mpsc::sync_channel(1);
@@ -296,9 +234,6 @@ mod tests {
         heard.recv_timeout(HEARD).expect("no process by that pid has ended");
     }
 
-    /// What changes in the folder as the first read is told, before `watch`
-    /// returns, is read again long before the sweep, as a session's socket
-    /// made as the daemon starts is.
     #[test]
     fn a_change_as_the_first_read_is_told_is_read_before_the_sweep() {
         let dir = tempfile::tempdir().unwrap();

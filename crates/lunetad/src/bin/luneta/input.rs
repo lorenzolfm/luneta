@@ -1,18 +1,3 @@
-//! What luneta's terminal sends it, read on a thread of its own for as long as
-//! luneta runs: keys, the mouse, pastes and the window's focus, and the
-//! answers to what luneta asks of the terminal. One reader reads all of it, so
-//! that an answer is heard as one whenever it comes, and a key as a key, one
-//! typed while the terminal answers too.
-//!
-//! The keys and the rest are read as crossterm 0.29 reads them, which `keys`
-//! and the sidebar take, after its parser, `src/event/sys/unix/parse.rs`. What
-//! differs: an `ESC ]` that goes on as a colour is that colour's answer, not
-//! `Alt ]` and keys; an `ESC [ ?` that is no answer luneta knows goes whole,
-//! and does not take the keys after it with it; an introducer that comes last
-//! of what was read is the key it is, with `Alt`, as `Esc` alone is `Esc`; and
-//! a line feed in the first read is `Enter`, as typed before luneta took the
-//! terminal raw.
-
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _};
 use std::os::fd::AsFd as _;
@@ -35,30 +20,21 @@ use crate::host::Event;
 
 const ESC: u8 = 0x1b;
 
-/// What a paste starts and ends with, where the terminal brackets it.
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// The most a colour's answer spells it in, between `ESC ] 1 1 ;` and its
-/// end: `rgb:ffff/ffff/ffff` is 18. An `ESC ]` that goes on longer is `Alt ]`
-/// and the keys typed after it.
 const COLOUR_LONGEST: usize = 32;
 
-/// Reads luneta's terminal on a thread of its own, and its resizes on another,
-/// for as long as it can, and hands on what it sends.
 pub fn read(events: Sender<Event>) {
     resizes(events.clone());
     hangups(events.clone());
     thread::spawn(move || {
         if let Err(error) = listen(&events) {
-            // luneta is on its way out.
             let _ = events.send(Event::InputEnded(error));
         }
     });
 }
 
-/// Hands on what luneta's terminal sends until it cannot be read, or until
-/// luneta is not listening any more.
 fn listen(events: &Sender<Event>) -> io::Result<()> {
     let mut terminal = terminal()?;
     let mut parser = Parser::default();
@@ -71,7 +47,6 @@ fn listen(events: &Sender<Event>) -> io::Result<()> {
             Err(error) => return Err(error),
         };
         let mut listening = true;
-        // A read that fills `bytes` leaves more behind.
         parser.advance(&bytes[..read], read == bytes.len(), &mut |sent| {
             let event = match sent {
                 Sent::Input(input) => Event::Input(input),
@@ -85,9 +60,6 @@ fn listen(events: &Sender<Event>) -> io::Result<()> {
     }
 }
 
-/// Says each resize of luneta's terminal, as crossterm did, so that luneta
-/// draws at the new size at once. Where it cannot be told of them, it draws at
-/// the new size at its next tick.
 fn resizes(events: Sender<Event>) {
     let Ok(mut signals) = Signals::new([SIGWINCH]) else {
         return;
@@ -104,11 +76,6 @@ fn resizes(events: Sender<Event>) {
     });
 }
 
-/// Says that luneta's terminal hung up, as it does once its window closes,
-/// or that luneta was told to end, as its terminal not to be read any more:
-/// luneta ends as it does then, and takes down what it put up, as the
-/// notifications on the desktop, which the signal would have left up. A
-/// second signal ends luneta at once, as the first did before.
 fn hangups(events: Sender<Event>) {
     const ENDS: [i32; 2] = [SIGHUP, SIGTERM];
     let Ok(mut signals) = Signals::new(ENDS) else {
@@ -116,22 +83,17 @@ fn hangups(events: Sender<Event>) {
     };
     let ending = Arc::new(AtomicBool::new(false));
     for signal in ENDS {
-        // Where one cannot be had, the second signal does what the first
-        // does.
         let _ = flag::register_conditional_default(signal, Arc::clone(&ending));
         let _ = flag::register(signal, Arc::clone(&ending));
     }
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {
             let ended = io::Error::other(format!("ended by signal {signal}"));
-            // luneta is on its way out.
             let _ = events.send(Event::InputEnded(ended));
         }
     });
 }
 
-/// luneta's terminal, to read: its standard input, where that is the terminal,
-/// and `/dev/tty` where not, as crossterm reads it.
 fn terminal() -> io::Result<File> {
     let stdin = io::stdin();
     if stdin.is_terminal() {
@@ -140,44 +102,26 @@ fn terminal() -> io::Result<File> {
     File::open("/dev/tty")
 }
 
-/// What luneta's terminal sent: input, or an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Sent {
     Input(Input),
     Answer(Answer),
 }
 
-/// What the bytes read so far come to.
 enum Parsed {
-    /// The start of something, which needs more of them.
     Partial,
-    /// Something luneta does not read, which goes.
     Unknown,
-    /// What all of them say.
     Whole(Sent),
-    /// What the first `taken` of them say, which the rest do not go with: an
-    /// `ESC ]` that did not go on as an answer, which is `Alt ]`.
     Split(Sent, usize),
 }
 
-/// Reads what luneta's terminal sends, a byte at a time.
 #[derive(Default)]
 struct Parser {
-    /// The bytes of what is yet to be read whole.
     pending: Vec<u8>,
-    /// Whether it has read the terminal yet.
     read: bool,
 }
 
 impl Parser {
-    /// Reads `bytes`, a read of the terminal as it came, and hands each thing
-    /// they say to `sent`. `more` is whether more came with them, which tells
-    /// an `Esc` key from the start of what follows it.
-    ///
-    /// The first read holds what was typed before luneta took the terminal
-    /// raw, which the terminal held as lines, each `Enter` turned to a line
-    /// feed (`ICRNL`): an `Enter` still, not the `Ctrl j` a line feed is
-    /// after, which would open the picker.
     fn advance(&mut self, bytes: &[u8], more: bool, sent: &mut impl FnMut(Sent)) {
         if std::mem::replace(&mut self.read, true) {
             self.take(bytes, more, sent);
@@ -188,7 +132,6 @@ impl Parser {
         self.take(&typed, more, sent);
     }
 
-    /// Reads `bytes`, as `advance` does, as they are.
     fn take(&mut self, bytes: &[u8], more: bool, sent: &mut impl FnMut(Sent)) {
         for (index, &byte) in bytes.iter().enumerate() {
             self.push(byte, more || index + 1 < bytes.len(), sent);
@@ -208,25 +151,17 @@ impl Parser {
                 let rest = self.pending.split_off(taken);
                 self.pending.clear();
                 sent(said);
-                // The rest is read again, as it came: the last of it is the
-                // byte just read.
                 self.take(&rest, more, sent);
             },
         }
     }
 }
 
-/// What `bytes`, the start of what the terminal sent, come to. `more` is
-/// whether more came with the last of them.
 fn parse(bytes: &[u8], more: bool) -> Parsed {
     match *bytes {
         [] => Parsed::Partial,
         [ESC] if more => Parsed::Partial,
         [ESC] | [ESC, ESC] => key(KeyCode::Esc, KeyModifiers::NONE),
-        // `ESC ]` that came last is `Alt ]`, as crossterm reads it. `ESC [`
-        // and `ESC O` wait for what comes after, as they do in crossterm: a
-        // mouse report or a paste that a read cuts after them would otherwise
-        // be typed, and kitty's keys send `Alt [` as `ESC [ 91 ; 3 u`.
         [ESC, b']'] if !more => alt(parse(&bytes[1..], more)),
         [ESC, b'[', ..] => csi(bytes),
         [ESC, b'O', ..] => ss3(bytes),
@@ -250,7 +185,6 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Parsed {
     Parsed::Whole(Sent::Input(Input::Key(KeyEvent::new(code, modifiers))))
 }
 
-/// `parsed`, typed with `Alt` held, where it is a key.
 fn alt(parsed: Parsed) -> Parsed {
     match parsed {
         Parsed::Whole(Sent::Input(Input::Key(mut key))) => {
@@ -261,7 +195,6 @@ fn alt(parsed: Parsed) -> Parsed {
     }
 }
 
-/// A character in UTF-8, with `Shift` where it is a capital.
 fn character(bytes: &[u8]) -> Parsed {
     let length = match bytes[0] {
         0x00..=0x7f => 1,
@@ -271,7 +204,6 @@ fn character(bytes: &[u8]) -> Parsed {
         _ => return Parsed::Unknown,
     };
     if bytes.len() < length {
-        // All after the first are `10xxxxxx`.
         let going_on = bytes[1..].iter().all(|byte| byte & 0xc0 == 0x80);
         return if going_on { Parsed::Partial } else { Parsed::Unknown };
     }
@@ -282,8 +214,6 @@ fn character(bytes: &[u8]) -> Parsed {
     key(KeyCode::Char(c), modifiers)
 }
 
-/// `ESC O` and a letter: the arrows, `Home` and `End` in the cursor keys'
-/// application mode, and `F1` to `F4`.
 fn ss3(bytes: &[u8]) -> Parsed {
     let [_, _, last] = *bytes else {
         return Parsed::Partial;
@@ -301,8 +231,6 @@ fn ss3(bytes: &[u8]) -> Parsed {
     key(code, KeyModifiers::NONE)
 }
 
-/// `ESC [` and what follows: keys, the mouse, the focus, a paste, and the
-/// answers to what luneta asks.
 fn csi(bytes: &[u8]) -> Parsed {
     if bytes.starts_with(PASTE_START) {
         return paste(bytes);
@@ -317,7 +245,6 @@ fn csi(bytes: &[u8]) -> Parsed {
         b'D' => KeyCode::Left,
         b'H' => KeyCode::Home,
         b'F' => KeyCode::End,
-        // Kitty's keys leave out the `1` before these with no modifier held.
         b'P' => KeyCode::F(1),
         b'Q' => KeyCode::F(2),
         b'S' => KeyCode::F(4),
@@ -325,7 +252,6 @@ fn csi(bytes: &[u8]) -> Parsed {
         b'I' => return Parsed::Whole(Sent::Input(Input::FocusGained)),
         b'O' => return Parsed::Whole(Sent::Input(Input::FocusLost)),
         b'M' => return x10_mouse(bytes),
-        // The Linux console's `F1` to `F5`.
         b'[' => {
             return match bytes.get(3) {
                 None => Parsed::Partial,
@@ -339,8 +265,6 @@ fn csi(bytes: &[u8]) -> Parsed {
     key(code, KeyModifiers::NONE)
 }
 
-/// `ESC [`, parameters, and a last byte that says what they are, once it
-/// comes.
 fn sequence(bytes: &[u8]) -> Parsed {
     let last = bytes[bytes.len() - 1];
     if (0x20..=0x3f).contains(&last) {
@@ -357,8 +281,6 @@ fn sequence(bytes: &[u8]) -> Parsed {
     }
 }
 
-/// `ESC [ ?`, numbers and a last byte: the answers to what luneta asks, and
-/// what its terminal says of itself unasked.
 fn answer(parameters: &[u8], last: u8) -> Parsed {
     let answer = match (last, parameters) {
         (b'u', _) => Answer::Kitty,
@@ -370,8 +292,6 @@ fn answer(parameters: &[u8], last: u8) -> Parsed {
     Parsed::Whole(Sent::Answer(answer))
 }
 
-/// `ESC [`, numbers and a last byte: the keys with a number of their own, as
-/// `Delete`, those held with a modifier, kitty's keys, and rxvt's mouse.
 fn numbered(parameters: &[u8], last: u8) -> Parsed {
     let Ok(parameters) = str::from_utf8(parameters) else {
         return Parsed::Unknown;
@@ -384,8 +304,6 @@ fn numbered(parameters: &[u8], last: u8) -> Parsed {
     }
 }
 
-/// The modifiers held, as a key's second number says them, and after a `:`
-/// whether the key went down, repeats or went up, as kitty's keys can say.
 fn held(field: &str) -> Option<(KeyModifiers, KeyEventState, KeyEventKind)> {
     let mut parts = field.split(':');
     let mask: u16 = parts.next()?.parse().ok()?;
@@ -418,13 +336,9 @@ fn held(field: &str) -> Option<(KeyModifiers, KeyEventState, KeyEventKind)> {
     Some((modifiers, state, kind))
 }
 
-/// What no modifiers number says: none held, and the key went down.
 const UNHELD: (KeyModifiers, KeyEventState, KeyEventKind) =
     (KeyModifiers::NONE, KeyEventState::NONE, KeyEventKind::Press);
 
-/// A key that has a letter of its own, as an arrow, held with the modifiers
-/// its second number says: `ESC [ 1 ; 5 A` for `Ctrl Up`. luneta never asks
-/// where the cursor is, so that a last `R` is `F3`.
 fn modified_key(parameters: &str, last: u8) -> Parsed {
     let code = match last {
         b'A' => KeyCode::Up,
@@ -441,7 +355,6 @@ fn modified_key(parameters: &str, last: u8) -> Parsed {
     };
     let (modifiers, _, kind) = match parameters.split(';').nth(1).and_then(held) {
         Some(held) => held,
-        // An old form has the modifiers' last digit alone, `ESC [ 5 A`.
         None => match parameters.chars().last().and_then(|digit| digit.to_digit(10)) {
             Some(digit) => held(&digit.to_string()).unwrap_or(UNHELD),
             None => return Parsed::Unknown,
@@ -450,8 +363,6 @@ fn modified_key(parameters: &str, last: u8) -> Parsed {
     Parsed::Whole(Sent::Input(Input::Key(KeyEvent::new_with_kind(code, modifiers, kind))))
 }
 
-/// A key with a number of its own and a `~`, as `Delete`, `ESC [ 3 ~`, held
-/// with the modifiers its second number says.
 fn special_key(parameters: &str) -> Parsed {
     let mut numbers = parameters.split(';');
     let Some(Ok(number)) = numbers.next().map(str::parse::<u8>) else {
@@ -477,9 +388,6 @@ fn special_key(parameters: &str) -> Parsed {
     ))))
 }
 
-/// A key as the kitty keyboard protocol spells it, `ESC [ 99 ; 5 u` for `Ctrl
-/// c`: the key's code, the modifiers held, and with `Shift` held the
-/// character it types after a `:`, where the terminal says it.
 fn kitty_key(parameters: &str) -> Parsed {
     let mut fields = parameters.split(';');
     let mut codes = fields.next().unwrap_or_default().split(':');
@@ -496,9 +404,6 @@ fn kitty_key(parameters: &str) -> Parsed {
             Some('\t') if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
             Some('\t') => KeyCode::Tab,
             Some('\x7f') => KeyCode::Backspace,
-            // The rest of the keys kitty numbers where Unicode keeps no
-            // character of its own, as `Menu`, `F13` on and the media keys,
-            // which type none, and for which `keys` has nothing to send.
             Some('\u{e000}'..='\u{f8ff}') | None => return Parsed::Unknown,
             Some(c) => KeyCode::Char(c),
         };
@@ -518,8 +423,6 @@ fn kitty_key(parameters: &str) -> Parsed {
     ))))
 }
 
-/// The keys of the keypad, which kitty's protocol numbers among Unicode's
-/// private use characters, with the other keys that type no character.
 fn keypad(number: u32) -> Option<KeyCode> {
     Some(match number {
         57399..=57408 => KeyCode::Char(char::from_digit(number - 57399, 10)?),
@@ -546,8 +449,6 @@ fn keypad(number: u32) -> Option<KeyCode> {
     })
 }
 
-/// The mouse as SGR spells it, `ESC [ < button ; column ; row M`, with a last
-/// `m` for a button that went up.
 fn sgr_mouse(parameters: &[u8], last: u8) -> Parsed {
     let (b'M' | b'm', Ok(parameters)) = (last, str::from_utf8(parameters)) else {
         return Parsed::Unknown;
@@ -563,8 +464,6 @@ fn sgr_mouse(parameters: &[u8], last: u8) -> Parsed {
     mouse(code, column, row, last == b'm')
 }
 
-/// The mouse as rxvt spells it, `ESC [ button ; column ; row M`, with 32 more
-/// to the button's code.
 fn rxvt_mouse(parameters: &str) -> Parsed {
     let mut numbers = parameters.split(';').map(str::parse::<u16>);
     let (Some(Ok(code)), Some(Ok(column)), Some(Ok(row))) =
@@ -578,8 +477,6 @@ fn rxvt_mouse(parameters: &str) -> Parsed {
     mouse(code, column, row, false)
 }
 
-/// The mouse as xterm first spelled it, `ESC [ M` and three bytes: the
-/// button's code, the column and the row, each with 32 more.
 fn x10_mouse(bytes: &[u8]) -> Parsed {
     let [_, _, _, code, column, row] = *bytes else {
         return Parsed::Partial;
@@ -592,9 +489,6 @@ fn x10_mouse(bytes: &[u8]) -> Parsed {
     mouse(code, column.into(), row.into(), false)
 }
 
-/// The mouse at `column` and `row`, from 1, doing what `code` says: which
-/// button, whether it drags, and the modifiers held. `released` is for SGR's
-/// `m`, which says which button went up.
 fn mouse(code: u8, column: u16, row: u16, released: bool) -> Parsed {
     let button = (code & 0b0000_0011) | ((code & 0b1100_0000) >> 4);
     let dragging = code & 0b0010_0000 != 0;
@@ -631,7 +525,6 @@ fn mouse(code: u8, column: u16, row: u16, released: bool) -> Parsed {
     Parsed::Whole(Sent::Input(Input::Mouse(MouseEvent { kind, column, row, modifiers })))
 }
 
-/// A paste, bracketed, once its end comes.
 fn paste(bytes: &[u8]) -> Parsed {
     let Some(text) = bytes.strip_prefix(PASTE_START).and_then(|rest| rest.strip_suffix(PASTE_END))
     else {
@@ -640,8 +533,6 @@ fn paste(bytes: &[u8]) -> Parsed {
     Parsed::Whole(Sent::Input(Input::Paste(String::from_utf8_lossy(text).into_owned())))
 }
 
-/// `ESC ]`: the start of a colour's answer, `ESC ] 1 1 ; rgb:1e1e/1e1e/2e2e
-/// ESC \`, or `Alt ]` and the keys typed after it, once they cannot be one.
 fn osc(bytes: &[u8]) -> Parsed {
     let typed = || {
         let alt = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT);
@@ -676,7 +567,6 @@ mod tests {
 
     use super::*;
 
-    /// What `reads` say, each read of the terminal as it came.
     fn sent(reads: &[&[u8]]) -> Vec<Sent> {
         let mut parser = Parser::default();
         let mut all = Vec::new();
@@ -694,9 +584,6 @@ mod tests {
         pressed(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
-    /// What luneta asks as it starts is answered in among keys typed meanwhile,
-    /// and a colour can come long after, among the keys typed then: each
-    /// answer is one, and each key a key.
     #[test]
     fn an_answer_is_heard_as_one_wherever_it_comes_among_the_keys() {
         let foreground = Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
@@ -717,9 +604,6 @@ mod tests {
         ]);
     }
 
-    /// What was typed before luneta took the terminal raw comes in the first
-    /// read, each `Enter` of it a line feed: an `Enter` still. A line feed
-    /// read after it is `Ctrl j`.
     #[test]
     fn an_enter_typed_before_luneta_took_the_terminal_raw_is_an_enter() {
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
@@ -727,7 +611,6 @@ mod tests {
         assert_eq!(sent(&[b"ls\n", b"\n"]), [typed('l'), typed('s'), enter, control_j]);
     }
 
-    /// An answer can come in two reads, as over a slow link.
     #[test]
     fn an_answer_split_between_reads_is_one() {
         let all = sent(&[b"\x1b]11;rgb:1e1e/", b"1e1e/2e2e\x1b", b"\\"]);
@@ -735,8 +618,6 @@ mod tests {
         assert_eq!(all, [Sent::Answer(Answer::Background(background))]);
     }
 
-    /// `Alt ]` typed where the terminal sends it as `ESC ]` is a key, and so is
-    /// each key typed after it, once they cannot be an answer: none is lost.
     #[test]
     fn an_esc_close_bracket_that_is_no_answer_is_alt_close_bracket_and_the_keys_after_it() {
         let alt = pressed(KeyCode::Char(']'), KeyModifiers::ALT);
@@ -754,8 +635,6 @@ mod tests {
         assert_eq!(sent(&[b"\x1b]1", b"2"]), [alt, typed('1'), typed('2')]);
     }
 
-    /// A turn to dark or light is heard as zellij is told it, and a report
-    /// luneta does not read goes whole, not with the key after it.
     #[test]
     fn a_turn_to_dark_or_light_is_heard_and_other_reports_go_whole() {
         assert_eq!(sent(&[Theme::Dark.report()]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
@@ -763,9 +642,6 @@ mod tests {
         assert_eq!(sent(&[b"\x1b[?2026;2$yx"]), [typed('x')]);
     }
 
-    /// The keys are read as crossterm read them, which `keys` writes out again
-    /// and the sidebar takes: as the terminal sends them by itself, and as the
-    /// kitty keyboard protocol does.
     #[test]
     fn keys_are_read_as_crossterm_reads_them() {
         let none = KeyModifiers::NONE;
@@ -814,11 +690,9 @@ mod tests {
             KeyEventState::KEYPAD,
         );
         assert_eq!(sent(&[b"\x1b[57399u"]), [Sent::Input(Input::Key(keypad))]);
-        // `Menu`, `F13` and `Play` type no private use character.
         for bytes in [&b"\x1b[57363u"[..], b"\x1b[57376;5u", b"\x1b[57428u"] {
             assert_eq!(sent(&[bytes]), [], "{bytes:?}");
         }
-        // An `Esc` that more came after is the start of what came.
         let mut parser = Parser::default();
         let mut all = Vec::new();
         parser.advance(b"\x1b", true, &mut |sent| all.push(sent));
@@ -826,8 +700,6 @@ mod tests {
         assert_eq!(all, [pressed(KeyCode::Char('x'), alt)]);
     }
 
-    /// A read that ends after `ESC [` or `ESC O` leaves them for the next, as
-    /// a burst of mouse reports or a paste may be cut there.
     #[test]
     fn an_introducer_a_read_ends_on_waits_for_the_rest() {
         let moved = MouseEvent {
@@ -842,7 +714,6 @@ mod tests {
         assert_eq!(sent(&[b"\x1bO", b"A"]), [pressed(KeyCode::Up, KeyModifiers::NONE)]);
     }
 
-    /// A read that ends within a character leaves it for the next.
     #[test]
     fn a_character_a_read_cuts_waits_for_the_rest() {
         let crab = "🦀".as_bytes();

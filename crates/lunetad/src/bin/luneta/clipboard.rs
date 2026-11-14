@@ -1,8 +1,3 @@
-//! The image on the clipboard of the machine luneta runs on, as its own tools
-//! hand it over, and as Claude Code reads it on the machine it runs on:
-//! `osascript` on macOS, and `wl-paste` or `xclip` on Linux. A tool that has
-//! none to hand over ends with a failure, as one does with no display to ask.
-
 use std::io::ErrorKind;
 use std::process::Command;
 use std::time::Duration;
@@ -11,28 +6,19 @@ use lunetad::images::{self, Png, Refused};
 use lunetad::log;
 use lunetad::program::{self, Ran};
 
-/// How long a tool has to hand an image over. It answers in milliseconds, and
-/// `osascript` takes a second or two for the largest. One that takes longer
-/// waits on a program that holds the clipboard, and answers nothing.
 const READ: Duration = Duration::from_secs(10);
 
-/// The most `osascript` prints of the largest image: two digits a byte, and
-/// what it prints around them.
 const PRINTED_MAX: u64 = 2 * images::BYTES_MAX + 32;
 
-/// A tool that hands over what the clipboard holds as a PNG.
 struct Tool {
     program: &'static str,
     args: &'static [&'static str],
     says: Says,
 }
 
-/// How a tool says the image's bytes.
 #[derive(Clone, Copy)]
 enum Says {
-    /// As they are.
     Bytes,
-    /// As `osascript` prints data of the class `PNGf`.
     Printed,
 }
 
@@ -51,21 +37,14 @@ const XCLIP: Tool = Tool {
     says: Says::Bytes,
 };
 
-/// What a tool said of the clipboard.
 enum Read {
-    /// It is not on the `PATH`.
     Absent,
-    /// It has no image to hand over, or could not say.
     Nothing,
     Image(Png),
-    /// Why the image it has is not one to send.
     Refused(String),
 }
 
 impl Tool {
-    /// What this tool says of the clipboard. Why it could not say goes in the
-    /// log, as the key then goes on to the pane, which says what it says with
-    /// no image.
     fn read(&self) -> Read {
         let Tool { program, args, says } = self;
         let most = match says {
@@ -103,13 +82,10 @@ impl Tool {
     }
 }
 
-/// The image on the clipboard: none where it holds none, as where no tool
-/// could say; or why it is not one to send, as it is too large.
 pub fn image() -> Result<Option<Png>, String> {
     if cfg!(target_os = "macos") { image_by(&[OSASCRIPT]) } else { image_by(&[WL_PASTE, XCLIP]) }
 }
 
-/// The image the first of `tools` that has one hands over, as `image` says.
 fn image_by(tools: &[Tool]) -> Result<Option<Png>, String> {
     let mut absent = Vec::new();
     for tool in tools {
@@ -126,9 +102,6 @@ fn image_by(tools: &[Tool]) -> Result<Option<Png>, String> {
     Ok(None)
 }
 
-/// The bytes in what `osascript` prints of data of the class `PNGf`, as
-/// `«data PNGf89504E47…»`: hex digits, after the class, up to the end of its
-/// quotes, whose encoding is the locale's. None where it prints no such data.
 fn printed(said: &[u8]) -> Option<Vec<u8>> {
     const CLASS: &[u8] = b"PNGf";
     let class = said.windows(CLASS.len()).position(|word| word == CLASS)?;
@@ -147,12 +120,10 @@ fn printed(said: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// A tool that runs `script`.
     fn tool(script: &'static [&'static str], says: Says) -> Tool {
         Tool { program: "sh", args: script, says }
     }
 
-    /// The bytes of the image `tools` hand over.
     fn image_of(tools: &[Tool]) -> Option<Vec<u8>> {
         let png = image_by(tools).unwrap()?;
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -165,9 +136,6 @@ mod tests {
         Some(parts.iter().flat_map(part).collect())
     }
 
-    /// `osascript` prints data in its quotes, in the locale's encoding, as
-    /// hex digits after the class; what is not data of that class, or digits
-    /// that do not make whole bytes, holds no image.
     #[test]
     fn data_as_applescript_prints_it_is_read_as_bytes() {
         let bytes = printed("«data PNGf89504E47»\n".as_bytes());
@@ -179,9 +147,6 @@ mod tests {
         assert_eq!(printed(b""), None);
     }
 
-    /// The first tool that hands over a PNG is the one: one that fails, as
-    /// with no such image, or no display, or that is not there, or that says
-    /// what is no PNG, leaves it to the next, and none is no image.
     #[test]
     fn the_first_tool_with_a_png_hands_it_over() {
         const FAILS: &[&str] = &["-c", "echo 'no image' >&2; exit 1"];
@@ -202,15 +167,12 @@ mod tests {
         assert_eq!(image_of(&[absent, fails, not_png]), None);
     }
 
-    /// A tool that says too much on its stderr says nothing of an image: the
-    /// clipboard holds none, rather than one too large.
     #[test]
     fn a_tool_loud_on_its_stderr_says_no_image_is_too_large() {
         const LOUD: &[&str] = &["-c", "head -c 16777217 /dev/zero >&2"];
         assert!(matches!(image_by(&[tool(LOUD, Says::Bytes)]), Ok(None)));
     }
 
-    /// A tool that prints as `osascript` does hands over the bytes printed.
     #[test]
     fn a_tool_that_prints_hands_over_the_bytes_printed() {
         const PRINTS: &[&str] = &["-c", "echo '«data PNGf89504E470D0A1A0A21»'"];
@@ -218,8 +180,6 @@ mod tests {
         assert_eq!(bytes, Some(b"\x89PNG\r\n\x1a\n!".to_vec()));
     }
 
-    /// An image too large to send is told apart from no image, as the key
-    /// would go on to the pane, which would say the clipboard holds none.
     #[test]
     fn an_image_too_large_is_no_image_to_send_and_says_so() {
         const LARGE: &[&str] = &["-c", "head -c 67108865 /dev/zero"];

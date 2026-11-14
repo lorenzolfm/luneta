@@ -1,7 +1,3 @@
-//! The ids of sessions, tabs, panes and clients, each of a type of its own:
-//! counted up from 1, never given again, and read from the protocol where a 0
-//! is none given.
-
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -15,12 +11,10 @@ macro_rules! id {
         pub struct $id($nonzero);
 
         impl $id {
-            /// The id `field` holds, which must be there.
             pub fn parse(field: &str, raw: $raw) -> Result<$id, Status> {
                 <$nonzero>::new(raw).map($id).ok_or_else(|| refused(field, "is missing"))
             }
 
-            /// The id after `last`, the last given, which it now is.
             pub fn next(last: &mut Option<$id>) -> $id {
                 let next = match *last {
                     None => <$nonzero>::MIN,
@@ -55,15 +49,12 @@ id!(ClientId(NonZeroU64, u64));
 mod tests {
     use super::*;
 
-    /// No id is 0, which the protocol sends where none was given, and a
-    /// refusal of it names the field.
     #[test]
     fn an_id_is_never_0() {
         assert_eq!(TabId::parse("tab", 7).unwrap().said(), 7);
         assert_eq!(SessionId::parse("session", 0).unwrap_err().message(), "session is missing");
     }
 
-    /// Ids count up from 1.
     #[test]
     fn ids_count_up_from_1() {
         let mut last = None;

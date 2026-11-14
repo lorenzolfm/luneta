@@ -1,0 +1,11 @@
+id: no-nix-string-comments
+valid:
+  - "''\n  echo \"# a\"\n''"
+  - "''\n  #[derive(Debug)]\n''"
+  - "''\n  #!/bin/sh\n''"
+  - "''\n  echo ${x}# a\n''"
+invalid:
+  - "''\n  # a\n  echo\n''"
+  - "''\n  echo\n  #a\n''"
+  - "''\n  echo ${x}\n  # a\n''"
+  - "''\n  echo\n  #! a\n''"

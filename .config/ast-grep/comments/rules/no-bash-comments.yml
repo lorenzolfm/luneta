@@ -1,0 +1,15 @@
+id: no-bash-comments
+language: bash
+severity: error
+message: >-
+  No comments. Say it in the code: a name, a type, a test.
+rule:
+  kind: comment
+  not:
+    regex: ^#!/
+    follows:
+      regex: ^''$
+      not:
+        follows:
+          stopBy: end
+          regex: '[\s\S]'

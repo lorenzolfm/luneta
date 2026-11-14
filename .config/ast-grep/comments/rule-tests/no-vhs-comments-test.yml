@@ -1,0 +1,5 @@
+id: no-vhs-comments
+valid:
+  - 'Type "# a"'
+invalid:
+  - "# a\nOutput a.gif"

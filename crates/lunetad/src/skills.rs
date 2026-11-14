@@ -1,18 +1,3 @@
-//! The skills a pane's directory can run, for the menu's search, in a
-//! harness: for Claude Code, each a `SKILL.md`, a command or a workflow, where
-//! it finds them for that directory, and for pi, each a `SKILL.md` or a `.md`
-//! where pi finds them.
-//!
-//! Claude Code names the skills it would run only as it starts a session:
-//! `claude -p` with `--output-format stream-json` says them in the `init` it
-//! prints first. That is a session's start for each search, with your hooks
-//! and MCP servers, and a prompt that must not reach the model, for their names
-//! alone: not what each does, which the search goes by too. So the finder
-//! looks where Claude Code looks, and asks `claude plugin list`, which takes a
-//! moment and starts no session, which plugins are on in that directory.
-//! pi names its skills only in a session too, and has no plugins: the finder
-//! looks where pi looks, which takes no program.
-
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
@@ -25,20 +10,6 @@ use serde::Deserialize;
 
 use crate::{program, Harness};
 
-/// Prints what `claude plugin list --json` says of the plugins in the
-/// directory `$1`, then for each skill, command and workflow found for it:
-/// where it was found, its path there and what it says of itself, each ending
-/// in a NUL. A skill is a directory's `SKILL.md`, a command a `.md` in
-/// `commands`, and a workflow a `.js` in `workflows`. They are found where
-/// Claude Code finds them: in the `.claude` of the directory and of each one
-/// above it up to its repository's top, or up to `/` outside of one, then in
-/// yours, where they were found being none, then in each plugin installed,
-/// where they were found being its install path. A plugin keeps its skills
-/// where its manifest says, which is printed whole: every `SKILL.md` in it is
-/// printed, but in a `node_modules` or a `.git`. Of a `.md`, what it
-/// says of itself is its frontmatter, and of a workflow the `meta` it begins
-/// with, each its first 64 lines, with any NUL in it left out: it would end
-/// the field early, and every field after it would be read as the one before.
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 found() {
@@ -83,19 +54,12 @@ printf '%s\n' "$plugins" |
         done
     done"#;
 
-/// How long the finder has to say what it found: `claude plugin list` takes
-/// a second or two, and the rest no time.
 const LIMIT: Duration = Duration::from_secs(15);
 
-/// Where a plugin's manifest is in it.
 const MANIFEST: &str = ".claude-plugin/plugin.json";
 
-/// How long a description the menu keeps, in characters: it shows a line of
-/// one at most, and the search goes by it.
 const DESCRIPTION_CHARS: usize = 500;
 
-/// A skill the directory can run, as a prompt runs it: its name, after the
-/// `/`, what its frontmatter says it does, on one line, and who can run it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub name: Name,
@@ -103,25 +67,16 @@ pub struct Skill {
     pub runs: Runs,
 }
 
-/// Who can run a skill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runs {
-    /// You, by its slash command, and an agent, told its name.
     ForAnyone,
-    /// You alone: its frontmatter says `disable-model-invocation: true`, and
-    /// an agent told its name cannot run it.
     OnlyForYou,
 }
 
-/// The name a skill runs by, after its `/`: one word, as the first word of a
-/// prompt is the skill it runs. Claude Code would read a name with a space in
-/// it as another skill, and the rest as what that one is asked.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Name(String);
 
 impl Name {
-    /// `name`, if a prompt can run it: a word, with no space or control
-    /// character in it.
     #[must_use]
     pub fn new(name: String) -> Option<Self> {
         let spaced = |c: char| c.is_whitespace() || c.is_control();
@@ -140,8 +95,6 @@ impl std::fmt::Display for Name {
     }
 }
 
-/// The skills `cwd` can run in `harness`, as the finder finds them on this
-/// machine, or why it found none.
 pub fn found_in(cwd: &str, harness: Harness) -> Result<Vec<Skill>, String> {
     match harness {
         Harness::ClaudeCode => claude_found_in(cwd),
@@ -154,8 +107,6 @@ pub fn found_in(cwd: &str, harness: Harness) -> Result<Vec<Skill>, String> {
     }
 }
 
-/// The skills `cwd` can run in Claude Code, as `FIND` finds them, or why it
-/// found none.
 fn claude_found_in(cwd: &str) -> Result<Vec<Skill>, String> {
     let mut finder = Command::new("sh");
     finder.args(["-c", FIND, "sh", cwd]);
@@ -165,13 +116,6 @@ fn claude_found_in(cwd: &str) -> Result<Vec<Skill>, String> {
         .map(|said| found(&said))
 }
 
-/// What `FIND` printed, as the skills you can run, by name. A plugin's skill
-/// runs as `plugin:skill`, and only while `claude plugin list` says the
-/// plugin is on. A skill found twice is the first found: the one nearest the
-/// directory. One whose frontmatter says it is not for you to run is left
-/// out, and so is one named what no slash command runs. A plugin's skills are
-/// named once all of its manifest is read, wherever it was printed. Output
-/// cut short ends with the last skill printed whole.
 fn found(stdout: &[u8]) -> Vec<Skill> {
     let printed = String::from_utf8_lossy(stdout);
     let whole = printed.rfind('\0').map_or("", |end| &printed[..=end]);
@@ -194,8 +138,6 @@ fn found(stdout: &[u8]) -> Vec<Skill> {
     listed(found.filter(|(_, front)| front.invocable))
 }
 
-/// The skills `found`, by name, in the order found: a skill found twice is
-/// the first found. One named what no slash command runs is left out.
 fn listed(found: impl Iterator<Item = (String, Front)>) -> Vec<Skill> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
@@ -204,7 +146,6 @@ fn listed(found: impl Iterator<Item = (String, Front)>) -> Vec<Skill> {
             continue;
         };
         if seen.insert(name.clone()) {
-            // A tab, say, has no width to draw, and would throw the line off.
             let shown = |c: char| if c.is_control() { ' ' } else { c };
             let description = front.description.chars().map(shown).take(DESCRIPTION_CHARS);
             skills.push(Skill { name, description: description.collect(), runs: front.runs });
@@ -214,36 +155,18 @@ fn listed(found: impl Iterator<Item = (String, Front)>) -> Vec<Skill> {
     skills
 }
 
-/// pi's own folder in your home, where `PI_CODING_AGENT_DIR` does not name
-/// another, which holds your skills in `skills`.
 const PI_AGENT: &str = ".pi/agent";
 
-/// How many folders deep the finder looks for pi's skills under where pi
-/// keeps them, as `FIND` looks in a plugin.
 const PI_DEPTH: usize = 6;
 
-/// The most bytes of a file the finder reads for its frontmatter.
 const FRONT_BYTES: u64 = 64 * 1024;
 
-/// Where pi finds skills: in a folder of its own, as `.pi/skills`, where a
-/// `.md` at the top is a skill too, or in an Agent Skills folder, as
-/// `.agents/skills`, where one below the top is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kept {
     Pi,
     Agents,
 }
 
-/// The skills `cwd` can run in pi, where pi 1.5 finds them, nearest first: in
-/// `.pi/skills` of the directory, in `.agents/skills` of it and of each one
-/// above it up to its repository's top, or up to `/` outside of one, in
-/// `skills` of `agent`, pi's own folder of yours, and in `.agents/skills` of
-/// `home`. A folder with a `SKILL.md` is a skill, named for the folder, and
-/// holds no other. A skill goes by the name its frontmatter gives it, or else
-/// by its folder's, and one that says nothing of what it does is none. pi
-/// loads the directory's own only once you trust it, which it asks as it
-/// starts. The skills your settings or pi's packages name are not where the
-/// finder looks, nor does it leave out what an ignore file does.
 fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill> {
     let ours = home.map(|home| home.join(".agents").join("skills"));
     let mut places = vec![(cwd.join(".pi").join("skills"), Kept::Pi)];
@@ -275,11 +198,6 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
     listed(found)
 }
 
-/// Adds the skills in `dir`, of `root`, `depth` folders under it, to `files`,
-/// as pi finds them: its `SKILL.md` alone where it has one, or else a `.md`
-/// where `kept` takes one at that depth, and the skills of each folder in it
-/// but those whose names start with a `.` and `node_modules`. A link is what
-/// it links to. In order of their names, as a folder lists them in no order.
 fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Vec<PathBuf>) {
     let Ok(listed) = fs::read_dir(dir) else {
         return;
@@ -308,8 +226,6 @@ fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Ve
     }
 }
 
-/// The frontmatter `file` starts with, as `FIND` prints one: up to its 64th
-/// line. None for a file with none, or that cannot be read.
 fn frontmatter(file: &Path) -> Option<String> {
     let mut text = String::new();
     File::open(file).ok()?.take(FRONT_BYTES).read_to_string(&mut text).ok()?;
@@ -322,12 +238,6 @@ fn frontmatter(file: &Path) -> Option<String> {
     Some(front.join("\n"))
 }
 
-/// A skill, a command or a workflow of yours, or of a directory's, by its
-/// path in its `.claude`, and what it says of itself in `text`: its name, and
-/// what the menu reads of it. A skill is named for its directory, as
-/// `skills/<name>/SKILL.md`, and a command for its file, as
-/// `commands/<name>.md`. A workflow, `workflows/<file>.js`, goes by the name
-/// its `meta` gives it, or else by its file's.
 fn own(path: &str, text: &str) -> Option<(String, Front)> {
     let workflow = path.strip_prefix("workflows/").and_then(|path| path.strip_suffix(".js"));
     if let Some(file) = workflow.filter(|file| one_name(file)) {
@@ -341,19 +251,14 @@ fn own(path: &str, text: &str) -> Option<(String, Front)> {
     Some((name.to_owned(), Front::read(text)))
 }
 
-/// The name of a command, by its path in what holds it: `commands/<name>.md`.
 fn command(path: &str) -> Option<&str> {
     path.strip_prefix("commands/")?.strip_suffix(".md").filter(|name| one_name(name))
 }
 
-/// Whether `name` is the name of one file or directory, and not a path.
 fn one_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/')
 }
 
-/// A plugin as `claude plugin list --json` lists it, once for each place it
-/// is installed in. A list with no `enabled` or `installPath` is one luneta
-/// cannot read, and no plugin of it is on: rather than every plugin off.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Installed {
@@ -362,18 +267,11 @@ struct Installed {
     install_path: String,
 }
 
-/// A plugin that is on: its name, which is its id up to the `@` of its
-/// marketplace, and where in it it keeps its skills: `skills`, and the paths
-/// its manifest names besides, each a skill's own directory or one that holds
-/// skills.
 struct Plugin {
     name: String,
     keeps: Vec<String>,
 }
 
-/// Each plugin that is on, by its install path. `claude` missing lists none,
-/// and so does a list luneta cannot read: Claude Code changed how it lists
-/// them, and the finder must follow.
 fn plugins_on(listed: &str) -> HashMap<String, Plugin> {
     let Ok(installed) = serde_json::from_str::<Vec<Installed>>(listed) else {
         return HashMap::new();
@@ -389,8 +287,6 @@ fn plugins_on(listed: &str) -> HashMap<String, Plugin> {
 }
 
 impl Plugin {
-    /// Takes up where the plugin's manifest says it keeps skills: a path,
-    /// or a list of them, under `skills`.
     fn keeps(&mut self, manifest: &str) {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(manifest) else {
             return;
@@ -405,9 +301,6 @@ impl Plugin {
         self.keeps.extend(paths.into_iter().map(|path| bare(path).to_owned()));
     }
 
-    /// The name a skill or a command at `path` in the plugin runs as, if it
-    /// is one: a `SKILL.md` where the plugin keeps skills, or a `.md` in
-    /// `commands`.
     fn name(&self, path: &str) -> Option<String> {
         if let Some(command) = command(path) {
             return Some(format!("{}:{command}", self.name));
@@ -419,8 +312,6 @@ impl Plugin {
     }
 }
 
-/// A path as a manifest names it, as `FIND` prints one in the plugin:
-/// without a `./` at its start or a `/` at its end.
 fn bare(path: &str) -> &str {
     let mut path = path.trim_end_matches('/');
     while let Some(rest) = path.strip_prefix("./") {
@@ -429,21 +320,14 @@ fn bare(path: &str) -> &str {
     path
 }
 
-/// What the menu reads of a frontmatter.
 struct Front {
-    /// The name it gives, which pi goes by, and Claude Code does not.
     name: Option<String>,
     description: String,
-    /// False for a skill that says `user-invocable: false`: Claude Code runs
-    /// it, but no slash command does.
     invocable: bool,
     runs: Runs,
 }
 
 impl Front {
-    /// The YAML of a frontmatter, read as far as the menu needs: a key's
-    /// value on its line, quoted or not, and the lines indented under it, as
-    /// a block scalar or a plain one runs on, joined by spaces.
     fn read(front: &str) -> Self {
         let mut read = Front {
             name: None,
@@ -480,14 +364,10 @@ impl Front {
     }
 }
 
-/// Whether Claude Code takes a frontmatter's value for true.
 fn truthy(value: &str) -> bool {
     ["1", "true", "yes", "on"].contains(&value.to_ascii_lowercase().as_str())
 }
 
-/// The string `key` has in a workflow's `meta`: the first line that starts
-/// with the key, and the literal after its colon, in quotes of any kind that
-/// JavaScript takes. None for a key with no literal on its line.
 fn meta(meta: &str, key: &str) -> Option<String> {
     meta.lines().find_map(|line| {
         let value = line.trim_start().strip_prefix(key)?.trim_start().strip_prefix(':')?;
@@ -495,9 +375,6 @@ fn meta(meta: &str, key: &str) -> Option<String> {
     })
 }
 
-/// The JavaScript string literal `text` starts with, what its backslashes
-/// escape taken as the characters they stand for, and a line break as a
-/// space. None for text that starts with none, or ends before it does.
 fn literal(text: &str) -> Option<String> {
     let mut chars = text.chars();
     let quote = chars.next().filter(|quote| matches!(quote, '\'' | '"' | '`'))?;
@@ -515,7 +392,6 @@ fn literal(text: &str) -> Option<String> {
     None
 }
 
-/// A YAML scalar with its quotes taken off, and what they escape.
 fn unquote(value: &str) -> String {
     let quoted = |quote: char| {
         value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
@@ -539,8 +415,6 @@ mod tests {
         Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
     }
 
-    /// What `FIND` prints: the plugins, then where, the path and the
-    /// frontmatter of each skill.
     fn printed(plugins: &str, skills: &[(&str, &str, &str)]) -> Vec<u8> {
         let mut printed = format!("{plugins}\0");
         for (at, path, front) in skills {
@@ -566,10 +440,6 @@ mod tests {
 
     const REVIEW: &str = "/c/plugins/review/1.0.0";
 
-    /// A skill is named for its directory and a command for its file, and a
-    /// plugin's for its plugin too, while the plugin is on. The first of two
-    /// skills of a name is the one nearest the directory, and one not for you
-    /// to run is left out.
     #[test]
     fn the_finder_names_each_skill_as_a_slash_command_runs_it() {
         let stdout = printed(
@@ -595,8 +465,6 @@ mod tests {
                 skill("tigerstyle", "Apply TigerStyle."),
             ]
         );
-        // `claude` missing, or saying what luneta cannot read: no plugin is
-        // on, and your own skills are still found.
         let stdout = printed(
             "",
             &[(REVIEW, "skills/deep/SKILL.md", ""), ("", "skills/tdd/SKILL.md", "")],
@@ -604,9 +472,6 @@ mod tests {
         assert_eq!(found(&stdout), [skill("tdd", "")]);
     }
 
-    /// A skill named what no slash command runs is left out, rather than
-    /// named some other way: the first word of a prompt is the skill it runs,
-    /// so a name with a space in it would run another, and no name runs none.
     #[test]
     fn a_skill_no_slash_command_runs_is_left_out() {
         let stdout = printed(
@@ -622,10 +487,6 @@ mod tests {
         assert_eq!(found(&stdout), [skill("one-word", "")]);
     }
 
-    /// A plugin keeps its skills in `skills`, and where its manifest says
-    /// besides: a skill's own directory, or one that holds skills, whether
-    /// the manifest comes before them or after. A `SKILL.md` anywhere else in
-    /// it is no skill of the plugin's.
     #[test]
     fn a_plugin_s_skills_are_where_its_manifest_says() {
         let stdout = printed(
@@ -682,8 +543,6 @@ mod tests {
         assert_eq!(tabbed, [skill("t", "a b")]);
     }
 
-    /// A workflow goes by the name its `meta` gives it, which Claude Code
-    /// runs it by, and says what it does in a string of any quotes.
     #[test]
     fn a_workflow_goes_by_the_name_its_meta_gives_it() {
         let meta = r#"export const meta = {
@@ -709,10 +568,6 @@ mod tests {
         );
     }
 
-    /// The finder runs on a directory of skills of its own: yours are left
-    /// out by a `CLAUDE_CONFIG_DIR` with none, and the plugins by a `PATH`
-    /// with no `claude` on it.
-    /// Writes `text` to `file` in `root`, and the folders it is in.
     fn put(root: &Path, file: &str, text: &str) {
         let path = root.join(file);
         let made = path.parent().map_or(Ok(()), std::fs::create_dir_all);
@@ -723,15 +578,6 @@ mod tests {
         Skill { runs: Runs::OnlyForYou, ..skill(name, description) }
     }
 
-    /// pi's skills are where pi finds them: the directory's own `.pi/skills`,
-    /// `.agents/skills` of it and of each one above it up to its repository's
-    /// top, yours in pi's folder and in `~/.agents/skills`, the nearest of a
-    /// name first. A folder with a `SKILL.md` holds no other skill; a `.md` is
-    /// a skill at the top of pi's folders and below the top of the Agent
-    /// Skills ones, named for the folder it is in, as pi names it. A skill
-    /// goes by the name its frontmatter gives first, and one that says
-    /// nothing of what it does is none, nor is what is in a folder
-    /// whose name starts with a `.`, or in `node_modules`.
     #[test]
     fn the_finder_finds_what_pi_runs_where_pi_finds_it() {
         let Ok(scratch) = tempfile::tempdir() else {
@@ -770,8 +616,6 @@ mod tests {
         ]);
     }
 
-    /// Outside of a repository, the finder looks up to `/`; without a home,
-    /// only where the directory is.
     #[test]
     fn outside_a_repository_pi_s_skills_are_found_up_to_the_root() {
         let Ok(scratch) = tempfile::tempdir() else {
@@ -812,15 +656,6 @@ mod tests {
         assert_eq!(found(&said.stdout), [skill("near", "Near.")]);
     }
 
-    /// What the finder finds in `LUNETA_SKILLS_DIR`, or in this directory,
-    /// against the slash commands Claude Code says it has there, in the
-    /// `init` that `claude -p` prints first. Each skill the finder names is
-    /// one of them, and each of them is one the finder found, but for those
-    /// Claude Code brings itself, which the menu leaves out: what it has with
-    /// none of your settings, skills or plugins, in a directory of none, and
-    /// the skills it brings from claude.ai, in the namespaces it keeps for
-    /// them. The finder looks where Claude Code looks, as far as luneta knows,
-    /// and only this says when a Claude Code looks elsewhere.
     #[test]
     #[ignore = "starts `claude`: run it with `dev skills [dir]`"]
     fn the_finder_finds_what_claude_code_runs() {
@@ -828,10 +663,6 @@ mod tests {
         use std::path::Path;
         use std::process::Stdio;
 
-        /// The slash commands of the `init` of `claude -p` in `dir`, with
-        /// `args`, on a model that is none, so that nothing reaches one. Out
-        /// of the panes luneta places agents in, and of a Claude Code
-        /// session this may run in, but for where yours keeps its config.
         fn commands(dir: &Path, args: &[&str]) -> BTreeSet<String> {
             let mut claude = Command::new("claude");
             for (key, _) in std::env::vars() {

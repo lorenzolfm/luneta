@@ -1,0 +1,7 @@
+id: no-toml-comments
+valid:
+  - 'key = "# a"'
+  - "key = '# a'"
+invalid:
+  - "# a\nkey = 1"
+  - "key = 1 # a"

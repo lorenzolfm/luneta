@@ -1,5 +1,3 @@
-//! A pane's pseudoterminal, and the program that runs on it.
-
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
@@ -18,35 +16,20 @@ use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
 use crate::asked::{Opens, Runs, Size};
 use crate::process::Group;
 
-/// What names the session of a pane, by its id, in the variables of what runs
-/// in it: as `lunetad`'s `mux::own` reads it.
 pub const SESSION_VAR: &str = "LUNETA_MUX_SESSION";
 
-/// What says when the session of a pane was made, in nanoseconds since the
-/// epoch, in the variables of what runs in it.
 pub const MADE_VAR: &str = "LUNETA_MUX_MADE";
 
-/// What names a pane, by its id, in the variables of what runs in it.
 pub const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
-/// The variables zellij gives what runs in its panes, which a server started
-/// in one of them would pass on to its own: `lunetad` takes them over this
-/// server's, so a pane of its with them would be taken for zellij's.
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
-/// The terminal the server says it is, to what runs in its panes.
 const TERM: &str = "xterm-256color";
 
-/// The most files macOS lets a process say it may open (`OPEN_MAX`), where
-/// it refuses a limit of no bound.
 const OPEN_MAX: u64 = 10_240;
 
-/// The limit of open files the server started with, where it raised it: what
-/// the programs of its panes get back.
 static FILES_FOUND: OnceLock<Rlimit> = OnceLock::new();
 
-/// Raises the server's limit of open files as far as it may go, as each pane
-/// holds four.
 pub fn raise_files_limit() -> io::Result<()> {
     let found = rustix::process::getrlimit(Resource::Nofile);
     let most = if cfg!(target_os = "macos") {
@@ -67,16 +50,12 @@ pub fn raise_files_limit() -> io::Result<()> {
     Ok(())
 }
 
-/// A pseudoterminal: the end the server reads and writes, and the end the
-/// program has, which the server holds open too, so that what the program
-/// writes as it ends is still there to read.
 pub struct Pty {
     pub near: File,
     far: OwnedFd,
 }
 
 impl Pty {
-    /// A pseudoterminal of `size`, its near end not blocking.
     pub fn opened(size: Size) -> io::Result<Pty> {
         let near = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
         rustix::pty::grantpt(&near)?;
@@ -96,7 +75,6 @@ impl Pty {
         Ok(pty)
     }
 
-    /// Tells the program its terminal is now `size`.
     pub fn resize(&self, size: Size) -> io::Result<()> {
         let size = Winsize {
             ws_row: size.rows.get(),
@@ -107,28 +85,19 @@ impl Pty {
         Ok(termios::tcsetwinsize(&self.near, size)?)
     }
 
-    /// The process group in front of the terminal, as its near end says it:
-    /// the far end says it only to a process whose terminal it is. None where
-    /// none is, as once the program and all it started are gone.
     pub fn front_group(&self) -> Option<Group> {
         let group = termios::tcgetpgrp(&self.near).ok()?;
         u32::try_from(group.as_raw_nonzero().get()).ok().map(Group)
     }
 
-    /// How the terminal takes keys: a line at a time, as the kernel edits
-    /// it, or else a key at a time, and with the echo on or off.
     pub fn modes(&self) -> io::Result<Modes> {
         Modes::of(&self.far)
     }
 
-    /// The terminal's device number.
     pub fn device(&self) -> io::Result<u64> {
         Ok(device_of(&self.far)?)
     }
 
-    /// Starts what `opens` runs on the far end, in a session of its own whose
-    /// terminal it is, with `vars` set among the server's own variables, and
-    /// zellij's left out.
     pub fn spawned(&self, opens: &Opens, vars: &[(&str, String)]) -> io::Result<Child> {
         let mut command = match &opens.runs {
             Runs::Shell => {
@@ -154,16 +123,13 @@ impl Pty {
     }
 }
 
-/// How a terminal takes keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Modes {
-    /// A line at a time, as the kernel edits it, or else a key at a time.
     pub lines: bool,
     pub echo: bool,
 }
 
 impl Modes {
-    /// How `terminal` takes keys.
     pub fn of(terminal: impl AsFd) -> io::Result<Modes> {
         let modes = termios::tcgetattr(terminal)?.local_modes;
         let (lines, echo) = (modes.contains(LocalModes::ICANON), modes.contains(LocalModes::ECHO));
@@ -171,28 +137,19 @@ impl Modes {
     }
 }
 
-/// The device number of the terminal `terminal`.
 #[cfg(target_os = "linux")]
 pub fn device_of(terminal: impl AsFd) -> rustix::io::Result<u64> {
     Ok(rustix::fs::fstat(terminal)?.st_rdev)
 }
 
-/// The device number of the terminal `terminal`, as `proc_pidinfo` gives a
-/// process's: its bits, unsigned.
 #[cfg(target_os = "macos")]
 pub fn device_of(terminal: impl AsFd) -> rustix::io::Result<u64> {
     Ok(u64::from(rustix::fs::fstat(terminal)?.st_rdev.cast_unsigned()))
 }
 
-/// Has `command` lead a session of its own, whose terminal is its stdin,
-/// with the limit of open files the server started with.
 #[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
 fn leads(command: &mut Command) -> &mut Command {
     let files = FILES_FOUND.get().copied();
-    // SAFETY: the closure runs in the child, between its fork and its exec,
-    // where only what a signal handler may do is safe: `setsid`, the ioctl
-    // and `setrlimit` are system calls alone, and their errors hold no
-    // memory. Stdin is open there, as std set it up before the closure runs.
     unsafe {
         command.pre_exec(move || {
             rustix::process::setsid()?;

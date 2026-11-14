@@ -1,10 +1,3 @@
-//! The protocol, as `proto/luneta/v1/daemon.proto` defines it: its messages,
-//! which `luneta-protocol` writes out, and the service, which
-//! tonic-prost-build writes out here on top of them.
-
-// The code is generated, and reads as tonic-prost-build writes it: with the
-// `#[allow]`s of its own that the workspace's lints would have spelled
-// `#[expect]`, and with a reason.
 #![allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,

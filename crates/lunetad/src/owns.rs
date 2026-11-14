@@ -1,9 +1,3 @@
-//! The own sessions, of luneta's own multiplexer, as their server lists them,
-//! with their panes and clients. The server says each change as it makes it,
-//! so the daemon follows its `Watch` and asks it nothing on a sweep. While no
-//! server runs, the daemon waits for its socket to turn up in luneta's
-//! runtime folder.
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,12 +13,6 @@ use crate::mux::own::server::{self, Listing, SOCKET};
 use crate::panes;
 use crate::watch::{self, Troubles};
 
-/// Has the core told the own sessions as their server lists them, and again
-/// each time they change, in a thread of its own, and says on `running`
-/// whether one runs. Where no server runs, or once it ends, the core hears
-/// that none does, and the thread waits for a server's socket to turn up in
-/// its folder, or for a `sweep` to pass, which is all it has where the folder
-/// cannot be watched. The thread ends once the core has.
 pub fn follow(
     core: SyncSender<Command>,
     running: Arc<AtomicBool>,
@@ -77,15 +65,10 @@ pub fn follow(
     Ok(())
 }
 
-/// Whether a change at `path`, in luneta's runtime folder, can be the
-/// server's socket coming or going.
 fn is_socket(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == SOCKET)
 }
 
-/// The own sessions `listed`, as the core keeps them: their terminals, as
-/// the daemon reads a session's panes. One whose panes do not read is left
-/// out, and `troubles` says why.
 fn owns(listed: Vec<Listing>, troubles: &mut Troubles) -> Vec<core::Own> {
     let own = |Listing { id, made, name, laid, clients, doings }: Listing| {
         match panes::terminals(laid) {

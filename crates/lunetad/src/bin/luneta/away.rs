@@ -1,9 +1,3 @@
-//! What luneta has zellij do on another machine, where its client runs
-//! through ssh: it asks the daemon it watches, which hands each question on
-//! to that machine's, through the bridge it watches the machine on. Each
-//! question waits on a runtime of its own, on the thread that asks it, as
-//! luneta's threads for zellij's actions are none of tokio's.
-
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::pin;
@@ -48,32 +42,20 @@ use crate::agents::Harness;
 use crate::daemon;
 use crate::zellij::Starts;
 
-/// How long luneta waits for an answer on a thread of its own: the daemon
-/// answers in 5 seconds, or says it did not, and a connection that stalls
-/// says nothing at all.
 pub const ANSWER: Duration = Duration::from_secs(6);
 
-/// How long luneta waits for an answer that its screen waits on: a machine
-/// on the same network answers in milliseconds.
 pub const QUICK: Duration = Duration::from_secs(1);
 
-/// How long an image takes before luneta says it is on its way: a machine
-/// on the same network takes even a large one in less.
 const SLOW: Duration = Duration::from_secs(1);
 
-/// The daemon of a machine, through the daemon luneta watches.
 pub struct Away {
     runtime: Runtime,
     daemon: DaemonClient<Channel>,
     on: Destination,
-    /// How long it waits for each answer.
     patience: Duration,
 }
 
 impl Away {
-    /// The daemon of `destination`, through the one luneta watches, waited
-    /// on for `patience` for each answer; or why luneta does not reach that
-    /// one.
     pub fn reach(destination: &Destination, patience: Duration) -> Result<Away, String> {
         let folder = lunetad::folder::find()
             .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
@@ -81,7 +63,6 @@ impl Away {
             .enable_all()
             .build()
             .map_err(|error| format!("no runtime: {error}"))?;
-        // A timer is made within a runtime, which it needs.
         let reached = daemon::running(&folder);
         let daemon = match runtime.block_on(async { tokio::time::timeout(patience, reached).await }) {
             Ok(reached) => reached?,
@@ -90,8 +71,6 @@ impl Away {
         Ok(Away { runtime, daemon, on: destination.clone(), patience })
     }
 
-    /// Has zellij there take the client that last typed in the session `at`
-    /// to the pane `pane` of `to`, or to `to` alone, or says why it did not.
     pub fn go(
         &mut self,
         at: &SessionName,
@@ -103,11 +82,6 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.go(request).await })
     }
 
-    /// The name a session luneta makes there takes, that starts as `starts`
-    /// says, as `lunetad::names::free_at` names it there, with the time just
-    /// before it read which names zellij there has, by that machine's clock,
-    /// and the directory it named it for, as `named_by` reads them; or why it
-    /// takes none.
     pub fn name(
         &mut self,
         starts: &Starts,
@@ -118,11 +92,6 @@ impl Away {
         named_by(&self.on, starts, named)
     }
 
-    /// The time just before zellij there read which names it has, by that
-    /// machine's clock, where it would make a session called `to` now, as
-    /// `lunetad::names::unused` says there; or why it would make none. Every
-    /// daemon that answers this says when: an answer without the time is of
-    /// one that did not do what its answer says, and is refused.
     pub fn check(&mut self, to: &SessionName) -> Result<SystemTime, String> {
         let request = CheckNameRequest { on: Some(self.on()), name: to.to_string() };
         let checked = self.ask(|mut daemon| async move { daemon.check_name(request).await })?;
@@ -131,10 +100,6 @@ impl Away {
         SystemTime::try_from(at).map_err(|why| format!("{on}: lunetad checked {to} at {why}"))
     }
 
-    /// The directories zoxide knows there, best first, each with the name a
-    /// session luneta makes there takes now, as `lunetad::zoxide::visited_free`
-    /// names them there, as `dirs_of` reads them; or why it did not list them.
-    /// How many `dirs_of` left out goes in the log.
     pub fn dirs(&mut self) -> Result<Vec<Dir>, String> {
         let request = ListDirsRequest { on: Some(self.on()) };
         let listed = self.ask(|mut daemon| async move { daemon.list_dirs(request).await })?;
@@ -148,18 +113,12 @@ impl Away {
         Ok(dirs)
     }
 
-    /// What is in the directory `dir` there, as `lunetad::eza::listed` lists
-    /// it there, or why eza did not.
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
         let request = ListContentsRequest { on: Some(self.on()), dir: dir.to_string() };
         let listed = self.ask(|mut daemon| async move { daemon.list_contents(request).await })?;
         Ok(listed.listed)
     }
 
-    /// The screen of the terminal `pane` of `session` there, or of the one a
-    /// client coming there would be on, where it asks of none, as
-    /// `lunetad::screens::dumped` dumps it there: the terminal, and its
-    /// lines; or why zellij did not dump it.
     pub fn screen(
         &mut self,
         session: &SessionName,
@@ -170,26 +129,18 @@ impl Away {
         Ok((dumped.pane, dumped.screen))
     }
 
-    /// The clients of `session` there, as zellij lists them now, or why it
-    /// does not.
     pub fn clients(&mut self, session: &str) -> Result<Vec<Client>, String> {
         let request = ListClientsRequest { on: Some(self.on()), session: session.to_owned() };
         let listed = self.ask(|mut daemon| async move { daemon.list_clients(request).await })?;
         Ok(listed.clients)
     }
 
-    /// What became there of the session of a client that ended in one of
-    /// `seats`, and the session it goes on in, as `lunetad::moves::refuge`
-    /// finds them there; or why the daemon there did not say.
     pub fn refuge(&mut self, seats: &[SessionName]) -> Result<RefugeResponse, String> {
         let seats = seats.iter().map(SessionName::to_string).collect();
         let request = RefugeRequest { on: Some(self.on()), seats };
         self.ask(|mut daemon| async move { daemon.refuge(request).await })
     }
 
-    /// Has zellij there open `open`, as `lunetad::opens::opening` does, and
-    /// says which terminal it opened, and what it left as it was, each of
-    /// the machine's, or why it opened nothing.
     pub fn open(&mut self, open: &Open) -> Result<Opened, String> {
         let request = open.asked(Some(self.on()));
         let opened = self.ask(|mut daemon| async move { daemon.open(request).await })?;
@@ -198,9 +149,6 @@ impl Away {
         Ok(Opened { terminal: opened.terminal, notes })
     }
 
-    /// The skills `dir` there can run in `harness`, as
-    /// `lunetad::skills::found_in` finds them, or why it found none. One of a
-    /// name no prompt runs, as a newer daemon's could be, is left out.
     pub fn skills(&mut self, dir: &str, harness: Harness) -> Result<Vec<Skill>, String> {
         let harness = Some(harness.to_api().into());
         let request = ListSkillsRequest { on: Some(self.on()), dir: dir.to_owned(), harness };
@@ -212,9 +160,6 @@ impl Away {
         Ok(listed.skills.into_iter().filter_map(skill).collect())
     }
 
-    /// Has zellij there dump the terminal `pane` of `session`, and keeps
-    /// what it printed after the line `typed` was last typed on, there, as
-    /// `lunetad::printed::kept_after` does, or says why it kept nothing.
     pub fn printed(
         &mut self,
         session: &SessionName,
@@ -242,9 +187,6 @@ impl Away {
         }
     }
 
-    /// The checks of the pull request of `page`, as gh says them there, with
-    /// the log of each that failed kept there, as
-    /// `lunetad::checks::kept_failing` keeps them, or why it found none.
     pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
         let request = KeepChecksRequest { on: Some(self.on()), url: page.url().to_owned() };
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
@@ -274,8 +216,6 @@ impl Away {
         Ok(Failing { head: answer.head, failed, pending: answer.pending, passed: answer.passed })
     }
 
-    /// What closing the terminal `pane` of `session` there closes, as
-    /// `lunetad::closes::closes_now` says there, or why it closes nothing.
     pub fn closes(&mut self, session: &SessionName, pane: u32) -> Result<Closes, String> {
         let request = ClosesRequest { on: Some(self.on()), session: session.to_string(), pane };
         let answer = self.ask(|mut daemon| async move { daemon.closes(request).await })?;
@@ -293,8 +233,6 @@ impl Away {
         }
     }
 
-    /// Has zellij there close `close` of `session`, as
-    /// `lunetad::closes::closed` does there, or says why it did not.
     pub fn close(
         &mut self,
         session: &SessionName,
@@ -305,8 +243,6 @@ impl Away {
         self.ask(|mut daemon| async move { daemon.close(request).await })
     }
 
-    /// The tabs of `session` there other than that of its terminal `pane`, as
-    /// `lunetad::turns::other_tabs` says there, or why it does not say.
     pub fn other_tabs(
         &mut self,
         session: &SessionName,
@@ -318,9 +254,6 @@ impl Away {
         Ok(listed.tabs.into_iter().map(tab).collect())
     }
 
-    /// Has zellij there turn the terminal `pane` of `session` into a tab, as
-    /// `lunetad::turns::into_tab` does there, and says what came of it, or why
-    /// it did not.
     pub fn turn_into_tab(
         &mut self,
         session: &SessionName,
@@ -337,10 +270,6 @@ impl Away {
         }
     }
 
-    /// Has zellij there turn the panes of the tab of the terminal `pane` of
-    /// `session` into panes of the tab of the terminal `beside`, as
-    /// `lunetad::turns::into_panes` does there, and says what came of it where
-    /// any moved, or why none did.
     pub fn turn_into_panes(
         &mut self,
         session: &SessionName,
@@ -362,8 +291,6 @@ impl Away {
         }
     }
 
-    /// Why a turn's answer says nothing this luneta knows: whatever came of it
-    /// there, it cannot say.
     fn unread_turn(&self) -> String {
         format!(
             "{}: its lunetad says what came of turning the pane in words this luneta cannot read, \
@@ -372,18 +299,12 @@ impl Away {
         )
     }
 
-    /// Has the multiplexer there kill `session`, the one `whose` says, and
-    /// delete it, as `lunetad::closes::Whose::killed` does there, or says why
-    /// it did not.
     pub fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
         let (session, whose) = (session.to_string(), Some(whose.into()));
         let request = KillRequest { on: Some(self.on()), session, whose };
         self.ask(|mut daemon| async move { daemon.kill(request).await })
     }
 
-    /// The sessions zellij keeps to bring back there, which ended, as
-    /// `Zellij::exited` lists them there, as `exited_of` reads them; or why it
-    /// did not list them. How many `exited_of` left out goes in the log.
     pub fn exited(&mut self) -> Result<Vec<Exited>, String> {
         let request = ListExitedRequest { on: Some(self.on()) };
         let listed = self.ask(|mut daemon| async move { daemon.list_exited(request).await })?;
@@ -397,25 +318,17 @@ impl Away {
         Ok(exited)
     }
 
-    /// Has zellij there let go of `session`, one that ended, as
-    /// `lunetad::closes::deleted` does there, or says why it did not.
     pub fn delete(&mut self, session: &SessionName) -> Result<(), String> {
         let request = DeleteExitedRequest { on: Some(self.on()), session: session.to_string() };
         self.ask(|mut daemon| async move { daemon.delete_exited(request).await })
     }
 
-    /// Has zellij there call `session` `to`, as `Mux::renamed`
-    /// does there, or says why it did not.
     pub fn rename(&mut self, session: &SessionName, to: &SessionName) -> Result<(), String> {
         let (session, to) = (session.to_string(), to.to_string());
         let request = RenameSessionRequest { on: Some(self.on()), session, to };
         self.ask(|mut daemon| async move { daemon.rename_session(request).await })
     }
 
-    /// The end of each transcript `reading` reads there, by its session's
-    /// id, as `lunetad::transcripts` reads them there, or why it read none.
-    /// One by an id that names no session, as a newer daemon's could be, is
-    /// left out.
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
         let request = reading.asked(Some(self.on()));
         let answer = self.ask(|mut daemon| async move { daemon.transcript_ends(request).await })?;
@@ -423,13 +336,6 @@ impl Away {
         Ok(answer.ends.into_iter().filter_map(end).collect())
     }
 
-    /// Has Claude Code take the turn `asked` there, as `lunetad::asks` runs
-    /// it there, and hands each step it hears to `hear` as it comes, for as
-    /// long as the turn is `wanted`: none once it is not, as the question
-    /// hangs up then, which gives up the turn there. Or how the turn ended:
-    /// well, or why not, as it did there, or as luneta heard nothing of its
-    /// end by `asks::TURN` and its patience after, by which that daemon ends
-    /// it, or as it heard a step that is none, which it hangs up on too.
     pub fn talk(
         &mut self,
         asked: &Asked,
@@ -441,7 +347,6 @@ impl Away {
         let deadline = Instant::now() + asks::TURN + patience;
         let secs = patience.as_secs_f32();
         self.runtime.block_on(async move {
-            // The daemon answers with the stream as the turn starts.
             let steps = match tokio::time::timeout(patience, daemon.ask(request)).await {
                 Ok(Ok(steps)) => steps.into_inner(),
                 Ok(Err(status)) => return Some(Err(on.said(&status))),
@@ -451,16 +356,11 @@ impl Away {
         })
     }
 
-    /// Where a key of luneta's menu goes for what was `pasted` there, as
-    /// `Pasted::ready_on` asks the daemon there, through the one luneta
-    /// watches, with its patience for each answer.
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), &self.on);
         self.runtime.block_on(pasted.ready_on(daemon, on, patience))
     }
 
-    /// The remotes on GitHub of the repository `dir` is in there, as
-    /// `lunetad::issues::remotes` lists them there, or why it did not.
     pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
         let request = IssueRepositoriesRequest { on: Some(self.on()), dir: dir.to_string() };
         let listed =
@@ -469,11 +369,6 @@ impl Away {
         remotes.collect::<Result<_, _>>().map_err(|why| format!("{}: {why}", self.on))
     }
 
-    /// Has the daemon there write and file `filing`, as `lunetad::issues`
-    /// does there, and says the issue filed, or why there is none, as
-    /// `Unfiled::of` reads it. A question that hangs up does not stop it, so
-    /// one luneta heard no answer to may have filed one, and so may one
-    /// whose answer luneta does not read.
     pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
         let request = filing.asked(Some(self.on()));
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
@@ -484,8 +379,6 @@ impl Away {
         Filed::of(answer).map_err(|why| Unfiled::InDoubt(format!("{}: {why}", self.on)))
     }
 
-    /// What deleting the merged worktrees of the repository `dir` is in there
-    /// deletes, as `prunes::plan` says there; or why it did not say.
     pub fn prunes(&mut self, dir: &Directory) -> Result<Plan, String> {
         let request = prunes::asked(Some(self.on()), dir);
         let (patience, mut daemon) = (self.patience, self.daemon.clone());
@@ -495,10 +388,6 @@ impl Away {
         Ok(answer.into())
     }
 
-    /// Has the repository `dir` is in there planned again, and what would go
-    /// deleted where that is `agreed`, as `prunes::deleted_as_agreed` does there,
-    /// and says what came of that; or why it did not hear. A question that hangs
-    /// up does not stop it.
     pub fn prune(
         &mut self,
         dir: &Directory,
@@ -512,8 +401,6 @@ impl Away {
         prunes::pruned_of(answer)
     }
 
-    /// The one answer of a stream the daemon there answers `asking` with, by
-    /// `patience` for it to start and `late` after that for it to come.
     fn answer_of<T>(
         &mut self,
         late: Duration,
@@ -522,8 +409,6 @@ impl Away {
         self.answer_or_code(late, asking).map_err(|(why, _)| why)
     }
 
-    /// As `answer_of`, with the code of the status the daemon said why with,
-    /// or none, where no answer came.
     fn answer_or_code<T>(
         &mut self,
         late: Duration,
@@ -551,12 +436,6 @@ impl Away {
         })
     }
 
-    /// Has the daemon there keep `png`, as `lunetad::images` does there, and
-    /// says the file's path there, or why it kept none: as it said there, or
-    /// as luneta heard no answer by `images::PATIENCE` and its patience
-    /// after, by which that daemon has given up on it. `slow` hears of an
-    /// image that takes longer than `SLOW`. Short of an answer, the question
-    /// hangs up as the runtime goes, which leaves no file there.
     pub fn keep_image(&mut self, png: Png, slow: impl FnOnce()) -> Result<String, String> {
         let request = png.asked(Some(self.on()));
         let (patience, mut daemon, on) = (self.patience, self.daemon.clone(), &self.on);
@@ -564,8 +443,6 @@ impl Away {
         let minutes = images::PATIENCE.as_secs() / 60;
         self.runtime.block_on(async move {
             let kept = async {
-                // The daemon answers with the stream at once, and the answer
-                // in it once all of the image has come.
                 let answer = tokio::time::timeout(patience, daemon.keep_image(request)).await;
                 let mut answer = match answer {
                     Ok(Ok(answer)) => answer.into_inner(),
@@ -596,8 +473,6 @@ impl Away {
         On { destination: self.on.to_string() }
     }
 
-    /// What the daemon answers `asked`, within its patience, or why it did
-    /// not.
     fn ask<T, F>(&mut self, asked: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, String>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
@@ -605,8 +480,6 @@ impl Away {
         self.answer(asked)?.map_err(|status| self.on.said(&status))
     }
 
-    /// What the daemon answers `asked`, within its patience, or what it
-    /// refused it with, or that it did not answer.
     fn answer<T, F>(
         &mut self,
         asked: impl FnOnce(DaemonClient<Channel>) -> F,
@@ -624,12 +497,6 @@ impl Away {
     }
 }
 
-/// How a turn of the ask box's agent on `on` ended, as the daemon hands on
-/// its `steps`, each of which goes to `hear` as it comes, for as long as the
-/// turn is `wanted`: none once it is not. Or why not: as it ended there, or
-/// as its end had not come by `deadline`, or as a step is none. Short of its
-/// end there, the question hangs up as `steps` goes, which gives up the turn
-/// there.
 async fn heard(
     on: &Destination,
     mut steps: impl Stream<Item = Result<AskResponse, Status>> + Unpin,
@@ -657,13 +524,6 @@ async fn heard(
     }
 }
 
-/// The name the daemon of `on` gives a session in `answer`, that starts as
-/// `starts` says, the time it read zellij's names at there, and the
-/// directory it named it for: no time from a daemon older than that time,
-/// which names the session all the same, as for one to start, and the one
-/// asked from a daemon older than that directory. Or why it names none
-/// zellij would make: one older than a session in the home takes the home
-/// for an empty directory, which is none.
 fn named_by(
     on: &Destination,
     starts: &Starts,
@@ -688,10 +548,6 @@ fn named_by(
     Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok()), dir))
 }
 
-/// The directories in `answer`, in its order: those by an absolute path,
-/// each named for a session zellij would make. Another is none a session
-/// can be made in, as a daemon that did not do what its answer says could
-/// send.
 fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
     let dir = |dir: lunetad::api::list_dirs_response::Dir| {
         let name = SessionName::parse(&dir.name).ok()?;
@@ -700,10 +556,6 @@ fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
     answer.dirs.into_iter().filter_map(dir).collect()
 }
 
-/// The sessions that ended in `answer`, in its order: those by a name zellij
-/// takes, each with how long before zellij listed it it was made. Another
-/// is none zellij would bring back, as a daemon that did not do what its
-/// answer says could send.
 fn exited_of(answer: ListExitedResponse) -> Vec<Exited> {
     let exited = |exited: lunetad::api::list_exited_response::Exited| {
         let name = SessionName::running(&exited.name).ok()?;
@@ -721,25 +573,18 @@ mod tests {
 
     use super::*;
 
-    /// How long a turn there has, in these tests.
     const DEADLINE: Duration = Duration::from_millis(50);
 
-    /// What the daemon hands on of a turn there.
     type Steps = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>>>>;
 
-    /// `steps`, and then the stream's end.
     fn ending(steps: Vec<Result<AskResponse, Status>>) -> Steps {
         Box::pin(tokio_stream::iter(steps))
     }
 
-    /// `steps`, and then nothing more, ever.
     fn stuck(steps: Vec<Result<AskResponse, Status>>) -> Steps {
         Box::pin(tokio_stream::iter(steps).chain(tokio_stream::pending()))
     }
 
-    /// The steps luneta hears of a turn on nixos as the daemon hands on
-    /// `steps`, by a deadline `DEADLINE` off, while the turn is `wanted`, and
-    /// how it ended.
     fn heard_of(steps: Steps, wanted: bool) -> (Vec<Step>, Option<Result<(), String>>) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let on = "nixos".parse().unwrap();
@@ -750,11 +595,6 @@ mod tests {
         (told.into_inner(), ended)
     }
 
-    /// A turn there ends for luneta as the daemon's stream of it does, its
-    /// steps heard as they come: well, or with why not. One whose end has
-    /// not come by its deadline ends with luneta saying so, one with a step
-    /// that is none ends at that step, and one given up ends with nothing
-    /// to say.
     #[test]
     fn a_turn_there_ends_as_its_stream_does_or_by_its_deadline() {
         let said = Step::Said("Looking.".to_owned());
@@ -779,13 +619,6 @@ mod tests {
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
     }
 
-    /// The daemon there names a session to make, and says when it read
-    /// zellij's names there, and which directory it named it for. One older
-    /// than that time says none, and its name stands all the same, as for a
-    /// session to start; one older than that directory names it for the one
-    /// asked. A name zellij would not take is none, as is a directory by no
-    /// absolute path. One older than a session in the home calls one there
-    /// invalid, and luneta says it is older.
     #[test]
     fn a_session_is_named_there_by_a_daemon_old_or_new() {
         let on = "nixos".parse().unwrap();
@@ -825,9 +658,6 @@ mod tests {
         assert_eq!(named_by(&on, &Starts::Home, unreached), Err(said));
     }
 
-    /// The directories another machine's zoxide knows are those of the
-    /// answer, in its order, but for one by no absolute path, or named for a
-    /// session zellij would not make, as one too long for it on any host.
     #[test]
     fn another_machine_s_directories_are_those_a_session_can_be_made_in() {
         let dir = |path: &str, name: &str| lunetad::api::list_dirs_response::Dir {

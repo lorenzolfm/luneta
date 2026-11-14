@@ -1,6 +1,3 @@
-//! `luneta-mux`'s protocol, as `proto/luneta/mux/v1/mux.proto` defines it:
-//! its messages and its client, which tonic-prost-build writes out here.
-
 #![allow(
     clippy::allow_attributes,
     clippy::allow_attributes_without_reason,

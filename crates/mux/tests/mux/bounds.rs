@@ -1,6 +1,3 @@
-//! What the server holds of a pane's program, which a program cannot grow
-//! past its bounds, and what of it a program cannot break.
-
 use std::time::Duration;
 
 use luneta_mux::api;
@@ -11,9 +8,6 @@ use crate::host::{
     watched_until,
 };
 
-/// A program that asks its terminal what it is, over and over, and never
-/// reads the answers, is held back: the server keeps no more of them than
-/// it bounds, however long the program asks.
 #[test]
 fn answers_a_program_never_reads_are_held_to_a_bound() {
     run(async {
@@ -32,8 +26,6 @@ fn answers_a_program_never_reads_are_held_to_a_bound() {
     });
 }
 
-/// A program that says it works in a folder whose name is not UTF-8 keeps
-/// its tab, and goes on.
 #[test]
 fn a_folder_named_in_no_utf_8_breaks_no_pane() {
     run(async {
@@ -55,9 +47,6 @@ fn a_folder_named_in_no_utf_8_breaks_no_pane() {
     });
 }
 
-/// A server started with a limit of 64 open files holds more tabs than they
-/// would, as each pane holds four, and the programs of its panes get the
-/// limit it was started with.
 #[test]
 fn a_server_holds_more_files_than_it_started_with_and_its_programs_get_that_back() {
     run(async {

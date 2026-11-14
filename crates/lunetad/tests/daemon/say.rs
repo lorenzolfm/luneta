@@ -1,7 +1,3 @@
-//! What `luneta say` gives lunetad, for luneta's window to read aloud, as
-//! `Watch` lists it: from a pane, by the name its session has now, from any
-//! machine, and at once.
-
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::net::UnixListener;
@@ -14,13 +10,10 @@ use lunetad::api::{self, Saying};
 use crate::agents::{self, file_for, now_in, process};
 use crate::host::{answered, eventually, folder_in, start, Host, LUNETA};
 
-/// The CLI, run with `args` outside zellij.
 fn luneta(host: &Host, args: &[&str]) -> Output {
     answered(host.vars().command(LUNETA).args(args))
 }
 
-/// How a saying is to be read, what it reads, and whose pane it comes from: the
-/// name the pane knows its session by, the name it has now, and the pane.
 type Read<'a> = (&'static str, &'a str, Option<(&'a str, Option<&'a str>, u32)>);
 
 fn read(saying: &Saying) -> Read<'_> {
@@ -91,8 +84,6 @@ fn what_says_nothing_or_too_much_is_refused() {
     assert_eq!(said(&host.host()), []);
 }
 
-/// A session's name is said too, so it is held to what the text is, and it has
-/// to be one, whatever the variables of the pane say.
 #[test]
 fn a_session_by_what_is_no_name_or_too_long_a_one_is_refused() {
     let host = Host::new();
@@ -111,7 +102,6 @@ fn a_session_by_what_is_no_name_or_too_long_a_one_is_refused() {
     assert_eq!(said(&host.host()), []);
 }
 
-/// An agent goes on in silence: nothing waits for a daemon that may never be.
 #[test]
 fn with_no_lunetad_it_fails_at_once_and_starts_none() {
     let host = Host::new();
@@ -124,10 +114,6 @@ fn with_no_lunetad_it_fails_at_once_and_starts_none() {
     assert!(folder_in(host.runtime.path()).is_none(), "it started a daemon");
 }
 
-/// zellij's variables keep the name a session had as the pane opened, and a
-/// pane needs no agent in it for the daemon to say what that is now. Where it
-/// cannot tell, as of a name no session has held, or that two have, the session
-/// is left unsaid: a pane's id is not unique across them.
 #[test]
 fn what_comes_from_a_pane_goes_by_the_name_its_session_has_now_where_that_can_be_told() {
     let host = agents::Host::new();

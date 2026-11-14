@@ -1,9 +1,3 @@
-//! A pane's thread: the only one that holds its screen, which Ghostty's
-//! emulator does not let another thread touch, and its pseudoterminal. It
-//! reads what the program writes, answers what it asks, writes what the
-//! clients on the pane do, and sends each of them the rows that changed since
-//! the last frame it got.
-
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
@@ -36,68 +30,41 @@ use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
 use crate::screen::{Pushed, Screen, View, Wheel};
 
-/// The scrollback each pane keeps, in bytes.
 const SCROLLBACK_BYTES: usize = 10_000_000;
 
-/// The least time between two frames of a pane: what its program draws in
-/// between goes in the next.
 const FRAME_GAP: Duration = Duration::from_millis(4);
 
-/// The longest a pane holds its frames while its program draws in one go
-/// (mode 2026), as Ghostty holds them: past it, the pane turns the mode off,
-/// as Ghostty does, and frames again.
 const SYNC_HOLD: Duration = Duration::from_secs(1);
 
-/// How soon a pane tries again to send a frame to a client that had no room.
 const OWED_RETRY: Duration = Duration::from_millis(8);
 
-/// The bytes a read takes from the program at most.
 const READ_BYTES: usize = 64 * 1024;
 
-/// The reads a turn of the loop makes at most before it sends frames.
 const READS_PER_TURN: usize = 16;
 
-/// The most messages a pane's queue holds.
 const MESSAGES_MAX: usize = 256;
 
-/// The messages a turn of the loop takes at most before it reads the program.
 const MESSAGES_PER_TURN: usize = 64;
 
-/// The most bytes a pane holds for its program that it has not read yet. A
-/// client's input past them is dropped, and the pane reads no more of the
-/// program until it reads them.
 pub const UNREAD_BYTES_MAX: usize = 1024 * 1024;
 
-/// The most a pane reads of what its program wrote as it ended.
 const LAST_WORDS_BYTES_MAX: usize = 1024 * 1024;
 
-/// How long after it last heard the program a pane looks again at what runs
-/// in front of its terminal: a shell writes as it hands the terminal to a
-/// command, and the command has it a little after.
 const LOOK_AGAIN: Duration = Duration::from_millis(100);
 
-/// How often a pane looks at what runs in front of its terminal while its
-/// shell runs a command, which may come to read the terminal, or to stop,
-/// with no word.
 const LOOK_WHILE_GOING: Duration = Duration::from_secs(1);
 
-/// The rows a turn of the wheel scrolls.
 const WHEEL_ROWS: isize = 3;
 
-/// The messages a client's stream holds.
 pub const CLIENT_MESSAGES: usize = 64;
 
-/// The messages of a client's stream kept for the server's words, which no
-/// frame takes.
 const FOR_WORDS: usize = 8;
 
 const _: () = assert!(FOR_WORDS < CLIENT_MESSAGES);
 const _: () = assert!(MESSAGES_PER_TURN <= MESSAGES_MAX);
 
-/// What goes to a client.
 pub type Out = mpsc::Sender<Result<api::ToClient, Status>>;
 
-/// How a pane's program ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     Code(i32),
@@ -123,8 +90,6 @@ impl Exit {
     }
 }
 
-/// A client on a pane: where its frames go, its size and its terminal's
-/// colours.
 pub struct Viewer {
     pub client: ClientId,
     pub out: Out,
@@ -132,8 +97,6 @@ pub struct Viewer {
     pub colours: Colours,
 }
 
-/// What a pane's thread is asked, in the order it was asked: by the model,
-/// for its clients, and by the clients.
 pub enum ToPane {
     Watch(Viewer),
     Unwatch(ClientId),
@@ -142,8 +105,6 @@ pub enum ToPane {
     Dump(Dumped, oneshot::Sender<Result<String, Status>>),
 }
 
-/// What reaches a pane's thread: its queue, which is bounded, and its hang
-/// up, which is not in the queue, as no full queue may hold it back.
 #[derive(Clone)]
 pub struct Handle {
     to: mpsc::Sender<ToPane>,
@@ -151,11 +112,9 @@ pub struct Handle {
     wake: Wake,
 }
 
-/// A pane's queue had no room.
 #[derive(Debug)]
 pub struct Busy;
 
-/// A place in a pane's queue, held for a message.
 pub struct Reserved {
     permit: OwnedPermit<ToPane>,
     wake: Wake,
@@ -169,17 +128,12 @@ impl Reserved {
 }
 
 impl Handle {
-    /// Sends `message` to the pane once its queue has room: for what a
-    /// client asks, who waits for that.
     pub async fn send(&self, message: ToPane) {
         if self.to.send(message).await.is_ok() {
             self.wake.wake();
         }
     }
 
-    /// A place in the pane's queue, where it has room now: for the model,
-    /// which may not wait under its lock. None where the pane's thread
-    /// ended, which takes no more.
     pub fn reserve(&self) -> Result<Option<Reserved>, Busy> {
         match self.to.clone().try_reserve_owned() {
             Ok(permit) => Ok(Some(Reserved { permit, wake: self.wake.clone() })),
@@ -188,14 +142,12 @@ impl Handle {
         }
     }
 
-    /// Hangs up the pane's program, and ends its thread.
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.wake.wake();
     }
 }
 
-/// What wakes a pane's thread from its poll.
 #[derive(Clone)]
 struct Wake(Arc<UnixStream>);
 
@@ -209,14 +161,11 @@ impl Wake {
     }
 }
 
-/// A started pane: what reaches its thread, and its program's pid.
 pub struct Started {
     pub handle: Handle,
     pub pid: u32,
 }
 
-/// Starts the thread of pane `pane`, with its pseudoterminal `pty`, on which
-/// `child` runs, of `size`.
 pub fn start(
     mux: Arc<Mux>,
     pane: PaneId,
@@ -282,7 +231,6 @@ pub fn start(
     Ok(Started { handle, pid })
 }
 
-/// Waits for pane `pane`'s program to end, and tells the pane how it did.
 fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
     match child.wait() {
         Ok(status) => {
@@ -296,7 +244,6 @@ fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake
     }
 }
 
-/// What a client last got of a pane.
 struct Shown {
     view: View,
     flags: Flags,
@@ -309,23 +256,18 @@ struct Watcher {
     owed: bool,
 }
 
-/// What the program does with a client's input.
 enum Does {
     Write(Vec<u8>),
     Scroll(isize),
     Nothing,
 }
 
-/// The program, as the pane reaches it: by its pseudoterminal, with what it
-/// has yet to read, the clients' input and the screen's answers, until it
-/// ends or is hung up.
 enum Program {
     Runs { pty: Pty, unread: Vec<u8> },
     Gone,
 }
 
 impl Program {
-    /// Whether the program has something to read.
     fn owed(&self) -> bool {
         matches!(self, Program::Runs { unread, .. } if !unread.is_empty())
     }
@@ -344,47 +286,34 @@ struct Thread {
     watchers: Vec<Watcher>,
     dirty: bool,
     framed: Instant,
-    /// Since when the program has held its frames, if it does.
     synced: Option<Instant>,
     title: String,
-    /// What the program last said in OSC 7.
     pwd: String,
-    /// This machine's name, as an OSC 7 names it.
     host: String,
-    /// The program's pid, which leads its session.
     pid: u32,
     shell: Shell,
     looks: Looks,
     told: Told,
 }
 
-/// What the model was last told runs in front, and what the shell said.
 #[derive(Clone, Default, PartialEq)]
 struct Told {
     foreground: Option<api::Foreground>,
     ran: Option<api::Ran>,
 }
 
-/// When a pane looks next at what runs in front of its terminal.
 #[derive(Default)]
 struct Looks {
     due: Option<Instant>,
     last: Option<Instant>,
-    /// Whether the program wrote since the last look.
     heard: bool,
 }
 
 impl Looks {
-    /// A look as the pane starts, at what its program runs: a program that
-    /// writes nothing would have none. Its program has run its own by then,
-    /// as `spawn` returns once it has.
     fn first() -> Looks {
         Looks { due: Some(Instant::now()), last: None, heard: false }
     }
 
-    /// The program wrote: the pane looks now, or `LOOK_AGAIN` after the last
-    /// look, where that is later, and again after that. A look due later
-    /// comes as soon.
     fn heard(&mut self, now: Instant) {
         let soonest = self.last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
         self.due = Some(self.due.map_or(soonest, |due| due.min(soonest)));
@@ -392,8 +321,6 @@ impl Looks {
         self.assert_paced();
     }
 
-    /// The pane looked at `now`, while its shell runs a command where it is
-    /// `going`.
     fn looked(&mut self, now: Instant, going: bool) {
         self.last = Some(now);
         self.due = if std::mem::take(&mut self.heard) {
@@ -406,7 +333,6 @@ impl Looks {
         self.assert_paced();
     }
 
-    /// Asserts that no look is due sooner than `LOOK_AGAIN` after the last.
     fn assert_paced(&self) {
         if let (Some(due), Some(last)) = (self.due, self.last) {
             assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
@@ -452,8 +378,6 @@ impl Thread {
         }
     }
 
-    /// Looks at what runs in front of the terminal, and, while the shell
-    /// runs a command, at what that does.
     fn look(&mut self) {
         let now = Instant::now();
         let Program::Runs { pty, .. } = &self.program else {
@@ -472,8 +396,6 @@ impl Thread {
         self.tell(foreground);
     }
 
-    /// Tells the model what runs in front, `foreground`, and what the shell
-    /// said, where either changed since it was told last.
     fn tell(&mut self, foreground: Option<api::Foreground>) {
         let told = Told { foreground, ran: self.shell.said() };
         if told != self.told {
@@ -482,7 +404,6 @@ impl Thread {
         }
     }
 
-    /// How long the loop waits for the program, a message, or the next look.
     fn timeout(&self) -> Option<Duration> {
         let look = self.looks.due.map(|due| due.saturating_duration_since(Instant::now()));
         match (self.framing(), look) {
@@ -491,7 +412,6 @@ impl Thread {
         }
     }
 
-    /// How long the loop waits for the program or a message, for its frames.
     fn framing(&self) -> Option<Duration> {
         if !self.inbox.is_empty() {
             return Some(Duration::ZERO);
@@ -507,9 +427,6 @@ impl Thread {
         Some(if owed { due.max(OWED_RETRY) } else { due })
     }
 
-    /// Waits for the wake, or the program, and says whether the program can
-    /// be read, can be written, and whether the wake came. The program is
-    /// not read while it has `UNREAD_BYTES_MAX` to read itself.
     fn poll(&self, timeout: Option<Duration>) -> io::Result<(bool, bool, bool)> {
         let wait = timeout.map(|timeout| Timespec {
             tv_sec: timeout.as_secs().try_into().unwrap_or(i64::MAX),
@@ -579,8 +496,6 @@ impl Thread {
         Ok(())
     }
 
-    /// Reads what the program wrote as it ended, shows it, and says whether
-    /// the pane went with the program.
     fn exited(&mut self, exit: Exit) -> io::Result<bool> {
         if let Program::Runs { unread, .. } = &mut self.program {
             unread.clear();
@@ -599,8 +514,6 @@ impl Thread {
         self.watchers.iter_mut().find(|watcher| watcher.viewer.client == client)
     }
 
-    /// Makes the pane the size of `client`, the latest to come to it, resize
-    /// or do anything in it, as tmux's `window-size latest` does.
     fn follow(&mut self, client: ClientId) -> io::Result<()> {
         let Some(size) = self.watcher(client).map(|watcher| watcher.viewer.size) else {
             return Ok(());
@@ -621,9 +534,6 @@ impl Thread {
         Ok(())
     }
 
-    /// Takes `client`'s input, which reaches the program, or scrolls the
-    /// client's view. A client that has left the pane may still type in it,
-    /// where it typed before it left.
     fn input(&mut self, client: ClientId, input: Input) -> io::Result<()> {
         self.follow(client)?;
         if input.types() {
@@ -637,7 +547,6 @@ impl Thread {
         Ok(())
     }
 
-    /// What the program does with `input`.
     fn does(&mut self, input: Input) -> Result<Does, Error> {
         let size = self.screen.size();
         let within = |column, row| size.holds(column, row);
@@ -661,7 +570,6 @@ impl Thread {
         })
     }
 
-    /// Gives the program `bytes` to read, where it runs and has room.
     fn unread_push(&mut self, bytes: &[u8]) {
         let Program::Runs { unread, .. } = &mut self.program else {
             return;
@@ -677,8 +585,6 @@ impl Thread {
         }
     }
 
-    /// Moves `client`'s view `by` rows back into the scrollback, or to the
-    /// bottom where `by` is none.
     fn back(&mut self, client: ClientId, by: Option<isize>) {
         let scrollback = self.screen.scrollback();
         let Some(watcher) = self.watcher(client) else {
@@ -695,8 +601,6 @@ impl Thread {
         }
     }
 
-    /// Reads up to `most` bytes of what the program wrote, as far as it
-    /// wrote, and while it has less than `UNREAD_BYTES_MAX` to read itself.
     fn read(&mut self, most: usize) -> io::Result<()> {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
@@ -759,7 +663,6 @@ impl Thread {
         Ok(())
     }
 
-    /// Writes what the program has yet to read, as much as it takes now.
     fn write(&mut self) -> io::Result<()> {
         let Program::Runs { pty, unread } = &mut self.program else {
             return Ok(());
@@ -783,8 +686,6 @@ impl Thread {
         Ok(())
     }
 
-    /// Sends each client on the pane what changed since its last frame, once
-    /// a frame is due. A client whose stream ended is let go of.
     fn frame(&mut self) -> io::Result<()> {
         self.watchers.retain(|watcher| !watcher.viewer.out.is_closed());
         if self.watchers.is_empty() {
@@ -848,19 +749,14 @@ impl Thread {
     }
 }
 
-/// The process `pid`, as the protocol says what runs in front: none where it
-/// is gone.
 fn foreground(pid: u32) -> Option<api::Foreground> {
     Some(api::Foreground { pid, argv: process::argv(pid)? })
 }
 
-/// This machine's name.
 fn host() -> String {
     rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
-/// The path on this machine, named `host`, that an OSC 7 `said`: none where
-/// it names another machine, or no absolute path in UTF-8.
 fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
     let after = said.strip_prefix("file://")?;
     let (named, path) = after.split_at(after.find('/')?);
@@ -877,9 +773,6 @@ fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path.as_ref())).filter(|path| path.is_absolute())
 }
 
-/// What the program does with a turn of the wheel: a click, where it takes
-/// the mouse, arrow keys, where it asked for them, and else a scroll of the
-/// client's view.
 fn wheeled(
     screen: &mut Screen,
     wheel: Wheel,
@@ -900,7 +793,6 @@ fn wheeled(
     })
 }
 
-/// What the program reads of a turn of the wheel as arrow keys.
 fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
     let key = match wheel {
         Wheel::Up => Key::ArrowUp,
@@ -919,8 +811,6 @@ fn arrows(screen: &mut Screen, wheel: Wheel) -> Result<Vec<u8>, Error> {
 mod tests {
     use super::*;
 
-    /// What the program writes brings a look due later forward, to no
-    /// sooner than `LOOK_AGAIN` after the last, and has another follow it.
     #[test]
     fn what_the_program_writes_brings_a_later_look_forward() {
         let start = Instant::now();
@@ -943,8 +833,6 @@ mod tests {
         assert_eq!(looks.due, None);
     }
 
-    /// An OSC 7 names a folder of this machine's, which it may spell in
-    /// escapes, or a folder of another's, which is none of this one's.
     #[test]
     fn a_cwd_is_one_this_machine_has() {
         let cwd = |said: &str| local_cwd(said, "here");

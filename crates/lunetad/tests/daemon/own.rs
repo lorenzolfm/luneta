@@ -1,8 +1,3 @@
-//! Own sessions, of luneta's own multiplexer, as the daemon makes them and
-//! follows them: on the host with their panes and clients, through the same
-//! questions as zellij's, under names the two share. Each test has the daemon
-//! start the real `luneta-mux`, which the same build puts beside it.
-
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
@@ -33,16 +28,8 @@ use crate::agents;
 use crate::host::{answered, eventually, folder_in, start, Daemon, Host, Running, LUNETA, LUNETAD};
 use crate::sessions::session;
 
-/// What an own pane runs in these tests: a program that waits, and so holds
-/// its tab open, and that the server hangs up as its session goes.
 const WAITS: [&str; 2] = ["sleep", "600"];
 
-/// The own sessions' server, beside the daemon, where the daemon starts it
-/// from: built since each file of its crate and its protocol last changed,
-/// which cargo builds it again for. `dev test` builds it, but a `cargo test -p
-/// lunetad` builds the daemon alone, and would leave the tests a server built
-/// before, or none. A file cargo does not build it of, in its folders, takes
-/// it to be built again all the same, and a test says which.
 pub fn built_server() -> PathBuf {
     let program = Path::new(LUNETAD).with_file_name("luneta-mux");
     let shown = program.display();
@@ -63,8 +50,6 @@ pub fn built_server() -> PathBuf {
     program
 }
 
-/// Adds `path` to `files`, or each file in it and its folders, where it is a
-/// folder.
 fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(path) else {
         files.push(path.to_owned());
@@ -75,8 +60,6 @@ fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// A host whose daemon runs, and the server of own sessions the daemon starts
-/// for it, which goes with the test, whatever becomes of its sessions.
 pub struct Owned {
     pub host: Host,
     daemon: Daemon,
@@ -92,7 +75,6 @@ impl Owned {
         Owned { host, daemon, runtime }
     }
 
-    /// Asks the daemon, as a client does.
     pub fn ask<T, F>(&self, asking: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, Status>
     where
         F: Future<Output = Result<tonic::Response<T>, Status>>,
@@ -104,8 +86,6 @@ impl Owned {
         })
     }
 
-    /// Has the daemon make the own session `name`, in the home, that runs
-    /// `WAITS`.
     pub fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
         let request = NewOwnRequest {
             on: None,
@@ -120,17 +100,14 @@ impl Owned {
         self.host.home.path().to_str().unwrap().to_owned()
     }
 
-    /// The own session `name`, once the host has it.
     pub fn listed(&self, name: &str) -> api::Session {
         eventually(&format!("{name} is on the host"), || session(&self.host.host(), name).cloned())
     }
 
-    /// Where the server listens.
     pub fn socket(&self) -> PathBuf {
         self.host.folder().join(server::SOCKET)
     }
 
-    /// The sessions as their server lists them now.
     pub fn listing(&self) -> Listing {
         let socket = self.socket();
         self.runtime.block_on(async move {
@@ -138,14 +115,10 @@ impl Owned {
         })
     }
 
-    /// A client of the server, attached to the own session the daemon says it
-    /// made.
     pub fn attach(&self, made: &NewOwnResponse) -> Attached {
         self.attach_saying(made, Vec::new())
     }
 
-    /// A client of the server, attached to the own session the daemon says it
-    /// made, that says `said` once there.
     pub fn attach_saying(&self, made: &NewOwnResponse, said: Vec<mux_api::ToServer>) -> Attached {
         let (session, made_at) = (made.session, made.made_at);
         let socket = self.socket();
@@ -179,7 +152,6 @@ impl Owned {
         Attached { client, hang_up: Some(hang_up), attaching: Some(attaching) }
     }
 
-    /// The pid of what the pane `pane` runs, as its server lists it.
     fn pid_of(&self, pane: u32) -> u32 {
         let listing = self.listing();
         let panes = listing.sessions.iter().flat_map(|session| &session.tabs);
@@ -191,7 +163,6 @@ impl Owned {
     }
 }
 
-/// A client of the server, by the id it gave it, which hangs up as it drops.
 pub struct Attached {
     pub client: u64,
     hang_up: Option<tokio::sync::oneshot::Sender<()>>,
@@ -209,7 +180,6 @@ impl Drop for Attached {
     }
 }
 
-/// A client of the server that listens on `socket`.
 async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
     let channel = Endpoint::from_static("http://luneta-mux")
         .connect_with_connector(tower::service_fn(move |_: Uri| {
@@ -224,8 +194,6 @@ async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
     MuxClient::new(channel)
 }
 
-/// The own session `session` is, by its id and when its server made it: none
-/// for zellij's.
 pub fn own(session: &api::Session) -> Option<api::OwnSession> {
     match &session.mux {
         Some(kind::Mux::Own(own)) => {
@@ -237,8 +205,6 @@ pub fn own(session: &api::Session) -> Option<api::OwnSession> {
 }
 
 impl Drop for Owned {
-    /// Ends the server, which hangs up what runs in its panes, where the test
-    /// left it running.
     fn drop(&mut self) {
         let socket = self.socket();
         let listening = self.runtime.block_on(async move {
@@ -251,24 +217,18 @@ impl Drop for Owned {
     }
 }
 
-/// The question that closes `closes` of the own session `own`, named `name`.
 fn close(name: &str, own: api::OwnSession, closes: Closed) -> CloseRequest {
     let session = name.to_owned();
     let whose = Some(close_request::Whose::Own(own));
     CloseRequest { on: None, session, closes: Some(closes), whose }
 }
 
-/// The question that opens a tab in `name` that runs `WAITS`.
 fn tab_in(name: &str, cwd: String) -> OpenRequest {
     let tab = open_request::Tab { name: Some("second".to_owned()), alone_since: None };
     let command = WAITS.map(str::to_owned).to_vec();
     OpenRequest { on: None, session: name.to_owned(), cwd, command, opens: Some(Opens::Tab(tab)) }
 }
 
-/// The daemon makes an own session, starting the server for it, and has it
-/// on the host by its name and its id, with no socket and no time it started
-/// at, which are zellij's: its pane, which works where it was made, and its
-/// clients, none yet.
 #[test]
 fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     let owned = Owned::new();
@@ -298,8 +258,6 @@ fn an_own_session_the_daemon_makes_is_on_the_host_with_its_panes() {
     assert_eq!(listed.clients, Some(api::Clients { clients: Vec::new() }));
 }
 
-/// An own pane's shell needs no hook: the host has what it runs, and what the
-/// marks it writes (OSC 133) say it ran, and how that ended.
 #[test]
 fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
     let owned = Owned::new();
@@ -325,8 +283,6 @@ fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
     assert!(ended.at.is_some() && ended.took.is_some(), "{ended:?}");
 }
 
-/// A shell that marks a command without its line, as bash and zsh do with a
-/// terminal's integration, has the host say that command ended, with no line.
 #[test]
 fn an_own_pane_s_shell_that_marks_no_line_says_its_command_ended() {
     let owned = Owned::new();
@@ -347,9 +303,6 @@ fn an_own_pane_s_shell_that_marks_no_line_says_its_command_ended() {
     assert_eq!(ended.ending, Some(api::shell::ended::Ending::Status(3)));
 }
 
-/// A tab opens in an own session as in zellij's, at its end, and closes as
-/// `Closes` says it does: a tab, by the own session's id. The last closes
-/// the session, which `Closes` says too, and the host lets it go.
 #[test]
 fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
     let owned = Owned::new();
@@ -382,11 +335,6 @@ fn an_own_session_s_tabs_open_and_close_as_zellij_s_do() {
     assert_eq!(closes(made.pane), Some(Closes::Session(())));
 }
 
-/// A rename keeps an own session's id and when it was made, and a kill by its
-/// name, its id and when it was made ends it: the host lets it go, and so does
-/// its server, which held no other. A kill by the name it had stays, and so
-/// does one of another time it was made, as the next server gives its ids
-/// again.
 #[test]
 fn an_own_session_is_renamed_and_killed_by_its_name_id_and_making() {
     let owned = Owned::new();
@@ -417,9 +365,6 @@ fn an_own_session_is_renamed_and_killed_by_its_name_id_and_making() {
     eventually("the server has ended", || (!owned.socket().exists()).then_some(()));
 }
 
-/// The server listens where the daemon reaches it, and one started while
-/// another holds the folder ends as the daemon waits on it to: the server
-/// keeps its own copy of both, as it does not depend on the daemon.
 #[test]
 fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     let host = Host::new();
@@ -434,10 +379,6 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     assert_eq!(second.code(), Some(i32::from(server::ANOTHER_RUNS)));
 }
 
-/// A session made as the server ends, its last session killed, is made all
-/// the same: the daemon waits for that server to go, and starts another. That
-/// one counts its ids from 1 again, and the time it made it tells its session
-/// from the first.
 #[test]
 fn a_session_made_as_the_server_ends_is_made_by_the_next() {
     let owned = Owned::new();
@@ -456,9 +397,6 @@ fn a_session_made_as_the_server_ends_is_made_by_the_next() {
     assert_ne!(now.made_at, was.made_at);
 }
 
-/// zellij's sessions and the own ones share their names: neither makes, nor
-/// renames to, a name a session of either has, and a name an own session has
-/// is no free one.
 #[test]
 fn zellij_s_sessions_and_own_ones_share_their_names() {
     let owned = Owned::new();
@@ -486,8 +424,6 @@ fn zellij_s_sessions_and_own_ones_share_their_names() {
     assert_eq!(owned.host.zellij.renamed(), [] as [String; 0]);
 }
 
-/// A zellij session made by a name an own session has, as zellij checks only
-/// its own, takes the name from both: a question by it goes to neither.
 #[test]
 fn a_name_a_zellij_session_and_an_own_one_share_is_neither_s() {
     let owned = Owned::new();
@@ -506,8 +442,6 @@ fn a_name_a_zellij_session_and_an_own_one_share_is_neither_s() {
     assert!(message.contains("two sessions are named work"), "{message}");
 }
 
-/// The server numbers panes across its sessions, so a pane of one own session
-/// is none of another's, and its screen does not dump by the other's name.
 #[test]
 fn a_pane_of_another_own_session_does_not_dump_by_this_one_s_name() {
     let owned = Owned::new();
@@ -522,9 +456,6 @@ fn a_pane_of_another_own_session_does_not_dump_by_this_one_s_name() {
     assert!(message.contains(&format!("has no pane {}", other.pane)), "{message}");
 }
 
-/// What an own session has no way to do yet is refused as such, and a
-/// question that names it by the id 0, which no session has, or by no time it
-/// was made, is no question.
 #[test]
 fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     let owned = Owned::new();
@@ -561,9 +492,6 @@ fn what_an_own_session_cannot_do_yet_is_refused_as_such() {
     assert_eq!(own(&owned.listed("own")).map(|own| own.id), Some(made.session));
 }
 
-/// A client in an own session goes to no name that no own session has, and
-/// the refusal says why: zellij has it, which the client cannot cross to yet,
-/// or no session has it.
 #[test]
 fn a_client_in_an_own_session_goes_to_no_other_kind_s_name_or_none() {
     let owned = Owned::new();
@@ -585,8 +513,6 @@ fn a_client_in_an_own_session_goes_to_no_other_kind_s_name_or_none() {
     assert!(none.message().contains("no session is named nowhere"), "{none:?}");
 }
 
-/// The screen of an own pane dumps as a zellij pane's does, by the session's
-/// name.
 #[test]
 fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
     let owned = Owned::new();
@@ -606,9 +532,6 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
     assert_eq!(screen.pane, made.pane);
 }
 
-/// A socket no one but root may connect to, until it drops: then as open as
-/// it was, even where a test fails first, for `Owned` to reach the server as
-/// it drops, and end it.
 struct Shut {
     path: PathBuf,
     was: fs::Permissions,
@@ -625,17 +548,12 @@ impl Shut {
 impl Drop for Shut {
     fn drop(&mut self) {
         let opened = fs::set_permissions(&self.path, self.was.clone());
-        // A test failing already says why: a second panic would abort it.
         if !thread::panicking() {
             opened.unwrap();
         }
     }
 }
 
-/// An agent that runs in an own pane is there, as the variables the server
-/// gives what runs in its panes name it: by the session's id and the pane's.
-/// `luneta agents` names it by its session's name, or by its ids where the
-/// server cannot be reached, and says why, but only where the daemon can be.
 #[test]
 fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let owned = Owned::new();
@@ -659,8 +577,6 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     let listed = String::from_utf8(listed.stdout).unwrap();
     assert!(listed.starts_with(&format!("own:{}  busy", made.pane)), "{listed}");
 
-    // A socket luneta may not connect to is a server it cannot reach: to all
-    // but root, which connects whatever the socket's mode.
     let socket = owned.socket();
     let shut = Shut::new(&socket);
     let refused = UnixStream::connect(&socket).map(drop).map_err(|error| error.kind());
@@ -672,8 +588,6 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     assert!(listed.starts_with(&format!("?:{} (own {id})  busy", made.pane)), "{listed}");
     assert!(why.contains("luneta-mux cannot list them"), "{why}");
 
-    // Where the daemon cannot be reached either, its failure is all luneta
-    // says: what luneta-mux could not do is said only beside the agents.
     let daemon = Shut::new(&owned.host.folder().join(lunetad::folder::SOCKET));
     let alone = answered(owned.host.vars().command(LUNETA).arg("agents"));
     drop((daemon, shut));
@@ -684,9 +598,6 @@ fn an_agent_in_an_own_pane_is_there_by_its_ids() {
     assert!(!why.contains("luneta-mux"), "{why}");
 }
 
-/// The daemon runs on while an own session does, however long zellij has had
-/// no session and no client has watched it. The test waits out longer than
-/// the daemon would run on alone.
 pub fn the_daemon_runs_on_while_an_own_session_does() {
     let mut owned = Owned::new();
     owned.make("own").unwrap();

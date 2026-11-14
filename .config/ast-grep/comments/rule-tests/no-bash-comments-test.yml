@@ -1,0 +1,12 @@
+id: no-bash-comments
+valid:
+  - 'echo "# a"'
+  - 'echo "${#a[@]}"'
+  - "echo a#b"
+  - "''\n  #!/bin/sh\n  echo\n''"
+invalid:
+  - "# a\necho"
+  - "echo a # b"
+  - "#!/usr/bin/env bash"
+  - "''\n  echo\n  #!/bin/sh\n''"
+  - "''\n  #! a\n''"

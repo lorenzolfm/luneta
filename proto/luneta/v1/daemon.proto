@@ -1,10 +1,3 @@
-// What lunetad, the daemon of a host, answers. It listens on a Unix socket,
-// `lunetad.sock` in luneta's runtime folder (see `crates/lunetad/src/folder.rs`),
-// and on nothing else.
-//
-// A field is never renumbered or given another type. One that goes away leaves
-// its number `reserved`, so that a client built against an older version reads
-// a newer daemon's answer as it was meant.
 syntax = "proto3";
 
 package luneta.v1;
@@ -14,221 +7,51 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 service Daemon {
-  // Which daemon runs, and since when.
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
-  // The agents that run on the host, each as it stands now.
   rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
-  // The host as it stands: its zellij sessions, their panes and clients, what
-  // the shell in each pane says through luneta's hook, how the work trees
-  // those panes are in stand, the pull requests of the branches checked out
-  // there, and its agents. It answers at once when the
-  // host is no longer as the client last saw it, and otherwise as soon as the
-  // host changes, or after four seconds with the host as it was.
   rpc Watch(WatchRequest) returns (Host);
-  // Has zellij take the client that last typed in a session to another
-  // session, or to a pane, as `zellij action switch-session` and
-  // `focus-pane-id` do. It answers once zellij has taken the action, which
-  // moves the client a moment after, or with what zellij said as it failed.
   rpc Go(GoRequest) returns (google.protobuf.Empty);
-  // The clients of a session, as `zellij action list-clients` lists them now.
   rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
-  // Where a client that ended in one of a few sessions goes on, as its
-  // session went with it: the newest session that answers for its clients.
   rpc Refuge(RefugeRequest) returns (RefugeResponse);
-  // Has zellij open a pane beside another of a session, or a tab of it, as
-  // `zellij action new-pane` and `new-tab` do, with no client moved. It
-  // answers with the terminal it opened, for a client to go to, or with what
-  // zellij said as it failed.
   rpc Open(OpenRequest) returns (OpenResponse);
-  // The skills Claude Code can run in a directory, as luneta's menu searches
-  // them: each a `SKILL.md`, a command or a workflow, of the directory and
-  // those above it, of the user's, and of each plugin that is on there.
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
-  // Keeps what the shell in a pane printed after the line a command was last
-  // typed on, in a file for the daemon's user alone, for an agent there to
-  // read, as luneta's menu does for `c f` and `c e`: zellij dumps the pane's
-  // text, and the daemon keeps what follows that line, up to the prompt the
-  // shell waits at. A file goes a day on.
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
-  // Keeps the log of each check of a pull request that failed on its head, as
-  // gh fetches the log of a job of GitHub Actions, in a file for
-  // the daemon's user alone, for an agent there to read, as luneta's menu does
-  // for `c c`. A file goes a day on. It answers once, as `Prunes` does, since
-  // gh can take longer than an answer has; a question that hangs up does not
-  // stop it.
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
-  // The name a session luneta makes for a directory takes, as its picker's
-  // directories name one: the directory's own, or its repository's and its
-  // own where it is a worktree of one, with a `-2` where a session that runs,
-  // or one zellij keeps to bring back, has that name.
   rpc NameSession(NameSessionRequest) returns (NameSessionResponse);
-  // Whether zellij would make a session by a name now, as luneta's picker
-  // makes one by the name you type, rather than take a client to one that
-  // has it, as `Start` would: no session that runs has the name, nor one
-  // zellij keeps to bring back. It answers when the daemon read which names
-  // its zellij has, or with why zellij would make none.
   rpc CheckName(CheckNameRequest) returns (CheckNameResponse);
-  // The directories zoxide knows, best first, as luneta's picker lists them:
-  // each with the name a session luneta makes there takes now, as
-  // `NameSession` names it.
   rpc ListDirs(ListDirsRequest) returns (ListDirsResponse);
-  // What is in a directory, as eza lists it for luneta's picker to show: an
-  // entry a line, in colour.
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
-  // What a terminal of a session shows, as zellij dumps its screen for
-  // luneta's picker to show, in its colours: the terminal asked, or else the
-  // one a client coming to the session would be on, as zellij lists its
-  // panes now.
   rpc DumpScreen(DumpScreenRequest) returns (DumpScreenResponse);
-  // Has zellij take the client that last typed in a session to a session it
-  // makes, that starts in a directory, as `zellij action switch-session
-  // --cwd` does: or to one that runs by that name, or one it keeps to bring
-  // back, which it brings back, as it does. It answers once zellij has taken
-  // the action, or with what zellij said as it failed.
   rpc Start(StartRequest) returns (google.protobuf.Empty);
-  // What closing a terminal of a session closes with it, as zellij lists the
-  // session's panes now: the pane alone, its tab, or the session.
   rpc Closes(ClosesRequest) returns (ClosesResponse);
-  // Has zellij close a terminal of a session, or a tab of it, its panes and
-  // all, as `zellij action close-pane` and `close-tab-by-id` do, while the
-  // session's panes are as `Closes` said: a terminal that would take its tab
-  // along now, or a tab that holds other terminals than it did, or that
-  // would take the session along now, or a session that took the name since,
-  // stays. It answers once zellij has, or
-  // with what zellij said as it failed, or why it closed nothing.
   rpc Close(CloseRequest) returns (google.protobuf.Empty);
-  // The tabs of the session of a terminal other than its own, as zellij lists
-  // the session's panes now, in their order, each by a terminal in it: for its
-  // tab's panes to turn into panes beside that terminal.
   rpc OtherTabs(OtherTabsRequest) returns (OtherTabsResponse);
-  // Has zellij turn a terminal of a session into a tab of its own. What runs in
-  // it runs on, and it keeps its id. It answers once it has moved, or that a
-  // client has to come first, or with why it did not: a terminal alone in its
-  // tab, or that alone holds it open for floating panes that would end, stays.
   rpc TurnIntoTab(TurnIntoTabRequest) returns (TurnIntoTabResponse);
-  // Has zellij turn the panes of the tab of a terminal of a session into panes
-  // of the tab of another terminal, which the tab they left goes with. What
-  // runs in them runs on, and each keeps its id. It answers once they have
-  // moved, or how many did before zellij stopped, or with why none did.
   rpc TurnIntoPanes(TurnIntoPanesRequest) returns (TurnIntoPanesResponse);
-  // Has zellij kill a session and delete it, so that it keeps nothing to
-  // bring it back with, as `zellij delete-session --force` does. It answers
-  // once the session's server has ended, or with why it did not: a session
-  // that took the name since stays.
   rpc Kill(KillRequest) returns (google.protobuf.Empty);
-  // The sessions zellij keeps to bring back, which ended, as `zellij
-  // list-sessions` lists them now, for luneta's picker to list.
   rpc ListExited(ListExitedRequest) returns (ListExitedResponse);
-  // Has zellij let go of a session it keeps to bring back, which ended, as
-  // `zellij delete-session` does, so that it cannot bring it back. It
-  // answers once zellij has, or with what zellij said as it failed: a
-  // session that runs by the name stays.
   rpc DeleteExited(DeleteExitedRequest) returns (google.protobuf.Empty);
-  // Has zellij call a session that runs by another name, as `zellij action
-  // rename-session` does, for luneta's picker. It answers once zellij has,
-  // or with what zellij said as it failed, as where a session has the name.
   rpc RenameSession(RenameSessionRequest) returns (google.protobuf.Empty);
-  // The ends of transcripts of Claude Code's sessions, as luneta's brief
-  // reads them in the daemon's Claude Code folder: of each, the last records
-  // that tell what its agent is doing, whole ones alone, as many as a share
-  // of bytes has room for. A transcript not found there, or that does not
-  // read, has none.
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
-  // Has Claude Code take a turn of a talk of luneta's ask box on the daemon's
-  // machine, as `claude -p` with luneta's skill, which runs luneta's commands
-  // there: what the agent does as it goes, a step at a time, for as long as
-  // it takes, up to ten minutes. The stream ends as the turn does: well, or
-  // with why not. A question that hangs up first gives up the turn, and
-  // `claude` is killed.
   rpc Ask(AskRequest) returns (stream AskResponse);
-  // Where a key of luneta's menu goes for a pull request's link, or an
-  // issue's, pasted on a row of the daemon's machine, and the worktree it
-  // has `luneta worktree` make of it there: a pane of those luneta says that
-  // has its branch checked out, or a tab of a session one of them is in that
-  // works in its repository, or a tab of a session to make in a clone of it
-  // that zoxide knows there. It answers once, as late as that takes, which
-  // fetches across the network: a stream, as the start of every answer is
-  // cut five seconds after the question. The stream ends after the answer,
-  // or with why there is none, which its code tells apart for luneta to know
-  // whether to ask its other machines. Not found is a machine with no session
-  // in a link's repository, and whose zoxide knows no clone of it, as git said
-  // of every directory: never of a file. A failed precondition is one that
-  // made nothing, and says what stands in the way, as one the daemon does not
-  // reach. Aborted is one that may have made the worktree, of which no other
-  // machine should make another. So may one of any other code, but for an
-  // invalid argument and unimplemented, before the stream as in it: a machine
-  // starts on the question as it hears it, and goes on if the answer is lost.
   rpc Paste(PasteRequest) returns (stream PasteResponse);
-  // Keeps an image in a file for the daemon's user alone, for an agent there
-  // to read as its path is pasted on its prompt, as luneta does for `Ctrl v`
-  // on an agent's pane on another machine, and answers with its path. A file
-  // goes a day on, or sooner, oldest first, to keep what images hold there to
-  // 128 MiB. The image comes as a stream, as tonic refuses a message over 4
-  // MiB, and a screenshot can be larger. It answers once, as late as all of it
-  // takes to come: a stream too, as the start of every answer is cut five
-  // seconds after the question. The stream ends after the answer, or with why
-  // there is none. An image that does not all come, or does not start as a PNG
-  // does, is kept by no name an image goes by, however the daemon ends.
   rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
-  // Takes what is to be read aloud on the machine you sit at, as `luneta say`
-  // gives it, and answers once it has it, without waiting for it to be read,
-  // or for anyone to be there to read it: the daemon puts it in
-  // `Host.sayings`, for luneta's window to read, here or on another machine.
-  // What says nothing, is too long, or names a session by what zellij takes
-  // for no name, is answered as an invalid argument.
   rpc Say(SayRequest) returns (google.protobuf.Empty);
-  // Says what `Prune` would delete in the repository a directory is in: each
-  // worktree whose pull request is merged at its `HEAD`, and each with a merged
-  // pull request that stays, and why. It deletes nothing. It answers once, as
-  // late as gh takes: a stream too, as the start of every answer is cut five
-  // seconds after the question. While the daemon cannot tell where every pane
-  // and agent is, or the directory is in no repository, it answers with why not.
   rpc Prunes(PrunesRequest) returns (stream PrunesResponse);
-  // Plans again, and where it would delete just what it is told was agreed,
-  // deletes that, each worktree in turn, and says how each went. Else it says
-  // what it would delete now, and deletes nothing. One that changes as it goes
-  // stays, and git may refuse one: the others go. It answers once, as `Prunes`
-  // does, and a question that hangs up does not stop it.
   rpc Prune(PruneRequest) returns (stream PruneResponse);
-  // Has Claude Code write an issue of the repository a directory is in, from
-  // what the user said, as `claude -p` reads how its issues are written there,
-  // and has gh file it there, with the daemon's user's login: luneta's `i`.
-  // It answers once, as late as that takes, up to five minutes for the writing
-  // and a minute for gh: a stream too, as the start of every answer is cut five
-  // seconds after the question. The stream ends after the answer, or with why
-  // there is none: `FAILED_PRECONDITION` where none was filed, and `ABORTED`
-  // where one may have been. A question that hangs up does not stop it.
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
-  // The repositories on GitHub an issue of the repository a directory is in
-  // can be filed in, as its remotes name them, in the order gh takes them:
-  // for luneta's `i` to have you pick one, where it has more than one. git
-  // says, and gh is not asked.
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
-  // Makes an own session, of luneta's own multiplexer, of one tab: and starts
-  // its server for it where none runs. It answers once the session is made, or
-  // with why it is not, as where a session of either multiplexer has the
-  // name.
   rpc NewOwn(NewOwnRequest) returns (NewOwnResponse);
 }
 
-// The machine a question is for: this daemon's own where it is absent, and
-// otherwise one of its `Host.remotes`, by its destination, whose daemon this
-// one hands the question on to, without it, through the bridge it watches
-// that machine on. One it does not reach now is answered as unavailable.
 message On {
   string destination = 1;
 }
 
-// Each session a question names is by a name zellij takes: one that is not,
-// as an empty one, has the question answered as an invalid argument.
 message GoRequest {
   On on = 1;
-  // The session the client is in, where it typed last.
   string at = 2;
-  // The session it goes to: `at` itself for a pane of it.
   string to = 3;
-  // The pane, by its terminal's id. Absent for the session alone, where the
-  // client goes on the pane it last had the focus on.
   optional uint32 pane = 4;
 }
 
@@ -238,31 +61,21 @@ message ListClientsRequest {
 }
 
 message ListClientsResponse {
-  // By their ids.
   repeated Client clients = 1;
 }
 
 message RefugeRequest {
   On on = 1;
-  // The sessions the client may have been in: one, or the two it was on its
-  // way between. Its session went with it where any of them is gone. Never
-  // none: a question with none is invalid.
   repeated string seats = 2;
 }
 
 message RefugeResponse {
-  // What became of the client's session: one of these, always. A client
-  // that finds none has a newer daemon's.
   oneof ended {
-    // It runs still, as none of `seats` is gone: the client detached, or the
-    // daemon cannot read all of zellij's folder, which could hold it.
     google.protobuf.Empty kept = 1;
     Went went = 2;
   }
 
-  // It went with the client, as one of `seats` is gone.
   message Went {
-    // The session to go on in. Absent where none answers.
     Refuge refuge = 1;
   }
 }
@@ -270,61 +83,33 @@ message RefugeResponse {
 message OpenRequest {
   On on = 1;
   string session = 2;
-  // The directory it starts in.
   string cwd = 3;
-  // What runs in it. Where empty, a tab runs the shell of the user the
-  // daemon runs as, and a pane zellij's own shell.
   repeated string command = 4;
-  // What it opens: one of these, always. A question with neither is
-  // invalid.
   oneof opens {
-    // A pane beside this one, by its terminal's id, in its tab.
     uint32 beside = 5;
     Tab tab = 6;
   }
 
-  // A tab, named so, or as zellij numbers it where absent.
   message Tab {
     optional string name = 1;
-    // Where present, it takes the place of the tabs zellij made the session
-    // with, which go once it has opened, where the session started then or
-    // after, by the daemon's clock: as one zellij made for a client asked to
-    // make it then. One that started before keeps them, as one renamed to
-    // its name since does. The daemon takes it as said: the time a
-    // `NameSessionResponse` of its own said it named the session at, just
-    // before the client made it, and no other.
     google.protobuf.Timestamp alone_since = 2;
   }
 }
 
 message OpenResponse {
-  // The terminal it opened: in a tab, the first zellij lists there.
   uint32 terminal = 1;
-  // What zellij left as it was of a tab that was to open alone, a line
-  // each: why the session keeps the tabs zellij made it with, or a tab of
-  // them it did not close.
   repeated string notes = 2;
 }
 
 message ListSkillsRequest {
   On on = 1;
   string dir = 2;
-  // The harness whose skills are asked for, where it finds them. Absent from a
-  // luneta older than this field, which asks for Claude Code's: so absent is
-  // Claude Code, as `Agent.harness` is. A daemon older than the field finds
-  // Claude Code's, whatever it says.
   optional Harness harness = 3;
 }
 
 message ListSkillsResponse {
-  // By their names, each once: the first found of a name, the nearest the
-  // directory.
   repeated Skill skills = 1;
 
-  // A skill, by the name a prompt runs it by, after its `/`, a word, what it
-  // says it does, on one line, and whether you alone can run it: an agent told
-  // its name cannot, as its frontmatter says `disable-model-invocation: true`.
-  // A daemon too old to know says false.
   message Skill {
     string name = 1;
     string description = 2;
@@ -335,75 +120,45 @@ message ListSkillsResponse {
 message KeepPrintedRequest {
   On on = 1;
   string session = 2;
-  // The pane, by its terminal's id.
   uint32 pane = 3;
-  // The line the command was typed on, as luneta's shell hook says it: the
-  // command, or `fg` for a job `fg` brought back.
   string typed = 4;
 }
 
 message KeepPrintedResponse {
-  // What it found: one of these, always. A client that finds none has a
-  // newer daemon's.
   oneof printed {
-    // What the command printed, after the line it was typed on.
     File after = 1;
-    // Nothing follows the line the command was typed on, the first the pane
-    // holds: it printed nothing.
     google.protobuf.Empty nothing = 2;
-    // Nothing follows the last line that holds the command after a word,
-    // which may be a line it printed: all the pane holds, up to and with
-    // that line.
     File unsure = 3;
-    // No line holds the command, as after a `clear`: all the pane holds.
     Top top = 4;
   }
 
-  // A file the lines are in.
   message File {
-    // Its path, with every link in it followed.
     string path = 1;
-    // How many lines it holds, the last the pane had, and how many came
-    // before them, left out.
     uint64 lines = 2;
     uint64 left_out = 3;
   }
 
   message Top {
-    // Absent where the pane holds nothing.
     File file = 1;
   }
 }
 
 message KeepChecksRequest {
   On on = 1;
-  // The pull request, by its page on GitHub, as `PullRequest.url` says it:
-  // one that is no `https` page of a pull request is invalid.
   string url = 2;
 }
 
 message KeepChecksResponse {
-  // The commit the checks ran on, the pull request's head as gh said it.
   string head = 1;
-  // Each check that failed, in the order gh lists them.
   repeated Failed failed = 2;
-  // How many have yet to end, and how many ended and did not fail.
   uint32 pending = 3;
   uint32 passed = 4;
 
   message Failed {
-    // As GitHub names it: a job's name, or a status's context.
     string name = 1;
-    // Its page, where GitHub says one: empty for none.
     string link = 2;
-    // What it holds of the log: one of these, always. A client that finds
-    // none has a newer daemon's.
     oneof log {
-      // The job's log, its last lines, kept in a file.
       KeepPrintedResponse.File kept = 3;
-      // Why none was kept, in words: a check of no job of GitHub Actions,
-      // one that ran in another repository, or one gh could not fetch the
-      // log of.
       string unkept = 4;
     }
   }
@@ -411,36 +166,21 @@ message KeepChecksResponse {
 
 message NameSessionRequest {
   On on = 1;
-  // The directory, by its absolute path: one by another, as an empty one, is
-  // invalid. Absent for the home of the daemon's user, which a daemon older
-  // than this absence takes for an empty one.
   optional string dir = 2;
 }
 
 message NameSessionResponse {
   string name = 1;
-  // Just before the daemon read which names its zellij has, by its clock: a
-  // session of the name that started then or after is one zellij made since,
-  // as `OpenRequest.Tab` takes it for its `alone_since`. A daemon older than
-  // this field says none.
   google.protobuf.Timestamp named_at = 2;
-  // The directory it named the session for, by its absolute path, where the
-  // session starts: the one asked, or the home of the daemon's user for none.
-  // Absent from a daemon older than this field, which names it for the one
-  // asked.
   optional string dir = 3;
 }
 
 message CheckNameRequest {
   On on = 1;
-  // The name: one zellij makes a session of on any machine, as luneta's are
-  // held to. One that is not, as one too long, is invalid.
   string name = 2;
 }
 
 message CheckNameResponse {
-  // Just before the daemon read which names its zellij has, by its clock, as
-  // `NameSessionResponse.named_at` is.
   google.protobuf.Timestamp named_at = 1;
 }
 
@@ -449,101 +189,70 @@ message ListDirsRequest {
 }
 
 message ListDirsResponse {
-  // Best first. One no session can be named for, as `/`, is left out.
   repeated Dir dirs = 1;
 
   message Dir {
-    // Absolute.
     string path = 1;
-    // A name zellij takes, as `NameSessionResponse.name` is.
     string name = 2;
   }
 }
 
 message ListContentsRequest {
   On on = 1;
-  // Absolute: one that is not has the question answered as an invalid
-  // argument.
   string dir = 2;
 }
 
 message ListContentsResponse {
-  // As eza prints it: an entry a line, in its colours, after its icon.
   string listed = 1;
 }
 
 message DumpScreenRequest {
   On on = 1;
   string session = 2;
-  // The terminal, by its id. Absent for the one a client coming to the
-  // session would be on.
   optional uint32 pane = 3;
 }
 
 message DumpScreenResponse {
-  // The terminal dumped: the one asked, or the one a client coming to the
-  // session would be on.
   uint32 pane = 1;
-  // As zellij dumps it: its lines, in the colours it shows them in.
   string screen = 2;
 }
 
 message NewOwnRequest {
   On on = 1;
-  // As a session luneta makes is named.
   string name = 2;
-  // The directory its tab starts in.
   string cwd = 3;
-  // What runs in its tab, which holds it as it ends. Where empty, the shell of
-  // the user the daemon runs as, and the tab closes as it ends.
   repeated string command = 4;
 }
 
 message NewOwnResponse {
-  // The id its server gave it, as its `OwnSession.id` says.
   uint64 session = 1;
-  // Its tab's id, and its pane's.
   uint32 tab = 2;
   uint32 pane = 3;
-  // When its server made it, as its `OwnSession.made_at` says. Absent from a
-  // daemon older than this field.
   google.protobuf.Timestamp made_at = 4;
 }
 
 message StartRequest {
   On on = 1;
-  // The session the client is in, where it typed last.
   string at = 2;
-  // The session it makes.
   string to = 3;
-  // Where the session starts. Absent for where the client started.
   optional string cwd = 4;
 }
 
 message ClosesRequest {
   On on = 1;
   string session = 2;
-  // The pane, by its terminal's id.
   uint32 pane = 3;
 }
 
 message ClosesResponse {
-  // What it closes: one of these, always. A client that finds none has a
-  // newer daemon's.
   oneof closes {
-    // The pane alone: something else holds its tab open.
     google.protobuf.Empty pane = 1;
-    // Its tab: nothing else holds the tab open.
     Tab tab = 2;
-    // Its session: nothing else holds the tab open, and the session has no
-    // other tab.
     google.protobuf.Empty session = 3;
   }
 
   message Tab {
     uint32 id = 1;
-    // The terminals in it, the pane's own among them, and the floating
-    // ones.
     repeated uint32 panes = 2;
   }
 }
@@ -551,33 +260,20 @@ message ClosesResponse {
 message CloseRequest {
   On on = 1;
   string session = 2;
-  // What it closes: one of these, always. A question with neither is
-  // invalid.
   oneof closes {
-    // A terminal, by its id, which `Closes` said closes alone.
     uint32 pane = 3;
-    // A tab, by its id, with the terminals `Closes` said are in it. A tab of
-    // no terminal is invalid.
     ClosesResponse.Tab tab = 4;
   }
-  // Which session it is, past its name: one of these, always. A question with
-  // neither is invalid.
   oneof whose {
-    // When a zellij session started, as its `Session.started_at` says: a
-    // session by its name that started at another time took the name since,
-    // and what is in it stays.
     google.protobuf.Timestamp started_at = 5;
-    // An own session, as its `Session.own` says.
     OwnSession own = 7;
   }
-  // An own session's id alone, which no release has sent.
   reserved 6;
 }
 
 message OtherTabsRequest {
   On on = 1;
   string session = 2;
-  // The terminal whose tab is left out, by its id.
   uint32 pane = 3;
 }
 
@@ -585,10 +281,7 @@ message OtherTabsResponse {
   repeated Tab tabs = 1;
 
   message Tab {
-    // A terminal in it, by its id, which names the tab: zellij gives the id of
-    // a tab that closed to the next it opens, and never a terminal's.
     uint32 pane = 1;
-    // Its name, as zellij lists it, who names it `Tab #N` until you do.
     string name = 2;
   }
 }
@@ -596,23 +289,13 @@ message OtherTabsResponse {
 message TurnIntoTabRequest {
   On on = 1;
   string session = 2;
-  // The terminal, by its id.
   uint32 pane = 3;
-  // When the session started, as its `Session.started_at` says: a session by
-  // its name that started at another time took the name since, and what is in
-  // it stays. A question without it is invalid.
   google.protobuf.Timestamp started_at = 4;
 }
 
 message TurnIntoTabResponse {
-  // What came of it: one of these, always. A client that finds none has a
-  // newer daemon's.
   oneof came {
-    // It moved. Its tab keeps its other panes, and names the new one where
-    // someone named it.
     google.protobuf.Empty done = 1;
-    // Nothing moved: the session has no client to make room for a new tab, and
-    // one that comes there can ask again.
     google.protobuf.Empty no_client = 2;
   }
 }
@@ -620,31 +303,20 @@ message TurnIntoTabResponse {
 message TurnIntoPanesRequest {
   On on = 1;
   string session = 2;
-  // The terminal whose tab's panes turn, by its id.
   uint32 pane = 3;
-  // A terminal of the tab they go into, by its id, as `OtherTabs` says it.
   uint32 beside = 4;
-  // When the session started, as its `Session.started_at` says: a session by
-  // its name that started at another time took the name since, and what is in
-  // it stays. A question without it is invalid.
   google.protobuf.Timestamp started_at = 5;
 }
 
 message TurnIntoPanesResponse {
-  // What came of it, where any moved: one of these, always. A client that finds
-  // none has a newer daemon's.
   oneof came {
-    // All that were there moved, and the tab they left goes.
     google.protobuf.Empty done = 1;
-    // Some did, and the rest stay in their tab.
     Partly partly = 2;
   }
 
   message Partly {
     uint32 moved = 1;
-    // How many there were, less any that ended on the way.
     uint32 of = 2;
-    // Why the rest stay.
     string why = 3;
   }
 }
@@ -652,18 +324,10 @@ message TurnIntoPanesResponse {
 message KillRequest {
   On on = 1;
   string session = 2;
-  // Which session it is, past its name: one of these, always. A question with
-  // neither is invalid.
   oneof whose {
-    // When a zellij session started, as its `Session.started_at` says: a
-    // session by its name that started at another time took the name since,
-    // and stays.
     google.protobuf.Timestamp started_at = 3;
-    // An own session, as its `Session.own` says: a session by its name of
-    // another id, or made at another time, took the name since, and stays.
     OwnSession own = 5;
   }
-  // An own session's id alone, which no release has sent.
   reserved 4;
 }
 
@@ -672,15 +336,10 @@ message ListExitedRequest {
 }
 
 message ListExitedResponse {
-  // In the order zellij lists them.
   repeated Exited exited = 1;
 
   message Exited {
-    // A name zellij takes.
     string name = 1;
-    // How long before zellij listed it it was made, to the second, as zellij
-    // says: no time by the machine's clock, which may be off of the
-    // client's.
     google.protobuf.Duration ago = 2;
   }
 }
@@ -692,68 +351,33 @@ message DeleteExitedRequest {
 
 message RenameSessionRequest {
   On on = 1;
-  // The session that runs.
   string session = 2;
-  // The name it takes: one zellij makes a session of on any machine, as
-  // luneta's are held to. One that is not, as one too long, is invalid.
   string to = 3;
 }
 
 message TranscriptEndsRequest {
   On on = 1;
-  // The sessions whose transcripts it reads, by the ids Claude Code gives
-  // them: a UUID's hex digits and dashes, a hex digit first. More than 32, or
-  // one of anything else, is invalid.
   repeated string ids = 2;
-  // The most bytes it keeps of each end: 512 KiB at the most of them all
-  // together. None, as a question that does not say has, is invalid.
   uint32 share = 3;
 }
 
 message TranscriptEndsResponse {
-  // The end of each transcript it found, by its session's id: its records,
-  // a line each, oldest first.
   map<string, string> ends = 1;
 }
 
 message AskRequest {
   On on = 1;
-  // The directory the agent works in, by its absolute path: one by another,
-  // as an empty one, is invalid. Absent for the home of the daemon's user.
   optional string cwd = 2;
-  // What the user typed: with nothing but white space, it is invalid.
   string words = 3;
-  // The Claude session the talk goes on on, by the id the turn before said,
-  // as `TranscriptEndsRequest.ids` has one, and anything else is invalid.
-  // Absent for a talk's first turn.
   optional string resumed = 4;
-  // What the agent is told of the row highlighted in luneta's sidebar as the
-  // box opened, for words that point at it.
   string highlighted = 5;
-  // Where the user is as they send the turn, as luneta tells it: absent
-  // where it cannot tell.
   oneof user {
-    // In a pane of zellij there, where luneta's zellij is: a session's name
-    // zellij takes, or else the question is invalid, and its terminal.
     UserPane pane = 6;
-    // On another machine, where luneta's zellij is: in none of its panes.
     google.protobuf.Empty away = 7;
-    // In a pane of an own session there, where luneta's client of an own
-    // session is. A daemon older than this field takes the user for one it
-    // cannot tell the place of.
     UserOwnPane own = 11;
   }
-  // The key of the turn, and of the turn before, absent for the first: a
-  // close the agent runs takes a yes only to a plan said in the turn before.
   fixed64 turn = 8;
   optional fixed64 before = 9;
-  // The harness the user picked last for the agents luneta's menu starts,
-  // which the agent starts one in. A pane the agent opens runs pi only where
-  // this is pi, as pi asks nothing before it runs a command. Absent from
-  // a luneta older than this field, whose menu starts Claude Code's alone: so
-  // absent is Claude Code, as `Agent.harness` is. A daemon older than the
-  // field, on the machine the turn is for, starts Claude Code's, whatever it
-  // says.
   optional Harness agents = 10;
 
   message UserPane {
@@ -762,284 +386,144 @@ message AskRequest {
   }
 
   message UserOwnPane {
-    // The own session, as its `Session.own` says. Always there.
     OwnSession session = 1;
-    // The pane's id, which its server gives no other.
     uint32 pane = 2;
-    // The session's name as luneta sent the turn, for the agent to be told:
-    // a name zellij takes, or else the question is invalid. The session goes
-    // by `session`, which a rename keeps.
     string named = 3;
-    // luneta's client, by the id the session's server gave it, which a go
-    // the agent asks for takes, wherever it is by then, and whoever typed
-    // last. Never 0.
     uint64 client = 4;
   }
 }
 
-// A step of a turn of the agent, as `claude` says it. One with none of
-// these, as a newer daemon's could be, is left out.
 message AskResponse {
   oneof step {
-    // The Claude session the turn runs on, by its id, which the next turn
-    // goes on with.
     string session = 1;
-    // A command the agent runs, or another tool it uses, by its name.
     Ran ran = 2;
-    // Claude Code denied the agent the call of this id, which ran nothing.
     string denied = 3;
-    // What the agent said.
     string said = 4;
   }
 
   message Ran {
-    // The id Claude Code gives the call.
     string id = 1;
     string command = 2;
   }
 }
 
 message KeepImageRequest {
-  // One of these, always.
   oneof part {
-    // What the image is: the first part of the stream, and only that one.
     Image image = 1;
-    // The next of its bytes, as much as a message has room for: every part
-    // after the first.
     bytes bytes = 2;
   }
 
   message Image {
     On on = 1;
-    // How many bytes it is, at least the 8 every PNG starts with: fewer than
-    // these is an image that did not all come, and more is refused.
     uint64 size = 2;
   }
 }
 
 message KeepImageResponse {
-  // The file it is in, a PNG, with every link in its path followed.
   string path = 1;
 }
 
 message PasteRequest {
   On on = 1;
-  // What was pasted: one of these, always. A question with neither is
-  // invalid, as a daemon older than `file` takes one of a file.
   oneof work {
-    // The link, of a pull request or of an issue on GitHub, as luneta pastes
-    // one: anything else is invalid.
     string link = 2;
-    // A `.md` file, for a worktree of a branch named for it.
     File file = 4;
   }
-  // The panes of the machine, in the order of luneta's rows. More than 1024
-  // are invalid.
   repeated Worked worked = 3;
-  // Whether the worktree must be at the pull request's head before the answer.
-  // Of anything but a pull request's link, it is invalid.
   bool at_head = 5;
-  // Whether the client reads `PasteResponse.moved_off`. The daemon looks for a
-  // worktree that moved off its branch only for one that does: an older one
-  // would start an agent on it.
   bool reads_moved_off = 6;
 
   message File {
-    // Its path, as it was pasted: from the root, from `~/`, or else from
-    // `from`. What is no path of a `.md` file is invalid. The daemon of the
-    // machine reads it there, and says why it found no file where it finds
-    // none.
     string path = 1;
-    // The directory the row it was pasted on works in, by its absolute path,
-    // absent for a row of none: a relative path goes from it, and a file in
-    // no repository has its worktree in the repository it is in. One by
-    // another path is invalid.
     optional string from = 2;
   }
 
   message Worked {
-    // The directory it works in, by its absolute path: one by another is
-    // invalid.
     string dir = 1;
-    // The page of the pull request of the branch checked out there, as
-    // `PullRequest.url` says it, absent for none: one that is no link of a
-    // pull request or of an issue is invalid.
     optional string pull = 2;
-    // Whether luneta's zellij is in its session.
     bool here = 3;
   }
 }
 
 message PasteResponse {
-  // Where the key goes: one of these, always. A client that finds none has a
-  // newer daemon's.
   oneof at {
-    // The pane of this place in `PasteRequest.worked`, first 0, which has the
-    // branch checked out.
     uint32 there = 1;
-    // A tab of the session of the pane of this place in `worked`, which works
-    // in the repository.
     uint32 session = 2;
-    // A tab of a session to make.
     Clone clone = 3;
   }
-  // The worktree, by its real path.
   string worktree = 4;
-  // The branch checked out there, absent for none.
   optional string branch = 5;
-  // The real path of the file, where one was pasted: an agent reads it where
-  // it is, as the worktree may not have it.
   optional string file = 6;
-  // Whether it did what `PasteRequest.at_head` asked: a daemon older than that
-  // field does not say so.
   bool at_head = 7;
-  // Whether `worktree` sits where what was pasted's branch would be made, with
-  // `branch` in its place, or none. The client says what its key does with it.
   bool moved_off = 8;
 
   message Clone {
-    // The directory the session starts in, which holds the clone.
     string cwd = 1;
-    // Its name, which no session the daemon's zellij runs, nor one it keeps
-    // to bring back, had as the daemon named it. luneta has it named again
-    // just before it makes the session, which can take minutes to come to.
     string name = 2;
   }
 }
 
-// A session that runs, and its clients, which are those it has before the
-// client that goes on there comes.
 message Refuge {
   string session = 1;
   repeated Client before = 2;
 }
 
 message WatchRequest {
-  // The host as the client last saw it. Absent for a first look.
   Version after = 1;
-  // Left out by a client, as luneta, and set by the daemon of another machine
-  // that watches this one: whether that daemon runs for reasons of its own,
-  // as zellij there has a session, or a client watches it. A daemon runs on
-  // while a client watches it, or a daemon that is kept, but only a client is
-  // a reason of its own, to say to the machines it watches: two daemons that
-  // watched each other would else keep each other running for good, with
-  // nothing else to.
   optional bool kept = 2;
-  // Whether someone sees the agents this names: set by a window of luneta's, and
-  // by the daemon of another machine where one watches that daemon. One such
-  // window is what has the daemon keep its agents' topics, which cost a model's
-  // call. Not set by a question asked once, as `luneta sessions` is, nor by a
-  // luneta or a daemon older than this field, which shows or hands on no topic.
-  // A daemon that says it is not `kept` is no one, and shows no one anything.
   bool shown = 3;
 }
 
-// A state of the host, as one daemon counts them.
 message Version {
-  // The daemon's process id. The next daemon counts from 0 again.
   uint32 pid = 1;
-  // Goes up by one each time the host changes.
   uint64 seq = 2;
 }
 
 message Host {
-  // Always there: a client that finds none has an answer that does not read.
   Version version = 1;
-  // The sessions that run, in no order a client can count on.
   repeated Session sessions = 2;
-  // How the work tree stands in each directory a pane works in, once git has
-  // said. In no order a client can count on.
   repeated WorkTree work_trees = 3;
-  // The agents and the session files that do not read, as
-  // `ListAgentsResponse` has them.
   repeated Agent agents = 4;
   uint32 unread = 5;
-  // The pull request of the branch checked out in each directory a pane works
-  // in, once gh has found one. In no order a client can count on.
   repeated PullRequest pull_requests = 6;
-  // The folders and sockets of zellij's the daemon could not read as it last
-  // looked, any of which could be a session's: while there are any,
-  // `sessions` may leave out one that runs. Absent from a daemon older than
-  // this field, which could not say, and whose `sessions` may leave one out
-  // too.
   optional uint32 unread_sockets = 7;
-  // The session files `unread` counts, as `ListAgentsResponse` has them.
   repeated UnreadFile unread_files = 8;
-  // The other machines the daemon watches, as luneta's hosts file names them,
-  // in its order.
   repeated Remote remotes = 9;
-  // How much of luneta's hosts file the daemon could not read a machine
-  // from as it last read it: each line led by a `-`, of more than one word,
-  // or past the 16th, and the file itself, where it did not read, which
-  // leaves `remotes` as it named them before. While there is any, `remotes`
-  // may leave out a machine the file names. The daemon's log says why.
-  // Absent from a daemon older than this field, which watches no machine.
   optional uint32 unread_hosts = 10;
-  // What `Say` last took, oldest first: the last 16 at the most, and none
-  // it took over two minutes ago. A window reads those later than it saw in
-  // the answer before. Those in its first answer of a machine it leaves.
   repeated Saying sayings = 11;
 }
 
-// What is to be said aloud, or that nothing more is.
 message Say {
-  // One of these, always: a client that finds none has a newer daemon's.
   oneof does {
-    // Read after what waits to be read.
     Utterance in_turn = 1;
-    // Read at once, before what waits, and cutting off what is being read.
     Utterance now = 2;
-    // Stop what is being read, and let go of what waits.
     google.protobuf.Empty stop = 3;
   }
 }
 
-// What to read aloud, and who it comes from.
 message Utterance {
-  // Never empty, nor, with `speaker.named`, over the 16 KiB `Say` takes.
   string text = 1;
-  // The pane it comes from: none from outside zellij. `Say` goes by `named`,
-  // a name zellij takes, and sets `session` itself, whatever it was asked with.
   optional Zellij speaker = 2;
 }
 
 message SayRequest {
-  // Always there.
   Say say = 1;
 }
 
-// What `Say` took, as `Host.sayings` lists it.
 message Saying {
-  // The daemon that took it, whose numbers begin again after it restarts.
   uint32 pid = 1;
-  // Each later than the last that daemon took.
   uint64 number = 2;
-  // Always there.
   Say say = 3;
 }
 
-// A machine the daemon watches besides its own, through
-// `ssh <destination> luneta bridge`, as it would watch its own daemon on the
-// socket.
 message Remote {
-  // As the hosts file spells it: `nixos`, or `me@vps`. Unique among a host's
-  // `remotes`, never empty, and never led by a `-`.
   string destination = 1;
-  // One of these, always: a client that finds none has a newer daemon's.
   oneof reached {
-    // The first ssh to it runs, which takes 10 seconds at the most.
     google.protobuf.Empty reaching = 2;
-    // Its host, as its daemon last said: `Remote.Host`, the inner scope's.
     Host host = 3;
     Unreached unreached = 4;
   }
 
-  // A machine's host, as its daemon says it, but for its version, and for
-  // the machines that daemon watches, which are its own. Two daemons that
-  // watch each other would else never rest: a change to one would be a
-  // change to the other's remotes, and so to its version, and so to the
-  // first one's remotes. The numbers are `luneta.v1.Host`'s, so that a field
-  // of the one reads as the same field of the other.
   message Host {
     repeated Session sessions = 2;
     repeated WorkTree work_trees = 3;
@@ -1051,286 +535,142 @@ message Remote {
     repeated Saying sayings = 11;
   }
 
-  // What the daemon has of a machine that its daemon does not answer for:
-  // ssh failed to reach it, or its daemon, or the connection broke and a
-  // new ssh failed too. ssh is run again after a while, and longer each
-  // time it fails, up to 30 seconds. Or the daemon could not start watching
-  // it, which it tries again each time it reads the hosts file, every 2
-  // seconds at the least.
   message Unreached {
-    // Since when: its daemon's last answer, or, where it has had none, since
-    // the daemon began to watch it. Always there.
     google.protobuf.Timestamp since = 1;
-    // Why, in words, on one line: what ssh says of it is in the daemon's
-    // log.
     string why = 2;
-    // What stopped it, in a word: one of these, always. A client that finds
-    // none has a newer daemon's.
     oneof stopped {
-      // ssh did not start on this machine, or what it said could not be
-      // read.
       google.protobuf.Empty unstarted = 3;
-      // ssh ended before it reached lunetad there.
       Ended ended = 4;
-      // Something there said what is not `luneta bridge`'s word first, as a
-      // login shell that prints does.
       google.protobuf.Empty said = 5;
-      // ssh neither reached lunetad there nor ended in 10 seconds, as it
-      // does that waits on a machine that does not answer.
       google.protobuf.Empty silent = 6;
-      // ssh reached lunetad there, and what came after did not do: the
-      // connection broke, or its daemon answered with an error, or with what
-      // this one does not read.
       google.protobuf.Empty lost = 7;
-      // The daemon could not start a thread to watch it from, nor a
-      // runtime, as one out of processes or files cannot.
       google.protobuf.Empty unwatched = 8;
     }
 
     message Ended {
-      // Its exit code: 255 where ssh did not get in, 127 where the shell
-      // there found no luneta, and 1 where luneta there could not reach its
-      // daemon, or is older than `luneta bridge`, and takes the word for a
-      // session's name. Absent where a signal ended it.
       optional int32 code = 1;
     }
   }
 }
 
-// A zellij session that runs: its server listens on a socket named for it.
 message Session {
   string name = 1;
-  // As `ZellijSession.started_at` says, for a zellij session, and absent for
-  // an own one: for a client older than `mux`.
   google.protobuf.Timestamp started_at = 2;
-  // Its panes, as zellij last listed them. Absent until zellij has, and while
-  // another session runs under its name: zellij is asked for them by name, and
-  // answers for one of the two, which the daemon cannot tell. An own session's
-  // are always there, as its server says them.
   Panes panes = 3;
-  // Its clients, as zellij last listed them. Absent as `panes` is.
   Clients clients = 4;
-  // As `ZellijSession.socket` says, for a zellij session, and 0 for an own
-  // one: for a client older than `mux`.
   uint64 socket = 5;
-  // Which multiplexer runs it: one of these, always, but from a daemon older
-  // than this field, whose sessions are all zellij's, and say so in
-  // `started_at` and `socket`.
   oneof mux {
     ZellijSession zellij = 7;
     OwnSession own = 8;
   }
-  // An own session's id alone, which no build has read.
   reserved 6;
 }
 
-// A session of luneta's own multiplexer, past its name.
 message OwnSession {
-  // The id its server gave it, which a rename keeps, and which its server
-  // gives no other. Never 0. Its panes' ids are unique across the own
-  // sessions, and so are its tabs', and neither is given again. Its clients'
-  // are as `Client.id` says of zellij's, but never given again. The next
-  // server counts them from 1 again.
   uint64 id = 1;
-  // When its server made it, which a rename keeps. With `id` it tells every
-  // own session from every other, of this server or another. Always there.
   google.protobuf.Timestamp made_at = 2;
 }
 
-// A session of zellij's, past its name.
 message ZellijSession {
-  // When its server started: when it made its socket, which a rename keeps.
-  // Always there.
   google.protobuf.Timestamp started_at = 1;
-  // The inode of its socket, which a rename keeps too. With `started_at` it
-  // tells every session from every other: two servers can make their sockets
-  // in one tick of the clock that dates them, and a socket made later can
-  // take the inode of one gone, but not both. Never 0.
   uint64 socket = 2;
 }
 
 message Panes {
-  // Its terminals. A plugin's pane is left out, and so is a pane zellij keeps
-  // off the screen, as one that another took the place of.
   repeated Pane panes = 1;
 }
 
 message Clients {
-  // Those attached to it, by their ids. One that left is not among them.
   repeated Client clients = 1;
 }
 
-// A client attached to a session, as `zellij action list-clients` lists it.
-// zellij does not say whose it is.
 message Client {
-  // Its id, which zellij gives it as it comes to the session: the lowest that
-  // nothing connected to the session holds, where a `zellij action` holds one
-  // too while it runs. It keeps it for as long as it stays, no other client
-  // gets it meanwhile, and it gets another in each session it goes to.
   uint32 id = 1;
-  // The pane it has the focus on, in the tab it is on, by the id of one of
-  // its session's `Panes`, unless zellij keeps that one off the screen.
-  // Absent while the focus is on a plugin's pane.
   optional uint32 pane = 2;
 }
 
-// A terminal, as `zellij action list-panes` lists it.
 message Pane {
-  // Its id, which is unique within its session and not across them.
   uint32 id = 1;
-  // The tab it is in: its position, from 0, and its name.
   uint32 tab = 2;
   string tab_name = 3;
-  // Where it works, absent until zellij has said. What it said last stands
-  // while it is too busy to say.
   optional string cwd = 4;
-  // What runs in front in it: the command line of the process in the
-  // foreground, or of the shell itself at its prompt. Absent, and kept, as
-  // `cwd` is.
   optional string command = 5;
-  // What an agent says in its title, where the glyph an agent leads a title
-  // with leads it: Claude Code's `✳`, or the frame it turns in the place of the
-  // `✳` while it works, which would change the host all the time. Absent for a
-  // title that leads with no such glyph, as a shell's, or zellij's own
-  // `Pane #1`: it is the glyph that tells an agent's. zellij keeps the last
-  // title a program gave, so an agent's can outlast it.
   Titled titled = 6;
-  // What its shell says through luneta's hook. Absent where no shell with the
-  // hook runs: one with a hook as new as `ready` says that from its first
-  // prompt, and one with an older hook says nothing until it runs a command.
   Shell shell = 7;
-  // The id zellij gave its tab, which stays the tab's as it moves and as tabs
-  // before it close, where `tab` does not. Absent from a daemon older than
-  // this field.
   optional uint32 tab_id = 8;
-  // Whether zellij holds it: what ran in it has ended, or has yet to start, so
-  // no process works in it. It has no `cwd` then, unless it said one before.
   bool held = 9;
 }
 
-// What an agent says in the title of its pane, without the glyph.
 message Titled {
-  // Its topic: `Fix the fold` for `✳ Fix the fold`, and for the frame turned
-  // in the place of the `✳`. Absent for the bare `Claude Code` Claude Code
-  // titles its pane with until it has a topic, which some never get.
   optional string topic = 1;
 }
 
-// What a shell with luneta's hook said last: the command it runs, the one it
-// ran last and how that ended, or that it has run none yet. The hook counts
-// whole seconds, so each time here is the second it said.
 message Shell {
-  // One of these, always: a client that finds none has a newer daemon's.
   oneof doing {
     Going going = 1;
     Ended ended = 2;
     Stopped stopped = 3;
-    // At its prompt, and it has run nothing yet.
     google.protobuf.Empty ready = 4;
   }
 
-  // A command it runs.
   message Going {
-    // The command line, on one line. None where the shell said none, as a
-    // shell that marks its commands may not, and never empty. It was a
-    // `string` of the same number, which a client of then reads as empty.
     optional string command = 1;
-    // When it started. Always there.
     google.protobuf.Timestamp since = 2;
-    // What the command in front of its terminal does. Never unspecified.
     Front front = 3;
   }
 
-  // The command it ran last, which ended.
   message Ended {
     optional string command = 1;
-    // When it ended. Always there.
     google.protobuf.Timestamp at = 2;
-    // How it ended. Neither where the shell cannot say. `status` was an
-    // `optional int32` of the same number, which reads the same.
     oneof ending {
-      // Its exit status.
       int32 status = 3;
-      // `fg` brought it back, and the shell cannot say its exit status, as
-      // fish cannot after `fg`. The line typed was `fg`, not `command`.
       google.protobuf.Empty resumed = 5;
     }
-    // How long it ran, to the millisecond. Always there.
     google.protobuf.Duration took = 4;
   }
 
-  // A job it stopped, with `Ctrl z`, which waits to be brought back.
   message Stopped {
     optional string command = 1;
-    // When it stopped. Always there.
     google.protobuf.Timestamp at = 2;
   }
 }
 
-// What the command in front of a terminal does, by how the terminal takes keys
-// and whether a process in front of it reads it.
 enum Front {
-  // Never sent. A client that finds it, or a number it does not know, has the
-  // word of a newer daemon's.
   FRONT_UNSPECIFIED = 0;
-  // It works, and reads nothing from the terminal.
   FRONT_WORKING = 1;
-  // It waits for you to type: it reads the terminal a line at a time, or with
-  // the echo off, as a password prompt does. A blocking read of a socket looks
-  // the same to Linux, and is this too.
   FRONT_ASKING = 2;
-  // It takes the terminal over a key at a time, as an editor, a pager or `ssh`
-  // does, for as long as you use it.
   FRONT_INTERACTIVE = 3;
 }
 
-// How the work tree stands where a pane works, as `git status` says it.
 message WorkTree {
-  // The directory, as zellij spells the pane's.
   string dir = 1;
-  // One of these, always: a client that finds none has a newer daemon's.
   oneof stands {
-    // The directory is in no repository.
     google.protobuf.Empty outside = 2;
     Checkout checkout = 3;
     NoCheckout no_checkout = 4;
   }
 
-  // In a repository, and in none of its work trees.
   message NoCheckout {
-    // The directory that holds the repository. Always there.
     string repository = 1;
   }
 }
 
-// A repository's work tree: what is checked out there, and what changed.
 message Checkout {
-  // One of these, always.
   oneof head {
-    // `HEAD` names a commit, and no branch.
     google.protobuf.Empty detached = 1;
     Branch branch = 2;
   }
-  // How many paths there are of each kind of change. Always there.
   Changes changes = 3;
   uint32 stashes = 4;
-  // The directory that holds the repository. Absent from a daemon older than
-  // this field.
   optional string repository = 5;
 }
 
 message Branch {
   string name = 1;
-  // How far it is from its upstream. Absent when it has none.
   Upstream upstream = 2;
-  // How many lines changed on it, against the branch its repository takes as
-  // its default, work tree changes included. Absent on that branch itself,
-  // where nothing changed, where no default is found, and from a daemon older
-  // than this field. Never zero in both.
   Changed changed = 3;
 }
 
-// How many lines changed on a branch.
 message Changed {
   uint32 added = 1;
   uint32 deleted = 2;
@@ -1338,13 +678,9 @@ message Changed {
 
 message Changes {
   uint32 conflicted = 1;
-  // In the index or in the work tree.
   uint32 deleted = 2;
   uint32 renamed = 3;
-  // In the work tree, a path added with `--intent-to-add` among them, and one
-  // whose type changed.
   uint32 modified = 4;
-  // In the index.
   uint32 staged = 5;
   uint32 untracked = 6;
 }
@@ -1354,39 +690,15 @@ message Upstream {
   uint32 behind = 2;
 }
 
-// The pull request on GitHub of the branch checked out where a pane works, as
-// `gh pr view` finds it there: an open one before the rest of a repository, and
-// a fork's before its parent's unless the fork's is closed. gh is asked again
-// about each branch every minute, and about one a pane has just come to at
-// once.
 message PullRequest {
-  // The directory, as `WorkTree` has it: the pull request is of the branch
-  // its work tree has checked out.
   string dir = 1;
-  // Never 0: GitHub counts them from 1.
   uint32 number = 2;
-  // Never unspecified.
   PullRequestState state = 3;
-  // Its page on GitHub, as gh says it: of the repository gh found it in,
-  // which `number` counts in. A repository with remotes of several, as a
-  // fork's clone has, can be any of them, or the one the fork was made from.
-  // Empty from a daemon older than this field, which did not say.
   string url = 4;
-  // How its checks stand on its head, as gh says them with it. Absent from a
-  // daemon older than this field, or where gh wrote them in a way the daemon
-  // does not read.
   Checks checks = 5;
-  // Whether gh failed the last time the daemon asked it about the branch:
-  // all of this is what gh said before, and may have changed since. False
-  // from a daemon older than this field, which did not say.
   bool stale = 6;
 }
 
-// How many checks of a pull request's head have yet to end, ended and
-// failed, and ended and did not: GitHub's checks of GitHub Actions and of
-// other apps, and the statuses other services set. A check that failed is
-// one that ended in failure, timed out, was cancelled, or waits for an
-// action, and a status that failed or erred.
 message Checks {
   uint32 pending = 1;
   uint32 failed = 2;
@@ -1394,252 +706,128 @@ message Checks {
 }
 
 enum PullRequestState {
-  // Never sent. A client that finds it, or a number it does not know, has the
-  // state of a newer daemon's.
   PULL_REQUEST_STATE_UNSPECIFIED = 0;
   PULL_REQUEST_STATE_OPEN = 1;
-  // Open, and a draft.
   PULL_REQUEST_STATE_DRAFT = 2;
   PULL_REQUEST_STATE_MERGED = 3;
-  // Closed, and not merged.
   PULL_REQUEST_STATE_CLOSED = 4;
 }
 
 message InfoResponse {
-  // The release of luneta the daemon was built from, as Cargo.toml names it.
-  // Every commit is of one release until the next, so `built` is what tells
-  // two builds of one release apart.
   string version = 1;
-  // Its process id, by which a client tells one daemon from the next across a
-  // restart.
   uint32 pid = 2;
-  // When it started.
   google.protobuf.Timestamp started_at = 3;
-  // The folder it reads zellij's sessions in, as its environment named it
-  // when it started, in the bytes of its path, which need not be UTF-8. Its
-  // `Host.sessions` are those of this folder alone. Absent from a daemon
-  // older than this field, which could not say.
   optional bytes zellij_folder = 4;
-  // The folder it reads Claude Code's sessions in, as its environment named it
-  // when it started, in the bytes of its path. Its Claude Code agents are those
-  // of this folder alone, and their transcripts are in it. Absent when its
-  // environment named none, and from a daemon older than this field.
   optional bytes claude_folder = 5;
-  // When the commit it was built from was made, in seconds since the epoch,
-  // as the flake stamps each build of a commit. Absent from a cargo build of a
-  // checkout, from the flake's build of a tree with changes not yet committed,
-  // and from a daemon older than this field: each is older than any stamped
-  // build of its `version`. `version` stays the release alone, as
-  // a client older than this field reads it.
   optional uint64 built = 6;
 }
 
 message ListAgentsResponse {
-  // In no order a client can count on.
   repeated Agent agents = 1;
-  // Claude Code's session files that the daemon cannot read, and so lists no
-  // agent for: cut short for good, or in a shape of a newer Claude Code's. One
-  // counts once it has not read for longer than a write takes, or at once if
-  // it did not read as the daemon started. Only those named for a pid that a
-  // process runs by count: one a crashed Claude Code left behind does not.
-  // The daemon's log says which.
   uint32 unread = 2;
-  // The files `unread` counts, each by where its process runs: as many as it
-  // counts. Empty from a daemon older than this field, which counts them all
-  // the same.
   repeated UnreadFile unread_files = 3;
 }
 
-// A session file of Claude Code's that the daemon cannot read, by the process
-// named for it: an agent, whose status no one can tell, or another process
-// that came by its pid since, as the file cannot say.
 message UnreadFile {
   uint32 pid = 1;
-  // Where it runs in zellij, as its environment names it, absent when it runs
-  // outside zellij. The daemon follows its session as it does an agent's, by
-  // when the process started.
   Zellij zellij = 2;
 }
 
-// An agent: the one process of it that runs, and its session.
 message Agent {
   uint32 pid = 1;
-  // Its harness's id for the session. Claude Code's names its transcript.
-  // Never empty: the daemon reads a file that names none as no agent's.
   string session_id = 2;
-  // Where it works. Never empty, as `session_id` is not.
   string cwd = 3;
-  // What it is doing, as its harness says. Neither when it says nothing.
   oneof status {
-    // A status the daemon knows.
     Status known_status = 4;
-    // A word it does not, as its harness wrote it: a newer harness's.
     string other_status = 10;
   }
-  // When it came to its status, as its harness dates it. Absent where it
-  // does not: when it last wrote its file, or when the session started, is no
-  // date of the status.
   google.protobuf.Timestamp status_since = 5;
-  // When its session started. A pi agent's process goes on through the sessions
-  // it moves between, and this is when that started.
   google.protobuf.Timestamp started_at = 6;
-  // The name its harness gives the session, if any.
   Name name = 7;
-  // How it was started, in its harness's word, verbatim, so that only `harness`
-  // tells what a word means. The agent a person talks to at a prompt is `cli` in
-  // Claude Code's and `tui` in pi's. Claude Code has `sdk-cli` for a `claude -p`,
-  // and a word of its own for each of the many other ways, which it adds to; pi
-  // has `print`, `json` and `rpc`. Absent when it does not say.
   optional string entrypoint = 8;
-  // The pane it runs in, absent when it runs in none. A zellij server started
-  // in an own pane gives the panes it has the variables of both, and the
-  // agent is zellij's.
   oneof pane {
-    // Where it runs in zellij.
     Zellij zellij = 9;
-    // Where it runs in an own session.
     Own own = 16;
   }
-  // What it waits for, as Claude Code says while its status is waiting.
-  // Neither while it does not wait, nor where it does not say, as pi does not.
   oneof waiting_for {
-    // A word the daemon knows.
     WaitingFor known_waiting_for = 11;
-    // A word it does not, as Claude Code wrote it: one of the others Claude
-    // Code has, as `sandbox request`, or a newer Claude Code's.
     string other_waiting_for = 12;
   }
-  // The harness it runs in. Absent from a daemon older than this field, whose
-  // agents are all Claude Code's: so absent is not `HARNESS_UNSPECIFIED`, as an
-  // enum's default would take it.
   optional Harness harness = 13;
-  // The review of a pull request it ran, a skill at a time.
   reserved 14;
   reserved "review";
-  // The subject it is on now, in a few words, as the daemon has a model name it
-  // while `WatchRequest.shown` says someone sees it, on a prompt that can move
-  // it. Never empty. Absent until an answer comes, and for good from a daemon
-  // older than this field; for an agent of pi's, one someone named, and one in
-  // no pane. It is kept in no file, and a daemon started again has none until
-  // the next prompt.
   optional string topic = 15;
 }
 
-// A harness an agent runs in.
 enum Harness {
-  // Never sent. A client that finds it, or a number it does not know, has an
-  // agent of a harness only a newer daemon knows.
   HARNESS_UNSPECIFIED = 0;
   HARNESS_CLAUDE_CODE = 1;
   HARNESS_PI = 2;
 }
 
 enum Status {
-  // Never sent. A client that finds it, or a number it does not know, has the
-  // status of a newer daemon's.
   STATUS_UNSPECIFIED = 0;
-  // At work: the one status that ends on its own.
   STATUS_BUSY = 1;
-  // Done, and waiting for the next prompt.
   STATUS_IDLE = 2;
-  // It asked something, and waits for the answer.
   STATUS_WAITING = 3;
-  // It is a shell.
   STATUS_SHELL = 4;
 }
 
-// What an agent waits for, in the words Claude Code says it in, in any case.
 enum WaitingFor {
-  // Never sent. A client that finds it, or a number it does not know, has a
-  // word a newer daemon knows.
   WAITING_FOR_UNSPECIFIED = 0;
-  // `permission prompt`: a tool it asks to run, or a plan it asks you to
-  // take.
   WAITING_FOR_PERMISSION_PROMPT = 1;
-  // `input needed`: a question of its own, or of a server's.
   WAITING_FOR_INPUT_NEEDED = 2;
-  // `dialog open`: one of its own dialogs, which you opened.
   WAITING_FOR_DIALOG_OPEN = 3;
 }
 
 message Name {
   string text = 1;
-  // Who chose it. Absent when Claude Code does not say, as one from before it
-  // said did not.
   optional NameSource source = 2;
 }
 
-// Who chose a name, as Claude Code spells it: `user`, `peer`, `derived`,
-// `collision`, `auto` or `hook`, the words it reads back itself.
 enum NameSource {
-  // Never sent.
   NAME_SOURCE_UNSPECIFIED = 0;
-  // `user` and `peer` are a name someone gave.
   NAME_SOURCE_USER = 1;
   NAME_SOURCE_PEER = 2;
-  // `derived` is Claude Code's own, from the directory.
   NAME_SOURCE_DERIVED = 3;
   NAME_SOURCE_COLLISION = 4;
   NAME_SOURCE_AUTO = 5;
   NAME_SOURCE_HOOK = 6;
-  // A word the daemon does not know: a newer Claude Code's.
   NAME_SOURCE_OTHER = 7;
 }
 
-// The own pane an agent runs in.
 message Own {
-  // The own session, as its `Session.own` says, which its pane's variables
-  // name. Always there.
   OwnSession session = 3;
-  // The pane's id.
   uint32 pane = 2;
-  // The own session's id alone, which no release has sent.
   reserved 1;
 }
 
-// The zellij pane an agent runs in.
 message Zellij {
-  // The session its environment names: what the session was called when the
-  // pane opened. A rename leaves it behind.
   string named = 1;
-  // The session it runs in now, under the name it has now. Absent when the
-  // daemon cannot tell: the session it names is gone, or was renamed before
-  // the daemon started, or more than one session that could be it has held
-  // the name.
   optional string session = 2;
-  // The pane's id, which is unique within its session and not across them.
   uint32 pane = 3;
 }
 
 message PrunesRequest {
   On on = 1;
-  // A directory of the repository, by its absolute path: one by another path is
-  // invalid.
   string dir = 2;
 }
 
 message PrunesResponse {
-  // The directory that holds the repository.
   string repository = 1;
   repeated Goes goes = 2;
   repeated Kept kept = 3;
   repeated Unasked unasked = 4;
 
   message Goes {
-    // The worktree, by the path git lists it at.
     string worktree = 1;
     string branch = 2;
-    // The commit its `HEAD` and its pull request's head are at.
     string head = 3;
-    // Its pull request's number.
     uint32 number = 4;
-    // Its branch on its push remote: which goes with it, or why it stays, and
-    // neither where that remote has no such branch.
     oneof pushed {
       RemoteBranch remote = 5;
       string stays = 6;
     }
-    // What it takes up. Absent where `du` did not say.
     optional uint64 bytes = 7;
   }
 
@@ -1648,14 +836,12 @@ message PrunesResponse {
     string branch = 2;
   }
 
-  // A worktree with a merged pull request that stays.
   message Kept {
     string worktree = 1;
     uint32 number = 2;
     string why = 3;
   }
 
-  // A worktree gh or git said nothing of, which stays.
   message Unasked {
     string worktree = 1;
     string why = 2;
@@ -1664,10 +850,7 @@ message PrunesResponse {
 
 message PruneRequest {
   On on = 1;
-  // A directory of the repository, by its absolute path: one by another path is
-  // invalid.
   string dir = 2;
-  // What you said yes to, by worktree.
   repeated Deleting agreed = 3;
 
   message Deleting {
@@ -1675,14 +858,12 @@ message PruneRequest {
     string branch = 2;
     string head = 3;
     uint32 number = 4;
-    // Its branch on its push remote, where that goes with it.
     PrunesResponse.RemoteBranch remote = 5;
   }
 }
 
 message PruneResponse {
   oneof answer {
-    // What it would delete now, which is not what was agreed: nothing went.
     PrunesResponse changed = 1;
     Outcomes deleted = 2;
   }
@@ -1694,11 +875,8 @@ message PruneResponse {
   message Outcome {
     string worktree = 1;
     oneof came {
-      // It went, with all that was to go with it.
       google.protobuf.Empty gone = 2;
-      // It went, and its branch stays, and why.
       string went_but = 3;
-      // It stays, and why.
       string stays = 4;
     }
   }
@@ -1706,42 +884,26 @@ message PruneResponse {
 
 message FileIssueRequest {
   On on = 1;
-  // A directory of the repository, by its absolute path: one by another path is
-  // invalid.
   string dir = 2;
-  // What the user said the issue is to be: with nothing but white space, it
-  // is invalid.
   string words = 3;
-  // The repository on GitHub it is filed in, as `owner/name`, as
-  // `IssueRepositories` says them: one spelled otherwise is invalid. The
-  // daemon files it in whichever is named, one of the remotes or not.
   string repository = 4;
 }
 
 message FileIssueResponse {
-  // The issue filed, by its page, as gh said it, whose last part is its
-  // number, and its title.
   string url = 1;
   string title = 2;
 }
 
 message IssueRepositoriesRequest {
   On on = 1;
-  // A directory of the repository, by its absolute path: one by another path is
-  // invalid.
   string dir = 2;
 }
 
 message IssueRepositoriesResponse {
-  // In the order gh takes them: the one `gh repo set-default` set, then
-  // `upstream`, `github` and `origin`, then the rest. None where no remote is
-  // on GitHub.
   repeated IssueRepository repositories = 1;
 }
 
 message IssueRepository {
-  // The first remote that names it.
   string remote = 1;
-  // As `owner/name`, on github.com.
   string repository = 2;
 }

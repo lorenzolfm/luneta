@@ -1,8 +1,3 @@
-//! The checks that failed on the head of a pane's pull request, for the agent
-//! that the menu's `c c` starts beside it, to fix them: gh says them, with the
-//! log of each job of GitHub Actions that failed, as `lunetad::checks` keeps
-//! them, on the machine the pane is on.
-
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -15,9 +10,6 @@ use crate::host::Event;
 use crate::machines::Machine;
 
 
-/// What an agent is told of `failing`, the checks of the pull request of
-/// `page`: what to do, and where each log is, or why there is none, and how
-/// many have yet to end.
 pub fn prompt(page: &PullPage, failing: &Failing) -> String {
     let Failing { head, failed, pending, .. } = failing;
     let (number, url) = (page.number(), page.url());
@@ -44,12 +36,10 @@ pub fn prompt(page: &PullPage, failing: &Failing) -> String {
     said.join(" ")
 }
 
-/// The files `failing` has the agent read.
 pub fn files(failing: &Failing) -> Vec<&str> {
     failing.failed.iter().filter_map(kept_file).collect()
 }
 
-/// The file the log of `failed` is kept in, where it is.
 fn kept_file(failed: &Failed) -> Option<&str> {
     match &failed.log {
         Log::Kept(kept) => Some(&kept.file),
@@ -57,10 +47,6 @@ fn kept_file(failed: &Failed) -> Option<&str> {
     }
 }
 
-/// Has gh on `on` say the checks of the pull request of `page`, and keep the
-/// log of each that failed, there, for the menu numbered `menu`, on a thread
-/// of its own, and hands back what it found, or why it found nothing, as
-/// `Due` does.
 pub fn fetch(menu: u64, on: &Machine, page: PullPage, events: &Sender<Event>) {
     let on = on.clone();
     let due = Due::new(events, move |checks| Event::Checks { menu, checks });
@@ -87,9 +73,6 @@ mod tests {
         Failed { name: name.to_owned(), link: link.map(str::to_owned), log }
     }
 
-    /// The agent is told the pull request and its head, then each check that
-    /// failed, with where its log is and how much of it, or why it has none
-    /// and its page, and how many others have yet to end.
     #[test]
     fn the_agent_is_told_each_check_that_failed_and_where_its_log_is() {
         let page = PullPage::parse("https://github.com/owner/repo/pull/328").unwrap();

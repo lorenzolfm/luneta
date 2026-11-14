@@ -1,6 +1,3 @@
-//! Clients: where the server says each is, what it sends each, and what each
-//! does in its pane.
-
 use luneta_mux::api;
 use tonic::Code;
 
@@ -9,9 +6,6 @@ use crate::host::{
     watched_until,
 };
 
-/// A client goes to another tab over its own stream, and is told where it is,
-/// then sent that pane's frames. One that asks for the client that last typed
-/// in a session takes that one.
 #[test]
 fn a_client_goes_between_tabs_and_is_told_where_it_is() {
     run(async {
@@ -41,8 +35,6 @@ fn a_client_goes_between_tabs_and_is_told_where_it_is() {
     });
 }
 
-/// A client that goes over its stream to a tab that closed is told it
-/// stays, and why, and stays on its pane, where it goes on typing.
 #[test]
 fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
     run(async {
@@ -67,10 +59,6 @@ fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
     });
 }
 
-/// A place says when its session was made, as the server said it made it,
-/// and is taken where the server made it then. It is refused where at
-/// another time, as of a server before this one, and where it says no time:
-/// a go to the session or to its tab, and a hello.
 #[test]
 fn a_place_of_a_session_made_at_another_time_is_refused() {
     run(async {
@@ -111,8 +99,6 @@ fn a_place_of_a_session_made_at_another_time_is_refused() {
     });
 }
 
-/// Two clients on a pane each look at it from where they scrolled to: one
-/// back in the scrollback, the other at the bottom.
 #[test]
 fn each_client_looks_back_in_the_scrollback_on_its_own() {
     run(async {
@@ -135,8 +121,6 @@ fn each_client_looks_back_in_the_scrollback_on_its_own() {
     });
 }
 
-/// A client back in the scrollback stays on the rows it looks at as the
-/// program writes more below them.
 #[test]
 fn a_client_back_in_the_scrollback_stays_on_its_rows() {
     run(async {
@@ -168,8 +152,6 @@ fn a_client_back_in_the_scrollback_stays_on_its_rows() {
     });
 }
 
-/// The pane takes the size of the client that last came, resized or typed,
-/// and its program is told.
 #[test]
 fn the_pane_takes_the_size_of_the_latest_client() {
     run(async {
@@ -200,7 +182,6 @@ fn the_pane_takes_the_size_of_the_latest_client() {
     });
 }
 
-/// A client that says it has no columns is refused, by the field's name.
 #[test]
 fn a_hello_of_no_columns_is_refused_by_its_field() {
     run(async {

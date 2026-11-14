@@ -1,15 +1,10 @@
-//! Processes as Linux's `/proc` says them.
-
 use std::fs::{self, File};
 use std::io::Read as _;
 
 use super::{ARGV_BYTES_MAX, CHILDREN_MAX, Group, Process, Terminal};
 
-/// The most threads of a process whose children the server reads.
 const TASKS_MAX: usize = 256;
 
-/// The process `pid`, as its `stat` and `wchan` say it, or none where it is
-/// gone.
 pub fn process(pid: u32) -> Option<Process> {
     let stat = fs::read(format!("/proc/{pid}/stat")).ok()?;
     let mut read = stat_of(&stat)?;
@@ -21,9 +16,6 @@ pub fn process(pid: u32) -> Option<Process> {
     Some(read)
 }
 
-/// A process as its `stat` says it: `<pid> (<name>) <state> <parent>
-/// <group> <session> <tty> <front> …`, with a name that may hold `)` or a
-/// space, so the fields go from its last `)`.
 fn stat_of(stat: &[u8]) -> Option<Process> {
     let open = stat.iter().position(|byte| *byte == b'(')?;
     let close = stat.iter().rposition(|byte| *byte == b')')?;
@@ -50,8 +42,6 @@ fn stat_of(stat: &[u8]) -> Option<Process> {
     })
 }
 
-/// The children of `pid`, of each of its first `TASKS_MAX` threads, up to
-/// `CHILDREN_MAX`: none where it is gone.
 pub fn children(pid: u32) -> Vec<u32> {
     let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
         return Vec::new();
@@ -71,9 +61,6 @@ pub fn children(pid: u32) -> Vec<u32> {
     children
 }
 
-/// The arguments of `pid`, as the first `ARGV_BYTES_MAX` bytes of its
-/// `cmdline` hold them, each ended by a NUL: none where it is gone, or a
-/// zombie, whose `cmdline` is empty.
 pub fn argv(pid: u32) -> Option<Vec<String>> {
     let cmdline = File::open(format!("/proc/{pid}/cmdline")).ok()?;
     let mut line = Vec::with_capacity(ARGV_BYTES_MAX);
@@ -91,8 +78,6 @@ pub fn argv(pid: u32) -> Option<Vec<String>> {
 mod tests {
     use super::*;
 
-    /// A name with `)` and spaces in it reads whole, the fields after it as
-    /// they are, and a terminal of none as none.
     #[test]
     fn a_stat_reads_past_a_name_of_parentheses_and_spaces() {
         let stat = b"42 (a) b (c) T 7 9 9 34817 51 4194560 0 0";

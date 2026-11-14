@@ -1,6 +1,3 @@
-//! The server: the protocol's service over the model, on the socket in
-//! luneta's runtime folder, until its last session ends.
-
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::pin::Pin;
@@ -24,20 +21,14 @@ use crate::mux::Mux;
 use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
 use crate::pty;
 
-/// How long a server with no session waits for one, as it starts.
 pub const FIRST_SESSION: Duration = Duration::from_secs(30);
 
-/// How long a server that is ending waits for its clients to go.
 const DRAIN: Duration = Duration::from_secs(5);
 
-/// The most streams a connection has at once.
 const STREAMS_MAX: u32 = 256;
 
-/// How long a client that attaches has to say its `Hello`.
 const HELLO_WAIT: Duration = Duration::from_secs(5);
 
-/// The most bytes a message to the server has: as many as a pane holds for
-/// its program to read.
 const MESSAGE_BYTES_MAX: usize = UNREAD_BYTES_MAX;
 
 struct Service {
@@ -142,8 +133,6 @@ impl mux_server::Mux for Service {
     }
 }
 
-/// Takes what client `client` says after its `Hello`, until it goes or says
-/// what is refused, and then lets go of it.
 async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToServer>, out: Out) {
     let refused = loop {
         let message = match heard.message().await {
@@ -164,9 +153,6 @@ async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToSer
     mux.detach(client);
 }
 
-/// Has `client` do what it said: its input and its size go to the pane it is
-/// on, as soon as the pane has room for them, and a `Go` that is refused is
-/// told to it.
 async fn take(mux: &Mux, client: ClientId, said: Heard, out: &Out) {
     match said {
         Heard::Input(input) => {
@@ -191,9 +177,6 @@ async fn take(mux: &Mux, client: ClientId, said: Heard, out: &Out) {
     }
 }
 
-/// What goes to a client, up to the word that its session ended, or a
-/// refusal of what it said, after which the stream ends. It ends too once the
-/// client is let go of, after what was sent to it before.
 pub struct UntilEnded {
     going: ReceiverStream<Result<api::ToClient, Status>>,
     let_go: oneshot::Receiver<()>,
@@ -229,9 +212,6 @@ impl Stream for UntilEnded {
     }
 }
 
-/// Serves on the claim's socket until the last session ends, or until it has
-/// had none for `FIRST_SESSION` as it starts. It says on stderr that it
-/// listens once it does.
 pub async fn serve(claim: Claim) -> io::Result<()> {
     if let Err(error) = pty::raise_files_limit() {
         eprintln!("luneta-mux: the limit of open files stays as it was: {error}");

@@ -1,64 +1,39 @@
-//! The icon on a pane's row in the sidebar, for the program that runs in the
-//! pane: its harness's for an agent, a terminal for a shell, neovim's for nvim.
-//!
-//! The program is the agent's harness, or else what the daemon says the
-//! pane's terminal runs in the foreground: the process group in front, or the
-//! shell itself at its prompt. The icons are Nerd Fonts', which only a Nerd
-//! Font draws, with the terminal for each shell a row is named as one for:
-//! `dash` and `elvish` too. luneta has no configuration to change them yet.
-
 use std::iter::Peekable;
 use std::str::SplitWhitespace;
 
 use lunetad::api::Harness;
 
-/// How many columns an icon takes: one, as each of these does in a font whose
-/// name ends in "Mono". Each pane's row keeps that many for one, whether its
-/// program has one or not.
 pub const WIDTH: usize = 1;
 
-/// The shells, whose name says only that a pane is at its prompt: each has the
-/// terminal for its icon, and a row of one is named for its directory.
 pub use luneta_protocol::shell::SHELLS;
 
-/// `dev-terminal`, for a shell.
 const TERMINAL: &str = "\u{e795}";
 
-/// `custom-neovim`, for vim as well.
 const NEOVIM: &str = "\u{e6ae}";
 
-/// `cod-claude`.
 const CLAUDE: &str = "\u{ec82}";
 
-/// `md-pi`.
 const PI: &str = "\u{f03ff}";
 
-/// `dev-python`.
 const PYTHON: &str = "\u{e73c}";
 
-/// `dev-git`.
 const GIT: &str = "\u{e702}";
 
-/// The icons of what is not a shell, by the name of the binary each is for,
-/// as Nerd Fonts 3.5 numbers them. Claude's came with Nerd Fonts 3.5.0, and
-/// ssh's with 3.3.0: an older font has neither, and the terminal draws a box
-/// or nothing for them.
 const ICONS: [(&str, &str); 12] = [
     ("claude", CLAUDE),
     ("pi", PI),
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
-    ("cargo", "\u{e7a8}"), // `dev-rust`
+    ("cargo", "\u{e7a8}"),
     ("python", PYTHON),
     ("python3", PYTHON),
-    ("docker", "\u{e7b0}"), // `dev-docker`
-    ("ssh", "\u{e8b1}"),    // `dev-ssh`
+    ("docker", "\u{e7b0}"),
+    ("ssh", "\u{e8b1}"),
     ("git", GIT),
     ("lazygit", GIT),
-    ("htop", "\u{eb31}"), // `cod-pulse`
+    ("htop", "\u{eb31}"),
 ];
 
-/// The icon of an agent in `harness`, as its row has.
 pub const fn harness(harness: lunetad::Harness) -> &'static str {
     match harness {
         lunetad::Harness::ClaudeCode => CLAUDE,
@@ -66,8 +41,6 @@ pub const fn harness(harness: lunetad::Harness) -> &'static str {
     }
 }
 
-/// The program an agent runs in `harness`, by its binary's name, if luneta
-/// knows of that harness.
 pub fn agent(harness: Harness) -> Option<&'static str> {
     match harness {
         Harness::ClaudeCode => Some("claude"),
@@ -76,7 +49,6 @@ pub fn agent(harness: Harness) -> Option<&'static str> {
     }
 }
 
-/// The icon of `program`, by its binary's name, if it has one.
 pub fn of(program: &str) -> Option<&'static str> {
     if SHELLS.contains(&program) {
         return Some(TERMINAL);
@@ -84,12 +56,6 @@ pub fn of(program: &str) -> Option<&'static str> {
     ICONS.iter().find(|(name, _)| *name == program).map(|(_, icon)| *icon)
 }
 
-/// The name of the binary a command line runs, as zellij spells a command:
-/// its path, then each argument after a space. A login shell's leading `-`
-/// goes, and `sudo`, `env` and `nix run` give way to what they run: `nix
-/// run`'s is the last part of the attribute it is given, as `htop` of
-/// `nixpkgs#htop`, and nothing a binary goes by for a flake's default. It
-/// reads no further than the binary, however many arguments follow it.
 pub fn program(command: &str) -> Option<&str> {
     let mut words = command.split_whitespace().peekable();
     loop {
@@ -111,14 +77,11 @@ pub fn program(command: &str) -> Option<&str> {
     }
 }
 
-/// The options of a command that take a value, by their letters after a `-`
-/// and their names after `--`.
 struct Takes {
     letters: &'static str,
     names: &'static [&'static str],
 }
 
-/// The options of `sudo` that take a value.
 const SUDO_TAKES: Takes = Takes {
     letters: "CDRTUghprtu",
     names: &[
@@ -136,14 +99,9 @@ const SUDO_TAKES: Takes = Takes {
     ],
 };
 
-/// The options of `env` that take a value.
 const ENV_TAKES: Takes = Takes { letters: "Cu", names: &["chdir", "unset"] };
 
 impl Takes {
-    /// Whether `option` takes the word after it as its value: a name that
-    /// takes one, with none after an `=`, or a run of letters whose first
-    /// that takes one is its last, as the `u` of `-Hu root`. One before the
-    /// last takes the rest of the run, as the `u` of `-uroot`.
     fn next_word(&self, option: &str) -> bool {
         if let Some(name) = option.strip_prefix("--") {
             return self.names.contains(&name);
@@ -155,8 +113,6 @@ impl Takes {
     }
 }
 
-/// Takes the options at the front of `words` off it, the value of each that
-/// takes the word after it, and a `--` that ends them.
 fn past_options(words: &mut Peekable<SplitWhitespace>, takes: &Takes) {
     while let Some(option) = words.next_if(|word| word.starts_with('-')) {
         if option == "--" {
@@ -168,7 +124,6 @@ fn past_options(words: &mut Peekable<SplitWhitespace>, takes: &Takes) {
     }
 }
 
-/// Whether `word` sets a variable for the command after it, as `FOO=1`.
 fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
@@ -176,8 +131,6 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// The name of the binary at `path`, without the `-` a login shell leads its
-/// own with.
 fn binary(path: &str) -> &str {
     let name = path.rsplit('/').next().unwrap_or(path);
     name.strip_prefix('-').unwrap_or(name)
@@ -189,7 +142,6 @@ mod tests {
 
     use super::*;
 
-    /// As zellij 0.45 spelled them, run from fish on NixOS, and what they run.
     #[test]
     fn a_command_line_runs_the_binary_it_names_past_sudo_env_and_nix_run() {
         let nvim = "/nix/store/q2rpnq6f54cba9mx1q159i1qw994z52k-neovim-unwrapped-0.12.6/bin/nvim \
@@ -212,7 +164,6 @@ mod tests {
             ("nix run nixpkgs#htop", Some("htop")),
             ("nix run --impure nixpkgs#python3Packages.ipython -- -i", Some("ipython")),
             ("nix build .#luneta", Some("nix")),
-            // A flake's default, a shell `sudo` starts, and nothing at all.
             ("nix run .", None),
             ("sudo -i", None),
             ("sudo -iu postgres", None),
@@ -223,8 +174,6 @@ mod tests {
         }
     }
 
-    /// The sidebar keeps a column of `WIDTH` for an icon, so that every label
-    /// starts at the same column: one that took more would push its label on.
     #[test]
     fn every_icon_takes_the_columns_a_row_keeps_for_one() {
         for program in SHELLS.into_iter().chain(ICONS.map(|(program, _)| program)) {

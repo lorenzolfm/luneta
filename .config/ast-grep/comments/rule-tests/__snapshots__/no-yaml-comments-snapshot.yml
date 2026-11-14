@@ -1,0 +1,16 @@
+id: no-yaml-comments
+snapshots:
+  ? |-
+    # a
+    key: value
+  : labels:
+    - source: '# a'
+      style: primary
+      start: 0
+      end: 3
+  'key: value # a':
+    labels:
+    - source: '# a'
+      style: primary
+      start: 11
+      end: 14

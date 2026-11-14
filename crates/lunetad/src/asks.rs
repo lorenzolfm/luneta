@@ -1,20 +1,3 @@
-//! A turn of a talk of luneta's ask box: what you want done, in words, for
-//! an agent to do with luneta's commands, as the menu would. What you type
-//! goes to `claude -p`, with luneta's skill, and with luneta's commands and
-//! the few its skill reads with as the only ones it may run, and those your
-//! own settings let it. luneta runs it for a row of its own machine; a
-//! daemon runs it here for a luneta on another machine, whose box was for a
-//! row of this one, so that the agent's commands, and the zoxide, gh and
-//! worktrees it reads with, act here, with this machine's skill and login.
-//!
-//! The agent runs in no pane of zellij, and goes by where you are as you
-//! send it the turn: the pane luneta's zellij is on, where that is of zellij
-//! on the agent's machine, which luneta's commands take for the one they run
-//! in, by `ASKED_VAR`; or the pane of an own session luneta's client is on,
-//! and which client that is, for `go` to move it, by `OWN_VAR`; or another
-//! machine, by `AWAY_VAR`, where a close takes none of your panes along, and
-//! `go` moves none of your clients.
-
 use std::env;
 use std::ffi::OsString;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
@@ -34,65 +17,27 @@ use crate::transcripts::SessionId;
 use crate::mux::{self, OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, SessionName};
 use crate::{git, program, Harness};
 
-/// The model the agent runs on: one that works out what words point at, and
-/// runs a few commands in a row, without slips.
 pub const MODEL: &str = "sonnet";
 
-/// How long a turn has. One that opens a tab with a worktree for each of a
-/// few issues takes a minute or two: one that takes longer than this is
-/// stuck, and is killed.
 pub const TURN: Duration = Duration::from_mins(10);
 
-/// How often a turn looks at whether it is still wanted, while `claude` says
-/// nothing.
 pub const LOOK: Duration = Duration::from_millis(5);
 
-/// What names the pane you asked luneta's ask box from, in the variables of
-/// the agent it runs, which runs in no pane: the pane luneta's zellij was on
-/// as the turn started, as `<session>:<pane>`, by the name its session had
-/// then, not the one it had as the pane opened.
 pub const ASKED_VAR: &str = "LUNETA_PANE";
 
-/// What names the pane of an own session you asked luneta's ask box from, in
-/// the variables of the agent it runs, as
-/// `<session>:<made>:<pane>:<client>:<name>`: the session by its id and when
-/// its server made it, in nanoseconds since the epoch, which a rename keeps,
-/// the pane by its id, luneta's client by the id its server gave it, which a
-/// go takes, and last the name the session had as the turn started, which
-/// may hold a `:` of its own.
 pub const OWN_VAR: &str = "LUNETA_OWN_SEAT";
 
-/// What named the pane of an own session you asked luneta's ask box from,
-/// before it named luneta's client too, as `<session>:<made>:<pane>:<name>`:
-/// set by a lunetad older than this luneta, whose spelling `OWN_VAR`'s would
-/// read wrong where the name starts with digits and a `:`, so none is read.
 pub const OWN_VAR_BEFORE: &str = "LUNETA_OWN_PANE";
 
-/// What says, in the variables of the agent of luneta's ask box, that you
-/// asked it from another machine, where luneta's zellij was as the turn
-/// started: no pane of the agent's machine is yours.
 pub const AWAY_VAR: &str = "LUNETA_AWAY";
 
-/// What names the turn of luneta's ask box a command runs in, in the
-/// variables of the box's agent, and what names the turn before it: a key of
-/// each, in hex. The agent knows neither, as Claude Code runs no line of its
-/// that reads a variable or sets one, in its `dontAsk` mode.
 pub const TURN_VAR: &str = "LUNETA_TURN";
 pub const BEFORE_VAR: &str = "LUNETA_TURN_BEFORE";
 
-/// What says, in the variables of the agent of luneta's ask box, that a pane
-/// it opens may run pi, as you picked pi last in luneta's menu: pi asks
-/// nothing before it runs a command, so the box opens none where you did not.
 pub const AGENTS_VAR: &str = "LUNETA_AGENTS";
 
-/// What `AGENTS_VAR` is, where it is set.
 const AGENTS_PI: &str = "pi";
 
-/// The commands the agent may run, as Claude Code's rules name them: the
-/// verbs of luneta's its skill has, and the commands its skill reads what
-/// your words point at with, and makes worktrees with. In `dontAsk` mode,
-/// Claude Code denies it any other but those your own settings allow, and a
-/// line that runs one inside another, as through `$(…)`.
 pub const ALLOWED: [&str; 16] = [
     "Bash(luneta here:*)",
     "Bash(luneta sessions:*)",
@@ -112,12 +57,8 @@ pub const ALLOWED: [&str; 16] = [
     "Bash(git worktree list:*)",
 ];
 
-/// luneta's skill, which says how an agent goes about what you ask: the one
-/// this build's commands are of, whatever skills Claude Code has installed.
 pub const SKILL: &str = include_str!("../../../skills/luneta/SKILL.md");
 
-/// What the agent is told, whatever you ask, before what it is told of the
-/// row highlighted, and the skill.
 pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they want in luneta's \
     sidebar, and reads what you say in a small box over zellij: write plain text for a \
     terminal, with no markdown, no headings, no tables and no code fences, and keep it short. \
@@ -139,15 +80,8 @@ pub const SYSTEM: &str = "You run in luneta's ask box. The user typed what they 
     You run in no pane yourself, so closing it does not end you, but it is the user's: leave \
     it and its session out of \"all\", as the skill says.";
 
-/// What `AWAY_VAR` is, where it is set.
 const AWAY_SET: &str = "1";
 
-/// A turn of the agent of luneta's ask box, by its key, and the key of the
-/// turn before it, where one went before. A plan a close says in a turn is of
-/// its key, and the one it takes a yes to, of the key before, so that a close
-/// takes a yes only to a plan said in the turn before, what you answered the
-/// agent between them. No turn is of the key of the turn before it, as it
-/// would take a yes to the plan it says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Turn {
     key: u64,
@@ -155,9 +89,6 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// The turn after the one of the key `before`, where one went before, by
-    /// a key of its own: one nothing the agent runs can tell, as std seeds
-    /// the keys of its hashers at random.
     #[must_use]
     pub fn after(before: Option<u64>) -> Turn {
         let key = RandomState::new().build_hasher().finish();
@@ -165,8 +96,6 @@ impl Turn {
         Turn { key, before }
     }
 
-    /// The turn of `key`, after the one of `before`, where one went before,
-    /// or why it is none: `before` is `key`.
     pub fn new(key: u64, before: Option<u64>) -> Result<Turn, String> {
         if before == Some(key) {
             return Err(format!("turn: {key:016x} is the key of the turn before it too"));
@@ -184,7 +113,6 @@ impl Turn {
         self.before
     }
 
-    /// Names it in the variables of `command`, for a close it runs to read.
     pub fn name_in(self, command: &mut Command) {
         command.env(TURN_VAR, format!("{:016x}", self.key));
         match self.before {
@@ -193,8 +121,6 @@ impl Turn {
         };
     }
 
-    /// The turn `key` and `before` name, as `name_in` names one in `TURN_VAR`
-    /// and `BEFORE_VAR`: none where neither does. Or why they do not read.
     fn read(key: Option<&str>, before: Option<&str>) -> Result<Option<Turn>, String> {
         let read = |name, spelled: &str| {
             let read = u64::from_str_radix(spelled, 16);
@@ -211,28 +137,15 @@ impl Turn {
     }
 }
 
-/// Where you are as you send a turn, as the agent is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum User {
-    /// In the pane `pane` of `session`, of zellij on the agent's machine,
-    /// where luneta's zellij is, by the name its session has now.
     Pane { session: SessionName, pane: u32 },
-    /// In the own pane `pane`, on the agent's machine, where luneta's client
-    /// of an own session is, of the session `named` as the turn started,
-    /// which the agent is told; and that client, `client`, which a go the
-    /// agent asks for takes, whoever typed last in the session.
     Own { pane: OwnPane, named: SessionName, client: OwnClientId },
-    /// On another machine, where luneta's zellij is: in none of the agent's
-    /// machine's panes.
     Away,
-    /// Where luneta cannot tell just now.
     Untold,
 }
 
 impl User {
-    /// Names it in the variables of `command`, for luneta's commands to go
-    /// by: the pane, as `<session>:<pane>`, in `ASKED_VAR`, or an own one in
-    /// `OWN_VAR`, or another machine in `AWAY_VAR`, or none of them.
     fn name_in(&self, command: &mut Command) {
         for name in [ASKED_VAR, OWN_VAR, OWN_VAR_BEFORE, AWAY_VAR] {
             command.env_remove(name);
@@ -247,7 +160,6 @@ impl User {
         };
     }
 
-    /// Where you are, as a question to a daemon says it.
     fn asked(&self) -> Option<ask_request::User> {
         match self {
             User::Untold => None,
@@ -265,8 +177,6 @@ impl User {
         }
     }
 
-    /// Where you are, as `name_in` names it in `said`. Or why they do not
-    /// read, or say more than one place, or are of an older lunetad's.
     fn read(said: Where<'_>) -> Result<User, String> {
         if let Some(before) = said.own_before {
             return Err(older(before));
@@ -277,7 +187,6 @@ impl User {
             Where { asked: None, own: None, away: Some(away), .. } => {
                 Err(format!("{AWAY_VAR} is {away:?}, and luneta's ask box sets it to {AWAY_SET}"))
             },
-            // A session's name may hold a `:` of its own, as zellij's may.
             Where { asked: Some(asked), own: None, away: None, .. } => {
                 let pane = asked.rsplit_once(':').and_then(|(session, pane)| {
                     let session = SessionName::running(session).ok()?;
@@ -306,8 +215,6 @@ impl User {
     }
 }
 
-/// Why `OWN_VAR_BEFORE`, set to `before`, does not read: a lunetad older than
-/// this luneta set it, and the luneta it runs with stops it once relaunched.
 fn older(before: &str) -> String {
     format!(
         "{OWN_VAR_BEFORE} is {before:?}, as a lunetad older than this luneta sets it: relaunch \
@@ -315,17 +222,11 @@ fn older(before: &str) -> String {
     )
 }
 
-/// `OWN_VAR` as `name_in` spells it, of the own pane `pane`, of the session
-/// named `named`, with luneta's client there `client`: as `own_read` reads it
-/// back.
 fn own_spelled(pane: OwnPane, named: &SessionName, client: OwnClientId) -> String {
     let made = pane.session.made.nanos();
     format!("{}:{made}:{}:{client}:{named}", pane.session.id, pane.id)
 }
 
-/// The pane of an own session `spelled` names, as `own_spelled` spells it:
-/// none where it does not read, as where an id is 0, or the name is one no
-/// session takes.
 fn own_read(spelled: &str) -> Option<User> {
     let mut parts = spelled.splitn(5, ':');
     let id = OwnId::new(parts.next()?.parse().ok()?)?;
@@ -336,9 +237,6 @@ fn own_read(spelled: &str) -> Option<User> {
     Some(User::Own { pane, named, client })
 }
 
-/// Where you are, as the variables of the agent of luneta's ask box spell it:
-/// of `ASKED_VAR`, `OWN_VAR` and `AWAY_VAR`, which the box sets one of at
-/// most, and `OWN_VAR_BEFORE`, which only an older lunetad's box sets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Where<'a> {
     pub asked: Option<&'a str>,
@@ -347,11 +245,6 @@ pub struct Where<'a> {
     pub own_before: Option<&'a str>,
 }
 
-/// The turn of luneta's ask box a command runs in, and where you are, as the
-/// box names them in the variables of its agent: `key` and `before`, of
-/// `TURN_VAR` and `BEFORE_VAR`, and where you are, as `user` spells it. None
-/// where none is set, as outside the box. Or why they do not read, or say
-/// where you are outside a turn.
 pub fn turn_in(
     key: Option<&str>,
     before: Option<&str>,
@@ -370,8 +263,6 @@ pub fn turn_in(
     Ok(Some((turn, User::read(user)?)))
 }
 
-/// The harness the turn's agents start in, as the box names it in `said`, of
-/// `AGENTS_VAR`: Claude Code where it is not set. Or why it does not read.
 pub fn agents_in(said: Option<&str>) -> Result<Harness, String> {
     match said {
         None => Ok(Harness::ClaudeCode),
@@ -382,22 +273,15 @@ pub fn agents_in(said: Option<&str>) -> Result<Harness, String> {
     }
 }
 
-/// A step of a turn of the agent, as `claude` says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// The Claude session the turn runs on, which the next one goes on with.
     Session(SessionId),
-    /// A command the agent runs, or a tool it uses, by its name, and the id
-    /// Claude Code gives the call.
     Ran { id: String, command: String },
-    /// Claude Code denied the agent the call of this id, which ran nothing.
     Denied(String),
-    /// What the agent said.
     Said(String),
 }
 
 impl Step {
-    /// It, as a daemon hands it on.
     #[must_use]
     pub fn answer(self) -> AskResponse {
         let step = match self {
@@ -409,9 +293,6 @@ impl Step {
         AskResponse { step: Some(step) }
     }
 
-    /// The step a daemon handed on: none where it is none of these, as a
-    /// newer daemon's could be. Or why it is no step: it names a session by
-    /// no id of one, which the next turn could not go on with.
     pub fn of(answer: AskResponse) -> Result<Option<Step>, String> {
         let Some(step) = answer.step else {
             return Ok(None);
@@ -428,16 +309,9 @@ impl Step {
     }
 }
 
-/// A turn asked of the agent: `words`, what you typed, for an agent that
-/// works in `cwd`, on the Claude session `resumed` if one went before, told
-/// of the row `highlighted` as the box opened, for you where `user` says, in
-/// `turn`, starting the agents it starts in `agents`, and in pi only where
-/// that is pi.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
-    /// By its absolute path: none for the home of the user it runs as.
     cwd: Option<PathBuf>,
-    /// With something besides white space, and none around it.
     words: String,
     resumed: Option<SessionId>,
     highlighted: String,
@@ -447,9 +321,6 @@ pub struct Asked {
 }
 
 impl Asked {
-    /// The turn of `words`, as `Asked` has it, or why not: `cwd` is by no
-    /// absolute path, or the words are only white space, or `user` is in an
-    /// own pane of id 0, or of a session made at a time `OWN_VAR` cannot say.
     pub fn new(
         cwd: Option<PathBuf>,
         words: &str,
@@ -469,11 +340,6 @@ impl Asked {
         Ok(Asked { cwd, words: words.to_owned(), resumed, highlighted, user, turn, agents })
     }
 
-    /// The turn a question asks for, and the machine it is for, or why the
-    /// question is invalid: as `new` says, or it resumes a session by no id
-    /// of one, or names your pane in a session by a name zellij does not
-    /// take, or its turn is of the key of the turn before it, or its agents
-    /// are to start in a harness this lunetad does not know.
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
         let AskRequest { on, cwd, words, resumed, highlighted, user, turn, before, agents } =
             request;
@@ -506,8 +372,6 @@ impl Asked {
         Ok((on, asked))
     }
 
-    /// The question that has the daemon of the machine `on` names run it, or
-    /// the daemon asked, where it names none.
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> AskRequest {
         let user = self.user.asked();
@@ -524,9 +388,6 @@ impl Asked {
         }
     }
 
-    /// Runs it, and hands each step the agent takes to `hear` as `claude`
-    /// says it, for as long as it is `wanted`: none once it is not, as
-    /// `claude` is killed then. Or how it ended: well, or why not.
     pub fn talk(
         &self,
         wanted: &dyn Fn() -> bool,
@@ -535,16 +396,6 @@ impl Asked {
         talk(self.claude(), &told(&self.user, self.agents, &self.words), wanted, hear)
     }
 
-    /// `claude`, for it. It runs on the model the box has, in safe mode, so
-    /// that none of your hooks, `CLAUDE.md` or MCP servers come into it, with
-    /// Bash its one tool, and `ALLOWED` all it runs but what your own
-    /// settings allow: not what those of the directory it runs in do, which
-    /// a repository brings. It has no zellij in its environment, so that the
-    /// daemon places it in no pane, nor what tells git where a repository
-    /// is, so that the git it runs, and `luneta worktree`, find one by the
-    /// directory they run in. The `luneta` it runs is the one beside this
-    /// program, where there is one, and its closes know the turn, and where
-    /// you are.
     fn claude(&self) -> Command {
         let mut claude = Command::new("claude");
         claude.args(["-p", "--model", MODEL, "--safe-mode", "--setting-sources", "user"]);
@@ -554,8 +405,6 @@ impl Asked {
         if let Some(session) = &self.resumed {
             claude.args(["--resume", session.as_str()]);
         }
-        // It takes every word after it for one more rule: the words you typed
-        // go on its stdin.
         claude.arg("--allowedTools").args(ALLOWED);
         mux::in_no_pane(&mut claude);
         git::local(&mut claude);
@@ -577,17 +426,10 @@ impl Asked {
     }
 }
 
-/// What the agent is told, with the row `highlighted` as the box opened, and
-/// the skill: the same each turn, as Claude Code keeps what a talk's first
-/// turn was told for the rest of it.
 fn system(highlighted: &str) -> String {
     format!("{SYSTEM}\n\n{highlighted}\n\n{SKILL}")
 }
 
-/// The message of a turn: `words`, what you typed, after a line that says
-/// where you are as you send it, as `user` has it, and one that says the
-/// harness an agent it starts runs in, `agents`: pi unless you name Claude
-/// Code, or Claude Code alone, as the box opens pi only where you picked it.
 fn told(user: &User, agents: Harness, words: &str) -> String {
     let agents = match agents {
         Harness::Pi => "[luneta: start an agent in pi, unless the user names Claude Code.]",
@@ -616,9 +458,6 @@ fn told(user: &User, agents: Harness, words: &str) -> String {
     format!("{user}\n{agents}\n\n{words}")
 }
 
-/// The `PATH` with the directory of `exe` first, where it is a `luneta`, or
-/// where one is beside it, as beside `lunetad`, so that the `luneta` the
-/// agent runs is that one, as old or as new as the skill the agent is told.
 fn path_with(exe: &Path) -> Option<OsString> {
     if exe.file_name()? != "luneta" && !exe.with_file_name("luneta").is_file() {
         return None;
@@ -628,20 +467,12 @@ fn path_with(exe: &Path) -> Option<OsString> {
     env::join_paths(dirs).ok()
 }
 
-/// What a line `claude` writes says, of what the box shows.
 #[derive(Debug, PartialEq, Eq)]
 enum Read {
     Step(Step),
-    /// The turn's end, as `claude` says it: what the agent said last, or why
-    /// the turn failed.
     Ended(Result<String, String>),
 }
 
-/// What `line`, a JSON record of what `claude` does, says: the session it
-/// starts on, what the agent ran and said, and the turn's end, with the
-/// calls Claude Code denied it, as it says only then. A subagent's records
-/// are left out, and so are what the agent thought, what a tool answered,
-/// and the rest.
 fn read(line: &str) -> Vec<Read> {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
@@ -673,8 +504,6 @@ fn read(line: &str) -> Vec<Read> {
     }
 }
 
-/// A step of what the agent did, from a block of what it sent: what it said,
-/// or the command it ran, or another tool it used, by its name.
 fn step(block: &Value) -> Option<Step> {
     match block["type"].as_str()? {
         "text" => {
@@ -690,12 +519,6 @@ fn step(block: &Value) -> Option<Step> {
     }
 }
 
-/// Runs `claude`, as `command` has it, on `words`, which go on its stdin, and
-/// hands each step it hears to `hear` as `claude` says it, for as long as the
-/// turn is `wanted`: none once it is not, as `claude` is killed then. Or how
-/// the turn ended: well, or why not, as `claude` says, or as it failed, or as
-/// it was still at it after `TURN`. An agent that said nothing all turn says
-/// what `claude` says it said last, if anything.
 fn talk(
     mut command: Command,
     words: &str,
@@ -705,8 +528,6 @@ fn talk(
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
-        // A program not on the PATH is not found, and so is a directory to
-        // start in that is gone, as a pane's is once its worktree is removed.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let gone = command.get_current_dir().filter(|cwd| !cwd.is_dir());
             return Some(Err(match gone {
@@ -716,8 +537,6 @@ fn talk(
         },
         Err(error) => return Some(Err(format!("claude could not be run: {error}"))),
     };
-    // `claude -p` reads its stdin to the end before it starts. One that ends
-    // without reading it says why on its stderr.
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(words.as_bytes());
     }
@@ -751,14 +570,11 @@ fn talk(
                     }
                 }
             },
-            // Its stdout ended, or does not read.
             Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {},
         }
         let stuck = Instant::now() >= deadline;
         if stuck || !wanted() {
-            // One that ended just now is not waited for yet, and takes the
-            // signal all the same.
             let _ = child.kill();
             let _ = child.wait();
             let minutes = TURN.as_secs() / 60;
@@ -780,9 +596,6 @@ fn talk(
     })
 }
 
-/// Why `claude` failed, as it ended with `status` and said `stderr`: the
-/// first line of what it said, or how it ended, or that it said nothing of
-/// the turn's end.
 fn failed(stderr: &[u8], status: ExitStatus) -> String {
     let said = String::from_utf8_lossy(stderr);
     match said.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -811,8 +624,6 @@ mod tests {
         User::Pane { session: SessionName::running(session).unwrap(), pane }
     }
 
-    /// The pane `pane` of an own session named `named`, of id 3, made
-    /// `made` nanoseconds after the epoch, with luneta's client 7 on it.
     fn own_pane_made(named: &str, pane: u32, made: u64) -> User {
         let made = OwnMade::from_nanos(made);
         let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, pane).unwrap();
@@ -832,18 +643,6 @@ mod tests {
         command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
     }
 
-    /// The agent runs in the turn's directory, on the box's model, in safe
-    /// mode, with the permission rules of your settings alone, no tool but
-    /// Bash and nothing it may run but `ALLOWED`, and the words go on its
-    /// stdin, as `--allowedTools` takes every word after it. It is told the
-    /// row highlighted as the box opened, and where you are each turn, in
-    /// what the turn sends it, as Claude Code keeps the system prompt of a
-    /// talk's first turn. It has no zellij in its environment, nor what tells
-    /// git where a repository is, and has the pane you are in, or that you
-    /// are on another machine, where luneta can tell either, and the turn it
-    /// is at. A turn after the first goes on with the session the first
-    /// said, and one with no directory works in the home of the user it
-    /// runs as.
     #[test]
     fn the_agent_runs_where_it_is_asked_for_where_you_are() {
         let var = |command: &Command, name: &str| {
@@ -907,9 +706,6 @@ mod tests {
         assert!(untold.ends_with("]\n\nyes"), "{untold}");
     }
 
-    /// luneta's commands read in the variables of the agent the turn it is
-    /// at and where you are, as the box named them, and read none outside
-    /// the box.
     #[test]
     fn the_agent_s_commands_read_the_turn_and_where_you_are() {
         let var = |command: &Command, name: &str| {
@@ -936,9 +732,6 @@ mod tests {
         assert_eq!(turn_in(None, None, Where::default()), Ok(None));
     }
 
-    /// luneta's commands read in the variables of the agent the harness its
-    /// agents start in, as the box named it: Claude Code where it names
-    /// none, and nothing the box would not name.
     #[test]
     fn the_agent_s_commands_read_the_harness_of_the_turn() {
         for agents in [Harness::ClaudeCode, Harness::Pi] {
@@ -954,12 +747,6 @@ mod tests {
         }
     }
 
-    /// A command reads no turn of the box's but one its variables name in
-    /// full: a key that reads, after none or another that does, and where
-    /// you are by a pane of a session zellij could run, or by a pane of an
-    /// own session, by ids that are not 0 and a name a session could have, or
-    /// by the `1` that says another machine, or by none. Where you are,
-    /// outside a turn, is none of the box's, nor are two places.
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
         let (key, before) = (Some("ff"), Some("0a"));
@@ -1020,8 +807,6 @@ mod tests {
         }
     }
 
-    /// Each turn has a key of its own, and the key of the turn before it, the
-    /// first none.
     #[test]
     fn a_turn_goes_by_its_own_key_and_the_one_before() {
         let first = Turn::after(None);
@@ -1032,7 +817,6 @@ mod tests {
         assert!(first.key() != second.key() && second.key() != third.key());
     }
 
-    /// The own pane of a question, as `change` leaves it.
     fn own_asked(change: impl FnOnce(&mut UserOwnPane)) -> ask_request::User {
         let Some(ask_request::User::Own(mut own)) = own_pane("work", 2).asked() else {
             unreachable!("an own pane is asked as one");
@@ -1041,13 +825,6 @@ mod tests {
         ask_request::User::Own(own)
     }
 
-    /// A turn is asked of a daemon as it is, and a question that asks for
-    /// none is invalid: one in a directory by no absolute path, of words
-    /// that are only white space, that resumes a session by no id of one,
-    /// that names your pane in a session by a name zellij does not take, or
-    /// an own pane of no session, of id 0, or of a session made before the
-    /// epoch, or with luneta's client there 0, or whose turn is of the key
-    /// of the turn before it.
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
@@ -1088,9 +865,6 @@ mod tests {
         }
     }
 
-    /// A step a daemon hands on is the step it took, and one that is none a
-    /// daemon hands on is left out. One that names a session by no id of
-    /// one is no step.
     #[test]
     fn a_step_is_handed_on_as_it_is() {
         let ran = Step::Ran { id: "toolu_1".to_owned(), command: "luneta here".to_owned() };
@@ -1108,8 +882,6 @@ mod tests {
         assert_eq!(Step::of(unnamed), Err("session: \"../x\" names no session".to_owned()));
     }
 
-    /// The agent runs this luneta, where it is one, or the one beside this
-    /// program, as beside lunetad, ahead of any other on the `PATH`.
     #[test]
     fn the_agent_runs_this_luneta() {
         let path = path_with(Path::new("/nix/store/x-luneta/bin/luneta")).expect("a PATH");
@@ -1123,10 +895,6 @@ mod tests {
         assert_eq!(env::split_paths(&path).next().as_deref(), Some(bin.path()));
     }
 
-    /// What the agent ran and said comes out of what `claude` writes, a
-    /// record to a line, and so does the session it runs on and how its turn
-    /// ended, with what Claude Code denied it. A subagent's records, what it
-    /// thought and the rest are left out.
     #[test]
     fn what_claude_writes_says_what_the_agent_ran_and_said() {
         let line = |record: Value| record.to_string();
@@ -1180,9 +948,6 @@ mod tests {
         );
     }
 
-    /// A turn hands on what `claude` writes as it writes it, and ends as it
-    /// says: well, or with why not. One that says how it ended without having
-    /// said a word says that.
     #[test]
     fn a_turn_hands_on_what_claude_writes_and_ends_as_it_says() {
         let heard = |script: &str, words: &str| {
@@ -1219,7 +984,6 @@ mod tests {
         assert_eq!(ended, Some(Err("claude is not on the PATH".to_owned())));
     }
 
-    /// A turn given up kills `claude`, and ends with nothing to say.
     #[test]
     fn a_turn_given_up_kills_claude() {
         let mut sh = Command::new("sh");

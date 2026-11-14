@@ -1,14 +1,3 @@
-//! The panes of each zellij session that runs, as `zellij action list-panes`
-//! lists them, and its clients.
-//!
-//! zellij tells no one as a pane opens, closes, or changes where it works or
-//! what it runs, nor as a client comes, goes, or moves its focus. It writes
-//! what it keeps of a session within a second of most of those, though, but
-//! for where a pane works and what it runs, which luneta's hook has a shell
-//! say as it runs a command. So a session is asked about again as either
-//! changes, and every sweep besides, for the rest; and one the daemon has not
-//! asked about yet as soon as it turns up.
-
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
@@ -25,26 +14,19 @@ use crate::shells::Doing;
 use crate::watch::{self, Troubles};
 use crate::mux::{CacheFolder, Failure, Id, Laid, Metadata, Mux, SessionName, Zellij};
 
-/// A terminal of a session's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
     pub id: u32,
-    /// The position of its tab, from 0.
     pub tab: u32,
-    /// The id zellij gave its tab, which stays the tab's as it moves and as
-    /// tabs before it close.
     pub tab_id: u32,
     pub tab_name: String,
     pub cwd: Option<Said>,
-    /// What runs in front in it.
     pub command: Option<Said>,
-    /// What an agent says in its title, as `titled` has it.
     pub titled: Option<Titled>,
     pub held: bool,
 }
 
 impl Pane {
-    /// The pane as the API gives it, with what its shell is `doing`.
     #[must_use]
     pub fn to_api(&self, doing: Option<&Doing>) -> api::Pane {
         api::Pane {
@@ -61,12 +43,8 @@ impl Pane {
     }
 }
 
-/// What an agent says in the title of its pane, without the glyph it leads
-/// the title with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Titled {
-    /// Its topic: none while Claude Code titles the pane a bare `Claude Code`,
-    /// as it does until it has one.
     pub topic: Option<Said>,
 }
 
@@ -76,10 +54,6 @@ impl Titled {
     }
 }
 
-/// The terminals among `laid`, every pane of a session, or why they do not
-/// read. A plugin's pane is no terminal, and a suppressed one is off the
-/// screen, in the place another took. A session gives each terminal an id of
-/// its own.
 pub(crate) fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
     let panes: Vec<Pane> = laid
         .into_iter()
@@ -104,15 +78,8 @@ pub(crate) fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
     Ok(panes)
 }
 
-/// The title Claude Code gives its pane until the agent has a topic, which
-/// some never get.
 const GENERIC_TITLE: &str = "Claude Code";
 
-/// What an agent says in a pane's title, without the glyph it leads the title
-/// with: Claude Code's `✳` at rest, and the frame it turns in its place while
-/// it works, `◐` and `◑` as 2.1.310 turns them, so that the host changes only
-/// as the agent's topic does. None for a title that leads with no such glyph,
-/// which no agent gave.
 fn titled(title: &str) -> Option<Titled> {
     let mut chars = title.trim().chars();
     let glyph = chars.next()?;
@@ -122,10 +89,6 @@ fn titled(title: &str) -> Option<Titled> {
     agent.then(|| Titled { topic: topic.map(str::to_owned).and_then(Said::new) })
 }
 
-/// Keeps in `panes` where each worked and what ran in it as `listed` said,
-/// where zellij says nothing of either now. It gives itself 100ms to find
-/// out each for each pane, and says nothing when it takes longer, as a
-/// server that is busy does (`route.rs` in zellij-server 0.45.1).
 pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
     for pane in panes {
         let Some(was) = listed.iter().find(|was| was.id == pane.id) else {
@@ -136,45 +99,22 @@ pub fn keep(panes: &mut [Pane], listed: &[Pane]) {
     }
 }
 
-/// The panes of `session`, or why zellij did not list them.
 fn list(session: &SessionName) -> Result<Vec<Pane>, String> {
     let laid = Mux::Zellij(session).panes_listed()?;
     terminals(laid).map_err(|why| format!("zellij listed what does not read: {why}"))
 }
 
-/// What tells the daemon that the panes of a session may have changed, short
-/// of asking zellij.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Signs {
-    /// What zellij last wrote of it.
     metadata: Option<Metadata>,
-    /// The last word said of it, as the core counts them.
     told: u64,
 }
 
-/// When the daemon last asked zellij about a session, and its signs then.
 struct Asked {
-    /// When it was done asking, rather than when it began: the daemon gives
-    /// zellij as long as it has to answer, 2s, for a session's panes and as
-    /// long for its clients, before it gives up on a server that hangs, longer than a
-    /// sweep. Due again as soon as it was given up on, a session never listed
-    /// would go first in every round a wake begins anew, and no other would
-    /// be asked about while the wakes kept coming.
     at: Instant,
     signs: Signs,
 }
 
-/// Asks zellij for the panes and the clients of each session it can be asked
-/// about, in a thread of its own, and tells the core what it says. It asks
-/// about a session as soon as it turns up, as zellij writes in
-/// `metadata_folder` that it changed, as a shell in it says a word, and once
-/// a `sweep` has passed since it last asked, for what changes with no sign: a
-/// shell without luneta's hook moves or runs a command, or an agent retitles
-/// its pane. The core wakes it on `woken`, and so does a change to the folder,
-/// which it watches with `wake`. One the host has no panes of goes first, and
-/// one that turns up while others are asked about goes before those left.
-/// None is asked about while a session is newborn, as `Zellij::newborn` says.
-/// The thread ends once the core has.
 pub fn follow(
     core: SyncSender<core::Command>,
     wake: SyncSender<()>,
@@ -242,8 +182,6 @@ pub fn follow(
     Ok(())
 }
 
-/// What zellij last wrote of the session `name` in `folder`. One that cannot
-/// be read, `troubles` says, and it says nothing.
 fn written(folder: &CacheFolder, name: &SessionName, troubles: &mut Troubles) -> Option<Metadata> {
     folder.metadata(name).unwrap_or_else(|error| {
         troubles.say(format!("the metadata of {name}: {error}"));
@@ -251,25 +189,17 @@ fn written(folder: &CacheFolder, name: &SessionName, troubles: &mut Troubles) ->
     })
 }
 
-/// Whether a session with `signs` is due to be asked about at `now`, as it
-/// was `asked` last: one never asked about, one whose signs have changed
-/// since, and one last asked about a `sweep` ago.
 fn due(asked: Option<&Asked>, signs: Signs, now: Instant, sweep: Duration) -> bool {
     asked.is_none_or(|asked| {
         asked.signs != signs || now.saturating_duration_since(asked.at) >= sweep
     })
 }
 
-/// How long until the first of the sessions `asked` is due for the sweep, at
-/// `now`: a `sweep`, of none.
 fn next<'a>(asked: impl Iterator<Item = &'a Asked>, sweep: Duration, now: Instant) -> Duration {
     let left = |asked: &Asked| (asked.at + sweep).saturating_duration_since(now);
     asked.map(left).min().unwrap_or(sweep)
 }
 
-/// Asks zellij for the panes and the clients of `session`, and tells the core
-/// what it says: what zellij listed last stands until it lists them again.
-/// None once the core has stopped.
 fn ask(
     core: &SyncSender<core::Command>,
     session: &Addressed,

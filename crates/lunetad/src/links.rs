@@ -1,52 +1,3 @@
-//! A pull request's link, pasted in luneta, and where the key of the menu
-//! it opens goes for it, on the machine of the row it was pasted on: a
-//! worktree of the pull request, in a tab of the session that works in its
-//! repository, or the same with an agent on a review of it. An issue's link
-//! opens it as well, for a worktree of a branch of its own, or the same with
-//! an agent on the issue. luneta finds that for a row of its own machine,
-//! and a daemon for a luneta on another, whose link was pasted on a row of
-//! this one: git, gh, ssh's config, zoxide and the worktree are the
-//! machine's. A machine with no session in the repository and no clone of it
-//! says so apart from any other failure, as `Unready::Nowhere`, for luneta to
-//! ask its other machines; and one that may have made the worktree says that
-//! apart too, as `Unready::InDoubt`, for it to ask no other.
-//!
-//! The key goes, of the panes luneta says of the machine, to the one in the
-//! session its zellij is in, where a pane of it works in the repository, or
-//! else another that does, or else to a session to make, in a clone of the
-//! repository that zoxide knows. A repository is the pull request's where
-//! any of its remotes is the repository on GitHub the link is of: a fork's
-//! clone has the repository it forks among its remotes, and that is the one
-//! its pull requests are of. wt's code makes the worktree, as `wt add` does,
-//! and says where it is, or where one of the pull request's branch is
-//! already, in a repository wt cloned: in one git cloned, wt would make it in
-//! its `.git`. luneta has it in its own program, which it runs as `luneta
-//! worktree`, and needs no `wt` on the `PATH`. An issue's branch is
-//! `issue-123`, so a second paste of the link finds the first's worktree.
-//! Where neither the repository nor origin has it yet, it is made from the
-//! default branch of the issue's repository as GitHub has it then, by the
-//! remote that is of it: wt would make it from origin's, as the repository
-//! last fetched it, and a fork's clone has the fork for its origin. gh says
-//! first that GitHub has an issue of its number, and no pull request: a link
-//! can say an issue of any number, and luneta would make a branch of each. A
-//! pane that has the pull request's branch checked out, as the daemon says by
-//! its page, or that works in the worktree wt's code says, is where a key
-//! goes instead of a new tab.
-//!
-//! A `.md` file's path opens it too, for work written down there and not on
-//! GitHub. It names no repository: the one the file is in is its own, by what
-//! git says of the directory it is in, and a file in none goes by the
-//! repository of the row it was pasted on. A pane works in that repository
-//! where git says the same of its directory, and a session luneta makes
-//! starts in the directory that holds it. A repository git refuses to read is
-//! not one a file is in none of: nothing is made, and the note says why. A
-//! file's branch is `md-sync-rework` and its tab `sync-rework`, so a second
-//! paste finds the first's worktree, and so do two files of one name; but
-//! `main.md` finds no branch of the repository's. Where neither the repository
-//! nor origin has the branch yet, it is made from origin's default branch as it
-//! is then. The agent reads the file where it is, by its real path: the
-//! worktree may not have it.
-
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -74,43 +25,22 @@ use crate::{names, zoxide, Destination, Directory, SessionName};
 
 mod sync;
 
-/// The host a pull request's link is on, and the remotes of its repository.
 const GITHUB: &str = "github.com";
 
-/// How long `luneta worktree` has to make a worktree, as wt fetches the pull
-/// request's branch, or git to ask a remote of an issue's branch, or to fetch
-/// the branch it is made from: across the network, which takes a while of a
-/// large repository.
 const MAKING: Duration = Duration::from_mins(3);
 
-/// How long git has to say a repository's remotes, or the branch checked out
-/// in a directory: it reads files.
 const ANSWER: Duration = Duration::from_secs(5);
 
-/// How long gh has to say what an issue's number is on GitHub: it asks
-/// GitHub, across the network.
 const ASKING: Duration = Duration::from_secs(30);
 
-/// How long luneta waits for where a key goes, found on another machine:
-/// gh asks GitHub once, and git and wt go across the network three times at
-/// the most, each for as long as `MAKING`; and a minute for the rest, which
-/// reads files.
 pub const PATIENCE: Duration = Duration::from_secs(3 * MAKING.as_secs() + ASKING.as_secs() + 60);
 
-/// The most panes a daemon is asked to find where a key goes among: more
-/// than any machine has, and as many directories git is asked about.
 const WORKED_MAX: usize = 1024;
 
-/// The remote of the repository a clone was cloned from, as git names it:
-/// a branch wt makes goes there.
 const ORIGIN: &str = "origin";
 
-/// What `luneta worktree` starts the line with that says why it made no
-/// worktree, on stderr, after what wt and git say there as they go, as
-/// luneta's commands say why they failed.
 pub const WHY: &str = "luneta: ";
 
-/// A pull request or an issue on GitHub, as its link names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     owner: String,
@@ -119,9 +49,6 @@ pub struct Link {
     number: NonZeroU32,
 }
 
-/// What a link is the page of: a pull request, or an issue. GitHub counts
-/// the two in one sequence, and takes a link of either page for the other's
-/// number, so a link can say an issue of a pull request's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Pull,
@@ -129,10 +56,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Each, as a link may name it.
     const ALL: [Kind; 2] = [Kind::Pull, Kind::Issue];
 
-    /// What its link names it by, after the repository.
     const fn path(self) -> &'static str {
         match self {
             Kind::Pull => "pull",
@@ -142,10 +67,6 @@ impl Kind {
 }
 
 impl Link {
-    /// The pull request or the issue `text` is the link of, but for the space
-    /// around it: of it itself or of a page of it, as a pull request's files
-    /// or a comment on it, with or without `https://`. None for any other
-    /// text.
     #[must_use]
     pub fn parse(text: &str) -> Option<Link> {
         let rest = on_github(text)?;
@@ -162,7 +83,6 @@ impl Link {
         Some(Link { owner: owner.to_owned(), name: name.to_owned(), kind, number })
     }
 
-    /// Its link, as the agent on it takes it.
     #[must_use]
     pub fn url(&self) -> String {
         let Link { owner, name, kind, number } = self;
@@ -179,8 +99,6 @@ impl Link {
         self.number
     }
 
-    /// The branch luneta has wt make for it: an issue's, `issue-123`. None
-    /// for a pull request, which has its own.
     fn branch(&self) -> Option<String> {
         match self.kind {
             Kind::Pull => None,
@@ -188,8 +106,6 @@ impl Link {
         }
     }
 
-    /// What `luneta worktree` makes the worktree of for it: the pull request,
-    /// for wt to find its branch, or an issue's branch.
     fn wt(&self) -> Of {
         match self.branch() {
             Some(branch) => Of::Branch(branch),
@@ -197,21 +113,16 @@ impl Link {
         }
     }
 
-    /// What its tab is named, and the menu calls it: `#123`.
     #[must_use]
     pub fn tab(&self) -> String {
         format!("#{}", self.number)
     }
 
-    /// Its repository, as `owner/name`.
     #[must_use]
     pub fn repository(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 
-    /// Whether `other` is the same pull request or issue, case aside in the
-    /// names of its repository, as GitHub takes them: by its number, of
-    /// whichever page either link is, as GitHub has one of the number.
     #[must_use]
     pub fn is(&self, other: &Link) -> bool {
         self.number == other.number
@@ -219,10 +130,6 @@ impl Link {
             && self.name.eq_ignore_ascii_case(&other.name)
     }
 
-    /// Whether a remote's `url` is of its repository, case aside, as GitHub
-    /// takes the names: on GitHub, by its name, or by ssh, by another that
-    /// ssh's config gives it, as `ssh_host` says what host ssh takes a name
-    /// for.
     fn of(&self, url: &str, ssh_host: impl FnOnce(&str) -> Option<String>) -> bool {
         url_is_of(url, (GITHUB, &self.owner, &self.name), ssh_host)
     }
@@ -232,10 +139,6 @@ pub(crate) fn remote_is_of(url: &str, repository: (&str, &str, &str)) -> bool {
     url_is_of(url, repository, ssh_host)
 }
 
-/// The owner and the name of the repository on GitHub a remote's `url`
-/// names: on GitHub by its host, or by ssh, by another that ssh's config
-/// gives it, as `ssh_host` says, as `url_is_of` takes a remote to be of one.
-/// None for a remote anywhere else.
 pub(crate) fn github_repository_of(
     url: &str,
     ssh_host: impl FnOnce(&str) -> Option<String>,
@@ -266,13 +169,8 @@ impl fmt::Display for Link {
     }
 }
 
-/// The end of the name of a file a paste opens the menu for.
 const MARKDOWN: &str = ".md";
 
-/// A `.md` file, by its path as it was pasted on a row of a machine, which is
-/// where it is read: from the root, from `~/`, or else from the directory
-/// that row works in, where it works in one. The tab of its worktree is named
-/// `stem`, and its branch for that.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File {
     path: String,
@@ -281,11 +179,6 @@ pub struct File {
 }
 
 impl File {
-    /// The file `text` is a path of, but for the space around it, pasted on a
-    /// row that works in `from`: one line that ends in `.md`, whether or not
-    /// any file has that path, which only its machine can say. None for any
-    /// other text, an address too, with or without its scheme, or for a file
-    /// whose name holds nothing to name a branch for.
     #[must_use]
     pub fn parse(text: &str, from: Option<Directory>) -> Option<File> {
         let path = text.trim();
@@ -298,21 +191,15 @@ impl File {
         (!stem.is_empty()).then(|| File { path: path.to_owned(), from, stem })
     }
 
-    /// The branch luneta has wt make for it, `md-sync-rework`, as an issue's
-    /// is `issue-123`: a second paste finds the first's by that, and no branch
-    /// of the repository's that goes by the file's name, as `main`.
     fn branch(&self) -> String {
         format!("md-{}", self.stem)
     }
 
-    /// Its path, as it was pasted.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
     }
 
-    /// Its real path, on the machine this runs on; or why it names no file
-    /// there.
     fn real(&self) -> Result<String, String> {
         let real = fs::canonicalize(self.absolute()?).map_err(|error| match error.kind() {
             ErrorKind::NotFound => "no such file".to_owned(),
@@ -324,9 +211,6 @@ impl File {
         real.into_os_string().into_string().map_err(|_| "its real path is no text".to_owned())
     }
 
-    /// Its path from the root, on the machine this runs on, as the machine's
-    /// `HOME` starts one from `~/`, and the row it was pasted on a relative
-    /// one; or why it has none.
     fn absolute(&self) -> Result<PathBuf, String> {
         if let Some(rest) = self.path.strip_prefix("~/") {
             let home = env::var_os("HOME").map(PathBuf::from);
@@ -343,11 +227,6 @@ impl File {
         Ok(Path::new(from.as_str()).join(&self.path))
     }
 
-    /// The repository its worktree is made in, once `real` is where it is: a
-    /// directory of it, and its common directory, by which a pane works in
-    /// it. The file's own, or else, for a file git says is in none, the one
-    /// the row it was pasted on works in. Or why it has neither, or git did not
-    /// say.
     fn repository(&self, real: &str) -> Result<(String, String), String> {
         let beside = Path::new(real).parent().and_then(Path::to_str).unwrap_or(real);
         match common_dir(beside) {
@@ -373,10 +252,6 @@ impl File {
     }
 }
 
-/// `stem` as a branch and a tab are named for it: in lower case, with `-` for
-/// each run of what is neither a letter, a digit nor `_`, and none at either
-/// end. Nothing git refuses in a branch's name is left, as `..`, a space or a
-/// `.lock` at the end. Empty where nothing is left.
 fn slug(stem: &str) -> String {
     let mut slug = String::with_capacity(stem.len());
     for c in stem.chars() {
@@ -390,8 +265,6 @@ fn slug(stem: &str) -> String {
     slug
 }
 
-/// What a paste opens the menu for, whose keys make a worktree for it: a pull
-/// request or an issue, by its link, or a file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Work {
     Link(Link),
@@ -399,15 +272,12 @@ pub enum Work {
 }
 
 impl Work {
-    /// What `text` pasted names, on a row that works in `from`: a link, as
-    /// `Link::parse` takes one, or else a file, as `File::parse` takes one.
     #[must_use]
     pub fn parse(text: &str, from: Option<Directory>) -> Option<Work> {
         let link = Link::parse(text).map(Work::Link);
         link.or_else(|| File::parse(text, from).map(Work::File))
     }
 
-    /// What its tab is named, and the menu calls it.
     #[must_use]
     pub fn tab(&self) -> String {
         match self {
@@ -423,8 +293,6 @@ impl Work {
         }
     }
 
-    /// What a note says of a worktree that moved off the branch luneta has wt
-    /// make for it, with `checked_out` there: `on feat, not issue-123`.
     #[must_use]
     pub fn off_branch(&self, checked_out: Option<&str>) -> Option<String> {
         let own = self.branch()?;
@@ -442,9 +310,6 @@ impl fmt::Display for Work {
     }
 }
 
-/// What `text` names on GitHub, after its host and a `/`, where it is an
-/// address there, with or without `https://` or `www.`, but for the space
-/// around it.
 fn on_github(text: &str) -> Option<&str> {
     let text = text.trim();
     let rest = text.strip_prefix("https://").or_else(|| text.strip_prefix("http://"));
@@ -453,11 +318,6 @@ fn on_github(text: &str) -> Option<&str> {
     rest.strip_prefix(GITHUB)?.strip_prefix('/')
 }
 
-/// What `luneta worktree` makes the worktree of: a pull request, whose
-/// branch wt finds by its link, or a branch, by its name. git takes a link
-/// without its `https://` for a branch's name, and wt, which tells a link by
-/// its `://`, would make a new branch of that name, with none of the pull
-/// request's commits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Of {
     Pull(Link),
@@ -465,11 +325,6 @@ pub enum Of {
 }
 
 impl Of {
-    /// What `text` names: a pull request, where it is one's link as
-    /// `Link::parse` takes one, or else a branch, by any name but an address
-    /// on GitHub or another link. Not an issue's link: luneta's paste makes
-    /// its branch, from the default branch of its repository as GitHub has
-    /// it, before it has the worktree made.
     pub fn parse(text: &str) -> Result<Of, String> {
         let Some(link) = Link::parse(text) else {
             if text.contains("://") || on_github(text).is_some() {
@@ -487,8 +342,6 @@ impl Of {
 }
 
 impl fmt::Display for Of {
-    /// As wt takes it: a pull request's link in full, which wt tells from a
-    /// branch by its `://`, or the branch.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Of::Pull(link) => f.write_str(&link.url()),
@@ -497,17 +350,11 @@ impl fmt::Display for Of {
     }
 }
 
-/// Whether `part` can name an owner or a repository on GitHub: letters,
-/// digits, `-`, `_` and `.`, and more than dots.
 pub(crate) fn named(part: &str) -> bool {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
     !part.is_empty() && part.chars().all(allowed) && part.chars().any(|c| c != '.')
 }
 
-/// A remote's url, as git spells it by ssh or https: `git@host:owner/name.git`,
-/// `https://host/owner/name` or `ssh://git@host:22/owner/name.git`. The host
-/// it names, and whether by ssh, whose config can give a host another name,
-/// and the owner and the name of the repository there.
 #[derive(Debug, PartialEq, Eq)]
 struct Spelled<'a> {
     host: &'a str,
@@ -516,16 +363,12 @@ struct Spelled<'a> {
     name: &'a str,
 }
 
-/// How git spells the remote's `url`, as `Spelled` has it. None for a path,
-/// or a repository with no owner.
 fn spelled(url: &str) -> Option<Spelled<'_>> {
     let (scheme, rest) = url.split_once("://").map_or((None, url), |(it, rest)| (Some(it), rest));
     let rest = match rest.split_once('@') {
         Some((user, host)) if !user.contains('/') => host,
         _ => rest,
     };
-    // As scp spells it, `host:path`, with no `/` before the `:`, which git
-    // takes for a path; or else `host:port/path`.
     let (host, path) = if scheme.is_some() {
         let (host, path) = rest.split_once('/')?;
         (host.split_once(':').map_or(host, |(host, _)| host), path)
@@ -539,10 +382,6 @@ fn spelled(url: &str) -> Option<Spelled<'_>> {
     (named(owner) && named(name)).then_some(Spelled { host, ssh, owner, name })
 }
 
-/// The host ssh connects to for `host`, which its config can give another
-/// name, as its `Host` and `HostName` do: as `ssh -G` says, which reads the
-/// config and connects nowhere. None for what names no host, as what starts
-/// with `-`, which ssh would take for an option.
 pub(crate) fn ssh_host(host: &str) -> Option<String> {
     let spelled = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_');
     if host.is_empty() || host.starts_with('-') || !host.chars().all(spelled) {
@@ -554,8 +393,6 @@ pub(crate) fn ssh_host(host: &str) -> Option<String> {
     said.lines().find_map(|line| line.strip_prefix("hostname ")).map(str::to_owned)
 }
 
-/// How a repository is the pull request's: by its `origin`, or by another of
-/// its remotes, as the one a fork's clone forks. One by its origin goes first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Remote {
     Origin,
@@ -563,17 +400,11 @@ enum Remote {
 }
 
 impl Remote {
-    /// How the remote named `name` is, where it is of the pull request.
     fn of(name: &str) -> Remote {
         if name == ORIGIN { Remote::Origin } else { Remote::Other }
     }
 }
 
-/// How a repository is laid out, as git says by its `core.bare`: bare, as wt
-/// clones one, with its worktrees beside its hidden `.bare`, or in it; or
-/// with a work tree, as git clones one, in whose `.git` wt would make the
-/// worktree, and luneta has it make none. Or git did not say, as where it
-/// did not answer in time, which is neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
     Wt,
@@ -581,27 +412,20 @@ enum Layout {
     Unsaid,
 }
 
-/// A repository that is the pull request's: `by` which of its remotes, and
-/// how it is laid out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Repository {
     by: Remote,
     layout: Layout,
 }
 
-/// What git says of whether a directory is in the pull request's repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Looked {
-    /// It is, so, by the remote of this name.
     Of(Repository, String),
-    /// It is not.
     NotOf,
-    /// git did not say its remotes, for this reason, so it may be.
     Unsaid(String),
 }
 
 impl Looked {
-    /// The repository, where it is the pull request's.
     fn repository(&self) -> Option<Repository> {
         match self {
             Looked::Of(repository, _) => Some(*repository),
@@ -617,8 +441,6 @@ impl Looked {
     }
 }
 
-/// How the repository `dir` is in is the pull request `link`'s, if it is,
-/// as `ssh_host` says what host ssh takes a name of its remotes for.
 fn repository(dir: &str, link: &Link, ssh_host: impl FnMut(&str) -> Option<String>) -> Looked {
     match remotes_in(dir) {
         Remotes::Listed(listed) => match remote(&listed, link, ssh_host) {
@@ -632,10 +454,6 @@ fn repository(dir: &str, link: &Link, ssh_host: impl FnMut(&str) -> Option<Strin
     }
 }
 
-/// The name of the remote of `listed` that is of the pull request `link`'s
-/// repository, if any is: origin, or else the first, as `git config
-/// --get-regexp` prints them, `remote.<name>.url <url>` a line, as
-/// `ssh_host` says what host ssh takes a name for.
 fn remote(
     listed: &str,
     link: &Link,
@@ -649,10 +467,6 @@ fn remote(
     listed.lines().filter_map(of).min_by_key(|name| Remote::of(name))
 }
 
-/// A pane of the machine, as luneta knows it, for where a key of the menu
-/// goes: where it works, the pull request of the branch checked out there,
-/// by its page, as the daemon says, and whether luneta's zellij is in its
-/// session. luneta says them in the order of its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
     pub dir: String,
@@ -660,27 +474,13 @@ pub struct Worked {
     pub here: bool,
 }
 
-/// Where a key of the menu goes, as found among the panes of a machine,
-/// each of which `P` names: by its place among them, as the daemon says it,
-/// or as luneta knows the pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum At<P> {
-    /// The pane that has the pull request's branch checked out.
     There(P),
-    /// A tab of the session of a pane that works in the pull request's
-    /// repository: luneta's zellij goes to that pane first, where it is in
-    /// another session, as a tab needs a client of its session.
     Session(P),
-    /// A tab of a session luneta makes, `name`, that starts in `cwd`, where
-    /// the clone of the repository is. No session the machine's zellij has
-    /// was called so as it was named: luneta has it named again just before
-    /// it makes the session, as a while can go by first.
     Clone { cwd: Directory, name: SessionName },
 }
 
-/// What a key of the menu goes on with: where it goes, the worktree made for
-/// what was pasted, the branch checked out there, which an agent is named for,
-/// and what the agent is on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready<P> {
     pub at: At<P>,
@@ -690,8 +490,6 @@ pub struct Ready<P> {
     pub work: Readied,
 }
 
-/// What an agent on what was pasted is on: the link, or the file, by its real
-/// path, which it reads where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Readied {
     Link(Link),
@@ -699,8 +497,6 @@ pub enum Readied {
 }
 
 impl Ready<usize> {
-    /// Where it goes, with each pane named as `among` names the pane of its
-    /// place there; or the place of one that `among` has none of.
     pub fn placed<P: Clone>(self, among: &[P]) -> Result<Ready<P>, usize> {
         let Ready { at, worktree, branch, moved_off, work } = self;
         let pane = |at: usize| among.get(at).cloned().ok_or(at);
@@ -712,12 +508,9 @@ impl Ready<usize> {
         Ok(Ready { at, worktree, branch, moved_off, work })
     }
 
-    /// The answer that says it.
     #[must_use]
     pub fn answer(self) -> PasteResponse {
         let Ready { at, worktree, branch, moved_off, work } = self;
-        // A place is of a question's panes, which are no more than
-        // `WORKED_MAX`.
         let place = |at: usize| u32::try_from(at).unwrap_or(u32::MAX);
         let at = match at {
             At::There(at) => paste_response::At::There(place(at)),
@@ -734,30 +527,14 @@ impl Ready<usize> {
     }
 }
 
-/// Why a machine has nowhere for a key of the menu to go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unready {
-    /// No session there works in the link's repository, and zoxide there
-    /// knows no clone of it, as this says: another machine may have one.
     Nowhere(String),
-    /// It made nothing, as this says: what is there is in the way, as a clone
-    /// git made, or the machine could not tell, or it was never asked.
     Failed(String),
-    /// It may have made the worktree, as this says: it made one and went no
-    /// further, or no answer came. No other machine should make another.
     InDoubt(String),
 }
 
 impl Unready {
-    /// Why the daemon of `on` found nowhere for a key of the menu to go, as
-    /// `status` says, before the answer's stream or in it: `Code::NotFound` is
-    /// its machine having none of the repository, which a daemon older than
-    /// that does not say apart; `Code::FailedPrecondition` its making nothing,
-    /// or the daemon between not reaching it; and `Code::InvalidArgument` and
-    /// `Code::Unimplemented` a daemon that did not take the question. Anything
-    /// else may have left a worktree there: the daemon may have said so, or the
-    /// connection been lost, or the answer been cut short, which all look the
-    /// same whether or not the question had reached it.
     fn of(on: &Destination, status: &Status) -> Unready {
         let why = on.said(status);
         match status.code() {
@@ -770,24 +547,18 @@ impl Unready {
     }
 }
 
-/// A failure on the way to the worktree, which made none, as `?` says it: what
-/// may have made one says `Unready::InDoubt` by name.
 impl From<String> for Unready {
     fn from(why: String) -> Self {
         Unready::Failed(why)
     }
 }
 
-/// What a key of the menu needs of the worktree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wanted {
     AsItIs,
     AtHead,
 }
 
-/// A link or a file pasted on a row of a machine, and the panes of that
-/// machine, as luneta knows them, for where a key of the menu goes: on that
-/// machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pasted {
     work: Work,
@@ -807,10 +578,6 @@ impl Pasted {
         Pasted { wanted, ..self }
     }
 
-    /// What `request` asks, and of which machine, or why it is invalid: it
-    /// says neither a link nor a path of a `.md` file, or a row's directory
-    /// by no absolute path, or more panes than `WORKED_MAX`, or a pane by no
-    /// absolute path, or a pull request's page that is no link.
     pub fn of(request: PasteRequest) -> Result<(Option<On>, Pasted), String> {
         let PasteRequest { on, work, worked, at_head, reads_moved_off } = request;
         let work = match work {
@@ -850,8 +617,6 @@ impl Pasted {
         Ok((on, Pasted { work, wanted, worked, reads_moved_off }))
     }
 
-    /// The question that asks it of the machine `on` names, or of the
-    /// daemon's own, where it names none.
     #[must_use]
     pub fn asked(&self, on: Option<On>) -> PasteRequest {
         let pane = |Worked { dir, pull, here }: &Worked| AskedWorked {
@@ -871,11 +636,6 @@ impl Pasted {
         PasteRequest { on, work: Some(work), worked, at_head, reads_moved_off }
     }
 
-    /// Where a key goes, on the machine this runs on, by the place of its
-    /// pane among those luneta said, and the worktree, which it has `luneta
-    /// worktree` make there, or where one of the branch is already; or why
-    /// it found nothing. A file is the row's machine's, wherever else one of
-    /// its name is, so of a file this is never `Unready::Nowhere`.
     pub fn ready(&self) -> Result<Ready<usize>, Unready> {
         match &self.work {
             Work::Link(link) => ready(link, self.wanted, self.reads_moved_off, &self.worked),
@@ -888,14 +648,6 @@ impl Pasted {
         Ok(PasteResponse { at_head: self.wanted == Wanted::AtHead, ..answer })
     }
 
-    /// Where a key goes, as `ready` finds it on the machine `on`, whose daemon
-    /// `daemon` hands the question on to, with `patience` for each answer; or
-    /// why it found nothing, as it said there, or as no answer came by
-    /// `PATIENCE` and that patience after, by which the daemon there has done
-    /// with it. The daemon there starts on it as it hears it, whether or not
-    /// its answer comes back, and a question that hangs up does not stop it:
-    /// so from the moment the question leaves, what does not say otherwise, as
-    /// `Unready::of` reads it, may leave a worktree there.
     pub async fn ready_on(
         &self,
         mut daemon: DaemonClient<Channel>,
@@ -906,8 +658,6 @@ impl Pasted {
         let secs = patience.as_secs_f32();
         let minutes = PATIENCE.as_secs() / 60;
         let in_doubt = |why: String| Err(Unready::InDoubt(format!("{on}: {why}")));
-        // The daemon answers with the stream at once, and the answer in it
-        // once it has found it.
         let mut answer = match timeout(patience, daemon.paste(request)).await {
             Ok(Ok(answer)) => answer.into_inner(),
             Ok(Err(status)) => return Err(Unready::of(on, &status)),
@@ -921,11 +671,6 @@ impl Pasted {
         }
     }
 
-    /// Where `answer`, from the daemon of another machine, says the key goes
-    /// for what this asks, or why it says nothing luneta can go by: it names a
-    /// session zellij would not take, or a worktree, a file or a directory for
-    /// the session by no absolute path, or it says a file of a link or no file
-    /// of a file, or it says where in words of a newer daemon's.
     pub fn answered(&self, answer: PasteResponse) -> Result<Ready<usize>, String> {
         let PasteResponse { at, worktree, branch, file, at_head, moved_off } = answer;
         if self.wanted == Wanted::AtHead && !at_head {
@@ -964,8 +709,6 @@ impl Pasted {
     }
 }
 
-/// Where a key goes for `link` among the panes `worked`, as `Pasted::ready`
-/// says.
 fn ready(
     link: &Link,
     wanted: Wanted,
@@ -1011,8 +754,6 @@ fn ready(
     Ok(ready)
 }
 
-/// A failure is `Unready::InDoubt`: the repository is here, and no other machine
-/// should make a second worktree of it.
 fn synced(
     dir: &str,
     link: &Link,
@@ -1026,12 +767,6 @@ fn synced(
     }
 }
 
-/// Why a key goes no further for `link`, of a machine that has its repository:
-/// an issue's number that gh says is a pull request's, or that gh does not say
-/// the page of. wt asks GitHub for a pull request's branch, and finds none for
-/// an issue's number; but it makes an issue's branch whatever the number is. A
-/// machine with none of the repository asks nothing, as its gh may be logged
-/// out, which says nothing of whether another machine has it.
 fn kind_holds(link: &Link) -> Result<(), String> {
     if link.kind() == Kind::Issue {
         let page = page(link)?;
@@ -1042,9 +777,6 @@ fn kind_holds(link: &Link) -> Result<(), String> {
     Ok(())
 }
 
-/// Where a key goes for `file` among the panes `worked`, as `Pasted::ready`
-/// says: the file, read where it is, says the repository, and any pane that
-/// works in that is of it, as in no other, whichever remotes it has.
 fn ready_file(
     file: &File,
     reads_moved_off: bool,
@@ -1127,8 +859,6 @@ fn sits_off<'a>(listed: &'a str, there: &str, own: &str) -> Option<&'a str> {
         .filter(|entry| !entry.lines().any(|line| line.starts_with("prunable")))
 }
 
-/// Where a key goes once the worktree `of` is made in the repository `dir` is
-/// in, as `going_to` says. An agent there is on `work`.
 fn made_worktree(
     dir: &str,
     of: &Of,
@@ -1141,8 +871,6 @@ fn made_worktree(
     Ok(Ready { at, branch: branch(&worktree), moved_off: false, worktree, work })
 }
 
-/// Where a key goes for `worktree`: `going`, or a pane among `worked` that
-/// works in it, where it was one already, as the kernel says where.
 fn going_to(worktree: &str, going: Going, worked: &[Worked]) -> Result<At<usize>, Unready> {
     let in_it = worked.iter().enumerate().filter(|(_, it)| it.dir == worktree);
     Ok(match (in_it.min_by_key(|(at, it)| (!it.here, *at)), going) {
@@ -1154,30 +882,17 @@ fn going_to(worktree: &str, going: Going, worked: &[Worked]) -> Result<At<usize>
     })
 }
 
-/// Where a key goes, by where it stands among the panes.
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
-    /// The pane that has the pull request's branch checked out.
     There(usize),
-    /// A pane that works in its repository, for a tab of its session.
     Session(usize),
 }
 
-/// Where a key goes once the worktree is made, where no pane works in it: a
-/// tab of the session of the pane of this place, or of a session to make
-/// in `cwd`, for its name, as the directory names it, made free once the
-/// worktree is, when the session is about to be made.
 enum Going {
     Session(usize),
     Clone { cwd: Directory, name: SessionName },
 }
 
-/// Where a key goes for `link` among the panes `worked`: the pane that has
-/// the pull request's branch checked out, or else a pane that works in its
-/// repository, where wt cloned it, by how `repository_of` says a directory's
-/// repository is the pull request's, if it is. Of either, one in the session
-/// luneta's zellij is in goes first; of a repository's, then one that is the
-/// pull request's by its origin; then the first row.
 fn found(
     link: &Link,
     worked: &[Worked],
@@ -1193,10 +908,6 @@ fn found(
     session_among(worked, by_wt).map(Found::Session)
 }
 
-/// The place among `worked` of the pane whose session a tab opens in: one that
-/// works in the repository, as `rank` says of a directory, and how well. One in
-/// the session luneta's zellij is in goes first, then the best by `rank`, then
-/// the first row.
 fn session_among<R: Ord>(
     worked: &[Worked],
     mut rank: impl FnMut(&str) -> Option<R>,
@@ -1206,12 +917,6 @@ fn session_among<R: Ord>(
     ranked.min().map(|(_, _, at)| at)
 }
 
-/// The clone of `link`'s repository that wt made among the directories
-/// zoxide knows, by how `repository_of` says a directory's repository is the
-/// pull request's: a directory of it, for `wt add`, and the directory that
-/// holds it, which the session made for it starts in, with the name the
-/// picker gives that directory. None where zoxide knows none; or why it
-/// cannot tell, or the directory names no session.
 fn clone(
     link: &Link,
     repository_of: impl FnMut(&str) -> Option<Repository>,
@@ -1232,9 +937,6 @@ fn clone(
     Ok(Some((dir, cwd, name)))
 }
 
-/// The directory a session made for the repository `dir` is in starts in,
-/// which holds it, and the name the picker gives that directory; or why it
-/// has none.
 fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
     let cwd = holder(dir).ok_or_else(|| format!("git does not say what repository {dir} is"))?;
     let cwd = Directory::parse(cwd)?;
@@ -1243,20 +945,11 @@ fn session_for(dir: &str) -> Result<(Directory, SessionName), String> {
     Ok((cwd, name))
 }
 
-/// `name`, or the first of it with a `-2` and on that no session has, one
-/// that runs or one that ended, which zellij keeps to bring back, as zellij's
-/// folders say now; or why luneta cannot tell which names are free.
 fn free(name: &SessionName) -> Result<SessionName, String> {
     let named = names::named()?;
     Ok(name.free(&named.iter().map(SessionName::as_str).collect::<Vec<_>>()))
 }
 
-/// Why no clone of `link`'s repository is for `wt add`, as what luneta has
-/// `seen` of each directory it looked in says: there is none, or one git
-/// cloned, in whose `.git` wt would make the worktree, or one git did not say
-/// how it is laid out, or a directory git did not say the remotes of, which
-/// may be one. Only of none may another machine have one to go to: the others
-/// say what stands in the way here, or that this machine cannot tell.
 fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     let repository = link.repository();
     let laid_out = move |layout: Layout| {
@@ -1289,9 +982,6 @@ fn no_clone(link: &Link, seen: &HashMap<String, Looked>) -> Unready {
     }
 }
 
-/// Which of `dirs`, best first, is of the pull request's repository, where
-/// wt cloned it, by how `repository_of` says a directory's is: the first by
-/// its origin, or else the first by another remote.
 fn cloned(
     dirs: &[String],
     mut repository_of: impl FnMut(&str) -> Option<Repository>,
@@ -1308,7 +998,6 @@ fn cloned(
     best.map(|(_, at)| at)
 }
 
-/// The directory that holds the repository `dir` is in, as `git::holder` says.
 fn holder(dir: &str) -> Option<String> {
     let Common::Of(common) = common_dir(dir) else {
         return None;
@@ -1316,7 +1005,6 @@ fn holder(dir: &str) -> Option<String> {
     git::holder(&common)
 }
 
-/// What git says of the repository `dir` is in.
 fn common_dir(dir: &str) -> Common {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "rev-parse", "--path-format=absolute"]))
@@ -1326,23 +1014,14 @@ fn common_dir(dir: &str) -> Common {
     Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
 }
 
-/// What git says of the remotes of the repository a directory is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Remotes {
-    /// As `git config --get-regexp` prints them.
     Listed(String),
-    /// It has none, or the directory is in no repository, or is gone.
     Unlisted,
-    /// git did not say, for this reason: it did not answer in time, could not
-    /// be run, or would not read the repository it found. That says nothing of
-    /// whether the directory is in one that has remotes.
     Unsaid(String),
 }
 
 impl Remotes {
-    /// What `ran` says: `git config` ends with 1, saying nothing, where it
-    /// matched nothing, in no repository too. Where it ignores a repository of
-    /// a newer format, it ends with 1 too, but warns of it.
     fn of(ran: io::Result<Ran>) -> Remotes {
         let ran = match ran {
             Ok(ran) => ran,
@@ -1361,7 +1040,6 @@ impl Remotes {
     }
 }
 
-/// What git says of the remotes of the repository `dir` is in.
 fn remotes_in(dir: &str) -> Remotes {
     remote_keys_in(dir, r"^remote\..*\.url$")
 }
@@ -1376,7 +1054,6 @@ fn remote_keys_in(dir: &str, keys: &str) -> Remotes {
     Remotes::of(program::run(&mut git, ANSWER))
 }
 
-/// How the repository `dir` is in is laid out, as git says.
 fn layout(dir: &str) -> Layout {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "config", "--type=bool", "--get", "core.bare"]));
@@ -1387,24 +1064,16 @@ fn layout(dir: &str) -> Layout {
     }
 }
 
-/// The branch checked out in `dir`, as `git status` names it: its ref
-/// without `refs/heads/`. None for a detached `HEAD`, or where git does not
-/// say.
 fn branch(dir: &str) -> Option<String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "symbolic-ref", "--quiet", "HEAD"]));
     Some(said(&mut git)?.strip_prefix("refs/heads/")?.to_owned())
 }
 
-/// The one line git said, where it ended well.
 fn said(git: &mut Command) -> Option<String> {
     one_line(program::run(git, ANSWER).ok()?.answer().ok()?)
 }
 
-/// The page on GitHub of `link`'s number, as gh says: `gh issue view` answers
-/// of a pull request's number too, with the pull request's page. Or why gh
-/// did not say, as that GitHub has none of the number, or that gh is not
-/// logged in.
 fn page(link: &Link) -> Result<Link, String> {
     let number = link.number.to_string();
     let repository = format!("{GITHUB}/{}", link.repository());
@@ -1418,14 +1087,6 @@ fn page(link: &Link) -> Result<Link, String> {
     Link::parse(said).ok_or_else(|| format!("gh issue view said {said}, which is no link"))
 }
 
-/// Makes `branch`, an issue's or a file's, in the repository `dir` is in,
-/// where neither it nor origin has one yet: from the default branch of
-/// `remote` as it has it now, the one of the issue's repository, or origin
-/// for a file, with no upstream, as wt makes a new branch. wt would make it
-/// from origin's, as the repository last fetched it, which can be weeks
-/// behind, and of the fork in a fork's clone. Where either has the branch, wt
-/// goes on with it: one origin has may be one pushed from another machine. Or
-/// why it made none.
 fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
     let head = format!("refs/heads/{branch}");
     let mut git = Command::new("git");
@@ -1441,9 +1102,6 @@ fn base(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
     across(dir, "fetch", &[remote, &format!("HEAD:{head}")]).map(drop)
 }
 
-/// What git says, as it runs `command` with `args` in the repository `dir`
-/// is in, which asks a remote across the network: alone, as ssh may ask for
-/// a passphrase. Or why it said nothing.
 fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, command]).args(args));
@@ -1452,26 +1110,14 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-/// Has a worktree made `of` a pull request or a branch in the repository
-/// `dir` is in, as `luneta worktree` makes it, and says where it is, or where
-/// one of its branch is already: the line it prints, as the real path of the
-/// directory it names. Or why it made none, as it says. A program of its own,
-/// and not a thread: wt says on stderr how it goes, and has git say it there
-/// too, which in luneta's sidebar is the terminal luneta draws; and alone, as
-/// git may ask for a passphrase on the terminal of its session.
 fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     let mut luneta = Command::new(luneta()?);
     git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
-    // It fetches across the network, by ssh as like as not.
     let ran = program::run_alone(&mut luneta, MAKING)
         .map_err(|error| format!("luneta worktree could not be run: {error}"))?;
     worktree_said(ran)
 }
 
-/// Where `ran`, of `luneta worktree`, says the worktree is. One that failed,
-/// and said why, made none. One that said no directory, or ended and did not
-/// say why, as a signal ends one, or that was killed as it went on too long,
-/// may have made it all the same.
 fn worktree_said(ran: Ran) -> Result<String, Unready> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
@@ -1495,9 +1141,6 @@ fn worktree_said(ran: Ran) -> Result<String, Unready> {
     }
 }
 
-/// The `luneta` that makes the worktree: the one this runs as, or else the
-/// one beside it, as beside `lunetad`, as old or as new as it is; or why
-/// there is none.
 pub(crate) fn luneta() -> Result<PathBuf, String> {
     let this = env::current_exe()
         .map_err(|error| format!("luneta cannot tell where it is: {error}"))?;
@@ -1511,14 +1154,6 @@ pub(crate) fn luneta() -> Result<PathBuf, String> {
     Err(format!("no luneta is beside {}, to make the worktree with", this.display()))
 }
 
-/// Where a worktree `of` a branch or a pull request is, once made in the
-/// repository `repo` is a directory of, as `wt add` makes one, by wt's own
-/// code, or where one of the branch is already; or why it made none. wt says
-/// how it goes on stderr, and has git say it there. In a repository git
-/// cloned it makes none: wt would make it in its `.git`. Nor where a variable
-/// tells git where a repository is: wt's git would read the repository it
-/// names, and `layout`'s the one `repo` is in, so that the clone luneta sees
-/// wt cloned may not be the one wt makes the worktree in.
 pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
     git_reads(repo)?;
     let wt_add = |error| format!("wt add: {error:#}");
@@ -1528,32 +1163,22 @@ pub fn made(repo: &str, of: &Of) -> Result<PathBuf, String> {
     Ok(made.path().to_owned())
 }
 
-/// Brings the worktree in `dir` to its upstream branch, by wt's own code; or why
-/// it did not.
 pub fn followed(dir: &str) -> Result<(), String> {
     git_reads(dir)?;
     wt::cmd::follow::run(Path::new(dir)).map_err(|error| format!("{error:#}"))
 }
 
-/// Fetches the upstream branch of `branch`, of the repository `dir` is in, by
-/// wt's own code, as `wt follow` fetches it, and moves no branch: what wt
-/// found of it, or why it did not.
 pub fn fetched_upstream(dir: &str, branch: &str) -> Result<Upstream, String> {
     git_reads(dir)?;
     reaches_as_the_user_does(dir)?;
     wt::cmd::follow::fetch_upstream(Path::new(dir), branch).map_err(|error| format!("{error:#}"))
 }
 
-/// The keys of git's config that name a command git runs as it reaches a
-/// remote, or that let a remote's URL name one.
 const REACHES: &str = concat!(
     r"^(core\.(sshcommand|gitproxy|askpass|alternaterefscommand)",
     r"|credential\..*helper|remote\..*\.uploadpack|protocol\.(.*\.)?allow)$",
 );
 
-/// Why git is not to reach the remote of the repository `dir` is in, where
-/// that repository's own config sets how, as one in a folder unpacked from
-/// anywhere can: what it names would run as it was fetched.
 fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
     let mut git = Command::new("git");
     git::local(git.args(["-C", dir, "config", "-z", "--show-scope", "--get-regexp", REACHES]))
@@ -1581,10 +1206,6 @@ fn reaches_as_the_user_does(dir: &str) -> Result<(), String> {
     ))
 }
 
-/// The keys of `listed`, as `git config -z --show-scope --get-regexp` lists
-/// them, that the repository's own config sets to anything: one set to
-/// nothing, as `credential.helper` is to forget the helpers before it, names
-/// nothing to run.
 fn own_keys(listed: &str) -> Vec<&str> {
     let fields: Vec<&str> = listed.split('\0').collect();
     let mut keys: Vec<&str> = fields
@@ -1602,7 +1223,6 @@ fn own_keys(listed: &str) -> Vec<&str> {
     keys
 }
 
-/// Each of what wt finds of an upstream branch, for `upstream_of_word`.
 const UPSTREAMS: [Upstream; 5] = [
     Upstream::Untracked,
     Upstream::Current,
@@ -1611,8 +1231,6 @@ const UPSTREAMS: [Upstream; 5] = [
     Upstream::Gone,
 ];
 
-/// What `luneta fetch-upstream` prints of what wt found, for lunetad to read
-/// back with `upstream_of_word`.
 #[must_use]
 pub fn upstream_word(found: Upstream) -> &'static str {
     match found {
@@ -1624,14 +1242,11 @@ pub fn upstream_word(found: Upstream) -> &'static str {
     }
 }
 
-/// What wt found, as `upstream_word` says it; none for a word it does not say.
 #[must_use]
 pub fn upstream_of_word(word: &str) -> Option<Upstream> {
     UPSTREAMS.into_iter().find(|found| upstream_word(*found) == word)
 }
 
-/// Why wt's git would not read the repository `dir` is in, where a variable
-/// tells it where another is.
 fn git_reads(dir: &str) -> Result<(), String> {
     let named = git::REPOSITORY_VARS.into_iter().find(|name| env::var_os(name).is_some());
     match named {
@@ -1642,9 +1257,6 @@ fn git_reads(dir: &str) -> Result<(), String> {
     }
 }
 
-/// Why wt makes no worktree in the repository `dir` is in, where it does not:
-/// one git cloned, in whose `.git` wt would make it, or one git does not say
-/// how it is laid out.
 fn wt_made(dir: &str) -> Result<(), String> {
     match layout(dir) {
         Layout::Wt => Ok(()),
@@ -1656,16 +1268,11 @@ fn wt_made(dir: &str) -> Result<(), String> {
     }
 }
 
-/// The real path of the directory `path` names, where it names one, as the
-/// kernel says where a pane works.
 fn directory(path: &str) -> Option<String> {
     let real = fs::canonicalize(path).ok().filter(|real| real.is_dir())?;
     real.into_os_string().into_string().ok()
 }
 
-/// Why `luneta worktree` made no worktree, as it says on stderr after what wt
-/// and git say there as they go: the lines from its last that starts with
-/// `WHY`, on one, as what wt says can take more than one.
 pub(crate) fn failure(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let why = lines.iter().rposition(|line| line.starts_with(WHY))?;
@@ -1683,27 +1290,21 @@ mod tests {
         Link::parse("https://github.com/cashubtc/cdk/pull/2736").expect("a link")
     }
 
-    /// A pane in `dir`, with the pull request of the page `pull` checked out,
-    /// in the session luneta's zellij is in, or another.
     fn worked(dir: &str, pull: Option<&str>, here: bool) -> Worked {
         let pull = pull.map(|page| Link::parse(page).expect("a pull request's page"));
         Worked { dir: dir.to_owned(), pull, here }
     }
 
-    /// A repository wt cloned, that is the pull request's `by` a remote.
     fn by_wt(by: Remote) -> Repository {
         Repository { by, layout: Layout::Wt }
     }
 
-    /// One git cloned, that is the pull request's by its origin.
     fn of(repository: Repository) -> Looked {
         Looked::Of(repository, ORIGIN.to_owned())
     }
 
     const BY_GIT: Repository = Repository { by: Remote::Origin, layout: Layout::Git };
 
-    /// One that is the pull request's by its origin, where git did not say
-    /// how it is laid out.
     const UNSAID: Repository = Repository { by: Remote::Origin, layout: Layout::Unsaid };
 
     fn issue() -> Link {
@@ -1751,9 +1352,6 @@ mod tests {
         assert_eq!(link().wt(), Of::Pull(link()));
     }
 
-    /// What another machine's daemon says of a page goes to a browser and a
-    /// clipboard only as a link spells it again: what is no link stays out,
-    /// and whatever comes after a number that reads is gone.
     #[test]
     fn a_link_spells_its_page_again_and_what_is_no_link_stays_out() {
         for text in [
@@ -1773,10 +1371,6 @@ mod tests {
         }
     }
 
-    /// An issue's link names it as a pull request's does, but for `issues`:
-    /// the agent takes it, and `luneta worktree` the branch luneta has it
-    /// make, or find where a paste made it before. It is the pull request of its
-    /// number, as GitHub counts the two in one sequence.
     #[test]
     fn a_link_is_of_an_issue_or_of_a_page_of_one() {
         for text in [
@@ -1791,17 +1385,10 @@ mod tests {
         assert_eq!(issue().url(), "https://github.com/cashubtc/cdk/issues/2736");
         assert_eq!(issue().tab(), "#2736");
         assert_eq!(issue().wt(), Of::Branch("issue-2736".to_owned()));
-        // GitHub has one #2736 of cdk, of whichever page a link is.
         assert!(issue().is(&link()));
         assert_eq!(Link::parse("https://github.com/cashubtc/cdk/issues/0"), None);
     }
 
-    /// `luneta worktree` takes a pull request's link as a paste does, with
-    /// no `https://` too, and hands wt the link in full, which wt tells from
-    /// a branch by its `://`: git would take the link with none for a
-    /// branch's name, and wt would make a new branch of it, with none of the
-    /// pull request's commits. An issue's link is no branch's, nor is any
-    /// other address.
     #[test]
     fn a_pull_request_s_link_is_one_with_no_scheme_and_no_address_is_a_branch() {
         let handed = |text: &str| Of::parse(text).map(|of| of.to_string());
@@ -1831,15 +1418,10 @@ mod tests {
         }
     }
 
-    /// ssh's config gives GitHub another name, `github-work`, as its `Host`
-    /// and `HostName` do.
     fn ssh_host(host: &str) -> Option<String> {
         (host == "github-work").then(|| "github.com".to_owned())
     }
 
-    /// A remote is of the pull request's repository by ssh or https, on
-    /// GitHub by its name, or by ssh by another that ssh's config gives it,
-    /// which https takes no account of.
     #[test]
     fn a_remote_is_of_a_repository_by_ssh_or_https_case_aside() {
         for url in [
@@ -1866,9 +1448,6 @@ mod tests {
         }
     }
 
-    /// A remote names a repository on GitHub by ssh or https, by GitHub's
-    /// name, or by ssh by another that ssh's config gives it; one anywhere
-    /// else names none.
     #[test]
     fn a_remote_names_a_repository_on_github_by_its_host() {
         let of = |url| github_repository_of(url, ssh_host);
@@ -1887,9 +1466,6 @@ mod tests {
         assert!(!of("https://github.com/cashubtc/cdk.git"));
     }
 
-    /// A fork's clone has the repository it forks among its remotes, by any
-    /// name: the pull request is of it as well as of a clone of that one. Of
-    /// those that are, origin goes first, and then the first.
     #[test]
     fn a_repository_is_the_pull_request_s_by_any_remote_its_origin_first() {
         let fork = "remote.cashubtc.url git@github.com:cashubtc/cdk.git\n\
@@ -1904,15 +1480,6 @@ mod tests {
         assert_eq!(remote("", &link(), ssh_host), None);
     }
 
-    /// The pane that has the pull request's branch checked out wins over a
-    /// session that works in its repository, wherever it is: by the pull
-    /// request's page, case aside, as the daemon says it, so that one of
-    /// another repository's with its number, as a fork's own, is not it. Of
-    /// each, one in the session luneta's zellij is in goes first; of a
-    /// session, then one whose repository is the pull request's by its
-    /// origin, then the first row. A repository git cloned has no session for
-    /// `wt add`, though a pane with the branch checked out in it is still
-    /// where the branch is.
     #[test]
     fn a_key_goes_to_the_pane_with_the_branch_or_else_a_session_of_the_repository() {
         let remotes = |dir: &str| match dir {
@@ -1929,7 +1496,6 @@ mod tests {
             worked("/cdk/main", None, false),
             worked("/cdk-upstream/master", None, false),
         ];
-        // Its origin before another remote.
         assert_eq!(found(&link(), &away, remotes), Some(Found::Session(2)));
         let here = [
             worked("/cdk/main", None, false),
@@ -1937,7 +1503,6 @@ mod tests {
             worked("/cdk/main", None, true),
             worked("/cdk-upstream/master", None, false),
         ];
-        // luneta's own session before any.
         assert_eq!(found(&link(), &here, remotes), Some(Found::Session(2)));
         let by_git = [worked("/cdk-git", None, true), worked("/cdk/main", None, false)];
         assert_eq!(found(&link(), &by_git, remotes), Some(Found::Session(1)));
@@ -1952,10 +1517,6 @@ mod tests {
         assert_eq!(found(&link(), &fork, remotes), Some(Found::Session(0)));
     }
 
-    /// Of the directories zoxide knows, the clone wt made that is the pull
-    /// request's by its origin goes first, or else the first by another
-    /// remote. One git cloned is none, by any remote, nor is one git did not
-    /// say how it is laid out.
     #[test]
     fn a_clone_is_the_first_by_its_origin_or_else_by_another_remote() {
         let dirs = ["/a", "/git", "/unsaid", "/fork/main", "/b", "/upstream", "/fork"]
@@ -1972,12 +1533,6 @@ mod tests {
         assert_eq!(cloned(&dirs[..3], remotes), None);
     }
 
-    /// With no clone for `wt add`, luneta says to have wt clone one, and
-    /// names one git made where it saw one, as wt would make the worktree in
-    /// its `.git`; or else one git did not say how it is laid out, which it
-    /// takes for neither; or else a directory git did not say the remotes of,
-    /// which may be one. Only with none of them may another machine have one
-    /// to go to.
     #[test]
     fn with_no_clone_for_wt_luneta_says_of_one_git_made() {
         let seen = |seen: &[(&str, Looked)]| -> HashMap<String, Looked> {
@@ -2036,8 +1591,6 @@ mod tests {
         );
     }
 
-    /// git as the test runs it, on the repository at `dir`, with no config but
-    /// its own, as no one in particular: what it said, where it ended well.
     fn git(dir: impl AsRef<Path>, args: &[&str]) -> Option<String> {
         let mut git = Command::new("git");
         git::local(&mut git)
@@ -2052,11 +1605,6 @@ mod tests {
         ran.status.success().then(|| said.trim_end().to_owned())
     }
 
-    /// An issue's branch is made from the default branch of the issue's
-    /// repository as it is now, by the remote that is of it, and not from
-    /// origin's, the fork's, as the clone last fetched it. It has no
-    /// upstream. Made once, it stays where it was made; and one origin has,
-    /// as pushed from another machine, is left for wt.
     #[test]
     fn an_issue_s_branch_is_made_from_its_repository_s_default_branch_as_it_is_now() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2069,8 +1617,6 @@ mod tests {
         empty(&cdk, "one");
         assert!(git(scratch.path(), &["clone", "-q", "--bare", &cdk, &fork]).is_some());
         assert!(git(scratch.path(), &["clone", "-q", &fork, &clone]).is_some());
-        // cdk's remote in the fork's clone, by its name on GitHub, which git
-        // takes for the scratch cdk.
         let github = "git@github.com:cashubtc/cdk.git";
         assert!(git(&clone, &["remote", "add", "cashubtc", github]).is_some());
         assert!(git(&clone, &["config", &format!("url.{cdk}.insteadOf"), github]).is_some());
@@ -2088,9 +1634,6 @@ mod tests {
         assert_eq!(git(&clone, &["rev-parse", "--verify", "-q", "refs/heads/issue-7"]), None);
     }
 
-    /// Why `luneta worktree` made no worktree is what it says last on stderr,
-    /// after `luneta: `, on one line, though wt says it on two, after what wt
-    /// and git say there as they go.
     #[test]
     fn why_no_worktree_was_made_comes_last_after_what_wt_says_as_it_goes() {
         let stderr = "  pull       #2736 (asking origin for its branch)\n\
@@ -2102,9 +1645,6 @@ mod tests {
         assert_eq!(failure("  pull  #1\n"), None);
     }
 
-    /// How git reaches a remote stops a fetch only where the repository's
-    /// own config sets it to something: not where the user's config does, or
-    /// lunetad's environment.
     #[test]
     fn only_the_repository_s_own_way_of_reaching_a_remote_stops_a_fetch() {
         let listed = "global\0credential.https://github.com.helper\n\0\
@@ -2126,10 +1666,6 @@ mod tests {
         assert!(refused.contains("sets core.sshcommand,"), "{refused}");
     }
 
-    /// What a daemon is asked for a paste names a link, and the panes of its
-    /// machine, each by an absolute path, with the page of the pull request
-    /// of its branch, if any: no more of them than a machine has. Anything
-    /// else is refused, as it is no question luneta asks.
     #[test]
     fn a_paste_is_asked_of_a_link_and_of_panes_by_their_absolute_paths() {
         let cdk = "https://github.com/cashubtc/cdk/pull/2736";
@@ -2163,9 +1699,6 @@ mod tests {
         );
     }
 
-    /// A file is asked of by its path as it was pasted, and the directory of
-    /// the row, which only the machine reads. What is no path of a `.md` file
-    /// is refused, or a row's directory by no absolute path.
     #[test]
     fn a_paste_is_asked_of_a_file_by_its_path_and_its_row_s_directory() {
         for from in [Some(directory("/w/cdk/main")), None] {
@@ -2189,12 +1722,6 @@ mod tests {
         assert_eq!(refused("plan.md", Some("w/cdk")), "from: \"w/cdk\" is no absolute path");
     }
 
-    /// A file's path is one line that ends in `.md`, but for the space around
-    /// it, wherever it says the file is. Its name gives its tab, of what git
-    /// takes in a branch's name, in lower case, and its branch, after `md-`,
-    /// which is no branch of the repository's, whatever the file's name is. An
-    /// address is no path, with or without its scheme, nor is a name with
-    /// nothing to name a branch for.
     #[test]
     fn a_file_s_path_is_one_line_that_ends_in_md_and_names_its_branch() {
         for (text, path, stem) in [
@@ -2231,19 +1758,12 @@ mod tests {
         ] {
             assert_eq!(File::parse(text, None), None, "{text:?}");
         }
-        // A link is a link, whatever it ends in.
         let issue = "https://github.com/cashubtc/cdk/issues/2736";
         assert_eq!(Work::parse(issue, None), Some(Work::Link(self::issue())));
         let file = Work::parse("/w/plan.md", Some(directory("/w")));
         assert_eq!(file, File::parse("/w/plan.md", Some(directory("/w"))).map(Work::File));
     }
 
-    /// A file's real path comes of its path from the root, or from the row it
-    /// was pasted on, through any link. What names no file says so, and so
-    /// does a relative path with no row to go from. The repository is the
-    /// file's own, untracked or not, or else the one the row works in; with
-    /// neither, it says so. In a repository git refuses to read, git does not
-    /// say it is in none, and the row's does not stand in for it.
     #[test]
     fn a_file_is_read_where_it_is_and_its_repository_is_its_own_or_else_the_row_s() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2309,7 +1829,6 @@ mod tests {
         assert!(by_it.starts_with(&by_it_starts), "{by_it}");
     }
 
-    /// A program that ended with `code`, having said `stdout` and `stderr`.
     fn ended(code: i32, stdout: &[u8], stderr: &[u8]) -> Ran {
         Ran::Ended {
             status: ExitStatus::from_raw(code << 8),
@@ -2318,10 +1837,6 @@ mod tests {
         }
     }
 
-    /// A `luneta worktree` that failed, and said why, made nothing, so another
-    /// machine may go on. One killed as it went on too long, or by a signal, or
-    /// that ended with no word of why, or said no worktree as it ended well,
-    /// may have made it, and no other should.
     #[test]
     fn a_worktree_may_be_made_unless_luneta_worktree_said_why_it_failed() {
         let failed = format!("{WHY}it is not there\n");
@@ -2345,11 +1860,6 @@ mod tests {
         }
     }
 
-    /// git says a directory has no remotes by ending with 1 and saying nothing,
-    /// in a repository with none and in no repository alike, and that it is
-    /// gone in its own words. A repository it ignores or cannot read says
-    /// nothing of whether it has remotes, nor does a directory it cannot go
-    /// into, nor a git that did not answer or could not be run.
     #[test]
     fn git_says_a_directory_has_no_remotes_apart_from_saying_nothing() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2387,10 +1897,6 @@ mod tests {
         assert!(matches!(unrun, Remotes::Unsaid(_)), "{unrun:?}");
     }
 
-    /// What a daemon says tells whether another machine may go on: it has none
-    /// of the repository, or it made nothing, or it did not take the question.
-    /// Anything else may have left a worktree there: `Aborted` says so, and an
-    /// answer cut short or lost says nothing.
     #[test]
     fn only_a_daemon_that_says_it_made_nothing_lets_another_machine_go_on() {
         let on: Destination = "nixos".parse().unwrap();
@@ -2414,12 +1920,6 @@ mod tests {
         }
     }
 
-    /// Where a key goes is answered as it was found: a pane by its place
-    /// among those asked of, or a session to make, by its name, with the file
-    /// by its real path where one was asked of. An answer luneta cannot go by
-    /// is refused: of a worktree by no absolute path, a session zellij would
-    /// not take, a file of a link or none of a file, or of where in words of a
-    /// newer daemon's.
     #[test]
     fn where_a_key_goes_is_answered_as_it_was_found() {
         let asked_of_link = Pasted::new(Work::Link(issue()), Vec::new());
@@ -2470,8 +1970,6 @@ mod tests {
         assert_eq!(relative, "clone: \"w\" is no absolute path");
     }
 
-    /// A far daemon older than `at_head` ignores it, and would start a review
-    /// of old code without a word.
     #[test]
     fn an_answer_that_does_not_say_the_worktree_is_at_the_head_is_refused() {
         let asked = Pasted::new(Work::Link(link()), Vec::new()).wanting(Wanted::AtHead);
@@ -2526,8 +2024,6 @@ mod tests {
         assert_eq!(of(&Work::Link(link()), Some("feat")), None);
     }
 
-    /// A pane named by its place among those luneta said is the pane it
-    /// knows of that place; a place it said none of is refused.
     #[test]
     fn a_place_names_the_pane_luneta_said_of_it() {
         fn ready<P>(at: At<P>) -> Ready<P> {

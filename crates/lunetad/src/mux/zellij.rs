@@ -1,28 +1,3 @@
-//! zellij, as `Mux` has it: its CLI in `cli`, its client's ways in `client`,
-//! and here the sessions that run, and the names they had, as zellij keeps
-//! them on the machine luneta runs on: by their sockets, and in `metadata`, by
-//! what zellij writes of each in its cache.
-//!
-//! Each session is a server that listens on a socket named for the session, in
-//! zellij's socket folder. A rename moves the socket to its new name with
-//! `std::fs::rename` (`RenameSession` in zellij-server's `screen.rs`), and so
-//! the socket keeps its inode, and the time it was made: those two say which
-//! session it is, whatever it is called now.
-//!
-//! A pane's environment holds the name its session had when the pane opened,
-//! which a rename leaves behind. The daemon sees each rename that happens while
-//! it runs, and so leads such a name on to the one the session has now.
-//!
-//! A name is not a session, though: once a session lets it go, another can
-//! take it. So a name leads only to a session that held it and was made before
-//! the agent started, as the pane it runs in opened in its session before then,
-//! and only when one session alone could be it. A rename from before the daemon
-//! started, it never saw: the name leads nowhere, or to the one session made
-//! under it since, if that one is older than the agent. Only an agent started
-//! after that, in a pane older than the rename, it puts in the wrong session.
-//! A shell, where more than one session could be its, goes to the one that has
-//! the name now, as `housing` says.
-
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -45,37 +20,20 @@ pub mod vars;
 pub use ended::{exited, Exited};
 pub use renames::renamed;
 
-/// The socket in the folder that is zellij's web server's, and no session's.
 const WEB_SERVER: &str = "web_server_bus";
 
-/// The folders the sockets are in sit in this one, one for each version of the
-/// contract between a zellij client and its server: `contract_version_1` and
-/// so on.
 const CONTRACT: &str = "contract_version_";
 
-/// The folder of the contract zellij 0.45 speaks, which luneta speaks: of its
-/// sessions' sockets in this folder, and of their metadata in zellij's cache
-/// folder.
 const SPOKEN: &str = "contract_version_1";
 
-/// The longest name zellij makes a session of on any host, in bytes: what
-/// its socket's path leaves where the user's id has ten digits. Where it has
-/// fewer, zellij makes longer ones.
 pub const NAME_BYTES_MAX: usize = 60;
 
-// `SessionName::parse` refuses a longer name in zellij's words, which count the
-// bytes a name must be shorter than.
 const _: () = assert!(NAME_BYTES_MAX + 1 == 61);
 
-/// A name zellij can make a session of, or made one of, on any machine.
-/// `parse` and `running` are the ways to make one, so a name that reaches
-/// zellij as one has been held to what zellij takes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionName(String);
 
 impl SessionName {
-    /// A name for luneta to make a session of: one zellij takes on any host,
-    /// and attaches a client to.
     pub fn parse(name: &str) -> Result<Self, &'static str> {
         let name = SessionName::running(name)?;
         if name.0.len() > NAME_BYTES_MAX {
@@ -87,9 +45,6 @@ impl SessionName {
         Ok(name)
     }
 
-    /// The name of a session zellij runs, as its folder lists it: one held
-    /// to what zellij holds every name to, which is not its length, as
-    /// zellij made the session on this host.
     pub fn running(name: &str) -> Result<Self, &'static str> {
         if name.is_empty() {
             return Err("name must not be empty");
@@ -106,9 +61,6 @@ impl SessionName {
         Ok(SessionName(name.to_owned()))
     }
 
-    /// The name with `-n` after it, cut between characters where it must be
-    /// for the two to fit. What is left of a name holds no `/`, and the
-    /// postfix is neither whitespace nor a dot, so the two are a name too.
     #[must_use]
     pub fn with_postfix(&self, n: usize) -> Self {
         let postfix = format!("-{n}");
@@ -119,12 +71,9 @@ impl SessionName {
         SessionName(format!("{}{postfix}", &self.0[..end]))
     }
 
-    /// The name, where no session of `names` has it, or else the first with
-    /// a postfix from `-2` up that none has.
     #[must_use]
     pub fn free(&self, names: &[&str]) -> Self {
         let taken = |name: &SessionName| names.contains(&name.as_str());
-        // Of more names than there are sessions, one is free.
         std::iter::once(self.clone())
             .chain((2..names.len() + 3).map(|n| self.with_postfix(n)))
             .find(|name| !taken(name))
@@ -149,10 +98,6 @@ impl fmt::Display for SessionName {
     }
 }
 
-/// Where zellij keeps the folders its sockets are in: `$ZELLIJ_SOCKET_DIR`, or
-/// else `zellij` in `$XDG_RUNTIME_DIR` on Linux, or else `zellij-<uid>` in the
-/// temporary folder, which is where macOS has them. zellij-utils' `consts.rs`
-/// says so.
 #[must_use]
 pub fn folder() -> SocketFolder {
     let set = |name| std::env::var_os(name).filter(|value| !value.is_empty());
@@ -168,13 +113,10 @@ pub fn folder() -> SocketFolder {
     SocketFolder(std::env::temp_dir().join(format!("zellij-{uid}")))
 }
 
-/// zellij's folder of the folders its sessions' sockets are in, as `folder`
-/// finds it: apart from its cache folder, which `metadata::CacheFolder` is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SocketFolder(PathBuf);
 
 impl SocketFolder {
-    /// The folder at `path`, for a test to read sockets of its own in.
     #[cfg(test)]
     #[must_use]
     pub fn at(path: &Path) -> Self {
@@ -186,18 +128,11 @@ impl SocketFolder {
         &self.0
     }
 
-    /// Where the socket of `session` is in it, as a zellij of the contract
-    /// luneta speaks makes it.
     fn socket_of(&self, session: &SessionName) -> PathBuf {
         self.0.join(SPOKEN).join(session.as_str())
     }
 }
 
-/// Whether a change at `path`, in the folder, can be a session's: one at a
-/// folder of sockets, or at a socket in one. zellij writes its log in the
-/// folder too where it is the temporary one, as on macOS, and does so all
-/// the time, to no session's account. Only the end of the path is read, as
-/// macOS can name the folder by a path of its own: `/private/var` for `/var`.
 #[must_use]
 pub fn of_sessions(path: &Path) -> bool {
     let contract = |path: &Path| {
@@ -206,16 +141,12 @@ pub fn of_sessions(path: &Path) -> bool {
     contract(path) || path.parent().is_some_and(contract)
 }
 
-/// A session that runs, by its socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Socket {
     pub name: SessionName,
     id: Id,
 }
 
-/// Which session runs, by what its socket keeps through a rename. The time it
-/// was made keeps a new socket that takes the inode of one gone from passing
-/// for it. Only a socket the daemon found makes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Id {
     dev: u64,
@@ -224,57 +155,41 @@ pub struct Id {
 }
 
 impl Id {
-    /// When the session started: when its server made its socket.
     #[must_use]
     pub fn started(self) -> SystemTime {
         self.made
     }
 
-    /// The inode of its socket. Every socket the daemon reads is in zellij's
-    /// folder, and so on one device.
     #[must_use]
     pub fn socket(self) -> u64 {
         self.ino
     }
 }
 
-/// What a scan of zellij's folder finds.
 pub struct Scan {
     pub sockets: Vec<Socket>,
-    /// The folders and sockets it cannot read, any of which could be a
-    /// session's.
     pub unread: u32,
 }
 
 impl Scan {
-    /// Whether zellij has no session, as far as the scan can tell: one that
-    /// could not read all of the folder cannot.
     #[must_use]
     pub fn alone(&self) -> bool {
         self.sockets.is_empty() && self.unread == 0
     }
 }
 
-/// The sessions whose sockets are in `folder` now. What goes wrong in reading
-/// it, `troubles` says.
 pub fn scan(folder: &SocketFolder, troubles: &mut Troubles) -> Scan {
     let scan = read(folder.path(), &mut |what| troubles.say(what));
     troubles.done();
     scan
 }
 
-/// The sessions that run, as their sockets in `folder` say now: each by its
-/// name, and when it started. None where any of the folder could not be
-/// read, as a session's socket could be in what was not. For luneta, which
-/// says nothing of what went wrong: its screen is zellij's.
 #[must_use]
 pub fn running(folder: &SocketFolder) -> Option<Vec<(SessionName, SystemTime)>> {
     let sockets = sockets(folder)?.into_iter();
     Some(sockets.map(|(name, id)| (name, id.started())).collect())
 }
 
-/// `running`, each by its name and which session it is, as its socket keeps
-/// through a rename.
 #[must_use]
 pub fn sockets(folder: &SocketFolder) -> Option<Vec<(SessionName, Id)>> {
     let scan = read(folder.path(), &mut |_| {});
@@ -282,27 +197,14 @@ pub fn sockets(folder: &SocketFolder) -> Option<Vec<(SessionName, Id)>> {
     (scan.unread == 0).then(|| sockets.collect())
 }
 
-/// How long luneta and its daemon leave a session's server be once it made
-/// its socket, before they ask zellij anything: every call of zellij's CLI
-/// asks the server of every session whether it runs, and zellij-server 0.45.1
-/// panics where such a call hangs up before the server took its first client
-/// (`lib.rs:1462`, fixed after 0.45.1 in zellij's 81f56e1), and the session
-/// ends with it. The client that started the server comes a few milliseconds
-/// after the socket, and the socket wakes the sweep as soon as `watch` lets
-/// the folder settle.
 const NEWBORN: Duration = Duration::from_millis(500);
 
-/// How long until the youngest of the sessions that `started` so is no longer
-/// `NEWBORN`, at `now`, where one is. One that started after `now`, by a clock
-/// set back since, is taken for old: it would hold the sweep up for as long
-/// as the clock went back.
 #[must_use]
 pub fn newborn(started: impl Iterator<Item = SystemTime>, now: SystemTime) -> Option<Duration> {
     let left = |started| NEWBORN.checked_sub(now.duration_since(started).ok()?);
     started.filter_map(left).filter(|left| !left.is_zero()).max()
 }
 
-/// `scan`, with what goes wrong told to `say`.
 fn read(folder: &Path, say: &mut dyn FnMut(String)) -> Scan {
     let mut scan = Scan { sockets: Vec::new(), unread: 0 };
     for contract in listed(folder, say, &mut scan.unread) {
@@ -313,8 +215,6 @@ fn read(folder: &Path, say: &mut dyn FnMut(String)) -> Scan {
             match socket(&path) {
                 Ok(Some(socket)) => scan.sockets.push(socket),
                 Ok(None) => {},
-                // A socket gone since the folder was listed is a session that
-                // has ended.
                 Err(error) if error.kind() == ErrorKind::NotFound => {},
                 Err(error) => {
                     say(format!("{}: {error}", path.display()));
@@ -326,8 +226,6 @@ fn read(folder: &Path, say: &mut dyn FnMut(String)) -> Scan {
     scan
 }
 
-/// The paths in `dir`, or none when it cannot be listed, which `say` hears
-/// and `unread` counts.
 fn listed(dir: &Path, say: &mut dyn FnMut(String), unread: &mut u32) -> Vec<PathBuf> {
     watch::listed(dir).unwrap_or_else(|error| {
         say(format!("{}: {error}", dir.display()));
@@ -336,9 +234,6 @@ fn listed(dir: &Path, say: &mut dyn FnMut(String), unread: &mut u32) -> Vec<Path
     })
 }
 
-/// The session whose socket is at `path`, if that is one: zellij names a
-/// session in UTF-8, by a name `SessionName::running` takes, and its web
-/// server's socket is no session's.
 fn socket(path: &Path) -> io::Result<Option<Socket>> {
     let Some(name) = path.file_name().and_then(OsStr::to_str) else {
         return Ok(None);
@@ -357,19 +252,13 @@ fn socket(path: &Path) -> io::Result<Option<Socket>> {
     Ok(Some(Socket { name, id }))
 }
 
-/// What the daemon has seen of zellij's sessions while it ran.
 #[derive(Default)]
 pub struct Sessions {
-    /// The name each session that runs has now.
     names: HashMap<Id, SessionName>,
-    /// Each name seen, and every session that runs and has held it: the one
-    /// it was renamed from, and one that took it later, side by side.
     held: HashMap<SessionName, Vec<Id>>,
 }
 
 impl Sessions {
-    /// Takes in the sessions that run now. A session that is gone takes the
-    /// names it had with it.
     pub fn saw(&mut self, sockets: Vec<Socket>) {
         self.names = sockets.iter().map(|socket| (socket.id, socket.name.clone())).collect();
         for socket in sockets {
@@ -383,7 +272,6 @@ impl Sessions {
             held.retain(|id| names.contains_key(id));
             !held.is_empty()
         });
-        // Every session that holds a name runs, and holds the one it has now.
         for held in self.held.values() {
             assert_ne!(held.as_slice(), []);
             for id in held {
@@ -395,20 +283,15 @@ impl Sessions {
         }
     }
 
-    /// The sessions that run, and the name each has now.
     pub fn running(&self) -> impl Iterator<Item = (Id, &SessionName)> {
         self.names.iter().map(|(id, name)| (*id, name))
     }
 
-    /// The name the session `id` has now, if it runs.
     #[must_use]
     pub fn name_of(&self, id: Id) -> Option<&SessionName> {
         self.names.get(&id)
     }
 
-    /// The session that zellij answers for by `name`: the one that runs under
-    /// it, if no other does. Of sessions that share a name, zellij answers for
-    /// the one of its own contract, and the daemon cannot tell which that is.
     #[must_use]
     pub fn addressed(&self, name: &SessionName) -> Option<Id> {
         let mut under = self.names.iter().filter(|(_, now)| *now == name);
@@ -418,16 +301,12 @@ impl Sessions {
         Some(*id)
     }
 
-    /// The name that the session once called `named` has now, for an agent
-    /// that started at `started`: a session made after it is not the one its
-    /// pane opened in. None when no session could be it, or more than one.
     #[must_use]
     pub fn lead(&self, named: &str, started: Option<SystemTime>) -> Option<&SessionName> {
         let id = self.led(named, started)?;
         Some(self.names.get(&id).expect("a session that holds a name runs"))
     }
 
-    /// The session that `lead` leads to.
     #[must_use]
     pub fn led(&self, named: &str, started: Option<SystemTime>) -> Option<Id> {
         let mut could = self.could_be(named, started);
@@ -437,14 +316,6 @@ impl Sessions {
         Some(id)
     }
 
-    /// The session of a shell that started at `started`, in a session called
-    /// `named` then: the one `led` leads to, or else, of those that could be
-    /// it, the one that has the name now. A session made under the name of one
-    /// renamed, while that one runs, so has the shells started in it; a shell
-    /// started since in an old pane of the one renamed, which says its old
-    /// name too, goes there as well. An agent goes by `lead` alone: where that
-    /// gives up, the sidebar finds its pane by where it works, which a shell
-    /// does not say.
     #[must_use]
     pub fn housing(&self, named: &str, started: SystemTime) -> Option<Id> {
         if let Some(id) = self.led(named, Some(started)) {
@@ -458,8 +329,6 @@ impl Sessions {
         Some(id)
     }
 
-    /// The sessions that have held `named`, but for those made after
-    /// `started`.
     fn could_be(&self, named: &str, started: Option<SystemTime>) -> impl Iterator<Item = Id> {
         let before = move |id: &Id| started.is_none_or(|started| id.made <= started);
         self.held.get(named).into_iter().flatten().copied().filter(before)
@@ -478,8 +347,6 @@ mod tests {
     use super::{NEWBORN, WEB_SERVER};
     use crate::watch::Troubles;
 
-    /// zellij is alone only as far as a scan can tell: a folder of its
-    /// sessions that cannot be listed could hold one, and so it is not.
     #[test]
     fn zellij_is_not_alone_where_its_folder_cannot_be_read() {
         let folder = tempfile::tempdir().unwrap();
@@ -494,9 +361,6 @@ mod tests {
         assert!(!unread.alone());
     }
 
-    /// luneta hears of each session by its socket and when that was made,
-    /// and of none where a folder that could hold one cannot be read. A
-    /// socket of a name zellij makes no session of is no session's.
     #[test]
     fn the_sessions_that_run_are_their_sockets_unless_one_could_go_unread() {
         let folder = tempfile::tempdir().unwrap();
@@ -530,9 +394,6 @@ mod tests {
         assert!(SessionName::parse(postfixed.as_str()).is_ok());
     }
 
-    /// A session's name names a file in a folder, as its fold does: no name
-    /// that names none, or one out of the folder, is a session's, to make or
-    /// of one that runs.
     #[test]
     fn a_name_that_names_no_file_is_no_session_s() {
         for name in ["../out", "..", ".", ""] {
@@ -541,18 +402,12 @@ mod tests {
         }
     }
 
-    /// zellij's client takes a name that starts with `-` for an option as it
-    /// attaches, so luneta makes none, but knows one zellij runs.
     #[test]
     fn a_name_that_starts_with_a_dash_is_made_by_no_one_but_zellij() {
         assert!(SessionName::parse("-c").is_err());
         assert!(SessionName::running("-c").is_ok());
     }
 
-    /// The sweep waits out the youngest session that is newborn, and none
-    /// that is not. One that started after now, as by a clock set back since,
-    /// holds nothing up: the sweep would wait for as long as the clock went
-    /// back.
     #[test]
     fn the_sweep_waits_out_the_youngest_newborn_session() {
         let now = SystemTime::now();

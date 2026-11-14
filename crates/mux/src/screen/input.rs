@@ -1,6 +1,3 @@
-//! What a client does in a pane, as the bytes its program reads: keys, the
-//! mouse, a paste and the focus, each in the way the program last asked for.
-
 use libghostty_vt::key::{self, Mods};
 use libghostty_vt::mouse::{self, EncoderSize, Position};
 use libghostty_vt::mode::Mode;
@@ -8,20 +5,15 @@ use libghostty_vt::{Error, focus, paste};
 
 use super::Screen;
 
-/// How wide and high a cell is taken to be, in the pixels the mouse's encoder
-/// counts in: any size, as a client says where it is in cells.
 const CELL_PIXELS: u32 = 2;
 
-/// What a mouse button did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Click {
     Press(mouse::Button),
     Release(mouse::Button),
-    /// A move, with the button held, if one is.
     Motion(Option<mouse::Button>),
 }
 
-/// A turn of the wheel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wheel {
     Up,
@@ -53,8 +45,6 @@ impl Encoders {
 }
 
 impl Screen {
-    /// What the program reads of a key: `key`, with `mods` held, that types
-    /// `text`, and types `unshifted` with no modifier held.
     pub fn key(
         &mut self,
         action: key::Action,
@@ -73,8 +63,6 @@ impl Screen {
         Ok(bytes)
     }
 
-    /// What the program reads of the mouse at `column` and `row`, where it
-    /// takes the mouse: nothing where it does not.
     pub fn mouse(
         &mut self,
         click: Click,
@@ -95,8 +83,6 @@ impl Screen {
         self.encoded(action, button, mods, column, row)
     }
 
-    /// What the program reads of a turn of the wheel at `column` and `row`,
-    /// where it takes the mouse.
     pub fn wheel(
         &mut self,
         wheel: Wheel,
@@ -113,9 +99,6 @@ impl Screen {
         self.encoded(mouse::Action::Press, Some(button), mods, column, row)
     }
 
-    /// Whether a turn of the wheel is for the program as the arrow keys: it
-    /// asked for that (mode 1007), on the alternate screen, and does not take
-    /// the mouse.
     #[must_use]
     pub fn wheel_is_arrows(&self) -> bool {
         let alternate = self.mode(Mode::ALT_SCREEN_SAVE) || self.mode(Mode::ALT_SCREEN);
@@ -156,9 +139,6 @@ impl Screen {
         Ok(bytes)
     }
 
-    /// What the program reads of `text` pasted: bracketed, where it asked for
-    /// that (mode 2004), and with the control characters that could end a
-    /// bracket made spaces.
     pub fn paste(&self, text: &str) -> Result<Vec<u8>, Error> {
         let bracketed = self.answering.terminal().mode(Mode::BRACKETED_PASTE)?;
         let mut data = text.as_bytes().to_vec();
@@ -176,8 +156,6 @@ impl Screen {
         Ok(bytes)
     }
 
-    /// What the program reads of the client gaining or losing the focus:
-    /// nothing, unless it asked to be told (mode 1004).
     pub fn focus(&self, focused: bool) -> Result<Vec<u8>, Error> {
         if !self.answering.terminal().mode(Mode::FOCUS_EVENT)? {
             return Ok(Vec::new());
@@ -204,7 +182,6 @@ mod tests {
         Screen::new(Size { columns, rows }, 0).unwrap()
     }
 
-    /// What `screen` answered the program that wrote `bytes`.
     fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
         screen.write(bytes).unwrap().answers
     }
@@ -219,8 +196,6 @@ mod tests {
         screen.key(Action::Press, key, mods, text, Some(unshifted)).unwrap()
     }
 
-    /// A letter types itself, and Ctrl with it the control character, until
-    /// the program asks for kitty's keys: then Ctrl a is spelled out.
     #[test]
     fn keys_follow_the_programs_keyboard_mode() {
         let mut screen = screen();
@@ -230,7 +205,6 @@ mod tests {
         assert_eq!(typed(&mut screen, Key::A, Mods::CTRL, None, 'a'), b"\x1b[97;5u");
     }
 
-    /// The arrow keys follow the cursor keys mode (DECCKM).
     #[test]
     fn arrows_follow_the_cursor_keys_mode() {
         let mut screen = screen();
@@ -242,7 +216,6 @@ mod tests {
         assert_eq!(up(&mut screen), b"\x1bOA");
     }
 
-    /// A paste is bracketed only where the program asked.
     #[test]
     fn a_paste_is_bracketed_where_asked() {
         let mut screen = screen();
@@ -251,8 +224,6 @@ mod tests {
         assert_eq!(screen.paste("ls\n").unwrap(), b"\x1b[200~ls\n\x1b[201~");
     }
 
-    /// The mouse says nothing to a program that does not take it, and a click
-    /// in SGR's words to one that asked.
     #[test]
     fn the_mouse_goes_to_a_program_that_takes_it() {
         let mut screen = screen();
@@ -262,7 +233,6 @@ mod tests {
         assert_eq!(screen.mouse(click, Mods::empty(), 2, 1).unwrap(), b"\x1b[<0;3;2M");
     }
 
-    /// The focus is told only to a program that asked.
     #[test]
     fn the_focus_is_told_where_asked() {
         let mut screen = screen();

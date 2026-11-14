@@ -1,7 +1,3 @@
-//! `luneta prune`, and the daemon's `Prunes` and `Prune`, for a far row of the
-//! menu's `d m`: real git on a repository of a test's own, and a gh that says
-//! what the test gives it.
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::net::UnixListener;
@@ -30,8 +26,6 @@ fn said_by(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(said.stdout).unwrap().trim().to_owned()
 }
 
-/// A repository wt cloned, with `main` checked out at `main`, and its origin
-/// beside it, on the same disk, by the name of the repository `merged` says.
 struct Repository {
     clone: PathBuf,
     up: PathBuf,
@@ -55,8 +49,6 @@ impl Repository {
         self.clone.join(name)
     }
 
-    /// A worktree of a new branch `name`, with a commit on it pushed to origin,
-    /// and that commit.
     fn pushed(&self, name: &str) -> String {
         let (bare, at) = (self.clone.join(".bare"), self.at(name));
         git(&bare, &["worktree", "add", "-q", "-b", name, &at.display().to_string(), "main"]);
@@ -65,13 +57,11 @@ impl Repository {
         said_by(&at, &["rev-parse", "HEAD"])
     }
 
-    /// Whether origin has the branch `name`.
     fn on_origin(&self, name: &str) -> bool {
         let up = said_by(&self.up, &["for-each-ref", "--format=%(refname)"]);
         up.lines().any(|line| line == format!("refs/heads/{name}"))
     }
 
-    /// Whether this clone has the branch `name`.
     fn on_clone(&self, name: &str) -> bool {
         let bare = self.clone.join(".bare");
         let heads = said_by(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads"]);
@@ -79,8 +69,6 @@ impl Repository {
     }
 }
 
-/// A pull request of the repository `o/n`, as gh says it, merged at `head`, by
-/// `author`.
 fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
     json!({
         "number": number,
@@ -94,8 +82,6 @@ fn merged(number: u32, head: &str, author: &str) -> serde_json::Value {
     })
 }
 
-/// A daemon of `host` that lists a session `work` of a pane in each of `dirs`,
-/// once it has heard where they work.
 fn serving(host: &Host, dirs: &[&Path]) -> (UnixListener, Daemon) {
     let panes: Vec<serde_json::Value> = dirs
         .iter()
@@ -125,8 +111,6 @@ fn prune(host: &Host, from: &Path, repo: &Path, more: &[&str]) -> Output {
     answered(&mut command)
 }
 
-/// What a plan says, and the plan it tells `--yes` that by, of a run that
-/// deleted nothing.
 fn planned(said: &Output) -> (String, String) {
     let why = String::from_utf8_lossy(&said.stderr);
     assert_eq!(said.status.code(), Some(PLANNED), "{why}");
@@ -135,11 +119,6 @@ fn planned(said: &Output) -> (String, String) {
     (String::from_utf8(said.stdout.clone()).unwrap(), plan)
 }
 
-/// A run lists each worktree with a merged pull request: what goes, and why the
-/// rest stay, and deletes nothing. Told yes to that, it deletes the worktree,
-/// what git ignores in it included, and the branch, which git would not count
-/// as merged, here and on origin, but for a branch of someone else's, one origin
-/// moved on from, or one another was merged into. What it did not list it leaves.
 #[test]
 fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     let host = Host::new();
@@ -277,8 +256,6 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     assert!(why.contains("n has no merged worktree to delete"), "{why}");
 }
 
-/// Told yes to a plan, it deletes nothing where what would go has changed, and
-/// says what would go now, as a pane has come to a worktree meanwhile.
 #[test]
 fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
     let host = Host::new();
@@ -313,8 +290,6 @@ fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
     assert!(repository.at("one").exists() && repository.at("two").exists(), "it deleted");
 }
 
-/// With no lunetad to say where the panes are, it deletes nothing, says so, and
-/// asks gh nothing.
 #[test]
 fn it_deletes_nothing_while_no_lunetad_says_where_the_panes_are() {
     let host = Host::new();
@@ -331,7 +306,6 @@ fn it_deletes_nothing_while_no_lunetad_says_where_the_panes_are() {
     assert!(repository.at("one").exists());
 }
 
-/// A directory in no repository has nothing to list, and says so.
 #[test]
 fn a_directory_in_no_repository_says_so() {
     let host = Host::new();
@@ -344,8 +318,6 @@ fn a_directory_in_no_repository_says_so() {
     assert!(why.contains("is in no repository"), "{why}");
 }
 
-/// Where git refuses one worktree, as one that holds a submodule, that one
-/// stays with its branch, the others go, and it says which.
 #[test]
 fn a_worktree_git_refuses_stays_and_the_others_go() {
     let host = Host::new();
@@ -419,8 +391,6 @@ fn a_far_branch_it_could_not_delete_keeps_its_worktree_to_try_again() {
     assert!(!repository.on_clone("one") && !repository.on_origin("one"));
 }
 
-/// In luneta's ask box, a plan takes its yes only in the turn after the one
-/// that said it, so that the user's answer comes between them, as a close's.
 #[test]
 fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
     let host = Host::new();
@@ -786,8 +756,6 @@ fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
     }
 }
 
-/// A far row's `d m` is planned and deleted on the row's machine, through the
-/// daemon luneta watches: git and gh run there, and what the panes there say.
 #[test]
 fn a_far_row_lists_and_deletes_on_its_own_machine() {
     let here = Host::new();

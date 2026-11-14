@@ -1,7 +1,3 @@
-//! What the kernel says of a process: its parent, its group, its name, where
-//! it sleeps, whether it is stopped, its terminal, and its arguments. Read of
-//! the processes of a pane, as the server looks at what runs in front of it.
-
 #[cfg(target_os = "linux")]
 #[path = "process/linux.rs"]
 mod os;
@@ -11,23 +7,14 @@ mod os;
 
 pub use os::{children, process};
 
-/// The most children of a process the server reads.
 pub const CHILDREN_MAX: usize = 256;
 
-/// The most bytes of a process's arguments the server keeps, a NUL after
-/// each among them: what runs in front names a pane's command, which needs
-/// no more, and each listing holds it.
 pub const ARGV_BYTES_MAX: usize = 16 * 1024;
 
-/// The arguments of `pid`, as `os::argv` reads them, cut to
-/// `ARGV_BYTES_MAX`: none where it is gone.
 pub fn argv(pid: u32) -> Option<Vec<String>> {
     os::argv(pid).map(bounded)
 }
 
-/// `args` up to `ARGV_BYTES_MAX` bytes, a NUL after each counted: the one
-/// that runs past them is cut at a character's boundary, and those after it
-/// are left out.
 fn bounded(args: Vec<String>) -> Vec<String> {
     let mut room = ARGV_BYTES_MAX;
     let mut kept = Vec::new();
@@ -52,38 +39,27 @@ fn bounded(args: Vec<String>) -> Vec<String> {
     kept
 }
 
-/// A process, as the kernel says it now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Process {
     pub pid: u32,
     pub parent: u32,
     pub group: Group,
-    /// Its binary's name, as the kernel keeps it: cut to 15 bytes on Linux,
-    /// 16 on macOS.
     pub name: String,
-    /// Where it sleeps in the kernel, as Linux names it. Empty where it does
-    /// not, and on macOS, which says it of no process.
     pub sleeps: String,
     pub stopped: bool,
-    /// Its controlling terminal, if it has one.
     pub terminal: Option<Terminal>,
 }
 
-/// A process's controlling terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Terminal {
-    /// Its device number.
     pub device: u64,
-    /// The process group in front of it, if one is.
     pub front: Option<Group>,
 }
 
-/// A process group, by the pid of its leader, which names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group(pub u32);
 
 impl Group {
-    /// The pid of its leader, which may be gone while the group is not.
     #[must_use]
     pub fn leader(self) -> u32 {
         self.0
@@ -98,8 +74,6 @@ mod tests {
 
     use super::*;
 
-    /// This process reads as itself: its parent, its group, and its
-    /// arguments, as std has them.
     #[test]
     fn this_process_reads_as_itself() {
         let pid = std::process::id();
@@ -114,9 +88,6 @@ mod tests {
         assert_eq!(argv(pid), Some(args));
     }
 
-    /// A child's arguments read as it was given them, an empty one with
-    /// them; it is among its parent's children; and stopped, it reads so. Its
-    /// name is the binary's that runs, which for macOS's `sh` is bash.
     #[test]
     fn a_child_reads_with_its_arguments_and_stops() {
         let mut child = Command::new("sh")
@@ -149,8 +120,6 @@ mod tests {
         child.wait().expect("it ends");
     }
 
-    /// Arguments past `ARGV_BYTES_MAX` are cut there, the one that runs past
-    /// it at a character's boundary.
     #[test]
     fn arguments_are_cut_to_their_bound() {
         let long = "é".repeat(ARGV_BYTES_MAX);
@@ -163,7 +132,6 @@ mod tests {
         assert_eq!(bounded(short.clone()), short);
     }
 
-    /// A child given an argument longer than the bound reads cut to it.
     #[test]
     fn a_child_s_long_argument_reads_cut() {
         let long = "a".repeat(4 * ARGV_BYTES_MAX);
@@ -188,7 +156,6 @@ mod tests {
         child.wait().expect("it ends");
     }
 
-    /// A process that is gone reads as none.
     #[test]
     fn a_process_gone_reads_as_none() {
         let mut child = Command::new("true").spawn().expect("true starts");

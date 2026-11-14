@@ -1,27 +1,15 @@
-//! Which pane of which session each agent sits in, as the daemon's host has
-//! them: the sidebar's rows show each agent in its pane, and a move to another
-//! session starts each anew by what it is.
-
 use std::collections::HashMap;
 
 use crate::api::session::Mux;
 use crate::api::{agent, Agent, Harness, Pane, Session, Zellij};
 use crate::mux::{OwnKey, OwnPane};
 
-/// A session, as a seat is in it: a zellij session by its name, and an own
-/// one as no other is. An own session can have the name of a zellij one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Where<'a> {
     Zellij(&'a str),
     Own(OwnKey),
 }
 
-/// The agent in each pane, by its session and the pane's id. A pane holds one:
-/// the agent started at a prompt, or else the one that started first. An
-/// agent is in the zellij session the daemon follows its pane to, or, where
-/// the daemon cannot tell, the one `found` finds; or in an own pane, in the
-/// own session its pane's variables name, and in none where `OwnPane::of`
-/// reads no own pane of what the daemon says.
 #[must_use]
 pub fn seated<'a>(
     agents: &'a [Agent],
@@ -59,12 +47,6 @@ pub fn seated<'a>(
     seated
 }
 
-/// The session of an agent the daemon cannot follow to one, as it cannot one
-/// renamed before it started, found by where it works: the one zellij session
-/// that lists a pane of the agent's id that works where the agent does. Of
-/// more than one, the session the agent's environment names, or else, for Claude
-/// Code's, the one whose pane runs `claude` or an agent titled, if one alone
-/// does: what a pane runs tells of no other harness's agent.
 fn found<'a>(agent: &Agent, zellij: &Zellij, sessions: &'a [Session]) -> Option<&'a str> {
     if agent.cwd.is_empty() {
         return None;

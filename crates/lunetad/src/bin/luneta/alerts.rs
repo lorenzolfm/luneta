@@ -1,23 +1,3 @@
-//! The desktop's notifications of the agents that want you, of this machine
-//! and of each other that lunetad reaches: of one that waits on you, once it
-//! has waited `HELD`, and of one done with its turn, at once, but while a
-//! window of luneta's of this machine has the focus, where its row says so.
-//! A turn is done once nothing it started runs on. Only a wait sounds. Each
-//! goes once its agent no longer wants you, or once you look at its pane, as
-//! you do while luneta's window has the focus and its zellij is on that pane,
-//! or another luneta's of this machine; and one of a turn that ended goes as
-//! a window of luneta's takes the focus. None comes of a pane you look at.
-//!
-//! What a notification says is in the end of its agent's transcript, which
-//! is read before it goes up: the tool a permission is for, which tells a
-//! plan from a command, the question asked, or what the agent said last. An
-//! agent that no longer wants you by the time it is read has none.
-//!
-//! A machine lunetad does not reach just now keeps its agents as they were,
-//! and their notifications, until it is heard again; and so does a session
-//! whose panes zellij has not listed yet, as none has as lunetad starts. A
-//! machine lunetad no longer watches takes its notifications with it.
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -35,59 +15,35 @@ use crate::machines::Machine;
 use crate::picker::{Here, Seated};
 use crate::sidebar::{Listed, PanePlace};
 
-/// How long an agent waits on you before the desktop says so: as long as
-/// Claude Code waits before it tells its hooks, so that a dialog that goes
-/// as it came, as one auto mode answers itself, says nothing.
 pub const HELD: Duration = Duration::from_secs(6);
 
-/// How much of the end of a transcript a notification reads: the records of
-/// the last turn, which a tool's long answer can be most of.
 const SHARE_BYTES: usize = 256 * 1024;
 
-/// The longest a notification's body is, on one line: enough to carry a
-/// thought, short enough that the desktop does not cut it.
 const BODY_CHARS: usize = 150;
 
-/// An agent, by the machine it runs on and its process there: no two run by
-/// one pid at once, which their sessions' ids do not promise, as a session
-/// resumed in another pane keeps its id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     pub on: Machine,
     pub pid: u32,
 }
 
-/// What an agent waits on you for, as Claude Code says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Wait {
-    /// A tool it asks to run, or a plan it asks you to take.
     Permission,
-    /// A question of its own, or of a server's.
     Input,
-    /// What Claude Code says in a word luneta does not know.
     Other(String),
-    /// What it does not say, or says in a word only a newer daemon knows.
     Unsaid,
 }
 
-/// What an agent does, of what its notifications are of, as its daemon
-/// says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doing {
     Busy,
-    /// Its turn is over, and nothing it started runs on.
     Idle,
-    /// It waits on you, since when Claude Code says: a wait since another
-    /// moment is another wait.
     Waiting { wait: Wait, since: Option<SystemTime> },
-    /// What says nothing: a turn over while a command it started in the
-    /// background runs on, whose end begins another; a word luneta does not
-    /// know; or one of Claude Code's own dialogs, which you opened.
     Quiet,
 }
 
 impl Doing {
-    /// What `agent` does, as its daemon says.
     pub fn of(agent: &Agent) -> Doing {
         let Some(Reported::KnownStatus(known)) = &agent.status else {
             return Doing::Quiet;
@@ -109,73 +65,47 @@ impl Doing {
                 let since = agent.status_since.and_then(|at| at.try_into().ok());
                 Doing::Waiting { wait, since }
             },
-            // Claude Code says `shell` of a turn that is over while a command
-            // it started in the background runs on.
             Ok(Status::Shell | Status::Unspecified) | Err(_) => Doing::Quiet,
         }
     }
 }
 
-/// What an agent wants of you.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Want {
-    /// It waits on you.
     Wait(Wait),
-    /// It is done with its turn.
     Done,
 }
 
-/// A notification to put up, once the end of its agent's transcript is read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Due {
-    /// Counts the notifications luneta reads for, by which one read late is
-    /// told from a newer one.
     pub number: u64,
     pub key: Key,
     pub want: Want,
-    /// What the sidebar names the agent's row.
     pub label: String,
-    /// The id of the agent's session, which names its transcript, where it
-    /// is one.
     pub transcript: Option<SessionId>,
-    /// Whether it was up already, put up by another luneta of this machine,
-    /// which took it down as it ended: it goes up again without a sound.
     pub again: bool,
 }
 
-/// What the desktop is to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    /// Read the end of the agent's transcript, for the notification `Due` is.
     Read(Due),
-    /// Take the agent's notification down, where one is up.
     Close(Key),
 }
 
-/// What luneta has of what runs on a machine lunetad watches.
 #[derive(Debug)]
 pub enum Reach {
-    /// What its daemon says runs there now: the agents in the panes zellij
-    /// there has listed, the sessions it has listed the panes of, and those
-    /// it has not yet, whose agents cannot be placed until it has.
     Heard { agents: Vec<Seated>, listed: Vec<Listed>, unlisted: Vec<Listed> },
-    /// Nothing: lunetad does not reach it just now.
     Away,
 }
 
-/// Where the notification of a turn that ended, or of a wait, is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Told {
-    /// None is up, nor on its way.
     Not,
-    /// The end of its transcript is being read, for the notification of
-    /// this number.
     Reading(u64),
     Shown,
 }
 
 impl Told {
-    /// Whether it is up, or on its way up.
     fn is_up(self) -> bool {
         match self {
             Told::Reading(_) | Told::Shown => true,
@@ -184,17 +114,12 @@ impl Told {
     }
 }
 
-/// Where the notification of a wait is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Hold {
-    /// It waits on you since luneta heard so, at this instant, and its
-    /// notification goes up once it has waited `HELD`.
     Held(Instant),
     Told(Told),
 }
 
-/// What an agent does, as last heard, and where its notification is: a turn
-/// that ended has one, and so has a wait, held first. Nothing else does.
 #[derive(Debug)]
 enum State {
     Busy,
@@ -204,9 +129,6 @@ enum State {
 }
 
 impl State {
-    /// An agent luneta begins to follow, which does as `doing` says at `now`:
-    /// one that waits on you is held, but where luneta takes it as it is, as
-    /// `as_is` says, which says nothing of it.
     fn new(doing: Doing, now: Instant, as_is: bool) -> State {
         match doing {
             Doing::Busy => State::Busy,
@@ -219,7 +141,6 @@ impl State {
         }
     }
 
-    /// Whether the agent does as `doing` says still.
     fn is(&self, doing: &Doing) -> bool {
         match (self, doing) {
             (State::Busy, Doing::Busy)
@@ -232,8 +153,6 @@ impl State {
         }
     }
 
-    /// Its notification, where it can have one: none while it works, nor
-    /// while it does what says nothing, nor while its wait is held.
     fn told(&mut self) -> Option<&mut Told> {
         match self {
             State::Idle(told) | State::Waiting { hold: Hold::Told(told), .. } => Some(told),
@@ -241,7 +160,6 @@ impl State {
         }
     }
 
-    /// Whether a notification of it is up, or on its way up.
     fn is_up(&self) -> bool {
         match self {
             State::Idle(told) | State::Waiting { hold: Hold::Told(told), .. } => told.is_up(),
@@ -249,8 +167,6 @@ impl State {
         }
     }
 
-    /// Takes down what is up of it, and what is held: none goes up of it
-    /// until it does something else.
     fn down(&mut self) {
         match self {
             State::Idle(told) => *told = Told::Not,
@@ -260,23 +176,15 @@ impl State {
     }
 }
 
-/// An agent luneta follows.
 #[derive(Debug)]
 struct Followed {
     state: State,
     place: PanePlace,
     label: String,
-    /// The id of its session, as last heard, where it is one: one cleared
-    /// has another.
     transcript: Option<SessionId>,
 }
 
 impl Followed {
-    /// The agent of `key` does as `doing` says, as heard at `now`: what the
-    /// desktop is to do of it. Whatever it does since makes what was up of it
-    /// stale. A wait that begins is held; and a turn that ends is said at
-    /// once, numbered after `numbered`, but where a window of luneta's has
-    /// the focus, as `focused` says.
     fn does(
         &mut self,
         key: &Key,
@@ -303,41 +211,25 @@ impl Followed {
         acts
     }
 
-    /// The notification of `want` numbered `number`, to read for: up
-    /// `again`, or for the first time.
     fn due(&self, key: &Key, number: u64, want: Want, again: bool) -> Due {
         let (key, label, transcript) = (key.clone(), self.label.clone(), self.transcript.clone());
         Due { number, key, want, label, transcript, again }
     }
 }
 
-/// The agents of every machine luneta heard of, and their notifications.
 #[derive(Debug, Default)]
 pub struct Alerts {
     followed: HashMap<Key, Followed>,
-    /// The sessions of each machine whose panes zellij had listed, as luneta
-    /// last heard. An agent it begins to follow in one that was not among
-    /// them is taken as it is: what it did before luneta could place it, and
-    /// whether you were told, luneta cannot say.
     listed: HashMap<Machine, HashSet<Listed>>,
-    /// The number of the last notification read for.
     numbered: u64,
-    /// Whether a window of luneta's of this machine has the focus, as luneta
-    /// last heard: no turn that ends is said then, as its row says it.
     focused: bool,
 }
 
 impl Alerts {
-    /// The notifications of no agent yet, with a window of luneta's that has
-    /// the focus where `focused` says.
     pub fn new(focused: bool) -> Alerts {
         Alerts { focused, ..Alerts::default() }
     }
 
-    /// A window of luneta's of this machine has the focus, or none has, as
-    /// `focused` says: what is up of each turn that ended goes as one takes
-    /// it, and no turn that ends is said until none has it. A wait is said
-    /// all the same, as it holds its agent up until you answer.
     pub fn focus(&mut self, focused: bool) -> Vec<Act> {
         let took = focused && !self.focused;
         self.focused = focused;
@@ -356,13 +248,6 @@ impl Alerts {
         acts
     }
 
-    /// Takes in what runs on each machine lunetad watches, as `machines`
-    /// says, at `now`: what the desktop is to do, where an agent came to wait
-    /// on you, or is done, or does anything else since, or ended. A machine
-    /// lunetad does not reach just now keeps its agents as they were, and so
-    /// does a session whose panes zellij has not listed yet; a machine left
-    /// out of `machines`, which lunetad no longer watches, takes its agents
-    /// with it.
     pub fn heard(&mut self, machines: Vec<(Machine, Reach)>, now: Instant) -> Vec<Act> {
         let mut acts = Vec::new();
         let watched: HashSet<Machine> = machines.iter().map(|(on, _)| on.clone()).collect();
@@ -397,8 +282,6 @@ impl Alerts {
                 running.insert(key);
             }
             self.followed.retain(|key, followed| {
-                // One in a session whose panes zellij has not listed yet may
-                // run there still.
                 let ended = key.on == on
                     && !running.contains(key)
                     && !unlisted.contains(&followed.place.session);
@@ -411,7 +294,6 @@ impl Alerts {
         acts
     }
 
-    /// The agents in the pane `here` is on, if it is on one, by their pids.
     pub fn at(&self, here: Option<&Here>) -> Vec<Key> {
         let Some(Here::Pane { on, place }) = here else {
             return Vec::new();
@@ -424,9 +306,6 @@ impl Alerts {
         keys
     }
 
-    /// You look at the panes of the agents of `keys`, in a window of
-    /// luneta's that has the focus: the notification of each goes, and one
-    /// held for it never goes up.
     pub fn looked(&mut self, keys: &[Key]) -> Vec<Act> {
         let mut acts = Vec::new();
         for key in keys {
@@ -441,7 +320,6 @@ impl Alerts {
         acts
     }
 
-    /// When the next agent that waits on you has waited `HELD`, if one does.
     pub fn due(&self) -> Option<Instant> {
         let held = self.followed.values().filter_map(|followed| match followed.state {
             State::Waiting { hold: Hold::Held(at), .. } => Some(at + HELD),
@@ -453,8 +331,6 @@ impl Alerts {
         held.min()
     }
 
-    /// The notifications of the agents that have waited on you `HELD` by
-    /// `now`, to read for.
     pub fn ticked(&mut self, now: Instant) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
@@ -475,9 +351,6 @@ impl Alerts {
         acts
     }
 
-    /// The waits up as far as luneta knows, to read for again, as this luneta
-    /// takes over putting them up from another of this machine, which took
-    /// them down as it ended: no turn that ended goes up again.
     pub fn again(&mut self) -> Vec<Act> {
         let mut acts = Vec::new();
         for (key, followed) in &mut self.followed {
@@ -498,9 +371,6 @@ impl Alerts {
         acts
     }
 
-    /// What was read for a notification, `read`: whether it goes up, as it
-    /// does while its agent still wants what it was read for, and you have
-    /// not looked.
     pub fn read(&mut self, read: &Read) -> bool {
         let Some(followed) = self.followed.get_mut(&read.alert.key) else {
             return false;
@@ -514,8 +384,6 @@ impl Alerts {
         }
     }
 
-    /// You clicked the notification of `key`'s agent, which goes: where its
-    /// pane is, as last heard, if luneta still follows it.
     pub fn clicked(&mut self, key: &Key) -> Option<PanePlace> {
         let followed = self.followed.get_mut(key)?;
         followed.state.down();
@@ -523,45 +391,31 @@ impl Alerts {
     }
 }
 
-/// What a notification is of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// The agent asked you something.
     Asked,
-    /// It has a plan for you to take or not.
     Plan,
-    /// It asks to run a tool.
     Permission,
-    /// It waits on you for something else.
     Wants,
-    /// It is done with its turn.
     Done,
 }
 
-/// What a notification sounds as it goes up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sound {
-    /// Of a question, or a plan, for you to answer.
     Question,
-    /// Of anything else the agent waits on you for.
     Bell,
 }
 
-/// A notification, as it goes up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
     pub key: Key,
     pub kind: Kind,
     pub title: String,
     pub body: String,
-    /// What it sounds as it goes up, if anything: a wait does, but where it
-    /// was up before, and a turn that ended never does.
     pub sound: Option<Sound>,
 }
 
 impl Alert {
-    /// The notification `due` is, by the end of its agent's transcript,
-    /// `end`, where it was read.
     pub fn of(due: &Due, end: Option<&str>) -> Alert {
         let turn = end.map_or_default(Turn::of);
         let tool = turn.tool.as_ref().map(|(name, input)| (name.as_str(), input));
@@ -611,19 +465,13 @@ impl Alert {
     }
 }
 
-/// What the end of a transcript says of its agent's last turn.
 #[derive(Debug, Default)]
 struct Turn {
-    /// The tool it called last that has had no answer yet, and what on: the
-    /// one a permission is asked for.
     tool: Option<(String, Value)>,
-    /// What it said last.
     said: Option<String>,
 }
 
 impl Turn {
-    /// The turn the end of a transcript, `end`, is the end of: a JSON record
-    /// to a line. A subagent's records are left out.
     fn of(end: &str) -> Turn {
         let mut calls: Vec<Call> = Vec::new();
         let mut said = None;
@@ -659,7 +507,6 @@ impl Turn {
     }
 }
 
-/// A tool the agent called, by the id its answer names.
 struct Call {
     id: String,
     name: String,
@@ -673,29 +520,21 @@ impl Call {
     }
 }
 
-/// What a tool was run on, as `on_what` says, where that is anything.
 fn run_on(input: &Value) -> Option<&str> {
     on_what(input).filter(|what| !what.trim().is_empty())
 }
 
-/// What a text block of the agent's says, if anything.
 fn text_of(block: &Value) -> Option<String> {
     let text = block["text"].as_str()?.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// What came of reading for a notification.
 #[derive(Debug)]
 pub struct Read {
     pub number: u64,
     pub alert: Alert,
 }
 
-/// Reads the end of the transcript of `due`'s agent on a thread of its own,
-/// on this machine in `claude_folder`, the folder the daemon reads Claude
-/// Code's sessions in, and on another through its daemon there, and hands
-/// back the notification it makes of it. One whose end does not read, or
-/// whose session names no transcript, says what `due` does alone.
 pub fn read(due: Due, claude_folder: Option<PathBuf>, events: &Sender<Event>) {
     let events = events.clone();
     thread::spawn(move || {
@@ -706,7 +545,6 @@ pub fn read(due: Due, claude_folder: Option<PathBuf>, events: &Sender<Event>) {
             ends.into_values().next()
         });
         let alert = Alert::of(&due, end.as_deref());
-        // luneta is on its way out.
         let _ = events.send(Event::Alerted(Read { number: due.number, alert }));
     });
 }
@@ -722,7 +560,6 @@ mod tests {
     use super::*;
     use crate::sidebar::Mark;
 
-    /// The session the tests' agents are in.
     fn work() -> Listed {
         Listed::new("work", UNIX_EPOCH + Duration::from_secs(10))
     }
@@ -731,8 +568,6 @@ mod tests {
         PanePlace { session: work(), pane }
     }
 
-    /// The agent of pid `pid`, in pane `pid` of the session `work`, as the
-    /// picker lists it, which does as `doing` says.
     fn seated(pid: u32, doing: Doing) -> Seated {
         Seated {
             place: place(pid),
@@ -747,17 +582,14 @@ mod tests {
         }
     }
 
-    /// A wait for `wait` since `since` seconds after the epoch.
     fn waits(wait: Wait, since: u64) -> Doing {
         Doing::Waiting { wait, since: Some(UNIX_EPOCH + Duration::from_secs(since)) }
     }
 
-    /// What zellij has listed of the session `work`, on a machine.
     fn heard(agents: Vec<Seated>) -> Reach {
         Reach::Heard { agents, listed: vec![work()], unlisted: Vec::new() }
     }
 
-    /// This machine's agents, and no other machine.
     fn here(agents: Vec<Seated>) -> Vec<(Machine, Reach)> {
         vec![(Machine::Local, heard(agents))]
     }
@@ -786,12 +618,10 @@ mod tests {
         acts.iter().filter_map(closed).collect()
     }
 
-    /// What was read for `due`, which says nothing of a transcript.
     fn read(due: &Due) -> Read {
         Read { number: due.number, alert: Alert::of(due, None) }
     }
 
-    /// Puts up what `acts` read for, as luneta does once each is read.
     fn shown(alerts: &mut Alerts, acts: &[Act]) {
         for act in acts {
             if let Act::Read(due) = act {
@@ -800,9 +630,6 @@ mod tests {
         }
     }
 
-    /// The agents luneta hears of first are as they are: one that waited
-    /// already, or finished, says nothing, as luneta cannot say whether you
-    /// were told.
     #[test]
     fn what_agents_did_before_luneta_heard_of_them_says_nothing() {
         let mut alerts = Alerts::default();
@@ -813,10 +640,6 @@ mod tests {
         assert_eq!(alerts.ticked(now + HELD), []);
     }
 
-    /// An agent in a session whose panes zellij had not listed is as it is
-    /// once they are, as it is in the first a daemon that starts lists; and
-    /// one that runs in a session listed again since is followed still, as
-    /// it is once a daemon that takes another's place has listed its panes.
     #[test]
     fn an_agent_placed_late_is_taken_as_it_is_and_one_unplaced_for_a_while_is_kept() {
         let mut alerts = Alerts::default();
@@ -839,9 +662,6 @@ mod tests {
         assert_eq!(closes(&alerts.heard(here(Vec::new()), now)), [key(2)]);
     }
 
-    /// A wait goes up once it has lasted `HELD`, and one over before then,
-    /// as a dialog auto mode answers itself, never does. A wait that ends
-    /// takes its notification down.
     #[test]
     fn a_wait_goes_up_once_it_has_lasted_and_down_once_it_ends() {
         let mut alerts = Alerts::default();
@@ -864,8 +684,6 @@ mod tests {
         assert_eq!(closes(&acts), [key(1)]);
     }
 
-    /// A turn that ends is said at once; a wait that ends in idle, as one
-    /// you said no to, is not. A turn said goes once the agent works again.
     #[test]
     fn a_turn_that_ends_is_said_at_once_and_goes_once_the_agent_works_again() {
         let mut alerts = Alerts::default();
@@ -880,8 +698,6 @@ mod tests {
         assert_eq!(closes(&acts), [key(1)]);
     }
 
-    /// Two agents of one session, as one resumed in a second pane, are two:
-    /// each is said of as it does, and only then.
     #[test]
     fn two_agents_of_one_session_are_two() {
         let mut alerts = Alerts::default();
@@ -896,8 +712,6 @@ mod tests {
         assert_eq!(reads(&acts), [(1, Want::Done)]);
     }
 
-    /// What was read for an agent that no longer wants it by the time it is
-    /// read does not go up, nor does what was read before a newer reading.
     #[test]
     fn what_is_read_too_late_does_not_go_up() {
         let mut alerts = Alerts::default();
@@ -914,8 +728,6 @@ mod tests {
         assert!(!alerts.read(&read(wait)));
     }
 
-    /// A dialog of Claude Code's own you opened says nothing; any other
-    /// wait, of a word luneta does not know too, does.
     #[test]
     fn a_dialog_you_opened_says_nothing() {
         let waiting = |pid, waiting_for| Agent {
@@ -945,9 +757,6 @@ mod tests {
         assert_eq!(read, [(2, Want::Wait(other)), (3, Want::Wait(Wait::Unsaid))]);
     }
 
-    /// The notification of an agent in the pane you look at goes, and one
-    /// held for it never goes up: of the agents in that pane of that
-    /// machine's.
     #[test]
     fn looking_at_an_agent_s_pane_takes_its_notification_down() {
         let mut alerts = Alerts::default();
@@ -976,11 +785,6 @@ mod tests {
         assert_eq!(alerts.ticked(later + HELD), [], "one seen as it was held");
     }
 
-    /// A turn over while a command the agent started in the background runs
-    /// on, as Claude Code says `shell` then, says nothing: the turn that
-    /// command's end begins says it, once it is over with nothing running.
-    /// One whose command ends with no turn after it, as one you stopped,
-    /// says nothing either.
     #[test]
     fn a_turn_over_with_a_command_running_on_says_nothing_until_the_agent_is_done() {
         let shell = Agent {
@@ -1004,9 +808,6 @@ mod tests {
         assert_eq!(alerts.heard(one(Doing::Idle), now), [], "you stopped its command");
     }
 
-    /// No turn that ends is said while a window of luneta's has the focus,
-    /// as its row says it there, nor once that window lets the focus go;
-    /// and one up goes as a window takes it. A wait is said all the same.
     #[test]
     fn no_turn_that_ends_is_said_while_a_window_of_luneta_s_has_the_focus() {
         let mut alerts = Alerts::new(true);
@@ -1031,8 +832,6 @@ mod tests {
         assert_eq!(alerts.heard(two(Doing::Idle, waits(Wait::Permission, 2)), now), []);
     }
 
-    /// Only a wait sounds as it goes up, and not where it was up before; a
-    /// turn that ended never does.
     #[test]
     fn only_a_wait_sounds() {
         let sound = |want, again| {
@@ -1045,9 +844,6 @@ mod tests {
         assert_eq!(sound(Want::Done, false), None);
     }
 
-    /// A wait up goes up again, without a sound, once this luneta takes over
-    /// putting the notifications up; one on its way up goes up as it was, and
-    /// what is not up does not. A turn that ended does not, up or on its way.
     #[test]
     fn a_wait_up_goes_up_again_quietly_for_a_luneta_that_takes_over() {
         let mut alerts = Alerts::default();
@@ -1094,9 +890,6 @@ mod tests {
         assert!(!alerts.read(&read(done)));
     }
 
-    /// An agent that ends takes its notification with it; one of a machine
-    /// lunetad does not reach just now stays as it was, and one of a machine
-    /// it no longer watches goes.
     #[test]
     fn an_agent_that_ends_takes_its_notification_down_and_one_out_of_reach_stays() {
         let mut alerts = Alerts::default();
@@ -1117,7 +910,6 @@ mod tests {
         assert_eq!(closes(&alerts.heard(here(Vec::new()), now)), [remote]);
     }
 
-    /// A transcript's end, a record to a line.
     fn end(records: &[Value]) -> String {
         records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
     }
@@ -1140,9 +932,6 @@ mod tests {
         Due { number: 1, key, want, label, transcript: None, again: false }
     }
 
-    /// A permission names the tool it is for, which has had no answer yet,
-    /// and what on; one for a plan says so, as a question does what it asks.
-    /// A subagent's call is none of the agent's.
     #[test]
     fn a_notification_says_what_the_agent_wants_by_its_transcript() {
         let mut subagent = assistant(&json!([call("c", "Grep", &json!({"pattern": "x"}))]));
@@ -1188,8 +977,6 @@ mod tests {
         assert_eq!(said(Wait::Unsaid, None).2, "Waiting on you");
     }
 
-    /// A turn that ended says what the agent said last, on one line, cut
-    /// short; and of another machine's agent, the machine.
     #[test]
     fn a_turn_that_ended_says_what_the_agent_said_last() {
         let long = "word ".repeat(100);

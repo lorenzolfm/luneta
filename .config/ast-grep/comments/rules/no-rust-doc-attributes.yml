@@ -1,0 +1,38 @@
+id: no-rust-doc-attributes
+language: rust
+severity: error
+message: >-
+  No documentation, as an attribute either. Say it in the code: a name, a type, a test.
+rule:
+  any:
+    - kind: attribute
+      all:
+        - has:
+            field: value
+            regex: .
+        - has:
+            kind: identifier
+            regex: ^doc$
+    - kind: identifier
+      regex: ^doc$
+      precedes:
+        regex: ^=$
+      inside:
+        kind: token_tree
+        follows:
+          kind: identifier
+          regex: ^cfg_attr$
+    - kind: identifier
+      regex: ^doc$
+      follows:
+        regex: ^\[$
+      precedes:
+        regex: ^=$
+      inside:
+        kind: token_tree
+        follows:
+          any:
+            - regex: ^#$
+            - regex: ^!$
+              follows:
+                regex: ^#$

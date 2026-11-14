@@ -1,8 +1,3 @@
-//! The program luneta runs beside its sidebar, zellij's client, in a terminal
-//! of luneta's own: a pseudoterminal it runs on, and a screen that keeps what
-//! it draws there, as a terminal emulator does. luneta draws that screen into
-//! its part of the terminal luneta itself runs in.
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -33,35 +28,18 @@ use rustix::termios::{self, LocalModes};
 
 use crate::host::Event;
 
-/// What the program in luneta's terminal does that luneta has to act on.
 pub enum Said {
-    /// It drew: the screen is to be drawn again.
     Drew,
-    /// It titled the terminal. zellij titles it with the session it is in.
     Titled(String),
-    /// It asked for text to be copied, as zellij does for what you select.
     Copied(ClipboardType, String),
-    /// It asked the terminal something, and this is the answer.
     Answer(String),
-    /// It asked how big the terminal is, in pixels, and this writes the answer.
     AskedSize(Arc<dyn Fn(WindowSize) -> String + Sync + Send>),
-    /// It asked for the colour alacritty numbers this, and this writes the
-    /// answer: luneta's terminal's, which luneta draws the program's
-    /// foreground and background in, whatever the program sets them to.
     AskedColour(usize, Arc<dyn Fn(Rgb) -> String + Sync + Send>),
-    /// It rang the bell.
     Rang,
-    /// It ended, with this status, where its terminal can tell. This comes
-    /// before `Ended`.
     Exited(ExitStatus),
-    /// Its terminal closed, with all it wrote on the screen.
     Ended,
 }
 
-/// How big the terminal luneta runs the program in is: in cells, of which it
-/// has one each way at least, as alacritty's screen keeps its cursor on one,
-/// and how big each cell is in pixels, or 0 where luneta's terminal does not
-/// say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
     pub columns: NonZeroU16,
@@ -87,16 +65,10 @@ impl From<Size> for WindowSize {
     }
 }
 
-/// Hands what the program does to luneta's loop.
 #[derive(Clone)]
 struct Listener {
     events: Sender<Event>,
-    /// The program's number, which what it says carries: luneta counts the
-    /// programs it starts, and goes by what the last says.
     number: u64,
-    /// Whether the program drew since luneta last drew its screen. One
-    /// `Said::Drew` stands for all it drew until then, so that luneta's queue
-    /// holds one at the most, however fast the program draws.
     drew: Arc<AtomicBool>,
 }
 
@@ -113,46 +85,30 @@ impl EventListener for Listener {
             Emitted::ClipboardStore(clipboard, text) => Said::Copied(clipboard, text),
             Emitted::PtyWrite(answer) => Said::Answer(answer),
             Emitted::TextAreaSizeRequest(answer) => Said::AskedSize(answer),
-            // The loop answers it in its place, before what the program asked
-            // after it, with the colour as luneta's terminal said it last.
             Emitted::ColorRequest(index, answer) => Said::AskedColour(index, answer),
             Emitted::Bell => Said::Rang,
             Emitted::ChildExit(status) => Said::Exited(status),
             Emitted::Exit => Said::Ended,
-            // The rest is of the window a terminal emulator draws in.
             Emitted::ClipboardLoad(..)
             | Emitted::ResetTitle
             | Emitted::CursorBlinkingChange
             | Emitted::MouseCursorDirty => return,
         };
-        // luneta is on its way out.
         let _ = self.events.send(Event::Hosted(self.number, said));
     }
 }
 
-/// The program, and the terminal luneta runs it in.
 pub struct Hosted {
     screen: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
-    /// luneta's end of the terminal, which says the modes the program set
-    /// the terminal to.
     modes: File,
-    /// The program's end of the terminal, which luneta holds open, so that
-    /// the terminal hangs up only as luneta lets it go. A program that writes
-    /// as it ends, at once, as ssh does that reaches no machine, would else
-    /// hang it up before alacritty has read what it wrote, which alacritty
-    /// drops where it cannot lock the screen at once.
     _far: File,
-    /// Its number, which what it says carries.
     number: u64,
     size: Size,
-    /// The listener's, which `draw` clears.
     drew: Arc<AtomicBool>,
 }
 
 impl Hosted {
-    /// Starts `program` in a terminal of `size`, in `dir`, as the one
-    /// numbered `number`.
     pub fn start(
         program: String,
         args: Vec<String>,
@@ -161,9 +117,6 @@ impl Hosted {
         number: u64,
         events: Sender<Event>,
     ) -> io::Result<Self> {
-        // What the program writes as it ends is read before its terminal says
-        // it closed, as zellij's error where it cannot start, which luneta says
-        // again once its own screen is gone.
         let options = tty::Options {
             shell: Some(tty::Shell::new(program, args)),
             working_directory: Some(dir.to_owned()),
@@ -175,11 +128,6 @@ impl Hosted {
         let far = far_end(pty.file())?;
         let drew = Arc::new(AtomicBool::new(false));
         let listener = Listener { events, number, drew: Arc::clone(&drew) };
-        // zellij draws on the alternate screen, and keeps the scrollback of
-        // each pane itself. It asks for the kitty keyboard protocol, which
-        // `keys` speaks. Its cursor is the hollow block a program cannot ask
-        // for until it asks for another, so that luneta's terminal draws its
-        // own meanwhile.
         let config = Config {
             scrolling_history: 0,
             kitty_keyboard: true,
@@ -195,8 +143,6 @@ impl Hosted {
         Ok(Hosted { screen, pty, modes, _far: far, number, size, drew })
     }
 
-    /// Its number, of the programs luneta started, which what it says
-    /// carries.
     pub fn number(&self) -> u64 {
         self.number
     }
@@ -205,7 +151,6 @@ impl Hosted {
         self.size
     }
 
-    /// Makes the terminal `size`, and tells the program.
     pub fn resize(&mut self, size: Size) {
         if (size.columns, size.lines) == (self.size.columns, self.size.lines) {
             self.size = size;
@@ -213,27 +158,17 @@ impl Hosted {
         }
         self.size = size;
         self.screen.lock().resize(size.dimensions());
-        // The reader is gone with the program, which needs no size.
         let _ = self.pty.send(Msg::Resize(size.into()));
     }
 
-    /// Sends the program `bytes`, as typed into its terminal.
     pub fn send(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return;
         }
-        // The reader is gone with the program, which reads no more.
         let _ = self.pty.send(Msg::Input(bytes));
     }
 
-    /// Sends the program `bytes`, the answer to what it asked of its
-    /// terminal, unless the terminal echoes. zellij's client asks with its
-    /// terminal echoing nothing, and puts back the modes it found as it ends,
-    /// as where it gives up as it starts: an answer that comes after would
-    /// only show, on its screen and in its error, which luneta says again.
-    /// It can put them back between luneta's look and the answer going in:
-    /// an answer in that moment still shows.
     pub fn answer(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         let modes = termios::tcgetattr(&self.modes);
         if modes.is_ok_and(|modes| modes.local_modes.contains(LocalModes::ECHO)) {
@@ -242,35 +177,24 @@ impl Hosted {
         self.send(bytes);
     }
 
-    /// What the program asked of its terminal: how it wants keys and the
-    /// mouse, and the screen it draws on.
     pub fn mode(&self) -> TermMode {
         *self.screen.lock().mode()
     }
 
-    /// The cursor as the program last styled it: its shape, and whether it
-    /// blinks. A hollow block for one it never styled.
     pub fn cursor_style(&self) -> (CursorShape, bool) {
         let style = self.screen.lock().cursor_style();
         (style.shape, style.blinking)
     }
 
-    /// Draws the screen into `area` of `buffer`, and says where the cursor is
-    /// on it, if it shows.
     pub fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
-        // Cleared before the screen is read, so that what the program draws
-        // from here on sends a `Said::Drew` of its own.
         self.drew.store(false, Ordering::SeqCst);
         paint(&self.screen.lock(), buffer, area)
     }
 
-    /// What the screen shows, as text.
     pub fn text(&self) -> String {
         text(&self.screen.lock())
     }
 
-    /// Whether the screen shows nothing: each cell of it as blank as the
-    /// program found it.
     pub fn blank(&self) -> bool {
         let screen = self.screen.lock();
         screen.renderable_content().display_iter.all(|indexed| indexed.cell.is_empty())
@@ -279,13 +203,10 @@ impl Hosted {
 
 impl Drop for Hosted {
     fn drop(&mut self) {
-        // The reader is gone with the program already.
         let _ = self.pty.send(Msg::Shutdown);
     }
 }
 
-/// The program's end of the terminal whose end `near` is, opened as no
-/// terminal of luneta's own, and for none of what luneta runs to inherit.
 fn far_end(near: &File) -> io::Result<File> {
     let path = rustix::pty::ptsname(near, Vec::new())?;
     let path = Path::new(OsStr::from_bytes(path.as_bytes()));
@@ -293,8 +214,6 @@ fn far_end(near: &File) -> io::Result<File> {
     Ok(File::from(rustix::fs::open(path, flags, Mode::empty())?))
 }
 
-/// Draws `screen` into `area` of `buffer`, and says where its cursor is on
-/// it, if it shows.
 fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) -> Option<Position> {
     show(screen, buffer, area, 0);
     let cursor = screen.renderable_content().cursor;
@@ -304,20 +223,14 @@ fn paint<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect) ->
     within(area, cursor.point.line.0, cursor.point.column.0)
 }
 
-/// The cell of `area` at `line` and `column` of a screen drawn into it from
-/// its top left, if `area` holds it.
 fn within(area: Rect, line: i32, column: usize) -> Option<Position> {
     let row = u16::try_from(line).ok().filter(|row| *row < area.height)?;
     let column = u16::try_from(column).ok().filter(|column| *column < area.width)?;
     Some(Position::new(area.x + column, area.y + row))
 }
 
-/// Draws the lines of `screen` from its line `top` on into `area` of
-/// `buffer`, as many of them, and as much of each, as `area` holds.
 pub fn show<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect, top: usize) {
     let content = screen.renderable_content();
-    // luneta never scrolls the screen back, and keeps no scrollback for it to
-    // go back into, as zellij keeps each pane's: its lines count from 0.
     assert_eq!(content.display_offset, 0);
     let top = i32::try_from(top).unwrap_or(i32::MAX);
     for indexed in content.display_iter {
@@ -329,8 +242,6 @@ pub fn show<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect,
             continue;
         };
         let cell = indexed.cell;
-        // The second column of a wide character is drawn with it, from the
-        // first.
         if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
             drawn.reset();
             continue;
@@ -342,8 +253,6 @@ pub fn show<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect,
     }
 }
 
-/// What `screen` shows, as text: each of its lines, less the blanks it ends
-/// in, and none of the blank lines above and below the rest.
 fn text<T: EventListener>(screen: &Term<T>) -> String {
     let mut lines = vec![String::new(); screen.screen_lines()];
     for indexed in screen.renderable_content().display_iter {
@@ -367,9 +276,6 @@ fn text<T: EventListener>(screen: &Term<T>) -> String {
     lines[first..=last].join("\n")
 }
 
-/// The style a cell is drawn in. The colours a terminal names are left for
-/// luneta's terminal to choose, as its theme does, and so are the program's
-/// own foreground and background.
 fn style(fg: Colour, bg: Colour, flags: Flags, underline: Option<Colour>) -> Style {
     let (fg, dim_fg) = colour(fg);
     let (bg, _) = colour(bg);
@@ -397,8 +303,6 @@ fn style(fg: Colour, bg: Colour, flags: Flags, underline: Option<Colour>) -> Sty
     style
 }
 
-// `colour` reads a named colour as its index: the sixteen a terminal names are
-// 0 to 15, and the eight dim ones are in the order of the first eight.
 const _: () = assert!(NamedColor::Black as usize == 0);
 const _: () = assert!(NamedColor::BrightWhite as usize == 15);
 const _: () = assert!(
@@ -406,8 +310,6 @@ const _: () = assert!(
         == NamedColor::White as usize - NamedColor::Black as usize
 );
 
-/// A colour as luneta's terminal is told it, and whether it is a dim one of
-/// the sixteen, which a terminal draws as that colour, dimmed.
 fn colour(colour: Colour) -> (Color, bool) {
     match colour {
         Colour::Spec(rgb) => (Color::Rgb(rgb.r, rgb.g, rgb.b), false),
@@ -440,8 +342,6 @@ mod tests {
     use super::*;
     use crate::answers::{Answer, Colours};
 
-    /// A screen of `columns` by `lines` that has read `bytes`, drawn into a
-    /// buffer two columns and a line in from its corner.
     fn drawn(columns: u16, lines: u16, bytes: &[u8]) -> (Buffer, Option<Position>) {
         let dimensions = TermSize::new(usize::from(columns), usize::from(lines));
         let mut screen = Term::new(Config::default(), &dimensions, VoidListener);
@@ -487,8 +387,6 @@ mod tests {
         assert_eq!(buffer[(5, 1)].style().fg, Some(Color::Reset));
     }
 
-    /// What a program printed as it ended reads as the text it was, as
-    /// zellij's error where it cannot start.
     #[test]
     fn the_screen_reads_as_its_text() {
         let dimensions = TermSize::new(12, 4);
@@ -500,18 +398,12 @@ mod tests {
         assert_eq!(text(&blank), "");
     }
 
-    /// zellij hands on what a program in a pane asks of its terminal, and asks
-    /// what the terminal is after it, to know when the answers are all in: a
-    /// colour is asked for in its place in the loop's queue, and answered
-    /// there where luneta's terminal said it.
     #[test]
     fn a_colour_is_answered_where_lunetas_terminal_said_it_and_before_what_it_is() {
         let (events, inbox) = mpsc::channel();
         let listener = Listener { events, number: 1, drew: Arc::default() };
         let mut screen = Term::new(Config::default(), &TermSize::new(4, 1), listener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
-        // The background, the foreground, the second of the sixteen, and what
-        // the terminal is.
         parser.advance(&mut screen, b"\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]4;1;?\x1b\\\x1b[c");
         let mut colours = Colours::default();
         colours.hear(Answer::Background(Rgb { r: 0x1e, g: 0x1e, b: 0x2e }));
@@ -526,9 +418,6 @@ mod tests {
         assert_eq!(answers, ["\x1b]11;rgb:1e1e/1e1e/2e2e\x07", "\x1b[?6c"]);
     }
 
-    /// What a program says as it fails at once, as ssh does that reaches no
-    /// machine, reads as its terminal's text once the terminal closed, though
-    /// luneta had its screen locked as it ended, as luneta drawing it does.
     #[test]
     fn what_a_program_says_as_it_fails_at_once_is_its_text() {
         let (events, inbox) = mpsc::channel();
@@ -543,7 +432,6 @@ mod tests {
             Hosted::start("/bin/sh".to_owned(), args, Path::new("/"), size, 1, events).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let drawing = hosted.screen.lock();
-        // Long enough for the program to have ended.
         thread::sleep(Duration::from_millis(300));
         drop(drawing);
         loop {
@@ -555,10 +443,6 @@ mod tests {
         assert_eq!(hosted.text(), "ssh: no such machine");
     }
 
-    /// What `/bin/sh` shows as it ends, run with `stty` first in a terminal
-    /// that starts as luneta's does, once it printed `ready`, then was sent an
-    /// answer to what the terminal is and a line typed. It reads the line,
-    /// and prints it with each escape as an `E`.
     fn answered(stty: &str) -> String {
         let (events, inbox) = mpsc::channel();
         let size = Size {
@@ -589,17 +473,11 @@ mod tests {
         hosted.text()
     }
 
-    /// zellij's client puts back the modes its terminal started in, which
-    /// echo, as it gives up: luneta's answer to what it asked, that comes
-    /// after, is left out, where it would show in zellij's error, which
-    /// luneta says again. What is typed still goes in.
     #[test]
     fn an_answer_to_a_terminal_that_echoes_is_left_out() {
         assert_eq!(answered("echo"), "readytyped\n[typed]");
     }
 
-    /// zellij's client turns the echo off as it starts, to read the answers
-    /// to what it asks.
     #[test]
     fn an_answer_to_a_terminal_that_echoes_nothing_goes_in() {
         assert_eq!(answered("-echo"), "ready[E[?6ctyped]");

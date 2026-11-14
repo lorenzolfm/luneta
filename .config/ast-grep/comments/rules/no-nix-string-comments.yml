@@ -1,0 +1,10 @@
+id: no-nix-string-comments
+language: nix
+severity: error
+message: >-
+  No comments, in a string's script or file either. Say it in the code: a name, a type, a test.
+rule:
+  kind: string_fragment
+  regex: \n[ \t]*#([^\[!]|![^/])
+  inside:
+    kind: indented_string_expression
