@@ -452,10 +452,20 @@ pub struct Tabbed {
 pub struct Layout {
     tab: NonZeroU32,
     size: Size,
-    panes: Vec<Placed>,
-    focused: NonZeroU32,
-    fullscreen: bool,
+    shown: Shown,
     tabs: Vec<Tabbed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shown {
+    Tiled(Tiled),
+    Full(Placed),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tiled {
+    panes: Vec<Placed>,
+    focused: usize,
 }
 
 impl Layout {
@@ -470,18 +480,8 @@ impl Layout {
     }
 
     #[must_use]
-    pub fn panes(&self) -> &[Placed] {
-        &self.panes
-    }
-
-    #[must_use]
-    pub fn focused(&self) -> NonZeroU32 {
-        self.focused
-    }
-
-    #[must_use]
-    pub fn fullscreen(&self) -> bool {
-        self.fullscreen
+    pub fn shown(&self) -> &Shown {
+        &self.shown
     }
 
     #[must_use]
@@ -504,35 +504,27 @@ impl Layout {
                 columns: cell(rect.columns)?,
                 rows: cell(rect.rows)?,
             };
-            let right = u32::from(rect.column) + u32::from(rect.columns);
-            let bottom = u32::from(rect.row) + u32::from(rect.rows);
-            if right > u32::from(columns) || bottom > u32::from(rows) {
+            if rect.columns == 0 || rect.rows == 0 {
+                return Err(format!("pane {pane} is laid on no cell"));
+            }
+            if rect.right() > u32::from(columns) || rect.bottom() > u32::from(rows) {
                 return Err(off());
             }
             Ok(Placed { pane, rect, title: placed.title })
         };
-        let panes = layout.panes.into_iter().map(placed).collect::<Result<Vec<_>, _>>()?;
-        let mut ids: Vec<NonZeroU32> = panes.iter().map(|placed| placed.pane).collect();
-        ids.sort_unstable();
-        if let Some([twice, _]) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(format!("a layout lays pane {twice} out twice"));
-        }
-        let cells = |columns: u16, rows: u16| u64::from(columns) * u64::from(rows);
-        let covered = panes.iter().map(|placed| cells(placed.rect.columns, placed.rect.rows));
-        let covered: u64 = covered.sum();
-        let whole = cells(columns, rows);
-        if covered != whole {
-            return Err(format!(
-                "a layout's panes cover {covered} of the {whole} cells of a tab of {columns}x{rows}"
-            ));
-        }
-        if layout.fullscreen && panes.len() != 1 {
-            return Err(format!("a fullscreen layout lays out {} panes", panes.len()));
-        }
-        let focused = NonZeroU32::new(layout.focused).ok_or("a layout focuses pane 0")?;
-        if !panes.iter().any(|placed| placed.pane == focused) {
-            return Err(format!("a layout focuses pane {focused}, which it does not lay out"));
-        }
+        let shown = match layout.shown.ok_or("a layout shows nothing")? {
+            api::layout::Shown::Tiled(api::Tiled { panes, focused }) => {
+                let panes = panes.into_iter().map(placed).collect::<Result<Vec<_>, _>>()?;
+                let wanted = NonZeroU32::new(focused).ok_or("a layout focuses pane 0")?;
+                let focused = panes.iter().position(|placed| placed.pane == wanted);
+                let focused = focused.ok_or_else(|| {
+                    format!("a layout focuses pane {wanted}, which it does not lay out")
+                })?;
+                Shown::Tiled(Tiled { panes, focused })
+            },
+            api::layout::Shown::Full(full) => Shown::Full(placed(full)?),
+        };
+        tiles(shown.panes(), columns, rows)?;
         let tabbed = |tabbed: api::Tabbed| {
             let id = NonZeroU32::new(tabbed.id).ok_or("a layout names tab 0")?;
             Ok::<_, String>(Tabbed { id, name: tabbed.name })
@@ -541,8 +533,66 @@ impl Layout {
         if !tabs.iter().any(|tabbed| tabbed.id == tab) {
             return Err(format!("a layout of tab {tab} does not name it"));
         }
-        Ok(Layout { tab, size, panes, focused, fullscreen: layout.fullscreen, tabs })
+        Ok(Layout { tab, size, shown, tabs })
     }
+}
+
+impl Shown {
+    #[must_use]
+    pub fn panes(&self) -> &[Placed] {
+        match self {
+            Shown::Tiled(tiled) => &tiled.panes,
+            Shown::Full(full) => std::slice::from_ref(full),
+        }
+    }
+
+    #[must_use]
+    pub fn focused(&self) -> &Placed {
+        match self {
+            Shown::Tiled(tiled) => &tiled.panes[tiled.focused],
+            Shown::Full(full) => full,
+        }
+    }
+}
+
+impl Rect {
+    fn right(self) -> u32 {
+        u32::from(self.column) + u32::from(self.columns)
+    }
+
+    fn bottom(self) -> u32 {
+        u32::from(self.row) + u32::from(self.rows)
+    }
+
+    fn overlaps(self, other: Rect) -> bool {
+        u32::from(self.column) < other.right()
+            && u32::from(other.column) < self.right()
+            && u32::from(self.row) < other.bottom()
+            && u32::from(other.row) < self.bottom()
+    }
+}
+
+fn tiles(panes: &[Placed], columns: u16, rows: u16) -> Result<(), String> {
+    for (place, one) in panes.iter().enumerate() {
+        for other in &panes[place + 1..] {
+            if one.pane == other.pane {
+                return Err(format!("a layout lays pane {} out twice", one.pane));
+            }
+            if one.rect.overlaps(other.rect) {
+                return Err(format!("a layout lays pane {} over pane {}", other.pane, one.pane));
+            }
+        }
+    }
+    let cells = |columns: u16, rows: u16| u64::from(columns) * u64::from(rows);
+    let covered = panes.iter().map(|placed| cells(placed.rect.columns, placed.rect.rows));
+    let covered: u64 = covered.sum();
+    let whole = cells(columns, rows);
+    if covered != whole {
+        return Err(format!(
+            "a layout's panes cover {covered} of the {whole} cells of a tab of {columns}x{rows}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -952,19 +1002,20 @@ mod tests {
         let rect = |column, columns| Some(api::Rect { column, row: 0, columns, rows: 24 });
         let placed = |pane, rect| api::Placed { pane, rect, title: "fish".to_owned() };
         let tabbed = |id| api::Tabbed { id, name: format!("Tab #{id}") };
-        let layout = |panes, focused, tabs| api::Layout {
+        let shown = |shown, tabs| api::Layout {
             session: 3,
             tab: 1,
             size: Some(api::Size { columns: 80, rows: 24 }),
-            panes,
-            focused,
-            fullscreen: false,
+            shown: Some(shown),
             tabs,
         };
+        let tiled = |panes, focused| api::layout::Shown::Tiled(api::Tiled { panes, focused });
+        let layout = |panes, focused, tabs| shown(tiled(panes, focused), tabs);
         let two = || vec![placed(4, rect(0, 40)), placed(5, rect(40, 40))];
         let read = Layout::heard(layout(two(), 5, vec![tabbed(1), tabbed(2)])).unwrap();
-        assert_eq!(read.focused().get(), 5);
-        assert_eq!(read.panes()[1].rect, Rect { column: 40, row: 0, columns: 40, rows: 24 });
+        assert_eq!(read.shown().focused().pane.get(), 5);
+        let second = Rect { column: 40, row: 0, columns: 40, rows: 24 };
+        assert_eq!(read.shown().panes()[1].rect, second);
         assert_eq!(read.tabs().len(), 2);
         let over = vec![placed(4, rect(41, 40))];
         let over = Layout::heard(layout(over, 4, vec![tabbed(1)])).unwrap_err();
@@ -981,8 +1032,20 @@ mod tests {
         let half = Layout::heard(layout(vec![placed(4, rect(0, 40))], 4, vec![tabbed(1)]));
         let uncovered = "a layout's panes cover 960 of the 1920 cells of a tab of 80x24";
         assert_eq!(half.unwrap_err(), uncovered);
-        let full = api::Layout { fullscreen: true, ..layout(two(), 4, vec![tabbed(1)]) };
-        assert_eq!(Layout::heard(full).unwrap_err(), "a fullscreen layout lays out 2 panes");
+        let top = |pane| placed(pane, Some(api::Rect { column: 0, row: 0, columns: 80, rows: 12 }));
+        let stacked = Layout::heard(layout(vec![top(4), top(5)], 4, vec![tabbed(1)]));
+        assert_eq!(stacked.unwrap_err(), "a layout lays pane 5 over pane 4");
+        let thin = vec![placed(4, rect(0, 80)), placed(5, rect(80, 0))];
+        let thin = Layout::heard(layout(thin, 4, vec![tabbed(1)])).unwrap_err();
+        assert_eq!(thin, "pane 5 is laid on no cell");
+        let full = shown(api::layout::Shown::Full(placed(5, rect(0, 80))), vec![tabbed(1)]);
+        let full = Layout::heard(full).unwrap();
+        assert_eq!(full.shown().focused().pane.get(), 5);
+        assert!(matches!(full.shown(), Shown::Full(_)));
+        let part = shown(api::layout::Shown::Full(placed(5, rect(0, 40))), vec![tabbed(1)]);
+        assert_eq!(Layout::heard(part).unwrap_err(), uncovered);
+        let empty = api::Layout { shown: None, ..layout(two(), 4, vec![tabbed(1)]) };
+        assert_eq!(Layout::heard(empty).unwrap_err(), "a layout shows nothing");
     }
 
     #[test]

@@ -128,6 +128,13 @@ impl Rect {
         u64::from(self.columns) * u64::from(self.rows)
     }
 
+    fn overlaps(self, other: Rect) -> bool {
+        self.column < other.right()
+            && other.column < self.right()
+            && self.row < other.bottom()
+            && other.row < self.bottom()
+    }
+
     fn extent(self, towards: Towards) -> u16 {
         match towards {
             Towards::Right => self.columns,
@@ -183,16 +190,37 @@ impl Least {
         let (columns, rows) = size.get();
         self.columns <= columns && self.rows <= rows
     }
+
+    fn raised(self, size: Size) -> Size {
+        let raised = |cells: NonZeroU16, least: u16| {
+            cells.max(NonZeroU16::new(least).expect("a pane is a cell or more each way"))
+        };
+        let raised =
+            Size { columns: raised(size.columns, self.columns), rows: raised(size.rows, self.rows) };
+        assert!(self.fits(raised), "{raised:?} holds the panes of the tree");
+        raised
+    }
+}
+
+pub trait Leaf {
+    fn id(&self) -> PaneId;
+}
+
+impl Leaf for PaneId {
+    fn id(&self) -> PaneId {
+        *self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tree {
-    nodes: Vec<Node>,
+pub struct Tree<L> {
+    nodes: Vec<Node<L>>,
+    size: Size,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Node {
-    Pane(PaneId),
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Node<L> {
+    Pane(L),
     Split(Split),
 }
 
@@ -200,25 +228,43 @@ enum Node {
 struct Split {
     towards: Towards,
     share: u32,
-    first: usize,
-    second: usize,
+    halves: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Removed {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removed<L> {
     Last,
-    Out { heir: PaneId },
+    Out { gone: L, heir: PaneId },
 }
 
-impl Tree {
+#[must_use]
+pub fn lone(size: Size) -> Size {
+    Rect::whole(Least::PANE.raised(size)).inner()
+}
+
+impl<L: Leaf> Tree<L> {
     #[must_use]
-    pub fn one(pane: PaneId) -> Tree {
-        Tree { nodes: vec![Node::Pane(pane)] }
+    pub fn one(pane: L, size: Size) -> Tree<L> {
+        Tree { nodes: vec![Node::Pane(pane)], size: Least::PANE.raised(size) }
+    }
+
+    #[must_use]
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.nodes.len().div_ceil(2)
     }
 
     #[must_use]
     pub fn panes(&self) -> Vec<PaneId> {
-        self.order().into_iter().map(|node| self.pane_of(node)).collect()
+        self.leaves().map(Leaf::id).collect()
+    }
+
+    pub fn leaves(&self) -> impl Iterator<Item = &L> {
+        self.order().into_iter().map(|node| self.leaf_at(node))
     }
 
     #[must_use]
@@ -227,48 +273,72 @@ impl Tree {
     }
 
     #[must_use]
-    pub fn fits(&self, size: Size) -> bool {
-        self.leasts()[ROOT].fits(size)
+    pub fn get(&self, pane: PaneId) -> Option<&L> {
+        Some(self.leaf_at(self.leaf(pane)?))
+    }
+
+    pub fn get_mut(&mut self, pane: PaneId) -> Option<&mut L> {
+        let node = self.leaf(pane)?;
+        match &mut self.nodes[node] {
+            Node::Pane(leaf) => Some(leaf),
+            Node::Split(_) => unreachable!("node {node} is a pane's leaf"),
+        }
     }
 
     #[must_use]
-    pub fn fitted(&self, size: Size) -> Size {
-        let least = self.leasts()[ROOT];
-        let raised = |cells: NonZeroU16, least: u16| {
-            cells.max(NonZeroU16::new(least).expect("a pane is a cell or more each way"))
-        };
-        let fitted = Size {
-            columns: raised(size.columns, least.columns),
-            rows: raised(size.rows, least.rows),
-        };
-        assert!(least.fits(fitted), "{fitted:?} holds the panes of the tree");
-        fitted
+    pub fn into_lone(mut self) -> L {
+        assert_eq!(self.nodes.len(), 1, "a lone pane's tree holds only it");
+        match self.nodes.pop() {
+            Some(Node::Pane(leaf)) => leaf,
+            Some(Node::Split(_)) | None => unreachable!("the root of a tree of one is a pane"),
+        }
+    }
+
+    pub fn fit(&mut self, size: Size) {
+        self.size = self.leasts()[ROOT].raised(size);
     }
 
     #[must_use]
-    pub fn rects(&self, size: Size) -> Vec<(PaneId, Rect)> {
-        let rects = self.node_rects(size, &self.leasts());
-        let laid: Vec<(PaneId, Rect)> =
-            self.order().into_iter().map(|node| (self.pane_of(node), rects[node])).collect();
-        assert_tiled(&laid, size);
+    pub fn laid(&self) -> Vec<(&L, Rect)> {
+        let rects = self.node_rects(&self.leasts());
+        let laid: Vec<(&L, Rect)> =
+            self.order().into_iter().map(|node| (self.leaf_at(node), rects[node])).collect();
+        assert_tiled(&laid, self.size);
         laid
     }
 
-    pub fn split(&mut self, at: PaneId, towards: Towards, new: PaneId) {
-        assert!(!self.holds(new), "pane {new} is split into a tree that holds it");
-        assert!(self.nodes.len() + 2 <= NODES_MAX, "a tree holds at most {PANES_MAX} panes");
-        let node = self.leaf(at).expect("a split pane is in the tree");
-        let first = self.nodes.len();
-        self.nodes.push(Node::Pane(at));
-        self.nodes.push(Node::Pane(new));
-        self.nodes[node] =
-            Node::Split(Split { towards, share: SHARES / 2, first, second: first + 1 });
-        self.assert_shaped();
+    #[must_use]
+    pub fn rects(&self) -> Vec<(PaneId, Rect)> {
+        self.laid().into_iter().map(|(leaf, rect)| (leaf.id(), rect)).collect()
     }
 
     #[must_use]
-    pub fn largest(&self, size: Size) -> (PaneId, Towards) {
-        let rects = self.rects(size);
+    pub fn room(&self, at: PaneId, towards: Towards, new: PaneId) -> Option<Size> {
+        let mut grown = self.shape();
+        grown.grafted(at, towards, new);
+        grown.leasts()[ROOT].fits(grown.size).then(|| {
+            let laid = grown.rects().into_iter().find(|(pane, _)| *pane == new);
+            laid.expect("a grafted pane is laid out").1.inner()
+        })
+    }
+
+    #[must_use]
+    pub fn room_beside_largest(&self, new: PaneId) -> Option<(PaneId, Towards, Size)> {
+        let (largest, towards) = self.largest();
+        [towards, towards.across()]
+            .into_iter()
+            .find_map(|towards| Some((largest, towards, self.room(largest, towards, new)?)))
+    }
+
+    pub fn split(&mut self, at: PaneId, towards: Towards, new: L) {
+        let id = new.id();
+        self.grafted(at, towards, new);
+        assert!(self.leasts()[ROOT].fits(self.size), "pane {id} has room in {:?}", self.size);
+    }
+
+    #[must_use]
+    pub fn largest(&self) -> (PaneId, Towards) {
+        let rects = self.rects();
         let (pane, rect) = rects
             .iter()
             .enumerate()
@@ -283,7 +353,7 @@ impl Tree {
         (pane, towards)
     }
 
-    pub fn remove(&mut self, pane: PaneId) -> Removed {
+    pub fn remove(&mut self, pane: PaneId) -> Removed<L> {
         let node = self.leaf(pane).expect("a removed pane is in the tree");
         if node == ROOT {
             assert_eq!(self.nodes.len(), 1, "the root is a pane only in a tree of one");
@@ -296,30 +366,29 @@ impl Tree {
         let Node::Split(split) = self.nodes[parent] else {
             unreachable!("node {parent} is a parent, so a split");
         };
-        let (sibling, heir) = if split.first == node {
-            (split.second, panes[place + 1])
+        let (sibling, heir) = if split.first() == node {
+            (split.second(), panes[place + 1])
         } else {
-            assert_eq!(split.second, node, "a pane is one half of its parent");
-            (split.first, panes[place - 1])
+            assert_eq!(split.second(), node, "a pane is one half of its parent");
+            (split.first(), panes[place - 1])
         };
-        self.nodes[parent] = self.nodes[sibling];
-        self.compact([node, sibling]);
+        self.nodes.swap(parent, sibling);
+        let gone = self.compact(split.halves, node);
         self.assert_shaped();
         assert!(!self.holds(pane), "pane {pane} left the tree");
         assert!(self.holds(heir), "pane {heir} took its sibling's room");
-        Removed::Out { heir }
+        Removed::Out { gone, heir }
     }
 
     pub fn swap(&mut self, one: PaneId, other: PaneId) {
-        let one_node = self.leaf(one).expect("a swapped pane is in the tree");
-        let other_node = self.leaf(other).expect("a swapped pane is in the tree");
-        self.nodes[one_node] = Node::Pane(other);
-        self.nodes[other_node] = Node::Pane(one);
+        let one = self.leaf(one).expect("a swapped pane is in the tree");
+        let other = self.leaf(other).expect("a swapped pane is in the tree");
+        self.nodes.swap(one, other);
     }
 
     #[must_use]
-    pub fn neighbour(&self, size: Size, pane: PaneId, direction: Direction) -> Option<PaneId> {
-        let rects = self.rects(size);
+    pub fn neighbour(&self, pane: PaneId, direction: Direction) -> Option<PaneId> {
+        let rects = self.rects();
         let from = rects.iter().find(|(found, _)| *found == pane);
         let (_, from) = *from.expect("a pane of the tree is laid out");
         rects
@@ -341,16 +410,10 @@ impl Tree {
         (panes.len() > 1).then(|| panes[order.stepped(place, panes.len())])
     }
 
-    pub fn resize(
-        &mut self,
-        size: Size,
-        pane: PaneId,
-        direction: Direction,
-        change: Change,
-    ) -> bool {
+    pub fn resize(&mut self, pane: PaneId, direction: Direction, change: Change) -> bool {
         let (towards, half) = direction.border();
         let leasts = self.leasts();
-        let rects = self.node_rects(size, &leasts);
+        let rects = self.node_rects(&leasts);
         let parents = self.parents();
         let mut node = self.leaf(pane).expect("a resized pane is in the tree");
         for _ in 0..self.nodes.len() {
@@ -360,10 +423,10 @@ impl Tree {
             let Node::Split(split) = &mut self.nodes[parent] else {
                 unreachable!("node {parent} is a parent, so a split");
             };
-            let held = if split.first == node { Side::First } else { Side::Second };
+            let held = if split.first() == node { Side::First } else { Side::Second };
             if (split.towards, held) == (towards, half) {
                 let extent = rects[parent].extent(towards);
-                let bounds = split.bounds(extent, leasts[split.first], leasts[split.second]);
+                let bounds = split.bounds(extent, leasts[split.first()], leasts[split.second()]);
                 return split.moved(extent, bounds, half, change);
             }
             node = parent;
@@ -371,33 +434,53 @@ impl Tree {
         unreachable!("a walk up a tree of {} nodes reaches its root", self.nodes.len());
     }
 
-    fn leaf(&self, pane: PaneId) -> Option<usize> {
-        self.nodes.iter().position(|node| *node == Node::Pane(pane))
+    fn shape(&self) -> Tree<PaneId> {
+        let nodes = self.nodes.iter().map(|node| match node {
+            Node::Pane(leaf) => Node::Pane(leaf.id()),
+            Node::Split(split) => Node::Split(*split),
+        });
+        Tree { nodes: nodes.collect(), size: self.size }
     }
 
-    fn pane_of(&self, node: usize) -> PaneId {
-        match self.nodes[node] {
-            Node::Pane(pane) => pane,
+    fn grafted(&mut self, at: PaneId, towards: Towards, new: L) {
+        assert!(!self.holds(new.id()), "pane {} is split into a tree that holds it", new.id());
+        assert!(self.nodes.len() + 2 <= NODES_MAX, "a tree holds at most {PANES_MAX} panes");
+        let node = self.leaf(at).expect("a split pane is in the tree");
+        let halves = self.nodes.len();
+        let split = Node::Split(Split { towards, share: SHARES / 2, halves });
+        let old = std::mem::replace(&mut self.nodes[node], split);
+        self.nodes.push(old);
+        self.nodes.push(Node::Pane(new));
+        self.assert_shaped();
+    }
+
+    fn leaf(&self, pane: PaneId) -> Option<usize> {
+        self.nodes.iter().position(|node| matches!(node, Node::Pane(leaf) if leaf.id() == pane))
+    }
+
+    fn leaf_at(&self, node: usize) -> &L {
+        match &self.nodes[node] {
+            Node::Pane(leaf) => leaf,
             Node::Split(_) => unreachable!("node {node} is laid out as a pane"),
         }
     }
 
     fn order(&self) -> Vec<usize> {
-        let mut order = Vec::with_capacity(self.nodes.len().div_ceil(2));
+        let mut order = Vec::with_capacity(self.len());
         let mut stack = Vec::with_capacity(self.nodes.len());
         stack.push(ROOT);
         for _ in 0..self.nodes.len() {
             let node = stack.pop().expect("a tree visits each of its nodes once");
-            match self.nodes[node] {
+            match &self.nodes[node] {
                 Node::Pane(_) => order.push(node),
                 Node::Split(split) => {
-                    stack.push(split.second);
-                    stack.push(split.first);
+                    stack.push(split.second());
+                    stack.push(split.first());
                 },
             }
         }
         assert!(stack.is_empty(), "a tree visits each of its nodes once");
-        assert_eq!(order.len(), self.nodes.len().div_ceil(2), "a tree of splits in two");
+        assert_eq!(order.len(), self.len(), "a tree of splits in two");
         order
     }
 
@@ -405,8 +488,8 @@ impl Tree {
         let mut parents = vec![None; self.nodes.len()];
         for (node, found) in self.nodes.iter().enumerate() {
             if let Node::Split(split) = found {
-                for half in [split.first, split.second] {
-                    assert!(half > node, "node {half} comes after its parent {node}");
+                assert!(split.halves > node, "node {} comes after its parent {node}", split.halves);
+                for half in [split.first(), split.second()] {
                     assert!(parents[half].is_none(), "node {half} has one parent");
                     parents[half] = Some(node);
                 }
@@ -419,50 +502,48 @@ impl Tree {
         let mut leasts = vec![Least::PANE; self.nodes.len()];
         for (node, found) in self.nodes.iter().enumerate().rev() {
             if let Node::Split(split) = found {
-                assert!(split.first > node, "node {} comes after its parent {node}", split.first);
-                assert!(split.second > node, "node {} comes after its parent {node}", split.second);
-                leasts[node] = leasts[split.first].joined(leasts[split.second], split.towards);
+                assert!(split.halves > node, "node {} comes after its parent {node}", split.halves);
+                leasts[node] = leasts[split.first()].joined(leasts[split.second()], split.towards);
             }
         }
         leasts
     }
 
-    fn node_rects(&self, size: Size, leasts: &[Least]) -> Vec<Rect> {
+    fn node_rects(&self, leasts: &[Least]) -> Vec<Rect> {
         assert_eq!(leasts.len(), self.nodes.len(), "a least size for every node");
-        assert!(leasts[ROOT].fits(size), "a tab of {size:?} holds its panes");
-        let mut rects = vec![Rect::whole(size); self.nodes.len()];
+        let mut rects = vec![Rect::whole(self.size); self.nodes.len()];
         for (node, found) in self.nodes.iter().enumerate() {
             if let Node::Split(split) = found {
-                let (first, second) = (leasts[split.first], leasts[split.second]);
-                let (first, second) = split.halves(rects[node], first, second);
-                rects[split.first] = first;
-                rects[split.second] = second;
+                let (first, second) = (leasts[split.first()], leasts[split.second()]);
+                let (first, second) = split.divided(rects[node], first, second);
+                rects[split.first()] = first;
+                rects[split.second()] = second;
             }
         }
         rects
     }
 
-    fn compact(&mut self, gone: [usize; 2]) {
+    fn compact(&mut self, halves: usize, leaving: usize) -> L {
         let shifted = |node: usize| {
-            assert!(!gone.contains(&node), "node {node} is gone");
-            node - gone.iter().filter(|gone| **gone < node).count()
+            assert!(node < halves || node > halves + 1, "node {node} is gone");
+            if node > halves { node - 2 } else { node }
         };
-        let kept: Vec<Node> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(node, _)| !gone.contains(node))
-            .map(|(_, found)| match *found {
-                pane @ Node::Pane(_) => pane,
-                Node::Split(split) => Node::Split(Split {
-                    first: shifted(split.first),
-                    second: shifted(split.second),
-                    ..split
-                }),
-            })
-            .collect();
-        assert_eq!(kept.len() + gone.len(), self.nodes.len(), "two nodes left the tree");
+        let count = self.nodes.len();
+        let mut gone = None;
+        let mut kept = Vec::with_capacity(count - 2);
+        for (node, found) in std::mem::take(&mut self.nodes).into_iter().enumerate() {
+            match found {
+                Node::Pane(leaf) if node == leaving => gone = Some(leaf),
+                _ if node == halves || node == halves + 1 => {},
+                pane @ Node::Pane(_) => kept.push(pane),
+                Node::Split(split) => {
+                    kept.push(Node::Split(Split { halves: shifted(split.halves), ..split }));
+                },
+            }
+        }
+        assert_eq!(kept.len() + 2, count, "two nodes left the tree");
         self.nodes = kept;
+        gone.expect("the leaving pane was one of the two halves")
     }
 
     fn assert_shaped(&self) {
@@ -481,6 +562,14 @@ impl Tree {
 }
 
 impl Split {
+    fn first(self) -> usize {
+        self.halves
+    }
+
+    fn second(self) -> usize {
+        self.halves + 1
+    }
+
     fn bounds(self, extent: u16, first: Least, second: Least) -> (u16, u16) {
         let low = first.along(self.towards);
         let high = extent.checked_sub(second.along(self.towards));
@@ -497,7 +586,7 @@ impl Split {
         wanted.clamp(low, high)
     }
 
-    fn halves(self, rect: Rect, first: Least, second: Least) -> (Rect, Rect) {
+    fn divided(self, rect: Rect, first: Least, second: Least) -> (Rect, Rect) {
         let extent = rect.extent(self.towards);
         let bounds = self.bounds(extent, first, second);
         rect.cut(self.towards, self.first_extent(extent, bounds))
@@ -528,17 +617,22 @@ impl Split {
     }
 }
 
-fn assert_tiled(laid: &[(PaneId, Rect)], size: Size) {
+fn assert_tiled<L: Leaf>(laid: &[(&L, Rect)], size: Size) {
     let (columns, rows) = size.get();
     let mut area = 0;
-    for (pane, rect) in laid {
+    for (place, (leaf, rect)) in laid.iter().enumerate() {
+        let pane = leaf.id();
         assert!(rect.right() <= columns, "pane {pane} at {rect:?} is off a tab of {size:?}");
         assert!(rect.bottom() <= rows, "pane {pane} at {rect:?} is off a tab of {size:?}");
         assert!(rect.columns >= COLUMNS_MIN, "pane {pane} at {rect:?} is narrower than a pane");
         assert!(rect.rows >= ROWS_MIN, "pane {pane} at {rect:?} is shorter than a pane");
+        for (other, over) in &laid[place + 1..] {
+            let other = other.id();
+            assert!(!rect.overlaps(*over), "pane {other} at {over:?} is over pane {pane}");
+        }
         area += rect.area();
     }
-    assert_eq!(area, Rect::whole(size).area(), "the panes of {laid:?} tile a tab of {size:?}");
+    assert_eq!(area, Rect::whole(size).area(), "the panes tile a tab of {size:?}");
 }
 
 fn touching(from: Rect, to: Rect, direction: Direction) -> Option<u16> {
@@ -580,16 +674,16 @@ mod tests {
         Rect { column, row, columns, rows }
     }
 
-    fn three() -> Tree {
-        let mut tree = Tree::one(pane(1));
+    fn three(at: Size) -> Tree<PaneId> {
+        let mut tree = Tree::one(pane(1), at);
         tree.split(pane(1), Towards::Right, pane(2));
         tree.split(pane(2), Towards::Down, pane(3));
         tree
     }
 
-    fn tiles(tree: &Tree, size: Size) {
-        let rects = tree.rects(size);
-        let (columns, rows) = size.get();
+    fn tiles(tree: &Tree<PaneId>) {
+        let rects = tree.rects();
+        let (columns, rows) = tree.size().get();
         let mut covered = vec![0u8; usize::from(columns) * usize::from(rows)];
         for (_, rect) in &rects {
             for row in rect.row..rect.bottom() {
@@ -598,22 +692,25 @@ mod tests {
                 }
             }
         }
-        assert!(covered.iter().all(|count| *count == 1), "{rects:?} tile {size:?}");
+        assert!(covered.iter().all(|count| *count == 1), "{rects:?} tile {:?}", tree.size());
     }
 
     #[test]
     fn a_lone_pane_takes_the_tab_and_its_frame_takes_a_cell_each_side() {
-        let tree = Tree::one(pane(1));
-        assert_eq!(tree.rects(size(80, 24)), [(pane(1), rect(0, 0, 80, 24))]);
+        let tree = Tree::one(pane(1), size(80, 24));
+        assert_eq!(tree.rects(), [(pane(1), rect(0, 0, 80, 24))]);
         assert_eq!(rect(0, 0, 80, 24).inner(), size(78, 22));
         assert_eq!(rect(0, 0, COLUMNS_MIN, ROWS_MIN).inner(), size(3, 1));
+        assert_eq!(lone(size(80, 24)), size(78, 22));
+        assert_eq!(lone(size(1, 1)), size(3, 1));
+        assert_eq!(Tree::one(pane(1), size(1, 1)).size(), size(COLUMNS_MIN, ROWS_MIN));
     }
 
     #[test]
     fn splits_halve_the_pane_split_and_tile_the_tab() {
-        let tree = three();
+        let mut tree = three(size(80, 24));
         assert_eq!(
-            tree.rects(size(80, 24)),
+            tree.rects(),
             [
                 (pane(1), rect(0, 0, 40, 24)),
                 (pane(2), rect(40, 0, 40, 12)),
@@ -621,124 +718,144 @@ mod tests {
             ]
         );
         assert_eq!(tree.panes(), [pane(1), pane(2), pane(3)]);
+        assert_eq!(tree.len(), 3);
         for (columns, rows) in [(80, 24), (81, 25), (11, 7), (10, 6), (200, 60)] {
-            tiles(&tree, size(columns, rows));
+            tree.fit(size(columns, rows));
+            assert_eq!(tree.size(), size(columns, rows));
+            tiles(&tree);
         }
     }
 
     #[test]
     fn a_tab_too_small_for_its_panes_is_fitted_up_to_them() {
-        let tree = three();
-        assert!(tree.fits(size(10, 6)));
-        assert!(!tree.fits(size(9, 6)));
-        assert!(!tree.fits(size(10, 5)));
-        assert_eq!(tree.fitted(size(4, 2)), size(10, 6));
-        assert_eq!(tree.fitted(size(9, 40)), size(10, 40));
-        assert_eq!(tree.fitted(size(80, 24)), size(80, 24));
-        tiles(&tree, tree.fitted(size(4, 2)));
+        let mut tree = three(size(80, 24));
+        for (asked, fitted) in [((4, 2), (10, 6)), ((9, 40), (10, 40)), ((80, 24), (80, 24))] {
+            tree.fit(size(asked.0, asked.1));
+            assert_eq!(tree.size(), size(fitted.0, fitted.1));
+            tiles(&tree);
+        }
+    }
+
+    #[test]
+    fn a_pane_has_room_only_where_the_tab_holds_it() {
+        let tree = three(size(10, 6));
+        assert_eq!(tree.room(pane(1), Towards::Down, pane(4)), Some(size(3, 1)));
+        assert_eq!(tree.room(pane(1), Towards::Right, pane(4)), None);
+        assert_eq!(tree.room_beside_largest(pane(4)), Some((pane(1), Towards::Down, size(3, 1))));
+        let mut full = Tree::one(pane(1), size(COLUMNS_MIN, ROWS_MIN));
+        assert_eq!(full.room_beside_largest(pane(2)), None);
+        full.fit(size(COLUMNS_MIN, 2 * ROWS_MIN));
+        assert_eq!(full.room_beside_largest(pane(2)), Some((pane(1), Towards::Down, size(3, 1))));
     }
 
     #[test]
     fn the_largest_pane_is_split_along_its_longer_side() {
-        let tree = three();
-        assert_eq!(tree.largest(size(80, 24)), (pane(1), Towards::Down));
-        assert_eq!(tree.largest(size(200, 24)), (pane(1), Towards::Right));
-        assert_eq!(Tree::one(pane(4)).largest(size(80, 24)), (pane(4), Towards::Right));
-        let mut even = Tree::one(pane(1));
+        let mut tree = three(size(80, 24));
+        assert_eq!(tree.largest(), (pane(1), Towards::Down));
+        tree.fit(size(200, 24));
+        assert_eq!(tree.largest(), (pane(1), Towards::Right));
+        assert_eq!(Tree::one(pane(4), size(80, 24)).largest(), (pane(4), Towards::Right));
+        let mut even = Tree::one(pane(1), size(80, 24));
         even.split(pane(1), Towards::Right, pane(2));
-        assert_eq!(even.largest(size(80, 24)).0, pane(1));
+        assert_eq!(even.largest().0, pane(1));
     }
 
     #[test]
     fn a_removed_pane_leaves_its_room_to_its_sibling() {
-        let mut tree = three();
-        assert_eq!(tree.remove(pane(2)), Removed::Out { heir: pane(3) });
-        assert_eq!(tree.rects(size(80, 24))[1], (pane(3), rect(40, 0, 40, 24)));
-        assert_eq!(tree.remove(pane(3)), Removed::Out { heir: pane(1) });
-        assert_eq!(tree, Tree::one(pane(1)));
+        let at = size(80, 24);
+        let mut tree = three(at);
+        assert_eq!(tree.remove(pane(2)), Removed::Out { gone: pane(2), heir: pane(3) });
+        assert_eq!(tree.rects()[1], (pane(3), rect(40, 0, 40, 24)));
+        assert_eq!(tree.remove(pane(3)), Removed::Out { gone: pane(3), heir: pane(1) });
+        assert_eq!(tree, Tree::one(pane(1), at));
         assert_eq!(tree.remove(pane(1)), Removed::Last);
-        let mut tree = three();
-        assert_eq!(tree.remove(pane(1)), Removed::Out { heir: pane(2) });
+        assert_eq!(tree.into_lone(), pane(1));
+        let mut tree = three(at);
+        assert_eq!(tree.remove(pane(1)), Removed::Out { gone: pane(1), heir: pane(2) });
         assert_eq!(tree.panes(), [pane(2), pane(3)]);
-        assert_eq!(
-            tree.rects(size(80, 24)),
-            [(pane(2), rect(0, 0, 80, 12)), (pane(3), rect(0, 12, 80, 12))]
-        );
+        assert_eq!(tree.rects(), [(pane(2), rect(0, 0, 80, 12)), (pane(3), rect(0, 12, 80, 12))]);
     }
 
     #[test]
     fn a_tree_of_many_panes_keeps_its_order_and_tiles_as_panes_leave() {
-        let at = size(400, 200);
-        let mut tree = Tree::one(pane(1));
+        let mut tree = Tree::one(pane(1), size(400, 200));
         for id in 2..=64 {
-            let (largest, towards) = tree.largest(at);
+            let (largest, towards, _) = tree.room_beside_largest(pane(id)).unwrap();
             tree.split(largest, towards, pane(id));
-            tiles(&tree, at);
+            tiles(&tree);
         }
         let mut order = tree.panes();
         assert_eq!(order.len(), 64);
         for id in (1..=64).step_by(3) {
-            assert!(matches!(tree.remove(pane(id)), Removed::Out { .. }));
+            assert!(matches!(tree.remove(pane(id)), Removed::Out { gone, .. } if gone == pane(id)));
             order.retain(|kept| *kept != pane(id));
             assert_eq!(tree.panes(), order, "the panes left keep their order");
-            tiles(&tree, at);
+            tiles(&tree);
         }
         for kept in order.iter().take(order.len() - 1) {
             assert!(matches!(tree.remove(*kept), Removed::Out { .. }));
-            tiles(&tree, at);
+            tiles(&tree);
         }
-        assert_eq!(tree, Tree::one(*order.last().unwrap()));
+        assert_eq!(tree, Tree::one(*order.last().unwrap(), size(400, 200)));
     }
 
     #[test]
     fn a_neighbour_is_the_pane_that_shares_the_most_of_that_edge() {
-        let tree = three();
-        let at = size(80, 24);
-        assert_eq!(tree.neighbour(at, pane(1), Direction::Right), Some(pane(2)));
-        assert_eq!(tree.neighbour(at, pane(3), Direction::Left), Some(pane(1)));
-        assert_eq!(tree.neighbour(at, pane(2), Direction::Down), Some(pane(3)));
-        assert_eq!(tree.neighbour(at, pane(3), Direction::Up), Some(pane(2)));
-        assert_eq!(tree.neighbour(at, pane(1), Direction::Left), None);
-        assert_eq!(tree.neighbour(at, pane(1), Direction::Up), None);
+        let tree = three(size(80, 24));
+        assert_eq!(tree.neighbour(pane(1), Direction::Right), Some(pane(2)));
+        assert_eq!(tree.neighbour(pane(3), Direction::Left), Some(pane(1)));
+        assert_eq!(tree.neighbour(pane(2), Direction::Down), Some(pane(3)));
+        assert_eq!(tree.neighbour(pane(3), Direction::Up), Some(pane(2)));
+        assert_eq!(tree.neighbour(pane(1), Direction::Left), None);
+        assert_eq!(tree.neighbour(pane(1), Direction::Up), None);
         assert_eq!(tree.in_order(pane(3), Order::Next), Some(pane(1)));
         assert_eq!(tree.in_order(pane(1), Order::Previous), Some(pane(3)));
-        assert_eq!(Tree::one(pane(1)).in_order(pane(1), Order::Next), None);
+        assert_eq!(Tree::one(pane(1), size(80, 24)).in_order(pane(1), Order::Next), None);
     }
 
     #[test]
     fn a_resize_moves_the_nearest_border_on_that_side() {
-        let mut tree = three();
-        let at = size(80, 24);
-        assert!(tree.resize(at, pane(3), Direction::Left, Change::Grow));
-        assert_eq!(tree.rects(at)[0].1, rect(0, 0, 36, 24));
-        assert!(tree.resize(at, pane(3), Direction::Up, Change::Grow));
-        assert_eq!(tree.rects(at)[2].1, rect(36, 11, 44, 13));
-        assert!(tree.resize(at, pane(1), Direction::Right, Change::Shrink));
-        assert_eq!(tree.rects(at)[0].1, rect(0, 0, 32, 24));
-        assert!(!tree.resize(at, pane(1), Direction::Left, Change::Grow));
-        assert!(!tree.resize(at, pane(2), Direction::Up, Change::Grow));
-        tiles(&tree, at);
+        let mut tree = three(size(80, 24));
+        assert!(tree.resize(pane(3), Direction::Left, Change::Grow));
+        assert_eq!(tree.rects()[0].1, rect(0, 0, 36, 24));
+        assert!(tree.resize(pane(3), Direction::Up, Change::Grow));
+        assert_eq!(tree.rects()[2].1, rect(36, 11, 44, 13));
+        assert!(tree.resize(pane(1), Direction::Right, Change::Shrink));
+        assert_eq!(tree.rects()[0].1, rect(0, 0, 32, 24));
+        assert!(!tree.resize(pane(1), Direction::Left, Change::Grow));
+        assert!(!tree.resize(pane(2), Direction::Up, Change::Grow));
+        tiles(&tree);
     }
 
     #[test]
     fn a_border_stops_where_a_pane_would_be_too_small() {
-        let mut tree = Tree::one(pane(1));
+        let mut tree = Tree::one(pane(1), size(20, 5));
         tree.split(pane(1), Towards::Right, pane(2));
-        let at = size(20, 5);
-        while tree.resize(at, pane(1), Direction::Right, Change::Grow) {}
-        assert_eq!(tree.rects(at)[1].1, rect(15, 0, COLUMNS_MIN, 5));
-        assert!(!tree.resize(at, pane(1), Direction::Right, Change::Grow));
-        let cramped = size(2 * COLUMNS_MIN, 5);
-        assert!(!tree.resize(cramped, pane(2), Direction::Left, Change::Grow));
+        while tree.resize(pane(1), Direction::Right, Change::Grow) {}
+        assert_eq!(tree.rects()[1].1, rect(15, 0, COLUMNS_MIN, 5));
+        assert!(!tree.resize(pane(1), Direction::Right, Change::Grow));
+        tree.fit(size(2 * COLUMNS_MIN, 5));
+        assert!(!tree.resize(pane(2), Direction::Left, Change::Grow));
     }
 
     #[test]
     fn a_swap_trades_two_panes_places() {
-        let mut tree = three();
+        let mut tree = three(size(80, 24));
         tree.swap(pane(1), pane(3));
         assert_eq!(tree.panes(), [pane(3), pane(2), pane(1)]);
-        let mut lone = Tree::one(pane(1));
+        let mut lone = Tree::one(pane(1), size(80, 24));
         lone.swap(pane(1), pane(1));
-        assert_eq!(lone, Tree::one(pane(1)));
+        assert_eq!(lone, Tree::one(pane(1), size(80, 24)));
+    }
+
+    #[test]
+    fn a_tree_holds_its_leaves_and_lends_them() {
+        let mut tree = three(size(80, 24));
+        assert_eq!(tree.get(pane(2)), Some(&pane(2)));
+        assert_eq!(tree.get(pane(9)), None);
+        assert_eq!(tree.get_mut(pane(3)).copied(), Some(pane(3)));
+        assert_eq!(tree.leaves().copied().collect::<Vec<_>>(), [pane(1), pane(2), pane(3)]);
+        assert!(rect(0, 0, 4, 4).overlaps(rect(3, 3, 4, 4)));
+        assert!(!rect(0, 0, 4, 4).overlaps(rect(4, 0, 4, 4)));
     }
 }

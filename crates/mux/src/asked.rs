@@ -296,16 +296,6 @@ fn direction_heard(field: &str, direction: i32) -> Result<Direction, Status> {
     }
 }
 
-fn sideways(field: &str, direction: i32) -> Result<Order, Status> {
-    match direction_heard(field, direction) {
-        Ok(Direction::Left) => Ok(Order::Previous),
-        Ok(Direction::Right) => Ok(Order::Next),
-        Ok(Direction::Up | Direction::Down) | Err(_) => {
-            Err(refused(field, "is not one of LEFT or RIGHT"))
-        },
-    }
-}
-
 fn order_heard(field: &str, order: i32) -> Result<Order, Status> {
     match api::Order::try_from(order) {
         Ok(api::Order::Next) => Ok(Order::Next),
@@ -476,8 +466,8 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
             api::focus_pane::To::Towards(towards) => {
                 FocusTo::Towards(direction_heard("focus_pane.towards", towards)?)
             },
-            api::focus_pane::To::TowardsOrTab(towards) => {
-                FocusTo::TowardsOrTab(sideways("focus_pane.towards_or_tab", towards)?)
+            api::focus_pane::To::TowardsOrTab(order) => {
+                FocusTo::TowardsOrTab(order_heard("focus_pane.towards_or_tab", order)?)
             },
             api::focus_pane::To::Order(order) => {
                 FocusTo::InOrder(order_heard("focus_pane.order", order)?)
@@ -505,8 +495,8 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
         Event::NameTab(api::NameTab { name }) => {
             Heard::Act(Act::NameTab(Name::parse("name_tab.name", name)?))
         },
-        Event::MoveTab(api::MoveTab { towards }) => {
-            Heard::Act(Act::MoveTab(sideways("move_tab.towards", towards)?))
+        Event::MoveTab(api::MoveTab { order }) => {
+            Heard::Act(Act::MoveTab(order_heard("move_tab.order", order)?))
         },
         Event::Turn(into) => Heard::Act(Act::Turn(TurnTo::parse("turn", Some(into))?)),
     })

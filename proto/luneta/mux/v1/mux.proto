@@ -305,7 +305,7 @@ message ClosePane {}
 message FocusPane {
   oneof to {
     Direction towards = 1;
-    Direction towards_or_tab = 2;
+    Order towards_or_tab = 2;
     Order order = 3;
   }
 }
@@ -353,7 +353,7 @@ message NameTab {
 }
 
 message MoveTab {
-  Direction towards = 1;
+  Order order = 1;
 }
 
 message Hello {
@@ -500,10 +500,16 @@ message Layout {
   uint64 session = 1;
   uint32 tab = 2;
   Size size = 3;
-  repeated Placed panes = 4;
-  uint32 focused = 5;
-  bool fullscreen = 6;
-  repeated Tabbed tabs = 7;
+  oneof shown {
+    Tiled tiled = 4;
+    Placed full = 5;
+  }
+  repeated Tabbed tabs = 6;
+}
+
+message Tiled {
+  repeated Placed panes = 1;
+  uint32 focused = 2;
 }
 
 message Placed {

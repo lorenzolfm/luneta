@@ -10,8 +10,26 @@ fn rect(column: u32, row: u32, columns: u32, rows: u32) -> api::Rect {
     api::Rect { column, row, columns, rows }
 }
 
+fn placed(layout: &api::Layout) -> Vec<&api::Placed> {
+    match layout.shown.as_ref().expect("a layout shows its tab") {
+        api::layout::Shown::Tiled(tiled) => tiled.panes.iter().collect(),
+        api::layout::Shown::Full(full) => vec![full],
+    }
+}
+
+fn focused(layout: &api::Layout) -> u32 {
+    match layout.shown.as_ref().expect("a layout shows its tab") {
+        api::layout::Shown::Tiled(tiled) => tiled.focused,
+        api::layout::Shown::Full(full) => full.pane,
+    }
+}
+
+fn full(layout: &api::Layout) -> bool {
+    matches!(layout.shown, Some(api::layout::Shown::Full(_)))
+}
+
 fn rects(layout: &api::Layout) -> Vec<(u32, api::Rect)> {
-    layout.panes.iter().map(|placed| (placed.pane, placed.rect.unwrap())).collect()
+    placed(layout).into_iter().map(|placed| (placed.pane, placed.rect.unwrap())).collect()
 }
 
 fn open(towards: api::Towards) -> Event {
@@ -70,7 +88,7 @@ fn a_split_halves_the_pane_and_the_client_goes_to_the_new_one() {
                 rects(layout) == [(made.pane, rect(0, 0, 40, 24)), (second, rect(40, 0, 40, 24))]
             })
             .await;
-        assert_eq!(attached.layout.as_ref().unwrap().focused, second);
+        assert_eq!(focused(attached.layout.as_ref().unwrap()), second);
         attached.type_line("stty size").await;
         attached.until_pane_row(second, "22 38").await;
         assert_eq!(panes_of(&listed(&mut mux).await, made.tab), [made.pane, second]);
@@ -217,19 +235,19 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
         let mut attached = Attached::new(&mut mux, session(&made), size(80, 24)).await;
         attached.send(Event::Fullscreen(api::Fullscreen {})).await;
         let second = opened(&mut attached, api::Towards::Right).await;
-        assert!(!attached.layout.as_ref().unwrap().fullscreen, "a lone pane has no fullscreen");
+        assert!(!full(attached.layout.as_ref().unwrap()), "a lone pane has no fullscreen");
         let first = api::Place { is: Some(api::place::Is::Pane(made.pane)), made_at: made.made_at };
         let mut other = Attached::new(&mut mux, first, size(80, 24)).await;
         assert_eq!(other.went.pane, made.pane);
         attached.send(Event::Fullscreen(api::Fullscreen {})).await;
         attached
             .until_laid("the pane over the whole tab", |layout| {
-                layout.fullscreen && rects(layout) == [(second, rect(0, 0, 80, 24))]
+                full(layout) && rects(layout) == [(second, rect(0, 0, 80, 24))]
             })
             .await;
         other
             .until_laid("the other client on the pane that fills the tab", |layout| {
-                layout.fullscreen && layout.focused == second
+                full(layout) && focused(layout) == second
             })
             .await;
         assert_eq!(other.went.pane, second);
@@ -238,7 +256,7 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
         attached.send(focus(api::Direction::Left)).await;
         attached
             .until_laid("both panes again", |layout| {
-                !layout.fullscreen && layout.focused == made.pane && layout.panes.len() == 2
+                !full(layout) && focused(layout) == made.pane && placed(layout).len() == 2
             })
             .await;
     });
@@ -258,13 +276,13 @@ fn a_client_back_on_a_fullscreen_tab_comes_to_the_pane_that_fills_it() {
         other.send(Event::Go(tab(two.tab, &made))).await;
         other.until("the other client went to tab two", |other| other.went.tab == two.tab).await;
         attached.send(Event::Fullscreen(api::Fullscreen {})).await;
-        attached.until_laid("the pane over the whole tab", |layout| layout.fullscreen).await;
+        attached.until_laid("the pane over the whole tab", full).await;
         other.send(Event::Go(tab(made.tab, &made))).await;
         other.until("the other client came back", |other| other.went.tab == made.tab).await;
         assert_eq!(other.went.pane, second, "a client comes back to the pane that fills the tab");
         other
             .until_laid("the pane still over the whole tab", |layout| {
-                layout.fullscreen && rects(layout) == [(second, rect(0, 0, 80, 24))]
+                full(layout) && rects(layout) == [(second, rect(0, 0, 80, 24))]
             })
             .await;
     });
@@ -301,16 +319,16 @@ fn names_of_panes_and_tabs_show_in_the_layout_and_the_listing() {
         let named =
             |name: Option<&str>| Event::NamePane(api::NamePane { name: name.map(str::to_owned) });
         attached.send(named(Some("logs"))).await;
-        attached.until_laid("the pane's name", |layout| layout.panes[0].title == "logs").await;
+        attached.until_laid("the pane's name", |layout| placed(layout)[0].title == "logs").await;
         let pane = |listing: &api::Listing| tabs(listing)[0].panes[0].name.clone();
         assert_eq!(pane(&listed(&mut mux).await), Some("logs".to_owned()));
         attached.send(named(None)).await;
-        attached.until_laid("the name gone", |layout| layout.panes[0].title != "logs").await;
+        attached.until_laid("the name gone", |layout| placed(layout)[0].title != "logs").await;
         assert_eq!(pane(&listed(&mut mux).await), None);
         let tab = Event::NameTab(api::NameTab { name: "build".to_owned() });
         attached.send(tab).await;
         attached.until_laid("the tab's name", |layout| layout.tabs[0].name == "build").await;
-        let right = Event::MoveTab(api::MoveTab { towards: api::Direction::Right.into() });
+        let right = Event::MoveTab(api::MoveTab { order: api::Order::Next.into() });
         attached.send(right).await;
         attached
             .until_laid("the tab moved right", |layout| {
@@ -382,15 +400,15 @@ fn the_focus_crosses_to_the_next_tab_from_the_edge_and_goes_to_a_pane_by_its_id(
         let two = new_tab(&mut mux, made.session, shell()).await;
         let mut attached = Attached::new(&mut mux, session(&made), size(80, 24)).await;
         let second = opened(&mut attached, api::Towards::Right).await;
-        let or_tab = |direction: api::Direction| {
-            let to = api::focus_pane::To::TowardsOrTab(direction.into());
+        let or_tab = |order: api::Order| {
+            let to = api::focus_pane::To::TowardsOrTab(order.into());
             Event::FocusPane(api::FocusPane { to: Some(to) })
         };
-        attached.send(or_tab(api::Direction::Right)).await;
+        attached.send(or_tab(api::Order::Next)).await;
         attached
             .until("the client crossed to tab two", |attached| attached.went.tab == two.tab)
             .await;
-        attached.send(or_tab(api::Direction::Left)).await;
+        attached.send(or_tab(api::Order::Previous)).await;
         attached.until("the client crossed back", |attached| attached.went.tab == made.tab).await;
         assert_eq!(attached.went.pane, second, "a tab keeps the pane last in focus");
         let pane = api::Place { is: Some(api::place::Is::Pane(made.pane)), made_at: made.made_at };
