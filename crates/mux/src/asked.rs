@@ -57,6 +57,19 @@ impl Size {
     pub fn said(self) -> api::Size {
         api::Size { columns: self.columns.get().into(), rows: self.rows.get().into() }
     }
+
+    /// The columns and the rows, as numbers.
+    #[must_use]
+    pub fn get(self) -> (u16, u16) {
+        (self.columns.get(), self.rows.get())
+    }
+
+    /// Whether `column` and `row`, from 0, are within it.
+    #[must_use]
+    pub fn holds(self, column: u16, row: u16) -> bool {
+        let (columns, rows) = self.get();
+        column < columns && row < rows
+    }
 }
 
 /// A session's name, or a tab's: not empty, of at most `NAME_BYTES_MAX`

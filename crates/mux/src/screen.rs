@@ -125,11 +125,13 @@ pub struct View {
 }
 
 impl View {
+    /// The size of the screen it is a view of.
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
     }
 
+    /// A line for each of its rows, from the top.
     #[must_use]
     pub fn lines(&self) -> &[Line] {
         &self.lines
@@ -148,9 +150,43 @@ pub struct Written {
     pub answers: Vec<u8>,
     /// The marks the program's shell put in it.
     pub marks: Vec<Mark>,
-    /// The rows it pushed into the scrollback: none where the rows that were
-    /// there went, or the program went to its other screen.
-    pub rows_pushed: Option<usize>,
+    pub pushed: Pushed,
+}
+
+/// What a write did to the rows of the scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pushed {
+    /// It pushed these rows into it, after those that were there.
+    Rows(usize),
+    /// The rows that were there went, or the program went to its other
+    /// screen, so a view back in it is on none of them.
+    Lost,
+}
+
+impl Pushed {
+    /// What this write and the `next` one did between them.
+    #[must_use]
+    pub fn then(self, next: Pushed) -> Pushed {
+        match (self, next) {
+            (Pushed::Rows(rows), Pushed::Rows(more)) => Pushed::Rows(rows + more),
+            (Pushed::Lost, _) | (_, Pushed::Lost) => Pushed::Lost,
+        }
+    }
+
+    /// Where a view `back` rows back in the scrollback, now of `scrollback`
+    /// rows, is after the write: on the rows it was on, or at the top where
+    /// they went. A view at the bottom stays there.
+    #[must_use]
+    pub fn moved(self, back: usize, scrollback: usize) -> usize {
+        if back == 0 {
+            return 0;
+        }
+        let moved = match self {
+            Pushed::Rows(rows) => back + rows,
+            Pushed::Lost => scrollback,
+        };
+        moved.min(scrollback)
+    }
 }
 
 /// A screen, and what the program asked of its terminal that it answers.
@@ -194,40 +230,32 @@ impl Screen {
 
     /// Reads `bytes`, as the program wrote them. A program that sets 80 or
     /// 132 columns (DECCOLM) has the screen erased, as tmux does, and it
-    /// keeps its size. The size comes back at the end of the write, as
-    /// Ghostty's parse has no stop at a CSI: what the same write holds after
-    /// the DECCOLM is drawn 80 or 132 wide and then reflowed, where a later
-    /// write draws it at the screen's size. A program that asked for 132
-    /// columns draws for 132 either way.
+    /// keeps its size, from the end of the write on.
     pub fn write(&mut self, bytes: &[u8]) -> Result<Written, Error> {
-        let (size, marks) = (self.size, &mut self.marks);
-        let (columns, rows) = (size.columns.get(), size.rows.get());
-        let (made, answers) = self.answering.drive(|terminal| {
-            // The rows pushed only move a scrolled-back view: where Ghostty
-            // cannot say them, the view goes to the top, as where the rows
-            // it was on went, and the pane goes on.
-            let before = Before::of(terminal).ok();
-            let mut marked = Vec::new();
-            marks.write(terminal, bytes, &mut marked)?;
+        let (columns, rows) = self.size.get();
+        let scanner = &mut self.marks;
+        let (wrote, answers) = self.answering.drive(|terminal| {
+            let end = ScrollbackEnd::of(terminal);
+            let mut marks = Vec::new();
+            scanner.write(terminal, bytes, &mut marks)?;
             if (terminal.cols()?, terminal.rows()?) != (columns, rows) {
                 terminal.resize(columns, rows, 0, 0)?;
             }
             assert_eq!((terminal.cols()?, terminal.rows()?), (columns, rows));
-            let rows_pushed =
-                before.and_then(|before| before.rows_pushed(terminal).ok().flatten());
-            Ok((marked, rows_pushed))
+            let pushed = end.and_then(|end| end.pushed(terminal)).unwrap_or(Pushed::Lost);
+            Ok((marks, pushed))
         });
-        let (marks, rows_pushed) = made?;
-        Ok(Written { answers, marks, rows_pushed })
+        let (marks, pushed) = wrote?;
+        Ok(Written { answers, marks, pushed })
     }
 
     /// Makes the screen `size`, and gives back what it answered the program
     /// as it did: its new size, where the program asked to be told (mode
     /// 2048).
     pub fn resize(&mut self, size: Size) -> Result<Vec<u8>, Error> {
-        let (resized, answers) = self
-            .answering
-            .drive(|terminal| terminal.resize(size.columns.get(), size.rows.get(), 0, 0));
+        let (columns, rows) = size.get();
+        let (resized, answers) =
+            self.answering.drive(|terminal| terminal.resize(columns, rows, 0, 0));
         resized?;
         self.size = size;
         Ok(answers)
@@ -247,6 +275,7 @@ impl Screen {
         set
     }
 
+    /// The size it was made or last resized to.
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
@@ -332,8 +361,8 @@ impl Screen {
     /// The lines the screen shows, and its cursor.
     fn shown(&mut self) -> Result<View, Error> {
         let terminal = self.answering.terminal();
-        let column_count = usize::from(self.size.columns.get());
-        let row_count = usize::from(self.size.rows.get());
+        let (columns, rows) = self.size.get();
+        let (column_count, row_count) = (usize::from(columns), usize::from(rows));
         let snapshot = self.render.update(terminal)?;
         let cursor = match snapshot.cursor_viewport()? {
             Some(at) if snapshot.cursor_visible()? => Some(Cursor {
@@ -384,13 +413,13 @@ impl Screen {
 
 /// Where the scrollback ended before a write: at the row it tracks, on the
 /// screen that was the program's, or none where it had no rows.
-struct Before {
+struct ScrollbackEnd {
     screen: libghostty_vt::screen::Screen,
     last: Option<TrackedGridRef>,
 }
 
-impl Before {
-    fn of(terminal: &Terminal<'_, '_>) -> Result<Before, Error> {
+impl ScrollbackEnd {
+    fn of(terminal: &Terminal<'_, '_>) -> Result<ScrollbackEnd, Error> {
         let rows = terminal.scrollback_rows()?;
         let last = match rows.checked_sub(1) {
             Some(index) => {
@@ -399,25 +428,25 @@ impl Before {
             },
             None => None,
         };
-        Ok(Before { screen: terminal.active_screen()?, last })
+        Ok(ScrollbackEnd { screen: terminal.active_screen()?, last })
     }
 
-    /// The rows that went into the scrollback since: those after the row it
-    /// tracks, which only the scrollback's pruning takes from it. None where
+    /// What went into the scrollback since: the rows after the one it
+    /// tracks, which only the scrollback's pruning takes from it. Lost where
     /// that row is out of the scrollback, as a reflow may put it.
-    fn rows_pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Option<usize>, Error> {
+    fn pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Pushed, Error> {
         if terminal.active_screen()? != self.screen {
-            return Ok(None);
+            return Ok(Pushed::Lost);
         }
         let rows = terminal.scrollback_rows()?;
         let Some(last) = &self.last else {
-            return Ok(Some(rows));
+            return Ok(Pushed::Rows(rows));
         };
         let Some(at) = last.point(Space::Screen)? else {
-            return Ok(None);
+            return Ok(Pushed::Lost);
         };
         let kept = usize::try_from(at.y).expect("a screen coordinate fits a usize") + 1;
-        Ok(rows.checked_sub(kept))
+        Ok(rows.checked_sub(kept).map_or(Pushed::Lost, Pushed::Rows))
     }
 }
 
@@ -482,7 +511,7 @@ mod tests {
 
     use super::*;
 
-    pub(super) fn size(columns: u16, rows: u16) -> Size {
+    fn size(columns: u16, rows: u16) -> Size {
         Size { columns: NonZeroU16::new(columns).unwrap(), rows: NonZeroU16::new(rows).unwrap() }
     }
 
@@ -497,7 +526,7 @@ mod tests {
     }
 
     /// What `screen` answered the program that wrote `bytes`.
-    pub(super) fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
+    fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
         screen.write(bytes).unwrap().answers
     }
 
@@ -691,45 +720,60 @@ mod tests {
     #[test]
     fn a_program_does_not_resize_its_screen() {
         let mut screen = screen(10, 2);
+        let edge = b"\x1b[999C\x1b[6n";
         assert_eq!(answered(&mut screen, b"ab\x1b[?40h\x1b[?3h"), b"");
-        assert_eq!(screen.size(), size(10, 2));
+        assert_eq!(answered(&mut screen, edge), b"\x1b[1;10R");
         let view = screen.view(0).unwrap();
-        assert_eq!(view.size(), size(10, 2));
         assert!(view.lines().iter().all(|line| line.cells().len() == 10));
         assert_eq!(glyphs(&view.lines()[0])[0], Glyph::Blank);
         assert_eq!(answered(&mut screen, b"\x1b[?3hcd"), b"");
         let view = screen.view(0).unwrap();
-        assert_eq!(view.size(), size(10, 2));
         assert_eq!(glyphs(&view.lines()[0])[..3], [narrow("c"), narrow("d"), Glyph::Blank]);
         assert_eq!(view.cursor().map(|cursor| (cursor.row, cursor.column)), Some((0, 2)));
         assert_eq!(answered(&mut screen, b"\x1b[?3l"), b"");
-        assert_eq!(screen.size(), size(10, 2));
+        assert_eq!(answered(&mut screen, edge), b"\x1b[1;10R");
     }
 
     /// A write says how many rows it pushed into the scrollback, also where
-    /// the scrollback, at its most, lets go of older ones as it does.
+    /// the scrollback, at its most, lets go of older ones as it does. Where
+    /// it lets go of the rows that were there, or they are erased, they are
+    /// lost.
     #[test]
     fn a_write_says_the_rows_it_pushed_into_the_scrollback() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4").unwrap().rows_pushed, Some(2));
-        // 10 kB holds some thousands of rows of 10 columns, so Ghostty lets
-        // go of some well before 100,000.
+        assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4").unwrap().pushed, Pushed::Rows(2));
         let pruned = (0..100_000).any(|_| {
             let before = screen.scrollback();
-            assert_eq!(screen.write(b"\r\nx").unwrap().rows_pushed, Some(1));
+            assert_eq!(screen.write(b"\r\nx").unwrap().pushed, Pushed::Rows(1));
             screen.scrollback() < before
         });
         assert!(pruned, "the scrollback let go of no rows");
-        assert_eq!(screen.write(b"\x1b[3J").unwrap().rows_pushed, None);
+        let past = "\r\nx".repeat(2 * screen.scrollback());
+        assert_eq!(screen.write(past.as_bytes()).unwrap().pushed, Pushed::Lost);
+        assert_eq!(screen.write(b"\x1b[3J").unwrap().pushed, Pushed::Lost);
     }
 
-    /// A program that goes to its other screen pushed no rows the client
-    /// may look back at.
+    /// A program that goes to its other screen loses the rows a client may
+    /// look back at, and on it pushes none.
     #[test]
-    fn a_write_to_the_other_screen_pushes_none() {
+    fn a_write_to_the_other_screen_loses_the_rows() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().rows_pushed, None);
-        assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().rows_pushed, Some(0));
+        assert_eq!(screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().pushed, Pushed::Lost);
+        assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().pushed, Pushed::Rows(0));
+    }
+
+    /// A view back in the scrollback goes back by the rows pushed, as far as
+    /// the scrollback goes, and to its top where the rows it was on were
+    /// lost, by one write or a later one. A view at the bottom stays there.
+    #[test]
+    fn a_view_back_stays_on_its_rows_or_goes_to_the_top() {
+        assert_eq!(Pushed::Rows(3).moved(2, 10), 5);
+        assert_eq!(Pushed::Rows(3).moved(9, 10), 10);
+        assert_eq!(Pushed::Lost.moved(2, 10), 10);
+        assert_eq!([Pushed::Rows(3).moved(0, 10), Pushed::Lost.moved(0, 10)], [0, 0]);
+        assert_eq!(Pushed::Rows(1).then(Pushed::Rows(2)), Pushed::Rows(3));
+        assert_eq!(Pushed::Rows(1).then(Pushed::Lost), Pushed::Lost);
+        assert_eq!(Pushed::Lost.then(Pushed::Rows(2)), Pushed::Lost);
     }
 
     /// The marks a shell writes come back from the write that ends them.

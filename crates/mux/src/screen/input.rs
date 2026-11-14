@@ -130,10 +130,11 @@ impl Screen {
         column: u16,
         row: u16,
     ) -> Result<Vec<u8>, Error> {
+        let (columns, rows) = self.size.get();
         let terminal = self.answering.terminal();
         let size = EncoderSize {
-            screen_width: u32::from(self.size.columns.get()) * CELL_PIXELS,
-            screen_height: u32::from(self.size.rows.get()) * CELL_PIXELS,
+            screen_width: u32::from(columns) * CELL_PIXELS,
+            screen_height: u32::from(rows) * CELL_PIXELS,
             cell_width: CELL_PIXELS,
             cell_height: CELL_PIXELS,
             padding_top: 0,
@@ -190,13 +191,22 @@ impl Screen {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use libghostty_vt::key::{Action, Key};
 
-    use super::super::tests::{answered, size};
     use super::*;
+    use crate::asked::Size;
 
     fn screen() -> Screen {
-        Screen::new(size(10, 4), 0).unwrap()
+        let columns = NonZeroU16::new(10).unwrap();
+        let rows = NonZeroU16::new(4).unwrap();
+        Screen::new(Size { columns, rows }, 0).unwrap()
+    }
+
+    /// What `screen` answered the program that wrote `bytes`.
+    fn answered(screen: &mut Screen, bytes: &[u8]) -> Vec<u8> {
+        screen.write(bytes).unwrap().answers
     }
 
     fn typed(

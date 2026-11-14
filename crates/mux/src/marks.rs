@@ -10,9 +10,10 @@
 //! ESC ] 133 ; D [; <status>] ST                 it ended
 //! ```
 //!
-//! with ST either `ESC \` or BEL. A mark may come split over two reads.
-//! Where an OSC starts and ends is Ghostty's to say, as it reads the same
-//! bytes for the screen: the scanner keeps only the text between.
+//! with ST either `ESC \` or BEL, and an ESC alone ends it too. A mark may
+//! come split over two reads. Where an OSC starts and ends is Ghostty's to
+//! say, as it reads the same bytes for the screen: the scanner keeps only the
+//! text between.
 
 use libghostty_vt::terminal::{Boundary, StringEnd};
 use libghostty_vt::{Error, Terminal};
@@ -67,8 +68,8 @@ impl Marks {
             let from = at;
             at += stop.consumed;
             if stop.reached.contains(Boundary::OSC_END) {
-                self.keep(&bytes[from..at - 1]);
-                let osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
+                let mut osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
+                osc.keep(&bytes[from..at - 1]);
                 if let Some(mark) = osc.end(stop.end == Some(StringEnd::Cancelled)) {
                     marks.push(mark);
                 }
@@ -78,42 +79,37 @@ impl Marks {
                 self.osc = Some(Osc::default());
             }
         }
-        self.keep(&bytes[at..]);
+        if let Some(osc) = &mut self.osc {
+            osc.keep(&bytes[at..]);
+        }
         Ok(())
-    }
-
-    /// Keeps `bytes` of the text of the OSC being read, as far as it may be
-    /// a mark.
-    fn keep(&mut self, bytes: &[u8]) {
-        let Some(osc) = &mut self.osc else {
-            return;
-        };
-        for &byte in bytes {
-            let markable = osc.text.starts_with(MARK) || MARK.starts_with(&osc.text);
-            if !markable {
-                break;
-            }
-            if osc.text.len() < MARK_BYTES_MAX {
-                osc.text.push(byte);
-            } else {
-                osc.over = true;
-                break;
-            }
-        }
-        assert!(osc.text.len() <= MARK_BYTES_MAX);
-        if osc.over {
-            assert_eq!(osc.text.len(), MARK_BYTES_MAX);
-        }
     }
 }
 
 impl Osc {
-    /// Ends the OSC, `cancelled` by CAN or SUB or not, and gives its mark
-    /// where it is one.
-    fn end(self, cancelled: bool) -> Option<Mark> {
+    /// Keeps `bytes` of its text, as far as it may be a mark.
+    fn keep(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            let markable = self.text.starts_with(MARK) || MARK.starts_with(&self.text);
+            if !markable {
+                break;
+            }
+            if self.text.len() < MARK_BYTES_MAX {
+                self.text.push(byte);
+            } else {
+                self.over = true;
+                break;
+            }
+        }
+        assert!(self.text.len() <= MARK_BYTES_MAX);
         if self.over {
             assert_eq!(self.text.len(), MARK_BYTES_MAX);
         }
+    }
+
+    /// Ends the OSC, `cancelled` by CAN or SUB or not, and gives its mark
+    /// where it is one.
+    fn end(self, cancelled: bool) -> Option<Mark> {
         if cancelled {
             return None;
         }

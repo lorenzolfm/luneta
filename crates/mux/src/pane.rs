@@ -34,7 +34,7 @@ use crate::mux::Mux;
 use crate::process::{self, Group};
 use crate::pty::Pty;
 use crate::ran::{Job, Now, Shell};
-use crate::screen::{Screen, View, Wheel};
+use crate::screen::{Pushed, Screen, View, Wheel};
 
 /// The scrollback each pane keeps, in bytes.
 const SCROLLBACK_BYTES: usize = 10_000_000;
@@ -640,7 +640,7 @@ impl Thread {
     /// What the program does with `input`.
     fn does(&mut self, input: Input) -> Result<Does, Error> {
         let size = self.screen.size();
-        let within = |column: u16, row: u16| column < size.columns.get() && row < size.rows.get();
+        let within = |column, row| size.holds(column, row);
         let screen = &mut self.screen;
         Ok(match input {
             Input::Key { action, key, mods, text, unshifted } => {
@@ -703,7 +703,7 @@ impl Thread {
         };
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
-        let mut rows_pushed = Some(0);
+        let mut pushed = Pushed::Rows(0);
         while total < most && unread.len() < UNREAD_BYTES_MAX {
             match pty.near.read(&mut self.buffer) {
                 Ok(0) => break,
@@ -713,8 +713,7 @@ impl Thread {
                         self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
                     unread.extend_from_slice(&written.answers);
                     marks.extend(written.marks);
-                    rows_pushed =
-                        rows_pushed.zip(written.rows_pushed).map(|(rows, more)| rows + more);
+                    pushed = pushed.then(written.pushed);
                 },
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {},
@@ -742,10 +741,7 @@ impl Thread {
         self.dirty = true;
         let scrollback = self.screen.scrollback();
         for watcher in &mut self.watchers {
-            if watcher.back > 0 {
-                let back = rows_pushed.map_or(scrollback, |rows| watcher.back + rows);
-                watcher.back = back.min(scrollback);
-            }
+            watcher.back = pushed.moved(watcher.back, scrollback);
         }
         self.synced = match (self.screen.syncs(), self.synced) {
             (true, None) => Some(Instant::now()),

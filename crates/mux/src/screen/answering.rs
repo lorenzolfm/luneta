@@ -20,7 +20,8 @@ pub(super) struct Answering {
 impl Answering {
     pub(super) fn new(size: Size, scrollback_bytes: usize) -> Result<Answering, Error> {
         assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
-        let mut terminal = Terminal::new(size.columns.get(), size.rows.get())?;
+        let (columns, rows) = size.get();
+        let mut terminal = Terminal::new(columns, rows)?;
         terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
         assert_eq!(terminal.scrollback_max_bytes()?, Some(scrollback_bytes));
         let answers = Rc::new(RefCell::new(Vec::new()));
