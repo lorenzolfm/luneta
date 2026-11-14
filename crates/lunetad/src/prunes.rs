@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use luneta_protocol::github::State;
 
+use crate::api::session::Mux;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
+use crate::mux::OwnKey;
 use crate::program;
 use crate::seats::{self, UnreadSeat};
 
@@ -173,12 +175,29 @@ impl Occupied {
                 .to_owned());
         }
         seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
-        let in_no_pane = |file: &&api::UnreadFile| UnreadSeat::of(file) == UnreadSeat::NoPane;
-        if let Some(file) = host.unread_files.iter().find(in_no_pane) {
+        let listed = |key: OwnKey| {
+            host.sessions.iter().any(|session| match &session.mux {
+                Some(Mux::Own(own)) => OwnKey::of(own).is_ok_and(|listed| listed == key),
+                Some(Mux::Zellij(_)) | None => false,
+            })
+        };
+        for file in &host.unread_files {
             let pid = file.pid;
-            return Err(format!(
-                "lunetad cannot read the session file of agent {pid}, which runs in no pane"
-            ));
+            match UnreadSeat::of(file) {
+                UnreadSeat::NoPane => {
+                    return Err(format!(
+                        "lunetad cannot read the session file of agent {pid}, which runs in no \
+                         pane"
+                    ));
+                },
+                UnreadSeat::Own(pane) if !listed(pane.session) => {
+                    return Err(format!(
+                        "lunetad cannot read the session file of agent {pid}, which runs in an \
+                         own session it does not list"
+                    ));
+                },
+                UnreadSeat::Own(_) | UnreadSeat::Zellij { .. } | UnreadSeat::Unplaced => {},
+            }
         }
         let mut panes = Vec::new();
         for session in &host.sessions {
@@ -1049,13 +1068,23 @@ mod tests {
         for unplaced_files in [vec![], vec![file(in_pane(None))]] {
             assert_eq!(Occupied::of(&files(1, unplaced_files)), Err(unplaced.to_owned()));
         }
+        let made_at = Some(prost_types::Timestamp::default());
+        let key = |id| api::OwnSession { id, made_at };
         let own = |pane| {
-            let made_at = Some(prost_types::Timestamp::default());
-            let session = api::OwnSession { id: 3, made_at };
-            api::UnreadFile { own: Some(api::Own { session: Some(session), pane }), ..file(None) }
+            api::UnreadFile { own: Some(api::Own { session: Some(key(3)), pane }), ..file(None) }
         };
-        assert!(Occupied::of(&files(1, vec![own(4)])).is_ok());
-        assert_eq!(Occupied::of(&files(1, vec![own(0)])), Err(unplaced.to_owned()));
+        let in_own = |id, unread_files| {
+            let mux = Some(api::session::Mux::Own(key(id)));
+            let own = api::Session { mux, ..session("work", Some(Vec::new())) };
+            api::Host { sessions: vec![own], ..files(1, unread_files) }
+        };
+        assert!(Occupied::of(&in_own(3, vec![own(4)])).is_ok());
+        let unlisted = "lunetad cannot read the session file of agent 9, which runs in an own \
+                        session it does not list";
+        for host in [files(1, vec![own(4)]), in_own(4, vec![own(4)])] {
+            assert_eq!(Occupied::of(&host), Err(unlisted.to_owned()), "{host:?}");
+        }
+        assert_eq!(Occupied::of(&in_own(3, vec![own(0)])), Err(unplaced.to_owned()));
         assert_eq!(
             Occupied::of(&files(1, vec![file(None)])),
             Err("lunetad cannot read the session file of agent 9, which runs in no pane".to_owned())
