@@ -28,8 +28,9 @@ const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 /// returns, so that what the daemon knows is whole before it answers anyone,
 /// and then from a thread of its own whenever something in `dir` changes at
 /// a path that `wanted` takes, and at least every `sweep` besides, for what
-/// changes without a word to the folder. The thread ends once `tell` says that
-/// no one listens.
+/// changes without a word to the folder. `dir` is watched before that first
+/// read, or what changed after it would wait for the sweep. The thread ends
+/// once `tell` says that no one listens.
 ///
 /// A folder that is not there yet is read on the sweep alone, and watched once
 /// it turns up.
@@ -67,12 +68,13 @@ pub fn watch_ending<T: 'static>(
         ends.hear(&pids(&found));
         found
     };
+    let mut troubles = Troubles::default();
+    let mut watcher = watching(&dir, mode, wanted, &changed, &mut troubles);
+    troubles.done();
     if !tell(read()) {
         return Ok(());
     }
     thread::Builder::new().name(name.to_owned()).spawn(move || {
-        let mut watcher = None;
-        let mut troubles = Troubles::default();
         loop {
             if watcher.is_none() {
                 watcher = watching(&dir, mode, wanted, &changed, &mut troubles);
@@ -292,5 +294,29 @@ mod tests {
         ends.hear(&[]);
         ends.hear(&[pid]);
         heard.recv_timeout(HEARD).expect("no process by that pid has ended");
+    }
+
+    /// What changes in the folder as the first read is told, before `watch`
+    /// returns, is read again long before the sweep, as a session's socket
+    /// made as the daemon starts is.
+    #[test]
+    fn a_change_as_the_first_read_is_told_is_read_before_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_owned();
+        let read = move || fs::read_dir(&path).unwrap().count();
+        let made = dir.path().join("made");
+        let (found, heard) = mpsc::channel();
+        let tell = move |count| {
+            if count == 0 {
+                fs::write(&made, "").unwrap();
+            }
+            found.send(count).is_ok()
+        };
+        let any = |_: &Path| true;
+        let sweep = Duration::from_mins(1);
+        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, sweep, read, tell)
+            .unwrap();
+        assert_eq!(heard.recv_timeout(QUIET), Ok(0));
+        assert_eq!(heard.recv_timeout(HEARD), Ok(1), "read on the sweep alone");
     }
 }
