@@ -1,11 +1,13 @@
-use std::path::Path;
-use std::process::Output;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
-use lunetad::api::{self, RenameSessionRequest};
+use lunetad::api::say::Does;
+use lunetad::api::{self, OwnSpeaker, RenameSessionRequest, UnreadFile};
 use lunetad::mux::own::api as mux_api;
 use lunetad::opens;
 
-use crate::host::{answered, eventually, LUNETA};
+use crate::host::{answered, eventually, Running, LUNETA};
 use crate::own::{own, Owned};
 use crate::sessions::session;
 
@@ -133,6 +135,87 @@ fn a_close_in_an_own_session_closes_the_tab_of_a_pane_and_the_session() {
     let agreed = stderr.split_once("--yes ").unwrap().1.split_whitespace().next().unwrap();
     said(&luneta(&owned, &here, &["close", "work", "--yes", agreed]));
     eventually("work is gone", || owned.host.host().sessions.is_empty().then_some(()));
+}
+
+fn session_file(owned: &Owned, pid: u32) -> PathBuf {
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    sessions.join(format!("{pid}.json"))
+}
+
+#[test]
+fn a_close_in_an_own_session_ends_the_agent_of_a_file_that_does_not_read() {
+    let owned = Owned::new();
+    let made = owned.make("work").unwrap();
+    let work = own(&owned.listed("work")).unwrap();
+    let here = in_pane(work, made.pane);
+    said(&luneta(&owned, &here, &["open", "tab", "--", "sleep", "600"]));
+    let second = panes(&owned, "work", 2)[1];
+    let mut agent = Command::new("sleep");
+    agent.arg("600").env_remove("ZELLIJ_SESSION_NAME").env_remove("ZELLIJ_PANE_ID");
+    let agent = Running::spawn(agent.envs(in_pane(work, second)));
+    fs::write(session_file(&owned, agent.pid()), "{\"pid\":").unwrap();
+    let in_own = api::Own { session: Some(work), pane: second };
+    let file = UnreadFile { pid: agent.pid(), zellij: None, own: Some(in_own) };
+    eventually("the file does not read, in its own pane", || {
+        (owned.host.host().unread_files == [file.clone()]).then_some(())
+    });
+
+    let unread = format!("work:{second}");
+    let first = format!("work:{}", made.pane);
+    for (asked, ends) in [(unread.as_str(), true), ("work", true), (first.as_str(), false)] {
+        let plan = luneta(&owned, &here, &["close", asked]);
+        let stderr = String::from_utf8_lossy(&plan.stderr);
+        assert_eq!(plan.status.code(), Some(PLANNED), "{stderr}");
+        let plan = String::from_utf8(plan.stdout).unwrap();
+        let line = |line: &str| {
+            line.trim_start().starts_with(&format!("{unread} "))
+                && line.ends_with("its session file does not read")
+        };
+        assert_eq!(plan.lines().any(line), ends, "{asked}: {plan}");
+        assert_eq!(plan.contains("1 unknown"), ends, "{asked}: {plan}");
+    }
+    assert_eq!(panes(&owned, "work", 2)[1], second);
+}
+
+#[test]
+fn what_is_said_from_an_own_pane_names_it_and_its_session_now() {
+    let owned = Owned::new();
+    let made = owned.make("work").unwrap();
+    let work = own(&owned.listed("work")).unwrap();
+    let here = in_pane(work, made.pane);
+    let made_nanos = &here[1].1;
+    let asked = format!("{}:{made_nanos}:{}:1:work", work.id, made.pane);
+    let from_the_box = [("LUNETA_OWN_SEAT", asked), ("LUNETA_TURN", "00000000000000aa".to_owned())];
+    let speakers = || {
+        let sayings = owned.host.host().sayings;
+        let does = sayings.into_iter().filter_map(|saying| saying.say?.does);
+        let spoken = does.filter_map(|does| match does {
+            Does::InTurn(utterance) => Some((utterance.text, utterance.own_speaker)),
+            Does::Now(_) | Does::Stop(()) => None,
+        });
+        spoken.collect::<Vec<_>>()
+    };
+    let from = |session: &str| {
+        let pane = Some(api::Own { session: Some(work), pane: made.pane });
+        Some(OwnSpeaker { pane, session: Some(session.to_owned()) })
+    };
+
+    said(&luneta(&owned, &here, &["say", "from the pane"]));
+    said(&luneta(&owned, &from_the_box, &["say", "from the box"]));
+    let request =
+        RenameSessionRequest { on: None, session: "work".to_owned(), to: "play".to_owned() };
+    owned.ask(|mut daemon| async move { daemon.rename_session(request).await }).unwrap();
+    owned.listed("play");
+    said(&luneta(&owned, &here, &["say", "renamed"]));
+    assert_eq!(
+        speakers(),
+        [
+            ("from the pane".to_owned(), from("work")),
+            ("from the box".to_owned(), from("work")),
+            ("renamed".to_owned(), from("play")),
+        ],
+    );
 }
 
 #[test]

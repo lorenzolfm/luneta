@@ -27,7 +27,7 @@ use lunetad::links;
 use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnMade, OwnPane};
 use lunetad::prunes;
-use lunetad::seats::{seated, Where};
+use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
 use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
@@ -724,8 +724,8 @@ struct Seen<'a> {
 }
 
 impl Seen<'_> {
-    fn unread_seats(&self) -> Result<Vec<(&str, u32)>, unread::Unplaced> {
-        unread::seats(self.unread, self.unread_files)
+    fn unread_seats(&self) -> Result<Vec<(Where<'_>, u32)>, unread::Unplaced> {
+        seats::unread(self.unread, self.unread_files)
     }
 }
 
@@ -2187,8 +2187,8 @@ impl Sidebar {
                     let here = on && here_pane.as_ref() == Some(&place);
                     let icon = program.and_then(icons::of);
                     let (machine, session) = (machine.clone(), place.session);
-                    let speaks = aloud.is_some_and(|(on, named, id)| {
-                        *on == machine && named == session.name().as_str() && id == pane.id
+                    let speaks = aloud.is_some_and(|(on, at, id)| {
+                        *on == machine && at == session.at() && id == pane.id
                     });
                     let row = move |bracket| Row::Pane {
                         machine,
@@ -3431,13 +3431,12 @@ impl Sidebar {
         let mut refuge: Option<Listed> = None;
         if let Some(seen) = self.seen(on) {
             if self.away.is_none() {
-                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread| {
+                agents = seen.unread_seats().map_err(Untold::Unplaced).map(|unread_seats| {
                     let seated = seated(seen.agents, seen.sessions);
                     let doing = seated.iter().filter(|((at, _), _)| *at == listed.at());
                     let doing =
                         doing.map(|((_, pane), agent)| (*pane, close::Doing::from(*agent)));
-                    let unread = if listed.own() { Vec::new() } else { unread };
-                    doing.chain(close::unread_in(&unread, session)).collect()
+                    doing.chain(close::unread_in(&unread_seats, listed.at())).collect()
                 });
             }
             let (sessions, _) = oldest_first(seen.sessions);
@@ -9215,7 +9214,7 @@ mod tests {
             let host = sidebar.host.clone().expect("the sidebar has heard the host");
             let session = Some("newer".to_owned());
             let zellij = Zellij { named: "newer".to_owned(), session, pane };
-            let unread_files = vec![UnreadFile { pid: 200, zellij: Some(zellij) }];
+            let unread_files = vec![UnreadFile { pid: 200, zellij: Some(zellij), own: None }];
             sidebar.heard(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
             type_in(&mut sidebar, "d");
@@ -9233,6 +9232,35 @@ mod tests {
             assert!(lines.contains(&note), "{lines:#?}");
             let asked = lines.contains(&"Close the pane? 1 agent, 1 unknown");
             assert_eq!((went == delete_here(act), asked), (!asks, asks), "pane {pane}");
+        }
+    }
+
+    #[test]
+    fn a_delete_of_an_own_session_asks_first_where_a_file_in_it_does_not_read() {
+        let made_at = Some(Timestamp { seconds: 20, nanos: 0 });
+        let own = Some(api::OwnSession { id: 1, made_at });
+        let own = Some(api::Own { session: own, pane: 1 });
+        let in_own = UnreadFile { pid: 200, zellij: None, own };
+        let zellij = Zellij { named: "twin".to_owned(), session: Some("twin".to_owned()), pane: 1 };
+        let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None };
+        let made = OwnMade::of(moment(20_000)).unwrap();
+        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
+        let kill = Act::Kill { session: session_name("twin"), whose };
+        for (file, asks) in [(in_own, true), (in_zellij, false)] {
+            let mut sidebar = fresh();
+            let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
+            let sessions = vec![session("twin", 10, panes()), own_session("twin", 1, 20, panes())];
+            let unread_files = vec![file];
+            sidebar.heard(Host { unread: 1, unread_files, ..host(sessions, Vec::new()) });
+            let own = Listed::new_own("twin", moment(20_000), 1);
+            sidebar.cursor = Some(Spot::Local(Place::Session(own)));
+            sidebar.focus(Keys::Sidebar);
+            type_in(&mut sidebar, "d");
+            let went = sidebar.key(&char('s'), moment(160_000));
+            let lines = screen(&mut sidebar, true, 60, 16);
+            let question = " Delete session twin? 1 agent, 1 unknown";
+            let asked = lines.iter().any(|line| line.trim_end() == question);
+            assert_eq!((went == delete_here(kill.clone()), asked), (!asks, asks), "{lines:#?}");
         }
     }
 
@@ -10816,6 +10844,7 @@ mod tests {
         assert_eq!(marked(&mut sidebar), [""; 0]);
 
         let speaker = Zellij { named: "old".to_owned(), session: Some("work".to_owned()), pane: 2 };
+        let speaker = lunetad::sayings::Speaker::Zellij(speaker);
         let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
         let text = "the tests pass".to_owned();
         sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));
@@ -10826,6 +10855,27 @@ mod tests {
 
         sidebar.aloud(None);
         assert_eq!(marked(&mut sidebar), [""; 0]);
+    }
+
+    #[test]
+    fn what_is_read_aloud_from_an_own_pane_marks_its_row_alone() {
+        let zellij = vec![pane(1, 0, "/one", "one"), pane(2, 0, "/two", "two")];
+        let own = vec![pane(1, 0, "/uno", "uno"), pane(2, 0, "/dos", "dos")];
+        let sessions = vec![session("work", 100, zellij), own_session("work", 1, 20, own)];
+        let mut sidebar = Sidebar::default();
+        sidebar.heard(host(sessions, Vec::new()));
+        let made = OwnMade::of(moment(20_000)).unwrap();
+        let key = OwnKey { id: OwnId::new(1).unwrap(), made };
+        let pane = OwnPane::new(key, 2).unwrap();
+        let speaker = lunetad::sayings::Speaker::Own { pane, session: Some("work".to_owned()) };
+        let whose = aloud::Whose::Said { on: Machine::Local, speaker: Some(speaker) };
+        let text = "the tests pass".to_owned();
+        sidebar.aloud(Some(aloud::Shown::Reading { whose, text, paused: false }));
+        let shown = screen(&mut sidebar, false, 40, 16);
+        let rows: Vec<_> = shown.into_iter().filter(|row| row.contains(aloud::MARK)).collect();
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert!(rows[0].contains("dos"), "{rows:#?}");
+        assert!(rows[1].contains("work · the tests pass"), "{rows:#?}");
     }
 
     #[test]

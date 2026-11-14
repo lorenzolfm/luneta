@@ -504,6 +504,12 @@ message Say {
 message Utterance {
   string text = 1;
   optional Zellij speaker = 2;
+  optional OwnSpeaker own_speaker = 3;
+}
+
+message OwnSpeaker {
+  Own pane = 1;
+  optional string session = 2;
 }
 
 message SayRequest {
@@ -731,6 +737,7 @@ message ListAgentsResponse {
 message UnreadFile {
   uint32 pid = 1;
   Zellij zellij = 2;
+  Own own = 3;
 }
 
 message Agent {

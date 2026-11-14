@@ -391,8 +391,9 @@ fn a_file_that_does_not_read_is_counted_at_once_where_its_process_runs() {
     }
     let _daemon = start(host.vars()).unwrap();
     let listed = host.list();
-    let in_work = UnreadFile { pid: inside.pid(), zellij: Some(zellij("work", Some("work"), 3)) };
-    let mut files = vec![in_work, UnreadFile { pid: outside.pid(), zellij: None }];
+    let in_work = Some(zellij("work", Some("work"), 3));
+    let in_work = UnreadFile { pid: inside.pid(), zellij: in_work, own: None };
+    let mut files = vec![in_work, UnreadFile { pid: outside.pid(), zellij: None, own: None }];
     files.sort_by_key(|file| file.pid);
     assert_eq!((listed.unread, listed.unread_files), (2, files));
 

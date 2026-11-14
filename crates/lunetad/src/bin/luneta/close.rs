@@ -5,6 +5,7 @@ use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 use lunetad::closes::Whose;
 use lunetad::mux::TabId;
+use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};
@@ -81,10 +82,11 @@ impl fmt::Display for Untold {
 }
 
 pub fn unread_in<'a>(
-    unread: &'a [(&str, u32)],
-    session: &'a str,
+    unread_seats: &'a [(Where<'_>, u32)],
+    session: Where<'a>,
 ) -> impl Iterator<Item = (u32, Doing)> + 'a {
-    unread.iter().filter(move |(at, _)| *at == session).map(|(_, pane)| (*pane, Doing::Unknown))
+    let in_session = unread_seats.iter().filter(move |(at, _)| *at == session);
+    in_session.map(|(_, pane)| (*pane, Doing::Unknown))
 }
 
 #[derive(Debug)]

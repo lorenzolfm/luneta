@@ -14,6 +14,7 @@ use lunetad::mux::own::server::{self, Listing, Mover, Place};
 use lunetad::mux::{self, Client, OwnKey, OwnPane, PaneId, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
+use lunetad::seats::{self, UnreadSeat, Where};
 use lunetad::turns::{self, IntoPanes};
 use lunetad::Directory;
 
@@ -687,8 +688,9 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let known = match &listed {
         Err(_) => Err(Untold::Away),
         Ok(listed) => {
-            let seats = listed.unread_seats().map_err(Untold::Unplaced);
-            seats.map(|unread| Told { agents: &placed, unread })
+            let seats = seats::unread(listed.unread, &listed.unread_files);
+            let seats = seats.map_err(Untold::Unplaced);
+            seats.map(|unread_seats| Told { agents: &placed, unread_seats })
         },
     };
     let here = match seat(agents, &running) {
@@ -798,7 +800,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
 
 struct Told<'a> {
     agents: &'a [Placed<'a>],
-    unread: Vec<(&'a str, u32)>,
+    unread_seats: Vec<(Where<'a>, u32)>,
 }
 
 fn plans_in(
@@ -826,10 +828,14 @@ fn plans_in(
     let in_session = |placed: &Placed| {
         placed.spot.pane_in(session, whose).map(|pane| (pane, Doing::from(placed.agent)))
     };
+    let at = match whose {
+        Whose::Zellij(_) => Where::Zellij(session),
+        Whose::Own(key) => Where::Own(key),
+    };
     let agents: Result<Vec<_>, Untold> = match told {
-        Ok(Told { agents, unread }) => {
+        Ok(Told { agents, unread_seats }) => {
             let agents = agents.iter().filter_map(in_session);
-            Ok(agents.chain(close::unread_in(unread, session)).collect())
+            Ok(agents.chain(close::unread_in(unread_seats, at)).collect())
         },
         Err(untold) => Err(*untold),
     };
@@ -880,6 +886,14 @@ impl<'a> Spot<'a> {
         match zellij.and_then(|zellij| Some((zellij.session.as_deref()?, zellij.pane))) {
             Some((session, pane)) => Spot::Zellij { session, pane },
             None => Spot::Unplaced,
+        }
+    }
+
+    fn unread(file: &'a UnreadFile) -> Self {
+        match UnreadSeat::of(file) {
+            UnreadSeat::Zellij { session, pane } => Spot::Zellij { session, pane },
+            UnreadSeat::Own(pane) => Spot::Own(pane),
+            UnreadSeat::NoPane | UnreadSeat::Unplaced => Spot::Unplaced,
         }
     }
 
@@ -935,9 +949,15 @@ fn ending(
         .collect();
     let unread: Vec<Ends<UnreadFile>> = unread
         .iter()
-        .map(|file| (file, Spot::zellij(file.zellij.as_ref())))
+        .map(|file| (file, Spot::unread(file)))
         .filter(|(_, spot)| ends(*spot))
-        .map(|(file, spot)| (commands::seat(file.zellij.as_ref()), file, spot))
+        .map(|(file, spot)| {
+            let seat = match spot {
+                Spot::Own(pane) => commands::own_seat(pane, &running.own),
+                Spot::Zellij { .. } | Spot::Unplaced => commands::seat(file.zellij.as_ref()),
+            };
+            (seat, file, spot)
+        })
         .collect();
     let seats = agents.iter().map(|(seat, ..)| seat).chain(unread.iter().map(|(seat, ..)| seat));
     let width = seats.map(String::len).max().unwrap_or(0);
