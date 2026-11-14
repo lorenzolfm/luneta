@@ -71,8 +71,19 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-#[expect(unsafe_code, reason = "a file lunetad was handed by its number has no safe close")]
+#[expect(
+    unsafe_code,
+    reason = "a file lunetad was handed by its number has no safe close. It is sound here: \
+              lunetad has no thread but this one yet, as asserted, and the listing that named \
+              each file is still open, so that nothing has closed one since. One without \
+              close-on-exec came through the exec, as std opens all of its own with it, so \
+              that nothing of lunetad's holds it, to use it once it is closed"
+)]
 fn close_inherited() -> io::Result<()> {
+    if cfg!(target_os = "linux") {
+        let threads = fs::read_dir("/proc/self/task")?.count();
+        assert_eq!(threads, 1, "lunetad closes what it was handed only while it has one thread");
+    }
     let open = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
     let mut listing = fs::read_dir(open)?;
     let mut fds: Vec<RawFd> = Vec::new();

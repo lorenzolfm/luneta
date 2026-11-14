@@ -147,7 +147,13 @@ pub fn device_of(terminal: impl AsFd) -> rustix::io::Result<u64> {
     Ok(u64::from(rustix::fs::fstat(terminal)?.st_rdev.cast_unsigned()))
 }
 
-#[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
+#[expect(
+    unsafe_code,
+    reason = "std has no safe way to start a command in a session of its own. The closure runs \
+              in the child, between its fork and its exec, where only what a signal handler may \
+              do is safe: `setsid`, the ioctl and `setrlimit` are system calls alone, and their \
+              errors hold no memory. Stdin is open there, as std set it up before the closure"
+)]
 fn leads(command: &mut Command) -> &mut Command {
     let files = FILES_FOUND.get().copied();
     unsafe {

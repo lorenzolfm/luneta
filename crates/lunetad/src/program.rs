@@ -192,7 +192,12 @@ fn kill(child: &mut Child, kills: Kills) -> io::Result<()> {
     }
 }
 
-#[expect(unsafe_code, reason = "std has no safe way to start a command in a session of its own")]
+#[expect(
+    unsafe_code,
+    reason = "std has no safe way to start a command in a session of its own. The closure runs \
+              in the child, between its fork and its exec, where only what a signal handler may \
+              do is safe: `setsid` is a system call alone, and its error holds no memory"
+)]
 pub fn alone(command: &mut Command) -> &mut Command {
     unsafe {
         command.pre_exec(|| process::setsid().map(|_| ()).map_err(io::Error::from));

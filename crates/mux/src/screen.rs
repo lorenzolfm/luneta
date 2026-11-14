@@ -325,7 +325,12 @@ impl Screen {
         let shown = Selection::new(corner(0, 0)?, corner(last.0, last.1)?, false);
         let mut formatter = Formatter::new(terminal)?;
         formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
-        #[expect(unsafe_code, reason = "a formatter takes a range only as a selection, unchecked")]
+        #[expect(
+            unsafe_code,
+            reason = "a formatter takes a range only as a selection, unchecked. Both corners are \
+                      of `terminal`'s active screen, taken from it just now, and the formatter \
+                      borrows it as they do"
+        )]
         unsafe { formatter.set_selection(Some(&shown)) }?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
