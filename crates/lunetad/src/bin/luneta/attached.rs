@@ -76,7 +76,11 @@ impl View {
                 self.went = Some(*went);
             },
             Heard::Frame(frame) => self.framed(frame)?,
-            Heard::Stayed(_) | Heard::Ended | Heard::Lost(_) => {},
+            Heard::Layout(_)
+            | Heard::Stayed(_)
+            | Heard::Refused(_)
+            | Heard::Ended
+            | Heard::Lost(_) => {},
         }
         Ok(())
     }

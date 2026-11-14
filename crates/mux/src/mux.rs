@@ -7,9 +7,13 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Ends, Hello, Is, Name, Opens, Place, SessionName, Size, Who};
+use crate::asked::{
+    Act, At, Colours, Ends, FocusTo, Hello, Is, MoveTo, Name, Opening, Opens, Place, Runs,
+    SessionName, Size, TurnTo, Who,
+};
 use crate::id::{ClientId, PaneId, SessionId, TabId};
-use crate::pane::{self, Busy, Exit, Handle, Out, ToPane, Viewer};
+use crate::layout::{Direction, Rect, Removed, Towards, Tree};
+use crate::pane::{self, Exit, Handle, Out, Viewer, Wanted};
 use crate::pty::{self, Pty};
 
 const FIRST_SIZE: Size = Size {
@@ -21,7 +25,13 @@ pub const SESSIONS_MAX: usize = 256;
 
 pub const TABS_MAX: usize = 1024;
 
+pub const PANES_MAX: usize = 1024;
+
 pub const CLIENTS_MAX: usize = 256;
+
+const _: () = assert!(TABS_MAX <= PANES_MAX);
+
+pub type Layouts = watch::Receiver<Option<api::Layout>>;
 
 pub struct Mux {
     model: Mutex<Model>,
@@ -67,14 +77,19 @@ enum Closed {
 struct Tab {
     id: TabId,
     name: Name,
-    ends: Ends,
-    pane: Pane,
+    tree: Tree,
+    panes: Vec<Pane>,
+    focused: PaneId,
+    fullscreen: Option<PaneId>,
+    size: Size,
 }
 
 struct Pane {
     id: PaneId,
+    name: Option<Name>,
     title: String,
     cwd: PathBuf,
+    ends: Ends,
     program: Program,
     handle: Handle,
 }
@@ -89,6 +104,7 @@ struct Seat {
     size: Size,
     colours: Colours,
     out: Out,
+    layout: watch::Sender<Option<api::Layout>>,
     came: u64,
     _gone: oneshot::Sender<()>,
 }
@@ -122,6 +138,7 @@ impl Mux {
         if model.ended {
             assert!(model.sessions.is_empty(), "the server ended with a session");
         }
+        model.settle();
         let listing = (!model.ended).then(|| model.listing());
         self.listing.send_if_modified(|said| {
             let modified = *said != listing;
@@ -142,8 +159,8 @@ impl Mux {
             refuse_if_full(model.sessions.len(), SESSIONS_MAX, "sessions")?;
             let session = SessionId::next(&mut model.last.session);
             let made = SystemTime::now();
-            let tab = model.tab(self, (session, made), Name::numbered(1), opens)?;
-            let ids = (session, made, tab.id, tab.pane.id);
+            let tab = model.tab(self, (session, made), Name::numbered(1), opens, FIRST_SIZE)?;
+            let ids = (session, made, tab.id, tab.focused);
             let tabs = Tabs::one(tab);
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
             Ok(ids)
@@ -157,16 +174,20 @@ impl Mux {
         opens: &Opens,
     ) -> Result<(TabId, PaneId), Status> {
         self.change(|model| {
-            let (place, made) = {
+            let (place, made, size) = {
                 let session = model.session(session)?;
-                (session.tabs.len() + 1, session.made)
+                (session.tabs.len() + 1, session.made, session.tabs.current().size)
             };
             let name = name.unwrap_or_else(|| Name::numbered(place));
-            let tab = model.tab(self, (session, made), name, opens)?;
-            let ids = (tab.id, tab.pane.id);
+            let tab = model.tab(self, (session, made), name, opens, size)?;
+            let ids = (tab.id, tab.focused);
             model.session_mut(session)?.tabs.push(tab);
             Ok(ids)
         })
+    }
+
+    pub fn new_pane(self: &Arc<Mux>, at: At, opens: &Opens) -> Result<PaneId, Status> {
+        self.change(|model| model.new_pane(self, at, opens))
     }
 
     pub fn close_tab(&self, tab: TabId) -> Result<(), Status> {
@@ -175,6 +196,18 @@ impl Mux {
             model.close(session, tab);
             Ok(())
         })
+    }
+
+    pub fn close_pane(&self, pane: PaneId) -> Result<(), Status> {
+        self.change(|model| {
+            model.pane_at(pane)?;
+            model.close_pane(pane);
+            Ok(())
+        })
+    }
+
+    pub fn turn(&self, pane: PaneId, to: TurnTo) -> Result<TabId, Status> {
+        self.change(|model| model.turn(pane, to))
     }
 
     pub fn kill(&self, session: SessionId) -> Result<(), Status> {
@@ -205,8 +238,12 @@ impl Mux {
         })
     }
 
+    pub fn act(self: &Arc<Mux>, client: ClientId, act: Act) -> Result<(), Status> {
+        self.change(|model| model.act(self, client, act))
+    }
+
     pub fn pane(&self, pane: PaneId) -> Result<Handle, Status> {
-        Ok(self.lock().pane_at(pane)?.1.pane.handle.clone())
+        Ok(self.lock().pane(pane)?.handle.clone())
     }
 
     pub fn listing(&self) -> api::Listing {
@@ -218,7 +255,7 @@ impl Mux {
         hello: Hello,
         out: Out,
         gone: oneshot::Sender<()>,
-    ) -> Result<ClientId, Status> {
+    ) -> Result<(ClientId, Layouts), Status> {
         self.change(|model| {
             refuse_if_full(model.clients.len(), CLIENTS_MAX, "clients")?;
             let pane = model.pane_of_place(hello.to)?;
@@ -230,13 +267,14 @@ impl Mux {
             };
             out.try_send(Ok(attached)).expect("a new client's stream has room for its first word");
             let (size, colours) = (hello.size, hello.colours);
-            let seat = Seat { pane, size, colours, out, came: 0, _gone: gone };
+            let (layout, layouts) = watch::channel(None);
+            let seat = Seat { pane, size, colours, out, layout, came: 0, _gone: gone };
             model.clients.insert(client, seat);
             if let Err(refusal) = model.seat_on(client, pane) {
                 model.drop_client(client);
                 return Err(refusal);
             }
-            Ok(client)
+            Ok((client, layouts))
         })
     }
 
@@ -247,31 +285,25 @@ impl Mux {
     pub fn input(&self, client: ClientId, types: bool) -> Option<Handle> {
         let mut model = self.lock();
         let pane = model.clients.get(&client)?.pane;
-        let (session, tab) = model.pane_at(pane).expect("a client is on a pane of the model");
-        let (session, handle) = (session.id, tab.pane.handle.clone());
+        let (session, _) = model.pane_at(pane).expect("a client is on a pane of the model");
+        let session = session.id;
+        let handle = model.pane(pane).expect("a client is on a pane of the model").handle.clone();
         if types {
             model.session_mut(session).expect("a pane's session").last_typed = Some(client);
         }
         Some(handle)
     }
 
-    pub fn resize(&self, client: ClientId, size: Size) -> Option<Handle> {
+    pub fn resize(&self, client: ClientId, size: Size) {
         self.change(|model| {
-            let seat = model.clients.get_mut(&client)?;
-            seat.size = size;
-            let pane = seat.pane;
-            let (_, tab) = model.pane_at(pane).expect("a client is on a pane of the model");
-            Some(tab.pane.handle.clone())
-        })
+            if let Some(seat) = model.clients.get_mut(&client) {
+                seat.size = size;
+            }
+        });
     }
 
     pub fn lost(&self, pane: PaneId) {
-        self.change(|model| {
-            if let Ok((session, tab)) = model.pane_at(pane) {
-                let (session, tab) = (session.id, tab.id);
-                model.close(session, tab);
-            }
-        });
+        self.change(|model| model.close_pane(pane));
     }
 
     pub fn titled(&self, pane: PaneId, title: String, cwd: Option<PathBuf>) {
@@ -297,22 +329,15 @@ impl Mux {
 
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
         self.change(|model| {
-            let Ok((session, tab)) = model.pane_at(pane) else {
+            let Some(found) = model.pane_mut(pane) else {
                 return true;
             };
-            let (session, tab, ends) = (session.id, tab.id, tab.ends);
-            match ends {
-                Ends::Closes => {
-                    model.close(session, tab);
-                    true
-                },
-                Ends::Holds => {
-                    if let Some(pane) = model.pane_mut(pane) {
-                        pane.program = Program::Ended(exit);
-                    }
-                    false
-                },
+            if found.ends == Ends::Holds {
+                found.program = Program::Ended(exit);
+                return false;
             }
+            model.close_pane(pane);
+            true
         })
     }
 }
@@ -336,46 +361,247 @@ impl Model {
         Ok(())
     }
 
+    fn refuse_if_no_room_for_a_pane(&self) -> Result<(), Status> {
+        let panes = self.tabs().map(|(_, tab)| tab.panes.len()).sum();
+        refuse_if_full(panes, PANES_MAX, "panes")
+    }
+
+    fn tabs(&self) -> impl Iterator<Item = (&Session, &Tab)> {
+        self.sessions.iter().flat_map(|session| session.tabs.iter().map(move |tab| (session, tab)))
+    }
+
     fn tab(
         &mut self,
         mux: &Arc<Mux>,
-        (session, made): (SessionId, SystemTime),
+        session: (SessionId, SystemTime),
         name: Name,
         opens: &Opens,
+        size: Size,
     ) -> Result<Tab, Status> {
         let tabs = self.sessions.iter().map(|session| session.tabs.len()).sum();
         refuse_if_full(tabs, TABS_MAX, "tabs")?;
-        let made = made.duration_since(UNIX_EPOCH).ok();
-        let made = made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
-            Status::failed_precondition("the clock says a time before 1970, or after 2554")
-        })?;
-        let (tab, pane) = (TabId::next(&mut self.last.tab), PaneId::next(&mut self.last.pane));
-        let failed =
-            |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
-        let pty =
-            Pty::opened(FIRST_SIZE).map_err(|error| failed("no pseudoterminal opened", error))?;
-        let vars = [
-            (pty::SESSION_VAR, session.to_string()),
-            (pty::MADE_VAR, made.to_string()),
-            (pty::PANE_VAR, pane.to_string()),
-        ];
-        let child = pty.spawned(opens, &vars).map_err(|error| {
-            Status::failed_precondition(format!("opens did not start: {error}"))
-        })?;
-        let started = pane::start(Arc::clone(mux), pane, pty, child, FIRST_SIZE)
-            .map_err(|error| failed("the pane did not start", error))?;
-        Ok(Tab {
-            id: tab,
-            name,
-            ends: opens.ends,
-            pane: Pane {
-                id: pane,
-                title: String::new(),
-                cwd: opens.cwd.clone(),
-                program: Program::Runs { pid: started.pid, foreground: None, ran: None },
-                handle: started.handle,
+        self.refuse_if_no_room_for_a_pane()?;
+        let tab = TabId::next(&mut self.last.tab);
+        let id = PaneId::next(&mut self.last.pane);
+        let pane = spawned(mux, session, id, opens, Rect::whole(size).inner())?;
+        Ok(Tab::one(tab, name, pane, size))
+    }
+
+    fn new_pane(&mut self, mux: &Arc<Mux>, at: At, opens: &Opens) -> Result<PaneId, Status> {
+        self.refuse_if_no_room_for_a_pane()?;
+        let (session, tab) = match at {
+            At::Beside { pane, .. } => {
+                let (session, tab) = self.pane_at(pane)?;
+                (session.id, tab.id)
             },
-        })
+            At::Tab(tab) => self.tab_at(tab)?,
+        };
+        let new = PaneId::next(&mut self.last.pane);
+        let found = self.tab_ref(tab);
+        let tree = match at {
+            At::Beside { pane, towards } => grown(&found.tree, found.size, pane, towards, new),
+            At::Tab(_) => {
+                let (pane, towards) = found.tree.largest(found.size);
+                grown(&found.tree, found.size, pane, towards, new)
+                    .or_else(|| grown(&found.tree, found.size, pane, towards.across(), new))
+            },
+        };
+        let tree = tree.ok_or_else(|| {
+            Status::failed_precondition(format!("tab {tab} has no room for another pane"))
+        })?;
+        let size = tree
+            .rects(found.size)
+            .into_iter()
+            .find_map(|(pane, rect)| (pane == new).then(|| rect.inner()))
+            .expect("the new pane is laid out in its tab");
+        let made = self.session(session).expect("a tab's session is the model's").made;
+        let pane = spawned(mux, (session, made), new, opens, size)?;
+        let found = self.tab_mut(tab);
+        found.tree = tree;
+        found.panes.push(pane);
+        found.fullscreen = None;
+        Ok(new)
+    }
+
+    fn act(&mut self, mux: &Arc<Mux>, client: ClientId, act: Act) -> Result<(), Status> {
+        let pane = self.seat(client)?.pane;
+        let (session, tab) = self.pane_at(pane).expect("a client is on a pane of the model");
+        let (session, tab) = (session.id, tab.id);
+        match act {
+            Act::Open(opening) => {
+                let at = match opening {
+                    Opening::Largest => At::Tab(tab),
+                    Opening::Beside(towards) => At::Beside { pane, towards },
+                };
+                let cwd = self.pane(pane).expect("a client's pane").cwd.clone();
+                let opens = Opens { cwd, runs: Runs::Shell, ends: Ends::Closes };
+                let new = self.new_pane(mux, at, &opens)?;
+                self.seat_on(client, new)
+            },
+            Act::ClosePane => {
+                self.close_pane(pane);
+                Ok(())
+            },
+            Act::Focus(to) => self.focus(client, (session, tab, pane), to),
+            Act::Resize { change, towards } => {
+                let found = self.tab_mut(tab);
+                let directions = towards.map_or(Direction::ALL.to_vec(), |towards| vec![towards]);
+                for direction in directions {
+                    found.tree.resize(found.size, pane, direction, change);
+                }
+                Ok(())
+            },
+            Act::Move(to) => {
+                let found = self.tab_mut(tab);
+                let other = match to {
+                    MoveTo::Towards(direction) => found.tree.neighbour(found.size, pane, direction),
+                    MoveTo::Order { forward } => found.tree.beside(pane, forward),
+                };
+                if let Some(other) = other {
+                    found.tree.swap(pane, other);
+                }
+                Ok(())
+            },
+            Act::Fullscreen => {
+                let found = self.tab_mut(tab);
+                found.fullscreen = match found.fullscreen {
+                    Some(full) if full == pane => None,
+                    _ if found.panes.len() > 1 => Some(pane),
+                    _ => None,
+                };
+                if found.fullscreen.is_none() {
+                    return Ok(());
+                }
+                let found = self.tab_ref(tab);
+                for other in self.seated_on(|seat| seat != pane && found.holds(seat)) {
+                    if self.seat_on(other, pane).is_err() {
+                        self.drop_client(other);
+                    }
+                }
+                Ok(())
+            },
+            Act::NamePane(name) => {
+                self.pane_mut(pane).expect("a client's pane").name = name;
+                Ok(())
+            },
+            Act::NameTab(name) => {
+                self.tab_mut(tab).name = name;
+                Ok(())
+            },
+            Act::MoveTab { forward } => {
+                self.session_mut(session).expect("a tab's session").tabs.shift(tab, forward);
+                Ok(())
+            },
+            Act::Turn(to) => self.turn(pane, to).map(drop),
+        }
+    }
+
+    fn focus(
+        &mut self,
+        client: ClientId,
+        (session, tab, pane): (SessionId, TabId, PaneId),
+        to: FocusTo,
+    ) -> Result<(), Status> {
+        let found = self.tab_ref(tab);
+        let next = match to {
+            FocusTo::Towards(direction) => found.tree.neighbour(found.size, pane, direction),
+            FocusTo::Order { forward } => found.tree.beside(pane, forward),
+            FocusTo::TowardsOrTab { forward } => {
+                let direction = if forward { Direction::Right } else { Direction::Left };
+                found.tree.neighbour(found.size, pane, direction).or_else(|| {
+                    let tabs = &self.session(session).expect("a tab's session").tabs;
+                    tabs.beside(tab, forward).map(|tab| tab.focused)
+                })
+            },
+        };
+        match next {
+            Some(next) => self.seat_on(client, next),
+            None => Ok(()),
+        }
+    }
+
+    fn turn(&mut self, pane: PaneId, to: TurnTo) -> Result<TabId, Status> {
+        let (session, from) = self.pane_at(pane)?;
+        let (session, from, alone) = (session.id, from.id, from.panes.len() == 1);
+        let placed = match to {
+            TurnTo::NewTab(name) => {
+                if alone {
+                    return Err(Status::failed_precondition(format!(
+                        "pane {pane} is alone in its tab"
+                    )));
+                }
+                let tabs = self.sessions.iter().map(|session| session.tabs.len()).sum();
+                refuse_if_full(tabs, TABS_MAX, "tabs")?;
+                let size = self.tab_ref(from).size;
+                let moved = self.unhooked(session, from, pane);
+                let id = TabId::next(&mut self.last.tab);
+                let tabs = &mut self.session_mut(session).expect("a tab's session").tabs;
+                let name = name.unwrap_or_else(|| Name::numbered(tabs.len() + 1));
+                tabs.push(Tab::one(id, name, moved, size));
+                id
+            },
+            TurnTo::Tab(to) => {
+                let (into, _) = self.tab_at(to)?;
+                if into != session {
+                    let refused = format!("tab {to} is in a session other than pane {pane}'s");
+                    return Err(Status::failed_precondition(refused));
+                }
+                if to == from {
+                    return Err(Status::failed_precondition(format!(
+                        "pane {pane} is in tab {to} already"
+                    )));
+                }
+                let found = self.tab_ref(to);
+                let (beside, towards) = found.tree.largest(found.size);
+                let tree = grown(&found.tree, found.size, beside, towards, pane)
+                    .or_else(|| grown(&found.tree, found.size, beside, towards.across(), pane))
+                    .ok_or_else(|| {
+                        Status::failed_precondition(format!(
+                            "tab {to} has no room for another pane"
+                        ))
+                    })?;
+                let moved = self.unhooked(session, from, pane);
+                let found = self.tab_mut(to);
+                found.tree = tree;
+                found.panes.push(moved);
+                found.fullscreen = None;
+                to
+            },
+        };
+        let following: Vec<ClientId> = self.seated_on(|seat| seat == pane);
+        for client in following {
+            if self.seat_on(client, pane).is_err() {
+                self.drop_client(client);
+            }
+        }
+        Ok(placed)
+    }
+
+    fn unhooked(&mut self, session: SessionId, tab: TabId, pane: PaneId) -> Pane {
+        let found = self.tab_mut(tab);
+        match found.tree.remove(pane) {
+            Removed::Absent => unreachable!("pane {pane} is in tab {tab}"),
+            Removed::Last => {
+                let tabs = &mut self.session_mut(session).expect("a tab's session").tabs;
+                let Closed::Out { tab, .. } = tabs.close(tab) else {
+                    unreachable!("a pane leaves a lone tab only for another tab of its session");
+                };
+                let mut panes = tab.panes;
+                assert_eq!(panes.len(), 1, "a tab of one pane in its tree holds only it");
+                panes.pop().expect("a lone tab's pane")
+            },
+            Removed::Out { heir } => {
+                let place = found.panes.iter().position(|found| found.id == pane);
+                let moved = found.panes.remove(place.expect("a tab holds the panes of its tree"));
+                if found.focused == pane {
+                    found.focused = heir;
+                }
+                if found.fullscreen == Some(pane) {
+                    found.fullscreen = None;
+                }
+                moved
+            },
+        }
     }
 
     fn session(&self, session: SessionId) -> Result<&Session, Status> {
@@ -392,41 +618,55 @@ impl Model {
             .ok_or_else(|| Status::not_found(format!("no session {session}")))
     }
 
-    fn tab_at(&self, tab: TabId) -> Result<(SessionId, &Tab), Status> {
-        self.sessions
-            .iter()
-            .find_map(|session| {
-                session.tabs.iter().find(|found| found.id == tab).map(|found| (session.id, found))
-            })
+    fn tab_at(&self, tab: TabId) -> Result<(SessionId, TabId), Status> {
+        self.tabs()
+            .find(|(_, found)| found.id == tab)
+            .map(|(session, _)| (session.id, tab))
             .ok_or_else(|| Status::not_found(format!("no tab {tab}")))
     }
 
+    fn tab_ref(&self, tab: TabId) -> &Tab {
+        let found = self.tabs().find(|(_, found)| found.id == tab);
+        found.expect("a tab found before is the model's").1
+    }
+
+    fn tab_mut(&mut self, tab: TabId) -> &mut Tab {
+        let mut tabs = self.sessions.iter_mut().flat_map(|session| session.tabs.iter_mut());
+        tabs.find(|found| found.id == tab).expect("a tab found before is the model's")
+    }
+
     fn pane_at(&self, pane: PaneId) -> Result<(&Session, &Tab), Status> {
-        self.sessions
-            .iter()
-            .find_map(|session| {
-                session.tabs.iter().find(|tab| tab.pane.id == pane).map(|tab| (session, tab))
-            })
+        self.tabs()
+            .find(|(_, tab)| tab.holds(pane))
             .ok_or_else(|| Status::not_found(format!("no pane {pane}")))
+    }
+
+    fn pane(&self, pane: PaneId) -> Result<&Pane, Status> {
+        Ok(self.pane_at(pane)?.1.pane(pane))
     }
 
     fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Pane> {
         self.sessions
             .iter_mut()
             .flat_map(|session| session.tabs.iter_mut())
-            .map(|tab| &mut tab.pane)
+            .flat_map(|tab| tab.panes.iter_mut())
             .find(|found| found.id == pane)
     }
 
     fn pane_of_place(&self, place: Place) -> Result<PaneId, Status> {
         let (session, pane) = match place.is {
+            Is::Pane(pane) => {
+                let (session, _) = self.pane_at(pane)?;
+                (session, pane)
+            },
             Is::Tab(tab) => {
                 let (session, tab) = self.tab_at(tab)?;
-                (self.session(session).expect("a tab's session is the model's"), tab.pane.id)
+                let session = self.session(session).expect("a tab's session is the model's");
+                (session, self.tab_ref(tab).focused)
             },
             Is::Session(session) => {
                 let session = self.session(session)?;
-                (session, session.tabs.current().pane.id)
+                (session, session.tabs.current().focused)
             },
         };
         if place.made != session.made {
@@ -439,12 +679,16 @@ impl Model {
         self.clients.get(&client).ok_or_else(|| Status::not_found(format!("no client {client}")))
     }
 
+    fn seated_on(&self, on: impl Fn(PaneId) -> bool) -> Vec<ClientId> {
+        self.clients.iter().filter(|(_, seat)| on(seat.pane)).map(|(client, _)| *client).collect()
+    }
+
     fn last_typed_in(&self, session: SessionId) -> Result<ClientId, Status> {
         let found = self.session(session)?;
         let on = |client: &ClientId| {
             self.clients
                 .get(client)
-                .is_some_and(|seat| found.tabs.iter().any(|tab| tab.pane.id == seat.pane))
+                .is_some_and(|seat| found.tabs.iter().any(|tab| tab.holds(seat.pane)))
         };
         if let Some(client) = found.last_typed.filter(on) {
             return Ok(client);
@@ -467,16 +711,7 @@ impl Model {
 
     fn seat_on(&mut self, client: ClientId, pane: PaneId) -> Result<(), Status> {
         let (session, tab) = self.pane_at(pane).expect("a client is seated on a pane of the model");
-        let (session, tab, to) = (session.id, tab.id, tab.pane.handle.clone());
-        let left = self.clients.get(&client).expect("a seated client is the model's").pane;
-        let from = match self.pane_at(left) {
-            Ok((_, tab)) if left != pane => Some(tab.pane.handle.clone()),
-            _ => None,
-        };
-        let busy =
-            |pane: PaneId| move |_: Busy| Status::unavailable(format!("pane {pane} is busy"));
-        let unwatch = from.map(|from| from.reserve().map_err(busy(left))).transpose()?.flatten();
-        let watch = to.reserve().map_err(busy(pane))?;
+        let (session, tab) = (session.id, tab.id);
         self.last.came += 1;
         let came = self.last.came;
         let seat = self.clients.get_mut(&client).expect("a seated client is the model's");
@@ -493,26 +728,46 @@ impl Model {
         }
         seat.pane = pane;
         seat.came = came;
-        let viewer =
-            Viewer { client, out: seat.out.clone(), size: seat.size, colours: seat.colours };
-        if let Some(unwatch) = unwatch {
-            unwatch.send(ToPane::Unwatch(client));
-        }
-        if let Some(watch) = watch {
-            watch.send(ToPane::Watch(viewer));
-        }
         self.session_mut(session).expect("a pane's session").tabs.make_current(tab);
+        let found = self.tab_mut(tab);
+        found.focused = pane;
+        if found.fullscreen.is_some_and(|full| full != pane) {
+            found.fullscreen = None;
+        }
         Ok(())
     }
 
     fn drop_client(&mut self, client: ClientId) {
-        let Some(seat) = self.clients.remove(&client) else {
+        self.clients.remove(&client);
+    }
+
+    fn close_pane(&mut self, pane: PaneId) {
+        let Ok((session, tab)) = self.pane_at(pane) else {
             return;
         };
-        if let Ok((_, tab)) = self.pane_at(seat.pane)
-            && let Ok(Some(unwatch)) = tab.pane.handle.reserve()
-        {
-            unwatch.send(ToPane::Unwatch(client));
+        let (session, tab) = (session.id, tab.id);
+        let found = self.tab_mut(tab);
+        let heir = match found.tree.remove(pane) {
+            Removed::Absent => unreachable!("pane {pane} is in tab {tab}"),
+            Removed::Last => {
+                self.close(session, tab);
+                return;
+            },
+            Removed::Out { heir } => heir,
+        };
+        let place = found.panes.iter().position(|found| found.id == pane);
+        let closed = found.panes.remove(place.expect("a tab holds the panes of its tree"));
+        closed.handle.close();
+        if found.focused == pane {
+            found.focused = heir;
+        }
+        if found.fullscreen == Some(pane) {
+            found.fullscreen = None;
+        }
+        for client in self.seated_on(|seat| seat == pane) {
+            if self.seat_on(client, heir).is_err() {
+                self.drop_client(client);
+            }
         }
     }
 
@@ -528,14 +783,10 @@ impl Model {
             },
             Closed::Out { tab, next } => (tab, next),
         };
-        closed.pane.handle.close();
-        let moved: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(_, seat)| seat.pane == closed.pane.id)
-            .map(|(client, _)| *client)
-            .collect();
-        for client in moved {
+        for pane in &closed.panes {
+            pane.handle.close();
+        }
+        for client in self.seated_on(|seat| closed.holds(seat)) {
             if self.seat_on(client, next_pane).is_err() {
                 self.drop_client(client);
             }
@@ -547,16 +798,10 @@ impl Model {
             return;
         };
         let ended = self.sessions.remove(place);
-        let panes: Vec<PaneId> = ended.tabs.iter().map(|tab| tab.pane.id).collect();
-        for tab in ended.tabs.iter() {
-            tab.pane.handle.close();
+        for pane in ended.tabs.iter().flat_map(|tab| &tab.panes) {
+            pane.handle.close();
         }
-        let gone: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(_, seat)| panes.contains(&seat.pane))
-            .map(|(client, _)| *client)
-            .collect();
+        let gone = self.seated_on(|seat| ended.tabs.iter().any(|tab| tab.holds(seat)));
         for client in gone {
             if let Some(seat) = self.clients.remove(&client) {
                 let word =
@@ -567,6 +812,73 @@ impl Model {
         if self.sessions.is_empty() {
             self.ended = true;
         }
+    }
+
+    fn settle(&mut self) {
+        let clients = &self.clients;
+        for tab in self.sessions.iter_mut().flat_map(|session| session.tabs.iter_mut()) {
+            tab.assert_whole();
+            let seated: Vec<(ClientId, &Seat)> = clients
+                .iter()
+                .filter(|(_, seat)| tab.holds(seat.pane))
+                .map(|(client, seat)| (*client, seat))
+                .collect();
+            if let Some(full) = tab.fullscreen {
+                let off = seated.iter().find(|(_, seat)| seat.pane != full).map(|(id, _)| *id);
+                assert!(off.is_none(), "client {off:?} is off pane {full}, which fills its tab");
+            }
+            if let Some(size) = smallest(seated.iter().map(|(_, seat)| seat.size)) {
+                tab.size = size;
+            }
+            let viewers: Vec<Viewer> = seated
+                .iter()
+                .map(|(client, seat)| Viewer {
+                    client: *client,
+                    out: seat.out.clone(),
+                    colours: seat.colours,
+                    came: seat.came,
+                })
+                .collect();
+            let whole = Rect::whole(tab.size).inner();
+            for (id, rect) in tab.tree.rects(tab.size) {
+                let size = if tab.fullscreen == Some(id) { whole } else { rect.inner() };
+                tab.pane(id).handle.want(Wanted { size, viewers: viewers.clone() });
+            }
+        }
+        for seat in self.clients.values() {
+            let layout = self.layout(seat.pane);
+            seat.layout.send_if_modified(|said| {
+                let modified = *said != layout;
+                *said = layout;
+                modified
+            });
+        }
+    }
+
+    fn layout(&self, pane: PaneId) -> Option<api::Layout> {
+        let (session, tab) = self.pane_at(pane).ok()?;
+        let placed = |(pane, rect): (PaneId, Rect)| {
+            let found = tab.pane(pane);
+            let title = found.name.as_ref().map_or(found.title.as_str(), Name::as_str);
+            api::Placed { pane: pane.said(), rect: Some(rect_said(rect)), title: title.to_owned() }
+        };
+        let panes = match tab.fullscreen {
+            Some(full) => vec![placed((full, Rect::whole(tab.size)))],
+            None => tab.tree.rects(tab.size).into_iter().map(placed).collect(),
+        };
+        let tabs = session.tabs.iter().map(|tab| api::Tabbed {
+            id: tab.id.said(),
+            name: tab.name.as_str().to_owned(),
+        });
+        Some(api::Layout {
+            session: session.id.said(),
+            tab: tab.id.said(),
+            size: Some(tab.size.said()),
+            panes,
+            focused: pane.said(),
+            fullscreen: tab.fullscreen.is_some(),
+            tabs: tabs.collect(),
+        })
     }
 
     fn listing(&self) -> api::Listing {
@@ -581,7 +893,11 @@ impl Model {
     }
 
     fn tab_said(&self, tab: &Tab) -> api::Tab {
-        let pane = &tab.pane;
+        let panes = tab.tree.panes().into_iter().map(|pane| self.pane_said(tab.pane(pane)));
+        api::Tab { id: tab.id.said(), name: tab.name.as_str().to_owned(), panes: panes.collect() }
+    }
+
+    fn pane_said(&self, pane: &Pane) -> api::Pane {
         let mut clients: Vec<(ClientId, &Seat)> = self
             .clients
             .iter()
@@ -596,7 +912,7 @@ impl Model {
             Program::Ended(exit) => (api::pane::Program::Ended(exit.said()), None, None),
         };
         let cwd = pane.cwd.to_str().expect("a pane's cwd was said in UTF-8");
-        let pane = api::Pane {
+        api::Pane {
             id: pane.id.said(),
             title: pane.title.clone(),
             cwd: cwd.to_owned(),
@@ -607,8 +923,42 @@ impl Model {
                 .into_iter()
                 .map(|(id, seat)| api::Client { id: id.said(), size: Some(seat.size.said()) })
                 .collect(),
-        };
-        api::Tab { id: tab.id.said(), name: tab.name.as_str().to_owned(), panes: vec![pane] }
+            name: pane.name.as_ref().map(|name| name.as_str().to_owned()),
+        }
+    }
+}
+
+impl Tab {
+    fn one(id: TabId, name: Name, pane: Pane, size: Size) -> Tab {
+        let focused = pane.id;
+        Tab {
+            id,
+            name,
+            tree: Tree::Pane(focused),
+            panes: vec![pane],
+            focused,
+            fullscreen: None,
+            size,
+        }
+    }
+
+    fn holds(&self, pane: PaneId) -> bool {
+        self.panes.iter().any(|found| found.id == pane)
+    }
+
+    fn assert_whole(&self) {
+        let mut laid = self.tree.panes();
+        let mut held: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
+        laid.sort_unstable();
+        held.sort_unstable();
+        assert_eq!(laid, held, "tab {} lays out the panes it holds", self.id);
+        assert!(self.holds(self.focused), "tab {} focuses a pane of its own", self.id);
+        assert!(self.fullscreen.is_none_or(|full| self.holds(full)));
+    }
+
+    fn pane(&self, pane: PaneId) -> &Pane {
+        let found = self.panes.iter().find(|found| found.id == pane);
+        found.expect("a pane of the tab's tree is the tab's")
     }
 }
 
@@ -637,13 +987,42 @@ impl Tabs {
         self.tabs.push(tab);
     }
 
+    fn place(&self, tab: TabId) -> Option<usize> {
+        self.tabs.iter().position(|found| found.id == tab)
+    }
+
     fn make_current(&mut self, tab: TabId) {
-        let place = self.tabs.iter().position(|found| found.id == tab);
-        self.current = place.expect("a tab of the session is made current");
+        self.current = self.place(tab).expect("a tab of the session is made current");
+    }
+
+    fn beside(&self, tab: TabId, forward: bool) -> Option<&Tab> {
+        let place = self.place(tab)?;
+        let count = self.tabs.len();
+        if count == 1 {
+            return None;
+        }
+        let next = if forward { (place + 1) % count } else { (place + count - 1) % count };
+        Some(&self.tabs[next])
+    }
+
+    fn shift(&mut self, tab: TabId, forward: bool) {
+        let Some(place) = self.place(tab) else {
+            return;
+        };
+        let other = if forward { place.checked_add(1) } else { place.checked_sub(1) };
+        let Some(other) = other.filter(|other| *other < self.tabs.len()) else {
+            return;
+        };
+        self.tabs.swap(place, other);
+        if self.current == place {
+            self.current = other;
+        } else if self.current == other {
+            self.current = place;
+        }
     }
 
     fn close(&mut self, tab: TabId) -> Closed {
-        let Some(place) = self.tabs.iter().position(|found| found.id == tab) else {
+        let Some(place) = self.place(tab) else {
             return Closed::Absent;
         };
         if self.tabs.len() == 1 {
@@ -654,7 +1033,64 @@ impl Tabs {
         if self.current >= place {
             self.current = self.current.saturating_sub(1);
         }
-        Closed::Out { tab: Box::new(tab), next: self.tabs[next].pane.id }
+        Closed::Out { tab: Box::new(tab), next: self.tabs[next].focused }
+    }
+}
+
+fn spawned(
+    mux: &Arc<Mux>,
+    (session, made): (SessionId, SystemTime),
+    pane: PaneId,
+    opens: &Opens,
+    size: Size,
+) -> Result<Pane, Status> {
+    let made = made.duration_since(UNIX_EPOCH).ok();
+    let made = made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
+        Status::failed_precondition("the clock says a time before 1970, or after 2554")
+    })?;
+    let failed =
+        |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
+    let pty = Pty::opened(size).map_err(|error| failed("no pseudoterminal opened", error))?;
+    let vars = [
+        (pty::SESSION_VAR, session.to_string()),
+        (pty::MADE_VAR, made.to_string()),
+        (pty::PANE_VAR, pane.to_string()),
+    ];
+    let child = pty.spawned(opens, &vars).map_err(|error| {
+        Status::failed_precondition(format!("opens did not start: {error}"))
+    })?;
+    let started = pane::start(Arc::clone(mux), pane, pty, child, size)
+        .map_err(|error| failed("the pane did not start", error))?;
+    Ok(Pane {
+        id: pane,
+        name: None,
+        title: String::new(),
+        cwd: opens.cwd.clone(),
+        ends: opens.ends,
+        program: Program::Runs { pid: started.pid, foreground: None, ran: None },
+        handle: started.handle,
+    })
+}
+
+fn grown(tree: &Tree, size: Size, at: PaneId, towards: Towards, new: PaneId) -> Option<Tree> {
+    let mut grown = tree.clone();
+    assert!(grown.split(at, towards, new), "pane {at} is in the tree it splits");
+    grown.fits(size).then_some(grown)
+}
+
+fn smallest(sizes: impl Iterator<Item = Size>) -> Option<Size> {
+    sizes.reduce(|smallest, size| Size {
+        columns: smallest.columns.min(size.columns),
+        rows: smallest.rows.min(size.rows),
+    })
+}
+
+fn rect_said(rect: Rect) -> api::Rect {
+    api::Rect {
+        column: rect.column.into(),
+        row: rect.row.into(),
+        columns: rect.columns.into(),
+        rows: rect.rows.into(),
     }
 }
 

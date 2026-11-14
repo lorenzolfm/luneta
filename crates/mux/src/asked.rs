@@ -8,7 +8,8 @@ use libghostty_vt::mouse;
 use tonic::Status;
 
 use crate::api;
-use crate::id::{ClientId, SessionId, TabId};
+use crate::id::{ClientId, PaneId, SessionId, TabId};
+use crate::layout::{Change, Direction, Towards};
 use crate::screen::{Click, RgbColor, Wheel};
 
 pub const NAME_BYTES_MAX: usize = 255;
@@ -179,6 +180,7 @@ pub struct Place {
 pub enum Is {
     Session(SessionId),
     Tab(TabId),
+    Pane(PaneId),
 }
 
 impl Place {
@@ -189,11 +191,138 @@ impl Place {
                 Is::Session(SessionId::parse(&format!("{field}.session"), session)?)
             },
             api::place::Is::Tab(tab) => Is::Tab(TabId::parse(&format!("{field}.tab"), tab)?),
+            api::place::Is::Pane(pane) => {
+                Is::Pane(PaneId::parse(&format!("{field}.pane"), pane)?)
+            },
         };
         let made_at = format!("{field}.made_at");
         let made = SystemTime::try_from(present(&made_at, place.made_at)?)
             .map_err(|why| refused(&made_at, why))?;
         Ok(Place { is, made })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum At {
+    Beside { pane: PaneId, towards: Towards },
+    Tab(TabId),
+}
+
+impl At {
+    pub fn parse(field: &str, at: Option<api::new_pane_request::At>) -> Result<At, Status> {
+        Ok(match present(field, at)? {
+            api::new_pane_request::At::Beside(api::Beside { pane, towards }) => At::Beside {
+                pane: PaneId::parse(&format!("{field}.beside.pane"), pane)?,
+                towards: towards_heard(&format!("{field}.beside.towards"), towards)?,
+            },
+            api::new_pane_request::At::Tab(tab) => {
+                At::Tab(TabId::parse(&format!("{field}.tab"), tab)?)
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnTo {
+    NewTab(Option<Name>),
+    Tab(TabId),
+}
+
+impl TurnTo {
+    pub fn parse(field: &str, into: Option<api::Into>) -> Result<TurnTo, Status> {
+        let into = present(field, into)?;
+        Ok(match present(&format!("{field}.is"), into.is)? {
+            api::into::Is::NewTab(api::NewTab { name }) => {
+                let field = format!("{field}.new_tab.name");
+                TurnTo::NewTab(name.map(|name| Name::parse(&field, name)).transpose()?)
+            },
+            api::into::Is::Tab(tab) => TurnTo::Tab(TabId::parse(&format!("{field}.tab"), tab)?),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opening {
+    Largest,
+    Beside(Towards),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusTo {
+    Towards(Direction),
+    TowardsOrTab { forward: bool },
+    Order { forward: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveTo {
+    Towards(Direction),
+    Order { forward: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Act {
+    Open(Opening),
+    ClosePane,
+    Focus(FocusTo),
+    Resize { change: Change, towards: Option<Direction> },
+    Move(MoveTo),
+    Fullscreen,
+    NamePane(Option<Name>),
+    NameTab(Name),
+    MoveTab { forward: bool },
+    Turn(TurnTo),
+}
+
+fn towards_heard(field: &str, towards: i32) -> Result<Towards, Status> {
+    match api::Towards::try_from(towards) {
+        Ok(api::Towards::Right) => Ok(Towards::Right),
+        Ok(api::Towards::Down) => Ok(Towards::Down),
+        Ok(api::Towards::Unspecified) | Err(_) => {
+            Err(refused(field, "is not one of RIGHT or DOWN"))
+        },
+    }
+}
+
+fn direction_heard(field: &str, direction: i32) -> Result<Direction, Status> {
+    match api::Direction::try_from(direction) {
+        Ok(api::Direction::Left) => Ok(Direction::Left),
+        Ok(api::Direction::Right) => Ok(Direction::Right),
+        Ok(api::Direction::Up) => Ok(Direction::Up),
+        Ok(api::Direction::Down) => Ok(Direction::Down),
+        Ok(api::Direction::Unspecified) | Err(_) => {
+            Err(refused(field, "is not one of LEFT, RIGHT, UP or DOWN"))
+        },
+    }
+}
+
+fn sideways(field: &str, direction: i32) -> Result<bool, Status> {
+    match direction_heard(field, direction) {
+        Ok(Direction::Left) => Ok(false),
+        Ok(Direction::Right) => Ok(true),
+        Ok(Direction::Up | Direction::Down) | Err(_) => {
+            Err(refused(field, "is not one of LEFT or RIGHT"))
+        },
+    }
+}
+
+fn order_heard(field: &str, order: i32) -> Result<bool, Status> {
+    match api::Order::try_from(order) {
+        Ok(api::Order::Next) => Ok(true),
+        Ok(api::Order::Previous) => Ok(false),
+        Ok(api::Order::Unspecified) | Err(_) => {
+            Err(refused(field, "is not one of NEXT or PREVIOUS"))
+        },
+    }
+}
+
+fn change_heard(field: &str, change: i32) -> Result<Change, Status> {
+    match api::Change::try_from(change) {
+        Ok(api::Change::Grow) => Ok(Change::Grow),
+        Ok(api::Change::Shrink) => Ok(Change::Shrink),
+        Ok(api::Change::Unspecified) | Err(_) => {
+            Err(refused(field, "is not one of GROW or SHRINK"))
+        },
     }
 }
 
@@ -278,6 +407,7 @@ pub enum Heard {
     Input(Input),
     Resize(Size),
     Go(Place),
+    Act(Act),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,6 +465,50 @@ pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
         Event::Scroll(api::Scroll { back }) => Heard::Input(Input::Scroll(back)),
         Event::Resize(size) => Heard::Resize(Size::parse("resize", Some(size))?),
         Event::Go(place) => Heard::Go(Place::parse("go", Some(place))?),
+        Event::Open(open) => Heard::Act(Act::Open(match present("open.at", open.at)? {
+            api::open::At::Largest(api::Largest {}) => Opening::Largest,
+            api::open::At::Beside(towards) => {
+                Opening::Beside(towards_heard("open.beside", towards)?)
+            },
+        })),
+        Event::ClosePane(api::ClosePane {}) => Heard::Act(Act::ClosePane),
+        Event::FocusPane(focus) => Heard::Act(Act::Focus(match present("focus_pane.to", focus.to)? {
+            api::focus_pane::To::Towards(towards) => {
+                FocusTo::Towards(direction_heard("focus_pane.towards", towards)?)
+            },
+            api::focus_pane::To::TowardsOrTab(towards) => FocusTo::TowardsOrTab {
+                forward: sideways("focus_pane.towards_or_tab", towards)?,
+            },
+            api::focus_pane::To::Order(order) => {
+                FocusTo::Order { forward: order_heard("focus_pane.order", order)? }
+            },
+        })),
+        Event::ResizePane(resize) => Heard::Act(Act::Resize {
+            change: change_heard("resize_pane.change", resize.change)?,
+            towards: resize
+                .towards
+                .map(|towards| direction_heard("resize_pane.towards", towards))
+                .transpose()?,
+        }),
+        Event::MovePane(moved) => Heard::Act(Act::Move(match present("move_pane.to", moved.to)? {
+            api::move_pane::To::Towards(towards) => {
+                MoveTo::Towards(direction_heard("move_pane.towards", towards)?)
+            },
+            api::move_pane::To::Order(order) => {
+                MoveTo::Order { forward: order_heard("move_pane.order", order)? }
+            },
+        })),
+        Event::Fullscreen(api::Fullscreen {}) => Heard::Act(Act::Fullscreen),
+        Event::NamePane(api::NamePane { name }) => Heard::Act(Act::NamePane(
+            name.map(|name| Name::parse("name_pane.name", name)).transpose()?,
+        )),
+        Event::NameTab(api::NameTab { name }) => {
+            Heard::Act(Act::NameTab(Name::parse("name_tab.name", name)?))
+        },
+        Event::MoveTab(api::MoveTab { towards }) => {
+            Heard::Act(Act::MoveTab { forward: sideways("move_tab.towards", towards)? })
+        },
+        Event::Turn(into) => Heard::Act(Act::Turn(TurnTo::parse("turn", Some(into))?)),
     })
 }
 

@@ -719,6 +719,7 @@ mod tests {
             clients,
             foreground: None,
             ran: None,
+            name: None,
         };
         let tab = api::Tab { id: 4, name: "Tab #1".to_owned(), panes: vec![pane] };
         let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });

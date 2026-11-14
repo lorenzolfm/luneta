@@ -90,12 +90,12 @@ impl Size {
         api::Size { columns: self.columns.get().into(), rows: self.rows.get().into() }
     }
 
-    fn heard(size: Option<api::Size>) -> Result<Size, String> {
-        let size = size.ok_or("a frame has no size")?;
+    fn heard(what: &str, size: Option<api::Size>) -> Result<Size, String> {
+        let size = size.ok_or_else(|| format!("{what} has no size"))?;
         let cells = |name: &str, count: u32| {
             let cells = u16::try_from(count).ok().filter(|cells| *cells <= SIDE_MAX);
             let cells = cells.and_then(NonZeroU16::new);
-            cells.ok_or_else(|| format!("a frame's {name} are {count}"))
+            cells.ok_or_else(|| format!("{what}'s {name} are {count}"))
         };
         Ok(Size { columns: cells("columns", size.columns)?, rows: cells("rows", size.rows)? })
     }
@@ -391,7 +391,7 @@ impl Frame {
     }
 
     fn heard(frame: api::Frame) -> Result<Frame, String> {
-        let size = Size::heard(frame.size)?;
+        let size = Size::heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
             api::frame::Rows::Whole(api::Whole { lines }) => {
                 if lines.len() != usize::from(size.rows.get()) {
@@ -427,11 +427,114 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
     Ok(Cursor { row, column, shape, blinking: cursor.blinking })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub column: u16,
+    pub row: u16,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub pane: NonZeroU32,
+    pub rect: Rect,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tabbed {
+    pub id: NonZeroU32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layout {
+    tab: NonZeroU32,
+    size: Size,
+    panes: Vec<Placed>,
+    focused: NonZeroU32,
+    fullscreen: bool,
+    tabs: Vec<Tabbed>,
+}
+
+impl Layout {
+    #[must_use]
+    pub fn tab(&self) -> NonZeroU32 {
+        self.tab
+    }
+
+    #[must_use]
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    #[must_use]
+    pub fn panes(&self) -> &[Placed] {
+        &self.panes
+    }
+
+    #[must_use]
+    pub fn focused(&self) -> NonZeroU32 {
+        self.focused
+    }
+
+    #[must_use]
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    #[must_use]
+    pub fn tabs(&self) -> &[Tabbed] {
+        &self.tabs
+    }
+
+    fn heard(layout: api::Layout) -> Result<Layout, String> {
+        let size = Size::heard("a layout", layout.size)?;
+        let tab = NonZeroU32::new(layout.tab).ok_or("a layout is of tab 0")?;
+        let (columns, rows) = (size.columns.get(), size.rows.get());
+        let placed = |placed: api::Placed| -> Result<Placed, String> {
+            let pane = NonZeroU32::new(placed.pane).ok_or("a layout places pane 0")?;
+            let rect = placed.rect.ok_or_else(|| format!("pane {pane} is laid nowhere"))?;
+            let off = || format!("pane {pane} is laid off the tab of {columns}x{rows}");
+            let cell = |count: u32| u16::try_from(count).map_err(|_| off());
+            let rect = Rect {
+                column: cell(rect.column)?,
+                row: cell(rect.row)?,
+                columns: cell(rect.columns)?,
+                rows: cell(rect.rows)?,
+            };
+            let right = u32::from(rect.column) + u32::from(rect.columns);
+            let bottom = u32::from(rect.row) + u32::from(rect.rows);
+            if right > u32::from(columns) || bottom > u32::from(rows) {
+                return Err(off());
+            }
+            Ok(Placed { pane, rect, title: placed.title })
+        };
+        let panes = layout.panes.into_iter().map(placed).collect::<Result<Vec<_>, _>>()?;
+        let focused = NonZeroU32::new(layout.focused).ok_or("a layout focuses pane 0")?;
+        if !panes.iter().any(|placed| placed.pane == focused) {
+            return Err(format!("a layout focuses pane {focused}, which it does not lay out"));
+        }
+        let tabbed = |tabbed: api::Tabbed| {
+            let id = NonZeroU32::new(tabbed.id).ok_or("a layout names tab 0")?;
+            Ok::<_, String>(Tabbed { id, name: tabbed.name })
+        };
+        let tabs = layout.tabs.into_iter().map(tabbed).collect::<Result<Vec<_>, _>>()?;
+        if !tabs.iter().any(|tabbed| tabbed.id == tab) {
+            return Err(format!("a layout of tab {tab} does not name it"));
+        }
+        Ok(Layout { tab, size, panes, focused, fullscreen: layout.fullscreen, tabs })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
     Went(Went),
     Frame(Frame),
+    Layout(Layout),
     Stayed(String),
+    Refused(String),
     Ended,
     Lost(String),
 }
@@ -469,6 +572,8 @@ fn heard(
         (Some(_), to_client::Event::Frame(frame)) => Heard::Frame(Frame::heard(frame)?),
         (Some(_), to_client::Event::Ended(api::Ended {})) => Heard::Ended,
         (Some(_), to_client::Event::Stayed(api::Stayed { reason })) => Heard::Stayed(reason),
+        (Some(_), to_client::Event::Layout(layout)) => Heard::Layout(Layout::heard(layout)?),
+        (Some(_), to_client::Event::Refused(api::Refused { reason })) => Heard::Refused(reason),
     }))
 }
 
@@ -823,6 +928,36 @@ mod tests {
         let tab = |tab| To::Tab { session: key(1, 30), tab: NonZeroU32::new(tab).unwrap() };
         assert_eq!(tab(7).found_in(&sessions, &listing), Ok(()));
         assert_eq!(tab(8).found_in(&sessions, &listing).unwrap_err(), "own session 1 has no tab 8");
+    }
+
+    #[test]
+    fn a_layout_reads_where_it_lays_its_panes_on_its_tab() {
+        let rect = |column, columns| Some(api::Rect { column, row: 0, columns, rows: 24 });
+        let placed = |pane, rect| api::Placed { pane, rect, title: "fish".to_owned() };
+        let tabbed = |id| api::Tabbed { id, name: format!("Tab #{id}") };
+        let layout = |panes, focused, tabs| api::Layout {
+            session: 3,
+            tab: 1,
+            size: Some(api::Size { columns: 80, rows: 24 }),
+            panes,
+            focused,
+            fullscreen: false,
+            tabs,
+        };
+        let two = || vec![placed(4, rect(0, 40)), placed(5, rect(40, 40))];
+        let read = Layout::heard(layout(two(), 5, vec![tabbed(1), tabbed(2)])).unwrap();
+        assert_eq!(read.focused().get(), 5);
+        assert_eq!(read.panes()[1].rect, Rect { column: 40, row: 0, columns: 40, rows: 24 });
+        assert_eq!(read.tabs().len(), 2);
+        let over = vec![placed(4, rect(41, 40))];
+        let over = Layout::heard(layout(over, 4, vec![tabbed(1)])).unwrap_err();
+        assert_eq!(over, "pane 4 is laid off the tab of 80x24");
+        let away = Layout::heard(layout(two(), 6, vec![tabbed(1)])).unwrap_err();
+        assert_eq!(away, "a layout focuses pane 6, which it does not lay out");
+        let unnamed = Layout::heard(layout(two(), 4, vec![tabbed(2)])).unwrap_err();
+        assert_eq!(unnamed, "a layout of tab 1 does not name it");
+        let nowhere = Layout::heard(layout(vec![placed(4, None)], 4, vec![tabbed(1)]));
+        assert_eq!(nowhere.unwrap_err(), "pane 4 is laid nowhere");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -204,6 +205,8 @@ pub struct Attached {
     pub went: api::Went,
     pub rows: Vec<String>,
     pub last: Option<api::Frame>,
+    pub layout: Option<api::Layout>,
+    screens: BTreeMap<u32, (Vec<String>, api::Frame)>,
     to: mpsc::Sender<api::ToServer>,
     from: Streaming<api::ToClient>,
 }
@@ -227,8 +230,16 @@ impl Attached {
         else {
             panic!("the first word was not attached");
         };
-        let mut attached =
-            Attached { client, went: api::Went::default(), rows: Vec::new(), last: None, to, from };
+        let mut attached = Attached {
+            client,
+            went: api::Went::default(),
+            rows: Vec::new(),
+            last: None,
+            layout: None,
+            screens: BTreeMap::new(),
+            to,
+            from,
+        };
         attached.went = attached.next_went().await;
         Ok(attached)
     }
@@ -260,15 +271,18 @@ impl Attached {
         let next = tokio::time::timeout(PATIENCE, self.from.message()).await;
         let message = next.expect("the server said something in time").ok()??;
         let event = message.event?;
-        if let api::to_client::Event::Frame(frame) = &event
-            && frame.pane == self.went.pane
-        {
-            self.apply(frame);
+        match &event {
+            api::to_client::Event::Frame(frame) => self.apply(frame),
+            api::to_client::Event::Went(went) => {
+                self.went = *went;
+                self.screens.clear();
+            },
+            api::to_client::Event::Layout(layout) => self.layout = Some(layout.clone()),
+            _ => {},
         }
-        if let api::to_client::Event::Went(went) = &event {
-            self.went = *went;
-            self.rows.clear();
-        }
+        let focused = self.screens.get(&self.went.pane);
+        self.rows = focused.map_or_else(Vec::new, |(rows, _)| rows.clone());
+        self.last = focused.map(|(_, frame)| frame.clone());
         Some(event)
     }
 
@@ -293,6 +307,21 @@ impl Attached {
         .await;
     }
 
+    pub async fn until_pane_row(&mut self, pane: u32, text: &str) {
+        self.until(&format!("a row of pane {pane} reads {text:?}"), |attached| {
+            attached.rows_of(pane).iter().any(|row| row == text)
+        })
+        .await;
+    }
+
+    pub async fn until_laid(&mut self, what: &str, test: impl Fn(&api::Layout) -> bool) {
+        self.until(what, |attached| attached.layout.as_ref().is_some_and(&test)).await;
+    }
+
+    pub fn rows_of(&self, pane: u32) -> &[String] {
+        self.screens.get(&pane).map_or(&[], |(rows, _)| rows)
+    }
+
     pub fn text(&self) -> String {
         self.rows.join("\n")
     }
@@ -300,16 +329,20 @@ impl Attached {
     fn apply(&mut self, frame: &api::Frame) {
         match frame.rows.as_ref().unwrap() {
             api::frame::Rows::Whole(whole) => {
-                self.rows = whole.lines.iter().map(line_text).collect();
+                let rows = whole.lines.iter().map(line_text).collect();
+                self.screens.insert(frame.pane, (rows, frame.clone()));
             },
             api::frame::Rows::Changed(changed) => {
+                let Some((rows, last)) = self.screens.get_mut(&frame.pane) else {
+                    return;
+                };
                 for row in &changed.rows {
                     let index = usize::try_from(row.index).unwrap();
-                    self.rows[index] = line_text(row.line.as_ref().unwrap());
+                    rows[index] = line_text(row.line.as_ref().unwrap());
                 }
+                *last = frame.clone();
             },
         }
-        self.last = Some(frame.clone());
     }
 }
 

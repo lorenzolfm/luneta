@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use libghostty_vt::Error;
 use libghostty_vt::key::{Action, Key, Mods};
 use rustix::event::{PollFd, PollFlags, Timespec};
-use tokio::sync::mpsc::{self, OwnedPermit, error::TryRecvError, error::TrySendError};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::{self, error::TryRecvError, error::TrySendError};
+use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
@@ -90,18 +90,32 @@ impl Exit {
     }
 }
 
+#[derive(Clone)]
 pub struct Viewer {
     pub client: ClientId,
     pub out: Out,
-    pub size: Size,
     pub colours: Colours,
+    pub came: u64,
+}
+
+#[derive(Clone)]
+pub struct Wanted {
+    pub size: Size,
+    pub viewers: Vec<Viewer>,
+}
+
+impl Wanted {
+    fn same(&self, other: &Wanted) -> bool {
+        let seen = |wanted: &Wanted| -> Vec<(ClientId, Colours, u64)> {
+            let seen = wanted.viewers.iter();
+            seen.map(|viewer| (viewer.client, viewer.colours, viewer.came)).collect()
+        };
+        self.size == other.size && seen(self) == seen(other)
+    }
 }
 
 pub enum ToPane {
-    Watch(Viewer),
-    Unwatch(ClientId),
     Input(ClientId, Input),
-    Resize(ClientId, Size),
     Dump(Dumped, oneshot::Sender<Result<String, Status>>),
 }
 
@@ -110,21 +124,7 @@ pub struct Handle {
     to: mpsc::Sender<ToPane>,
     closed: Arc<AtomicBool>,
     wake: Wake,
-}
-
-#[derive(Debug)]
-pub struct Busy;
-
-pub struct Reserved {
-    permit: OwnedPermit<ToPane>,
-    wake: Wake,
-}
-
-impl Reserved {
-    pub fn send(self, message: ToPane) {
-        self.permit.send(message);
-        self.wake.wake();
-    }
+    wanted: Arc<watch::Sender<Wanted>>,
 }
 
 impl Handle {
@@ -134,11 +134,16 @@ impl Handle {
         }
     }
 
-    pub fn reserve(&self) -> Result<Option<Reserved>, Busy> {
-        match self.to.clone().try_reserve_owned() {
-            Ok(permit) => Ok(Some(Reserved { permit, wake: self.wake.clone() })),
-            Err(TrySendError::Full(_)) => Err(Busy),
-            Err(TrySendError::Closed(_)) => Ok(None),
+    pub fn want(&self, wanted: Wanted) {
+        let changed = self.wanted.send_if_modified(|was| {
+            if was.same(&wanted) {
+                return false;
+            }
+            *was = wanted;
+            true
+        });
+        if changed {
+            self.wake.wake();
         }
     }
 
@@ -180,7 +185,9 @@ pub fn start(
     woken.set_nonblocking(true)?;
     let wake = Wake(Arc::new(wake));
     let closed = Arc::new(AtomicBool::new(false));
-    let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone() };
+    let (wanted, wants) = watch::channel(Wanted { size, viewers: Vec::new() });
+    let wanted = Arc::new(wanted);
+    let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
     let pid = child.id();
     thread::Builder::new().name(format!("pane {pane} waits")).spawn(move || {
         waits(pane, &mut child, &exited, &wake);
@@ -199,6 +206,7 @@ pub fn start(
             pane,
             mux,
             inbox,
+            wants,
             exits,
             closed,
             woken,
@@ -277,6 +285,7 @@ struct Thread {
     pane: PaneId,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
+    wants: watch::Receiver<Wanted>,
     exits: Receiver<Exit>,
     closed: Arc<AtomicBool>,
     woken: UnixStream,
@@ -353,6 +362,7 @@ impl Thread {
                 self.program = Program::Gone;
                 return Ok(());
             }
+            self.want()?;
             if let Ok(exit) = self.exits.try_recv()
                 && self.exited(exit)?
             {
@@ -461,28 +471,38 @@ impl Thread {
         Ok((readable, near.contains(PollFlags::OUT), woken))
     }
 
+    fn want(&mut self) -> io::Result<()> {
+        if !self.wants.has_changed().unwrap_or(false) {
+            return Ok(());
+        }
+        let Wanted { size, viewers } = self.wants.borrow_and_update().clone();
+        self.watchers.retain(|watcher| viewers.iter().any(|it| it.client == watcher.viewer.client));
+        for viewer in viewers {
+            if let Some(watcher) =
+                self.watchers.iter_mut().find(|watcher| watcher.viewer.client == viewer.client)
+            {
+                if watcher.viewer.came != viewer.came {
+                    watcher.shown = None;
+                    self.dirty = true;
+                }
+                watcher.viewer = viewer;
+                continue;
+            }
+            if viewer.colours != Colours::default() {
+                let Colours { foreground, background } = viewer.colours;
+                self.screen.colour(foreground, background).map_err(io::Error::other)?;
+            }
+            self.watchers.push(Watcher { viewer, back: 0, shown: None, owed: false });
+            self.dirty = true;
+        }
+        self.resized(size)
+    }
+
     fn take(&mut self, message: ToPane) -> io::Result<()> {
         match message {
-            ToPane::Watch(viewer) => {
-                let client = viewer.client;
-                if viewer.colours != Colours::default() {
-                    let Colours { foreground, background } = viewer.colours;
-                    self.screen.colour(foreground, background).map_err(io::Error::other)?;
-                }
-                self.watchers.retain(|watcher| watcher.viewer.client != client);
-                self.watchers.push(Watcher { viewer, back: 0, shown: None, owed: false });
-                self.follow(client)?;
-                self.dirty = true;
-            },
-            ToPane::Unwatch(client) => {
-                self.watchers.retain(|watcher| watcher.viewer.client != client);
-            },
-            ToPane::Input(client, input) => self.input(client, input)?,
-            ToPane::Resize(client, size) => {
-                if let Some(watcher) = self.watcher(client) {
-                    watcher.viewer.size = size;
-                    self.follow(client)?;
-                }
+            ToPane::Input(client, input) => {
+                self.want()?;
+                self.input(client, input)?;
             },
             ToPane::Dump(dumped, answer) => {
                 let text = match dumped {
@@ -514,10 +534,7 @@ impl Thread {
         self.watchers.iter_mut().find(|watcher| watcher.viewer.client == client)
     }
 
-    fn follow(&mut self, client: ClientId) -> io::Result<()> {
-        let Some(size) = self.watcher(client).map(|watcher| watcher.viewer.size) else {
-            return Ok(());
-        };
+    fn resized(&mut self, size: Size) -> io::Result<()> {
         if self.screen.size() == size {
             return Ok(());
         }
@@ -535,7 +552,6 @@ impl Thread {
     }
 
     fn input(&mut self, client: ClientId, input: Input) -> io::Result<()> {
-        self.follow(client)?;
         if input.types() {
             self.back(client, None);
         }
