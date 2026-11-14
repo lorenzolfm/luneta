@@ -22,10 +22,10 @@ use lunetad::api::{
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
 use lunetad::mux::own::server::{self, Listing};
-use lunetad::mux::{Failure, OwnId, OwnPane, ZellijPane};
+use lunetad::mux::{Failure, OwnId, OwnPane, SessionName, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
-use lunetad::sayings::{self, Speaker, BYTES_MAX};
+use lunetad::sayings::{self, Asker, BYTES_MAX};
 use lunetad::{release, Destination};
 use prost::Message as _;
 use tonic::transport::Channel;
@@ -246,11 +246,18 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        let speaker = speaker_here().unwrap_or_else(|why| {
+        let seat = zellij::here().unwrap_or_else(|why| {
             untold = Some(why);
             None
         });
-        let utterance = sayings::utterance(text, speaker);
+        let asker = match seat.map(asker_of).transpose() {
+            Ok(asker) => asker.flatten(),
+            Err(why) => {
+                eprintln!("luneta: speaker: {why}");
+                return ExitCode::FAILURE;
+            },
+        };
+        let utterance = sayings::asked(text, asker);
         if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
     };
     let say = Some(Say { does: Some(does) });
@@ -272,19 +279,20 @@ fn from_stdin() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&read).into_owned())
 }
 
-fn speaker_here() -> Result<Option<Speaker>, String> {
-    let zellij = |named, pane| Speaker::Zellij(Zellij { named, session: None, pane });
-    let speaker = match zellij::here()? {
-        Some(Seat::Opened(ZellijPane { session, pane })) => zellij(session, pane),
-        Some(Seat::Asked { user: User::Pane { session, pane }, .. }) => {
-            zellij(session.to_string(), pane)
+fn asker_of(seat: Seat) -> Result<Option<Asker>, String> {
+    let asker = match seat {
+        Seat::Opened(ZellijPane { session, pane }) => {
+            let named = SessionName::running(&session)
+                .map_err(|why| format!("session {session:?}: {why}"))?;
+            Asker::Zellij { named, pane }
         },
-        Some(Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. }) => {
-            Speaker::Own { pane, session: None }
+        Seat::Asked { user: User::Pane { session, pane }, .. } => {
+            Asker::Zellij { named: session, pane }
         },
-        Some(Seat::Asked { user: User::Away | User::Untold, .. }) | None => return Ok(None),
+        Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. } => Asker::Own(pane),
+        Seat::Asked { user: User::Away | User::Untold, .. } => return Ok(None),
     };
-    Ok(Some(speaker))
+    Ok(Some(asker))
 }
 
 fn ssh(destination: &Destination, folder: &Path) -> ExitCode {

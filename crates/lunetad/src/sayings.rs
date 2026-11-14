@@ -54,8 +54,59 @@ impl Speaker {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Asker {
+    Zellij { named: SessionName, pane: u32 },
+    Own(OwnPane),
+}
+
+impl Asker {
+    pub fn of(
+        zellij: Option<api::Zellij>,
+        own: Option<api::OwnSpeaker>,
+    ) -> Result<Option<Asker>, String> {
+        match (zellij, own) {
+            (None, None) => Ok(None),
+            (Some(zellij), None) => {
+                let named = SessionName::running(&zellij.named)
+                    .map_err(|why| format!("speaker: {why}"))?;
+                Ok(Some(Asker::Zellij { named, pane: zellij.pane }))
+            },
+            (None, Some(own)) => {
+                let pane = own.pane.ok_or_else(|| "own speaker: no pane".to_owned())?;
+                let pane = OwnPane::of(&pane).map_err(|why| format!("own speaker: {why}"))?;
+                Ok(Some(Asker::Own(pane)))
+            },
+            (Some(_), Some(_)) => Err("it comes from a pane of zellij's and an own one".to_owned()),
+        }
+    }
+
+    fn placed(self, sessions: &Sessions, own_named: &impl Fn(OwnKey) -> Option<String>) -> Speaker {
+        match self {
+            Asker::Zellij { named, pane } => {
+                let session = sessions.lead(named.as_str(), None).map(ToString::to_string);
+                Speaker::Zellij(api::Zellij { named: named.to_string(), session, pane })
+            },
+            Asker::Own(pane) => Speaker::Own { pane, session: own_named(pane.session) },
+        }
+    }
+}
+
 #[must_use]
-pub fn utterance(text: String, speaker: Option<Speaker>) -> api::Utterance {
+pub fn asked(text: String, asker: Option<Asker>) -> api::Utterance {
+    let (speaker, own_speaker) = match asker {
+        None => (None, None),
+        Some(Asker::Zellij { named, pane }) => {
+            (Some(api::Zellij { named: named.to_string(), session: None, pane }), None)
+        },
+        Some(Asker::Own(pane)) => {
+            (None, Some(api::OwnSpeaker { pane: Some(pane.into()), session: None }))
+        },
+    };
+    api::Utterance { text, speaker, own_speaker }
+}
+
+fn utterance(text: String, speaker: Option<Speaker>) -> api::Utterance {
     let (speaker, own_speaker) = match speaker {
         None => (None, None),
         Some(Speaker::Zellij(zellij)) => (Some(zellij), None),
@@ -76,7 +127,7 @@ pub enum ToSay {
 #[derive(Debug)]
 pub struct Spoken {
     text: String,
-    speaker: Option<Speaker>,
+    asker: Option<Asker>,
 }
 
 impl ToSay {
@@ -95,16 +146,13 @@ impl Spoken {
         if text.trim().is_empty() {
             return Err("it says nothing".to_owned());
         }
-        let speaker = Speaker::of(speaker, own_speaker)?;
-        let named = match &speaker {
-            Some(Speaker::Zellij(zellij)) => {
-                SessionName::running(&zellij.named).map_err(|why| format!("speaker: {why}"))?;
-                Some(zellij.named.as_str())
-            },
-            Some(Speaker::Own { .. }) | None => None,
+        let asker = Asker::of(speaker, own_speaker)?;
+        let named = match &asker {
+            Some(Asker::Zellij { named, .. }) => Some(named.as_str()),
+            Some(Asker::Own(_)) | None => None,
         };
         bounded(&text, named)?;
-        Ok(Spoken { text, speaker })
+        Ok(Spoken { text, asker })
     }
 }
 
@@ -159,16 +207,10 @@ fn placed(
     sessions: &Sessions,
     own_named: &impl Fn(OwnKey) -> Option<String>,
 ) -> Result<api::Utterance, String> {
-    let Spoken { text, speaker } = spoken;
+    let Spoken { text, asker } = spoken;
     assert_ne!(text.trim(), "");
     assert!(text.len() <= BYTES_MAX);
-    let speaker = speaker.map(|speaker| match speaker {
-        Speaker::Zellij(zellij) => {
-            let session = sessions.lead(&zellij.named, None).map(ToString::to_string);
-            Speaker::Zellij(api::Zellij { session, ..zellij })
-        },
-        Speaker::Own { pane, .. } => Speaker::Own { pane, session: own_named(pane.session) },
-    });
+    let speaker = asker.map(|asker| asker.placed(sessions, own_named));
     bounded(&text, speaker.as_ref().and_then(Speaker::called))?;
     Ok(utterance(text, speaker))
 }
@@ -247,9 +289,10 @@ mod tests {
 
     #[test]
     fn what_a_speaker_was_asked_with_has_no_say_in_its_session() {
-        let speaker = Some(Speaker::Zellij(from("work", Some("made up"))));
-        let spoken = Spoken { text: "hello".to_owned(), speaker };
-        let placed = placed(spoken, &Sessions::default(), &nameless).unwrap().speaker.unwrap();
+        let asked = ToSay::parse(does("hello", Some(from("work", Some("made up"))))).unwrap();
+        let mut sayings = Sayings::default();
+        sayings.take(asked, &Sessions::default(), SystemTime::UNIX_EPOCH, nameless).unwrap();
+        let placed = utterance(&sayings).speaker.unwrap();
         assert_eq!(placed.session, None);
         assert_eq!(placed.named, "work");
     }
