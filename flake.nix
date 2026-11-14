@@ -255,12 +255,11 @@
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             comments =
               let
-                config = import ./nix/comments.nix { inherit pkgs; };
+                comments = import ./nix/comments.nix { inherit pkgs; };
               in
               pkgs.runCommand "luneta-comments" { } ''
                 cd ${./.}
-                ${pkgs.lib.getExe pkgs.ast-grep} test --config ${config}
-                ${pkgs.lib.getExe pkgs.ast-grep} scan --no-ignore hidden --config ${config} .
+                find . -type f -print0 | ${pkgs.lib.getExe comments}
                 touch "$out"
               '';
           };

@@ -7,12 +7,12 @@ in
   usage = "[--breaking]";
   help = "statix, deadnix, no comments and buf breaking; --breaking runs that one alone";
   tools = [
-    pkgs.ast-grep
     pkgs.buf
     pkgs.deadnix
     pkgs.findutils
     pkgs.git
     pkgs.statix
+    comments
   ];
   text = ''
     breaking() {
@@ -29,19 +29,13 @@ in
       )
     }
 
-    comments() {
-      ast-grep test --config ${comments} &&
-        git ls-files -z --cached --others --exclude-standard |
-        xargs -0 ast-grep scan --config ${comments}
-    }
-
     case "$#:$*" in
       0:)
         status=0
         statix check . || status=1
         git ls-files -z --cached --others --exclude-standard '*.nix' |
           xargs -0 deadnix --fail || status=1
-        comments || status=1
+        git ls-files -z --cached --others --exclude-standard | luneta-comments || status=1
         breaking || status=1
         exit "$status"
         ;;
