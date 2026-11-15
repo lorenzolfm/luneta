@@ -9,7 +9,7 @@ use lunetad::{log, Destination};
 use crate::away;
 use crate::ledger::Session;
 use crate::news::News;
-use crate::own_sessions;
+use crate::own_sessions::{self, Unmade};
 use crate::sidebar::Sidebar;
 use crate::zellij::{self, Refuge, SessionName};
 
@@ -28,7 +28,12 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
         session
     } else {
         let cwd = own_sessions::directory(dir)?;
-        own_sessions::made(named, &cwd).map_err(|why| format!("no own session made: {why}"))?
+        match own_sessions::made(named, &cwd) {
+            Ok(session) => session,
+            Err(Unmade::Taken(_)) => own_sessions::named(named)?
+                .ok_or_else(|| format!("another luneta made {named}, which ended already"))?,
+            Err(Unmade::Failed(why)) => return Err(format!("no own session made: {why}")),
+        }
     };
     if let Some(refusal) = own_sessions::refusal(session, named) {
         return Err(refusal);
