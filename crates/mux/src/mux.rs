@@ -898,6 +898,7 @@ impl Tab {
             self.focused = heir;
             self.fullscreen = false;
         }
+        self.fullscreen &= self.tree.len() > 1;
     }
 
     fn assert_whole(&self) {

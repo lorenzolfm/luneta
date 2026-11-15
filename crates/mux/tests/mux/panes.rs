@@ -263,6 +263,27 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
 }
 
 #[test]
+fn a_fullscreen_tab_left_with_one_pane_is_tiled_again() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let made = new_session(&mut mux, "work", shell()).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(80, 24)).await;
+        let second = opened(&mut attached, api::Towards::Right).await;
+        attached.send(Event::Fullscreen(api::Fullscreen {})).await;
+        attached
+            .until_laid("the pane over the whole tab", |layout| {
+                full(layout) && focused(layout) == second
+            })
+            .await;
+        mux.close_pane(api::ClosePaneRequest { pane: made.pane }).await.unwrap();
+        attached
+            .until_laid("the lone pane tiled", |layout| !full(layout) && placed(layout).len() == 1)
+            .await;
+    });
+}
+
+#[test]
 fn a_client_back_on_a_fullscreen_tab_comes_to_the_pane_that_fills_it() {
     run(async {
         let server = Server::start();
