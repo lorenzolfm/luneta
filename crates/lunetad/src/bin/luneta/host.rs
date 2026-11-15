@@ -691,7 +691,7 @@ impl App {
             Event::InputEnded(error) => return Err(error),
             Event::Own(number, heard) => {
                 if self.right.attached.number() == number {
-                    self.own_heard(heard)?;
+                    self.own_heard(heard);
                 }
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
@@ -1575,7 +1575,8 @@ impl App {
                 }
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start { on: Machine::Remote(_), .. } | Picked::Make { on: Machine::Remote(_), .. } => {
+            Picked::Start { on: Machine::Remote(_), .. }
+            | Picked::Make { on: Machine::Remote(_), .. } => {
                 self.sidebar.notify(format!("picker: {}", menu::HERE_ONLY));
             },
             Picked::BringBack { session, .. } => {
@@ -1837,7 +1838,7 @@ impl App {
         self.watch();
     }
 
-    fn own_heard(&mut self, heard: Heard) -> io::Result<()> {
+    fn own_heard(&mut self, heard: Heard) {
         let own = &mut self.right;
         own.attached.heard(&heard);
         match heard {
@@ -1860,13 +1861,12 @@ impl App {
                     after.untold(&self.events);
                 }
             },
-            Heard::Ended => return self.own_ended(None),
-            Heard::Lost(why) => return self.own_ended(Some(why)),
+            Heard::Ended => self.own_ended(None),
+            Heard::Lost(why) => self.own_ended(Some(why)),
         }
-        Ok(())
     }
 
-    fn own_ended(&mut self, lost: Option<String>) -> io::Result<()> {
+    fn own_ended(&mut self, lost: Option<String>) {
         let own = &mut self.right;
         let (coming, going) = match std::mem::replace(&mut own.phase, Phase::In { going: None }) {
             Phase::Coming { going } => (true, Some(going)),
@@ -1876,21 +1876,19 @@ impl App {
             after.untold(&self.events);
         }
         let Some(why) = lost else {
-            self.newest_here();
-            return Ok(());
+            return self.newest_here();
         };
         let note = format!("luneta's client of an own session: {why}");
         if coming {
             self.end(&note);
             self.gave_up = Some(why);
-            return Ok(());
+            return;
         }
         self.sidebar.notify(note);
         if let Some(seat) = self.sidebar.own_seat() {
             self.own_lost.push(seat.session());
         }
         self.newest_here();
-        Ok(())
     }
 
     fn give_way(&mut self) {
@@ -1901,9 +1899,9 @@ impl App {
 
     fn make_own(&mut self, session: SessionName, cwd: Directory) {
         self.name_own(move || {
-            let made = own_sessions::made(&session, &cwd);
-            let made = made.and_then(|made| own_sessions::elsewhere(To::Session(made), &session));
-            made.map_err(|why| format!("no own session made: {why}"))
+            let unmade = |why: String| format!("no own session made: {why}");
+            let made = own_sessions::made(&session, &cwd).map_err(|why| unmade(why.to_string()))?;
+            own_sessions::elsewhere(To::Session(made), &session).map_err(unmade)
         });
     }
 

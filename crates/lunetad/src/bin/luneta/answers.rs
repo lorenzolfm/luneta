@@ -53,7 +53,6 @@ impl Colours {
         let rgb = |colour: Rgb| [colour.r, colour.g, colour.b];
         (self.foreground.map(rgb), self.background.map(rgb))
     }
-
 }
 
 pub fn ask(inbox: &mut Inbox) -> Answers {

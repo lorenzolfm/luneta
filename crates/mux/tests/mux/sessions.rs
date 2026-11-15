@@ -85,14 +85,14 @@ fn a_session_s_first_tab_takes_the_name_it_is_made_with() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
-        let named = |tab: &str| api::NewSessionRequest {
+        let made_with = |tab: &str| api::NewSessionRequest {
             name: "work".to_owned(),
             opens: Some(shell()),
             tab: Some(tab.to_owned()),
         };
-        let refused = mux.new_session(named("")).await.unwrap_err();
+        let refused = mux.new_session(made_with("")).await.unwrap_err();
         assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, "tab is empty"));
-        mux.new_session(named("#2736")).await.unwrap();
+        mux.new_session(made_with("#2736")).await.unwrap();
         let listing = listed(&mut mux).await;
         let names: Vec<&str> = tabs(&listing).iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["#2736"]);

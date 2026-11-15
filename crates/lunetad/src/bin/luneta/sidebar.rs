@@ -1270,7 +1270,8 @@ impl Sidebar {
             self.unfold_own(pane.session);
         }
         if let Some(session) = self.own_listed(pane.session) {
-            let spot = Spot::on(&Machine::Local, Place::Pane(PanePlace { session, pane: pane.id.get() }));
+            let place = Place::Pane(PanePlace { session, pane: pane.id.get() });
+            let spot = Spot::on(&Machine::Local, place);
             if let Some(under) = self.heads(&spot).map(|listed| listed.name.clone()) {
                 self.folds.set(Fold::Session(&Machine::Local, &under), false);
             }
@@ -2758,8 +2759,8 @@ impl Sidebar {
                     Asked::Open { menu: number, on, open: opened }
                 } else {
                     self.drop_menu(number);
-                    let why = format!("menu: {session} is one of zellij's sessions: {}", menu::OWN_ONLY);
-                    self.say(why);
+                    let zellij_s = format!("{session} is one of zellij's sessions");
+                    self.say(format!("menu: {zellij_s}: {}", menu::OWN_ONLY));
                     Asked::Nothing
                 }
             },
@@ -2916,7 +2917,7 @@ impl Sidebar {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
-        close::plan(&self.subject(on, listed, deletes))
+        Ok(close::plan(&self.subject(on, listed, deletes)))
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -4855,7 +4856,8 @@ mod tests {
         }
         for agent in &mut host.agents {
             if let Some(api::agent::Pane::Zellij(zellij)) = agent.pane.clone() {
-                let (_, id, started) = made.iter().find(|(name, ..)| *name == zellij.named).unwrap();
+                let named = made.iter().find(|(name, ..)| *name == zellij.named);
+                let (_, id, started) = named.expect("the agent's session");
                 *agent = in_own(agent.clone(), *id, *started, zellij.pane);
             }
         }
