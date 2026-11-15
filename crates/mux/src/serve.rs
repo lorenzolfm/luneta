@@ -245,12 +245,13 @@ impl Stream for UntilEnded {
             return Poll::Ready(None);
         }
         if self.spoke {
-            if self.waiting.is_none()
+            let passed = self.wents;
+            while self.waiting.is_none()
                 && let Poll::Ready(Some(laid)) = self.layouts.as_mut().poll_next(context)
             {
-                self.waiting = Some(laid);
+                self.waiting = Some(laid).filter(|(_, wents)| *wents >= passed);
             }
-            if self.waiting.as_ref().is_some_and(|(_, wents)| *wents <= self.wents) {
+            if self.waiting.as_ref().is_some_and(|(_, wents)| *wents == passed) {
                 let (laid, _) = self.waiting.take().expect("a layout waits");
                 return Poll::Ready(Some(laid));
             }
@@ -330,7 +331,8 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::task::Waker;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Wake, Waker};
 
     use super::*;
 
@@ -366,5 +368,38 @@ mod tests {
         assert_eq!(next(&mut until), api::to_client::Event::Layout(laid_out));
         assert_eq!(next(&mut until), frame(2));
         assert_eq!(next(&mut until), frame(3));
+    }
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_layout_older_than_the_wents_passed_goes_nowhere_and_the_next_one_wakes_the_stream() {
+        let (out, going) = mpsc::channel(8);
+        let (layout, layouts) = watch::channel(None);
+        let (_gone, let_go) = oneshot::channel();
+        let went = |pane| api::to_client::Event::Went(api::Went { session: 1, tab: 1, pane });
+        let attached = api::to_client::Event::Attached(api::Attached { client: 1 });
+        for said_now in [attached, went(1), went(2)] {
+            out.try_send(Ok(said(said_now))).unwrap();
+        }
+        let mut until = UntilEnded::new(ReceiverStream::new(going), laid(layouts), let_go);
+        assert!(matches!(next(&mut until), api::to_client::Event::Attached(_)));
+        assert_eq!(next(&mut until), went(1));
+        assert_eq!(next(&mut until), went(2));
+        let laid_out = |tab| api::Layout { tab, ..Default::default() };
+        layout.send(Some(LaidOut { layout: laid_out(1), wents: 1 })).unwrap();
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut context = Context::from_waker(&waker);
+        assert!(Pin::new(&mut until).poll_next(&mut context).is_pending());
+        layout.send(Some(LaidOut { layout: laid_out(2), wents: 2 })).unwrap();
+        assert!(woken.0.load(Ordering::SeqCst), "the newer layout wakes the stream");
+        assert_eq!(next(&mut until), api::to_client::Event::Layout(laid_out(2)));
     }
 }

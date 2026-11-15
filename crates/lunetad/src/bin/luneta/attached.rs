@@ -348,11 +348,14 @@ impl Kept {
     }
 
     fn moused(&mut self, session: OwnKey, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
+        let down = matches!(mouse.kind, MouseEventKind::Down(_));
         if self.pointer == Pointer::Sending {
-            return self.sent(mouse, below_bar(at));
+            if !down {
+                return self.sent(mouse, below_bar(at));
+            }
+            self.pointer = Pointer::Free;
         }
         let layout = &self.layout;
-        let down = matches!(mouse.kind, MouseEventKind::Down(_));
         let Some(spot) = on_panes(at) else {
             let tab = down.then(|| tab_under(layout.tabs(), width, at.column)).flatten();
             return match tab {
@@ -1137,6 +1140,21 @@ mod tests {
         view.select_to(spot(2, 4));
         assert_eq!(view.selected().as_deref(), Some("abcd"));
         assert_eq!(view.moused(down, spot(2, 14), 22), Moused::Go(To::Pane(pane(2))));
+    }
+
+    #[test]
+    fn a_press_whose_release_never_came_lets_the_next_press_go_to_another_pane_or_tab() {
+        let mut view = split_view();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left));
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left));
+        assert!(matches!(view.moused(down, spot(2, 3), 22), Moused::Sent(_)));
+        assert_eq!(view.moused(down, spot(2, 14), 22), Moused::Go(To::Pane(pane(2))));
+        assert!(matches!(view.moused(down, spot(2, 3), 22), Moused::Sent(_)));
+        let tab = Moused::Go(To::Tab { session: session(), tab: id(2) });
+        assert_eq!(view.moused(down, spot(0, 7), 22), tab);
+        assert!(matches!(view.moused(down, spot(2, 3), 22), Moused::Sent(_)));
+        assert_eq!(view.moused(down, spot(0, 1), 22), Moused::Nothing);
+        assert_eq!(view.moused(drag, spot(2, 3), 22), Moused::Nothing);
     }
 
     #[test]
