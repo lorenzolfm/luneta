@@ -4,7 +4,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::mux::{value_in, Named};
+use crate::mux::value_in;
 
 pub mod api;
 pub mod attach;
@@ -145,12 +145,12 @@ const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
 const PANE_VARS: [&str; 3] = [SESSION_VAR, MADE_VAR, PANE_VAR];
 
-pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
+pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
     let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
     let id = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
     let made = OwnMade::from_nanos(text(MADE_VAR)?.parse().ok()?);
     let pane = text(PANE_VAR)?.parse().ok()?;
-    Some(Named::Own(OwnPane { session: OwnKey { id, made }, id: pane }))
+    Some(OwnPane { session: OwnKey { id, made }, id: pane })
 }
 
 pub fn here() -> Result<Option<OwnPane>, String> {
@@ -169,12 +169,9 @@ fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {
     if PANE_VARS.iter().all(|name| value_in(environ, name).is_none()) {
         return Ok(None);
     }
-    match pane_in(environ) {
-        Some(Named::Own(own)) => Ok(Some(own)),
-        Some(Named::Zellij(_)) | None => {
-            Err(format!("{SESSION_VAR}, {MADE_VAR} and {PANE_VAR} name no pane of luneta-mux's"))
-        },
-    }
+    let unread =
+        || format!("{SESSION_VAR}, {MADE_VAR} and {PANE_VAR} name no pane of luneta-mux's");
+    pane_in(environ).map(Some).ok_or_else(unread)
 }
 
 pub(crate) fn in_no_pane(command: &mut Command) {
@@ -196,7 +193,7 @@ mod tests {
         let all = environ(&[&all[..], &["LUNETA_MUX_PANE=12"]].concat());
         let made = OwnMade::from_nanos(60_000_000_005);
         let session = OwnKey { id: OwnId::new(3).unwrap(), made };
-        assert_eq!(pane_in(&all), OwnPane::new(session, 12).map(Named::Own));
+        assert_eq!(pane_in(&all), OwnPane::new(session, 12));
         let made = "LUNETA_MUX_MADE=60";
         let unnamed = [
             environ(&["LUNETA_MUX_SESSION=3", made]),

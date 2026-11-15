@@ -25,9 +25,10 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
-use crate::host::{eventually, script, Host, Running, Vars, LUNETA};
+use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
 use crate::own::{own, Owned};
-use crate::sessions::session;
+use crate::remote::{hosts, FakeSsh};
+use crate::sessions::{listed, session};
 
 const ENDS: Duration = Duration::from_secs(30);
 
@@ -179,6 +180,16 @@ impl Window {
         });
         decoded.collect()
     }
+}
+
+pub fn goes_to_zellij_s(owned: &Owned, window: &mut Window, own: &str, session: &str) {
+    eventually(&format!("luneta is {own}'s client"), || (clients(owned, own)? == 1).then_some(()));
+    eventually(&format!("the sidebar lists {session}"), || window.shows(session).then_some(()));
+    window.send(&format!("\x1b[106;5u{session}\r"));
+    let attach = format!("attach {session}");
+    eventually(&format!("zellij's client attaches to {session}"), || {
+        owned.host.zellij.attached().contains(&attach).then_some(())
+    });
 }
 
 pub fn clients(owned: &Owned, name: &str) -> Option<usize> {
@@ -388,4 +399,149 @@ fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     assert!(starts >= 2, "it was started {starts} times in {took:?}");
     let most = usize::try_from(took.as_secs()).unwrap() + 1;
     assert!(starts <= most, "it was started {starts} times in {took:?}");
+}
+
+#[test]
+fn a_client_zellij_drops_is_taken_back_to_its_session() {
+    let owned = Owned::new();
+    owned.make("mine").unwrap();
+    let _session = runs(&owned.host, "project");
+    owned.host.zellij.drops_clients(1);
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["mine"]);
+
+    goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    let ended = window.luneta.ended_within(ENDS).expect("luneta ends as zellij detaches");
+    assert!(ended.success(), "{:?}", window.screen());
+    assert_eq!(owned.host.zellij.attached(), ["attach project", "attach project"]);
+    let log = log_of(&owned.host);
+    assert!(log.contains("zellij dropped its client: taking it back to project"), "{log}");
+}
+
+#[test]
+fn a_client_zellij_keeps_dropping_at_once_is_given_up_on() {
+    let owned = Owned::new();
+    owned.make("mine").unwrap();
+    let _session = runs(&owned.host, "project");
+    owned.host.zellij.drops_clients(100);
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["mine"]);
+
+    goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    let ended = window.luneta.ended_within(ENDS).expect("luneta gives up");
+    assert_eq!(ended.code(), Some(1), "{:?}", window.screen());
+    assert_eq!(owned.host.zellij.attached(), ["attach project"; 6]);
+    assert!(window.shows("zellij dropped its client 6 times"), "{:?}", window.screen());
+    let log = log_of(&owned.host);
+    assert!(log.contains("ends: zellij dropped its client 6 times"), "{log}");
+}
+
+pub fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
+    let owned = Owned::new();
+    owned.make("mine").unwrap();
+    let _project = runs(&owned.host, "project");
+    let _next = runs(&owned.host, "next");
+    let lasts = Duration::from_secs(31);
+    owned.host.zellij.drops_clients(5);
+    owned.host.zellij.stays_for(lasts);
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["mine"]);
+
+    goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
+    owned.host.zellij.drops_clients(1);
+    fs::remove_file(owned.host.contract().join("project")).unwrap();
+    thread::sleep(lasts);
+    let ended = window.luneta.ended_within(ENDS).expect("luneta ends as zellij detaches");
+    assert!(ended.success(), "{:?}", window.screen());
+    let mut attached = vec!["attach project"; 6];
+    attached.extend(["attach next"; 2]);
+    assert_eq!(owned.host.zellij.attached(), attached);
+}
+
+#[test]
+fn a_client_that_took_the_place_of_another_ends_the_asking_after_it() {
+    let owned = Owned::new();
+    owned.make("mine").unwrap();
+    let _project = runs(&owned.host, "project");
+    let _next = runs(&owned.host, "next");
+    owned.host.zellij.stays_unlisted_for(Duration::from_secs(1));
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["mine"]);
+
+    goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
+    owned.host.zellij.listen();
+    fs::remove_file(owned.host.contract().join("project")).unwrap();
+    let zellij = &owned.host.zellij;
+    eventually("another client", || (zellij.attached().len() == 2).then_some(()));
+    assert_eq!(zellij.attached(), ["attach project", "attach next"]);
+    thread::sleep(Duration::from_secs(1));
+    let asked = zellij.asked_clients("project");
+    assert!(asked > 0, "luneta never asked after its client");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(zellij.asked_clients("project"), asked);
+}
+
+fn pane_running(command: &str) -> serde_json::Value {
+    let mut pane = listed(1, "~", (0, "Tab #1"), Some("/home/you"));
+    pane["pane_command"] = json!(command);
+    json!([pane])
+}
+
+#[test]
+fn luneta_never_goes_on_in_its_own_session_once_that_is_renamed() {
+    let owned = Owned::new();
+    owned.host.zellij.stays_unlisted_for(Duration::from_secs(1));
+    owned.make("mine").unwrap();
+    let _project = runs(&owned.host, "project");
+    let _renamed = owned.host.serve("renamed");
+    owned.host.zellij.list("renamed", &pane_running("luneta"));
+    let dir = directory("anywhere");
+    let mut in_a_pane = luneta(owned.host.vars(), &dir.path);
+    in_a_pane.arg("mine").env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
+    let mut window = Window::running(in_a_pane);
+
+    goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
+    fs::remove_file(owned.host.contract().join("project")).unwrap();
+    eventually("luneta goes on in mine", || (clients(&owned, "mine")? == 1).then_some(()));
+    assert_eq!(owned.host.zellij.attached(), ["attach project"]);
+}
+
+#[test]
+fn a_client_zellij_drops_on_another_machine_is_taken_back_there() {
+    let owned = Owned::new();
+    let ssh = FakeSsh::new(owned.host.zellij.bin());
+    let _far = machine(&ssh, "far", "work");
+    ssh.drops_clients("far", 1);
+    hosts(&owned.host, "far\n");
+    owned.make("mine").unwrap();
+    let dir = directory("anywhere");
+    let mut window = Window::open(&owned.host, &dir, &["mine"]);
+
+    eventually("luneta is mine's client", || (clients(&owned, "mine")? == 1).then_some(()));
+    eventually("the sidebar lists work", || window.shows("work").then_some(()));
+    window.send("\x1b[106;5uwork\r");
+    let ended = window.luneta.ended_within(ENDS).expect("luneta ends as zellij detaches");
+    assert!(ended.success(), "{:?}", window.screen());
+    assert_eq!(ssh.clients("far"), ["zellij 'attach' 'work'", "zellij 'attach' 'work'"]);
+    assert_eq!(owned.host.zellij.attached(), [] as [String; 0]);
+    let log = log_of(&owned.host);
+    assert!(log.contains("far: zellij dropped its client: taking it back to work"), "{log}");
+}
+
+struct Machine {
+    _host: Host,
+    _session: std::os::unix::net::UnixListener,
+    _daemon: crate::host::Daemon,
+}
+
+fn machine(ssh: &FakeSsh, destination: &str, name: &str) -> Machine {
+    let host = Host::new();
+    host.zellij.list(name, &json!([]));
+    let session = host.serve(name);
+    let daemon = start(host.vars()).unwrap();
+    ssh.reaches(destination, host.vars());
+    Machine { _host: host, _session: session, _daemon: daemon }
 }

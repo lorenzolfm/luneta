@@ -14,6 +14,8 @@ mod folder;
 #[cfg(test)]
 mod host;
 #[cfg(test)]
+mod mouse;
+#[cfg(test)]
 mod own;
 #[cfg(test)]
 mod own_drive;

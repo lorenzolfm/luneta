@@ -731,7 +731,7 @@ impl Daemon for StandIn {
 
 #[test]
 fn the_waits_of_half_a_minute_hold_side_by_side() {
-    let waits: [(&str, fn()); 5] = [
+    let waits: [(&str, fn()); 6] = [
         ("the daemon ends alone", the_daemon_ends_once_zellij_has_had_no_session_for_a_while),
         (
             "an own session keeps the daemon",
@@ -745,6 +745,10 @@ fn the_waits_of_half_a_minute_hold_side_by_side() {
         (
             "two daemons that watch each other end",
             crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
+        ),
+        (
+            "a client that lasted starts the count again",
+            crate::starts::a_client_that_lasted_starts_the_count_of_those_zellij_drops_again,
         ),
     ];
     let failed: Vec<&str> = thread::scope(|scope| {

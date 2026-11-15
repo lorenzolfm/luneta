@@ -44,8 +44,8 @@ use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
 use crate::host::{
-    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars, LUNETA,
-    LUNETAD,
+    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars, DROPPED,
+    LUNETA, LUNETAD,
 };
 use crate::sessions::listed;
 use crate::worktree::{cloned_as_wt, git};
@@ -72,6 +72,14 @@ done
 if [ -n "$client" ] && [ -z "$quiet" ]; then
     destination="$1"
     shift
+    echo "$*" >> "$to/$destination.clients"
+    if [ -f "$to/$destination.drops" ]; then
+        drops=$(cat "$to/$destination.drops")
+        if [ "$drops" -gt 0 ]; then
+            echo $((drops - 1)) > "$to/$destination.drops"
+            cat "$to/dropped"
+        fi
+    fi
     exit 0
 fi
 if [ -z "$quiet" ] || [ -z "$batch" ]; then
@@ -103,6 +111,16 @@ exec "$to/$destination"
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
         script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridge(&vars)));
+    }
+
+    pub fn drops_clients(&self, destination: &str, clients: u32) {
+        fs::write(self.to.join("dropped"), DROPPED).unwrap();
+        fs::write(self.to.join(format!("{destination}.drops")), clients.to_string()).unwrap();
+    }
+
+    pub fn clients(&self, destination: &str) -> Vec<String> {
+        let clients = fs::read_to_string(self.to.join(format!("{destination}.clients")));
+        clients.unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
     fn ends_with(&self, destination: &str, code: u8) {

@@ -407,7 +407,7 @@ pub fn pane_of(pid: u32) -> Option<Named> {
 }
 
 fn pane_in(environ: &[OsString]) -> Option<Named> {
-    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ))
+    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ).map(Named::Own))
 }
 
 fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
