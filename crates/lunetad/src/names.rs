@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -88,23 +89,57 @@ fn home() -> Result<Directory, String> {
     Directory::parse(home).map_err(|_| unset.to_owned())
 }
 
-pub fn unused(to: &SessionName) -> Result<SystemTime, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taken {
+    Zellij,
+    Kept,
+    Own,
+}
+
+#[derive(Debug)]
+pub enum Unusable {
+    Taken(SessionName, Taken),
+    Unknown(String),
+}
+
+impl fmt::Display for Unusable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unusable::Taken(to, Taken::Zellij) => write!(f, "{to} runs already"),
+            Unusable::Taken(to, Taken::Kept) => {
+                write!(f, "zellij keeps {to}, which ended, to bring back")
+            },
+            Unusable::Taken(to, Taken::Own) => write!(f, "{to} runs already, as an own session"),
+            Unusable::Unknown(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<Unusable> for String {
+    fn from(unusable: Unusable) -> Self {
+        unusable.to_string()
+    }
+}
+
+pub fn unused(to: &SessionName) -> Result<SystemTime, Unusable> {
     let since = unused_by_zellij(to)?;
-    if server::named(to)?.is_some() {
-        return Err(format!("{to} runs already, as an own session"));
+    let named = server::named(to).map_err(|failure| Unusable::Unknown(failure.to_string()))?;
+    if named.is_some() {
+        return Err(Unusable::Taken(to.clone(), Taken::Own));
     }
     Ok(since)
 }
 
-pub fn unused_by_zellij(to: &SessionName) -> Result<SystemTime, String> {
+pub fn unused_by_zellij(to: &SessionName) -> Result<SystemTime, Unusable> {
     let since = SystemTime::now();
-    let running = running_in(&Zellij::socket_folder())?;
+    let running = running_in(&Zellij::socket_folder()).map_err(Unusable::Unknown)?;
     if running.iter().any(|(name, _)| name == to) {
-        return Err(format!("{to} runs already"));
+        return Err(Unusable::Taken(to.clone(), Taken::Zellij));
     }
-    let unknown = |why| format!("luneta cannot tell whether zellij keeps {to}: {why}");
+    let unknown =
+        |why| Unusable::Unknown(format!("luneta cannot tell whether zellij keeps {to}: {why}"));
     if Zellij::kept().map_err(unknown)?.contains(to) {
-        return Err(format!("zellij keeps {to}, which ended, to bring back"));
+        return Err(Unusable::Taken(to.clone(), Taken::Kept));
     }
     Ok(since)
 }

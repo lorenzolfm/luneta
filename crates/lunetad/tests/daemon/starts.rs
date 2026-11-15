@@ -117,7 +117,19 @@ impl Window {
         Window::running(command)
     }
 
-    pub fn running(mut command: Command) -> Window {
+    pub fn opening(host: &Host, dir: &Directory, args: &[&str]) -> Window {
+        let mut command = luneta(host.vars(), &dir.path);
+        command.args(args);
+        Window::started(command)
+    }
+
+    pub fn running(command: Command) -> Window {
+        let window = Window::started(command);
+        eventually("luneta draws its sidebar", || window.shows("─ luneta").then_some(()));
+        window
+    }
+
+    fn started(mut command: Command) -> Window {
         let (controller, tty) = terminal();
         let typed = File::from(controller.try_clone().unwrap());
         let said = Arc::new(Mutex::new(Vec::new()));
@@ -134,9 +146,7 @@ impl Window {
         });
         let luneta = spawn_on(&tty, &mut command);
         drop(tty);
-        let window = Window { typed, said, luneta };
-        eventually("luneta draws its sidebar", || window.shows("─ luneta").then_some(()));
-        window
+        Window { typed, said, luneta }
     }
 
     pub fn send(&mut self, sent: &str) {

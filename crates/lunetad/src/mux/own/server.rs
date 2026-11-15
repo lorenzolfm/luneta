@@ -114,9 +114,13 @@ pub(super) fn runtime() -> Result<Runtime, Failure> {
 }
 
 pub(super) fn refused(status: &Status) -> Failure {
-    match status.message() {
-        "" => Failure::Own(status.code().description().to_owned()),
-        said => Failure::Own(said.to_owned()),
+    let said = match status.message() {
+        "" => status.code().description().to_owned(),
+        said => said.to_owned(),
+    };
+    match status.code() {
+        Code::AlreadyExists => Failure::Taken(said),
+        _ => Failure::Own(said),
     }
 }
 

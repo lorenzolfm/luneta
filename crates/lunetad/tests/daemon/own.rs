@@ -413,6 +413,7 @@ fn zellij_s_sessions_and_own_ones_share_their_names() {
     owned.make("own").unwrap();
     owned.listed("own");
     let refused = owned.make("own").unwrap_err();
+    assert_eq!(refused.code(), Code::AlreadyExists, "{refused:?}");
     assert!(refused.message().contains("own session"), "{refused:?}");
 
     let request = CheckNameRequest { on: None, name: "own".to_owned() };
@@ -426,6 +427,30 @@ fn zellij_s_sessions_and_own_ones_share_their_names() {
     assert!(rename("work", "own").message().contains("as an own session"));
     assert!(rename("own", "work").message().contains("work runs already"));
     assert_eq!(owned.host.zellij.renamed(), [] as [String; 0]);
+}
+
+#[test]
+fn of_two_own_sessions_named_at_once_one_is_made_and_one_is_taken() {
+    let owned = Owned::new();
+    let request = NewOwnRequest {
+        on: None,
+        name: "work".to_owned(),
+        cwd: owned.home(),
+        command: WAITS.map(str::to_owned).to_vec(),
+    };
+    let (first, second) = (request.clone(), request);
+    let (first, second) = owned.ask(|daemon| async move {
+        let (mut one, mut other) = (daemon.clone(), daemon);
+        let both = tokio::join!(one.new_own(first), other.new_own(second));
+        Ok(tonic::Response::new(both))
+    })
+    .unwrap();
+    let (made, refused) = match (first, second) {
+        (Ok(made), Err(refused)) | (Err(refused), Ok(made)) => (made, refused),
+        both => panic!("one is made, one refused: {both:?}"),
+    };
+    assert_eq!(refused.code(), Code::AlreadyExists, "{refused:?}");
+    assert_eq!(own(&owned.listed("work")).unwrap().id, made.into_inner().session);
 }
 
 #[test]

@@ -58,6 +58,35 @@ fn luneta_refuses_a_name_a_session_of_zellij_s_has() {
     assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
 }
 
+fn both_join(owned: &Owned, name: &str, mut windows: [Window; 2]) {
+    eventually(&format!("both lunetas are {name}'s clients"), || {
+        for window in &mut windows {
+            let ended = window.luneta.ended_within(Duration::ZERO);
+            assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
+        }
+        (clients(owned, name)? == 2).then_some(())
+    });
+    let host = owned.host.host();
+    let made = host.sessions.iter().filter(|session| session.name == name);
+    assert_eq!(made.count(), 1, "{:?}", host.sessions);
+}
+
+#[test]
+fn bare_lunetas_started_at_once_join_the_session_one_of_them_made() {
+    let owned = Owned::new();
+    let dir = directory("project");
+    let opening = || Window::opening(&owned.host, &dir, &[]);
+    both_join(&owned, "project", [opening(), opening()]);
+}
+
+#[test]
+fn named_lunetas_started_at_once_join_the_session_one_of_them_made() {
+    let owned = Owned::new();
+    let dir = directory("anywhere");
+    let opening = || Window::opening(&owned.host, &dir, &["work"]);
+    both_join(&owned, "work", [opening(), opening()]);
+}
+
 #[test]
 fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
     let owned = Owned::new();

@@ -61,12 +61,12 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
-use crate::names::Starts;
+use crate::names::{Starts, Taken, Unusable};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
 use crate::mux::own::server;
-use crate::mux::{self, Called, Runs, SessionName, SocketFolder, Zellij};
+use crate::mux::{self, Called, Failure, Runs, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -614,7 +614,7 @@ impl Daemon for Host {
         }
         let checked = task::spawn_blocking(move || names::unused(&name)).await;
         let checked = checked.map_err(|error| unfinished(&error))?;
-        let since = checked.map_err(Status::failed_precondition)?;
+        let since = checked.map_err(|unusable| Status::failed_precondition(unusable.to_string()))?;
         Ok(Response::new(CheckNameResponse { named_at: Some(since.into()) }))
     }
 
@@ -1017,13 +1017,20 @@ impl Daemon for Host {
             let (name, cwd) = (name.to_string(), cwd.into());
             return daemon.new_own(NewOwnRequest { on: None, name, cwd, command }).await;
         }
-        let made = task::spawn_blocking(move || -> Result<server::Made, String> {
-            names::unused(&name)?;
+        let made = task::spawn_blocking(move || -> Result<server::Made, Status> {
+            names::unused(&name).map_err(|unusable| match unusable {
+                Unusable::Taken(_, Taken::Own) => Status::already_exists(unusable.to_string()),
+                unusable => Status::failed_precondition(unusable.to_string()),
+            })?;
             let shell = opens::your_shell();
-            Ok(server::made(&name, &cwd, Runs::of(&command, Runs::Shell(&shell)))?)
+            let made = server::made(&name, &cwd, Runs::of(&command, Runs::Shell(&shell)));
+            made.map_err(|failure| match failure {
+                Failure::Taken(_) => Status::already_exists(failure.to_string()),
+                failure => Status::failed_precondition(failure.to_string()),
+            })
         });
         let made = made.await.map_err(|error| unfinished(&error))?;
-        let server::Made { pane, tab } = made.map_err(Status::failed_precondition)?;
+        let server::Made { pane, tab } = made?;
         Ok(Response::new(NewOwnResponse {
             session: pane.session.id.get(),
             tab: tab.get(),

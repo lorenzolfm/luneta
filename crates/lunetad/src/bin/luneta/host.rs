@@ -1905,7 +1905,7 @@ impl App {
                 self.name_own(move || {
                     let unmade = |why| format!("menu: no own session made: {why}");
                     let (name, _, dir) = lunetad::names::free_at(starts).map_err(unmade)?;
-                    own_sessions::made(&name, &dir).map_err(unmade)
+                    own_sessions::made(&name, &dir).map_err(|why| unmade(why.to_string()))
                 });
                 self.leave();
             },
