@@ -924,15 +924,16 @@ impl Tab {
             }
         };
         let size = self.tree.size();
-        let (shown, hidden) = if self.fullscreen {
+        let shown = if self.fullscreen {
             let full = self.tree.get(self.focused).expect("a tab focuses a pane of its own");
             let laid = self.tree.laid().into_iter().map(|(pane, _)| pane.id);
             let hidden: Vec<u32> = laid.filter(|pane| *pane != full.id).map(PaneId::said).collect();
             assert_eq!(hidden.len() + 1, self.tree.laid().len(), "a full pane hides the others");
-            (api::layout::Shown::Full(placed((full, Rect::whole(size)))), hidden)
+            let pane = Some(placed((full, Rect::whole(size))));
+            api::layout::Shown::Full(api::Full { pane, hidden })
         } else {
             let panes = self.tree.laid().into_iter().map(placed).collect();
-            (api::layout::Shown::Tiled(api::Tiled { panes, focused: self.focused.said() }), vec![])
+            api::layout::Shown::Tiled(api::Tiled { panes, focused: self.focused.said() })
         };
         let tabs = session.tabs.iter().map(|tab| api::Tabbed {
             id: tab.id.said(),
@@ -944,7 +945,6 @@ impl Tab {
             size: Some(size.said()),
             shown: Some(shown),
             tabs: tabs.collect(),
-            hidden,
         }
     }
 }

@@ -13,15 +13,19 @@ fn rect(column: u32, row: u32, columns: u32, rows: u32) -> api::Rect {
 fn placed(layout: &api::Layout) -> Vec<&api::Placed> {
     match layout.shown.as_ref().expect("a layout shows its tab") {
         api::layout::Shown::Tiled(tiled) => tiled.panes.iter().collect(),
-        api::layout::Shown::Full(full) => vec![full],
+        api::layout::Shown::Full(full) => vec![full_pane(full)],
     }
 }
 
 fn focused(layout: &api::Layout) -> u32 {
     match layout.shown.as_ref().expect("a layout shows its tab") {
         api::layout::Shown::Tiled(tiled) => tiled.focused,
-        api::layout::Shown::Full(full) => full.pane,
+        api::layout::Shown::Full(full) => full_pane(full).pane,
     }
+}
+
+fn full_pane(full: &api::Full) -> &api::Placed {
+    full.pane.as_ref().expect("a full layout places its pane")
 }
 
 fn full(layout: &api::Layout) -> bool {
@@ -245,7 +249,11 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
                 full(layout) && rects(layout) == [(second, rect(0, 0, 80, 24))]
             })
             .await;
-        assert_eq!(attached.layout.as_ref().unwrap().hidden, [made.pane], "it hides the other");
+        let hidden = match &attached.layout.as_ref().unwrap().shown {
+            Some(api::layout::Shown::Full(full)) => full.hidden.clone(),
+            other => panic!("a full layout shows {other:?}"),
+        };
+        assert_eq!(hidden, [made.pane], "it hides the other");
         other
             .until_laid("the other client on the pane that fills the tab", |layout| {
                 full(layout) && focused(layout) == second

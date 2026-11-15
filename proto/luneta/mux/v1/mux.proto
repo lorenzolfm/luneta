@@ -502,10 +502,15 @@ message Layout {
   Size size = 3;
   oneof shown {
     Tiled tiled = 4;
-    Placed full = 5;
+    Full full = 7;
   }
   repeated Tabbed tabs = 6;
-  repeated uint32 hidden = 7;
+  reserved 5;
+}
+
+message Full {
+  Placed pane = 1;
+  repeated uint32 hidden = 2;
 }
 
 message Tiled {

@@ -461,19 +461,24 @@ pub struct Layout {
     size: Size,
     shown: Shown,
     tabs: Vec<Tabbed>,
-    hidden: Vec<NonZeroU32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     Tiled(Tiled),
-    Full(Placed),
+    Full(Full),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tiled {
     panes: Vec<Placed>,
     focused: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Full {
+    pane: Placed,
+    hidden: Vec<NonZeroU32>,
 }
 
 impl Layout {
@@ -498,13 +503,9 @@ impl Layout {
     }
 
     #[must_use]
-    pub fn hidden(&self) -> &[NonZeroU32] {
-        &self.hidden
-    }
-
-    #[must_use]
     pub fn holds(&self, pane: NonZeroU32) -> bool {
-        self.shown.panes().iter().any(|placed| placed.pane == pane) || self.hidden.contains(&pane)
+        let shows = self.shown.panes().iter().any(|placed| placed.pane == pane);
+        shows || matches!(&self.shown, Shown::Full(full) if full.hidden.contains(&pane))
     }
 
     pub fn heard(layout: api::Layout) -> Result<Layout, String> {
@@ -540,7 +541,11 @@ impl Layout {
                 })?;
                 Shown::Tiled(Tiled { panes, focused })
             },
-            api::layout::Shown::Full(full) => Shown::Full(placed(full)?),
+            api::layout::Shown::Full(api::Full { pane, hidden }) => {
+                let pane = placed(pane.ok_or("a full layout places no pane")?)?;
+                let hidden = hidden_heard(pane.pane, hidden, columns, rows)?;
+                Shown::Full(Full { pane, hidden })
+            },
         };
         tiles(shown.panes(), columns, rows)?;
         let tabbed = |tabbed: api::Tabbed| {
@@ -551,8 +556,7 @@ impl Layout {
         if !tabs.iter().any(|tabbed| tabbed.id == tab) {
             return Err(format!("a layout of tab {tab} does not name it"));
         }
-        let hidden = hidden_heard(&shown, layout.hidden, columns, rows)?;
-        Ok(Layout { tab, size, shown, tabs, hidden })
+        Ok(Layout { tab, size, shown, tabs })
     }
 }
 
@@ -561,7 +565,7 @@ impl Shown {
     pub fn panes(&self) -> &[Placed] {
         match self {
             Shown::Tiled(tiled) => &tiled.panes,
-            Shown::Full(full) => std::slice::from_ref(full),
+            Shown::Full(full) => std::slice::from_ref(&full.pane),
         }
     }
 
@@ -569,7 +573,7 @@ impl Shown {
     pub fn focused(&self) -> &Placed {
         match self {
             Shown::Tiled(tiled) => &tiled.panes[tiled.focused],
-            Shown::Full(full) => full,
+            Shown::Full(full) => &full.pane,
         }
     }
 }
@@ -592,16 +596,11 @@ impl Rect {
 }
 
 fn hidden_heard(
-    shown: &Shown,
+    full: NonZeroU32,
     hidden: Vec<u32>,
     columns: u16,
     rows: u16,
 ) -> Result<Vec<NonZeroU32>, String> {
-    let full = match shown {
-        Shown::Full(full) => full.pane,
-        Shown::Tiled(_) if hidden.is_empty() => return Ok(Vec::new()),
-        Shown::Tiled(_) => return Err("a tiled layout hides panes".to_owned()),
-    };
     let cells = u64::from(columns) * u64::from(rows);
     let count = u64::try_from(hidden.len()).unwrap_or(u64::MAX);
     if count >= cells {
@@ -1070,7 +1069,6 @@ mod tests {
             size: Some(api::Size { columns: 80, rows: 24 }),
             shown: Some(shown),
             tabs,
-            hidden: vec![],
         };
         let tiled = |panes, focused| api::layout::Shown::Tiled(api::Tiled { panes, focused });
         let layout = |panes, focused, tabs| shown(tiled(panes, focused), tabs);
@@ -1101,18 +1099,15 @@ mod tests {
         let thin = vec![placed(4, rect(0, 80)), placed(5, rect(80, 0))];
         let thin = Layout::heard(layout(thin, 4, vec![tabbed(1)])).unwrap_err();
         assert_eq!(thin, "pane 5 is laid on no cell");
-        let full = shown(api::layout::Shown::Full(placed(5, rect(0, 80))), vec![tabbed(1)]);
-        let full = Layout::heard(full).unwrap();
-        assert_eq!(full.shown().focused().pane.get(), 5);
-        assert!(matches!(full.shown(), Shown::Full(_)));
-        let whole = placed(5, rect(0, 80));
-        let hides = |hidden| api::Layout {
-            hidden,
-            ..shown(api::layout::Shown::Full(whole.clone()), vec![tabbed(1)])
-        };
+        let full = |pane, hidden| api::layout::Shown::Full(api::Full { pane: Some(pane), hidden });
+        let hides = |hidden| shown(full(placed(5, rect(0, 80)), hidden), vec![tabbed(1)]);
+        let alone = Layout::heard(hides(vec![])).unwrap();
+        assert_eq!(alone.shown().focused().pane.get(), 5);
+        assert!(matches!(alone.shown(), Shown::Full(_)));
         let hiding = Layout::heard(hides(vec![4, 6])).unwrap();
         let (four, six) = (NonZeroU32::new(4).unwrap(), NonZeroU32::new(6).unwrap());
-        assert_eq!(hiding.hidden(), [four, six]);
+        let Shown::Full(hid) = hiding.shown() else { panic!("a full layout reads as tiled") };
+        assert_eq!(hid.hidden, [four, six]);
         assert!(hiding.holds(four) && hiding.holds(NonZeroU32::new(5).unwrap()));
         assert!(!hiding.holds(NonZeroU32::new(7).unwrap()));
         assert_eq!(Layout::heard(hides(vec![0])).unwrap_err(), "a layout hides pane 0");
@@ -1122,10 +1117,10 @@ mod tests {
         assert_eq!(twice, "a layout hides pane 4 twice");
         let many = Layout::heard(hides((1..=1921).filter(|it| *it != 5).collect())).unwrap_err();
         assert_eq!(many, "a layout hides 1920 panes on 1920 cells");
-        let tiled_hiding = api::Layout { hidden: vec![4], ..layout(two(), 4, vec![tabbed(1)]) };
-        assert_eq!(Layout::heard(tiled_hiding).unwrap_err(), "a tiled layout hides panes");
-        let part = shown(api::layout::Shown::Full(placed(5, rect(0, 40))), vec![tabbed(1)]);
+        let part = shown(full(placed(5, rect(0, 40)), vec![]), vec![tabbed(1)]);
         assert_eq!(Layout::heard(part).unwrap_err(), uncovered);
+        let unplaced = shown(api::layout::Shown::Full(api::Full::default()), vec![tabbed(1)]);
+        assert_eq!(Layout::heard(unplaced).unwrap_err(), "a full layout places no pane");
         let empty = api::Layout { shown: None, ..layout(two(), 4, vec![tabbed(1)]) };
         assert_eq!(Layout::heard(empty).unwrap_err(), "a layout shows nothing");
     }

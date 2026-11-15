@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::mpsc::Sender;
 
@@ -7,10 +8,10 @@ use crossterm::event::{
     MouseEventKind,
 };
 use lunetad::mux::own::api::{self, to_server};
-use lunetad::mux::own::OwnPane;
+use lunetad::mux::own::{OwnKey, OwnPane};
 use lunetad::mux::own::attach::{
-    self, Attach, Cursor, Frame, Glyph, Heard, Hello, Layout, Line, Placed, Rows, Shows, Size,
-    Tabbed, To, Went,
+    self, Attach, Cursor, Frame, Glyph, Heard, Hello, Layout, Line, Rows, Shows, Size, Tabbed,
+    To, Went,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Position, Rect};
@@ -40,14 +41,6 @@ struct Selection {
     to: Spot,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Selected {
-    #[default]
-    Nothing,
-    Dragging(Selection),
-    Held(Selection),
-}
-
 impl Selection {
     fn ends(self) -> (Spot, Spot) {
         if self.to < self.from {
@@ -60,6 +53,30 @@ impl Selection {
     fn holds(self, spot: Spot) -> bool {
         let (first, last) = self.ends();
         first <= spot && spot <= last
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pointer {
+    Free,
+    Sending,
+    Selecting(Selection),
+    Shown(Selection),
+}
+
+impl Pointer {
+    fn unselected(self) -> Pointer {
+        match self {
+            Pointer::Selecting(_) | Pointer::Shown(_) => Pointer::Free,
+            Pointer::Free | Pointer::Sending => self,
+        }
+    }
+
+    fn selection(self) -> Option<Selection> {
+        match self {
+            Pointer::Selecting(selection) | Pointer::Shown(selection) => Some(selection),
+            Pointer::Free | Pointer::Sending => None,
+        }
     }
 }
 
@@ -87,12 +104,23 @@ struct TabSpan {
 }
 
 #[derive(Default)]
-struct View {
-    went: Option<Went>,
-    layout: Option<Layout>,
-    screens: Vec<(NonZeroU32, Screen)>,
-    selected: Selected,
-    pressed: bool,
+enum View {
+    #[default]
+    Unseated,
+    Going {
+        went: Went,
+        kept: Option<Kept>,
+    },
+    Laid {
+        went: Went,
+        kept: Kept,
+    },
+}
+
+struct Kept {
+    layout: Layout,
+    screens: BTreeMap<NonZeroU32, Screen>,
+    pointer: Pointer,
 }
 
 impl View {
@@ -107,24 +135,27 @@ impl View {
     }
 
     fn went(&mut self, went: Went) {
+        let (before, kept) = match std::mem::take(self) {
+            View::Unseated => (None, None),
+            View::Going { went, kept } => (Some(went), kept),
+            View::Laid { went, kept } => (Some(went), Some(kept)),
+        };
         let tab = |went: Went| (went.pane.session, went.tab);
-        if self.went.is_none_or(|before| tab(before) != tab(went)) {
-            self.screens.clear();
-            self.layout = None;
-            self.pressed = false;
+        let mut kept = kept.filter(|_| before.is_some_and(|before| tab(before) == tab(went)));
+        if let Some(kept) = &mut kept
+            && before.is_some_and(|before| before.pane != went.pane)
+        {
+            kept.pointer = Pointer::Free;
         }
-        if self.went.is_none_or(|before| before.pane != went.pane) {
-            self.unselect();
-        }
-        if let Some(layout) = &self.layout {
-            assert_eq!(layout.tab(), went.tab, "a view keeps a layout only of the tab it is on");
-        }
-        self.went = Some(went);
+        *self = View::Going { went, kept };
     }
 
     fn laid(&mut self, layout: &Layout) -> Result<(), String> {
-        let Some(went) = self.went else {
-            return Err(format!("a layout of tab {} came before a went", layout.tab()));
+        let went = match self {
+            View::Unseated => {
+                return Err(format!("a layout of tab {} came before a went", layout.tab()));
+            },
+            View::Going { went, .. } | View::Laid { went, .. } => *went,
         };
         if layout.tab() != went.tab {
             return Err(format!("a layout of tab {} came on tab {}", layout.tab(), went.tab));
@@ -134,25 +165,144 @@ impl View {
             let gone = went.pane.id;
             return Err(format!("a layout focuses pane {focused}, not pane {gone} gone to"));
         }
-        self.screens.retain(|(pane, _)| layout.holds(*pane));
-        let held = layout.shown().panes().len() + layout.hidden().len();
-        assert!(self.screens.len() <= held, "a view holds no more screens than its layout panes");
-        if self.focused().is_none_or(|before| before.pane != focused) {
-            self.unselect();
-            self.pressed = false;
-        }
-        self.layout = Some(layout.clone());
+        let kept = match std::mem::take(self) {
+            View::Unseated => None,
+            View::Going { kept, .. } => kept,
+            View::Laid { kept, .. } => Some(kept),
+        };
+        let kept = match kept {
+            Some(mut kept) => {
+                kept.screens.retain(|pane, _| layout.holds(*pane));
+                if kept.layout.shown().focused().pane != focused {
+                    kept.pointer = Pointer::Free;
+                }
+                kept.layout = layout.clone();
+                kept
+            },
+            None => {
+                Kept { layout: layout.clone(), screens: BTreeMap::new(), pointer: Pointer::Free }
+            },
+        };
+        *self = View::Laid { went, kept };
         Ok(())
     }
 
     fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+        self.kept_mut().map_or(Ok(()), |kept| kept.framed(frame))
+    }
+
+    fn kept(&self) -> Option<&Kept> {
+        match self {
+            View::Unseated | View::Going { kept: None, .. } => None,
+            View::Going { kept: Some(kept), .. } | View::Laid { kept, .. } => Some(kept),
+        }
+    }
+
+    fn kept_mut(&mut self) -> Option<&mut Kept> {
+        match self {
+            View::Unseated | View::Going { kept: None, .. } => None,
+            View::Going { kept: Some(kept), .. } | View::Laid { kept, .. } => Some(kept),
+        }
+    }
+
+    fn selects(&self, mouse: MouseEvent, at: Spot) -> bool {
+        let View::Laid { kept, .. } = self else {
+            return false;
+        };
+        let inside = kept
+            .focused_screen()
+            .zip(on_panes(at))
+            .is_some_and(|((inner, _), at)| inner.contains(at));
+        inside && selects(kept.tracks_mouse(), mouse)
+    }
+
+    fn select_from(&mut self, at: Spot) {
+        let View::Laid { kept, .. } = self else {
+            return;
+        };
+        kept.pointer = Pointer::Free;
+        let (Some((inner, screen)), Some(at)) = (kept.focused_screen(), on_panes(at)) else {
+            return;
+        };
+        let at = within(spot_in(inner, at), screen.size);
+        kept.pointer = Pointer::Selecting(Selection { from: at, to: at });
+    }
+
+    fn select_to(&mut self, at: Spot) {
+        let Some(kept) = self.kept_mut() else {
+            return;
+        };
+        let Some((inner, screen)) = kept.focused_screen() else {
+            return;
+        };
+        let at = within(spot_in(inner, below_bar(at)), screen.size);
+        if let Pointer::Selecting(selection) = &mut kept.pointer {
+            selection.to = at;
+        }
+    }
+
+    fn selected(&mut self) -> Option<String> {
+        let kept = self.kept_mut()?;
+        let Pointer::Selecting(selection) = kept.pointer else {
+            return None;
+        };
+        let moved = Some(selection).filter(|selection| selection.from != selection.to);
+        let screen = kept.focused_screen().map(|(_, screen)| screen);
+        let text = moved.zip(screen).map(|(selection, screen)| text(screen, selection));
+        let text = text.filter(|text| !text.is_empty());
+        kept.pointer = match text {
+            Some(_) => Pointer::Shown(selection),
+            None => Pointer::Free,
+        };
+        text
+    }
+
+    fn unselect(&mut self) {
+        if let Some(kept) = self.kept_mut() {
+            kept.pointer = kept.pointer.unselected();
+        }
+    }
+
+    fn moused(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
+        let View::Laid { went, kept } = self else {
+            return Moused::Nothing;
+        };
+        kept.moused(went.pane.session, mouse, at, width)
+    }
+
+    fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buffer.cell_mut((x, y)) {
+                    cell.reset();
+                }
+            }
+        }
+        self.kept()?.draw(buffer, area)
+    }
+
+    fn cursor_style(&self) -> (CursorShape, bool) {
+        let screen = self.kept().and_then(Kept::focused_screen);
+        let Some(cursor) = screen.and_then(|(_, screen)| screen.cursor) else {
+            return (CursorShape::HollowBlock, false);
+        };
+        let shape = match cursor.shape {
+            attach::CursorShape::Block => CursorShape::Block,
+            attach::CursorShape::Bar => CursorShape::Beam,
+            attach::CursorShape::Underline => CursorShape::Underline,
+            attach::CursorShape::BlockHollow => CursorShape::HollowBlock,
+        };
+        (shape, cursor.blinking)
+    }
+}
+
+impl Kept {
+    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
         let pane = frame.pane();
-        let at = self.screens.iter().position(|(id, _)| *id == pane);
-        if !self.layout.as_ref().is_some_and(|layout| layout.holds(pane)) {
-            assert!(at.is_none(), "a view holds a screen only of a pane its layout holds");
+        if !self.layout.holds(pane) {
             return Ok(());
         }
-        let before = at.map(|at| self.screens.swap_remove(at).1);
+        let before = self.screens.remove(&pane);
         let size = before.as_ref().map(|screen| screen.size);
         let lines = match (frame.rows(), before) {
             (Rows::Whole(lines), _) => lines.clone(),
@@ -167,13 +317,12 @@ impl View {
             (Rows::Changed(_), Some(screen)) => {
                 let sides = |size: Size| format!("{}x{}", size.columns, size.rows);
                 let (had, sides) = (sides(screen.size), sides(frame.size()));
-                self.screens.push((pane, screen));
+                self.screens.insert(pane, screen);
                 return Err(format!("a frame of {sides} changes the rows of {had}"));
             },
         };
-        let focused = self.focused().is_some_and(|focused| focused.pane == pane);
-        if focused && size != Some(frame.size()) {
-            self.unselect();
+        if self.layout.shown().focused().pane == pane && size != Some(frame.size()) {
+            self.pointer = self.pointer.unselected();
         }
         let screen = Screen {
             size: frame.size(),
@@ -181,86 +330,28 @@ impl View {
             cursor: frame.cursor(),
             tracks_mouse: frame.tracks_mouse(),
         };
-        assert!(self.screens.iter().all(|(id, _)| *id != pane), "a view holds one screen a pane");
-        self.screens.push((pane, screen));
+        self.screens.insert(pane, screen);
         Ok(())
     }
 
-    fn focused(&self) -> Option<&Placed> {
-        Some(self.layout.as_ref()?.shown().focused())
-    }
-
-    fn screen(&self, pane: NonZeroU32) -> Option<&Screen> {
-        self.screens.iter().find(|(id, _)| *id == pane).map(|(_, screen)| screen)
-    }
-
     fn focused_screen(&self) -> Option<(Rect, &Screen)> {
-        let focused = self.focused()?;
+        let focused = self.layout.shown().focused();
         let inner = screen_rect(pane_rect(Rect::default(), focused.rect));
         if inner.is_empty() {
             return None;
         }
-        Some((inner, self.screen(focused.pane)?))
+        Some((inner, self.screens.get(&focused.pane)?))
     }
 
     fn tracks_mouse(&self) -> bool {
         self.focused_screen().is_some_and(|(_, screen)| screen.tracks_mouse)
     }
 
-    fn selects(&self, mouse: MouseEvent, at: Spot) -> bool {
-        let inside = self
-            .focused_screen()
-            .zip(on_panes(at))
-            .is_some_and(|((inner, _), at)| inner.contains(at));
-        inside && selects(self.tracks_mouse(), mouse)
-    }
-
-    fn select_from(&mut self, at: Spot) {
-        self.unselect();
-        let (Some((inner, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
-            return;
-        };
-        let at = within(spot_in(inner, at), screen.size);
-        self.selected = Selected::Dragging(Selection { from: at, to: at });
-    }
-
-    fn select_to(&mut self, at: Spot) {
-        let Some((inner, screen)) = self.focused_screen() else {
-            return;
-        };
-        let at = within(spot_in(inner, below_bar(at)), screen.size);
-        if let Selected::Dragging(selection) = &mut self.selected {
-            selection.to = at;
-        }
-    }
-
-    fn selected(&mut self) -> Option<String> {
-        let Selected::Dragging(selection) = self.selected else {
-            return None;
-        };
-        let moved = Some(selection).filter(|selection| selection.from != selection.to);
-        let screen = self.focused_screen().map(|(_, screen)| screen);
-        let text = moved.zip(screen).map(|(selection, screen)| text(screen, selection));
-        let text = text.filter(|text| !text.is_empty());
-        self.selected = match text {
-            Some(_) => Selected::Held(selection),
-            None => Selected::Nothing,
-        };
-        text
-    }
-
-    fn unselect(&mut self) {
-        self.selected = Selected::Nothing;
-    }
-
-    fn moused(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
-        if self.pressed {
+    fn moused(&mut self, session: OwnKey, mouse: MouseEvent, at: Spot, width: u16) -> Moused {
+        if self.pointer == Pointer::Sending {
             return self.sent(mouse, below_bar(at));
         }
-        let (Some(went), Some(layout)) = (self.went, &self.layout) else {
-            return Moused::Nothing;
-        };
-        let session = went.pane.session;
+        let layout = &self.layout;
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
         let Some(spot) = on_panes(at) else {
             let tab = down.then(|| tab_under(layout.tabs(), width, at.column)).flatten();
@@ -285,22 +376,27 @@ impl View {
     }
 
     fn sent(&mut self, mouse: MouseEvent, at: Position) -> Moused {
-        let Some(focused) = self.focused() else {
-            return Moused::Nothing;
-        };
-        let inner = screen_rect(pane_rect(Rect::default(), focused.rect));
+        let sending = self.pointer == Pointer::Sending;
+        let inner = screen_rect(pane_rect(Rect::default(), self.layout.shown().focused().rect));
         if inner.is_empty() {
-            self.pressed = false;
+            if sending {
+                self.pointer = Pointer::Free;
+            }
             return Moused::Nothing;
         }
         let inside = inner.contains(at);
         let sends = match mouse.kind {
             MouseEventKind::Down(_) => {
-                self.pressed = inside;
+                self.pointer = if inside { Pointer::Sending } else { Pointer::Free };
                 inside
             },
-            MouseEventKind::Drag(_) => self.pressed,
-            MouseEventKind::Up(_) => std::mem::replace(&mut self.pressed, false),
+            MouseEventKind::Drag(_) => sending,
+            MouseEventKind::Up(_) => {
+                if sending {
+                    self.pointer = Pointer::Free;
+                }
+                sending
+            },
             MouseEventKind::Moved
             | MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
@@ -314,22 +410,12 @@ impl View {
     }
 
     fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buffer.cell_mut((x, y)) {
-                    cell.reset();
-                }
-            }
-        }
-        let layout = self.layout.as_ref()?;
+        let layout = &self.layout;
         let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
         let panes = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
         draw_tabs(buffer, bar, layout);
         let focused = layout.shown().focused().pane;
-        let selection = match self.selected {
-            Selected::Nothing => None,
-            Selected::Dragging(selection) | Selected::Held(selection) => Some(selection),
-        };
+        let selection = self.pointer.selection();
         let mut cursor = None;
         for placed in layout.shown().panes() {
             let mine = placed.pane == focused;
@@ -337,7 +423,7 @@ impl View {
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
             border(buffer, panes, outer, &placed.title, Style::new().fg(colour));
             let seen = screen_rect(outer).intersection(panes);
-            let Some(screen) = self.screen(placed.pane).filter(|_| !seen.is_empty()) else {
+            let Some(screen) = self.screens.get(&placed.pane).filter(|_| !seen.is_empty()) else {
                 continue;
             };
             let drawn = draw_screen(buffer, seen, screen, selection.filter(|_| mine));
@@ -346,20 +432,6 @@ impl View {
             }
         }
         cursor
-    }
-
-    fn cursor_style(&self) -> (CursorShape, bool) {
-        let cursor = self.focused_screen().and_then(|(_, screen)| screen.cursor);
-        let Some(cursor) = cursor else {
-            return (CursorShape::HollowBlock, false);
-        };
-        let shape = match cursor.shape {
-            attach::CursorShape::Block => CursorShape::Block,
-            attach::CursorShape::Bar => CursorShape::Beam,
-            attach::CursorShape::Underline => CursorShape::Underline,
-            attach::CursorShape::BlockHollow => CursorShape::HollowBlock,
-        };
-        (shape, cursor.blinking)
     }
 }
 
@@ -814,7 +886,7 @@ fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 #[cfg(test)]
 mod tests {
     use lunetad::mux::own::attach::Grapheme;
-    use lunetad::mux::own::{OwnClientId, OwnId, OwnKey, OwnMade};
+    use lunetad::mux::own::{OwnClientId, OwnId, OwnMade};
 
     use super::*;
 
@@ -877,16 +949,6 @@ mod tests {
     }
 
     fn laid(tab: u32, columns: u32, rows: u32, shown: api::layout::Shown) -> Layout {
-        hiding(tab, columns, rows, shown, vec![])
-    }
-
-    fn hiding(
-        tab: u32,
-        columns: u32,
-        rows: u32,
-        shown: api::layout::Shown,
-        hidden: Vec<u32>,
-    ) -> Layout {
         let tabbed = |id, name: &str| api::Tabbed { id, name: name.to_owned() };
         Layout::heard(api::Layout {
             session: 1,
@@ -894,7 +956,6 @@ mod tests {
             size: Some(api::Size { columns, rows }),
             shown: Some(shown),
             tabs: vec![tabbed(1, "one"), tabbed(2, "two")],
-            hidden,
         })
         .unwrap()
     }
@@ -905,6 +966,18 @@ mod tests {
 
     fn two_panes() -> Layout {
         laid(1, 20, 4, tiled(vec![placed(1, rect(0, 0, 10, 4)), placed(2, rect(10, 0, 10, 4))], 1))
+    }
+
+    fn screen(view: &View, pane: NonZeroU32) -> Option<&Screen> {
+        view.kept()?.screens.get(&pane)
+    }
+
+    fn pointer(view: &View) -> Option<Pointer> {
+        Some(view.kept()?.pointer)
+    }
+
+    fn unlaid(view: &View) -> bool {
+        matches!(view, View::Going { kept: None, .. })
     }
 
     fn heard(view: &mut View, heard: &Heard) {
@@ -1043,6 +1116,30 @@ mod tests {
     }
 
     #[test]
+    fn a_client_gone_to_another_pane_sends_no_mouse_until_the_layout_that_focuses_it() {
+        let mut view = split_view();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left));
+        heard(&mut view, &Heard::Went(went(2, 1)));
+        assert_eq!(view.moused(down, spot(2, 3), 22), Moused::Nothing);
+        assert_eq!(view.moused(down, spot(2, 14), 22), Moused::Nothing);
+        assert!(!view.selects(down, spot(2, 3)));
+        let panes = vec![placed(1, rect(0, 0, 10, 4)), placed(2, rect(10, 0, 10, 4))];
+        heard(&mut view, &Heard::Layout(laid(1, 20, 4, tiled(panes, 2))));
+        assert!(matches!(view.moused(down, spot(2, 14), 22), Moused::Sent(_)));
+    }
+
+    #[test]
+    fn a_selection_ends_a_press_whose_release_never_came() {
+        let mut view = split_view();
+        let down = mouse(MouseEventKind::Down(MouseButton::Left));
+        assert!(matches!(view.moused(down, spot(2, 3), 22), Moused::Sent(_)));
+        view.select_from(spot(2, 1));
+        view.select_to(spot(2, 4));
+        assert_eq!(view.selected().as_deref(), Some("abcd"));
+        assert_eq!(view.moused(down, spot(2, 14), 22), Moused::Go(To::Pane(pane(2))));
+    }
+
+    #[test]
     fn a_key_goes_to_the_server_by_its_name_or_its_character() {
         let said = |code, modifiers| key_said(&KeyEvent::new(code, modifiers));
         let named = |named: api::Named| Some(api::key::Key::Named(named.into()));
@@ -1079,11 +1176,11 @@ mod tests {
         view.select_from(spot(2, 1));
         view.select_to(spot(3, 30));
         assert_eq!(view.selected().as_deref(), Some("abcdefgh\nijklmnop"));
-        assert!(matches!(view.selected, Selected::Held(_)));
+        assert!(matches!(pointer(&view), Some(Pointer::Shown(_))));
         heard(&mut view, &Heard::Frame(whole(2, lines(&["ab"]), None)));
-        assert!(matches!(view.selected, Selected::Held(_)));
+        assert!(matches!(pointer(&view), Some(Pointer::Shown(_))));
         heard(&mut view, &Heard::Frame(whole(1, lines(&["ab"]), None)));
-        assert_eq!(view.selected, Selected::Nothing);
+        assert_eq!(pointer(&view), Some(Pointer::Free));
     }
 
     #[test]
@@ -1094,39 +1191,40 @@ mod tests {
         let frame = Frame::new(NonZeroU32::MIN, size, rows, None, false).unwrap();
         let why = view.heard(&Heard::Frame(frame)).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
-        assert_eq!(view.screen(NonZeroU32::MIN).unwrap().lines[0].glyphs()[0], narrow("a"));
+        assert_eq!(screen(&view, NonZeroU32::MIN).unwrap().lines[0].glyphs()[0], narrow("a"));
     }
 
     #[test]
     fn a_pane_keeps_its_screen_while_its_tab_lays_it_out_and_waits_for_a_whole_frame_after() {
         let mut view = split_view();
         let (one, two, three) = (id(1), id(2), id(3));
-        let full = api::layout::Shown::Full(placed(1, rect(0, 0, 20, 4)));
-        heard(&mut view, &Heard::Layout(hiding(1, 20, 4, full, vec![2])));
-        assert!(view.screen(two).is_some(), "a pane hidden by a fullscreen one keeps its screen");
+        let pane = Some(placed(1, rect(0, 0, 20, 4)));
+        let full = api::layout::Shown::Full(api::Full { pane, hidden: vec![2] });
+        heard(&mut view, &Heard::Layout(laid(1, 20, 4, full)));
+        assert!(screen(&view, two).is_some(), "a pane hidden by a fullscreen one keeps its screen");
         heard(&mut view, &Heard::Frame(whole(2, lines(&["yz", "01"]), None)));
-        assert_eq!(view.screen(two).unwrap().size, Size { columns: side(2), rows: side(2) });
+        assert_eq!(screen(&view, two).unwrap().size, Size { columns: side(2), rows: side(2) });
         heard(&mut view, &Heard::Frame(whole(9, lines(&["no"]), None)));
-        assert!(view.screen(id(9)).is_none(), "a pane its layout does not hold gets no screen");
+        assert!(screen(&view, id(9)).is_none(), "a pane its layout does not hold gets no screen");
         heard(&mut view, &Heard::Went(went(2, 1)));
-        assert!(view.screen(one).is_some(), "a client moving inside its tab keeps every screen");
+        assert!(screen(&view, one).is_some(), "a client moving inside its tab keeps every screen");
         let alone = tiled(vec![placed(2, rect(0, 0, 20, 4))], 2);
         heard(&mut view, &Heard::Layout(laid(1, 20, 4, alone)));
-        assert!(view.screen(one).is_none(), "a pane its tab no longer lays out has no screen");
-        assert!(view.screen(two).is_some());
+        assert!(screen(&view, one).is_none(), "a pane its tab no longer lays out has no screen");
+        assert!(screen(&view, two).is_some());
         heard(&mut view, &Heard::Went(went(3, 2)));
-        assert!(view.screens.is_empty() && view.layout.is_none());
+        assert!(unlaid(&view));
         heard(&mut view, &Heard::Frame(whole(3, lines(&["e"]), None)));
-        assert!(view.screens.is_empty(), "a frame before its tab's layout is of the tab left");
+        assert!(unlaid(&view), "a frame before its tab's layout is of the tab left");
         let three_alone = tiled(vec![placed(3, rect(0, 0, 20, 4))], 3);
         heard(&mut view, &Heard::Layout(laid(2, 20, 4, three_alone)));
         let size = Size { columns: side(1), rows: side(1) };
         let changed =
             Frame::new(three, size, Rows::Changed(vec![(0, line(vec![narrow("c")]))]), None, false);
         heard(&mut view, &Heard::Frame(changed.unwrap()));
-        assert!(view.screens.is_empty(), "changed rows wait for a whole frame of a new tab");
+        assert!(screen(&view, three).is_none(), "changed rows wait for a whole frame of a new tab");
         heard(&mut view, &Heard::Frame(whole(3, lines(&["d"]), None)));
-        assert_eq!(view.screen(three).unwrap().lines[0].glyphs()[0], narrow("d"));
+        assert_eq!(screen(&view, three).unwrap().lines[0].glyphs()[0], narrow("d"));
     }
 
     #[test]
@@ -1140,6 +1238,6 @@ mod tests {
         heard(&mut view, &Heard::Went(went(2, 1)));
         let astray = view.heard(&Heard::Layout(two_panes())).unwrap_err();
         assert_eq!(astray, "a layout focuses pane 1, not pane 2 gone to");
-        assert!(view.layout.is_none());
+        assert!(unlaid(&view));
     }
 }
