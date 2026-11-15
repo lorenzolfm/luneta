@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lunetad::api::{NewOwnRequest, On, OwnSession};
+use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{self, server, OwnId, OwnKey};
 use lunetad::{log, Directory, SessionName};
 use tonic::{Code, Status};
@@ -16,13 +17,25 @@ pub fn holding() -> Result<Option<OwnKey>, String> {
     own::here().map(|pane| pane.map(|pane| pane.session))
 }
 
-pub fn refusal(session: OwnKey, name: &SessionName) -> Option<String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Elsewhere(To);
+
+impl Elsewhere {
+    #[must_use]
+    pub fn to(self) -> To {
+        self.0
+    }
+}
+
+pub fn elsewhere(to: To, name: &SessionName) -> Result<Elsewhere, String> {
     match holding() {
-        Ok(held) => (held == Some(session))
-            .then(|| format!("luneta runs in {name}, and goes nowhere it shows itself")),
-        Err(why) => Some(format!(
-            "{why}, so luneta may run in {name}, and goes nowhere it shows itself"
-        )),
+        Ok(held) if held == Some(to.session()) => {
+            Err(format!("luneta runs in {name}, and goes nowhere it shows itself"))
+        },
+        Ok(_) => Ok(Elsewhere(to)),
+        Err(why) => {
+            Err(format!("{why}, so luneta may run in {name}, and goes nowhere it shows itself"))
+        },
     }
 }
 
@@ -36,14 +49,18 @@ pub fn directory(dir: &Path) -> Result<Directory, String> {
     cwd.ok_or_else(|| format!("{} is no directory an own session starts in", dir.display()))
 }
 
-pub fn newest(passed: &[OwnKey]) -> Option<OwnKey> {
+pub fn newest(passed: &[OwnKey]) -> Option<Elsewhere> {
     let sessions = server::sessions()
         .inspect_err(|failure| log::say(&format!("no own session to go on in: {failure}")))
         .ok()?;
     let held = holding()
         .inspect_err(|why| log::say(&format!("no own session to go on in: {why}")))
         .ok()?;
-    newest_of(sessions.iter().map(server::Listing::key), held, passed)
+    let newest = newest_of(sessions.iter().map(server::Listing::key), held, passed)?;
+    let listing = sessions.iter().find(|listing| listing.key() == newest)?;
+    elsewhere(To::Session(newest), &listing.name)
+        .inspect_err(|why| log::say(&format!("no own session to go on in: {why}")))
+        .ok()
 }
 
 fn newest_of(

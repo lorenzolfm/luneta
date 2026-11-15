@@ -21,6 +21,7 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::gruvbox;
 use crate::host::Event;
+use crate::own_sessions::Elsewhere;
 
 struct Screen {
     size: Size,
@@ -622,8 +623,8 @@ impl Attached {
         self.attach.send(to_server::Event::Focus(api::Focus { focused }));
     }
 
-    pub fn go(&self, to: To) {
-        self.attach.go(to);
+    pub fn go(&self, to: Elsewhere) {
+        self.attach.go(to.to());
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, at: Spot, area: Rect) -> Option<To> {

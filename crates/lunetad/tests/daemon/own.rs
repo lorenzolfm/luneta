@@ -571,15 +571,19 @@ fn an_own_session_s_first_tab_takes_its_name_and_runs_its_command() {
         on: None,
         name: "pulled".to_owned(),
         cwd: owned.home(),
-        command: ["sh", "-c", "exec sleep 600"].map(str::to_owned).to_vec(),
+        command: ["sh", "-c", "echo pulled ran; exec sleep 600"].map(str::to_owned).to_vec(),
         tab: Some("#2736".to_owned()),
     };
     let made = owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let pane = eventually("the host lists the tab", || {
         owned.listed("pulled").panes?.panes.into_iter().next()
     });
-    let listed = (pane.id, pane.tab_name.as_str(), pane.command.as_deref());
-    assert_eq!(listed, (made.pane, "#2736", Some("sh -c exec sleep 600")));
+    assert_eq!((pane.id, pane.tab_name.as_str()), (made.pane, "#2736"));
+    eventually("the tab's command runs", || {
+        let request = DumpScreenRequest { on: None, session: "pulled".to_owned(), pane: None };
+        let dumped = owned.ask(|mut daemon| async move { daemon.dump_screen(request).await });
+        dumped.ok().filter(|dumped| dumped.screen.contains("pulled ran"))
+    });
 }
 
 struct Shut {

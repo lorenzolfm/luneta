@@ -2,12 +2,13 @@ use std::time::SystemTime;
 
 use std::path::Path;
 
+use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{server, OwnKey};
 use lunetad::names::session_for;
 
 use crate::ledger::Session;
 use crate::news::News;
-use crate::own_sessions::{self, Unmade};
+use crate::own_sessions::{self, Elsewhere, Unmade};
 use crate::zellij::{self, SessionName};
 
 struct Running {
@@ -16,7 +17,7 @@ struct Running {
     seen: Option<SystemTime>,
 }
 
-pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
+pub fn own(named: &SessionName, dir: &Path) -> Result<Elsewhere, String> {
     let running = zellij::running()?;
     if running.iter().any(|(name, _)| name == named) {
         return Err(format!("{named} is a session of zellij's: name another for an own one"));
@@ -32,13 +33,10 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
             Err(Unmade::Failed(why)) => return Err(format!("no own session made: {why}")),
         }
     };
-    if let Some(refusal) = own_sessions::refusal(session, named) {
-        return Err(refusal);
-    }
-    Ok(session)
+    own_sessions::elsewhere(To::Session(session), named)
 }
 
-pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
+pub fn bare(dir: &Path, news: &News) -> Result<Elsewhere, String> {
     let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
     let held = own_sessions::holding().map_err(|why| {
@@ -53,7 +51,9 @@ pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
         })
         .collect();
     if let Some(joined) = to_join(&free, named.as_ref()) {
-        return Ok(joined);
+        let name = free.iter().find(|session| session.key == joined).map(|session| &session.name);
+        let name = name.expect("luneta joins a session it found");
+        return own_sessions::elsewhere(To::Session(joined), name);
     }
     match named {
         Some(named) => own(&named, dir),

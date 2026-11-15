@@ -57,7 +57,7 @@ use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::prune;
-use crate::own_sessions;
+use crate::own_sessions::{self, Elsewhere};
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -71,7 +71,7 @@ use crate::width::Width;
 use crate::zellij::{self, After, Close, Closes, SessionName, Turned};
 
 pub enum Made {
-    Own(Result<OwnKey, String>),
+    Own(Result<Elsewhere, String>),
     Pulled { menu: u64, on: Machine, session: SessionName, made: Result<OwnKey, String> },
 }
 
@@ -257,7 +257,7 @@ struct Own {
 }
 
 enum Phase {
-    Coming { back: Option<OwnKey>, going: Going },
+    Coming { going: Going },
     In { going: Option<Going> },
 }
 
@@ -269,7 +269,7 @@ struct Going {
 impl Phase {
     fn going(&mut self, going: Going) -> Option<After> {
         let before = match self {
-            Phase::Coming { going: was, .. } => Some(std::mem::replace(was, going)),
+            Phase::Coming { going: was } => Some(std::mem::replace(was, going)),
             Phase::In { going: was } => was.replace(going),
         };
         before.and_then(|before| before.after)
@@ -277,7 +277,7 @@ impl Phase {
 
     fn went(&mut self, went: &own_attach::Went) -> Option<After> {
         let going = match std::mem::replace(self, Phase::In { going: None }) {
-            Phase::Coming { going, .. } => Some(going),
+            Phase::Coming { going } => Some(going),
             Phase::In { going } => going,
         };
         match going {
@@ -291,7 +291,7 @@ impl Phase {
 
     fn undone(&mut self) -> Option<After> {
         match self {
-            Phase::Coming { going, .. } => going.after.take(),
+            Phase::Coming { going } => going.after.take(),
             Phase::In { going } => going.take().and_then(|going| going.after),
         }
     }
@@ -488,7 +488,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    session: OwnKey,
+    session: Elsewhere,
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -553,13 +553,11 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
-    let elsewhere = own_sessions::holding().is_ok_and(|held| held != Some(session));
-    assert!(elsewhere, "luneta attaches to a session it may run in");
-    sidebar.attaching(session);
-    let hello = hello(To::Session(session), areas.1, colours);
+    sidebar.attaching(session.to().session());
+    let hello = hello(session.to(), areas.1, colours);
     let attached = Attached::start(started, hello, &events);
-    let going = Going { to: To::Session(session), after: None };
-    let right = Own { attached, phase: Phase::Coming { back: None, going } };
+    let going = Going { to: session.to(), after: None };
+    let right = Own { attached, phase: Phase::Coming { going } };
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
@@ -1363,12 +1361,20 @@ impl App {
 
     fn zellij_mouse(&mut self, mouse: MouseEvent) {
         let at = self.zellij_cell(mouse);
+        let Some(to) = self.right.attached.mouse(mouse, at, self.areas.1) else {
+            return;
+        };
+        let Some(listed) = self.sidebar.own_listed(to.session()) else {
+            return self.sidebar.notify("lunetad lists no session luneta's client is in".to_owned());
+        };
+        let to = match own_sessions::elsewhere(to, listed.name()) {
+            Ok(to) => to,
+            Err(why) => return self.sidebar.notify(why),
+        };
         let own = &mut self.right;
-        if let Some(to) = own.attached.mouse(mouse, at, self.areas.1) {
-            own.attached.go(to);
-            if let Some(before) = own.phase.going(Going { to, after: None }) {
-                before.untold(&self.events);
-            }
+        own.attached.go(to);
+        if let Some(before) = own.phase.going(Going { to: to.to(), after: None }) {
+            before.untold(&self.events);
         }
     }
 
@@ -1484,7 +1490,9 @@ impl App {
                 self.name_own(move || {
                     let unmade = |why| format!("menu: no own session made: {why}");
                     let (name, _, dir) = lunetad::names::free_at(starts).map_err(unmade)?;
-                    own_sessions::made(&name, &dir).map_err(|why| unmade(why.to_string()))
+                    let made = own_sessions::made(&name, &dir);
+                    let made = made.map_err(|why| unmade(why.to_string()))?;
+                    own_sessions::elsewhere(To::Session(made), &name).map_err(unmade)
                 });
                 self.leave();
             },
@@ -1792,10 +1800,7 @@ impl App {
             Some(why) => Err(why),
             None => self.sidebar.own_target(place),
         };
-        let target = target.and_then(|to| match own_sessions::refusal(to.session(), session) {
-            Some(why) => Err(why),
-            None => Ok(to),
-        });
+        let target = target.and_then(|to| own_sessions::elsewhere(to, session));
         let to = match target {
             Ok(target) => target,
             Err(why) => {
@@ -1808,21 +1813,21 @@ impl App {
         };
         let own = &mut self.right;
         own.attached.go(to);
-        if let Some(before) = own.phase.going(Going { to, after }) {
+        if let Some(before) = own.phase.going(Going { to: to.to(), after }) {
             before.untold(&self.events);
         }
         true
     }
 
-    fn attach(&mut self, to: To, after: Option<After>, back: Option<OwnKey>) {
+    fn attach(&mut self, to: Elsewhere, after: Option<After>) {
         let number = self.started + 1;
-        let hello = hello(to, self.areas.1, self.colours);
+        let hello = hello(to.to(), self.areas.1, self.colours);
         let attached = Attached::start(number, hello, &self.events);
         self.started = number;
         self.give_way();
-        let going = Going { to, after };
-        self.right = Own { attached, phase: Phase::Coming { back, going } };
-        self.sidebar.attaching(to.session());
+        let going = Going { to: to.to(), after };
+        self.right = Own { attached, phase: Phase::Coming { going } };
+        self.sidebar.attaching(to.to().session());
         if matches!(self.held, Held::Zellij | Held::Selecting) {
             self.held = Held::Nothing;
         }
@@ -1863,9 +1868,9 @@ impl App {
 
     fn own_ended(&mut self, lost: Option<String>) -> io::Result<()> {
         let own = &mut self.right;
-        let (back, going) = match std::mem::replace(&mut own.phase, Phase::In { going: None }) {
-            Phase::Coming { back, going } => (Some(back), Some(going)),
-            Phase::In { going } => (None, going),
+        let (coming, going) = match std::mem::replace(&mut own.phase, Phase::In { going: None }) {
+            Phase::Coming { going } => (true, Some(going)),
+            Phase::In { going } => (false, going),
         };
         if let Some(after) = going.and_then(|going| going.after) {
             after.untold(&self.events);
@@ -1875,24 +1880,16 @@ impl App {
             return Ok(());
         };
         let note = format!("luneta's client of an own session: {why}");
-        let Some(back) = back else {
-            self.sidebar.notify(note);
-            if let Some(seat) = self.sidebar.own_seat() {
-                self.own_lost.push(seat.session());
-            }
-            self.newest_here();
+        if coming {
+            self.end(&note);
+            self.gave_up = Some(why);
             return Ok(());
-        };
-        match back {
-            Some(id) => {
-                self.sidebar.notify(note);
-                self.attach(To::Session(id), None, None);
-            },
-            None => {
-                self.end(&note);
-                self.gave_up = Some(why);
-            },
         }
+        self.sidebar.notify(note);
+        if let Some(seat) = self.sidebar.own_seat() {
+            self.own_lost.push(seat.session());
+        }
+        self.newest_here();
         Ok(())
     }
 
@@ -1904,11 +1901,13 @@ impl App {
 
     fn make_own(&mut self, session: SessionName, cwd: Directory) {
         self.name_own(move || {
-            own_sessions::made(&session, &cwd).map_err(|why| format!("no own session made: {why}"))
+            let made = own_sessions::made(&session, &cwd);
+            let made = made.and_then(|made| own_sessions::elsewhere(To::Session(made), &session));
+            made.map_err(|why| format!("no own session made: {why}"))
         });
     }
 
-    fn name_own(&mut self, made: impl FnOnce() -> Result<OwnKey, String> + Send + 'static) {
+    fn name_own(&mut self, made: impl FnOnce() -> Result<Elsewhere, String> + Send + 'static) {
         if self.refuse_naming(None) {
             return;
         }
@@ -1957,7 +1956,12 @@ impl App {
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
         match (on, held) {
-            (Machine::Local, Some(sidebar::Held::Open)) => self.go_made_own(made),
+            (Machine::Local, Some(sidebar::Held::Open)) => {
+                match own_sessions::elsewhere(To::Session(made), session) {
+                    Ok(made) => self.go_made_own(made),
+                    Err(why) => self.sidebar.notify(format!("menu: made {session}: {why}")),
+                }
+            },
             (Machine::Local, _) => self.sidebar.notify(format!("menu: made {session}")),
             (Machine::Remote(destination), _) => self.sidebar.notify(format!(
                 "menu: made {session} on {destination}, where luneta goes to no session yet"
@@ -1965,12 +1969,11 @@ impl App {
         }
     }
 
-    fn go_made_own(&mut self, made: OwnKey) {
+    fn go_made_own(&mut self, made: Elsewhere) {
         self.own_lost.clear();
-        let to = To::Session(made);
         let own = &mut self.right;
-        own.attached.go(to);
-        if let Some(before) = own.phase.going(Going { to, after: None }) {
+        own.attached.go(made);
+        if let Some(before) = own.phase.going(Going { to: made.to(), after: None }) {
             before.untold(&self.events);
         }
     }
@@ -2061,7 +2064,7 @@ impl App {
 
     fn newest_here(&mut self) {
         match own_sessions::newest(&self.own_lost) {
-            Some(id) => self.attach(To::Session(id), None, None),
+            Some(newest) => self.attach(newest, None),
             None => self.end("no own session runs to go on in"),
         }
     }
@@ -2244,7 +2247,7 @@ mod tests {
         };
         let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
         let going = Going { to: To::Session(there), after: kill() };
-        let mut phase = Phase::Coming { back: None, going };
+        let mut phase = Phase::Coming { going };
         assert!(phase.went(&went(here, 3)).is_none());
         assert!(matches!(phase, Phase::In { going: Some(_) }), "it came, and still goes");
         assert!(is_kill(phase.went(&went(there, 4))));
