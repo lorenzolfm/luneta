@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use lunetad::api::{NewOwnRequest, OwnSession};
@@ -20,6 +21,11 @@ pub fn refusal(session: OwnKey, name: &SessionName) -> Option<String> {
 pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
     let named = server::named(name).map_err(|failure| failure.to_string())?;
     Ok(named.map(|own| own.key()))
+}
+
+pub fn directory(dir: &Path) -> Result<Directory, String> {
+    let cwd = dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok());
+    cwd.ok_or_else(|| format!("{} is no directory an own session starts in", dir.display()))
 }
 
 pub fn newest(passed: &[OwnKey]) -> Option<OwnKey> {

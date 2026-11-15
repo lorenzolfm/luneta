@@ -267,6 +267,15 @@ fn a_bare_luneta_never_joins_the_session_its_terminal_is_a_pane_of() {
 }
 
 #[test]
+fn a_bare_luneta_where_the_directory_names_no_session_asks_for_a_name() {
+    let owned = Owned::new();
+    let output = luneta(owned.host.vars(), Path::new("/")).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    assert!(refusal.starts_with("luneta: / names no own session: name one"), "{refusal}");
+}
+
+#[test]
 fn the_log_says_luneta_ended_by_a_signal() {
     let owned = Owned::new();
     owned.make("work").unwrap();

@@ -869,13 +869,6 @@ pub struct Ended {
     pub at: SystemTime,
 }
 
-fn started(on: &Machine, starts: Starts) -> Done {
-    match on {
-        Machine::Local => Done::Own(starts),
-        Machine::Remote(_) => Done::Start(on.clone(), starts),
-    }
-}
-
 impl Target {
     pub fn machine(&self) -> &Machine {
         match self {
@@ -1443,7 +1436,7 @@ impl Menu {
                     stays(stage, Wants::Nothing)
                 },
                 (Pressed::New(New::Session), Target::Machine(machine)) => {
-                    Did::Closed(started(machine, Starts::Home))
+                    Did::Closed(new_session(machine, Starts::Home))
                 },
                 (Pressed::New(New::Pane), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
@@ -1462,7 +1455,7 @@ impl Menu {
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 (Pressed::New(New::Session), Target::Pane(machine, row)) => match row.beside() {
-                    Ok(Beside { cwd, .. }) => Did::Closed(started(machine, Starts::In(cwd))),
+                    Ok(Beside { cwd, .. }) => Did::Closed(new_session(machine, Starts::In(cwd))),
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 (Pressed::Turn(turning), Target::Pane(_, row)) => {
@@ -2025,6 +2018,13 @@ impl Menu {
             },
         };
         Shown { title, right, body, spots, footer, keys }
+    }
+}
+
+fn new_session(on: &Machine, starts: Starts) -> Done {
+    match on {
+        Machine::Local => Done::Own(starts),
+        Machine::Remote(_) => Done::Start(on.clone(), starts),
     }
 }
 

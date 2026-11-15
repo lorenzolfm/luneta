@@ -42,7 +42,6 @@ use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange, Theme};
 use crate::ask::{self, Ask, Keyed};
 use crate::attached::{self, Attached};
-use crate::away;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
@@ -695,7 +694,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    start: OwnKey,
+    session: OwnKey,
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -760,10 +759,11 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
-    sidebar.attaching(start);
-    let hello = hello(To::Session(start), areas.1, colours);
+    assert_ne!(own_sessions::holding(), Some(session), "luneta attaches to the session it runs in");
+    sidebar.attaching(session);
+    let hello = hello(To::Session(session), areas.1, colours);
     let attached = Attached::start(started, hello, &events);
-    let going = Going { to: To::Session(start), after: None };
+    let going = Going { to: To::Session(session), after: None };
     let right = Right::Own(Own { attached, phase: Phase::Coming { fails: Fails::End, going } });
     let desktop = Desktop::start(&events);
     let focused = true;
@@ -1981,12 +1981,9 @@ impl App {
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Start { on: Machine::Local, session } => {
-                match self.dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok()) {
-                    Some(cwd) => self.make_own(session, cwd),
-                    None => self.sidebar.notify(format!(
-                        "no own session made: {} is no directory one starts in",
-                        self.dir.display()
-                    )),
+                match own_sessions::directory(&self.dir) {
+                    Ok(cwd) => self.make_own(session, cwd),
+                    Err(why) => self.sidebar.notify(format!("no own session made: {why}")),
                 }
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -3001,7 +2998,7 @@ impl App {
 
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
         let Some((destination, Refuge { session, before, .. })) =
-            starts::away(&self.sidebar, tried, away::QUICK)
+            starts::away(&self.sidebar, tried)
         else {
             self.end("no machine has a session to go on in");
             return Ok(());

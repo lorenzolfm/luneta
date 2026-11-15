@@ -1,10 +1,12 @@
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use std::path::Path;
 
 use lunetad::mux::own::{server, OwnKey};
-use lunetad::{log, Destination, Directory};
+use lunetad::names::session_for;
+use lunetad::{log, Destination};
 
+use crate::away;
 use crate::ledger::Session;
 use crate::news::News;
 use crate::own_sessions;
@@ -25,9 +27,7 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
     let session = if let Some(session) = own_sessions::named(named)? {
         session
     } else {
-        let unread = || format!("{} is no directory an own session starts in", dir.display());
-        let cwd = dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok());
-        let cwd = cwd.ok_or_else(unread)?;
+        let cwd = own_sessions::directory(dir)?;
         own_sessions::made(named, &cwd).map_err(|why| format!("no own session made: {why}"))?
     };
     if let Some(refusal) = own_sessions::refusal(session, named) {
@@ -37,16 +37,18 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
 }
 
 pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
-    let named = zellij::session_for(dir);
+    let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
     let held = own_sessions::holding();
     let free = sessions.iter().filter(|listing| Some(listing.key()) != held);
-    let free = free.map(|listing| Running {
-        key: listing.key(),
-        name: listing.name.clone(),
-        seen: news.last_seen(Session::own(listing.made, listing.id)),
-    });
-    if let Some(&joined) = joinable(free.collect(), named.as_ref()).first() {
+    let free: Vec<Running> = free
+        .map(|listing| Running {
+            key: listing.key(),
+            name: listing.name.clone(),
+            seen: news.last_seen(Session::own(listing.made, listing.id)),
+        })
+        .collect();
+    if let Some(joined) = to_join(&free, named.as_ref()) {
         return Ok(joined);
     }
     match named {
@@ -55,11 +57,7 @@ pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
     }
 }
 
-pub fn away(
-    sidebar: &Sidebar,
-    tried: &[Destination],
-    limit: Duration,
-) -> Option<(Destination, Refuge)> {
+pub fn away(sidebar: &Sidebar, tried: &[Destination]) -> Option<(Destination, Refuge)> {
     for (destination, refuges) in sidebar.refuges_away(tried, zellij::within()) {
         let sessions = match refuges {
             Ok(sessions) => sessions,
@@ -68,7 +66,7 @@ pub fn away(
                 continue;
             },
         };
-        match zellij::answering_away(&destination, sessions, limit) {
+        match zellij::answering_away(&destination, sessions, away::QUICK) {
             Ok(Some(refuge)) => return Some((destination, refuge)),
             Ok(None) => log::say(&format!("{destination}: no session to go on in answers")),
             Err(why) => {
@@ -80,17 +78,16 @@ pub fn away(
     None
 }
 
-fn joinable(mut running: Vec<Running>, named: Option<&SessionName>) -> Vec<OwnKey> {
-    let is_named = |session: &Running| named == Some(&session.name);
-    running.sort_by(|a, b| {
-        let a_order = (is_named(a), a.seen, a.key.made, &a.name);
-        (is_named(b), b.seen, b.key.made, &b.name).cmp(&a_order)
-    });
-    running.into_iter().map(|session| session.key).collect()
+fn to_join(running: &[Running], named: Option<&SessionName>) -> Option<OwnKey> {
+    let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key.made);
+    let ranked = |a: &&Running, b: &&Running| (rank(a), &a.name).cmp(&(rank(b), &b.name));
+    running.iter().max_by(ranked).map(|session| session.key)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use lunetad::mux::own::{OwnId, OwnMade};
 
     use super::*;
@@ -109,10 +106,16 @@ mod tests {
         SessionName::running(name).unwrap()
     }
 
-    fn order(sessions: Vec<Running>, named: Option<&str>) -> Vec<u64> {
+    fn order(mut sessions: Vec<Running>, named: Option<&str>) -> Vec<u64> {
         let named = named.map(name);
-        let joinable = joinable(sessions, named.as_ref());
-        joinable.iter().map(|key| key.id.get()).collect()
+        let mut order = Vec::with_capacity(sessions.len());
+        for _ in 0..sessions.len() {
+            let joined = to_join(&sessions, named.as_ref()).unwrap();
+            sessions.retain(|session| session.key != joined);
+            order.push(joined.id.get());
+        }
+        assert_eq!(to_join(&sessions, named.as_ref()), None);
+        order
     }
 
     #[test]
