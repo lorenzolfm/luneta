@@ -17,7 +17,7 @@ use crate::api::{self, mux_server};
 use crate::asked::{self, At, Dumped, Heard, Name, Opens, Place, SessionName, TurnTo, Who};
 use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
-use crate::mux::{Layouts, Mux};
+use crate::mux::{LaidOut, Layouts, Mux};
 use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
 use crate::pty;
 
@@ -154,9 +154,7 @@ impl mux_server::Mux for Service {
         let (gone, let_go) = oneshot::channel();
         let (client, layouts) = self.mux.attach(hello, out.clone(), gone)?;
         tokio::spawn(listen(Arc::clone(&self.mux), client, heard, out));
-        let going = ReceiverStream::new(going);
-        let layouts = laid(layouts);
-        Ok(Response::new(UntilEnded { going, layouts, let_go, spoke: false, ended: false }))
+        Ok(Response::new(UntilEnded::new(ReceiverStream::new(going), laid(layouts), let_go)))
     }
 }
 
@@ -181,9 +179,10 @@ async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToSer
 }
 
 fn laid(layouts: Layouts) -> Laid {
-    let laid = WatchStream::new(layouts).filter_map(|layout| {
-        layout.map(|layout| {
-            Ok(api::ToClient { event: Some(api::to_client::Event::Layout(layout)) })
+    let laid = WatchStream::new(layouts).filter_map(|laid| {
+        laid.map(|LaidOut { layout, wents }| {
+            let said = Ok(api::ToClient { event: Some(api::to_client::Event::Layout(layout)) });
+            (said, wents)
         })
     });
     Box::pin(laid.fuse())
@@ -220,14 +219,22 @@ async fn take(mux: &Arc<Mux>, client: ClientId, said: Heard, out: &Out) {
 
 type Said = Result<api::ToClient, Status>;
 
-type Laid = Pin<Box<dyn Stream<Item = Said> + Send>>;
+type Laid = Pin<Box<dyn Stream<Item = (Said, u64)> + Send>>;
 
 pub struct UntilEnded {
     going: ReceiverStream<Said>,
     layouts: Laid,
     let_go: oneshot::Receiver<()>,
+    waiting: Option<(Said, u64)>,
+    wents: u64,
     spoke: bool,
     ended: bool,
+}
+
+impl UntilEnded {
+    fn new(going: ReceiverStream<Said>, layouts: Laid, let_go: oneshot::Receiver<()>) -> Self {
+        UntilEnded { going, layouts, let_go, waiting: None, wents: 0, spoke: false, ended: false }
+    }
 }
 
 impl Stream for UntilEnded {
@@ -237,24 +244,32 @@ impl Stream for UntilEnded {
         if self.ended {
             return Poll::Ready(None);
         }
+        if self.spoke {
+            let passed = self.wents;
+            while self.waiting.is_none()
+                && let Poll::Ready(Some(laid)) = self.layouts.as_mut().poll_next(context)
+            {
+                self.waiting = Some(laid).filter(|(_, wents)| *wents >= passed);
+            }
+            if self.waiting.as_ref().is_some_and(|(_, wents)| *wents == passed) {
+                let (laid, _) = self.waiting.take().expect("a layout waits");
+                return Poll::Ready(Some(laid));
+            }
+        }
         let next = Pin::new(&mut self.going).poll_next(context);
         match &next {
             Poll::Ready(Some(said)) => {
-                let ended = matches!(
-                    said,
-                    Ok(api::ToClient { event: Some(api::to_client::Event::Ended(_)) })
-                );
+                let event = said.as_ref().ok().and_then(|said| said.event.as_ref());
+                let ended = matches!(event, Some(api::to_client::Event::Ended(_)));
                 self.ended = ended || said.is_err();
                 self.spoke = true;
+                if let Some(api::to_client::Event::Went(_)) = event {
+                    self.wents += 1;
+                }
                 next
             },
             Poll::Ready(None) => next,
             Poll::Pending => {
-                if self.spoke
-                    && let Poll::Ready(Some(laid)) = self.layouts.as_mut().poll_next(context)
-                {
-                    return Poll::Ready(Some(laid));
-                }
                 if Pin::new(&mut self.let_go).poll(context).is_ready() {
                     self.ended = true;
                     return Poll::Ready(None);
@@ -311,5 +326,80 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
             eprintln!("luneta-mux: clients still connected after {}s are left", DRAIN.as_secs());
             Ok(())
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Wake, Waker};
+
+    use super::*;
+
+    fn said(event: api::to_client::Event) -> api::ToClient {
+        api::ToClient { event: Some(event) }
+    }
+
+    fn next(until: &mut UntilEnded) -> api::to_client::Event {
+        let mut context = Context::from_waker(Waker::noop());
+        match Pin::new(until).poll_next(&mut context) {
+            Poll::Ready(Some(Ok(api::ToClient { event: Some(event) }))) => event,
+            other => panic!("the client heard {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_layout_goes_out_after_the_wents_said_before_it_and_ahead_of_the_frames_queued_with_it() {
+        let (out, going) = mpsc::channel(8);
+        let (layout, layouts) = watch::channel(None);
+        let (_gone, let_go) = oneshot::channel();
+        let frame = |pane| api::to_client::Event::Frame(api::Frame { pane, ..Default::default() });
+        let went = api::to_client::Event::Went(api::Went { session: 1, tab: 1, pane: 1 });
+        let attached = api::to_client::Event::Attached(api::Attached { client: 1 });
+        for said_now in [attached, frame(1), went.clone(), frame(2), frame(3)] {
+            out.try_send(Ok(said(said_now))).unwrap();
+        }
+        let laid_out = api::Layout { tab: 1, ..Default::default() };
+        layout.send(Some(LaidOut { layout: laid_out.clone(), wents: 1 })).unwrap();
+        let mut until = UntilEnded::new(ReceiverStream::new(going), laid(layouts), let_go);
+        assert!(matches!(next(&mut until), api::to_client::Event::Attached(_)));
+        assert_eq!(next(&mut until), frame(1));
+        assert_eq!(next(&mut until), went);
+        assert_eq!(next(&mut until), api::to_client::Event::Layout(laid_out));
+        assert_eq!(next(&mut until), frame(2));
+        assert_eq!(next(&mut until), frame(3));
+    }
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_layout_older_than_the_wents_passed_goes_nowhere_and_the_next_one_wakes_the_stream() {
+        let (out, going) = mpsc::channel(8);
+        let (layout, layouts) = watch::channel(None);
+        let (_gone, let_go) = oneshot::channel();
+        let went = |pane| api::to_client::Event::Went(api::Went { session: 1, tab: 1, pane });
+        let attached = api::to_client::Event::Attached(api::Attached { client: 1 });
+        for said_now in [attached, went(1), went(2)] {
+            out.try_send(Ok(said(said_now))).unwrap();
+        }
+        let mut until = UntilEnded::new(ReceiverStream::new(going), laid(layouts), let_go);
+        assert!(matches!(next(&mut until), api::to_client::Event::Attached(_)));
+        assert_eq!(next(&mut until), went(1));
+        assert_eq!(next(&mut until), went(2));
+        let laid_out = |tab| api::Layout { tab, ..Default::default() };
+        layout.send(Some(LaidOut { layout: laid_out(1), wents: 1 })).unwrap();
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut context = Context::from_waker(&waker);
+        assert!(Pin::new(&mut until).poll_next(&mut context).is_pending());
+        layout.send(Some(LaidOut { layout: laid_out(2), wents: 2 })).unwrap();
+        assert!(woken.0.load(Ordering::SeqCst), "the newer layout wakes the stream");
+        assert_eq!(next(&mut until), api::to_client::Event::Layout(laid_out(2)));
     }
 }

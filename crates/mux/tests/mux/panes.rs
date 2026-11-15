@@ -13,15 +13,19 @@ fn rect(column: u32, row: u32, columns: u32, rows: u32) -> api::Rect {
 fn placed(layout: &api::Layout) -> Vec<&api::Placed> {
     match layout.shown.as_ref().expect("a layout shows its tab") {
         api::layout::Shown::Tiled(tiled) => tiled.panes.iter().collect(),
-        api::layout::Shown::Full(full) => vec![full],
+        api::layout::Shown::Full(full) => vec![full_pane(full)],
     }
 }
 
 fn focused(layout: &api::Layout) -> u32 {
     match layout.shown.as_ref().expect("a layout shows its tab") {
         api::layout::Shown::Tiled(tiled) => tiled.focused,
-        api::layout::Shown::Full(full) => full.pane,
+        api::layout::Shown::Full(full) => full_pane(full).pane,
     }
+}
+
+fn full_pane(full: &api::Full) -> &api::Placed {
+    full.pane.as_ref().expect("a full layout places its pane")
 }
 
 fn full(layout: &api::Layout) -> bool {
@@ -245,6 +249,11 @@ fn a_fullscreen_pane_takes_the_tab_until_the_focus_moves() {
                 full(layout) && rects(layout) == [(second, rect(0, 0, 80, 24))]
             })
             .await;
+        let hidden = match &attached.layout.as_ref().unwrap().shown {
+            Some(api::layout::Shown::Full(full)) => full.hidden.clone(),
+            other => panic!("a full layout shows {other:?}"),
+        };
+        assert_eq!(hidden, [made.pane], "it hides the other");
         other
             .until_laid("the other client on the pane that fills the tab", |layout| {
                 full(layout) && focused(layout) == second
@@ -418,5 +427,35 @@ fn the_focus_crosses_to_the_next_tab_from_the_edge_and_goes_to_a_pane_by_its_id(
             .await;
         attached.type_line("echo $((6 * 7))").await;
         attached.until_pane_row(made.pane, "42").await;
+    });
+}
+
+#[test]
+fn a_went_to_where_the_client_is_brings_its_layout_again() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let made = new_session(&mut mux, "work", shell()).await;
+        let mut attached = Attached::new(&mut mux, session(&made), size(80, 24)).await;
+        attached.until("the first layout", |attached| attached.layout.is_some()).await;
+        let here = api::Place { is: Some(api::place::Is::Pane(made.pane)), made_at: made.made_at };
+        attached.send(Event::Go(here)).await;
+        loop {
+            if let Some(api::to_client::Event::Went(went)) = attached.next().await {
+                assert_eq!(went.pane, made.pane);
+                break;
+            }
+        }
+        loop {
+            match attached.next().await {
+                Some(api::to_client::Event::Layout(layout)) => {
+                    assert_eq!(focused(&layout), made.pane);
+                    break;
+                },
+                Some(api::to_client::Event::Went(went)) => panic!("a second went {went:?}"),
+                Some(_) => {},
+                None => panic!("the stream ended before the layout"),
+            }
+        }
     });
 }

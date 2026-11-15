@@ -931,7 +931,7 @@ enum FirstClient {
 fn hello(to: To, area: Rect, colours: Colours) -> Hello {
     let size = window(area);
     let (foreground, background) = colours.both();
-    Hello { to, size: own_attach::Size::within(size.columns, size.lines), foreground, background }
+    Hello { to, size: attached::laid_size(size.columns, size.lines), foreground, background }
 }
 
 const IN_OWN: &str = "luneta's client is in an own session";
@@ -1899,7 +1899,14 @@ impl App {
                     client.hosted.send(bytes);
                 }
             },
-            Right::Own(own) => own.attached.mouse(mouse, at),
+            Right::Own(own) => {
+                if let Some(to) = own.attached.mouse(mouse, at, self.areas.1) {
+                    own.attached.go(to);
+                    if let Some(before) = own.phase.going(Going { to, after: None }) {
+                        before.untold(&self.events);
+                    }
+                }
+            },
         }
     }
 
@@ -1916,7 +1923,7 @@ impl App {
             return false;
         };
         match (mouse.kind, self.held) {
-            (MouseEventKind::Down(_), _) if own.attached.selects(mouse) => {
+            (MouseEventKind::Down(_), _) if own.attached.selects(mouse, at) => {
                 own.attached.select_from(at);
                 self.held = Held::Selecting;
                 self.last_press = LastPress::Zellij;

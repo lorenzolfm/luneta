@@ -20,6 +20,7 @@ const SAID_MAX: usize = 1024;
 pub enum To {
     Session(OwnKey),
     Tab { session: OwnKey, tab: NonZeroU32 },
+    Pane(OwnPane),
 }
 
 impl To {
@@ -27,6 +28,7 @@ impl To {
     pub fn session(self) -> OwnKey {
         match self {
             To::Session(session) | To::Tab { session, .. } => session,
+            To::Pane(pane) => pane.session,
         }
     }
 
@@ -35,6 +37,7 @@ impl To {
         match self {
             To::Session(session) => went.pane.session == session,
             To::Tab { session, tab } => went.pane.session == session && went.tab == tab,
+            To::Pane(pane) => went.pane == pane,
         }
     }
 
@@ -42,6 +45,7 @@ impl To {
         let is = match self {
             To::Session(session) => api::place::Is::Session(session.id.get()),
             To::Tab { tab, .. } => api::place::Is::Tab(tab.get()),
+            To::Pane(pane) => api::place::Is::Pane(pane.id.get()),
         };
         api::Place { is: Some(is), made_at: Some(self.session().made.into()) }
     }
@@ -51,14 +55,16 @@ impl To {
         if !sessions.contains(&session) {
             return Err(format!("own session {} no longer runs", session.id));
         }
-        let To::Tab { tab, .. } = self else {
-            return Ok(());
-        };
         let listed = listing.iter().find(|listed| listed.id == session.id.get());
-        if listed.is_some_and(|listed| listed.tabs.iter().any(|it| it.id == tab.get())) {
-            Ok(())
-        } else {
-            Err(format!("own session {} has no tab {tab}", session.id))
+        let tabs = listed.map_or(&[][..], |listed| &listed.tabs);
+        let has_pane =
+            |pane: NonZeroU32| tabs.iter().flat_map(|tab| &tab.panes).any(|it| it.id == pane.get());
+        match self {
+            To::Session(_) => Ok(()),
+            To::Tab { tab, .. } if tabs.iter().any(|it| it.id == tab.get()) => Ok(()),
+            To::Tab { tab, .. } => Err(format!("own session {} has no tab {tab}", session.id)),
+            To::Pane(pane) if has_pane(pane.id) => Ok(()),
+            To::Pane(pane) => Err(format!("own session {} has no pane {}", session.id, pane.id)),
         }
     }
 }
@@ -316,7 +322,7 @@ pub struct Cursor {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    pane: u32,
+    pane: NonZeroU32,
     size: Size,
     rows: Rows,
     cursor: Option<Cursor>,
@@ -325,7 +331,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(
-        pane: u32,
+        pane: NonZeroU32,
         size: Size,
         rows: Rows,
         cursor: Option<Cursor>,
@@ -366,7 +372,7 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn pane(&self) -> u32 {
+    pub fn pane(&self) -> NonZeroU32 {
         self.pane
     }
 
@@ -391,6 +397,7 @@ impl Frame {
     }
 
     fn heard(frame: api::Frame) -> Result<Frame, String> {
+        let pane = NonZeroU32::new(frame.pane).ok_or("a frame is of pane 0")?;
         let size = Size::heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
             api::frame::Rows::Whole(api::Whole { lines }) => {
@@ -410,7 +417,7 @@ impl Frame {
             },
         };
         let cursor = frame.cursor.map(|cursor| cursor_heard(&cursor)).transpose()?;
-        Frame::new(frame.pane, size, rows, cursor, frame.mouse_tracking)
+        Frame::new(pane, size, rows, cursor, frame.mouse_tracking)
     }
 }
 
@@ -459,13 +466,19 @@ pub struct Layout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     Tiled(Tiled),
-    Full(Placed),
+    Full(Full),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tiled {
     panes: Vec<Placed>,
     focused: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Full {
+    pane: Placed,
+    hidden: Vec<NonZeroU32>,
 }
 
 impl Layout {
@@ -489,7 +502,13 @@ impl Layout {
         &self.tabs
     }
 
-    fn heard(layout: api::Layout) -> Result<Layout, String> {
+    #[must_use]
+    pub fn holds(&self, pane: NonZeroU32) -> bool {
+        let shows = self.shown.panes().iter().any(|placed| placed.pane == pane);
+        shows || matches!(&self.shown, Shown::Full(full) if full.hidden.contains(&pane))
+    }
+
+    pub fn heard(layout: api::Layout) -> Result<Layout, String> {
         let size = Size::heard("a layout", layout.size)?;
         let tab = NonZeroU32::new(layout.tab).ok_or("a layout is of tab 0")?;
         let (columns, rows) = (size.columns.get(), size.rows.get());
@@ -522,7 +541,11 @@ impl Layout {
                 })?;
                 Shown::Tiled(Tiled { panes, focused })
             },
-            api::layout::Shown::Full(full) => Shown::Full(placed(full)?),
+            api::layout::Shown::Full(api::Full { pane, hidden }) => {
+                let pane = placed(pane.ok_or("a full layout places no pane")?)?;
+                let hidden = hidden_heard(pane.pane, hidden, columns, rows)?;
+                Shown::Full(Full { pane, hidden })
+            },
         };
         tiles(shown.panes(), columns, rows)?;
         let tabbed = |tabbed: api::Tabbed| {
@@ -542,7 +565,7 @@ impl Shown {
     pub fn panes(&self) -> &[Placed] {
         match self {
             Shown::Tiled(tiled) => &tiled.panes,
-            Shown::Full(full) => std::slice::from_ref(full),
+            Shown::Full(full) => std::slice::from_ref(&full.pane),
         }
     }
 
@@ -550,7 +573,7 @@ impl Shown {
     pub fn focused(&self) -> &Placed {
         match self {
             Shown::Tiled(tiled) => &tiled.panes[tiled.focused],
-            Shown::Full(full) => full,
+            Shown::Full(full) => &full.pane,
         }
     }
 }
@@ -570,6 +593,37 @@ impl Rect {
             && u32::from(self.row) < other.bottom()
             && u32::from(other.row) < self.bottom()
     }
+}
+
+fn hidden_heard(
+    full: NonZeroU32,
+    hidden: Vec<u32>,
+    columns: u16,
+    rows: u16,
+) -> Result<Vec<NonZeroU32>, String> {
+    let cells = u64::from(columns) * u64::from(rows);
+    let count = u64::try_from(hidden.len()).unwrap_or(u64::MAX);
+    if count >= cells {
+        return Err(format!("a layout hides {count} panes on {cells} cells"));
+    }
+    let mut read: Vec<NonZeroU32> = Vec::with_capacity(hidden.len());
+    for pane in hidden {
+        let pane = NonZeroU32::new(pane).ok_or("a layout hides pane 0")?;
+        if pane == full {
+            return Err(format!("a layout hides pane {pane}, which fills its tab"));
+        }
+        read.push(pane);
+    }
+    let mut sorted = read.clone();
+    sorted.sort_unstable();
+    let twice = sorted.windows(2).find_map(|pair| match pair {
+        [one, other] if one == other => Some(*one),
+        _ => None,
+    });
+    if let Some(pane) = twice {
+        return Err(format!("a layout hides pane {pane} twice"));
+    }
+    Ok(read)
 }
 
 fn tiles(panes: &[Placed], columns: u16, rows: u16) -> Result<(), String> {
@@ -863,6 +917,8 @@ mod tests {
         let mut two = frame(1, vec![row.clone(), row.clone()]);
         two.size = Some(api::Size { columns: 1, rows: 1 });
         assert_eq!(Frame::heard(two).unwrap_err(), "a frame of 1 rows has 2");
+        let nobody = api::Frame { pane: 0, ..frame(1, vec![row.clone()]) };
+        assert_eq!(Frame::heard(nobody).unwrap_err(), "a frame is of pane 0");
         let changed = api::Changed { rows: vec![api::Row { index: 1, line: Some(row.clone()) }] };
         let past = api::Frame {
             rows: Some(api::frame::Rows::Changed(changed)),
@@ -918,7 +974,7 @@ mod tests {
         let cursor = |column| {
             Some(Cursor { row: 0, column, shape: CursorShape::Bar, blinking: false })
         };
-        let made = |rows, cursor| Frame::new(1, size, rows, cursor, false);
+        let made = |rows, cursor| Frame::new(NonZeroU32::MIN, size, rows, cursor, false);
         assert!(made(Rows::Whole(vec![two.clone()]), cursor(1)).is_ok());
         let none = made(Rows::Whole(Vec::new()), None);
         assert_eq!(none.unwrap_err(), "a frame of 1 rows has 0");
@@ -979,7 +1035,8 @@ mod tests {
 
     #[test]
     fn a_client_goes_only_to_a_session_its_server_holds() {
-        let tab = |id| api::Tab { id, ..api::Tab::default() };
+        let pane = api::Pane { id: 3, ..api::Pane::default() };
+        let tab = |id| api::Tab { id, panes: vec![pane.clone()], ..api::Tab::default() };
         let listed = |id, made: u64, tabs| api::Session {
             id,
             tabs,
@@ -995,6 +1052,10 @@ mod tests {
         let tab = |tab| To::Tab { session: key(1, 30), tab: NonZeroU32::new(tab).unwrap() };
         assert_eq!(tab(7).found_in(&sessions, &listing), Ok(()));
         assert_eq!(tab(8).found_in(&sessions, &listing).unwrap_err(), "own session 1 has no tab 8");
+        let pane = |pane| To::Pane(OwnPane::new(key(1, 30), pane).unwrap());
+        assert_eq!(pane(3).found_in(&sessions, &listing), Ok(()));
+        let none = pane(4).found_in(&sessions, &listing).unwrap_err();
+        assert_eq!(none, "own session 1 has no pane 4");
     }
 
     #[test]
@@ -1038,12 +1099,28 @@ mod tests {
         let thin = vec![placed(4, rect(0, 80)), placed(5, rect(80, 0))];
         let thin = Layout::heard(layout(thin, 4, vec![tabbed(1)])).unwrap_err();
         assert_eq!(thin, "pane 5 is laid on no cell");
-        let full = shown(api::layout::Shown::Full(placed(5, rect(0, 80))), vec![tabbed(1)]);
-        let full = Layout::heard(full).unwrap();
-        assert_eq!(full.shown().focused().pane.get(), 5);
-        assert!(matches!(full.shown(), Shown::Full(_)));
-        let part = shown(api::layout::Shown::Full(placed(5, rect(0, 40))), vec![tabbed(1)]);
+        let full = |pane, hidden| api::layout::Shown::Full(api::Full { pane: Some(pane), hidden });
+        let hides = |hidden| shown(full(placed(5, rect(0, 80)), hidden), vec![tabbed(1)]);
+        let alone = Layout::heard(hides(vec![])).unwrap();
+        assert_eq!(alone.shown().focused().pane.get(), 5);
+        assert!(matches!(alone.shown(), Shown::Full(_)));
+        let hiding = Layout::heard(hides(vec![4, 6])).unwrap();
+        let (four, six) = (NonZeroU32::new(4).unwrap(), NonZeroU32::new(6).unwrap());
+        let Shown::Full(hid) = hiding.shown() else { panic!("a full layout reads as tiled") };
+        assert_eq!(hid.hidden, [four, six]);
+        assert!(hiding.holds(four) && hiding.holds(NonZeroU32::new(5).unwrap()));
+        assert!(!hiding.holds(NonZeroU32::new(7).unwrap()));
+        assert_eq!(Layout::heard(hides(vec![0])).unwrap_err(), "a layout hides pane 0");
+        let under = Layout::heard(hides(vec![5])).unwrap_err();
+        assert_eq!(under, "a layout hides pane 5, which fills its tab");
+        let twice = Layout::heard(hides(vec![4, 6, 4])).unwrap_err();
+        assert_eq!(twice, "a layout hides pane 4 twice");
+        let many = Layout::heard(hides((1..=1921).filter(|it| *it != 5).collect())).unwrap_err();
+        assert_eq!(many, "a layout hides 1920 panes on 1920 cells");
+        let part = shown(full(placed(5, rect(0, 40)), vec![]), vec![tabbed(1)]);
         assert_eq!(Layout::heard(part).unwrap_err(), uncovered);
+        let unplaced = shown(api::layout::Shown::Full(api::Full::default()), vec![tabbed(1)]);
+        assert_eq!(Layout::heard(unplaced).unwrap_err(), "a full layout places no pane");
         let empty = api::Layout { shown: None, ..layout(two(), 4, vec![tabbed(1)]) };
         assert_eq!(Layout::heard(empty).unwrap_err(), "a layout shows nothing");
     }
