@@ -29,7 +29,7 @@ use crate::away::{self, Away};
 use crate::close::{Act, Deletes, Plan};
 use crate::gruvbox;
 use crate::host::Event;
-use crate::hosted;
+use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
@@ -436,7 +436,7 @@ impl Shot {
     }
 
     fn show(&self, buffer: &mut Buffer, area: Rect, top: usize) {
-        hosted::show(&self.screen, buffer, area, top);
+        screen::show(&self.screen, buffer, area, top);
     }
 }
 

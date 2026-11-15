@@ -4,14 +4,11 @@ use std::path::Path;
 
 use lunetad::mux::own::{server, OwnKey};
 use lunetad::names::session_for;
-use lunetad::{log, Destination};
 
-use crate::away;
 use crate::ledger::Session;
 use crate::news::News;
 use crate::own_sessions::{self, Unmade};
-use crate::sidebar::Sidebar;
-use crate::zellij::{self, Refuge, SessionName};
+use crate::zellij::{self, SessionName};
 
 struct Running {
     key: OwnKey,
@@ -62,27 +59,6 @@ pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
         Some(named) => own(&named, dir),
         None => Err(format!("{} names no own session: name one", dir.display())),
     }
-}
-
-pub fn away(sidebar: &Sidebar, tried: &[Destination]) -> Option<(Destination, Refuge)> {
-    for (destination, refuges) in sidebar.refuges_away(tried, zellij::within()) {
-        let sessions = match refuges {
-            Ok(sessions) => sessions,
-            Err(why) => {
-                log::say(&format!("{destination}: no session to go on in: {why}"));
-                continue;
-            },
-        };
-        match zellij::answering_away(&destination, sessions, away::QUICK) {
-            Ok(Some(refuge)) => return Some((destination, refuge)),
-            Ok(None) => log::say(&format!("{destination}: no session to go on in answers")),
-            Err(why) => {
-                log::say(&format!("no session of another machine's to go on in: {why}"));
-                break;
-            },
-        }
-    }
-    None
 }
 
 fn to_join(running: &[Running], named: Option<&SessionName>) -> Option<OwnKey> {

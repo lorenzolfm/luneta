@@ -2023,6 +2023,8 @@ impl Menu {
     }
 }
 
+pub const OWN_ONLY: &str = "luneta goes to its own sessions only, now";
+
 pub const HERE_ONLY: &str = "luneta makes and goes to sessions of this machine only, for now";
 
 fn new_session(on: &Machine, starts: Starts) -> Done {

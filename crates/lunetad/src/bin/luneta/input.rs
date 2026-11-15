@@ -637,8 +637,8 @@ mod tests {
 
     #[test]
     fn a_turn_to_dark_or_light_is_heard_and_other_reports_go_whole() {
-        assert_eq!(sent(&[Theme::Dark.report()]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
-        assert_eq!(sent(&[Theme::Light.report()]), [Sent::Answer(Answer::Turned(Theme::Light))]);
+        assert_eq!(sent(&[b"\x1b[?997;1n"]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
+        assert_eq!(sent(&[b"\x1b[?997;2n"]), [Sent::Answer(Answer::Turned(Theme::Light))]);
         assert_eq!(sent(&[b"\x1b[?2026;2$yx"]), [typed('x')]);
     }
 

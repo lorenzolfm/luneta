@@ -3,7 +3,7 @@ use std::io::{self, Write as _};
 use std::str;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::vte::ansi::{NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::Rgb;
 
 use crate::host::Inbox;
 
@@ -26,15 +26,6 @@ pub enum Answer {
 pub enum Theme {
     Dark,
     Light,
-}
-
-impl Theme {
-    pub fn report(self) -> &'static [u8] {
-        match self {
-            Theme::Dark => b"\x1b[?997;1n",
-            Theme::Light => b"\x1b[?997;2n",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,16 +54,6 @@ impl Colours {
         (self.foreground.map(rgb), self.background.map(rgb))
     }
 
-    pub fn answer(self, index: usize, spell: &dyn Fn(Rgb) -> String) -> Option<String> {
-        let colour = if index == NamedColor::Foreground as usize {
-            self.foreground
-        } else if index == NamedColor::Background as usize {
-            self.background
-        } else {
-            None
-        };
-        colour.map(spell)
-    }
 }
 
 pub fn ask(inbox: &mut Inbox) -> Answers {
