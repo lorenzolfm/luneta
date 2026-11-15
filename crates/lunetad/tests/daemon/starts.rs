@@ -267,6 +267,31 @@ fn a_bare_luneta_never_joins_the_session_its_terminal_is_a_pane_of() {
 }
 
 #[test]
+fn a_luneta_whose_pane_variables_do_not_read_joins_no_session() {
+    let owned = Owned::new();
+    let project = owned.make("project").unwrap();
+    owned.make("other").unwrap();
+    let dir = directory("project");
+    let unread = "LUNETA_MUX_SESSION, LUNETA_MUX_MADE and LUNETA_MUX_PANE name no pane of \
+                  luneta-mux's, so luneta may run in";
+    for (named, refused) in [
+        (None, format!("{unread} any own session, and joins none: unset them")),
+        (Some("other"), format!("{unread} other, and goes nowhere it shows itself")),
+    ] {
+        let mut garbled = luneta(owned.host.vars(), &dir.path);
+        garbled.args(named);
+        in_pane_of(&mut garbled, &project);
+        garbled.env_remove("LUNETA_MUX_MADE");
+        let output = garbled.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let refusal = String::from_utf8(output.stderr).unwrap();
+        assert!(refusal.starts_with(&format!("luneta: {refused}")), "{refusal}");
+    }
+    assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
+    assert_eq!(clients(&owned, "other").unwrap_or(0), 0);
+}
+
+#[test]
 fn a_bare_luneta_where_the_directory_names_no_session_asks_for_a_name() {
     let owned = Owned::new();
     let output = luneta(owned.host.vars(), Path::new("/")).output().unwrap();

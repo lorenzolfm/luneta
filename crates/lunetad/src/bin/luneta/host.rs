@@ -759,7 +759,8 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
-    assert_ne!(own_sessions::holding(), Some(session), "luneta attaches to the session it runs in");
+    let elsewhere = own_sessions::holding().is_ok_and(|held| held != Some(session));
+    assert!(elsewhere, "luneta attaches to a session it may run in");
     sidebar.attaching(session);
     let hello = hello(To::Session(session), areas.1, colours);
     let attached = Attached::start(started, hello, &events);

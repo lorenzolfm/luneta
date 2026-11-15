@@ -78,7 +78,7 @@ pub fn here() -> Result<Option<Seat>, String> {
         own_before: own_before.as_deref(),
     };
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), said);
-    seat_in(turn?, Zellij::here()?, own::here())
+    seat_in(turn?, Zellij::here()?, own::here()?)
 }
 
 fn seat_in(

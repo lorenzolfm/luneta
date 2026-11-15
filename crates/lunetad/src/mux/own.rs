@@ -153,8 +153,7 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<Named> {
     Some(Named::Own(OwnPane { session: OwnKey { id, made }, id: pane }))
 }
 
-#[must_use]
-pub fn here() -> Option<OwnPane> {
+pub fn here() -> Result<Option<OwnPane>, String> {
     let environ: Vec<OsString> = std::env::vars_os()
         .map(|(name, value)| {
             let mut entry = name;
@@ -163,9 +162,18 @@ pub fn here() -> Option<OwnPane> {
             entry
         })
         .collect();
-    match pane_in(&environ)? {
-        Named::Own(own) => Some(own),
-        Named::Zellij(_) => None,
+    here_in(&environ)
+}
+
+fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {
+    if PANE_VARS.iter().all(|name| value_in(environ, name).is_none()) {
+        return Ok(None);
+    }
+    match pane_in(environ) {
+        Some(Named::Own(own)) => Ok(Some(own)),
+        Some(Named::Zellij(_)) | None => {
+            Err(format!("{SESSION_VAR}, {MADE_VAR} and {PANE_VAR} name no pane of luneta-mux's"))
+        },
     }
 }
 
@@ -205,6 +213,28 @@ mod tests {
         ];
         for environ in unnamed {
             assert_eq!(pane_in(&environ), None, "{environ:?}");
+        }
+    }
+
+    #[test]
+    fn a_pane_s_variables_set_that_do_not_read_are_no_pane_and_not_none() {
+        let environ = |entries: &[&str]| -> Vec<OsString> {
+            entries.iter().map(OsString::from).collect()
+        };
+        assert_eq!(here_in(&environ(&["HOME=/h"])), Ok(None));
+        let all = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
+        let session = OwnKey { id: OwnId::new(3).unwrap(), made: OwnMade::from_nanos(60) };
+        assert_eq!(here_in(&environ(&all)), Ok(OwnPane::new(session, 12)));
+        let unread = "LUNETA_MUX_SESSION, LUNETA_MUX_MADE and LUNETA_MUX_PANE name no pane of \
+                      luneta-mux's";
+        for partial in [
+            environ(&all[..2]),
+            environ(&all[1..]),
+            environ(&[all[0], all[2]]),
+            environ(&["LUNETA_MUX_MADE="]),
+            environ(&["LUNETA_MUX_SESSION=work", all[1], all[2]]),
+        ] {
+            assert_eq!(here_in(&partial), Err(unread.to_owned()), "{partial:?}");
         }
     }
 

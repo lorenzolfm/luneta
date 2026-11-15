@@ -39,7 +39,9 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
 pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
     let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
-    let held = own_sessions::holding();
+    let held = own_sessions::holding().map_err(|why| {
+        format!("{why}, so luneta may run in any own session, and joins none: unset them")
+    })?;
     let free = sessions.iter().filter(|listing| Some(listing.key()) != held);
     let free: Vec<Running> = free
         .map(|listing| Running {
