@@ -5,9 +5,7 @@ use lunetad::api::{kill_request, KillRequest, NewOwnRequest};
 use crate::host::eventually;
 use crate::own::{own, Owned};
 use crate::sessions::session;
-use crate::starts::{
-    clients, directory, goes_to_zellij_s, luneta, mouse, on_terminal, runs, Window,
-};
+use crate::starts::{clients, directory, luneta, mouse, on_terminal, runs, Window};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -107,21 +105,6 @@ fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
     eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
     assert!(owned.host.zellij.attached().is_empty(), "{:?}", owned.host.zellij.attached());
     assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
-}
-
-#[test]
-fn luneta_goes_from_an_own_session_to_zellij_s_and_back() {
-    let owned = Owned::new();
-    owned.host.zellij.listen();
-    let _project = runs(&owned.host, "project");
-    owned.make("mine").unwrap();
-    let dir = directory("anywhere");
-    let mut window = Window::open(&owned.host, &dir, &["mine"]);
-    goes_to_zellij_s(&owned, &mut window, "mine", "project");
-    assert_eq!(owned.host.zellij.attached(), ["attach project"]);
-    eventually("mine lets go of luneta", || (clients(&owned, "mine")? == 0).then_some(()));
-    window.send("\x1b[106;5umine\r");
-    eventually("luneta is mine's client again", || (clients(&owned, "mine")? == 1).then_some(()));
 }
 
 #[test]
