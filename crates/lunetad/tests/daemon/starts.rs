@@ -440,7 +440,6 @@ pub fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
     let owned = Owned::new();
     owned.make("mine").unwrap();
     let _project = runs(&owned.host, "project");
-    let _next = runs(&owned.host, "next");
     let lasts = Duration::from_secs(31);
     owned.host.zellij.drops_clients(5);
     owned.host.zellij.stays_for(lasts);
@@ -448,6 +447,7 @@ pub fn a_client_that_lasted_starts_the_count_of_those_zellij_drops_again() {
     let mut window = Window::open(&owned.host, &dir, &["mine"]);
 
     goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    let _next = runs(&owned.host, "next");
     eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
     owned.host.zellij.drops_clients(1);
     fs::remove_file(owned.host.contract().join("project")).unwrap();
@@ -464,12 +464,12 @@ fn a_client_that_took_the_place_of_another_ends_the_asking_after_it() {
     let owned = Owned::new();
     owned.make("mine").unwrap();
     let _project = runs(&owned.host, "project");
-    let _next = runs(&owned.host, "next");
     owned.host.zellij.stays_unlisted_for(Duration::from_secs(1));
     let dir = directory("anywhere");
     let mut window = Window::open(&owned.host, &dir, &["mine"]);
 
     goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    let _next = runs(&owned.host, "next");
     eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
     owned.host.zellij.listen();
     fs::remove_file(owned.host.contract().join("project")).unwrap();
@@ -495,14 +495,14 @@ fn luneta_never_goes_on_in_its_own_session_once_that_is_renamed() {
     owned.host.zellij.stays_unlisted_for(Duration::from_secs(1));
     owned.make("mine").unwrap();
     let _project = runs(&owned.host, "project");
-    let _renamed = owned.host.serve("renamed");
-    owned.host.zellij.list("renamed", &pane_running("luneta"));
     let dir = directory("anywhere");
     let mut in_a_pane = luneta(owned.host.vars(), &dir.path);
     in_a_pane.arg("mine").env("ZELLIJ_SESSION_NAME", "opened-as").env("ZELLIJ_PANE_ID", "1");
     let mut window = Window::running(in_a_pane);
 
     goes_to_zellij_s(&owned, &mut window, "mine", "project");
+    owned.host.zellij.list("renamed", &pane_running("luneta"));
+    let _renamed = owned.host.serve("renamed");
     eventually("a client to stay", || owned.host.zellij.stayed().then_some(()));
     fs::remove_file(owned.host.contract().join("project")).unwrap();
     eventually("luneta goes on in mine", || (clients(&owned, "mine")? == 1).then_some(()));
