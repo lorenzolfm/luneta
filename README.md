@@ -330,13 +330,13 @@ pi's ignore files.
 
 The New group, under `n`, opens where the pane works: `n p` your shell in a
 pane of its own beside that pane, `n t` a tab of its session, and `n s` a
-session, which you go to. The session is named as the picker's directories
-name that directory, `luneta-main` for a worktree of `luneta`, with a `-2`
-when a session has that name. On a machine's header, which has no pane, `n s`
-makes the session in your home on that machine, named for it too, as
-`lorenzo`; on a session's row, the group has only `n m`. On this machine's
-rows, `n o` makes an [own session](#luneta-in-your-terminal) in the same place, named the same
-way.
+session, which you go to. On this machine the session is an
+[own session](#luneta-in-your-terminal), and on another a session of zellij's.
+It is named as the picker's directories name that directory, `luneta-main` for
+a worktree of `luneta`, with a `-2` when a session has that name. On a
+machine's header, which has no pane, `n s` makes the session in your home on
+that machine, named for it too, as `lorenzo`; on a session's row, the group has
+only `n m`.
 
 ```text
 ╭─ New ─── luneta/sidebar ─╮
@@ -455,60 +455,42 @@ pane. luneta runs `claude` itself, so it needs `claude` on its own `PATH`.
 
 ### luneta in your terminal
 
-Type `luneta` in a terminal, and zellij runs in it beside luneta's
-sidebar: every live session, the panes in it, and what the agent in each pane
-is doing.
+Type `luneta` in a terminal, and a session of luneta's own multiplexer,
+`luneta-mux`, runs in it beside luneta's sidebar: every live session, the panes
+in it, and what the agent in each pane is doing.
 
 ```text
-─ 2 sessions ───────────── ●1 ─  Zellij (luneta-main)  Tab #1
-                                ╭ Pane #1 ────────────────────
- ▾ mac ════════════════════ ●1  │~/P/m/luneta/main ➜
- ▾ luneta-main ──────────── ●1  │
-   ● fold                   3m  │
-     feat/sidebar            !  │
-▌    luneta/main                │
-▌    main                       │
- ▾ elo ───────────────────────  │
-     elo/main                   │
+─ 2 sessions ───────────── ●1 ─ ~/P/m/luneta/main ➜
+ ▾ mac ════════════════════ ●1
+ ▾ luneta-main ──────────── ●1
+   ● fold                   3m
+     feat/sidebar            !
+▌    luneta/main
+▌    main
+ ▾ elo ───────────────────────
+     elo/main
 ```
 
-`luneta` joins a session that runs, and makes one only where none runs
-anywhere. It starts in the first of these that exists:
+`luneta` joins an own session that runs on this machine: the one named for
+the directory you are in, as the picker's [directories](#directories) name it,
+`luneta-main` in a worktree of `luneta`; or else the one you were in last, in
+any luneta; or else the newest. Where none runs, it makes the one named for the
+directory you are in; where the directory names none, as `/` does, it says so
+and ends, for you to name one.
 
-1. A session on this machine: the one named for the directory you are in, as
-   the picker's [directories](#directories) name it, `luneta-main` in a
-   worktree of `luneta`; or else the one you were in last, in any luneta; or
-   else the newest.
-2. A session on [another machine](#other-machines): the newest of the first by
-   the sidebar's headers that lunetad reaches. With no session here, luneta
-   waits to hear what runs on them, for 5 seconds at the most, and says so; a
-   machine it has not heard of by then counts as having none. Where zellij
-   fails there, luneta goes on to the next machine, and where it fails on each,
-   it makes none: it says so and ends, for you to name one.
-3. The session named for the directory you are in, made. A session that ended
-   counts as none running, and comes back here if it has that name.
+`luneta <name>` attaches to that one, and makes it in the directory you are in
+if none runs: naming a session is asking for it. A name a session of zellij's
+has is refused, as the two kinds share their names. Inside luneta, `n s` or
+the picker makes one. Run in a pane of an own session, luneta will not attach
+to the session that pane is in, and goes to another that runs instead.
 
-`luneta <name>` attaches to that one, and makes it if none runs: naming a
-session is asking for it. Inside luneta, `n s` or the picker makes one.
-
-`luneta --own` attaches to a session of luneta's own multiplexer instead,
-`luneta-mux`, in zellij's place: the one named for the directory, made if none
-runs, and `luneta --own <name>` to that one. A name a session of zellij's has
-is refused, as the two kinds share their names. Own sessions are new, and of
-this machine alone. The sidebar marks each with a dim `◇`; going to one, as
-`Enter` on its row does, takes luneta there, and going to zellij's takes it
-back; `n o` makes one. A drag over an own pane selects its text and copies
-it, as a drag over the sidebar does; where the pane's program takes the
-mouse, hold `Shift`. When the own session luneta is in ends, the newest
-session of this machine takes its place, of either kind, and so it does
-when zellij's ends.
-
-Run in a pane of zellij, luneta will not attach to the session that pane is
-in, as zellij will not. Where it chooses a session itself, as a bare `luneta`
-does, or as it goes on after one ended, luneta knows that session under a new
-name too: zellij lists its pane there running luneta. Where sessions run but
-luneta will join none of them, it makes none: it says so and ends, for you to
-name one.
+Own sessions are of this machine alone, as yet. The sidebar marks each with a
+dim `◇`. Sessions of zellij's that run still show in the sidebar, and going to
+one, as `Enter` on its row does, takes luneta there, and going to an own one
+takes it back. A drag over an own pane selects its text and copies it, as a
+drag over the sidebar does; where the pane's program takes the mouse, hold
+`Shift`. When the own session luneta is in ends, the newest session of this
+machine takes its place, of either kind, and so it does when zellij's ends.
 
 When zellij detaches, luneta ends. When the session zellij is in ends, as
 zellij quits, its last pane exits, or it is killed, luneta attaches zellij to
@@ -1392,7 +1374,7 @@ luneta-mux cannot be reached, or lists the session so it does not read. An
 own session's tab holds one pane for now, so `open pane` and `turn` refuse
 there and say so: `open tab` opens a tab of it, with no one in it needed.
 `open session` there makes an own session, which lunetad makes, as it does
-for `n o`. `go` takes you between own sessions, or between zellij's, but not
+for `n s`. `go` takes you between own sessions, or between zellij's, but not
 from one kind to the other: luneta's own client and zellij's are two, and it
 says so. The ask box tells its agent the own pane you are on, as it does a
 pane of zellij's, and which client is luneta's: `go` and `open session` from
@@ -2060,8 +2042,7 @@ the highlighted row, which lists only the keys that work on that row:
 | *a key it shows* | open its group, or start its agent | any row |
 | `n p` | open your shell in a pane beside the pane | a pane |
 | `n t` | open a tab of the pane's session | a pane |
-| `n s` | start a session where the pane works, or in your home on a machine's header, and go there | a pane, a machine's header |
-| `n o` | start an own session where `n s` would start one, and go there | this machine's pane or header |
+| `n s` | start a session where the pane works, or in your home on a machine's header, and go there: an own session on this machine | a pane, a machine's header |
 | `n m` | add a machine, by what you type ssh to it | any row |
 | `t t` | turn the pane into a tab of its own | a pane |
 | `t p` | turn the pane's tab into panes of another tab, which you pick where it has several | a pane |

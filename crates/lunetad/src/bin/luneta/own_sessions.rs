@@ -8,7 +8,7 @@ use crate::daemon;
 
 const MAKING: Duration = Duration::from_secs(20);
 
-fn holding() -> Option<OwnKey> {
+pub fn holding() -> Option<OwnKey> {
     own::here().map(|pane| pane.session)
 }
 

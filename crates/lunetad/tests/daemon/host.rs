@@ -93,22 +93,6 @@ impl<'a> Vars<'a> {
     }
 }
 
-pub const DROPPED: &str = "
-Your zellij client lost connection to the zellij server.
-
-As a safety measure, you have been disconnected from the current zellij session.
-However, the session should still exist and none of your data should be lost.
-
-This usually means that your terminal didn't process server messages quick
-enough. Maybe your system is currently under high load, or your terminal
-isn't performant enough.
-
-There are a few things you can try now:
-    - Reattach to your previous session and see if it works out better this
-      time: `zellij attach project`
-    - Try using a faster (maybe GPU-accelerated) terminal emulator
-";
-
 pub fn install(from: &Path, to: &Path) {
     let mut install = Command::new("install");
     let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
@@ -300,28 +284,6 @@ case "$*" in
             printf '\033[?1000h\033[?1002h\033[?1006hon screen'
             exec cat > "$panes/heard"
         fi
-        if [ -f "$panes/refused-clients" ]; then
-            echo "this zellij attaches no client"
-            exit 1
-        fi
-        if [ -f "$panes/drops" ]; then
-            drops=$(cat "$panes/drops")
-            if [ "$drops" -gt 0 ]; then
-                echo $((drops - 1)) > "$panes/drops"
-                cat "$panes/dropped"
-                exit 0
-            fi
-        fi
-        if [ -f "$panes/stays" ]; then
-            stays=$(cat "$panes/stays")
-            if [ -f "$panes/stays.clients" ]; then
-                mv "$panes/stays.clients" "$panes/$session.clients"
-            else
-                printf 'on screen'
-            fi
-            rm "$panes/stays"
-            sleep "$stays"
-        fi
         exit 0
         ;;
     "delete-session "*)
@@ -402,36 +364,6 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 
     pub fn listen(&self) {
         fs::write(self.panes().join("listen"), "").unwrap();
-    }
-
-    pub fn drops_clients(&self, clients: u32) {
-        fs::write(self.panes().join("dropped"), DROPPED).unwrap();
-        fs::write(self.panes().join("drops"), clients.to_string()).unwrap();
-    }
-
-    pub fn stays_for(&self, time: Duration) {
-        fs::write(self.panes().join("stays.clients"), clients_said(&[(1, "terminal_1")])).unwrap();
-        fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
-    }
-
-    pub fn stays_unlisted_for(&self, time: Duration) {
-        fs::write(self.panes().join("stays"), time.as_secs().to_string()).unwrap();
-    }
-
-    pub fn stayed(&self) -> bool {
-        !self.panes().join("stays").exists()
-    }
-
-    pub fn refuses_clients(&self) {
-        fs::write(self.panes().join("refused-clients"), "").unwrap();
-    }
-
-    pub fn heard(&self) -> String {
-        match fs::read(self.panes().join("heard")) {
-            Ok(heard) => String::from_utf8_lossy(&heard).into_owned(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => panic!("what zellij's client heard does not read: {error}"),
-        }
     }
 
     pub fn asked_clients(&self, session: &str) -> usize {

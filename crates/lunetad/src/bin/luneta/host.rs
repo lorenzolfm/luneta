@@ -34,9 +34,7 @@ use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Directory};
 use ratatui::backend::CrosstermBackend;
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
 use crate::alerts::{self, Alerts};
@@ -78,7 +76,7 @@ use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
-use crate::starts::{self, First, Sought, Start};
+use crate::starts;
 use crate::width::Width;
 use crate::zellij::{
     self, After, Alone, Arrival, Close, Closes, Ended, Refuge, SessionName, Tab, Turned, Unused,
@@ -170,8 +168,6 @@ const FRAME_EVENTS_MAX: usize = 256;
 const WAITING_MAX: Duration = Duration::from_secs(2);
 
 const WAITING_LOOK: Duration = Duration::from_millis(50);
-
-const HEARING: Duration = Duration::from_secs(5);
 
 const SSH_FAILED: i32 = 255;
 
@@ -590,7 +586,7 @@ struct App {
     desktop: Desktop,
 }
 
-pub fn run(session: Option<SessionName>, own: bool, folder: Result<PathBuf, String>) -> ExitCode {
+pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let unkept = log::start(Process::Luneta).err();
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -600,13 +596,9 @@ pub fn run(session: Option<SessionName>, own: bool, folder: Result<PathBuf, Stri
         Ok(runtime) => News::within(runtime),
         Err(why) => News::unshared(why),
     };
-    let start = match (own, session) {
-        (true, session) => match session.or_else(|| zellij::session_for(&dir)) {
-            Some(session) => starts::own(&session, &dir),
-            None => Err(format!("{} names no own session: name one", dir.display())),
-        },
-        (false, Some(session)) => starts::named(session),
-        (false, None) => starts::bare(zellij::session_for(&dir), &news),
+    let start = match session {
+        Some(session) => starts::own(&session, &dir),
+        None => starts::bare(&dir, &news),
     };
     let start = match start {
         Ok(start) => start,
@@ -703,7 +695,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    start: Start,
+    start: OwnKey,
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -759,53 +751,20 @@ fn run_in(
     if let Some(why) = width_unread {
         sidebar.notify(format!("the sidebar opens {} wide: {why}", sidebar::COLUMNS));
     }
-    let mut daemon = match folder {
+    let daemon = match folder {
         Ok(folder) => Some(folder),
         Err(why) => {
             sidebar.lost(why);
             None
         },
     };
-    let first = match start {
-        Start::Now(first) => first,
-        Start::Hear { machines, named } => {
-            if let Some(folder) = daemon.take() {
-                crate::watch::start(folder, events.clone());
-                hear(terminal, &mut sidebar, width.columns(), machines, inbox)?;
-            }
-            match starts::heard(named, &sidebar) {
-                Ok(first) => first,
-                Err(refusal) => {
-                    say_ends(&refusal);
-                    return Ok(Some(format!("luneta: {refusal}")));
-                },
-            }
-        },
-    };
-    let first = match first_client(first, &mut sidebar) {
-        Ok(first) => first,
-        Err(refusal) => {
-            say_ends(&refusal);
-            return Ok(Some(format!("luneta: {refusal}")));
-        },
-    };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
-    let right = match first {
-        FirstClient::Zellij((program, args), fails, arrival) => {
-            let size = window(areas.1);
-            let hosted = Hosted::start(program, args, dir, size, started, events.clone())?;
-            Right::Zellij(Client::new(hosted, fails, arrival, None))
-        },
-        FirstClient::Own(session) => {
-            sidebar.attaching(session);
-            let hello = hello(To::Session(session), areas.1, colours);
-            let attached = Attached::start(started, hello, &events);
-            let going = Going { to: To::Session(session), after: None };
-            Right::Own(Own { attached, phase: Phase::Coming { fails: Fails::End, going } })
-        },
-    };
-    let own = matches!(right, Right::Own(_));
+    sidebar.attaching(start);
+    let hello = hello(To::Session(start), areas.1, colours);
+    let attached = Attached::start(started, hello, &events);
+    let going = Going { to: To::Session(start), after: None };
+    let right = Right::Own(Own { attached, phase: Phase::Coming { fails: Fails::End, going } });
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
@@ -854,78 +813,13 @@ fn run_in(
         alerts: Alerts::new(focused),
         desktop,
     };
-    if own {
-        app.ask(None);
-    }
+    app.ask(None);
     let ran = run_loop(terminal, &mut app, inbox);
     for deleting in app.deleting.drain(..) {
         let _ = deleting.join();
     }
     ran?;
     Ok(app.failure())
-}
-
-fn hear(
-    terminal: &mut DefaultTerminal,
-    sidebar: &mut Sidebar,
-    columns: u16,
-    machines: Vec<Destination>,
-    inbox: &mut Inbox,
-) -> io::Result<()> {
-    let within = zellij::within();
-    let until = Instant::now() + HEARING;
-    let mut unheard = machines;
-    while !unheard.is_empty() {
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        whole(terminal, |terminal| {
-            terminal.draw(|frame| {
-                let now = SystemTime::now();
-                let (beside, zellij) = areas(frame.area(), columns);
-                let buffer = frame.buffer_mut();
-                sidebar.draw(buffer, beside, now);
-                draw_hearing(buffer, zellij, &unheard, now);
-            })?;
-            Ok(())
-        })?;
-        match inbox.events.recv_timeout(left.min(sidebar::SPIN)) {
-            Ok(Event::InputEnded(error)) => return Err(error),
-            Ok(event) => {
-                match &event {
-                    Event::Daemon(Ok(host)) => {
-                        unheard = sidebar::unheard(host, within);
-                        let _ = sidebar.heard(host.clone());
-                    },
-                    Event::Daemon(Err(why)) => sidebar.lost(why.clone()),
-                    _ => {},
-                }
-                inbox.aside.push_back(event);
-            },
-            Err(RecvTimeoutError::Timeout) => {},
-            Err(RecvTimeoutError::Disconnected) => {
-                unreachable!("the caller holds a sender, for zellij's client")
-            },
-        }
-    }
-    Ok(())
-}
-
-fn draw_hearing(buffer: &mut Buffer, area: Rect, machines: &[Destination], now: SystemTime) {
-    let names: Vec<String> = machines.iter().map(ToString::to_string).collect();
-    let doing = format!("Waiting to hear what runs on {}…", names.join(", "));
-    let dim = Style::new().add_modifier(Modifier::DIM);
-    let lines = menu::waiting(&doing, usize::from(area.width), dim, sidebar::frame(now));
-    for (line, y) in lines.iter().zip(area.y + 1..area.bottom()) {
-        buffer.set_line(area.x, y, line, area.width);
-    }
-}
-
-#[expect(clippy::large_enum_variant, reason = "it lasts as luneta starts")]
-enum FirstClient {
-    Zellij((String, Vec<String>), Fails, Option<Arrival>),
-    Own(OwnKey),
 }
 
 fn hello(to: To, area: Rect, colours: Colours) -> Hello {
@@ -975,33 +869,6 @@ fn onward(refuge: Option<Refuge>, own: Option<OwnKey>) -> Option<Onward> {
         (Some(refuge), None) => Some(Onward::Zellij(refuge)),
         (None, Some(own)) => Some(Onward::Own(own)),
         (None, None) => None,
-    }
-}
-
-fn first_client(first: First, sidebar: &mut Sidebar) -> Result<FirstClient, String> {
-    match first {
-        First::Make(session) => {
-            let arrival = session.as_ref().and_then(|session| {
-                let before = zellij::before(session);
-                let look = sidebar.sending(session)?;
-                Some(Arrival::new(Machine::Local, look, before, None))
-            });
-            Ok(FirstClient::Zellij(zellij::client(session.as_ref())?, Fails::End, arrival))
-        },
-        First::Here(session) => {
-            let before = zellij::before(&session);
-            let look = sidebar.sending(&session);
-            let arrival = look.map(|look| Arrival::new(Machine::Local, look, before, None));
-            Ok(FirstClient::Zellij(zellij::rejoin(&session)?, Fails::End, arrival))
-        },
-        First::Away(destination, Refuge { session, before, .. }) => {
-            let program = zellij::attach_away(&destination, &session)?;
-            let machine = Machine::Remote(destination);
-            let look = sidebar.swapping(&machine, &session);
-            let arrival = Arrival::new(machine, look, Before::Listed(before), None);
-            Ok(FirstClient::Zellij(program, Fails::Onward(Vec::new()), Some(arrival)))
-        },
-        First::Own(session) => Ok(FirstClient::Own(session)),
     }
 }
 
@@ -2113,29 +1980,31 @@ impl App {
                 self.go(&on, &place, None);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start { on, session } => {
-                self.name(None, move || {
-                    let unused = match &on {
-                        Machine::Local => zellij::makes(session),
-                        Machine::Remote(destination) => zellij::makes_there(destination, session),
-                    };
-                    Ok((unused?, None))
-                });
+            Picked::Start { on: Machine::Local, session } => {
+                match self.dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok()) {
+                    Some(cwd) => self.make_own(session, cwd),
+                    None => self.sidebar.notify(format!(
+                        "no own session made: {} is no directory one starts in",
+                        self.dir.display()
+                    )),
+                }
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Start { on: Machine::Remote(destination), session } => {
+                self.name(None, move || Ok((zellij::makes_there(&destination, session)?, None)));
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::BringBack { on, session } => {
                 self.bring_back(&on, &session);
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Make { on, session, cwd } => {
+            Picked::Make { on: Machine::Local, session, cwd } => {
+                self.make_own(session, cwd);
+                self.give(Focus::on(self.focus.side.zellij()));
+            },
+            Picked::Make { on: Machine::Remote(destination), session, cwd } => {
                 self.name(None, move || {
-                    let unused = match &on {
-                        Machine::Local => zellij::makes(session),
-                        Machine::Remote(destination) => {
-                            zellij::makes_away(destination, &session, &cwd)
-                        },
-                    };
-                    Ok((unused?, Some(cwd)))
+                    Ok((zellij::makes_away(&destination, &session, &cwd)?, Some(cwd)))
                 });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
@@ -2665,6 +2534,12 @@ impl App {
         self.naming_on(move || Made::Zellij(caught(named), tab));
     }
 
+    fn make_own(&mut self, session: SessionName, cwd: Directory) {
+        self.name_own(move || {
+            own_sessions::made(&session, &cwd).map_err(|why| format!("no own session made: {why}"))
+        });
+    }
+
     fn name_own(&mut self, made: impl FnOnce() -> Result<OwnKey, String> + Send + 'static) {
         if self.refuse_naming(None) {
             return;
@@ -3125,7 +3000,7 @@ impl App {
     }
 
     fn newest_away(&mut self, tried: &[Destination]) -> io::Result<()> {
-        let Sought::Found(destination, Refuge { session, before, .. }) =
+        let Some((destination, Refuge { session, before, .. })) =
             starts::away(&self.sidebar, tried, away::QUICK)
         else {
             self.end("no machine has a session to go on in");

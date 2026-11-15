@@ -62,7 +62,7 @@ fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
 
 pub struct Owned {
     pub host: Host,
-    daemon: Daemon,
+    daemon: Option<Daemon>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -72,7 +72,7 @@ impl Owned {
         let host = Host::new();
         let daemon = start(host.vars()).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        Owned { host, daemon, runtime }
+        Owned { host, daemon: Some(daemon), runtime }
     }
 
     pub fn ask<T, F>(&self, asking: impl FnOnce(DaemonClient<Channel>) -> F) -> Result<T, Status>
@@ -84,6 +84,10 @@ impl Owned {
             let daemon = lunetad::connect(&folder).await.unwrap();
             asking(daemon).await.map(tonic::Response::into_inner)
         })
+    }
+
+    pub fn stop_daemon(&mut self) {
+        self.daemon = None;
     }
 
     pub fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
@@ -602,5 +606,6 @@ pub fn the_daemon_runs_on_while_an_own_session_does() {
     let mut owned = Owned::new();
     owned.make("own").unwrap();
     owned.listed("own");
-    assert_eq!(owned.daemon.ended_within(Duration::from_secs(36)), None);
+    let daemon = owned.daemon.as_mut().unwrap();
+    assert_eq!(daemon.ended_within(Duration::from_secs(36)), None);
 }

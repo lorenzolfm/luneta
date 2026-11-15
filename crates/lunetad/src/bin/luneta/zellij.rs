@@ -20,7 +20,7 @@ use lunetad::asks::{
     self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, OWN_VAR_BEFORE, TURN_VAR,
 };
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
-use lunetad::{moves, Destination, Directory, SocketId};
+use lunetad::{moves, Destination, Directory};
 pub use lunetad::{var, SessionName};
 
 use crate::away::{self, Away};
@@ -112,30 +112,6 @@ fn asked_in_pane(user: &User, in_pane: &str) -> String {
         User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
     };
     format!("{asked}, and this runs in {in_pane}")
-}
-
-pub fn refusal(session: &SessionName) -> Option<String> {
-    let here = Zellij::here();
-    refused(session, here.as_ref().map(PaneVars::named).map_err(String::as_str))
-}
-
-fn refused(session: &SessionName, current: Result<Option<&str>, &str>) -> Option<String> {
-    match current {
-        Ok(current) => (current == Some(session.as_str())).then(|| {
-            format!(
-                "this terminal is a pane of \"{session}\", which zellij would show inside \
-                 itself: name another session, or run luneta outside zellij"
-            )
-        }),
-        Err(why) => Some(format!(
-            "{why}, so this terminal may be a pane of \"{session}\", which zellij would show \
-             inside itself: run luneta outside zellij"
-        )),
-    }
-}
-
-pub fn client(session: Option<&SessionName>) -> Result<(String, Vec<String>), String> {
-    Zellij::client_attaching(session).map(client_with)
 }
 
 pub fn make(session: &SessionName) -> (String, Vec<String>) {
@@ -252,22 +228,6 @@ pub fn may_hold_terminal(session: &SessionName) -> bool {
         let runs = listed.command.as_ref().map(Said::as_str);
         runs.is_none_or(|command| icons::program(command) == Some("luneta"))
     })
-}
-
-pub fn settled() -> Option<Vec<(SessionName, SocketId)>> {
-    let folder = Zellij::socket_folder();
-    loop {
-        let running = folder.sockets()?;
-        let started = running.iter().map(|(_, id)| id.started());
-        match Zellij::newborn(started, SystemTime::now()) {
-            Some(left) => thread::sleep(left),
-            None => return Some(running),
-        }
-    }
-}
-
-pub fn answering(sessions: Vec<SessionName>) -> Option<Refuge> {
-    moves::answering(sessions, moves::before)
 }
 
 pub fn newest() -> Option<Refuge> {
@@ -1216,10 +1176,6 @@ mod tests {
         let Ok(session) = SessionName::parse("luneta-main") else {
             panic!("a name zellij takes");
         };
-        let (program, args) = client(Some(&session)).unwrap();
-        assert_eq!(program, "env");
-        assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
-        assert_eq!(args[args.len() - 4..], ["zellij", "attach", "--create", "luneta-main"]);
         let (program, args) = make(&session);
         assert_eq!(program, "env");
         assert!(args.windows(2).any(|pair| pair == ["-u", "ZELLIJ"]));
@@ -1249,18 +1205,6 @@ mod tests {
                 assert_eq!(String::from_utf8(said.stdout).unwrap(), name, "{shell}");
             }
         }
-    }
-
-    #[test]
-    fn a_pane_does_not_attach_to_its_own_session() {
-        let Ok(session) = SessionName::parse("outer") else {
-            panic!("a name zellij takes");
-        };
-        assert!(refused(&session, Ok(Some("outer"))).is_some());
-        assert_eq!(refused(&session, Ok(Some("other"))), None);
-        assert_eq!(refused(&session, Ok(None)), None);
-        let unread = refused(&session, Err("ZELLIJ_PANE_ID does not read"));
-        assert!(unread.is_some_and(|why| why.starts_with("ZELLIJ_PANE_ID does not read, so")));
     }
 
     #[test]

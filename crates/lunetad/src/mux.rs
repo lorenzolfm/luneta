@@ -338,10 +338,6 @@ impl Zellij {
         zellij::exited()
     }
 
-    pub fn client_attaching(session: Option<&SessionName>) -> Result<ClientWords, String> {
-        zellij::cli::client_attaching(session).map(zellij::cli::words)
-    }
-
     #[must_use]
     pub fn client_making(session: &SessionName) -> ClientWords {
         zellij::cli::words(zellij::cli::client_making(session))

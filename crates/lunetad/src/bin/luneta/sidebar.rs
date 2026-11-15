@@ -1774,10 +1774,6 @@ impl Sidebar {
         refuges.collect()
     }
 
-    pub fn news(&self) -> &News {
-        &self.news
-    }
-
     fn here_place(&self) -> Result<PanePlace, &'static str> {
         if let Some(seat) = self.own_seat() {
             let pane = seat.on().ok_or(NO_HERE_PANE)?.id.get();
@@ -4444,19 +4440,6 @@ fn pull_requests(pull_requests: &[lunetad::api::PullRequest]) -> HashMap<&str, P
         .iter()
         .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
         .collect()
-}
-
-pub fn unheard(host: &Host, within: Within) -> Vec<Destination> {
-    let others = machines(host).others.into_iter();
-    let unheard = others.filter(|(_, seen)| match seen {
-        Ok(seen) => {
-            let unlisted = |session: &Session| session.panes.is_none();
-            within != Within::Here && seen.sessions.iter().any(unlisted)
-        },
-        Err(Away::Reaching) => true,
-        Err(Away::Unreached { .. }) => false,
-    });
-    unheard.map(|(destination, _)| destination).collect()
 }
 
 const CARRIERS: [&str; 2] = ["ssh", "luneta"];
@@ -7702,12 +7685,11 @@ mod tests {
         let clicked = clicks(&mut sidebar, 13);
         let menu: Vec<(&str, Option<Hit>)> =
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
-        assert_eq!(menu, [
+        assert_eq!(menu[1..], [
             ("─ New ─────────── luneta/main ─", None),
             (" p  new pane", Some(on_menu(KeyCode::Char('p')))),
             (" t  new tab", Some(on_menu(KeyCode::Char('t')))),
             (" s  new session", Some(on_menu(KeyCode::Char('s')))),
-            (" o  new own session", Some(on_menu(KeyCode::Char('o')))),
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
@@ -8026,12 +8008,11 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
-        assert_eq!(lines[10..], [
+        assert_eq!(lines[11..], [
             "─ New ─────────── luneta/main ─",
             " p  new pane",
             " t  new tab",
             " s  new session",
-            " o  new own session",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
@@ -8659,7 +8640,7 @@ mod tests {
         assert_eq!(cursor(&sidebar), Some(pane_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
-        assert_eq!(lines[6], "─ New ─────────── luneta/main ─", "{lines:?}");
+        assert_eq!(lines[7], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
         let pane = Asked::Open { menu: 1, on: Machine::Local, open: pane };
@@ -10343,17 +10324,6 @@ mod tests {
     }
 
     #[test]
-    fn luneta_waits_for_machines_lunetad_is_reaching() {
-        let mut host = machines();
-        let unlisted = Session { panes: None, ..session("new", 40, Vec::new()) };
-        host.remotes.push(remote("far", up(vec![unlisted], Vec::new())));
-        let (pi, far): (Destination, Destination) =
-            ("pi".parse().unwrap(), "far".parse().unwrap());
-        assert_eq!(unheard(&host, Within::Here), std::slice::from_ref(&pi));
-        assert_eq!(unheard(&host, Within::MaybeAway), [pi, far]);
-    }
-
-    #[test]
     fn a_delete_on_a_machine_lunetad_no_longer_reaches_deletes_nothing() {
         for answers in [true, false] {
             let mut sidebar = fresh();
@@ -10453,7 +10423,10 @@ mod tests {
         for on in [Machine::Local, Machine::Remote(nixos())] {
             sidebar.cursor = Some(Spot::Machine(on.clone()));
             type_in(&mut sidebar, "n");
-            let start = Asked::Start { on, starts: Starts::Home };
+            let start = match on {
+                Machine::Local => Asked::StartOwn { starts: Starts::Home },
+                Machine::Remote(_) => Asked::Start { on, starts: Starts::Home },
+            };
             assert_eq!(sidebar.key(&char('s'), moment(160_000)), start);
         }
         for far in ["me@vps", "pi"] {
