@@ -780,6 +780,7 @@ impl Model {
 
     fn settle(&mut self) {
         let clients = &self.clients;
+        let mut seated_by_tab: Vec<Vec<(ClientId, &Seat)>> = Vec::new();
         for tab in self.sessions.iter_mut().flat_map(|session| session.tabs.iter_mut()) {
             tab.assert_whole();
             let seated: Vec<(ClientId, &Seat)> = clients
@@ -795,53 +796,48 @@ impl Model {
             if let Some(size) = smallest(seated.iter().map(|(_, seat)| seat.size)) {
                 tab.tree.fit(size);
             }
+            seated_by_tab.push(seated);
         }
+        let mut seated_by_tab = seated_by_tab.into_iter();
         let mut laid_out = 0;
         for session in &self.sessions {
             for tab in session.tabs.iter() {
-                let seats = self.clients.values().filter(|seat| tab.holds(seat.pane));
-                let mut seats = seats.peekable();
-                if seats.peek().is_none() {
-                    continue;
-                }
-                let laid = tab.layout(session);
-                for seat in seats {
-                    let mut layout = laid.clone();
-                    if let Some(api::layout::Shown::Tiled(tiled)) = &mut layout.shown {
-                        tiled.focused = seat.pane.said();
-                    }
-                    let wents = seat.wents;
-                    seat.layout.send_if_modified(|said| {
-                        if said.as_ref().is_some_and(|said| said.layout == layout) {
-                            return false;
+                let seated = seated_by_tab.next().expect("settle seats every tab once");
+                if !seated.is_empty() {
+                    let laid = tab.layout(session);
+                    for (_, seat) in &seated {
+                        let mut layout = laid.clone();
+                        if let Some(api::layout::Shown::Tiled(tiled)) = &mut layout.shown {
+                            tiled.focused = seat.pane.said();
                         }
-                        *said = Some(LaidOut { layout, wents });
-                        true
-                    });
-                    laid_out += 1;
+                        let laid_out = Some(LaidOut { layout, wents: seat.wents });
+                        seat.layout.send_if_modified(|said| {
+                            let modified = *said != laid_out;
+                            *said = laid_out;
+                            modified
+                        });
+                    }
+                }
+                laid_out += seated.len();
+                let viewers: Arc<[Viewer]> = seated
+                    .iter()
+                    .map(|(client, seat)| Viewer {
+                        client: *client,
+                        out: seat.out.clone(),
+                        colours: seat.colours,
+                        came: seat.came,
+                    })
+                    .collect();
+                let whole = Rect::whole(tab.tree.size()).inner();
+                for (pane, rect) in tab.tree.laid() {
+                    let full = tab.fullscreen && pane.id == tab.focused;
+                    let size = if full { whole } else { rect.inner() };
+                    pane.handle.want(Wanted { size, viewers: Arc::clone(&viewers) });
                 }
             }
         }
+        assert!(seated_by_tab.next().is_none(), "settle seats no tab it did not see");
         assert_eq!(laid_out, self.clients.len(), "every client sits on a pane of the model");
-        for tab in self.sessions.iter().flat_map(|session| session.tabs.iter()) {
-            let viewers: Arc<[Viewer]> = self
-                .clients
-                .iter()
-                .filter(|(_, seat)| tab.holds(seat.pane))
-                .map(|(client, seat)| Viewer {
-                    client: *client,
-                    out: seat.out.clone(),
-                    colours: seat.colours,
-                    came: seat.came,
-                })
-                .collect();
-            let whole = Rect::whole(tab.tree.size()).inner();
-            for (pane, rect) in tab.tree.laid() {
-                let full = tab.fullscreen && pane.id == tab.focused;
-                let size = if full { whole } else { rect.inner() };
-                pane.handle.want(Wanted { size, viewers: Arc::clone(&viewers) });
-            }
-        }
     }
 
     fn listing(&self) -> api::Listing {
@@ -928,12 +924,15 @@ impl Tab {
             }
         };
         let size = self.tree.size();
-        let shown = if self.fullscreen {
+        let (shown, hidden) = if self.fullscreen {
             let full = self.tree.get(self.focused).expect("a tab focuses a pane of its own");
-            api::layout::Shown::Full(placed((full, Rect::whole(size))))
+            let laid = self.tree.laid().into_iter().map(|(pane, _)| pane.id);
+            let hidden: Vec<u32> = laid.filter(|pane| *pane != full.id).map(PaneId::said).collect();
+            assert_eq!(hidden.len() + 1, self.tree.laid().len(), "a full pane hides the others");
+            (api::layout::Shown::Full(placed((full, Rect::whole(size)))), hidden)
         } else {
             let panes = self.tree.laid().into_iter().map(placed).collect();
-            api::layout::Shown::Tiled(api::Tiled { panes, focused: self.focused.said() })
+            (api::layout::Shown::Tiled(api::Tiled { panes, focused: self.focused.said() }), vec![])
         };
         let tabs = session.tabs.iter().map(|tab| api::Tabbed {
             id: tab.id.said(),
@@ -945,6 +944,7 @@ impl Tab {
             size: Some(size.said()),
             shown: Some(shown),
             tabs: tabs.collect(),
+            hidden,
         }
     }
 }

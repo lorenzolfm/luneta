@@ -505,6 +505,7 @@ message Layout {
     Placed full = 5;
   }
   repeated Tabbed tabs = 6;
+  repeated uint32 hidden = 7;
 }
 
 message Tiled {

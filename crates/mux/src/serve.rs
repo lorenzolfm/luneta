@@ -258,18 +258,13 @@ impl Stream for UntilEnded {
         let next = Pin::new(&mut self.going).poll_next(context);
         match &next {
             Poll::Ready(Some(said)) => {
-                let (ended, went) = match said {
-                    Ok(api::ToClient { event: Some(api::to_client::Event::Went(_)) }) => {
-                        (false, true)
-                    },
-                    Ok(api::ToClient { event: Some(api::to_client::Event::Ended(_)) }) | Err(_) => {
-                        (true, false)
-                    },
-                    Ok(_) => (false, false),
-                };
-                self.ended = ended;
+                let event = said.as_ref().ok().and_then(|said| said.event.as_ref());
+                let ended = matches!(event, Some(api::to_client::Event::Ended(_)));
+                self.ended = ended || said.is_err();
                 self.spoke = true;
-                self.wents += u64::from(went);
+                if let Some(api::to_client::Event::Went(_)) = event {
+                    self.wents += 1;
+                }
                 next
             },
             Poll::Ready(None) => next,

@@ -322,7 +322,7 @@ pub struct Cursor {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    pane: u32,
+    pane: NonZeroU32,
     size: Size,
     rows: Rows,
     cursor: Option<Cursor>,
@@ -331,7 +331,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(
-        pane: u32,
+        pane: NonZeroU32,
         size: Size,
         rows: Rows,
         cursor: Option<Cursor>,
@@ -372,7 +372,7 @@ impl Frame {
     }
 
     #[must_use]
-    pub fn pane(&self) -> u32 {
+    pub fn pane(&self) -> NonZeroU32 {
         self.pane
     }
 
@@ -397,6 +397,7 @@ impl Frame {
     }
 
     fn heard(frame: api::Frame) -> Result<Frame, String> {
+        let pane = NonZeroU32::new(frame.pane).ok_or("a frame is of pane 0")?;
         let size = Size::heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
             api::frame::Rows::Whole(api::Whole { lines }) => {
@@ -416,7 +417,7 @@ impl Frame {
             },
         };
         let cursor = frame.cursor.map(|cursor| cursor_heard(&cursor)).transpose()?;
-        Frame::new(frame.pane, size, rows, cursor, frame.mouse_tracking)
+        Frame::new(pane, size, rows, cursor, frame.mouse_tracking)
     }
 }
 
@@ -460,6 +461,7 @@ pub struct Layout {
     size: Size,
     shown: Shown,
     tabs: Vec<Tabbed>,
+    hidden: Vec<NonZeroU32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -493,6 +495,16 @@ impl Layout {
     #[must_use]
     pub fn tabs(&self) -> &[Tabbed] {
         &self.tabs
+    }
+
+    #[must_use]
+    pub fn hidden(&self) -> &[NonZeroU32] {
+        &self.hidden
+    }
+
+    #[must_use]
+    pub fn holds(&self, pane: NonZeroU32) -> bool {
+        self.shown.panes().iter().any(|placed| placed.pane == pane) || self.hidden.contains(&pane)
     }
 
     pub fn heard(layout: api::Layout) -> Result<Layout, String> {
@@ -539,7 +551,8 @@ impl Layout {
         if !tabs.iter().any(|tabbed| tabbed.id == tab) {
             return Err(format!("a layout of tab {tab} does not name it"));
         }
-        Ok(Layout { tab, size, shown, tabs })
+        let hidden = hidden_heard(&shown, layout.hidden, columns, rows)?;
+        Ok(Layout { tab, size, shown, tabs, hidden })
     }
 }
 
@@ -576,6 +589,42 @@ impl Rect {
             && u32::from(self.row) < other.bottom()
             && u32::from(other.row) < self.bottom()
     }
+}
+
+fn hidden_heard(
+    shown: &Shown,
+    hidden: Vec<u32>,
+    columns: u16,
+    rows: u16,
+) -> Result<Vec<NonZeroU32>, String> {
+    let full = match shown {
+        Shown::Full(full) => full.pane,
+        Shown::Tiled(_) if hidden.is_empty() => return Ok(Vec::new()),
+        Shown::Tiled(_) => return Err("a tiled layout hides panes".to_owned()),
+    };
+    let cells = u64::from(columns) * u64::from(rows);
+    let count = u64::try_from(hidden.len()).unwrap_or(u64::MAX);
+    if count >= cells {
+        return Err(format!("a layout hides {count} panes on {cells} cells"));
+    }
+    let mut read: Vec<NonZeroU32> = Vec::with_capacity(hidden.len());
+    for pane in hidden {
+        let pane = NonZeroU32::new(pane).ok_or("a layout hides pane 0")?;
+        if pane == full {
+            return Err(format!("a layout hides pane {pane}, which fills its tab"));
+        }
+        read.push(pane);
+    }
+    let mut sorted = read.clone();
+    sorted.sort_unstable();
+    let twice = sorted.windows(2).find_map(|pair| match pair {
+        [one, other] if one == other => Some(*one),
+        _ => None,
+    });
+    if let Some(pane) = twice {
+        return Err(format!("a layout hides pane {pane} twice"));
+    }
+    Ok(read)
 }
 
 fn tiles(panes: &[Placed], columns: u16, rows: u16) -> Result<(), String> {
@@ -869,6 +918,8 @@ mod tests {
         let mut two = frame(1, vec![row.clone(), row.clone()]);
         two.size = Some(api::Size { columns: 1, rows: 1 });
         assert_eq!(Frame::heard(two).unwrap_err(), "a frame of 1 rows has 2");
+        let nobody = api::Frame { pane: 0, ..frame(1, vec![row.clone()]) };
+        assert_eq!(Frame::heard(nobody).unwrap_err(), "a frame is of pane 0");
         let changed = api::Changed { rows: vec![api::Row { index: 1, line: Some(row.clone()) }] };
         let past = api::Frame {
             rows: Some(api::frame::Rows::Changed(changed)),
@@ -924,7 +975,7 @@ mod tests {
         let cursor = |column| {
             Some(Cursor { row: 0, column, shape: CursorShape::Bar, blinking: false })
         };
-        let made = |rows, cursor| Frame::new(1, size, rows, cursor, false);
+        let made = |rows, cursor| Frame::new(NonZeroU32::MIN, size, rows, cursor, false);
         assert!(made(Rows::Whole(vec![two.clone()]), cursor(1)).is_ok());
         let none = made(Rows::Whole(Vec::new()), None);
         assert_eq!(none.unwrap_err(), "a frame of 1 rows has 0");
@@ -1019,6 +1070,7 @@ mod tests {
             size: Some(api::Size { columns: 80, rows: 24 }),
             shown: Some(shown),
             tabs,
+            hidden: vec![],
         };
         let tiled = |panes, focused| api::layout::Shown::Tiled(api::Tiled { panes, focused });
         let layout = |panes, focused, tabs| shown(tiled(panes, focused), tabs);
@@ -1053,6 +1105,25 @@ mod tests {
         let full = Layout::heard(full).unwrap();
         assert_eq!(full.shown().focused().pane.get(), 5);
         assert!(matches!(full.shown(), Shown::Full(_)));
+        let whole = placed(5, rect(0, 80));
+        let hides = |hidden| api::Layout {
+            hidden,
+            ..shown(api::layout::Shown::Full(whole.clone()), vec![tabbed(1)])
+        };
+        let hiding = Layout::heard(hides(vec![4, 6])).unwrap();
+        let (four, six) = (NonZeroU32::new(4).unwrap(), NonZeroU32::new(6).unwrap());
+        assert_eq!(hiding.hidden(), [four, six]);
+        assert!(hiding.holds(four) && hiding.holds(NonZeroU32::new(5).unwrap()));
+        assert!(!hiding.holds(NonZeroU32::new(7).unwrap()));
+        assert_eq!(Layout::heard(hides(vec![0])).unwrap_err(), "a layout hides pane 0");
+        let under = Layout::heard(hides(vec![5])).unwrap_err();
+        assert_eq!(under, "a layout hides pane 5, which fills its tab");
+        let twice = Layout::heard(hides(vec![4, 6, 4])).unwrap_err();
+        assert_eq!(twice, "a layout hides pane 4 twice");
+        let many = Layout::heard(hides((1..=1921).filter(|it| *it != 5).collect())).unwrap_err();
+        assert_eq!(many, "a layout hides 1920 panes on 1920 cells");
+        let tiled_hiding = api::Layout { hidden: vec![4], ..layout(two(), 4, vec![tabbed(1)]) };
+        assert_eq!(Layout::heard(tiled_hiding).unwrap_err(), "a tiled layout hides panes");
         let part = shown(api::layout::Shown::Full(placed(5, rect(0, 40))), vec![tabbed(1)]);
         assert_eq!(Layout::heard(part).unwrap_err(), uncovered);
         let empty = api::Layout { shown: None, ..layout(two(), 4, vec![tabbed(1)]) };
