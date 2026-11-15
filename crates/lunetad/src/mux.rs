@@ -338,10 +338,6 @@ impl Zellij {
         zellij::exited()
     }
 
-    pub fn client_attaching(session: Option<&SessionName>) -> Result<ClientWords, String> {
-        zellij::cli::client_attaching(session).map(zellij::cli::words)
-    }
-
     #[must_use]
     pub fn client_making(session: &SessionName) -> ClientWords {
         zellij::cli::words(zellij::cli::client_making(session))
@@ -411,7 +407,7 @@ pub fn pane_of(pid: u32) -> Option<Named> {
 }
 
 fn pane_in(environ: &[OsString]) -> Option<Named> {
-    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ))
+    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ).map(Named::Own))
 }
 
 fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {

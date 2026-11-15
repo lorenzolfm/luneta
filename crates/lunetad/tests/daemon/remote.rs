@@ -73,10 +73,6 @@ if [ -n "$client" ] && [ -z "$quiet" ]; then
     destination="$1"
     shift
     echo "$*" >> "$to/$destination.clients"
-    if [ -f "$to/$destination.refused" ]; then
-        echo "ssh: connect to host $destination port 22: Connection refused" >&2
-        exit 255
-    fi
     if [ -f "$to/$destination.drops" ]; then
         drops=$(cat "$to/$destination.drops")
         if [ "$drops" -gt 0 ]; then
@@ -115,14 +111,6 @@ exec "$to/$destination"
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
         script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridge(&vars)));
-    }
-
-    pub fn waits_on(&self, destination: &str) {
-        script(&self.to.join(destination), "exec sleep 60\n");
-    }
-
-    pub fn refuses_clients(&self, destination: &str) {
-        fs::write(self.to.join(format!("{destination}.refused")), "").unwrap();
     }
 
     pub fn drops_clients(&self, destination: &str, clients: u32) {

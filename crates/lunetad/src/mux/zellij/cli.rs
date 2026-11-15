@@ -487,13 +487,6 @@ pub fn words(args: Vec<String>) -> ClientWords {
     ClientWords { program: PROGRAM, args, unset: &LEFT_OUT }
 }
 
-pub fn client_attaching(session: Option<&SessionName>) -> Result<Vec<String>, String> {
-    let Some(session) = session else {
-        return Ok(Vec::new());
-    };
-    Ok(vec!["attach".to_owned(), "--create".to_owned(), attached(session)?])
-}
-
 #[must_use]
 pub fn client_making(session: &SessionName) -> Vec<String> {
     vec![session_option(session)]
@@ -541,7 +534,6 @@ mod tests {
         assert_eq!(args(&started), [&switch[..], &["--cwd=/w", "--", "-to"]].concat());
         assert_eq!(client_making(&at), ["--session=-at"]);
         assert!(client_rejoining(&at).is_err());
-        assert!(client_attaching(Some(&at)).is_err());
     }
 
     #[test]

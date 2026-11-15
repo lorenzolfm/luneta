@@ -70,26 +70,20 @@ use crate::zellij::SessionName;
 #[command(
     name = "luneta",
     version = release::SAID.as_str(),
-    about = "zellij, beside a sidebar of every session on this host and what the agent in each \
-             pane is doing. With a command, ask lunetad, the daemon of this host, instead, or \
-             have zellij open, move or close something"
+    about = "Sessions of luneta's own multiplexer, beside a sidebar of every session on this \
+             host and what the agent in each pane is doing. With a command, ask lunetad, the \
+             daemon of this host, instead, or have it open, move or close something"
 )]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[arg(
-        help = "The session to attach to, made if none runs by that name. Without one, luneta \
-                joins a session that runs: the one named for this directory, as the picker names \
-                it, or else the one you looked at last; or, with none on this machine, another \
-                machine's. It makes the one named for this directory only where none runs anywhere"
+        help = "The session to attach to, made in this directory if none runs by that name. \
+                Without one, luneta joins a session that runs: the one named for this directory, \
+                as the picker names it, or else the one you looked at last, or else the newest. \
+                It makes the one named for this directory only where none runs. A name a \
+                session of zellij's has is refused"
     )]
     session: Option<String>,
-    #[arg(
-        long,
-        help = "Attach to an own session of luneta's own multiplexer, made if none runs by the \
-                name, rather than zellij's: the one named for this directory, where none is \
-                named. A name a session of zellij's has is refused"
-    )]
-    own: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -163,7 +157,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        return host::run(session, cli.own, folder);
+        return host::run(session, folder);
     };
     let command = match command {
         Command::Worktree { repo, of } => return pull::make(&repo, &of),

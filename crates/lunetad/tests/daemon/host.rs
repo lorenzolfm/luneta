@@ -300,10 +300,6 @@ case "$*" in
             printf '\033[?1000h\033[?1002h\033[?1006hon screen'
             exec cat > "$panes/heard"
         fi
-        if [ -f "$panes/refused-clients" ]; then
-            echo "this zellij attaches no client"
-            exit 1
-        fi
         if [ -f "$panes/drops" ]; then
             drops=$(cat "$panes/drops")
             if [ "$drops" -gt 0 ]; then
@@ -420,10 +416,6 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
 
     pub fn stayed(&self) -> bool {
         !self.panes().join("stays").exists()
-    }
-
-    pub fn refuses_clients(&self) {
-        fs::write(self.panes().join("refused-clients"), "").unwrap();
     }
 
     pub fn heard(&self) -> String {

@@ -275,26 +275,22 @@ const _: () = {
     assert!(Top::moves(ISSUE).is_none(), "the issue box on a key the sidebar moves with");
 };
 
-const OWN_HERE: &str = "menu: own sessions are of this machine alone, as yet";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum New {
     Pane,
     Tab,
     Session,
-    Own,
     Machine,
 }
 
 impl New {
-    const ALL: [New; 5] = [New::Pane, New::Tab, New::Session, New::Own, New::Machine];
+    const ALL: [New; 4] = [New::Pane, New::Tab, New::Session, New::Machine];
 
     const fn key(self) -> char {
         match self {
             New::Pane => 'p',
             New::Tab => 't',
             New::Session => 's',
-            New::Own => 'o',
             New::Machine => 'm',
         }
     }
@@ -304,7 +300,6 @@ impl New {
             New::Pane => "new pane",
             New::Tab => "new tab",
             New::Session => "new session",
-            New::Own => "new own session",
             New::Machine => "new machine",
         }
     }
@@ -472,9 +467,6 @@ impl Entry {
             | Entry::New(New::Tab) => pane.then_some(self),
             Entry::New(New::Pane) | Entry::Turn(_) => (pane && !target.own()).then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
-            Entry::New(New::Own) => {
-                (!session && *target.machine() == Machine::Local).then_some(self)
-            },
             Entry::Issue => target.repository().is_some().then_some(self),
             Entry::New(New::Machine)
             | Entry::Ask
@@ -1404,7 +1396,7 @@ impl Menu {
                     | Pressed::Turn(_),
                     Target::Session(..) | Target::Machine(_),
                 )
-                | (Pressed::New(New::Session | New::Own), Target::Session(..)) => {
+                | (Pressed::New(New::Session), Target::Session(..)) => {
                     stays(Stage::Choosing(keys), Wants::Nothing)
                 },
                 (Pressed::Search, Target::Pane(_, row)) => match row.beside() {
@@ -1444,7 +1436,7 @@ impl Menu {
                     stays(stage, Wants::Nothing)
                 },
                 (Pressed::New(New::Session), Target::Machine(machine)) => {
-                    Did::Closed(Done::Start(machine.clone(), Starts::Home))
+                    Did::Closed(new_session(machine, Starts::Home))
                 },
                 (Pressed::New(New::Pane), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
@@ -1463,20 +1455,8 @@ impl Menu {
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
                 },
                 (Pressed::New(New::Session), Target::Pane(machine, row)) => match row.beside() {
-                    Ok(Beside { cwd, .. }) => {
-                        Did::Closed(Done::Start(machine.clone(), Starts::In(cwd)))
-                    },
+                    Ok(Beside { cwd, .. }) => Did::Closed(new_session(machine, Starts::In(cwd))),
                     Err(reason) => Did::Closed(Done::Wrong(reason)),
-                },
-                (Pressed::New(New::Own), Target::Machine(Machine::Local)) => {
-                    Did::Closed(Done::Own(Starts::Home))
-                },
-                (Pressed::New(New::Own), Target::Pane(Machine::Local, row)) => match row.beside() {
-                    Ok(Beside { cwd, .. }) => Did::Closed(Done::Own(Starts::In(cwd))),
-                    Err(reason) => Did::Closed(Done::Wrong(reason)),
-                },
-                (Pressed::New(New::Own), Target::Machine(_) | Target::Pane(..)) => {
-                    Did::Closed(Done::Wrong(OWN_HERE.to_owned()))
                 },
                 (Pressed::Turn(turning), Target::Pane(_, row)) => {
                     let (session, pane) = (row.session.clone(), row.pane);
@@ -2038,6 +2018,13 @@ impl Menu {
             },
         };
         Shown { title, right, body, spots, footer, keys }
+    }
+}
+
+fn new_session(on: &Machine, starts: Starts) -> Done {
+    match on {
+        Machine::Local => Done::Own(starts),
+        Machine::Remote(_) => Done::Start(on.clone(), starts),
     }
 }
 
@@ -2758,7 +2745,6 @@ mod tests {
                 " p  new pane",
                 " t  new tab",
                 " s  new session",
-                " o  new own session",
                 " m  new machine",
                 " <BS> - Back, <ESC> - Close",
             ]
@@ -2774,8 +2760,7 @@ mod tests {
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
 
         let (menu, _) = stays(opened(pane_row(), Some('n')));
-        let start = Done::Start(Machine::Local, Starts::In(main_dir()));
-        assert_eq!(closed(menu.key(&char('s'))), start);
+        assert_eq!(closed(menu.key(&char('s'))), Done::Own(Starts::In(main_dir())));
     }
 
     fn esc() -> KeyEvent {
@@ -2901,10 +2886,9 @@ mod tests {
         let lines = text(&menu.lines(31, 10, 0).0);
         assert!(lines.iter().all(|line| !line.contains("Turn")), "{lines:?}");
         let (menu, _) = stays(opened(own_row(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
             " t  new tab",
             " s  new session",
-            " o  new own session",
             " m  new machine",
         ]);
         let (_, wants) = stays(stays(opened(own_row(), Some('c'))).0.key(&char('t')));
@@ -3293,8 +3277,8 @@ mod tests {
     }
 
     #[test]
-    fn n_o_makes_an_own_session_where_n_s_makes_one() {
-        let own = |target| closed(stays(opened(target, Some(NEW))).0.key(&char('o')));
+    fn n_s_makes_an_own_session_on_this_machine() {
+        let own = |target| closed(stays(opened(target, Some(NEW))).0.key(&char('s')));
         assert_eq!(own(pane_row()), Done::Own(Starts::In(main_dir())));
         assert_eq!(own(local_header()), Done::Own(Starts::Home));
     }
@@ -3646,7 +3630,6 @@ mod tests {
         assert_eq!(new(local_header()), [
             "─ New ─────────────────────────",
             " s  new session",
-            " o  new own session",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);

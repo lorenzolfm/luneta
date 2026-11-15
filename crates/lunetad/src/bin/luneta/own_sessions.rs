@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use lunetad::api::{NewOwnRequest, OwnSession};
@@ -8,13 +9,18 @@ use crate::daemon;
 
 const MAKING: Duration = Duration::from_secs(20);
 
-fn holding() -> Option<OwnKey> {
-    own::here().map(|pane| pane.session)
+pub fn holding() -> Result<Option<OwnKey>, String> {
+    own::here().map(|pane| pane.map(|pane| pane.session))
 }
 
 pub fn refusal(session: OwnKey, name: &SessionName) -> Option<String> {
-    (holding() == Some(session))
-        .then(|| format!("luneta runs in {name}, and goes nowhere it shows itself"))
+    match holding() {
+        Ok(held) => (held == Some(session))
+            .then(|| format!("luneta runs in {name}, and goes nowhere it shows itself")),
+        Err(why) => Some(format!(
+            "{why}, so luneta may run in {name}, and goes nowhere it shows itself"
+        )),
+    }
 }
 
 pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
@@ -22,11 +28,19 @@ pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
     Ok(named.map(|own| own.key()))
 }
 
+pub fn directory(dir: &Path) -> Result<Directory, String> {
+    let cwd = dir.to_str().and_then(|dir| Directory::parse(dir.to_owned()).ok());
+    cwd.ok_or_else(|| format!("{} is no directory an own session starts in", dir.display()))
+}
+
 pub fn newest(passed: &[OwnKey]) -> Option<OwnKey> {
     let sessions = server::sessions()
         .inspect_err(|failure| log::say(&format!("no own session to go on in: {failure}")))
         .ok()?;
-    newest_of(sessions.iter().map(server::Listing::key), holding(), passed)
+    let held = holding()
+        .inspect_err(|why| log::say(&format!("no own session to go on in: {why}")))
+        .ok()?;
+    newest_of(sessions.iter().map(server::Listing::key), held, passed)
 }
 
 fn newest_of(
