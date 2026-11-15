@@ -156,7 +156,8 @@ fn shell(login: Option<OsString>, named: Option<OsString>) -> OsString {
 
 fn login_shell() -> Option<OsString> {
     let you = uzers::get_user_by_uid(rustix::process::getuid().as_raw())?;
-    Some(uzers::os::unix::UserExt::shell(&you).as_os_str().to_owned())
+    let shell = uzers::os::unix::UserExt::shell(&you);
+    shell.is_file().then(|| shell.as_os_str().to_owned())
 }
 
 #[cfg(test)]
