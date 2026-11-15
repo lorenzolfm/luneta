@@ -21,6 +21,7 @@ fn luneta_attaches_to_its_session_and_shows_what_its_shell_prints() {
         name: "work".to_owned(),
         cwd: owned.home(),
         command: vec!["sh".to_owned()],
+        tab: None,
     };
     owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let dir = directory("work");

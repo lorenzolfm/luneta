@@ -86,6 +86,7 @@ type Named = Result<(Unused, Option<Directory>), String>;
 pub enum Made {
     Zellij(Named, Option<MenuTab>),
     Own(Result<OwnKey, String>),
+    Pulled { menu: u64, on: Machine, session: SessionName, made: Result<OwnKey, String> },
 }
 
 pub struct MenuTab {
@@ -1894,13 +1895,6 @@ impl App {
             Asked::Turn { menu, on, turned, turn } => {
                 zellij::turn(menu, &on, turned, turn, &self.events);
             },
-            Asked::Start { on, starts } => {
-                self.name(None, move || match zellij::unused_at(&on, starts) {
-                    Ok((unused, dir)) => Ok((unused, Some(dir))),
-                    Err(why) => Err(format!("menu: {why}")),
-                });
-                self.leave();
-            },
             Asked::StartOwn { starts } => {
                 self.name_own(move || {
                     let unmade = |why| format!("menu: no own session made: {why}");
@@ -1909,16 +1903,16 @@ impl App {
                 });
                 self.leave();
             },
-            Asked::Make { menu, on, session, cwd, tab_cwd, name, command } => {
-                let tab = Tab { cwd: tab_cwd, name: Some(name), command };
-                self.name(Some(MenuTab { menu, tab }), move || {
-                    let unused = match &on {
-                        Machine::Local => zellij::makes(session),
-                        Machine::Remote(destination) => {
-                            zellij::makes_away(destination, &session, &cwd)
-                        },
-                    };
-                    Ok((unused?, Some(cwd)))
+            Asked::Make { menu, on, session, tab_cwd, name, command, .. } => {
+                if self.refuse_naming(Some(menu)) {
+                    return;
+                }
+                self.naming_on(move || {
+                    let first = own_sessions::First { tab: &name, command: &command };
+                    let made = caught(|| {
+                        Ok(own_sessions::made_on(&on, &session, &tab_cwd, Some(first))?)
+                    });
+                    Made::Pulled { menu, on, session, made }
                 });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
@@ -1988,9 +1982,8 @@ impl App {
                 }
                 self.give(Focus::on(self.focus.side.zellij()));
             },
-            Picked::Start { on: Machine::Remote(destination), session } => {
-                self.name(None, move || Ok((zellij::makes_there(&destination, session)?, None)));
-                self.give(Focus::on(self.focus.side.zellij()));
+            Picked::Start { on: Machine::Remote(_), .. } | Picked::Make { on: Machine::Remote(_), .. } => {
+                self.sidebar.notify(format!("picker: {}", menu::HERE_ONLY));
             },
             Picked::BringBack { on, session } => {
                 self.bring_back(&on, &session);
@@ -1998,12 +1991,6 @@ impl App {
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
                 self.make_own(session, cwd);
-                self.give(Focus::on(self.focus.side.zellij()));
-            },
-            Picked::Make { on: Machine::Remote(destination), session, cwd } => {
-                self.name(None, move || {
-                    Ok((zellij::makes_away(&destination, &session, &cwd)?, Some(cwd)))
-                });
                 self.give(Focus::on(self.focus.side.zellij()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -2569,6 +2556,9 @@ impl App {
             Made::Zellij(named, tab) => (named, tab),
             Made::Own(Ok(made)) => return self.go_made_own(made),
             Made::Own(Err(why)) => return self.sidebar.notify(why),
+            Made::Pulled { menu, on, session, made } => {
+                return self.pulled_made(menu, &on, &session, made);
+            },
         };
         let menu = tab.as_ref().map(|tab| tab.menu);
         let tab = tab.map(|MenuTab { menu, tab }| (zellij::owed(menu, &self.events), tab));
@@ -2580,6 +2570,27 @@ impl App {
             && let Some(menu) = menu
         {
             self.sidebar.drop_menu(menu);
+        }
+    }
+
+    fn pulled_made(
+        &mut self,
+        menu: u64,
+        on: &Machine,
+        session: &SessionName,
+        made: Result<OwnKey, String>,
+    ) {
+        let held = self.sidebar.made_for(menu);
+        let made = match made {
+            Ok(made) => made,
+            Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
+        };
+        match (on, held) {
+            (Machine::Local, Some(sidebar::Held::Open)) => self.go_made_own(made),
+            (Machine::Local, _) => self.sidebar.notify(format!("menu: made {session}")),
+            (Machine::Remote(destination), _) => self.sidebar.notify(format!(
+                "menu: made {session} on {destination}, where luneta goes to no session yet"
+            )),
         }
     }
 

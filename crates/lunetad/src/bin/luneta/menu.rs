@@ -1091,7 +1091,6 @@ pub enum Wants {
 pub enum Done {
     Nothing,
     Wrong(String),
-    Start(Machine, Starts),
     Own(Starts),
     Go(Machine, Place),
     Act(Machine, Act),
@@ -1142,7 +1141,6 @@ enum Stage {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Opening {
     In(Listed),
-    Made(SessionName),
     Turned(Listed),
 }
 
@@ -1229,9 +1227,6 @@ impl Menu {
             | Stage::Pull { step: Step::Waiting(Wait::Opening(session)), .. } => {
                 Some(Opening::In(session.clone()))
             },
-            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => {
-                Some(Opening::Made(session.clone()))
-            },
             Stage::Turning { session, .. } => Some(Opening::Turned(session.clone())),
             Stage::Choosing(_)
             | Stage::Planning { .. }
@@ -1303,6 +1298,13 @@ impl Menu {
             | Stage::Turning { .. }
             | Stage::Pull { step: Step::Choosing { .. }, .. }
             | Stage::Ssh { .. } => None,
+        }
+    }
+
+    pub fn made(&self) -> Option<&SessionName> {
+        match &self.stage {
+            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
+            _ => None,
         }
     }
 
@@ -2021,10 +2023,12 @@ impl Menu {
     }
 }
 
+pub const HERE_ONLY: &str = "luneta makes and goes to sessions of this machine only, for now";
+
 fn new_session(on: &Machine, starts: Starts) -> Done {
     match on {
         Machine::Local => Done::Own(starts),
-        Machine::Remote(_) => Done::Start(on.clone(), starts),
+        Machine::Remote(_) => Done::Wrong(format!("menu: {HERE_ONLY}")),
     }
 }
 
@@ -3329,7 +3333,8 @@ mod tests {
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: Vec::new() }));
         assert_eq!(menu.target(), &pane);
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), Starts::In(main_dir())));
+        let away = Done::Wrong(format!("menu: {HERE_ONLY}"));
+        assert_eq!(closed(menu.key(&char('s'))), away);
 
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
@@ -4275,7 +4280,7 @@ mod tests {
                 command: Vec::new(),
             }
         );
-        assert_eq!(menu.opening(), Some(Opening::Made(name)));
+        assert_eq!((menu.opening(), menu.made()), (None, Some(&name)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
         let why = "no session works in cashubtc/cdk".to_owned();

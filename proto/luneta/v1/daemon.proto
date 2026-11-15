@@ -222,6 +222,7 @@ message NewOwnRequest {
   string name = 2;
   string cwd = 3;
   repeated string command = 4;
+  optional string tab = 5;
 }
 
 message NewOwnResponse {

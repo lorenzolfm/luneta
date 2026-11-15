@@ -96,6 +96,7 @@ impl Owned {
             name: name.to_owned(),
             cwd: self.home(),
             command: WAITS.map(str::to_owned).to_vec(),
+            tab: None,
         };
         self.ask(|mut daemon| async move { daemon.new_own(request).await })
     }
@@ -268,8 +269,8 @@ fn an_own_pane_s_shell_marks_say_what_it_ran_on_the_host() {
     let marks = "m() { printf '\\033]133;%s\\007' \"$1\"; }; \
         m A; m 'C;cmdline_url=make%20test'; m 'D;3'; m A; exec sleep 600";
     let command = ["sh", "-c", marks].map(str::to_owned).to_vec();
-    let request =
-        NewOwnRequest { on: None, name: "marks".to_owned(), cwd: owned.home(), command };
+    let name = "marks".to_owned();
+    let request = NewOwnRequest { on: None, name, cwd: owned.home(), command, tab: None };
     owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let pane = eventually("the host says make test ended", || {
         let panes = owned.listed("marks").panes?.panes;
@@ -293,8 +294,8 @@ fn an_own_pane_s_shell_that_marks_no_line_says_its_command_ended() {
     let marks =
         "m() { printf '\\033]133;%s\\007' \"$1\"; }; m A; m C; m 'D;3'; m A; exec sleep 600";
     let command = ["sh", "-c", marks].map(str::to_owned).to_vec();
-    let request =
-        NewOwnRequest { on: None, name: "unsaid".to_owned(), cwd: owned.home(), command };
+    let name = "unsaid".to_owned();
+    let request = NewOwnRequest { on: None, name, cwd: owned.home(), command, tab: None };
     owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let ended = eventually("the host says a command ended", || {
         let pane = owned.listed("unsaid").panes?.panes.into_iter().next()?;
@@ -437,6 +438,7 @@ fn of_two_own_sessions_named_at_once_one_is_made_and_one_is_taken() {
         name: "work".to_owned(),
         cwd: owned.home(),
         command: WAITS.map(str::to_owned).to_vec(),
+        tab: None,
     };
     let (first, second) = (request.clone(), request);
     let (first, second) = owned.ask(|daemon| async move {
@@ -550,6 +552,7 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
         name: "own".to_owned(),
         cwd: owned.home(),
         command: ["sh", "-c", "echo own pane; exec sleep 600"].map(str::to_owned).to_vec(),
+        tab: None,
     };
     let made = owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
 
@@ -559,6 +562,24 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
         dumped.ok().filter(|dumped| dumped.screen.contains("own pane"))
     });
     assert_eq!(screen.pane, made.pane);
+}
+
+#[test]
+fn an_own_session_s_first_tab_takes_its_name_and_runs_its_command() {
+    let owned = Owned::new();
+    let request = NewOwnRequest {
+        on: None,
+        name: "pulled".to_owned(),
+        cwd: owned.home(),
+        command: ["sh", "-c", "exec sleep 600"].map(str::to_owned).to_vec(),
+        tab: Some("#2736".to_owned()),
+    };
+    let made = owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
+    let pane = eventually("the host lists the tab", || {
+        owned.listed("pulled").panes?.panes.into_iter().next()
+    });
+    let listed = (pane.id, pane.tab_name.as_str(), pane.command.as_deref());
+    assert_eq!(listed, (made.pane, "#2736", Some("sh -c exec sleep 600")));
 }
 
 struct Shut {

@@ -155,6 +155,7 @@ impl Mux {
     pub fn new_session(
         self: &Arc<Mux>,
         name: SessionName,
+        first: Option<Name>,
         opens: &Opens,
     ) -> Result<(SessionId, SystemTime, TabId, PaneId), Status> {
         self.change(|model| {
@@ -163,7 +164,8 @@ impl Mux {
             refuse_if_full(model.sessions.len(), SESSIONS_MAX, "sessions")?;
             let session = SessionId::next(&mut model.last.session);
             let made = SystemTime::now();
-            let tab = model.tab(self, (session, made), Name::numbered(1), opens, FIRST_SIZE)?;
+            let first = first.unwrap_or_else(|| Name::numbered(1));
+            let tab = model.tab(self, (session, made), first, opens, FIRST_SIZE)?;
             let ids = (session, made, tab.id, tab.focused);
             let tabs = Tabs::one(tab);
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });

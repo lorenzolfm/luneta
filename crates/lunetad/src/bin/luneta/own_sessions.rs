@@ -2,12 +2,13 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use lunetad::api::{NewOwnRequest, OwnSession};
+use lunetad::api::{NewOwnRequest, On, OwnSession};
 use lunetad::mux::own::{self, server, OwnId, OwnKey};
 use lunetad::{log, Directory, SessionName};
 use tonic::{Code, Status};
 
 use crate::daemon;
+use crate::machines::Machine;
 
 const MAKING: Duration = Duration::from_secs(20);
 
@@ -94,7 +95,21 @@ fn unmade(status: &Status) -> Unmade {
     }
 }
 
+pub struct First<'a> {
+    pub tab: &'a str,
+    pub command: &'a [String],
+}
+
 pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, Unmade> {
+    made_on(&Machine::Local, name, cwd, None)
+}
+
+pub fn made_on(
+    on: &Machine,
+    name: &SessionName,
+    cwd: &Directory,
+    first: Option<First<'_>>,
+) -> Result<OwnKey, Unmade> {
     let folder = lunetad::folder::find()
         .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -102,10 +117,14 @@ pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, Unmade> {
         .build()
         .map_err(|error| format!("no runtime: {error}"))?;
     let request = NewOwnRequest {
-        on: None,
+        on: match on {
+            Machine::Local => None,
+            Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
+        },
         name: name.as_str().to_owned(),
         cwd: cwd.as_str().to_owned(),
-        command: Vec::new(),
+        command: first.as_ref().map_or_else(Vec::new, |first| first.command.to_vec()),
+        tab: first.map(|first| first.tab.to_owned()),
     };
     let making = async {
         let mut daemon = daemon::current(&folder).await?.daemon;
@@ -119,6 +138,10 @@ pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, Unmade> {
         return Ok(OwnKey::of(&session).map_err(|why| format!("lunetad made {why}"))?);
     }
     let id = OwnId::new(made.session).ok_or("lunetad made an own session of id 0")?;
+    if let Machine::Remote(destination) = on {
+        let untold = format!("lunetad of {destination} did not say when it made {name}");
+        return Err(Unmade::Failed(untold));
+    }
     match named(name)? {
         Some(key) if key.id == id => Ok(key),
         _ => Err(Unmade::Failed(format!("own session {id}, {name}, no longer runs"))),

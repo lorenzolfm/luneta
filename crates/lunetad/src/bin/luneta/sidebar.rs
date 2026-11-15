@@ -837,7 +837,6 @@ pub enum Asked {
     OpenThere { menu: u64, on: Machine, place: Place, open: Open },
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
     Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
-    Start { on: Machine, starts: Starts },
     StartOwn { starts: Starts },
     Make {
         menu: u64,
@@ -882,7 +881,6 @@ impl Asked {
             | Asked::Browse(_)
             | Asked::Leave
             | Asked::Delete { .. }
-            | Asked::Start { .. }
             | Asked::StartOwn { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
@@ -3162,13 +3160,6 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Start(on, starts) => match self.out_of_reach(&on) {
-                        Some(why) => {
-                            self.say(why);
-                            Asked::Nothing
-                        },
-                        None => Asked::Start { on, starts },
-                    },
                     Done::Own(starts) => Asked::StartOwn { starts },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
                     Done::Go(_, place) => {
@@ -3261,16 +3252,8 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { session, cwd, tab_cwd, name, command } if held == Held::Open => {
+            Wants::Make { session, cwd, tab_cwd, name, command } => {
                 Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
-            },
-            Wants::Make { session, tab_cwd, .. } => {
-                let said = format!(
-                    "menu: the worktree of {tab_cwd} is made: no session is made for it, as \
-                     luneta's zellij is where you went; open {session} and try again"
-                );
-                self.say(said);
-                Asked::Nothing
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
@@ -3565,7 +3548,7 @@ impl Sidebar {
             Err(why) => {
                 let said = match opening {
                     Opening::Turned(_) => "not turned",
-                    Opening::In(_) | Opening::Made(_) => "nothing opened",
+                    Opening::In(_) => "nothing opened",
                 };
                 self.say(format!("menu: {said}: {why}"));
                 return Asked::Nothing;
@@ -3573,18 +3556,6 @@ impl Sidebar {
         };
         let place = match opening {
             Opening::In(session) | Opening::Turned(session) => {
-                Place::Pane(PanePlace { session, pane })
-            },
-            Opening::Made(made) => {
-                let sessions = self.seen(&on).map(|seen| oldest_first(seen.sessions).0);
-                let mut named =
-                    sessions.into_iter().flatten().filter(|(listed, _)| listed.name == made);
-                let (Some((session, _)), None) = (named.next(), named.next()) else {
-                    self.say(format!(
-                        "menu: zellij opened pane {pane} in {made}, which luneta cannot tell"
-                    ));
-                    return Asked::Nothing;
-                };
                 Place::Pane(PanePlace { session, pane })
             },
         };
@@ -3612,6 +3583,11 @@ impl Sidebar {
             },
             Err(why) => self.opened(menu, Err(why)),
         }
+    }
+
+    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
+        let made = |it: &Menu| it.made().map(|_| ());
+        self.take_seen(menu, made).map(|(_, held, ())| held)
     }
 
     pub fn waits_on(&self, menu: u64) -> Option<Held> {
@@ -8282,11 +8258,9 @@ mod tests {
             command: Vec::new(),
         };
         assert_eq!(sidebar.pulled(1, Ok(Found { on: Machine::Local, ready })), asked);
-        if let Some(host) = &mut sidebar.host {
-            host.sessions.push(session("newer-2", 30, vec![pane(1, 0, "/w/n", "fish")]));
-        }
-        let opened = pane_of("newer-2", 30, 3);
-        assert_eq!(sidebar.opened(1, Ok(3)), go_here(opened));
+        assert_eq!(sidebar.made_for(1), Some(Held::Open));
+        assert!(sidebar.menu.is_none());
+        assert_eq!(sidebar.made_for(1), None);
     }
 
     #[test]
@@ -8734,17 +8708,18 @@ mod tests {
             let worktree = "/w/luneta/feat".to_owned();
             let ready = Ready { at, worktree, branch: None, moved_off: false, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
-            assert_eq!(asked, Asked::Nothing);
-            assert!(sidebar.working.is_empty());
-            assert!(!sidebar.turning());
-            sidebar.notice
+            (sidebar, number, asked)
         };
-        let made = left(At::Clone { cwd: directory("/w/n"), name: session_name("luneta") });
-        let said = "menu: the worktree of /w/luneta/feat is made: no session is made for it, as \
-                    luneta's zellij is where you went; open luneta and try again";
-        assert_eq!(made.as_deref(), Some(said));
-        let there = left(At::Session((listed("newer", 20), 1)));
-        assert_eq!(there, Some(Sidebar::busy_said(&session_name("newer"))));
+        let made = At::Clone { cwd: directory("/w/n"), name: session_name("luneta") };
+        let (mut sidebar, number, asked) = left(made);
+        assert!(matches!(asked, Asked::Make { menu, .. } if menu == number), "{asked:?}");
+        assert_eq!(sidebar.made_for(number), Some(Held::Kept));
+        assert!(sidebar.working.is_empty());
+        let (sidebar, _, asked) = left(At::Session((listed("newer", 20), 1)));
+        assert_eq!(asked, Asked::Nothing);
+        assert!(sidebar.working.is_empty());
+        assert!(!sidebar.turning());
+        assert_eq!(sidebar.notice, Some(Sidebar::busy_said(&session_name("newer"))));
 
         let tab = |pane, name: &str| OtherTab { pane, name: name.to_owned() };
         let listing = || {
@@ -10153,11 +10128,7 @@ mod tests {
         let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };
         let asked = sidebar.pulled(number, Ok(Found { on: on.clone(), ready }));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
-        let made = session("main", 30, vec![pane(1, 0, "/w/n", "fish")]);
-        host.remotes[0] = remote("nixos", up(vec![work(), made], Vec::new()));
-        sidebar.heard(host);
-        let opened = pane_of("main", 30, 3);
-        assert_eq!(sidebar.opened(number, Ok(3)), Asked::Go { on, place: opened });
+        assert_eq!(sidebar.made_for(number), Some(Held::Open));
     }
 
     #[test]
@@ -10416,24 +10387,19 @@ mod tests {
     }
 
     #[test]
-    fn n_s_on_a_machine_s_header_starts_a_session_in_its_home() {
+    fn n_s_on_this_machine_s_header_starts_a_session_in_its_home_and_elsewhere_refuses() {
         let mut sidebar = fresh();
         sidebar.heard(machines());
         sidebar.focus(Keys::Sidebar);
-        for on in [Machine::Local, Machine::Remote(nixos())] {
-            sidebar.cursor = Some(Spot::Machine(on.clone()));
-            type_in(&mut sidebar, "n");
-            let start = match on {
-                Machine::Local => Asked::StartOwn { starts: Starts::Home },
-                Machine::Remote(_) => Asked::Start { on, starts: Starts::Home },
-            };
-            assert_eq!(sidebar.key(&char('s'), moment(160_000)), start);
-        }
-        for far in ["me@vps", "pi"] {
-            sidebar.cursor = Some(Spot::Machine(Machine::Remote(far.parse().unwrap())));
+        sidebar.cursor = Some(Spot::Machine(Machine::Local));
+        type_in(&mut sidebar, "n");
+        let start = Asked::StartOwn { starts: Starts::Home };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), start);
+        for far in [nixos(), "me@vps".parse().unwrap()] {
+            sidebar.cursor = Some(Spot::Machine(Machine::Remote(far)));
             type_in(&mut sidebar, "n");
             assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
-            let refused = format!("menu: lunetad does not reach {far} now");
+            let refused = format!("menu: {}", menu::HERE_ONLY);
             assert_eq!(sidebar.notice.as_deref(), Some(refused.as_str()));
         }
     }

@@ -140,7 +140,7 @@ pub async fn new_session(
     name: &str,
     opens: api::Opens,
 ) -> api::NewSessionResponse {
-    let request = api::NewSessionRequest { name: name.to_owned(), opens: Some(opens) };
+    let request = api::NewSessionRequest { name: name.to_owned(), opens: Some(opens), tab: None };
     mux.new_session(request).await.unwrap().into_inner()
 }
 

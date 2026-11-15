@@ -81,6 +81,25 @@ fn a_watch_follows_the_tabs_and_ids_are_never_given_again() {
 }
 
 #[test]
+fn a_session_s_first_tab_takes_the_name_it_is_made_with() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let named = |tab: &str| api::NewSessionRequest {
+            name: "work".to_owned(),
+            opens: Some(shell()),
+            tab: Some(tab.to_owned()),
+        };
+        let refused = mux.new_session(named("")).await.unwrap_err();
+        assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, "tab is empty"));
+        mux.new_session(named("#2736")).await.unwrap();
+        let listing = listed(&mut mux).await;
+        let names: Vec<&str> = tabs(&listing).iter().map(|tab| tab.name.as_str()).collect();
+        assert_eq!(names, ["#2736"]);
+    });
+}
+
+#[test]
 fn a_tab_closes_or_holds_as_its_program_ends() {
     run(async {
         let server = Server::start();
@@ -131,7 +150,8 @@ fn a_name_is_one_sessions() {
         let mut mux = server.client().await;
         let work = new_session(&mut mux, "work", shell()).await;
         new_session(&mut mux, "play", shell()).await;
-        let again = api::NewSessionRequest { name: "work".to_owned(), opens: Some(shell()) };
+        let again =
+            api::NewSessionRequest { name: "work".to_owned(), opens: Some(shell()), tab: None };
         let refused = mux.new_session(again).await.unwrap_err();
         assert_eq!(
             (refused.code(), refused.message()),
