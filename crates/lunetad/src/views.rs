@@ -17,7 +17,8 @@ use crate::mux::own::TerminalKey;
 use crate::mux::Runs as Opened;
 use crate::projects::layout::{self, Direction, Order, Rect, Towards};
 use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
-use crate::projects::{Size, Store, Terminal, View, Workstream, LINE_BYTES_MAX};
+use crate::projects::{Size, Store, Terminal, TerminalId, View, Workstream, WorkstreamId};
+use crate::projects::LINE_BYTES_MAX;
 use crate::watch::Troubles;
 use crate::{opens, Directory};
 
@@ -43,7 +44,7 @@ pub struct ClientId(u64);
 pub enum Command {
     Change { change: Change, answer: oneshot::Sender<Result<Option<Id>, Failed>> },
     Came {
-        workstream: Id,
+        workstream: WorkstreamId,
         size: Size,
         out: Out,
         answer: oneshot::Sender<Result<ClientId, Status>>,
@@ -59,7 +60,7 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Asked {
     Size(Size),
-    Go(Id),
+    Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(Focus),
@@ -77,7 +78,7 @@ pub enum Beside {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Step(Step),
-    Terminal(Id),
+    Terminal(TerminalId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +93,7 @@ impl Asked {
         Ok(match event {
             Event::Hello(_) => return Err("a hello comes only first".to_owned()),
             Event::Size(size) => Asked::Size(size_of(Some(size))?),
-            Event::Go(workstream) => Asked::Go(id("go", workstream)?),
+            Event::Go(workstream) => Asked::Go(id("go", workstream).map(WorkstreamId::new)?),
             Event::Open(show_request::Open { beside, argv }) => {
                 use show_request::open::Beside as Said;
                 let beside = match beside.ok_or("open: it says no side to open beside")? {
@@ -115,7 +116,9 @@ impl Asked {
                         Focus::Step(Step::Direction(direction_of(direction)?))
                     },
                     To::Order(order) => Focus::Step(Step::Order(order_of(order)?)),
-                    To::Terminal(terminal) => Focus::Terminal(id("focus", terminal)?),
+                    To::Terminal(terminal) => {
+                        Focus::Terminal(id("focus", terminal).map(TerminalId::new)?)
+                    },
                 })
             },
             Event::Resize(show_request::Resize { direction, grow }) => {
@@ -213,18 +216,18 @@ struct Views {
     mux: Terminals,
     clients: BTreeMap<ClientId, Client>,
     arrivals: u64,
-    known: BTreeMap<Id, Known>,
+    known: BTreeMap<TerminalId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
-    last_focus: BTreeMap<Id, Id>,
+    last_focus: BTreeMap<WorkstreamId, TerminalId>,
     troubles: Troubles,
     shell: OsString,
 }
 
 struct Client {
-    workstream: Id,
+    workstream: WorkstreamId,
     size: Size,
-    focus: Option<Id>,
+    focus: Option<TerminalId>,
     out: Out,
     said: Option<api::ShowResponse>,
 }
@@ -304,7 +307,7 @@ impl Views {
         }
     }
 
-    fn came(&mut self, workstream: Id, size: Size, out: Out) -> Result<ClientId, Status> {
+    fn came(&mut self, workstream: WorkstreamId, size: Size, out: Out) -> Result<ClientId, Status> {
         if self.clients.len() >= CLIENTS_MAX {
             let many = format!("{CLIENTS_MAX} clients show views, as many as may");
             return Err(Status::resource_exhausted(many));
@@ -390,14 +393,20 @@ impl Views {
         self.clients.get_mut(&client).expect("a client asked is held")
     }
 
-    fn view(&self, workstream: Id) -> Result<&View, String> {
+    fn view(&self, workstream: WorkstreamId) -> Result<&View, String> {
         let projects = self.kept()?;
         let found = projects.find(workstream).ok_or_else(|| format!("no workstream {workstream}"));
         let (_, found) = found?;
         Ok(found.view())
     }
 
-    fn stepped(&self, workstream: Id, from: Id, step: Step, size: Size) -> Result<Id, String> {
+    fn stepped(
+        &self,
+        workstream: WorkstreamId,
+        from: TerminalId,
+        step: Step,
+        size: Size,
+    ) -> Result<TerminalId, String> {
         let tree = self.view(workstream)?.tree().ok_or("the view holds no terminal")?;
         let to = match step {
             Step::Direction(direction) => tree.neighbour(from, direction, size),
@@ -406,7 +415,7 @@ impl Views {
         to.ok_or_else(|| "no other terminal is there".to_owned())
     }
 
-    fn focus(&mut self, client: ClientId, terminal: Id) -> Result<(), String> {
+    fn focus(&mut self, client: ClientId, terminal: TerminalId) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
         let full = self.view(workstream)?.full();
         if full.is_some_and(|full| full != terminal) {
@@ -485,7 +494,7 @@ impl Views {
         Ok(())
     }
 
-    fn close(&mut self, terminal: Id) -> Result<(), String> {
+    fn close(&mut self, terminal: TerminalId) -> Result<(), String> {
         let key = match self.known.get(&terminal) {
             Some(known) => Some(known.key),
             None => self.mux.tagged(&tag(terminal)).map_err(|failure| {
@@ -498,7 +507,7 @@ impl Views {
         self.closed(terminal)
     }
 
-    fn closed(&mut self, terminal: Id) -> Result<(), String> {
+    fn closed(&mut self, terminal: TerminalId) -> Result<(), String> {
         let projects = self.kept()?;
         let (held_in, _) = projects.holding(terminal).ok_or("no view holds the terminal")?;
         let workstream = held_in.id();
@@ -516,7 +525,7 @@ impl Views {
             };
         }
         let projects = self.kept()?;
-        assert!(!projects.holds(terminal), "terminal {terminal} left its view");
+        assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its view");
         if let Some(heir) = heir {
             assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
         }
@@ -539,7 +548,7 @@ impl Views {
             self.listed = by_key(terminals);
             return;
         };
-        let mut found: BTreeMap<Id, (TerminalKey, Option<Size>)> = BTreeMap::new();
+        let mut found: BTreeMap<TerminalId, (TerminalKey, Option<Size>)> = BTreeMap::new();
         for listed in &terminals {
             let Some(terminal) = tagged(&listed.tag) else {
                 continue;
@@ -557,8 +566,8 @@ impl Views {
             }
             found.insert(terminal, (listed.key, listed.size));
         }
-        let ended: Vec<Id> = if whole {
-            let gone = |(terminal, known): &(&Id, &Known)| {
+        let ended: Vec<TerminalId> = if whole {
+            let gone = |(terminal, known): &(&TerminalId, &Known)| {
                 !found.contains_key(*terminal) && known.heard == Heard::Seen
             };
             self.known.iter().filter(gone).map(|(terminal, _)| *terminal).collect()
@@ -567,7 +576,7 @@ impl Views {
             self.troubles.say(unread.to_owned());
             Vec::new()
         };
-        let owners: BTreeMap<TerminalKey, Id> =
+        let owners: BTreeMap<TerminalKey, TerminalId> =
             found.iter().map(|(terminal, (key, _))| (*key, *terminal)).collect();
         self.known.retain(|terminal, known| {
             owners.get(&known.key).is_none_or(|owner| owner == terminal)
@@ -669,7 +678,7 @@ impl Views {
         last_focus.retain(|workstream, terminal| {
             projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
         });
-        let mut sizes: BTreeMap<Id, Size> = BTreeMap::new();
+        let mut sizes: BTreeMap<WorkstreamId, Size> = BTreeMap::new();
         for client in clients.values() {
             let size = sizes.entry(client.workstream).or_insert(client.size);
             *size = size.least(client.size);
@@ -744,7 +753,7 @@ fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Ter
     listed
 }
 
-fn arrival(workstream: &Workstream, last: Option<Id>) -> Option<Id> {
+fn arrival(workstream: &Workstream, last: Option<TerminalId>) -> Option<TerminalId> {
     let view = workstream.view();
     if let Some(full) = view.full() {
         return Some(full);
@@ -755,19 +764,19 @@ fn arrival(workstream: &Workstream, last: Option<Id>) -> Option<Id> {
     view.terminals().next().map(layout::Leaf::id)
 }
 
-fn tag(terminal: Id) -> Vec<u8> {
+fn tag(terminal: TerminalId) -> Vec<u8> {
     format!("{TAG}{terminal}").into_bytes()
 }
 
-fn tagged(tag: &[u8]) -> Option<Id> {
+fn tagged(tag: &[u8]) -> Option<TerminalId> {
     std::str::from_utf8(tag).ok()?.strip_prefix(TAG)?.parse().ok()
 }
 
 fn laid(
     workstream: &Workstream,
     size: Size,
-    focus: Option<Id>,
-    known: &BTreeMap<Id, Known>,
+    focus: Option<TerminalId>,
+    known: &BTreeMap<TerminalId, Known>,
     looked: bool,
 ) -> api::ShowResponse {
     let view = workstream.view();
@@ -808,8 +817,8 @@ fn laid(
         workstream: workstream.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         panes,
-        focused: focus.map(Id::get),
-        full: view.full().map(Id::get),
+        focused: focus.map(TerminalId::get),
+        full: view.full().map(TerminalId::get),
     };
     api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }
 }
@@ -972,7 +981,7 @@ mod tests {
 
     #[test]
     fn a_tag_names_the_terminal_of_a_view() {
-        let id = Id::of(0x1f).unwrap();
+        let id = TerminalId::of(0x1f).unwrap();
         assert_eq!(tagged(format!("{TAG}{id}").as_bytes()), Some(id));
         for refused in [&b"luneta terminal 1f"[..], b"terminal 000000000000001f", b"\xff", b""] {
             assert_eq!(tagged(refused), None, "{refused:?}");
@@ -983,7 +992,8 @@ mod tests {
     fn a_show_word_reads_into_what_it_asks() {
         use show_request::{focus, open, Event};
         let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(3)) });
-        assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::Terminal(Id::of(3).unwrap()))));
+        let three = TerminalId::of(3).unwrap();
+        assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::Terminal(three))));
         let right = show_request::Towards::Right.into();
         let open = show_request::Open { beside: Some(open::Beside::Towards(right)), argv: vec![] };
         let towards = Beside::Towards(Towards::Right);

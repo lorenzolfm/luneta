@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Runs, Session, Terminal};
+use super::{TerminalId, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -193,10 +194,11 @@ impl Store {
         }
     }
 
-    pub fn fresh(&self) -> Result<Id, Failed> {
+    pub fn fresh(&self) -> Result<TerminalId, Failed> {
         match &self.keeping {
             Keeping::Kept { projects, .. } => {
-                projects.fresh(&mut Id::random).map_err(Failed::Refused)
+                let fresh = projects.fresh(&mut Id::random);
+                fresh.map(TerminalId::new).map_err(Failed::Refused)
             },
             Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
         }
@@ -361,7 +363,7 @@ impl KeptProject {
 
 impl KeptWorkstream {
     fn read(self) -> Result<Workstream, String> {
-        let id: Id = self.id.parse()?;
+        let id: WorkstreamId = self.id.parse()?;
         let view = match self.view {
             None => View::default(),
             Some(view) => view.read().map_err(|why| format!("workstream {id}'s view: {why}"))?,
@@ -425,7 +427,7 @@ impl KeptTowards {
 
 impl KeptTerminal {
     fn read(self) -> Result<Terminal, String> {
-        let id: Id = self.id.parse()?;
+        let id: TerminalId = self.id.parse()?;
         let why = |why: String| format!("terminal {id}: {why}");
         let folder = Dir::parse(&self.folder).map_err(why)?;
         let runs = match self.runs {
@@ -503,7 +505,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
-    use super::super::Placed;
+    use super::super::{Placed, ProjectId};
     use super::*;
 
     fn dir(text: &str) -> Dir {
@@ -537,7 +539,7 @@ mod tests {
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
         let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
-        let vault = made.unwrap().unwrap();
+        let vault = ProjectId::new(made.unwrap().unwrap());
         store.change(Change::AddProject { dir: dir("/w/luneta"), name: None }).unwrap();
         let top = dir("/home/me/Vault");
         store.change(Change::AddWorkstream { project: vault, folder: top, name: None }).unwrap();
@@ -570,11 +572,12 @@ mod tests {
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
-        let top = Change::AddWorkstream { project: ids[0], folder: dir("/w/luneta"), name: None };
+        let project = ProjectId::new(ids[0]);
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(top, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
         let folder = dir("/w/luneta/main");
-        let main = Change::AddWorkstream { project: ids[0], folder, name: named };
+        let main = Change::AddWorkstream { project, folder, name: named };
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let want = r#"{
   "version": 2,
@@ -611,10 +614,12 @@ mod tests {
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
-        let top = Change::AddWorkstream { project: ids[0], folder: dir("/w/luneta"), name: None };
+        let project = ProjectId::new(ids[0]);
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(top, &mut draw).unwrap();
+        let workstream = WorkstreamId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
-        let [shell, vim, agent] = [4, 5, 6].map(|id| Id::of(id).unwrap());
+        let [shell, vim, agent] = [4, 5, 6].map(|id| TerminalId::of(id).unwrap());
         let runs = [
             (shell, Runs::Shell, Placed::Alone),
             (vim, Runs::Command(Line::parse("vim notes").unwrap()), Placed::Beside {
@@ -632,10 +637,10 @@ mod tests {
         ];
         for (id, runs, placed) in runs {
             let terminal = Terminal::new(id, dir("/w/luneta/main"), runs);
-            let open = Change::Open { workstream: ids[1], terminal, placed, size };
+            let open = Change::Open { workstream, terminal, placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
-        let fill = Change::Fill { workstream: ids[1], full: Some(vim) };
+        let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
   "version": 2,
@@ -887,11 +892,11 @@ mod tests {
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
-        let project = project.unwrap().unwrap();
+        let project = ProjectId::new(project.unwrap().unwrap());
         let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
-        let workstream = store.change(add).unwrap().unwrap();
+        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
         let size = super::super::Size::of(80, 24).unwrap();
-        let [one, two] = [store.fresh().unwrap(), Id::of(u64::MAX).unwrap()];
+        let [one, two] = [store.fresh().unwrap(), TerminalId::of(u64::MAX).unwrap()];
         let opened = |id, placed| {
             let terminal = Terminal::new(id, dir("/a"), Runs::Shell);
             Change::Open { workstream, terminal, placed, size }

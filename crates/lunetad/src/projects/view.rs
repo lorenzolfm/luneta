@@ -1,7 +1,7 @@
 use crate::agent::Harness;
 
 use super::layout::{self, Direction, Leaf, Preordered, Removed, Towards, Tree, PANES_MAX};
-use super::{Dir, Id, Size};
+use super::{Dir, Size, TerminalId};
 
 pub const LINE_BYTES_MAX: usize = 1024;
 
@@ -9,14 +9,14 @@ pub const SESSION_BYTES_MAX: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Terminal {
-    id: Id,
+    id: TerminalId,
     folder: Dir,
     runs: Runs,
 }
 
 impl Terminal {
     #[must_use]
-    pub fn new(id: Id, folder: Dir, runs: Runs) -> Terminal {
+    pub fn new(id: TerminalId, folder: Dir, runs: Runs) -> Terminal {
         Terminal { id, folder, runs }
     }
 
@@ -37,7 +37,7 @@ impl Terminal {
 }
 
 impl Leaf for Terminal {
-    fn id(&self) -> Id {
+    fn id(&self) -> TerminalId {
         self.id
     }
 }
@@ -98,17 +98,20 @@ pub struct View(Option<Laid>);
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Laid {
     tree: Tree<Terminal>,
-    full: Option<Id>,
+    full: Option<TerminalId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
     Alone,
-    Beside { at: Id, towards: Towards },
+    Beside { at: TerminalId, towards: Towards },
 }
 
 impl View {
-    pub fn read(preorder: Vec<Preordered<Terminal>>, full: Option<Id>) -> Result<View, String> {
+    pub fn read(
+        preorder: Vec<Preordered<Terminal>>,
+        full: Option<TerminalId>,
+    ) -> Result<View, String> {
         if preorder.is_empty() {
             return Err("a view holds no terminal, and so is kept as no view".to_owned());
         }
@@ -125,7 +128,7 @@ impl View {
     }
 
     #[must_use]
-    pub fn full(&self) -> Option<Id> {
+    pub fn full(&self) -> Option<TerminalId> {
         self.0.as_ref().and_then(|laid| laid.full)
     }
 
@@ -144,11 +147,11 @@ impl View {
     }
 
     #[must_use]
-    pub fn holds(&self, terminal: Id) -> bool {
+    pub fn holds(&self, terminal: TerminalId) -> bool {
         self.tree().is_some_and(|tree| tree.holds(terminal))
     }
 
-    pub(super) fn terminal_mut(&mut self, terminal: Id) -> Option<&mut Terminal> {
+    pub(super) fn terminal_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
         self.0.as_mut()?.tree.get_mut(terminal)
     }
 
@@ -187,7 +190,7 @@ impl View {
         Ok(())
     }
 
-    pub(super) fn closed(&mut self, terminal: Id) -> Option<Id> {
+    pub(super) fn closed(&mut self, terminal: TerminalId) -> Option<TerminalId> {
         let laid = self.0.as_mut().expect("a closed terminal is in the view");
         let heir = match laid.tree.remove(terminal) {
             Removed::Last => {
@@ -208,7 +211,7 @@ impl View {
         heir
     }
 
-    pub(super) fn filled(&mut self, full: Option<Id>) -> Result<(), String> {
+    pub(super) fn filled(&mut self, full: Option<TerminalId>) -> Result<(), String> {
         let Some(laid) = &mut self.0 else {
             return match full {
                 None => Ok(()),
@@ -224,7 +227,7 @@ impl View {
 
     pub(super) fn resized(
         &mut self,
-        terminal: Id,
+        terminal: TerminalId,
         direction: Direction,
         change: layout::Change,
         size: Size,
@@ -239,7 +242,7 @@ impl View {
         Ok(())
     }
 
-    pub(super) fn swapped(&mut self, one: Id, other: Id) -> Result<(), String> {
+    pub(super) fn swapped(&mut self, one: TerminalId, other: TerminalId) -> Result<(), String> {
         let laid = self.0.as_mut().expect("swapped terminals are in the view");
         if laid.full.is_some() {
             return Err("a view one terminal fills moves none of them".to_owned());
@@ -249,7 +252,7 @@ impl View {
     }
 }
 
-fn fills(tree: &Tree<Terminal>, full: Id) -> Result<(), String> {
+fn fills(tree: &Tree<Terminal>, full: TerminalId) -> Result<(), String> {
     if !tree.holds(full) {
         return Err(format!("the view holds no terminal {full}"));
     }

@@ -58,7 +58,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes, Whose};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Change, Failed, Id, Store};
+use crate::projects::{Change, Failed, Id, Store, WorkstreamId};
 use crate::views;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
@@ -1030,7 +1030,8 @@ impl Daemon for Host {
         else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let workstream = views::id("workstream", workstream).map_err(Status::invalid_argument)?;
+        let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
+        let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
         let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
         let views = self.views.clone();
