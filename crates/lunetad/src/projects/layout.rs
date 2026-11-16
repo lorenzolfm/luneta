@@ -13,7 +13,7 @@ pub const PANES_MAX: usize = 64;
 
 pub const SIDE_MAX: u16 = 1000;
 
-pub const SHARES: u32 = 1_000_000;
+const SHARES: u32 = 1_000_000;
 
 const STEP_PERCENT: u32 = 5;
 
@@ -320,7 +320,8 @@ impl<L: Leaf> Tree<L> {
         if !open.is_empty() {
             return Err("a split of a view lacks a half".to_owned());
         }
-        let nodes: Vec<Node<L>> = nodes.into_iter().map(|node| node.expect("filled")).collect();
+        let filled = "a preorder that ends with no open slot fills every node";
+        let nodes: Vec<Node<L>> = nodes.into_iter().map(|node| node.expect(filled)).collect();
         let tree = Tree { nodes };
         let mut panes = tree.panes();
         let count = panes.len();
@@ -365,13 +366,6 @@ impl<L: Leaf> Tree<L> {
 
     pub fn leaves(&self) -> impl Iterator<Item = &L> {
         self.order().into_iter().map(|node| self.leaf_at(node))
-    }
-
-    pub fn leaves_mut(&mut self) -> impl Iterator<Item = &mut L> {
-        self.nodes.iter_mut().filter_map(|node| match node {
-            Node::Pane(leaf) => Some(leaf),
-            Node::Split(_) => None,
-        })
     }
 
     #[must_use]
@@ -984,7 +978,6 @@ mod tests {
         assert_eq!(tree.get(pane(9)), None);
         assert_eq!(tree.get_mut(pane(3)).copied(), Some(pane(3)));
         assert_eq!(tree.leaves().copied().collect::<Vec<_>>(), [pane(1), pane(2), pane(3)]);
-        assert_eq!(tree.leaves_mut().count(), 3);
         assert!(rect(0, 0, 4, 4).overlaps(rect(3, 3, 4, 4)));
         assert!(!rect(0, 0, 4, 4).overlaps(rect(4, 0, 4, 4)));
     }

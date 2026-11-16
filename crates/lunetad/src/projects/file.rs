@@ -705,7 +705,7 @@ mod tests {
                 "workstreams": [{"id": "0000000000000002", "view": {"full": "0000000000000003",
                 "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
                 "runs": "shell"}}]}}]}]}"#,
-                "a view of one terminal fills itself with it",
+                "a view of one terminal shows it whole already",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",

@@ -1,7 +1,7 @@
 use std::fs;
 use std::time::Duration;
 
-use lunetad::api::show_request::{self, focus, open, Event, Hello};
+use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, Laid};
 use lunetad::api::{ShowRequest, ShowResponse};
 use lunetad::mux::own::api::{self as mux_api, Listing};
@@ -53,8 +53,12 @@ impl<'a> Shown<'a> {
     }
 
     fn open(&mut self) -> u64 {
+        self.open_running(&WAITS)
+    }
+
+    fn open_running(&mut self, words: &[&str]) -> u64 {
         let before = self.terminals();
-        let argv = WAITS.map(str::to_owned).to_vec();
+        let argv = words.iter().map(|word| (*word).to_owned()).collect();
         let largest = open::Beside::Largest(());
         self.ask(Event::Open(show_request::Open { beside: Some(largest), argv }));
         let laid = self.until("a terminal more", |laid| laid.panes.len() == before.len() + 1);
@@ -266,4 +270,68 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
     });
     assert_eq!(after, before);
     assert_eq!(fs::read_to_string(kept(&owned.host)).unwrap(), file);
+}
+
+#[test]
+fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let left = shown.open();
+    let right = shown.open();
+    let towards_left = show_request::Direction::Left.into();
+    shown.ask(Event::Resize(show_request::Resize { towards: towards_left, grow: true }));
+    let laid = shown.until("the border moved", |laid| {
+        laid.panes[0].rect == Some(rect(0, 0, 36, 24))
+    });
+    assert_eq!(laid.panes[1].rect, Some(rect(36, 0, 44, 24)));
+    eventually("the grown terminal takes its place's size", || {
+        (sized(&owned, right) == Some((42, 22))).then_some(())
+    });
+    let to = Some(r#move::To::Towards(towards_left));
+    shown.ask(Event::Move(show_request::Move { to }));
+    let laid = shown.until("the terminals traded", |laid| laid.panes[0].terminal == right);
+    assert_eq!((laid.panes[1].terminal, laid.focused), (left, Some(right)));
+    shown.ask(Event::Fullscreen(()));
+    shown.until("the view full", |laid| laid.full == Some(right));
+    shown.ask(Event::Resize(show_request::Resize { towards: towards_left, grow: true }));
+    assert!(shown.until_refused().contains("resized by none"));
+}
+
+#[test]
+fn a_view_keeps_its_terminals_as_lost_when_the_mux_dies() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
+    owned.kill_mux();
+    let laid = shown.until("the terminal lost", |laid| laid.panes[0].key.is_none());
+    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    assert!(file.contains(&format!("{terminal:016x}")), "a lost terminal is kept: {file}");
+    shown.ask(Event::Close(()));
+    shown.until("the lost terminal closed", |laid| laid.panes.is_empty());
+}
+
+#[test]
+fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 601");
+}
+
+fn heard_in_below(owned: &Owned, shown: &mut Shown, runs: &str) -> u64 {
+    let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
+    fs::create_dir_all(&below).unwrap();
+    let said = r#"(sleep 0.3; printf '\033]7;file://localhost%s\007' "$PWD") &"#;
+    let line = format!("cd '{}' && {said} exec {runs}", below.display());
+    let terminal = shown.open_running(&["sh", "-c", &line]);
+    let folder = format!(r#""folder": "{}""#, below.display());
+    let command = format!(r#""command": "{runs}""#);
+    eventually("the folder and command it runs are kept", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        (file.contains(&folder) && file.contains(&command)).then_some(())
+    });
+    terminal
 }

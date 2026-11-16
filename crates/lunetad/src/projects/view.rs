@@ -1,7 +1,7 @@
 use crate::agent::Harness;
 
-use super::layout::{Leaf, Preordered, Removed, Tree, PANES_MAX};
-use super::{Dir, Id};
+use super::layout::{Leaf, Preordered, Removed, Towards, Tree, PANES_MAX};
+use super::{Dir, Id, Size};
 
 pub const LINE_BYTES_MAX: usize = 1024;
 
@@ -104,7 +104,7 @@ struct Laid {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
     Alone,
-    Beside { at: Id, towards: super::layout::Towards },
+    Beside { at: Id, towards: Towards },
 }
 
 impl View {
@@ -117,12 +117,7 @@ impl View {
         }
         let tree = Tree::of_preorder(preorder)?;
         if let Some(full) = full {
-            if !tree.holds(full) {
-                return Err(format!("a view fills itself with terminal {full}, which it lacks"));
-            }
-            if tree.len() == 1 {
-                return Err(format!("a view of one terminal fills itself with it, {full}"));
-            }
+            fills(&tree, full)?;
         }
         Ok(View(Some(Laid { tree, full })))
     }
@@ -164,8 +159,12 @@ impl View {
         self.0.as_mut().map(|laid| &mut laid.tree)
     }
 
-    pub(super) fn opened(&mut self, terminal: Terminal, placed: Placed, size: super::Size)
-    -> Result<(), String> {
+    pub(super) fn opened(
+        &mut self,
+        terminal: Terminal,
+        placed: Placed,
+        size: Size,
+    ) -> Result<(), String> {
         let id = terminal.id;
         match (&mut self.0, placed) {
             (None, Placed::Alone) => {
@@ -216,12 +215,7 @@ impl View {
             };
         };
         if let Some(full) = full {
-            if !laid.tree.holds(full) {
-                return Err(format!("the view holds no terminal {full}"));
-            }
-            if laid.tree.len() == 1 {
-                return Err("a view of one terminal shows it whole already".to_owned());
-            }
+            fills(&laid.tree, full)?;
         }
         laid.full = full;
         Ok(())
@@ -231,4 +225,14 @@ impl View {
         let laid = self.0.as_mut().expect("swapped terminals are in the view");
         laid.tree.swap(one, other);
     }
+}
+
+fn fills(tree: &Tree<Terminal>, full: Id) -> Result<(), String> {
+    if !tree.holds(full) {
+        return Err(format!("the view holds no terminal {full}"));
+    }
+    if tree.len() == 1 {
+        return Err("a view of one terminal shows it whole already".to_owned());
+    }
+    Ok(())
 }

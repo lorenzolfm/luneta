@@ -225,8 +225,8 @@ pub fn own(session: &api::Session) -> Option<api::OwnSession> {
     }
 }
 
-impl Drop for Owned {
-    fn drop(&mut self) {
+impl Owned {
+    pub fn kill_mux(&self) {
         let socket = self.socket();
         let listening = self.runtime.block_on(async move {
             let stream = tokio::net::UnixStream::connect(socket).await.ok()?;
@@ -235,6 +235,12 @@ impl Drop for Owned {
         if let Some(pid) = listening.and_then(rustix::process::Pid::from_raw) {
             let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
         }
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.kill_mux();
     }
 }
 

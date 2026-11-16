@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
@@ -17,7 +17,7 @@ use crate::mux::own::TerminalKey;
 use crate::mux::Runs as Opened;
 use crate::projects::layout::{self, Direction, Order, Rect, Towards};
 use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
-use crate::projects::{Size, Store, Terminal, Workstream};
+use crate::projects::{Size, Store, Terminal, View, Workstream};
 use crate::watch::Troubles;
 use crate::{opens, Directory};
 
@@ -38,8 +38,8 @@ pub enum Command {
     Came { workstream: Id, size: Size, out: Out, answer: oneshot::Sender<Result<u64, Status>> },
     Asked { client: u64, asked: Result<Asked, String> },
     Left(u64),
-    Listed(Vec<server::Terminal>),
-    Unlisted { emptied: bool },
+    Listed { terminals: Vec<server::Terminal>, since: Instant },
+    Unlisted { emptied: Option<Instant> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,9 +175,11 @@ pub fn start(
         follower,
         mux: Terminals::default(),
         clients: BTreeMap::new(),
-        came: 0,
+        arrivals: 0,
         keys: BTreeMap::new(),
         seen: BTreeSet::new(),
+        made: BTreeMap::new(),
+        agent_fronts: BTreeMap::new(),
         listed: Vec::new(),
         sized: BTreeMap::new(),
         sizes: BTreeMap::new(),
@@ -195,9 +197,11 @@ struct Views {
     follower: SyncSender<()>,
     mux: Terminals,
     clients: BTreeMap<u64, Client>,
-    came: u64,
+    arrivals: u64,
     keys: BTreeMap<Id, TerminalKey>,
     seen: BTreeSet<TerminalKey>,
+    made: BTreeMap<TerminalKey, Instant>,
+    agent_fronts: BTreeMap<Id, u32>,
     listed: Vec<server::Terminal>,
     sized: BTreeMap<TerminalKey, Size>,
     sizes: BTreeMap<Id, Size>,
@@ -218,7 +222,7 @@ fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
     loop {
         match commands.recv_timeout(sweep) {
             Ok(command) => views.heard(command),
-            Err(RecvTimeoutError::Timeout) => views.ran(),
+            Err(RecvTimeoutError::Timeout) => views.read_runs(),
             Err(RecvTimeoutError::Disconnected) => return,
         }
         views.settle();
@@ -251,13 +255,15 @@ impl Views {
             Command::Left(client) => {
                 self.clients.remove(&client);
             },
-            Command::Listed(terminals) => self.heard_listed(terminals),
+            Command::Listed { terminals, since } => self.heard_listed(terminals, since),
             Command::Unlisted { emptied } => {
-                if emptied {
-                    self.heard_listed(Vec::new());
+                if let Some(since) = emptied {
+                    self.heard_listed(Vec::new(), since);
                 }
                 self.keys.clear();
                 self.seen.clear();
+                self.made.clear();
+                self.agent_fronts.clear();
                 self.listed.clear();
                 self.sized.clear();
             },
@@ -274,10 +280,10 @@ impl Views {
             return Err(Status::not_found(format!("no workstream has the id {workstream}")));
         };
         let focus = arrival(shown, self.last.get(&workstream).copied());
-        self.came += 1;
+        self.arrivals += 1;
         let client = Client { workstream, size, focus, out, said: None };
-        assert!(self.clients.insert(self.came, client).is_none(), "a client comes once");
-        Ok(self.came)
+        assert!(self.clients.insert(self.arrivals, client).is_none(), "a client comes once");
+        Ok(self.arrivals)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -320,6 +326,9 @@ impl Views {
                 self.focus(client, to)?;
             },
             Asked::Resize { towards, change } => {
+                if self.view(workstream)?.full().is_some() {
+                    return Err("a view one terminal fills is resized by none".to_owned());
+                }
                 let terminal = focused()?;
                 self.changed(Change::Resize { terminal, direction: towards, change, size })?;
             },
@@ -343,7 +352,7 @@ impl Views {
         self.clients.get_mut(&client).expect("a client asked is held")
     }
 
-    fn view(&self, workstream: Id) -> Result<&crate::projects::View, String> {
+    fn view(&self, workstream: Id) -> Result<&View, String> {
         let projects = self.kept()?;
         let found = projects.find(workstream).ok_or_else(|| format!("no workstream {workstream}"));
         let (_, found) = found?;
@@ -406,12 +415,11 @@ impl Views {
         let (opened, runs) = match argv.split_first() {
             None => (Opened::Shell(&self.shell), Runs::Shell),
             Some((program, rest)) => {
-                let line = Line::parse(&argv.join(" ")).map_or(Runs::Shell, Runs::Command);
-                (Opened::Command { program, args: rest }, line)
+                (Opened::Command { program, args: rest }, runs_line(&quoted(argv)))
             },
         };
-        let tag = format!("{TAG}{terminal}").into_bytes();
-        let key = self.mux.made(&cwd, opened, tag, inner).map_err(|failure| failure.to_string())?;
+        let opening = self.mux.made(&cwd, opened, tag(terminal), inner);
+        let key = opening.map_err(|failure| failure.to_string())?;
         let made = Terminal::new(terminal, folder, runs);
         let change = Change::Open { workstream, terminal: made, placed, size };
         if let Err(why) = self.changed(change) {
@@ -421,6 +429,7 @@ impl Views {
             return Err(why);
         }
         self.keys.insert(terminal, key);
+        self.made.insert(key, Instant::now());
         self.sized.insert(key, inner);
         if self.seen.is_empty() {
             let _ = self.follower.try_send(());
@@ -431,7 +440,11 @@ impl Views {
     }
 
     fn close(&mut self, terminal: Id) -> Result<(), String> {
-        if let Some(key) = self.keys.get(&terminal).copied() {
+        let key = match self.keys.get(&terminal).copied() {
+            Some(key) => Some(key),
+            None => self.mux.tagged(&tag(terminal)).unwrap_or_default(),
+        };
+        if let Some(key) = key {
             self.mux.closed(key).map_err(|failure| failure.to_string())?;
         }
         self.closed(terminal)
@@ -449,7 +462,9 @@ impl Views {
         self.changed(Change::Close { terminal })?;
         if let Some(key) = self.keys.remove(&terminal) {
             self.seen.remove(&key);
+            self.made.remove(&key);
             self.sized.remove(&key);
+            self.agent_fronts.remove(&terminal);
         }
         for client in self.clients.values_mut().filter(|client| client.focus == Some(terminal)) {
             client.focus = heir;
@@ -463,7 +478,14 @@ impl Views {
         Ok(())
     }
 
-    fn heard_listed(&mut self, terminals: Vec<server::Terminal>) {
+    fn heard_listed(&mut self, terminals: Vec<server::Terminal>, since: Instant) {
+        self.made.retain(|key, made| {
+            let before = *made < since;
+            if before {
+                self.seen.insert(*key);
+            }
+            !before
+        });
         let Some(projects) = self.store.projects() else {
             self.listed = terminals;
             return;
@@ -505,18 +527,19 @@ impl Views {
                 self.troubles.say(format!("{stays}: {why}"));
             }
         }
-        self.ran();
+        self.read_runs();
     }
 
-    fn ran(&mut self) {
+    fn read_runs(&mut self) {
         if self.listed.is_empty() {
             return;
         }
-        let agents = core::ask(&self.core, Core::Harnessed).unwrap_or_default();
+        let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
         let Some(projects) = self.store.projects() else {
             return;
         };
         let mut ran = Vec::new();
+        let mut fronts = Vec::new();
         for (terminal, key) in &self.keys {
             let Some(listed) = self.listed.iter().find(|listed| listed.key == *key) else {
                 continue;
@@ -525,10 +548,27 @@ impl Views {
                 continue;
             };
             let folder = Dir::parse(&listed.cwd).unwrap_or_else(|_| held.folder().clone());
-            let runs = runs_of(listed, &agents, held.runs(), &self.shell);
+            let mut runs = runs_of(listed, &agents, held.runs(), &self.shell);
+            let front = match &listed.is {
+                Is::Running { front: Some(front), .. } => Some(front.pid),
+                Is::Running { front: None, .. } | Is::Ended => None,
+            };
+            let was_agent = matches!(held.runs(), Runs::Agent { .. });
+            let same_front = front.is_some() && front == self.agent_fronts.get(terminal).copied();
+            if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
+                runs = held.runs().clone();
+            }
+            let agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
+            fronts.push((*terminal, agent_front));
             if folder != *held.folder() || runs != *held.runs() {
                 ran.push(Ran { terminal: *terminal, folder, runs });
             }
+        }
+        for (terminal, front) in fronts {
+            match front {
+                Some(pid) => self.agent_fronts.insert(terminal, pid),
+                None => self.agent_fronts.remove(&terminal),
+            };
         }
         if ran.is_empty() {
             return;
@@ -565,6 +605,10 @@ impl Views {
         for id in gone {
             clients.remove(&id);
         }
+        sizes.retain(|workstream, _| projects.find(*workstream).is_some());
+        last.retain(|workstream, terminal| {
+            projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
+        });
         let shown: BTreeSet<Id> = clients.values().map(|client| client.workstream).collect();
         for workstream in shown {
             let size = Size::smallest(
@@ -615,7 +659,7 @@ impl Views {
         for id in slow {
             clients.remove(&id);
         }
-        assert!(clients.len() <= CLIENTS_MAX);
+        assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show views");
     }
 }
 
@@ -640,6 +684,10 @@ fn arrival(workstream: &Workstream, last: Option<Id>) -> Option<Id> {
         return Some(last);
     }
     view.terminals().next().map(layout::Leaf::id)
+}
+
+fn tag(terminal: Id) -> Vec<u8> {
+    format!("{TAG}{terminal}").into_bytes()
 }
 
 fn tagged(tag: &[u8]) -> Option<Id> {
@@ -697,15 +745,29 @@ fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &O
     {
         return Runs::Agent { harness: agent.harness, session };
     }
-    let line = |text: &str| Line::parse(text).map_or(Runs::Shell, Runs::Command);
     match (word, front) {
         (Some(Word::Prompts), _) => Runs::Shell,
-        (Some(Word::Going(Some(command))), _) => line(command),
-        (_, Some(front)) if front.pid != *root => line(&front.argv.join(" ")),
+        (Some(Word::Going(Some(command))), _) => runs_line(command),
+        (_, Some(front)) if front.pid != *root => runs_line(&quoted(&front.argv)),
         (_, Some(front)) if is_shell(&front.argv, shell) => Runs::Shell,
-        (_, Some(front)) => line(&front.argv.join(" ")),
+        (_, Some(front)) => runs_line(&quoted(&front.argv)),
         (Some(Word::Going(None)) | None, None) => before.clone(),
     }
+}
+
+fn runs_line(line: &str) -> Runs {
+    Line::parse(line).map_or(Runs::Shell, Runs::Command)
+}
+
+fn quoted(argv: &[String]) -> String {
+    let plain = |word: &str| {
+        let safe = |byte: u8| byte.is_ascii_alphanumeric() || b"-_./=:,+@%".contains(&byte);
+        !word.is_empty() && word.bytes().all(safe)
+    };
+    let words = argv.iter().map(|word| {
+        if plain(word) { word.clone() } else { format!("'{}'", word.replace('\'', r"'\''")) }
+    });
+    words.collect::<Vec<String>>().join(" ")
 }
 
 fn is_shell(argv: &[String], shell: &OsString) -> bool {
@@ -785,6 +847,14 @@ mod tests {
         let long = "x".repeat(crate::projects::LINE_BYTES_MAX + 1);
         let too_long = running(Some((20, &[long.as_str()])), None);
         assert_eq!(of(&too_long, &[]), Runs::Shell);
+    }
+
+    #[test]
+    fn a_command_line_is_quoted_back_as_a_shell_would_read_it() {
+        let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+        assert_eq!(quoted(&argv(&["vim", "notes.md"])), "vim notes.md");
+        assert_eq!(quoted(&argv(&["sh", "-c", "echo hi"])), "sh -c 'echo hi'");
+        assert_eq!(quoted(&argv(&["printf", "it's", ""])), r"printf 'it'\''s' ''");
     }
 
     #[test]
