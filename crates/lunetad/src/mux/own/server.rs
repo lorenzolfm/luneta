@@ -21,8 +21,9 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
-use super::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
+use super::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, TerminalKey};
 use crate::mux::{in_no_pane, Client, Failure, Laid, Listed, PaneId, Runs, SessionName, TabId};
+use crate::projects::Size;
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
@@ -342,22 +343,184 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
     Ok(doing)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Followed {
+    Unreached,
+    Emptied,
+    LetGo,
+}
+
 pub fn followed(
-    mut told: impl FnMut(Vec<Listing>, Vec<String>) -> bool,
-) -> Result<Option<()>, Failure> {
+    mut told: impl FnMut(Vec<Listing>, Vec<String>, Vec<Terminal>) -> bool,
+) -> Result<Followed, Failure> {
     let Ok(server) = Server::reached_on(runtime()?, None)? else {
-        return Ok(None);
+        return Ok(Followed::Unreached);
     };
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
     let mut stream: Streaming<api::Listing> = watched.map_err(|status| refused(&status))?;
     loop {
         let heard = server.runtime.block_on(stream.message());
         let Some(listing) = heard.map_err(|status| refused(&status))? else {
-            return Ok(Some(()));
+            return Ok(Followed::Emptied);
         };
-        let (listed, unread) = read(listing.sessions);
-        if !told(listed, unread) {
-            return Ok(Some(()));
+        let (listed, mut unread) = read(listing.sessions);
+        let (terminals, unread_terminals) = terminals(listing.terminals);
+        unread.extend(unread_terminals);
+        if !told(listed, unread, terminals) {
+            return Ok(Followed::LetGo);
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Terminal {
+    pub key: TerminalKey,
+    pub tag: Vec<u8>,
+    pub size: Option<Size>,
+    pub cwd: String,
+    pub is: Is,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Is {
+    Ended,
+    Running { root: u32, front: Option<Foreground>, word: Option<Word> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Foreground {
+    pub pid: u32,
+    pub argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Word {
+    Prompts,
+    Going(Option<String>),
+}
+
+fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>) {
+    let mut terminals: Vec<Terminal> = Vec::with_capacity(listed.len());
+    let mut unread = Vec::new();
+    for terminal in listed {
+        match terminal_of(terminal) {
+            Ok(read) if terminals.iter().any(|it| it.key.id == read.key.id) => {
+                unread.push(format!("terminal {} is listed twice", read.key.id));
+            },
+            Ok(read) => terminals.push(read),
+            Err(why) => unread.push(why),
+        }
+    }
+    (terminals, unread)
+}
+
+fn terminal_of(terminal: api::Terminal) -> Result<Terminal, String> {
+    use api::ran::Is as Said;
+    let key = TerminalKey::read(terminal.key)?;
+    let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
+    let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
+    let is = match terminal.program {
+        None => return Err(format!("terminal {} runs nothing it says", key.id)),
+        Some(api::terminal::Program::Ended(_)) => Is::Ended,
+        Some(api::terminal::Program::Runs(runs)) => {
+            let front = runs.foreground;
+            let front = front.map(|front| Foreground { pid: front.pid, argv: front.argv });
+            let word = runs.ran.and_then(|ran| ran.is).map(|is| match is {
+                Said::Ready(_) | Said::Ended(_) | Said::Stopped(_) => Word::Prompts,
+                Said::Going(going) => Word::Going(going.command),
+            });
+            Is::Running { root: runs.pid, front, word }
+        },
+    };
+    Ok(Terminal { key, tag: terminal.tag, size, cwd: terminal.cwd, is })
+}
+
+#[derive(Default)]
+pub struct Terminals {
+    server: Option<Server>,
+}
+
+impl Terminals {
+    pub fn made(
+        &mut self,
+        cwd: &Directory,
+        runs: Runs<'_>,
+        tag: Vec<u8>,
+        size: Size,
+    ) -> Result<TerminalKey, Failure> {
+        let opens = opens(cwd, runs)?;
+        let (columns, rows) = size.get();
+        let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
+        let request = api::NewTerminalRequest { opens: Some(opens), tag, size };
+        let (server, made) = on_started(self.server.take(), |server| {
+            let request = request.clone();
+            server.ask(|mut client| async move { client.new_terminal(request).await })
+        })?;
+        self.server = Some(server);
+        TerminalKey::read(made.terminal).map_err(Failure::Unread)
+    }
+
+    pub fn sized(&mut self, key: TerminalKey, size: Size) -> Result<(), Failure> {
+        let (columns, rows) = size.get();
+        let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
+        let request = api::SizeTerminalRequest { terminal: Some(key.said()), size };
+        self.asked(|server| {
+            server.ask(|mut client| async move { client.size_terminal(request).await }).map(drop)
+        })
+    }
+
+    pub fn closed(&mut self, key: TerminalKey) -> Result<(), Failure> {
+        let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
+        self.asked(|server| {
+            match server.ask(|mut client| async move { client.close_terminal(request).await }) {
+                Err(status) if status.code() == Code::NotFound => Ok(()),
+                asked => asked.map(drop),
+            }
+        })
+    }
+
+    fn asked(&mut self, ask: impl Fn(&Server) -> Result<(), Status>) -> Result<(), Failure> {
+        let gone = || Failure::Own("luneta-mux runs no more".to_owned());
+        let server = match self.server.take() {
+            Some(server) => server,
+            None => Server::reached()?.ok_or_else(gone)?,
+        };
+        let asked = ask(&server);
+        if !matches!(&asked, Err(status) if status.code() == Code::Unavailable) {
+            self.server = Some(server);
+        }
+        asked.map_err(|status| refused(&status))
+    }
+}
+
+fn on_started<T>(
+    server: Option<Server>,
+    mut ask: impl FnMut(&Server) -> Result<T, Status>,
+) -> Result<(Server, T), Failure> {
+    let deadline = Instant::now() + MAKING;
+    let mut runtime = match server {
+        Some(server) => match ask(&server) {
+            Ok(answer) => return Ok((server, answer)),
+            Err(status) if status.code() == Code::Unavailable => server.into_runtime(),
+            Err(status) => return Err(refused(&status)),
+        },
+        None => runtime()?,
+    };
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Failure::Own("no server answered in time".to_owned()));
+        }
+        let server = match Server::reached_on(runtime, Some(ANSWER))? {
+            Ok(server) => server,
+            Err(runtime) => started(runtime, deadline)?,
+        };
+        match ask(&server) {
+            Ok(answer) => return Ok((server, answer)),
+            Err(status) if status.code() == Code::Unavailable => {
+                gone_by(&server, deadline)?;
+                runtime = server.into_runtime();
+            },
+            Err(status) => return Err(refused(&status)),
         }
     }
 }
@@ -561,46 +724,28 @@ pub fn made(
     cwd: &Directory,
     runs: Runs<'_>,
 ) -> Result<Made, Failure> {
-    let deadline = Instant::now() + MAKING;
     let request = api::NewSessionRequest {
         name: name.as_str().to_owned(),
         opens: Some(opens(cwd, runs)?),
         tab: tab.map(str::to_owned),
     };
-    let mut runtime = runtime()?;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(Failure::Own("no server made the session in time".to_owned()));
-        }
-        let server = match Server::reached_on(runtime, Some(ANSWER))? {
-            Ok(server) => server,
-            Err(runtime) => started(runtime, deadline)?,
-        };
+    let (server, made) = on_started(None, |server| {
         let request = request.clone();
-        match server.ask(|mut client| async move { client.new_session(request).await }) {
-            Ok(made) => {
-                let session = OwnId::new(made.session);
-                let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
-                let id = session.ok_or_else(unread)?;
-                let made_at = match made.made_at {
-                    Some(at) => OwnMade::read(at)
-                        .map_err(|why| format!("own session {id}'s made_at: {why}")),
-                    None => made_of(&server.session(id)?, id),
-                };
-                let session = OwnKey { id, made: made_at.map_err(Failure::Unread)? };
-                let zero = || Failure::Unread(format!("luneta-mux made {id} with the pane 0"));
-                let pane = OwnPane::new(session, made.pane).ok_or_else(zero)?;
-                let unnumbered = || Failure::Unread(format!("luneta-mux made {id} with the tab 0"));
-                let tab = NonZeroU32::new(made.tab).ok_or_else(unnumbered)?;
-                return Ok(Made { pane, tab });
-            },
-            Err(status) if status.code() == Code::Unavailable => {
-                gone_by(&server, deadline)?;
-                runtime = server.into_runtime();
-            },
-            Err(status) => return Err(refused(&status)),
-        }
-    }
+        server.ask(|mut client| async move { client.new_session(request).await })
+    })?;
+    let session = OwnId::new(made.session);
+    let unread = || Failure::Unread("luneta-mux made a session of id 0".to_owned());
+    let id = session.ok_or_else(unread)?;
+    let made_at = match made.made_at {
+        Some(at) => OwnMade::read(at).map_err(|why| format!("own session {id}'s made_at: {why}")),
+        None => made_of(&server.session(id)?, id),
+    };
+    let session = OwnKey { id, made: made_at.map_err(Failure::Unread)? };
+    let zero = || Failure::Unread(format!("luneta-mux made {id} with the pane 0"));
+    let pane = OwnPane::new(session, made.pane).ok_or_else(zero)?;
+    let unnumbered = || Failure::Unread(format!("luneta-mux made {id} with the tab 0"));
+    let tab = NonZeroU32::new(made.tab).ok_or_else(unnumbered)?;
+    Ok(Made { pane, tab })
 }
 
 fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {

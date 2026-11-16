@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
@@ -49,7 +49,8 @@ use crate::api::{
     NameSessionRequest, NameSessionResponse, NewOwnRequest, NewOwnResponse, OpenRequest,
     OpenResponse, OtherTabsRequest,
     OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
-    PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, StartRequest,
+    PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
+    ShowResponse, StartRequest,
     TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
     TurnIntoTabRequest, TurnIntoTabResponse,
 };
@@ -58,6 +59,7 @@ use crate::closes::{Close, Closes, Whose};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Change, Failed, Id, Store};
+use crate::views;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -161,7 +163,8 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     if let Some(why) = store.unkept() {
         log::say(why);
     }
-    let store = Arc::new(Mutex::new(store));
+    let (wake_owns, owns_woken) = mpsc::sync_channel(1);
+    let views = views::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
     projects::follow(core.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
     let sockets = Zellij::socket_folder();
@@ -171,7 +174,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let owns = Arc::new(AtomicBool::new(false));
     follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
-    owns::follow(core.clone(), owns, SWEEP)?;
+    owns::follow(core.clone(), views.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -189,7 +192,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, sockets, claude_folder, core, watchers, bridges, store };
+    let host = Host { started, sockets, claude_folder, core, watchers, bridges, views };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
@@ -413,7 +416,7 @@ struct Host {
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
-    store: Arc<Mutex<Store>>,
+    views: SyncSender<views::Command>,
 }
 
 #[tonic::async_trait]
@@ -1014,6 +1017,49 @@ impl Daemon for Host {
 
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
 
+    type ShowStream = Pin<Box<dyn Stream<Item = Result<ShowResponse, Status>> + Send>>;
+
+    async fn show(
+        &self,
+        request: Request<Streaming<ShowRequest>>,
+    ) -> Result<Response<Self::ShowStream>, Status> {
+        use crate::api::show_request::{Event, Hello};
+        let mut heard = request.into_inner();
+        let Some(ShowRequest { event: Some(Event::Hello(Hello { workstream, size })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let workstream = views::id("workstream", workstream).map_err(Status::invalid_argument)?;
+        let size = views::size_of(size).map_err(Status::invalid_argument)?;
+        let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
+        let views = self.views.clone();
+        let came = task::spawn_blocking(move || {
+            views::ask(&views, |answer| views::Command::Came { workstream, size, out, answer })
+        });
+        let came = came.await.map_err(|error| unfinished(&error))?;
+        let client = came.ok_or_else(|| Status::unavailable("the views have stopped"))??;
+        let views = self.views.clone();
+        tokio::spawn(async move {
+            loop {
+                let asked = match heard.message().await {
+                    Ok(Some(ShowRequest { event: Some(event) })) => views::Asked::of_api(event),
+                    Ok(Some(ShowRequest { event: None })) => Err("a word says nothing".to_owned()),
+                    Ok(None) | Err(_) => break,
+                };
+                let views = views.clone();
+                let told = task::spawn_blocking(move || {
+                    views.send(views::Command::Asked { client, asked }).is_ok()
+                });
+                if !matches!(told.await, Ok(true)) {
+                    return;
+                }
+            }
+            let _ = task::spawn_blocking(move || views.send(views::Command::Left(client))).await;
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(answers))))
+    }
+
     async fn change_projects(
         &self,
         request: Request<ChangeProjectsRequest>,
@@ -1023,12 +1069,13 @@ impl Daemon for Host {
             return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
-        let store = Arc::clone(&self.store);
+        let views = self.views.clone();
         let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
             let change = Change::of_api(change).map_err(Status::invalid_argument)?;
-            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
             let stopped = "it is kept, but the daemon's core has stopped";
-            store.change(change).map_err(|failed| match failed {
+            let asked = views::ask(&views, |answer| views::Command::Change { change, answer });
+            let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;
+            changed.map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),

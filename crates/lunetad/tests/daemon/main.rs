@@ -38,4 +38,6 @@ mod topics;
 #[cfg(test)]
 mod turns;
 #[cfg(test)]
+mod views;
+#[cfg(test)]
 mod worktree;

@@ -73,6 +73,7 @@ pub enum Command {
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     Claudes(oneshot::Sender<Vec<Agent>>),
+    Harnessed(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
     Watch { after: Option<api::Version>, answer: oneshot::Sender<Option<api::Host>> },
 }
@@ -273,6 +274,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Claudes(answer) => {
                 let _ = answer.send(known.found.agents.clone());
+                continue;
+            },
+            Command::Harnessed(answer) => {
+                let _ = answer.send(known.found.agents.iter().chain(&known.pi).cloned().collect());
                 continue;
             },
             Command::List(answer) => {

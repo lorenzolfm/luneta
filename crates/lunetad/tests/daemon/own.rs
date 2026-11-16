@@ -90,6 +90,15 @@ impl Owned {
         self.daemon = None;
     }
 
+    pub fn start_daemon(&mut self) {
+        assert!(self.daemon.is_none(), "one daemon runs at a time");
+        self.daemon = Some(start(self.host.vars()).unwrap());
+    }
+
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
+
     pub fn make(&self, name: &str) -> Result<NewOwnResponse, Status> {
         let request = NewOwnRequest {
             on: None,
@@ -118,6 +127,13 @@ impl Owned {
         self.runtime.block_on(async move {
             mux_client(socket).await.list(ListRequest {}).await.unwrap().into_inner()
         })
+    }
+
+    pub fn close_terminal(&self, request: mux_api::CloseTerminalRequest) {
+        let socket = self.socket();
+        self.runtime.block_on(async move {
+            mux_client(socket).await.close_terminal(request).await.unwrap();
+        });
     }
 
     pub fn attach(&self, made: &NewOwnResponse) -> Attached {

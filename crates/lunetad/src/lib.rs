@@ -41,6 +41,7 @@ pub mod state;
 mod topics;
 pub mod transcripts;
 pub mod turns;
+mod views;
 mod watch;
 pub mod zoxide;
 

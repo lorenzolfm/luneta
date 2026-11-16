@@ -88,6 +88,27 @@ impl From<OwnMade> for prost_types::Timestamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalKey {
+    pub id: NonZeroU32,
+    pub made: OwnMade,
+}
+
+impl TerminalKey {
+    pub fn read(key: Option<api::TerminalKey>) -> Result<Self, String> {
+        let key = key.ok_or("a terminal with no key")?;
+        let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
+        let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
+        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
+        Ok(TerminalKey { id, made })
+    }
+
+    #[must_use]
+    pub fn said(self) -> api::TerminalKey {
+        api::TerminalKey { id: self.id.get(), made_at: Some(self.made.into()) }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OwnKey {
     pub id: OwnId,
@@ -145,6 +166,8 @@ const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
 const PANE_VARS: [&str; 3] = [SESSION_VAR, MADE_VAR, PANE_VAR];
 
+const TERMINAL_VARS: [&str; 2] = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
+
 pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
     let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
     let id = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
@@ -175,7 +198,7 @@ fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {
 }
 
 pub(crate) fn in_no_pane(command: &mut Command) {
-    for name in PANE_VARS {
+    for name in PANE_VARS.into_iter().chain(TERMINAL_VARS) {
         command.env_remove(name);
     }
 }
