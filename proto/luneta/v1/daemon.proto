@@ -1106,7 +1106,11 @@ message ShowResponse {
   message Pane {
     fixed64 terminal = 1;
     Rect rect = 2;
-    TerminalKey key = 3;
+    oneof found {
+      TerminalKey key = 3;
+      google.protobuf.Empty lost = 4;
+      google.protobuf.Empty looking = 5;
+    }
   }
 
   message Rect {

@@ -60,20 +60,19 @@ pub fn follow(
                 core.send(Command::Owns(owns)).is_ok()
             });
             running.store(false, Ordering::Relaxed);
-            let lost = views::Command::Unlisted { emptied: None };
+            let listens_soon = socket.as_deref().is_some_and(Path::exists);
+            let unreached_now = matches!(followed, Ok(Followed::Unreached));
             let unlisted = match followed {
-                Ok(Followed::Unreached) => None,
-                Ok(Followed::Emptied { since }) => {
-                    Some(views::Command::Unlisted { emptied: Some(since) })
-                },
-                Ok(Followed::LetGo) => Some(lost),
+                Ok(Followed::Unreached) if listens_soon && unreached < UNREACHED_TRIES => None,
+                Ok(Followed::Unreached) => Some(views::Command::Unreached),
+                Ok(Followed::Emptied { since }) => Some(views::Command::Emptied { since }),
+                Ok(Followed::LetGo) => return,
                 Err(failure) => {
                     troubles.say(format!("the own sessions: {failure}"));
                     troubles.done();
-                    Some(lost)
+                    Some(views::Command::Crashed)
                 },
             };
-            let unreached_now = unlisted.is_none();
             if !unreached_now {
                 unreached = 0;
             }
@@ -85,7 +84,6 @@ pub fn follow(
             if core.send(Command::Owns(Vec::new())).is_err() {
                 return;
             }
-            let listens_soon = socket.as_deref().is_some_and(Path::exists);
             if unreached_now && listens_soon && unreached < UNREACHED_TRIES {
                 unreached += 1;
                 thread::sleep(UNREACHED_PAUSE);

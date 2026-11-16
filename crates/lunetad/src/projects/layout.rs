@@ -417,6 +417,9 @@ impl<L: Leaf> Tree<L> {
 
     #[must_use]
     pub fn room(&self, at: Id, towards: Towards, new: Id, size: Size) -> Option<Size> {
+        if self.len() >= PANES_MAX {
+            return None;
+        }
         let size = self.fitted(size);
         let mut grown = self.shape();
         grown.grafted(at, towards, new);
@@ -818,6 +821,19 @@ mod tests {
             }
         }
         assert!(covered.iter().all(|count| *count == 1), "{rects:?} tile {at:?}");
+    }
+
+    #[test]
+    fn a_tree_of_as_many_panes_as_it_may_has_room_for_none() {
+        let at = size(SIDE_MAX, SIDE_MAX);
+        let mut tree = Tree::one(pane(1));
+        for new in 2..=u64::try_from(PANES_MAX).unwrap() {
+            let (beside, towards, _) = tree.room_beside_largest(pane(new), at).unwrap();
+            tree.split(beside, towards, pane(new), at);
+        }
+        assert_eq!(tree.len(), PANES_MAX);
+        assert_eq!(tree.room_beside_largest(pane(1000), at), None);
+        assert_eq!(tree.room(pane(1), Towards::Right, pane(1000), at), None);
     }
 
     #[test]

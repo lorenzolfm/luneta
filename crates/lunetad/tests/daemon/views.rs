@@ -2,8 +2,8 @@ use std::fs;
 use std::time::Duration;
 
 use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
-use lunetad::api::show_response::{self, Laid};
-use lunetad::api::{ShowRequest, ShowResponse};
+use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
+use lunetad::api::{ShowRequest, ShowResponse, TerminalKey};
 use lunetad::mux::own::api::{self as mux_api, Listing};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -119,6 +119,17 @@ impl<'a> Shown<'a> {
     }
 }
 
+fn key(pane: &Pane) -> Option<TerminalKey> {
+    match &pane.found {
+        Some(Found::Key(key)) => Some(*key),
+        Some(Found::Lost(()) | Found::Looking(())) | None => None,
+    }
+}
+
+fn lost(pane: &Pane) -> bool {
+    matches!(pane.found, Some(Found::Lost(())))
+}
+
 fn tagged(listing: &Listing, terminal: u64) -> Option<&mux_api::Terminal> {
     let tag = format!("luneta terminal {terminal:016x}");
     listing.terminals.iter().find(|listed| listed.tag == tag.as_bytes())
@@ -146,7 +157,7 @@ fn a_view_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
     let first = shown.open();
     let laid = shown.laid.clone().unwrap();
     assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 80, 24)));
-    let key = laid.panes[0].key.expect("an open terminal has its key in the mux");
+    let key = key(&laid.panes[0]).expect("an open terminal has its key in the mux");
     let listing = owned.listing();
     let listed = tagged(&listing, first).expect("the mux holds the terminal by its tag");
     assert_eq!(listed.key.map(|it| (it.id, it.made_at)), Some((key.id, key.made_at)));
@@ -216,7 +227,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_view_s() {
 
 fn closed_outside(owned: &Owned, laid: &Laid, terminal: u64) {
     let pane = laid.panes.iter().find(|pane| pane.terminal == terminal).unwrap();
-    let key = pane.key.unwrap();
+    let key = key(pane).unwrap();
     let mux_key = mux_api::TerminalKey { id: key.id, made_at: key.made_at };
     owned.close_terminal(mux_api::CloseTerminalRequest { terminal: Some(mux_key) });
 }
@@ -270,10 +281,28 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
     owned.start_daemon();
     let mut again = Shown::new(&owned, workstream, 80, 24);
     let after = again.until("the terminals found again", |laid| {
-        laid.panes.iter().all(|pane| pane.key.is_some())
+        assert!(!laid.panes.iter().any(lost), "no terminal is lost before a look: {laid:?}");
+        laid.panes.iter().all(|pane| key(pane).is_some())
     });
     assert_eq!(after, before);
     assert_eq!(fs::read_to_string(kept(&owned.host)).unwrap(), file);
+}
+
+#[test]
+fn an_open_the_view_refuses_makes_no_terminal_in_the_mux() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 1000, 1000);
+    let opened: Vec<u64> = (0..64).map(|_| shown.open()).collect();
+    let largest = open::Beside::Largest(());
+    let argv = WAITS.iter().map(|word| (*word).to_owned()).collect();
+    shown.ask(Event::Open(show_request::Open { beside: Some(largest), argv }));
+    assert!(shown.until_refused().contains("no terminal has room"));
+    let listing = owned.listing();
+    assert_eq!(listing.terminals.len(), opened.len(), "the mux holds only the views' terminals");
+    assert!(opened.iter().all(|terminal| tagged(&listing, *terminal).is_some()));
+    shown.ask(Event::Close(()));
+    shown.until("a terminal fewer", |laid| laid.panes.len() == opened.len() - 1);
 }
 
 #[test]
@@ -309,12 +338,27 @@ fn a_view_keeps_its_terminals_as_lost_when_the_mux_dies() {
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
     owned.kill_mux();
-    let laid = shown.until("the terminal lost", |laid| laid.panes[0].key.is_none());
+    let laid = shown.until("the terminal lost", |laid| lost(&laid.panes[0]));
     assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.contains(&format!("{terminal:016x}")), "a lost terminal is kept: {file}");
     shown.ask(Event::Close(()));
     shown.until("the lost terminal closed", |laid| laid.panes.is_empty());
+}
+
+#[test]
+fn a_view_comes_back_lost_when_lunetad_starts_with_no_mux() {
+    let mut owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 603");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, workstream, 80, 24);
+    let laid = again.until("the terminal lost", |laid| laid.panes.iter().all(lost));
+    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
 }
 
 #[test]

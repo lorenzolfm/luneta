@@ -53,7 +53,9 @@ pub enum Command {
     Asked { client: ClientId, asked: Result<Asked, String> },
     Left(ClientId),
     Listed(TerminalsListed),
-    Unlisted { emptied: Option<Instant> },
+    Emptied { since: Instant },
+    Crashed,
+    Unreached,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +199,7 @@ pub fn start(
         arrivals: 0,
         known: BTreeMap::new(),
         listed: BTreeMap::new(),
+        looked: false,
         last_focus: BTreeMap::new(),
         last_size: BTreeMap::new(),
         troubles: Troubles::default(),
@@ -215,6 +218,7 @@ struct Views {
     arrivals: u64,
     known: BTreeMap<Id, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
+    looked: bool,
     last_focus: BTreeMap<Id, Id>,
     last_size: BTreeMap<Id, Size>,
     troubles: Troubles,
@@ -289,14 +293,18 @@ impl Views {
                 self.clients.remove(&client);
             },
             Command::Listed(listed) => self.heard_listed(listed),
-            Command::Unlisted { emptied } => {
-                if let Some(since) = emptied {
-                    let none = TerminalsListed { terminals: Vec::new(), whole: true, since };
-                    self.heard_listed(none);
-                }
+            Command::Emptied { since } => {
+                let none = TerminalsListed { terminals: Vec::new(), whole: true, since };
+                self.heard_listed(none);
                 self.known.clear();
                 self.listed.clear();
             },
+            Command::Crashed => {
+                self.looked = true;
+                self.known.clear();
+                self.listed.clear();
+            },
+            Command::Unreached => self.looked = true,
         }
     }
 
@@ -453,20 +461,21 @@ impl Views {
             .and_then(|listed| Dir::parse(&listed.cwd).ok());
         let folder = listed_cwd.unwrap_or_else(|| project.folder(shown));
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let made = Terminal::new(terminal, folder, runs);
+        self.changed(Change::Open { workstream, terminal: made, placed, size })?;
         let opened = match argv.split_first() {
             None => Opened::Shell(&self.shell),
             Some((program, rest)) => Opened::Command { program, args: rest },
         };
-        let opening = self.mux.made(&cwd, opened, tag(terminal), inner);
-        let key = opening.map_err(|failure| failure.to_string())?;
-        let made = Terminal::new(terminal, folder, runs);
-        let change = Change::Open { workstream, terminal: made, placed, size };
-        if let Err(why) = self.changed(change) {
-            if let Err(failure) = self.mux.closed(key) {
-                self.troubles.say(format!("terminal {} was left open: {failure}", key.id));
-            }
-            return Err(why);
-        }
+        let key = match self.mux.made(&cwd, opened, tag(terminal), inner) {
+            Ok(key) => key,
+            Err(failure) => {
+                if let Err(why) = self.changed(Change::Close { terminal }) {
+                    self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
+                }
+                return Err(failure.to_string());
+            },
+        };
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
         let known = Known { key, heard, sized: Some(inner), agent_front: None };
@@ -526,6 +535,7 @@ impl Views {
 
     fn heard_listed(&mut self, listed: TerminalsListed) {
         let TerminalsListed { terminals, whole, since } = listed;
+        self.looked |= whole;
         for known in self.known.values_mut() {
             if let Heard::Made(made) = known.heard
                 && made < since
@@ -638,7 +648,7 @@ impl Views {
     }
 
     fn settle(&mut self) {
-        let Views { store, clients, known, last_size, last_focus, mux, troubles, .. } = self;
+        let Views { store, clients, known, looked, last_size, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             for (_, client) in std::mem::take(clients) {
@@ -703,7 +713,7 @@ impl Views {
             let found = projects.find(client.workstream);
             let (_, found) = found.expect("a client's workstream is held");
             let size = last_size[&client.workstream];
-            let laid = laid(found, size, client.focus, known);
+            let laid = laid(found, size, client.focus, known, *looked);
             if client.said.as_ref() == Some(&laid) {
                 continue;
             }
@@ -768,6 +778,7 @@ fn laid(
     size: Size,
     focus: Option<Id>,
     known: &BTreeMap<Id, Known>,
+    looked: bool,
 ) -> api::ShowResponse {
     let view = workstream.view();
     if let Some(focus) = focus {
@@ -777,11 +788,16 @@ fn laid(
         None => (size, Vec::new()),
         Some(tree) => {
             let panes = tree.laid(size).into_iter().map(|(terminal, rect)| {
+                use show_response::pane::Found;
                 let terminal = layout::Leaf::id(terminal);
-                let key = known.get(&terminal).map(|known| api::TerminalKey {
-                    id: known.key.id.get(),
-                    made_at: Some(known.key.made.into()),
-                });
+                let found = match known.get(&terminal) {
+                    Some(known) => Found::Key(api::TerminalKey {
+                        id: known.key.id.get(),
+                        made_at: Some(known.key.made.into()),
+                    }),
+                    None if looked => Found::Lost(()),
+                    None => Found::Looking(()),
+                };
                 show_response::Pane {
                     terminal: terminal.get(),
                     rect: Some(show_response::Rect {
@@ -790,7 +806,7 @@ fn laid(
                         columns: rect.columns.into(),
                         rows: rect.rows.into(),
                     }),
-                    key,
+                    found: Some(found),
                 }
             });
             (tree.fitted(size), panes.collect::<Vec<_>>())
