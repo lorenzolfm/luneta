@@ -9,6 +9,7 @@ use crate::mux::value_in;
 pub mod api;
 pub mod attach;
 pub mod server;
+pub mod viewer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnId(NonZeroU64);

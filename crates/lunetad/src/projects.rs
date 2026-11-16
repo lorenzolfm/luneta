@@ -20,7 +20,7 @@ pub(crate) mod layout;
 mod view;
 
 pub use file::{Failed, Store};
-pub use layout::Size;
+pub use layout::{Size, FRAME_CELLS, PANES_MAX};
 pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;

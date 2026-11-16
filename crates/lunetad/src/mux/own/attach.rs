@@ -116,17 +116,18 @@ pub struct Hello {
     pub background: Option<[u8; 3]>,
 }
 
+pub(super) fn colours(foreground: Option<[u8; 3]>, background: Option<[u8; 3]>) -> api::Colours {
+    let rgb = |[red, green, blue]: [u8; 3]| api::Rgb {
+        red: red.into(),
+        green: green.into(),
+        blue: blue.into(),
+    };
+    api::Colours { foreground: foreground.map(rgb), background: background.map(rgb) }
+}
+
 impl Hello {
     fn said(self) -> api::ToServer {
-        let rgb = |[red, green, blue]: [u8; 3]| api::Rgb {
-            red: red.into(),
-            green: green.into(),
-            blue: blue.into(),
-        };
-        let colours = api::Colours {
-            foreground: self.foreground.map(rgb),
-            background: self.background.map(rgb),
-        };
+        let colours = colours(self.foreground, self.background);
         let runs_in = self.runs_in.map(|session| api::RunsIn {
             session: session.id.get(),
             made_at: Some(session.made.into()),
@@ -402,7 +403,7 @@ impl Frame {
         self.tracks_mouse
     }
 
-    fn heard(frame: api::Frame) -> Result<Frame, String> {
+    pub(super) fn heard(frame: api::Frame) -> Result<Frame, String> {
         let pane = NonZeroU32::new(frame.pane).ok_or("a frame is of pane 0")?;
         let size = Size::heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {

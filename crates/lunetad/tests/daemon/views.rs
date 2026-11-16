@@ -5,7 +5,11 @@ use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey};
-use lunetad::mux::own::api::{self as mux_api, Listing};
+use lunetad::mux::own::api::{self as mux_api, typed, Listing};
+use lunetad::mux::own::attach::{Line, Rows, Shows};
+use lunetad::mux::own::viewer::{view, Greeting, Seen};
+use lunetad::projects::{Size, WorkstreamId};
+use lunetad::{Asked, Heard};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
@@ -474,4 +478,65 @@ fn an_agent_in_a_view_s_terminal_is_there_by_the_terminal_s_key() {
     });
     assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
     assert_eq!(agent.zellij(), None);
+}
+
+fn text_of(lines: &[Line]) -> Vec<String> {
+    let shown = |glyph: &lunetad::mux::own::attach::Glyph| match &glyph.shows {
+        Shows::Blank => " ".to_owned(),
+        Shows::Narrow(grapheme) | Shows::Wide(grapheme) => grapheme.as_str().to_owned(),
+    };
+    let line = |line: &Line| {
+        let text: String = line.glyphs().iter().map(shown).collect();
+        text.trim_end().to_owned()
+    };
+    lines.iter().map(line).collect()
+}
+
+#[test]
+fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
+    let owned = Owned::new();
+    let workstream = WorkstreamId::of(workstream_in_home(&owned)).unwrap();
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(80, 24).unwrap();
+    let show = lunetad::show(folder, workstream, size, move |it| drop(heard.send(it)));
+    let laid = || loop {
+        match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
+            Heard::Laid(laid) => return laid,
+            Heard::Refused(why) | Heard::Lost(why) => panic!("the view is not laid out: {why}"),
+        }
+    };
+    assert_eq!(laid().panes().len(), 0);
+    show.ask(Asked::Open { towards: None, argv: vec!["sh".to_owned()] });
+    let opened = laid();
+    let pane = opened.panes()[0];
+    let key = pane.key().expect("lunetad says the key of a terminal it opened");
+    assert_eq!(opened.focused(), Some(&pane));
+
+    let (seen, seeing) = std::sync::mpsc::channel();
+    let greeting = Greeting { runs_in: None, foreground: None, background: None };
+    let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
+    viewer.show(opened.keys());
+    let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
+    viewer.typed(key, paste("echo seen-$((40 + 2))\r"));
+    let mut lines = Vec::new();
+    loop {
+        let frame = match seeing.recv_timeout(HEARD_IN).expect("the mux shows the terminal") {
+            Seen::Frame(frame) => frame,
+            Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
+        };
+        assert_eq!(frame.pane(), key.id, "the mux shows only the terminal asked for");
+        assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
+        match frame.rows() {
+            Rows::Whole(whole) => lines.clone_from(whole),
+            Rows::Changed(rows) => {
+                for (row, line) in rows {
+                    lines[usize::from(*row)] = line.clone();
+                }
+            },
+        }
+        if text_of(&lines).iter().any(|line| line == "seen-42") {
+            break;
+        }
+    }
 }
