@@ -103,6 +103,13 @@ impl TerminalKey {
         Ok(TerminalKey { id, made })
     }
 
+    pub fn of(key: &crate::api::TerminalKey) -> Result<Self, String> {
+        let id = NonZeroU32::new(key.id).ok_or("0 is no terminal's id")?;
+        let made = key.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
+        let made = OwnMade::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
+        Ok(TerminalKey { id, made })
+    }
+
     #[must_use]
     pub fn said(self) -> api::TerminalKey {
         api::TerminalKey { id: self.id.get(), made_at: Some(self.made.into()) }
@@ -121,6 +128,12 @@ impl OwnKey {
         let made = own.made_at.ok_or_else(|| format!("own session {id} has no made_at"))?;
         let made = OwnMade::read(made).map_err(|why| format!("own session {id}'s made_at: {why}"))?;
         Ok(OwnKey { id, made })
+    }
+}
+
+impl From<TerminalKey> for crate::api::TerminalKey {
+    fn from(key: TerminalKey) -> Self {
+        crate::api::TerminalKey { id: key.id.get(), made_at: Some(key.made.into()) }
     }
 }
 
@@ -166,7 +179,18 @@ const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
 const PANE_VARS: [&str; 3] = [SESSION_VAR, MADE_VAR, PANE_VAR];
 
-const TERMINAL_VARS: [&str; 2] = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
+const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
+
+const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
+
+const TERMINAL_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
+
+pub(crate) fn terminal_in(environ: &[OsString]) -> Option<TerminalKey> {
+    let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
+    let id = NonZeroU32::new(text(TERMINAL_VAR)?.parse().ok()?)?;
+    let made = OwnMade::from_nanos(text(TERMINAL_MADE_VAR)?.parse().ok()?);
+    Some(TerminalKey { id, made })
+}
 
 pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
     let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
@@ -233,6 +257,28 @@ mod tests {
         ];
         for environ in unnamed {
             assert_eq!(pane_in(&environ), None, "{environ:?}");
+        }
+    }
+
+    #[test]
+    fn the_variables_name_a_terminal_by_its_id_and_its_making() {
+        let environ = |entries: &[&str]| -> Vec<OsString> {
+            entries.iter().map(OsString::from).collect()
+        };
+        let all = environ(&["LUNETA_MUX_TERMINAL=7", "HOME=/h", "LUNETA_MUX_TERMINAL_MADE=60"]);
+        let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
+        assert_eq!(terminal_in(&all), Some(key));
+        let made = "LUNETA_MUX_TERMINAL_MADE=60";
+        let unnamed = [
+            environ(&[made]),
+            environ(&["LUNETA_MUX_TERMINAL=7"]),
+            environ(&["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=-1"]),
+            environ(&["LUNETA_MUX_TERMINAL=0", made]),
+            environ(&["LUNETA_MUX_TERMINAL=4294967296", made]),
+            environ(&["LUNETA_MUX_TERMINAL=", made]),
+        ];
+        for environ in unnamed {
+            assert_eq!(terminal_in(&environ), None, "{environ:?}");
         }
     }
 

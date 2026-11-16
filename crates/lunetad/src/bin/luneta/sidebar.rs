@@ -8474,7 +8474,8 @@ mod tests {
             let host = sidebar.host.clone().expect("the sidebar has heard the host");
             let session = Some("newer".to_owned());
             let zellij = Zellij { named: "newer".to_owned(), session, pane };
-            let unread_files = vec![UnreadFile { pid: 200, zellij: Some(zellij), own: None }];
+            let file = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
+            let unread_files = vec![file];
             sidebar.heard(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
             type_in(&mut sidebar, "d");
@@ -8500,9 +8501,9 @@ mod tests {
         let made_at = Some(Timestamp { seconds: 20, nanos: 0 });
         let own = Some(api::OwnSession { id: 1, made_at });
         let own = Some(api::Own { session: own, pane: 1 });
-        let in_own = UnreadFile { pid: 200, zellij: None, own };
+        let in_own = UnreadFile { pid: 200, zellij: None, own, terminal: None };
         let zellij = Zellij { named: "twin".to_owned(), session: Some("twin".to_owned()), pane: 1 };
-        let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None };
+        let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
         let made = OwnMade::of(moment(20_000)).unwrap();
         let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
         let kill = Act::Kill { session: session_name("twin"), whose };

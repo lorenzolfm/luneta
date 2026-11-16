@@ -34,7 +34,7 @@ impl v1::Agent {
     pub fn zellij(&self) -> Option<&v1::Zellij> {
         match &self.pane {
             Some(v1::agent::Pane::Zellij(zellij)) => Some(zellij),
-            Some(v1::agent::Pane::Own(_)) | None => None,
+            Some(v1::agent::Pane::Own(_) | v1::agent::Pane::Terminal(_)) | None => None,
         }
     }
 }

@@ -74,6 +74,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                     renamed: false,
                     folder: text(&clone.join("main")),
                     seen: Some(Seen::Stage(Stage::Working.into())),
+                    terminals: Vec::new(),
                 }],
             },
             api::Project {
@@ -87,6 +88,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                     renamed: false,
                     folder: text(&vault),
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
+                    terminals: Vec::new(),
                 }],
             },
         ],

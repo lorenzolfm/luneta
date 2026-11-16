@@ -15,7 +15,7 @@ pub mod own;
 mod zellij;
 
 pub use laid::{tabs, terminal_of, Laid, PaneId, TabId};
-pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane};
+pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, TerminalKey};
 pub use zellij::cli::{Asks, Client, Failure, Listed, Runs};
 pub use zellij::metadata::{CacheFolder, Metadata, Unknown};
 pub use zellij::{Exited, Id, Scan, SessionName, Sessions, Socket, SocketFolder, NAME_BYTES_MAX};
@@ -69,6 +69,7 @@ impl<'a> Called<'a> {
 pub enum Named {
     Zellij(ZellijPane),
     Own(OwnPane),
+    Terminal(TerminalKey),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -407,7 +408,9 @@ pub fn pane_of(pid: u32) -> Option<Named> {
 }
 
 fn pane_in(environ: &[OsString]) -> Option<Named> {
-    zellij::vars::pane_in(environ).or_else(|| own::pane_in(environ).map(Named::Own))
+    let own = || own::pane_in(environ).map(Named::Own);
+    let terminal = || own::terminal_in(environ).map(Named::Terminal);
+    zellij::vars::pane_in(environ).or_else(own).or_else(terminal)
 }
 
 fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
@@ -445,6 +448,8 @@ impl CacheFolder {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
 
     #[test]
@@ -460,6 +465,11 @@ mod tests {
         let named = Named::Zellij(ZellijPane { session: "work".to_owned(), pane: 2 });
         assert_eq!(pane_in(&environ(&[&own[..], &zellij].concat())), Some(named));
         assert_eq!(pane_in(&environ(&["HOME=/h"])), None);
+        let terminal = ["LUNETA_MUX_TERMINAL=7", "LUNETA_MUX_TERMINAL_MADE=60"];
+        let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made };
+        assert_eq!(pane_in(&environ(&terminal)), Some(Named::Terminal(key)));
+        let both = pane_in(&environ(&[&own[..], &terminal].concat()));
+        assert_eq!(both, OwnPane::new(session, 12).map(Named::Own));
     }
 
     #[test]

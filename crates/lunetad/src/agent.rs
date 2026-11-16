@@ -243,6 +243,7 @@ impl Agent {
                     })
                 },
                 Named::Own(own) => api::agent::Pane::Own((*own).into()),
+                Named::Terminal(key) => api::agent::Pane::Terminal((*key).into()),
             }),
             topic: topic.map(String::from),
         }
@@ -264,7 +265,11 @@ impl Unread {
             }),
             own: self.pane.as_ref().and_then(|named| match named {
                 Named::Own(own) => Some((*own).into()),
-                Named::Zellij(_) => None,
+                Named::Zellij(_) | Named::Terminal(_) => None,
+            }),
+            terminal: self.pane.as_ref().and_then(|named| match named {
+                Named::Terminal(key) => Some((*key).into()),
+                Named::Zellij(_) | Named::Own(_) => None,
             }),
         }
     }
@@ -273,7 +278,7 @@ impl Unread {
 fn zellij_of(named: &Named) -> Option<(&str, u32)> {
     match named {
         Named::Zellij(ZellijPane { session, pane }) => Some((session, *pane)),
-        Named::Own(_) => None,
+        Named::Own(_) | Named::Terminal(_) => None,
     }
 }
 

@@ -22,7 +22,7 @@ use lunetad::api::{
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
 use lunetad::mux::own::server::{self, Listing};
-use lunetad::mux::{Failure, OwnId, OwnPane, SessionName, ZellijPane};
+use lunetad::mux::{Failure, OwnId, OwnPane, SessionName, TerminalKey, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::{self, Asker, BYTES_MAX};
@@ -447,8 +447,17 @@ pub fn seat_of(agent: &Agent, own: &[Listing]) -> Result<String, (String, String
                 (unnamed_own(session, NonZeroU32::new(pane.pane)), why)
             })
         },
+        Some(agent::Pane::Terminal(key)) => TerminalKey::of(key)
+            .map(terminal_seat)
+            .map_err(|why| (format!("terminal {} (unread)", key.id), why)),
         Some(agent::Pane::Zellij(_)) | None => Ok(seat(agent.zellij())),
     }
+}
+
+pub fn terminal_seat(key: TerminalKey) -> String {
+    let seat = format!("terminal {}", key.id);
+    assert!(zellij::pane_address(&seat).is_err(), "{seat} reads as a pane");
+    seat
 }
 
 pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {

@@ -11,7 +11,7 @@ use tonic::Status;
 
 use crate::agent::Agent;
 use crate::api::{self, show_request, show_response};
-use crate::core::{self, Command as Core};
+use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
 use crate::mux::own::TerminalKey;
 use crate::mux::Runs as Opened;
@@ -202,6 +202,7 @@ pub fn start(
         listed: BTreeMap::new(),
         looked: false,
         last_focus: BTreeMap::new(),
+        told: None,
         troubles: Troubles::default(),
         shell: opens::your_shell(),
     };
@@ -220,6 +221,7 @@ struct Views {
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
     last_focus: BTreeMap<WorkstreamId, TerminalId>,
+    told: Option<BTreeMap<TerminalId, Located>>,
     troubles: Troubles,
     shell: OsString,
 }
@@ -262,6 +264,7 @@ fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
             swept = Instant::now();
         }
         views.settle();
+        views.tell_core();
         views.troubles.done();
     }
 }
@@ -648,6 +651,33 @@ impl Views {
         }
     }
 
+    fn tell_core(&mut self) {
+        let Some(projects) = self.store.projects() else {
+            return;
+        };
+        let located = |(_, terminal): (&Workstream, &Terminal)| {
+            let id = layout::Leaf::id(terminal);
+            let located = match self.known.get(&id) {
+                Some(known) => {
+                    let listed = self.listed.get(&known.key).cloned().map(Box::new);
+                    Located::Shown(Shown { key: known.key, listed })
+                },
+                None if self.looked => Located::Lost,
+                None => Located::Looking,
+            };
+            (id, located)
+        };
+        let now: BTreeMap<TerminalId, Located> = projects.terminals().map(located).collect();
+        if self.told.as_ref() == Some(&now) {
+            return;
+        }
+        if self.core.send(Core::Terminals(now.clone())).is_err() {
+            self.troubles.say("the core hears the views' terminals no more".to_owned());
+            return;
+        }
+        self.told = Some(now);
+    }
+
     fn settle(&mut self) {
         let Views { store, clients, known, looked, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
@@ -824,7 +854,7 @@ fn laid(
 }
 
 fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &OsString) -> Runs {
-    let Is::Running { root, front, word } = &listed.is else {
+    let Is::Running { root, front, word, .. } = &listed.is else {
         return before.clone();
     };
     if let Some(front) = front
@@ -901,7 +931,8 @@ mod tests {
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };
-        server::Terminal { key, tag: Vec::new(), size: None, cwd: "/w".to_owned(), is }
+        let (tag, cwd, title) = (Vec::new(), "/w".to_owned(), String::new());
+        server::Terminal { key, tag, size: None, cwd, title, is }
     }
 
     fn running(front: Option<(u32, &[&str])>, word: Option<Word>) -> server::Terminal {
@@ -909,7 +940,7 @@ mod tests {
             pid,
             argv: argv.iter().map(|word| (*word).to_owned()).collect(),
         });
-        listed(Is::Running { root: 10, front, word })
+        listed(Is::Running { root: 10, front, word, doing: None })
     }
 
     fn agent(pid: u32) -> Agent {

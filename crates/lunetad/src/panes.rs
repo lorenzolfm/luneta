@@ -49,7 +49,7 @@ pub struct Titled {
 }
 
 impl Titled {
-    fn to_api(&self) -> api::Titled {
+    pub(crate) fn to_api(&self) -> api::Titled {
         api::Titled { topic: self.topic.clone().map(String::from) }
     }
 }
@@ -80,7 +80,7 @@ pub(crate) fn terminals(laid: Vec<Laid>) -> Result<Vec<Pane>, String> {
 
 const GENERIC_TITLE: &str = "Claude Code";
 
-fn titled(title: &str) -> Option<Titled> {
+pub(crate) fn titled(title: &str) -> Option<Titled> {
     let mut chars = title.trim().chars();
     let glyph = chars.next()?;
     let agent = matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
