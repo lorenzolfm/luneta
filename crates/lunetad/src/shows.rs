@@ -396,12 +396,12 @@ mod tests {
         }
     }
 
-    fn tiled(terminal: u64) -> Option<Said> {
-        Some(Said::Tiled(terminal))
+    fn tiled(terminal: u64) -> Said {
+        Said::Tiled(terminal)
     }
 
-    fn full(terminal: u64) -> Option<Said> {
-        Some(Said::Full(terminal))
+    fn full(terminal: u64) -> Said {
+        Said::Full(terminal)
     }
 
     fn halves() -> Vec<show_response::Pane> {
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_view_reads_where_its_terminals_tile_it_and_one_is_focused() {
-        let read = Laid::heard(laid(halves(), tiled(2))).unwrap();
+        let read = Laid::heard(laid(halves(), Some(tiled(2)))).unwrap();
         let terminals: Vec<u64> = read.panes().map(|pane| pane.terminal.get()).collect();
         assert_eq!(terminals, [2, 1], "the focused terminal first");
         let focused = read.focused().map(|pane| (pane.terminal.get(), pane.found));
@@ -419,7 +419,7 @@ mod tests {
         let drawn: Vec<(u64, u16)> =
             read.drawn().iter().map(|(pane, rect)| (pane.terminal.get(), rect.columns)).collect();
         assert_eq!((read.full(), drawn), (false, vec![(2, 40), (1, 40)]));
-        let full = Laid::heard(laid(halves(), full(1))).unwrap();
+        let full = Laid::heard(laid(halves(), Some(full(1)))).unwrap();
         let drawn: Vec<(u64, u16)> =
             full.drawn().iter().map(|(pane, rect)| (pane.terminal.get(), rect.columns)).collect();
         assert_eq!((full.full(), drawn), (true, vec![(1, 80)]));
@@ -451,20 +451,20 @@ mod tests {
         let unframed = vec![placed(1, (0, 0, 2, 24), None), placed(2, (2, 0, 78, 24), None)];
         let one = vec![placed(1, (0, 0, 80, 24), None)];
         for refused in [
-            laid(gap, tiled(1)),
-            laid(over, tiled(1)),
-            laid(off, tiled(1)),
-            laid(twice, tiled(1)),
-            laid(shared, tiled(1)),
-            laid(one_id, tiled(1)),
-            laid(unframed, tiled(1)),
+            laid(gap, Some(tiled(1))),
+            laid(over, Some(tiled(1))),
+            laid(off, Some(tiled(1))),
+            laid(twice, Some(tiled(1))),
+            laid(shared, Some(tiled(1))),
+            laid(one_id, Some(tiled(1))),
+            laid(unframed, Some(tiled(1))),
             laid(halves(), None),
-            laid(halves(), tiled(3)),
-            laid(halves(), full(3)),
-            laid(one, full(1)),
-            laid(Vec::new(), tiled(1)),
-            show_response::Laid { workstream: 0, ..laid(halves(), tiled(1)) },
-            show_response::Laid { size: None, ..laid(halves(), tiled(1)) },
+            laid(halves(), Some(tiled(3))),
+            laid(halves(), Some(full(3))),
+            laid(one, Some(full(1))),
+            laid(Vec::new(), Some(tiled(1))),
+            show_response::Laid { workstream: 0, ..laid(halves(), Some(tiled(1))) },
+            show_response::Laid { size: None, ..laid(halves(), Some(tiled(1))) },
         ] {
             assert!(Laid::heard(refused.clone()).is_err(), "{refused:?}");
         }

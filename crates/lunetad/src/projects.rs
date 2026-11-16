@@ -585,13 +585,11 @@ impl Projects {
             Change::WorkstreamAt { project, folder } => {
                 let held = changed.project(project)?;
                 let at = held.workstreams.iter().find(|it| held.folder(it) == folder);
-                match at.map(|it| it.id.0) {
-                    Some(found) => Some(found),
-                    None => {
-                        let add = Change::AddWorkstream { project, folder, name: None };
-                        return self.changed_by(add, draw);
-                    },
-                }
+                let Some(found) = at else {
+                    let add = Change::AddWorkstream { project, folder, name: None };
+                    return self.changed_by(add, draw);
+                };
+                Some(found.id.0)
             },
             Change::RenameProject { project, to } => {
                 changed.project(project)?.name = to;
