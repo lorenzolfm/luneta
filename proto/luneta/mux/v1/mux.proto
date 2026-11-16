@@ -227,11 +227,15 @@ message Terminal {
   string title = 4;
   string cwd = 5;
   oneof program {
-    uint32 pid = 6;
+    Running runs = 6;
     Exit ended = 7;
   }
-  Foreground foreground = 8;
-  Ran ran = 9;
+}
+
+message Running {
+  uint32 pid = 1;
+  Foreground foreground = 2;
+  Ran ran = 3;
 }
 
 message Session {
@@ -565,7 +569,7 @@ message Showing {
 }
 
 message Typed {
-  uint32 terminal = 1;
+  TerminalKey terminal = 1;
   oneof event {
     Key key = 2;
     Mouse mouse = 3;

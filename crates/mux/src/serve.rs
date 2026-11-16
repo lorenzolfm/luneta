@@ -265,17 +265,17 @@ async fn listen_to_viewer(
             Ok(said) => said,
             Err(refusal) => break Some(refusal),
         };
-        let taken = match said {
-            ViewerHeard::Showing(keys) => mux.show(client, &keys),
+        let refusals = match said {
+            ViewerHeard::Showing(keys) => mux.show(client, &keys).unwrap_or_else(|all| vec![all]),
             ViewerHeard::Typed(terminal, input) => match mux.typed(client, terminal) {
                 Ok(handle) => {
                     handle.send(ToPane::Input(client, input)).await;
-                    Ok(())
+                    Vec::new()
                 },
-                Err(refusal) => Err(refusal),
+                Err(refusal) => vec![refusal],
             },
         };
-        if let Err(refusal) = taken {
+        for refusal in refusals {
             let reason = refusal.message().to_owned();
             let refused = api::to_viewer::Event::Refused(api::Refused { reason });
             if out.send(Ok(api::ToViewer { event: Some(refused) })).await.is_err() {

@@ -3,7 +3,7 @@ use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -838,7 +838,7 @@ fn host() -> String {
     rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
-fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
+fn local_cwd(said: &str, host: &str) -> Option<String> {
     let after = said.strip_prefix("file://")?;
     let (named, path) = after.split_at(after.find('/')?);
     let local = named.is_empty()
@@ -851,7 +851,7 @@ fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
     if path.contains('\0') {
         return None;
     }
-    Some(PathBuf::from(path.as_ref())).filter(|path| path.is_absolute())
+    Some(path.into_owned()).filter(|path| Path::new(path).is_absolute())
 }
 
 fn wheeled(
@@ -917,10 +917,10 @@ mod tests {
     #[test]
     fn a_cwd_is_one_this_machine_has() {
         let cwd = |said: &str| local_cwd(said, "here");
-        assert_eq!(cwd("file://here/home/a%20b"), Some(PathBuf::from("/home/a b")));
-        assert_eq!(cwd("file://HERE/tmp"), Some(PathBuf::from("/tmp")));
-        assert_eq!(cwd("file:///tmp"), Some(PathBuf::from("/tmp")));
-        assert_eq!(cwd("file://localhost/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(cwd("file://here/home/a%20b"), Some("/home/a b".to_owned()));
+        assert_eq!(cwd("file://HERE/tmp"), Some("/tmp".to_owned()));
+        assert_eq!(cwd("file:///tmp"), Some("/tmp".to_owned()));
+        assert_eq!(cwd("file://localhost/tmp"), Some("/tmp".to_owned()));
         assert_eq!(cwd("file://there/tmp"), None);
         assert_eq!(cwd("/tmp"), None);
         assert_eq!(cwd("file://here"), None);

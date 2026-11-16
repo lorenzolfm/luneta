@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,7 +94,7 @@ struct Pane {
     id: PaneId,
     name: Option<Name>,
     title: String,
-    cwd: PathBuf,
+    cwd: String,
     program: Program,
     handle: Handle,
 }
@@ -128,14 +127,8 @@ struct Viewing {
     out: ViewerOut,
     colours: Colours,
     runs_in: Option<TerminalKey>,
-    shows: Vec<Shown>,
+    shows: BTreeMap<TerminalKey, u64>,
     _gone: oneshot::Sender<()>,
-}
-
-#[derive(Clone, Copy)]
-struct Shown {
-    key: TerminalKey,
-    came: u64,
 }
 
 impl Mux {
@@ -323,7 +316,7 @@ impl Mux {
             model.refuse_if_no_room_for_a_client()?;
             let client = ClientId::next(&mut model.last.client);
             let Greeting { colours, runs_in } = greeting;
-            let viewing = Viewing { out, colours, runs_in, shows: Vec::new(), _gone: gone };
+            let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
             assert!(!model.clients.contains_key(&client), "viewer {client} is no client");
             let was = model.viewing.insert(client, viewing);
             assert!(was.is_none(), "viewer {client} is new");
@@ -331,18 +324,22 @@ impl Mux {
         })
     }
 
-    pub fn show(&self, client: ClientId, keys: &[TerminalKey]) -> Result<(), Status> {
+    pub fn show(
+        &self,
+        client: ClientId,
+        keys: &BTreeSet<TerminalKey>,
+    ) -> Result<Vec<Status>, Status> {
         self.change(|model| model.show(client, keys))
     }
 
-    pub fn typed(&self, client: ClientId, terminal: PaneId) -> Result<Handle, Status> {
+    pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
         let model = self.lock();
         let viewing = model.viewing.get(&client).ok_or_else(|| no_client(client))?;
-        let shown = viewing.shows.iter().find(|shown| shown.key.id == terminal);
-        let shown = shown.ok_or_else(|| {
-            Status::failed_precondition(format!("terminal {terminal} is not shown"))
-        })?;
-        let terminal = model.terminal(shown.key).expect("a shown terminal is the model's");
+        if !viewing.shows.contains_key(&terminal) {
+            let not_shown = format!("terminal {} is not shown", terminal.id);
+            return Err(Status::failed_precondition(not_shown));
+        }
+        let terminal = model.terminal(terminal).expect("a shown terminal is the model's");
         Ok(terminal.pane.handle.clone())
     }
 
@@ -428,7 +425,7 @@ impl Mux {
         self.change(|model| model.close_pane(pane));
     }
 
-    pub fn titled(&self, pane: PaneId, title: String, cwd: Option<PathBuf>) {
+    pub fn titled(&self, pane: PaneId, title: String, cwd: Option<String>) {
         self.change(|model| {
             if let Some(pane) = model.any_pane_mut(pane) {
                 pane.title = title;
@@ -521,7 +518,11 @@ impl Model {
             .ok_or_else(|| Status::not_found(format!("no terminal {} made then", key.id)))
     }
 
-    fn show(&mut self, client: ClientId, keys: &[TerminalKey]) -> Result<(), Status> {
+    fn show(
+        &mut self,
+        client: ClientId,
+        keys: &BTreeSet<TerminalKey>,
+    ) -> Result<Vec<Status>, Status> {
         let viewing = self.viewing.get(&client).ok_or_else(|| no_client(client))?;
         if let Some(runs_in) = viewing.runs_in
             && keys.contains(&runs_in)
@@ -532,22 +533,22 @@ impl Model {
             )));
         }
         assert!(keys.len() <= SHOWN_MAX);
+        let mut now = BTreeMap::new();
+        let mut gone = Vec::new();
         for key in keys {
-            self.terminal(*key)?;
-        }
-        let before: BTreeMap<TerminalKey, u64> =
-            viewing.shows.iter().map(|shown| (shown.key, shown.came)).collect();
-        let mut now = Vec::with_capacity(keys.len());
-        for key in keys {
-            let came = before.get(key).copied().unwrap_or_else(|| {
+            if let Err(refusal) = self.terminal(*key) {
+                gone.push(refusal);
+                continue;
+            }
+            let came = viewing.shows.get(key).copied().unwrap_or_else(|| {
                 self.last.came += 1;
                 self.last.came
             });
-            now.push(Shown { key: *key, came });
+            now.insert(*key, came);
         }
-        assert_eq!(now.len(), keys.len());
+        assert_eq!(now.len() + gone.len(), keys.len());
         self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
-        Ok(())
+        Ok(gone)
     }
 
     fn tabs(&self) -> impl Iterator<Item = (&Session, &Tab)> {
@@ -917,7 +918,7 @@ impl Model {
             let closed = self.terminals.remove(place);
             closed.pane.handle.close();
             for viewing in self.viewing.values_mut() {
-                viewing.shows.retain(|shown| shown.key != closed.key);
+                viewing.shows.remove(&closed.key);
             }
             self.end_if_empty();
             return;
@@ -1045,14 +1046,14 @@ impl Model {
         for (client, viewing) in &self.viewing {
             assert!(viewing.shows.len() <= SHOWN_MAX);
             if let Some(runs_in) = viewing.runs_in {
-                let shown = viewing.shows.iter().any(|shown| shown.key == runs_in);
+                let shown = viewing.shows.contains_key(&runs_in);
                 assert!(!shown, "viewer {client} shows terminal {}, which it runs in", runs_in.id);
             }
-            for shown in &viewing.shows {
+            for (key, came) in &viewing.shows {
                 let frames = Frames::Viewer(viewing.out.clone());
-                let viewer =
-                    Viewer { client: *client, frames, colours: viewing.colours, came: shown.came };
-                by_terminal.entry(shown.key).or_default().push(viewer);
+                let colours = viewing.colours;
+                let viewer = Viewer { client: *client, frames, colours, came: *came };
+                by_terminal.entry(*key).or_default().push(viewer);
             }
         }
         for terminal in &self.terminals {
@@ -1093,11 +1094,10 @@ impl Model {
             },
             Program::Ended(exit) => (api::pane::Program::Ended(exit.said()), None, None),
         };
-        let cwd = pane.cwd.to_str().expect("a pane's cwd was said in UTF-8");
         api::Pane {
             id: pane.id.said(),
             title: pane.title.clone(),
-            cwd: cwd.to_owned(),
+            cwd: pane.cwd.clone(),
             program: Some(program),
             foreground,
             ran,
@@ -1113,22 +1113,20 @@ impl Model {
 impl Terminal {
     fn said(&self) -> api::Terminal {
         let pane = &self.pane;
-        let (program, foreground, ran) = match &pane.program {
+        let program = match &pane.program {
             Program::Runs { pid, foreground, ran, .. } => {
-                (api::terminal::Program::Pid(*pid), foreground.clone(), ran.clone())
+                let (foreground, ran) = (foreground.clone(), ran.clone());
+                api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran })
             },
-            Program::Ended(exit) => (api::terminal::Program::Ended(exit.said()), None, None),
+            Program::Ended(exit) => api::terminal::Program::Ended(exit.said()),
         };
-        let cwd = pane.cwd.to_str().expect("a terminal's cwd was said in UTF-8");
         api::Terminal {
             key: Some(self.key.said()),
             tag: self.tag.said(),
             size: Some(self.size.said()),
             title: pane.title.clone(),
-            cwd: cwd.to_owned(),
+            cwd: pane.cwd.clone(),
             program: Some(program),
-            foreground,
-            ran,
         }
     }
 }

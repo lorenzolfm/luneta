@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::SystemTime;
 
 use libghostty_vt::key::{self as keys, Mods};
@@ -119,7 +120,7 @@ impl SessionName {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
-    pub cwd: PathBuf,
+    pub cwd: String,
     pub runs: Runs,
     pub ends: Ends,
 }
@@ -142,8 +143,7 @@ impl Opens {
         if opens.cwd.contains('\0') {
             return Err(refused(&format!("{field}.cwd"), "has a NUL"));
         }
-        let cwd = PathBuf::from(opens.cwd);
-        if !cwd.is_absolute() {
+        if !Path::new(&opens.cwd).is_absolute() {
             return Err(refused(&format!("{field}.cwd"), "is not an absolute path"));
         }
         let runs = match present(&format!("{field}.runs"), opens.runs)? {
@@ -170,7 +170,7 @@ impl Opens {
                 return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
             },
         };
-        Ok(Opens { cwd, runs, ends })
+        Ok(Opens { cwd: opens.cwd, runs, ends })
     }
 }
 
@@ -466,8 +466,8 @@ pub struct Greeting {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewerHeard {
-    Showing(Vec<TerminalKey>),
-    Typed(PaneId, Input),
+    Showing(BTreeSet<TerminalKey>),
+    Typed(TerminalKey, Input),
 }
 
 pub fn greeting(api::FromViewer { event }: api::FromViewer) -> Result<Greeting, Status> {
@@ -489,18 +489,12 @@ pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
             if terminals.len() > SHOWN_MAX {
                 return Err(refused("showing.terminals", format_args!("are over {SHOWN_MAX}")));
             }
-            let keys: Vec<TerminalKey> = terminals
-                .into_iter()
-                .map(|key| TerminalKey::parse("showing.terminals", Some(key)))
-                .collect::<Result<_, _>>()?;
-            let mut ids: Vec<PaneId> = keys.iter().map(|key| key.id).collect();
-            ids.sort_unstable();
-            let repeated = ids.windows(2).find_map(|pair| match *pair {
-                [one, other] if one == other => Some(one),
-                _ => None,
-            });
-            if let Some(repeated) = repeated {
-                return Err(refused("showing.terminals", format_args!("repeat {repeated}")));
+            let mut keys = BTreeSet::new();
+            for key in terminals {
+                let key = TerminalKey::parse("showing.terminals", Some(key))?;
+                if !keys.insert(key) {
+                    return Err(refused("showing.terminals", format_args!("repeat {}", key.id)));
+                }
             }
             ViewerHeard::Showing(keys)
         },
@@ -513,7 +507,7 @@ pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
                 Typed::Focus(api::Focus { focused }) => Input::Focus(focused),
                 Typed::Scroll(api::Scroll { back }) => Input::Scroll(back),
             };
-            ViewerHeard::Typed(PaneId::parse("typed.terminal", terminal)?, input)
+            ViewerHeard::Typed(TerminalKey::parse("typed.terminal", terminal)?, input)
         },
     })
 }
