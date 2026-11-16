@@ -20,6 +20,8 @@ mod own_drive;
 #[cfg(test)]
 mod pi;
 #[cfg(test)]
+mod projects;
+#[cfg(test)]
 mod prune;
 #[cfg(test)]
 mod remote;
