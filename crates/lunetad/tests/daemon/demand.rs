@@ -565,6 +565,13 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in makes no own session"))
     }
 
+    async fn change_projects(
+        &self,
+        _: Request<api::ChangeProjectsRequest>,
+    ) -> Result<Response<api::ChangeProjectsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in keeps no projects"))
+    }
+
     async fn list_clients(
         &self,
         _: Request<ListClientsRequest>,

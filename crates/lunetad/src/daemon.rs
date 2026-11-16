@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
@@ -38,9 +38,10 @@ use crate::api::other_tabs_response::Tab as OtherTab;
 use crate::api::refuge_response::{self, Went};
 use crate::api::{turn_into_panes_response, turn_into_tab_response};
 use crate::api::{
-    self, AskRequest, AskResponse, CheckNameRequest, CheckNameResponse,
-    CloseRequest, ClosesRequest, ClosesResponse, DeleteExitedRequest, DumpScreenRequest,
-    DumpScreenResponse, FileIssueRequest, FileIssueResponse, GoRequest, InfoResponse,
+    self, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
+    CheckNameRequest, CheckNameResponse, CloseRequest, ClosesRequest, ClosesResponse,
+    DeleteExitedRequest, DumpScreenRequest, DumpScreenResponse, FileIssueRequest,
+    FileIssueResponse, GoRequest, InfoResponse,
     IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
@@ -56,6 +57,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes, Whose};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
+use crate::projects::{Change, Id, Store};
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -75,8 +77,8 @@ use crate::turns::{IntoPanes, IntoTab};
 use crate::checks::{Failing, Log};
 use crate::{
     checks, claude, client, closes, eza, fetches, git, github, keeps, log, moves, names, opens,
-    owns, panes, pi, printed, release, remote, screens, shells, skills, topics, turns, watch,
-    zoxide,
+    owns, panes, pi, printed, projects, release, remote, screens, shells, skills, topics, turns,
+    watch, zoxide,
     Harness,
 };
 
@@ -155,6 +157,13 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let github = wake_github.clone();
     let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
     let core = core::start(wakes)?;
+    let store = Store::open();
+    if let Some(why) = store.unkept() {
+        log::say(why);
+    }
+    let _ = core.send(Command::Projects(store.projects().clone()));
+    let store = Arc::new(Mutex::new(store));
+    projects::follow(core.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
     let sockets = Zellij::socket_folder();
     let claude_folder = claude::folder();
@@ -181,7 +190,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, sockets, claude_folder, core, watchers, bridges };
+    let host = Host { started, sockets, claude_folder, core, watchers, bridges, store };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
@@ -405,6 +414,7 @@ struct Host {
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
+    store: Arc<Mutex<Store>>,
 }
 
 #[tonic::async_trait]
@@ -1004,6 +1014,28 @@ impl Daemon for Host {
     }
 
     type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
+
+    async fn change_projects(
+        &self,
+        request: Request<ChangeProjectsRequest>,
+    ) -> Result<Response<ChangeProjectsResponse>, Status> {
+        let ChangeProjectsRequest { on, change } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
+        }
+        let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
+        let (store, core) = (Arc::clone(&self.store), self.core.clone());
+        let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
+            let change = Change::of_api(change).map_err(Status::invalid_argument)?;
+            let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+            let made = store.change(change).map_err(Status::failed_precondition)?;
+            let stopped = || Status::unavailable("the daemon's core has stopped");
+            core.send(Command::Projects(store.projects().clone())).map_err(|_| stopped())?;
+            Ok(made)
+        });
+        let made = changed.await.map_err(|error| unfinished(&error))??;
+        Ok(Response::new(ChangeProjectsResponse { made: made.map(Id::get) }))
+    }
 
     async fn new_own(
         &self,

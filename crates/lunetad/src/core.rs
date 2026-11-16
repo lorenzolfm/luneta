@@ -14,6 +14,7 @@ use crate::api;
 use crate::claude::Scan;
 use crate::github::Found;
 use crate::panes::{self, Pane};
+use crate::projects::{Dir, Name, Project, Projects, Stage};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -62,10 +63,13 @@ pub enum Command {
     Shells(Vec<Shell>),
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
+    Projects(Projects),
+    Missing(BTreeSet<Dir>),
     Remote { destination: Destination, reached: Reached },
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
     Sessions(oneshot::Sender<Vec<Addressed>>),
     Dirs(oneshot::Sender<BTreeSet<String>>),
+    Folders(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     Claudes(oneshot::Sender<Vec<Agent>>),
@@ -120,6 +124,8 @@ struct Known {
     topics: HashMap<SessionId, Said>,
     remotes: Vec<(Destination, Reached)>,
     unread_hosts: u32,
+    projects: Projects,
+    missing: BTreeSet<Dir>,
     words: u64,
     told: HashMap<Id, u64>,
     host: api::Host,
@@ -144,6 +150,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         topics: HashMap::new(),
         remotes: Vec::new(),
         unread_hosts: 0,
+        projects: Projects::default(),
+        missing: BTreeSet::new(),
         words: 0,
         told: HashMap::new(),
         host: api::Host::default(),
@@ -209,6 +217,14 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Topics(now) => known.topics = now,
             Command::Hosts(now) => known.named(now),
+            Command::Projects(now) => {
+                let before = known.dirs();
+                known.projects = now;
+                if !known.dirs().is_subset(&before) {
+                    wake(&wakes.git);
+                }
+            },
+            Command::Missing(now) => known.missing = now,
             Command::Remote { destination, reached } => {
                 let Some((_, was)) = known.remotes.iter_mut().find(|(it, _)| *it == destination)
                 else {
@@ -234,6 +250,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Dirs(answer) => {
                 let _ = answer.send(known.dirs());
+                continue;
+            },
+            Command::Folders(answer) => {
+                let _ = answer.send(known.projects.folders().collect());
                 continue;
             },
             Command::Branches(answer) => {
@@ -399,7 +419,9 @@ impl Known {
     fn dirs(&self) -> BTreeSet<String> {
         let owns = self.owns.iter().flat_map(|own| &own.panes);
         let cwds = self.panes.values().flatten().chain(owns).filter_map(|pane| pane.cwd.as_ref());
-        cwds.map(|cwd| cwd.as_str().to_owned()).collect()
+        let cwds = cwds.map(|cwd| cwd.as_str().to_owned());
+        let folders = self.projects.workstream_folders().map(|folder| folder.as_str().to_owned());
+        cwds.chain(folders).collect()
     }
 
     fn forget_dirs(&mut self) {
@@ -508,7 +530,38 @@ impl Known {
             remotes,
             unread_hosts: Some(self.unread_hosts),
             sayings: self.sayings.fresh(SystemTime::now()),
+            projects: self.built_projects(),
         }
+    }
+
+    fn built_projects(&self) -> Vec<api::Project> {
+        let workstreams = |project: &Project| {
+            let built = project.workstreams().iter().map(|workstream| {
+                let folder = project.folder(workstream);
+                let branch = self.branch(folder.as_str());
+                let found = self.pull_requests.get(folder.as_str());
+                let found = found.filter(|found| branch == Some(found.branch.as_str()));
+                let stage = Stage::of(branch, found.map(|found| &found.pull_request));
+                let renamed = workstream.renamed().map(Name::as_str);
+                api::Workstream {
+                    id: workstream.id().get(),
+                    name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
+                    renamed: renamed.is_some(),
+                    missing: self.missing.contains(&folder),
+                    stage: stage.to_api().into(),
+                    folder: folder.as_str().to_owned(),
+                }
+            });
+            built.collect()
+        };
+        let project = |project: &Project| api::Project {
+            id: project.id().get(),
+            name: project.name().as_str().to_owned(),
+            dir: project.dir().as_str().to_owned(),
+            missing: self.missing.contains(project.dir()),
+            workstreams: workstreams(project),
+        };
+        self.projects.all().iter().map(project).collect()
     }
 
     fn built_sessions(&self) -> Vec<api::Session> {

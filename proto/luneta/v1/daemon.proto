@@ -42,6 +42,7 @@ service Daemon {
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc NewOwn(NewOwnRequest) returns (NewOwnResponse);
+  rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
 }
 
 message On {
@@ -492,6 +493,7 @@ message Host {
   repeated Remote remotes = 9;
   optional uint32 unread_hosts = 10;
   repeated Saying sayings = 11;
+  repeated Project projects = 12;
 }
 
 message Say {
@@ -540,6 +542,7 @@ message Remote {
     optional uint32 unread_sockets = 7;
     repeated UnreadFile unread_files = 8;
     repeated Saying sayings = 11;
+    repeated Project projects = 12;
   }
 
   message Unreached {
@@ -914,4 +917,87 @@ message IssueRepositoriesResponse {
 message IssueRepository {
   string remote = 1;
   string repository = 2;
+}
+
+message Project {
+  fixed64 id = 1;
+  string name = 2;
+  string dir = 3;
+  bool missing = 4;
+  repeated Workstream workstreams = 5;
+}
+
+message Workstream {
+  fixed64 id = 1;
+  string name = 2;
+  bool renamed = 3;
+  string folder = 4;
+  bool missing = 5;
+  Stage stage = 6;
+}
+
+enum Stage {
+  STAGE_UNSPECIFIED = 0;
+  STAGE_NO_BRANCH = 1;
+  STAGE_WORKING = 2;
+  STAGE_PULL_REQUEST_OPEN = 3;
+  STAGE_CHECKS_FAILING = 4;
+  STAGE_MERGED = 5;
+}
+
+message ChangeProjectsRequest {
+  On on = 1;
+  oneof change {
+    AddProject add_project = 2;
+    AddWorkstream add_workstream = 3;
+    RenameProject rename_project = 4;
+    RenameWorkstream rename_workstream = 5;
+    MoveProject move_project = 6;
+    MoveWorkstream move_workstream = 7;
+    ForgetProject forget_project = 8;
+    ForgetWorkstream forget_workstream = 9;
+  }
+
+  message AddProject {
+    string dir = 1;
+    optional string name = 2;
+  }
+
+  message AddWorkstream {
+    fixed64 project = 1;
+    string folder = 2;
+    optional string name = 3;
+  }
+
+  message RenameProject {
+    fixed64 project = 1;
+    string to = 2;
+  }
+
+  message RenameWorkstream {
+    fixed64 workstream = 1;
+    optional string to = 2;
+  }
+
+  message MoveProject {
+    fixed64 project = 1;
+    uint32 to = 2;
+  }
+
+  message MoveWorkstream {
+    fixed64 workstream = 1;
+    uint32 to = 2;
+  }
+
+  message ForgetProject {
+    fixed64 project = 1;
+  }
+
+  message ForgetWorkstream {
+    fixed64 workstream = 1;
+  }
+}
+
+message ChangeProjectsResponse {
+  optional fixed64 made = 1;
 }
