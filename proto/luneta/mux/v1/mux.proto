@@ -19,7 +19,47 @@ service Mux {
   rpc NewPane(NewPaneRequest) returns (NewPaneResponse);
   rpc ClosePane(ClosePaneRequest) returns (ClosePaneResponse);
   rpc Turn(TurnRequest) returns (TurnResponse);
+  rpc NewTerminal(NewTerminalRequest) returns (NewTerminalResponse);
+  rpc CloseTerminal(CloseTerminalRequest) returns (CloseTerminalResponse);
+  rpc SizeTerminal(SizeTerminalRequest) returns (SizeTerminalResponse);
+  rpc TagTerminal(TagTerminalRequest) returns (TagTerminalResponse);
+  rpc Show(stream ToShower) returns (stream ToViewer);
 }
+
+message TerminalKey {
+  uint32 id = 1;
+  google.protobuf.Timestamp made_at = 2;
+}
+
+message NewTerminalRequest {
+  Opens opens = 1;
+  bytes tag = 2;
+  Size size = 3;
+}
+
+message NewTerminalResponse {
+  TerminalKey terminal = 1;
+}
+
+message CloseTerminalRequest {
+  TerminalKey terminal = 1;
+}
+
+message CloseTerminalResponse {}
+
+message SizeTerminalRequest {
+  TerminalKey terminal = 1;
+  Size size = 2;
+}
+
+message SizeTerminalResponse {}
+
+message TagTerminalRequest {
+  TerminalKey terminal = 1;
+  bytes tag = 2;
+}
+
+message TagTerminalResponse {}
 
 message NewSessionRequest {
   string name = 1;
@@ -158,6 +198,7 @@ message Place {
 message DumpRequest {
   uint32 pane = 1;
   Dumped dumped = 2;
+  TerminalKey terminal = 3;
 }
 
 enum Dumped {
@@ -176,6 +217,21 @@ message WatchRequest {}
 
 message Listing {
   repeated Session sessions = 1;
+  repeated Terminal terminals = 2;
+}
+
+message Terminal {
+  TerminalKey key = 1;
+  bytes tag = 2;
+  Size size = 3;
+  string title = 4;
+  string cwd = 5;
+  oneof program {
+    uint32 pid = 6;
+    Exit ended = 7;
+  }
+  Foreground foreground = 8;
+  Ran ran = 9;
 }
 
 message Session {
@@ -489,6 +545,41 @@ message Focus {
 
 message Scroll {
   sint32 back = 1;
+}
+
+message ToShower {
+  oneof event {
+    Greeting hello = 1;
+    Showing showing = 2;
+    Typed typed = 3;
+  }
+}
+
+message Greeting {
+  Colours colours = 1;
+  TerminalKey runs_in = 2;
+}
+
+message Showing {
+  repeated TerminalKey terminals = 1;
+}
+
+message Typed {
+  uint32 terminal = 1;
+  oneof event {
+    Key key = 2;
+    Mouse mouse = 3;
+    Paste paste = 4;
+    Focus focus = 5;
+    Scroll scroll = 6;
+  }
+}
+
+message ToViewer {
+  oneof event {
+    Frame frame = 1;
+    Refused refused = 2;
+  }
 }
 
 message ToClient {

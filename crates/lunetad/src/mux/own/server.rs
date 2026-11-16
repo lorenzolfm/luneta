@@ -514,7 +514,7 @@ impl Own {
 
     pub fn dumped(&self, pane: u32, dumped: api::Dumped) -> Result<String, Failure> {
         self.server.tab_of(pane_of(self.key, pane)?)?;
-        let request = api::DumpRequest { pane, dumped: dumped.into() };
+        let request = api::DumpRequest { pane, dumped: dumped.into(), terminal: None };
         let dump = self.server.ask(|mut client| async move { client.dump(request).await });
         Ok(dump.map_err(|status| refused(&status))?.text)
     }
