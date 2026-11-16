@@ -65,8 +65,17 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
         windows.iter().all(|window| window.shows(name)).then_some(())
     });
     let projects = projects_of(owned);
-    let made = projects.iter().filter(|project| project.name == name);
-    assert_eq!(made.count(), 1, "{projects:?}");
+    let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
+    assert_eq!(made.len(), 1, "{projects:?}");
+    assert_eq!(made[0].workstreams.len(), 1, "{projects:?}");
+    let terminals = || {
+        let projects = projects_of(owned);
+        let made = projects.into_iter().find(|project| project.name == name)?;
+        Some(made.workstreams.iter().map(|it| it.terminals.len()).sum::<usize>())
+    };
+    eventually("a shell opens in the empty view", || terminals().filter(|count| *count > 0));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(terminals(), Some(1), "{:?}", projects_of(owned));
 }
 
 #[test]

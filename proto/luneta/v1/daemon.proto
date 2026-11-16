@@ -988,6 +988,7 @@ message ChangeProjectsRequest {
     MoveWorkstream move_workstream = 7;
     ForgetProject forget_project = 8;
     ForgetWorkstream forget_workstream = 9;
+    WorkstreamAt workstream_at = 10;
   }
 
   message AddProject {
@@ -1028,6 +1029,11 @@ message ChangeProjectsRequest {
   message ForgetWorkstream {
     fixed64 workstream = 1;
   }
+
+  message WorkstreamAt {
+    fixed64 project = 1;
+    string folder = 2;
+  }
 }
 
 message ChangeProjectsResponse {
@@ -1062,6 +1068,7 @@ message ShowRequest {
       google.protobuf.Empty largest = 1;
       Towards towards = 2;
       google.protobuf.Empty focused = 4;
+      google.protobuf.Empty alone = 5;
     }
     repeated string argv = 3;
   }

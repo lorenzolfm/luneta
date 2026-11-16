@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, RenameProject};
+use lunetad::api::change_projects_request::WorkstreamAt;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, Project, WatchRequest};
@@ -98,6 +99,13 @@ pub fn add_workstream(
     made.ok_or_else(|| "lunetad made no workstream".to_owned())
 }
 
+fn workstream_at(path: &Path, project: ProjectId, folder: &str) -> Result<WorkstreamId, String> {
+    let (project, folder) = (project.get(), folder.to_owned());
+    let change = Change::WorkstreamAt(WorkstreamAt { project, folder });
+    let found = changed(path, change).map_err(Unmade::said)?.and_then(WorkstreamId::of);
+    found.ok_or_else(|| "lunetad found and made no workstream".to_owned())
+}
+
 pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
     let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
     let (project, to) = (project.get(), to.to_owned());
@@ -112,7 +120,7 @@ fn holds(dir: &str, folder: &Path) -> bool {
 fn first_of(path: &Path, project: &Project) -> Result<WorkstreamId, String> {
     match project.workstreams.first().and_then(|it| WorkstreamId::of(it.id)) {
         Some(first) => Ok(first),
-        None => add_workstream(path, project_id(project)?, &project.dir, None),
+        None => workstream_at(path, project_id(project)?, &project.dir),
     }
 }
 
@@ -146,11 +154,7 @@ fn chosen(
             "{cwd} is in project {holding}, and no project is made inside another"
         )));
     }
-    let here = holding.workstreams.iter().find(|it| Path::new(&it.folder) == cwd);
-    Some(match here.and_then(|it| WorkstreamId::of(it.id)) {
-        Some(here) => Ok(here),
-        None => project_id(holding).and_then(|id| add_workstream(path, id, folder, None)),
-    })
+    Some(project_id(holding).and_then(|id| workstream_at(path, id, folder)))
 }
 
 pub fn start(
@@ -165,7 +169,7 @@ pub fn start(
     }
     let unmade = if name.is_some() || session_for(cwd).is_some() {
         match add_project(path, folder, name) {
-            Ok(made) => return add_workstream(path, made, folder, None),
+            Ok(made) => return workstream_at(path, made, folder),
             Err(Unmade::Failed(why)) => return Err(why),
             Err(Unmade::Nests(why)) => why,
         }

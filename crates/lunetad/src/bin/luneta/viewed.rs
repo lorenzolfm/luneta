@@ -455,7 +455,7 @@ impl Viewed {
         match heard {
             Heard::Laid(laid) => {
                 if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
-                    self.ask(Asked::Open { beside: Beside::Largest, argv: Vec::new() });
+                    self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
                 }
                 self.watch();
                 Heeded::Quiet

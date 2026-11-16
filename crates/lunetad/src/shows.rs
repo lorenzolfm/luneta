@@ -218,6 +218,7 @@ pub enum Heard {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Beside {
+    Alone,
     Largest,
     Focused,
 }
@@ -241,6 +242,7 @@ impl Asked {
             Asked::Open { beside, argv } => {
                 use show_request::open::Beside as Said;
                 let beside = match beside {
+                    Beside::Alone => Said::Alone(()),
                     Beside::Largest => Said::Largest(()),
                     Beside::Focused => Said::Focused(()),
                 };

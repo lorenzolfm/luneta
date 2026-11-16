@@ -326,6 +326,7 @@ pub struct Projects {
 pub enum Change {
     AddProject { dir: Dir, name: Option<Name> },
     AddWorkstream { project: ProjectId, folder: Dir, name: Option<Name> },
+    WorkstreamAt { project: ProjectId, folder: Dir },
     RenameProject { project: ProjectId, to: Name },
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     MoveProject { project: ProjectId, to: usize },
@@ -373,6 +374,10 @@ impl Change {
                     name: name(named).map_err(field("name"))?,
                 }
             },
+            Asked::WorkstreamAt(asked::WorkstreamAt { project, folder }) => Change::WorkstreamAt {
+                project: id("project", project).map(ProjectId)?,
+                folder: Dir::found(&folder).map_err(field("folder"))?,
+            },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
                 to: Name::parse(&to).map_err(field("to"))?,
@@ -406,6 +411,7 @@ impl Change {
         match self {
             Change::AddProject { .. }
             | Change::AddWorkstream { .. }
+            | Change::WorkstreamAt { .. }
             | Change::RenameProject { .. }
             | Change::RenameWorkstream { .. }
             | Change::MoveProject { .. }
@@ -575,6 +581,17 @@ impl Projects {
                 let workstream = Workstream { id: WorkstreamId(id), renamed: name, below, view };
                 project.workstreams.push(workstream);
                 Some(id)
+            },
+            Change::WorkstreamAt { project, folder } => {
+                let held = changed.project(project)?;
+                let at = held.workstreams.iter().find(|it| held.folder(it) == folder);
+                match at.map(|it| it.id.0) {
+                    Some(found) => Some(found),
+                    None => {
+                        let add = Change::AddWorkstream { project, folder, name: None };
+                        return self.changed_by(add, draw);
+                    },
+                }
             },
             Change::RenameProject { project, to } => {
                 changed.project(project)?.name = to;
@@ -966,6 +983,22 @@ mod tests {
         assert_eq!(folders, want);
         let outside = Change::AddWorkstream { project: luneta, folder: dir("/w/elo"), name: None };
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
+    }
+
+    #[test]
+    fn a_workstream_at_a_folder_is_the_first_there_or_else_one_made_there() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        workstream(&mut projects, luneta, "/w/luneta/main");
+        let at = |folder: &str| Change::WorkstreamAt { project: luneta, folder: dir(folder) };
+        let (same, found) = change(&projects, at("/w/luneta/main")).unwrap();
+        assert_eq!((same == projects, found), (true, Some(main.0)));
+        let made = WorkstreamId(add(&mut projects, at("/w/luneta/feat")));
+        assert_eq!(projects.all()[0].workstreams().len(), 3);
+        let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
+        assert_eq!(again, Some(made.0));
+        assert!(change(&projects, at("/w/elo")).unwrap_err().contains("is not in /w/luneta"));
     }
 
     #[test]

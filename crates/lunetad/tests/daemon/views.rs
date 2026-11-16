@@ -318,6 +318,27 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
 }
 
 #[test]
+fn two_views_that_each_open_a_terminal_alone_in_one_empty_workstream_open_one() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut one = Shown::new(&owned, workstream, 80, 24);
+    let mut other = Shown::new(&owned, workstream, 80, 24);
+    let alone = || {
+        let argv = WAITS.iter().map(|word| (*word).to_owned()).collect();
+        Event::Open(show_request::Open { beside: Some(open::Beside::Alone(())), argv })
+    };
+    one.ask(alone());
+    other.ask(alone());
+    let opened = one.until("a terminal alone", |laid| !laid.panes.is_empty());
+    other.until("the other sees it", |laid| !laid.panes.is_empty());
+    one.ask(Event::Size(size(79, 24)));
+    let resized = one.until("the view again", |laid| laid.size != opened.size);
+    assert_eq!(resized.panes.len(), 1, "the second open alone opens nothing");
+    assert!(other.refused.is_empty() && one.refused.is_empty(), "{:?}", other.refused);
+    assert_eq!(watched(&owned, workstream).len(), 1);
+}
+
+#[test]
 fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);

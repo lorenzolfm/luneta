@@ -71,6 +71,7 @@ pub enum Asked {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Beside {
+    Alone,
     Largest,
     Focused,
     Towards(Towards),
@@ -100,6 +101,7 @@ impl Asked {
                 let beside = match beside.ok_or("open: it says no side to open beside")? {
                     Said::Largest(()) => Beside::Largest,
                     Said::Focused(()) => Beside::Focused,
+                    Said::Alone(()) => Beside::Alone,
                     Said::Towards(towards) => Beside::Towards(towards_of(towards)?),
                 };
                 if argv.first().is_some_and(String::is_empty) {
@@ -449,6 +451,7 @@ impl Views {
         let (project, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
         let (placed, inner) = match (shown.view().tree(), beside) {
             (None, _) => (Placed::Alone, layout::lone(size)),
+            (Some(_), Beside::Alone) => return Ok(()),
             (Some(tree), Beside::Towards(towards)) => {
                 let at = focus.ok_or("the view holds no terminal to open beside")?;
                 let room = tree.room(at, towards, terminal, size);
@@ -1048,6 +1051,9 @@ mod tests {
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let open = show_request::Open { beside: Some(open::Beside::Focused(())), argv: vec![] };
         let asked = Asked::Open { beside: Beside::Focused, argv: vec![] };
+        assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
+        let open = show_request::Open { beside: Some(open::Beside::Alone(())), argv: vec![] };
+        let asked = Asked::Open { beside: Beside::Alone, argv: vec![] };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let refused = [
             Event::Go(0),
