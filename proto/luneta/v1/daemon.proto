@@ -1061,6 +1061,7 @@ message ShowRequest {
     oneof beside {
       google.protobuf.Empty largest = 1;
       Towards towards = 2;
+      google.protobuf.Empty focused = 4;
     }
     repeated string argv = 3;
   }

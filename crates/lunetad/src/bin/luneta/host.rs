@@ -33,7 +33,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
-use lunetad::{Asked as Shown, Destination, Directory};
+use lunetad::{Destination, Directory};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::{DefaultTerminal, Terminal};
@@ -684,8 +684,10 @@ impl App {
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
             Event::Daemon(Ok(mut host)) => {
-                self.projected = Projected::of(&host);
-                self.projected.adapt(&mut host);
+                self.projected = Projected::adapted(&mut host).unwrap_or_else(|why| {
+                    self.sidebar.notify(format!("lunetad's projects: {why}"));
+                    Projected::default()
+                });
                 let (tabs, titles) = self.projected.tabs(self.right.workstream());
                 self.right.tabs(tabs, titles);
                 self.sidebar.heard(host);
@@ -1583,16 +1585,15 @@ impl App {
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, open: &Open) -> bool {
+        if *on != Machine::Local {
+            return false;
+        }
         let session = open.session();
         let project = self.projected.projects().iter().find(|it| it.name == session.as_str());
         let Some(project) = project else {
             return false;
         };
         self.sidebar.drop_menu(menu);
-        if *on != Machine::Local {
-            self.sidebar.notify(format!("menu: {}", menu::HERE_ONLY));
-            return true;
-        }
         match open {
             Open::Pane { beside, command, .. } => {
                 let pane = OwnPane::new(project.key, *beside);
@@ -1602,8 +1603,7 @@ impl App {
                     return true;
                 };
                 self.go_workstream(workstream, Some(terminal));
-                let argv = command.clone();
-                self.right.ask(Shown::Open { towards: None, argv });
+                self.right.open_beside_focused(command.clone());
             },
             Open::Tab { tab, .. } => {
                 let (lunetad, id) = (self.lunetad.clone(), project.id);
@@ -1893,7 +1893,7 @@ impl App {
         let (tabs, titles) = self.projected.tabs(workstream);
         self.right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
-            self.right.ask(Shown::Focus(focus::To::Terminal(terminal.get())));
+            self.right.ask(lunetad::Asked::Focus(focus::To::Terminal(terminal.get())));
         }
         self.seat();
     }
@@ -1904,7 +1904,7 @@ impl App {
             return;
         };
         let key = project.key;
-        let pane = self.right.focused().and_then(|focused| self.projected.pane_of(focused));
+        let pane = self.right.focused().and_then(|focused| project.pane_of(focused));
         let seated = self.sidebar.own_seat().map(sidebar::OwnSeat::session);
         if seated != Some(key) {
             self.sidebar.attaching(key);
@@ -1923,10 +1923,12 @@ impl App {
         match heeded {
             Heeded::Quiet => {},
             Heeded::Note(note) => self.sidebar.notify(note),
-            Heeded::Lost(why) if why.contains("is forgotten") => {
-                let first = self.projected.projects().iter().flat_map(|it| &it.workstreams).next();
-                match first.map(|it| it.id) {
-                    Some(first) => self.go_workstream(first, None),
+            Heeded::Forgotten(why) => {
+                let forgotten = self.right.workstream();
+                let workstreams = self.projected.projects().iter().flat_map(|it| &it.workstreams);
+                let other = workstreams.map(|it| it.id).find(|id| *id != forgotten);
+                match other {
+                    Some(other) => self.go_workstream(other, None),
                     None => self.end("no workstream is left to show"),
                 }
                 self.sidebar.notify(format!("lunetad's view: {why}"));

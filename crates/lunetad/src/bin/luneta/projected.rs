@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 
 use lunetad::api::projects::Held;
 use lunetad::api::session::Mux;
@@ -47,80 +48,44 @@ fn tab_id(tab: u32) -> u32 {
     tab.checked_add(1).expect("a project holds fewer than 2^32 workstreams")
 }
 
-impl Projected {
-    #[must_use]
-    pub fn of(host: &Host) -> Projected {
-        let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
-        let Some(Held::Kept(kept)) = held else {
-            return Projected::default();
-        };
-        Projected { projects: kept.projects.iter().filter_map(project).collect() }
-    }
-
-    #[must_use]
-    pub fn projects(&self) -> &[Project] {
-        &self.projects
-    }
-
-    #[must_use]
-    pub fn project(&self, key: OwnKey) -> Option<&Project> {
-        self.projects.iter().find(|project| project.key == key)
-    }
-
-    #[must_use]
-    pub fn holding(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
-        self.projects.iter().find_map(|project| {
-            let found = project.workstreams.iter().find(|it| it.id == workstream)?;
-            Some((project, found))
-        })
-    }
-
-    #[must_use]
-    pub fn of_pane(&self, pane: OwnPane) -> Option<(WorkstreamId, TerminalId)> {
-        let project = self.project(pane.session)?;
-        project.workstreams.iter().find_map(|workstream| {
-            let held = workstream.terminals.iter().find(|(_, key)| {
-                key.is_some_and(|key| key.id == pane.id)
-            })?;
-            Some((workstream.id, held.0))
-        })
-    }
-
-    #[must_use]
-    pub fn key_of(&self, pane: OwnPane) -> Option<TerminalKey> {
-        let project = self.project(pane.session)?;
-        let held = project.workstreams.iter().flat_map(|it| &it.terminals);
-        held.filter_map(|(_, key)| *key).find(|key| key.id == pane.id)
-    }
-
+impl Project {
     #[must_use]
     pub fn pane_of(&self, terminal: TerminalId) -> Option<OwnPane> {
-        self.projects.iter().find_map(|project| {
-            let key = project.workstreams.iter().find_map(|workstream| {
-                let held = workstream.terminals.iter().find(|(id, _)| *id == terminal)?;
-                held.1
-            })?;
-            Some(OwnPane { session: project.key, id: key.id })
-        })
+        let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
+        let (_, key) = held.find(|(id, _)| *id == terminal)?;
+        Some(OwnPane { session: self.key, id: key.as_ref()?.id })
     }
 
-    #[must_use]
-    pub fn tabs(&self, workstream: WorkstreamId) -> (Vec<Tab>, BTreeMap<TerminalId, String>) {
-        let Some((project, shown)) = self.holding(workstream) else {
-            return (Vec::new(), BTreeMap::new());
-        };
-        let tab = |it: &Workstream| Tab { workstream: it.id, name: it.name.clone() };
-        (project.workstreams.iter().map(tab).collect(), shown.titles.clone())
+    fn holding(&self, pane: NonZeroU32) -> Option<(WorkstreamId, TerminalId, TerminalKey)> {
+        let held = self.workstreams.iter().flat_map(|workstream| {
+            let keyed = workstream.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
+            keyed.map(|(id, key)| (workstream.id, id, key))
+        });
+        let mut on_pane = held.filter(|(_, _, key)| key.id == pane);
+        let first = on_pane.next()?;
+        on_pane.next().is_none().then_some(first)
     }
+}
 
-    pub fn adapt(&self, host: &mut Host) {
+impl Projected {
+    pub fn adapted(host: &mut Host) -> Result<Projected, String> {
         let own = |session: &api::Session| matches!(session.mux, Some(Mux::Own(_)));
         host.sessions.retain(|session| !own(session));
         let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
-        if let Some(Held::Kept(kept)) = held {
-            let sessions: Vec<api::Session> = kept.projects.iter().filter_map(session).collect();
-            host.sessions.extend(sessions);
-        }
+        let Some(Held::Kept(kept)) = held else {
+            return Ok(Projected::default());
+        };
+        let projects = kept.projects.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
+        let said = kept.projects.iter().zip(&projects);
+        let sessions: Vec<api::Session> =
+            said.map(|(said, project)| session(said, project.key)).collect();
+        host.sessions.extend(sessions);
+        let projected = Projected { projects };
+        projected.seat(host);
+        Ok(projected)
+    }
+
+    fn seat(&self, host: &mut Host) {
         let seat = |key: &api::TerminalKey| {
             let key = TerminalKey::of(key).ok()?;
             self.projects.iter().find_map(|project| {
@@ -145,6 +110,45 @@ impl Projected {
             }
         }
     }
+
+    #[must_use]
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
+    }
+
+    #[must_use]
+    pub fn project(&self, key: OwnKey) -> Option<&Project> {
+        self.projects.iter().find(|project| project.key == key)
+    }
+
+    #[must_use]
+    pub fn holding(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
+        self.projects.iter().find_map(|project| {
+            let found = project.workstreams.iter().find(|it| it.id == workstream)?;
+            Some((project, found))
+        })
+    }
+
+    #[must_use]
+    pub fn of_pane(&self, pane: OwnPane) -> Option<(WorkstreamId, TerminalId)> {
+        let (workstream, terminal, _) = self.project(pane.session)?.holding(pane.id)?;
+        Some((workstream, terminal))
+    }
+
+    #[must_use]
+    pub fn key_of(&self, pane: OwnPane) -> Option<TerminalKey> {
+        let (_, _, key) = self.project(pane.session)?.holding(pane.id)?;
+        Some(key)
+    }
+
+    #[must_use]
+    pub fn tabs(&self, workstream: WorkstreamId) -> (Vec<Tab>, BTreeMap<TerminalId, String>) {
+        let Some((project, shown)) = self.holding(workstream) else {
+            return (Vec::new(), BTreeMap::new());
+        };
+        let tab = |it: &Workstream| Tab { workstream: it.id, name: it.name.clone() };
+        (project.workstreams.iter().map(tab).collect(), shown.titles.clone())
+    }
 }
 
 fn found_key(terminal: &api::Terminal) -> Option<TerminalKey> {
@@ -159,35 +163,37 @@ fn title_of(terminal: &api::Terminal) -> Option<String> {
     topic.or_else(|| terminal.command.clone())
 }
 
-fn project(project: &api::Project) -> Option<Project> {
-    let id = ProjectId::of(project.id)?;
-    let workstreams = project.workstreams.iter().zip(0..).filter_map(|(workstream, tab)| {
-        let id = WorkstreamId::of(workstream.id)?;
+fn project(project: &api::Project) -> Result<Project, String> {
+    let named = &project.name;
+    let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
+    let workstream = |(workstream, tab): (&api::Workstream, u32)| {
+        let (named, of) = (&workstream.name, &project.name);
+        let id = WorkstreamId::of(workstream.id);
+        let id = id.ok_or_else(|| format!("workstream {named} of project {of} has id 0"))?;
         let mut terminals = Vec::new();
         let mut titles = BTreeMap::new();
         for terminal in &workstream.terminals {
-            let Some(held) = TerminalId::of(terminal.id) else {
-                continue;
-            };
+            let held = TerminalId::of(terminal.id);
+            let held = held.ok_or_else(|| format!("a terminal of workstream {named} has id 0"))?;
             terminals.push((held, found_key(terminal)));
             if let Some(title) = title_of(terminal) {
                 titles.insert(held, title);
             }
         }
         let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-        Some(Workstream { id, name, folder, tab, terminals, titles })
-    });
-    Some(Project {
+        Ok(Workstream { id, name, folder, tab, terminals, titles })
+    };
+    let workstreams = project.workstreams.iter().zip(0..).map(workstream);
+    Ok(Project {
         id,
         key: key_of(id),
         name: project.name.clone(),
         dir: project.dir.clone(),
-        workstreams: workstreams.collect(),
+        workstreams: workstreams.collect::<Result<_, String>>()?,
     })
 }
 
-fn session(project: &api::Project) -> Option<api::Session> {
-    let key = key_of(ProjectId::of(project.id)?);
+fn session(project: &api::Project, key: OwnKey) -> api::Session {
     let mut panes = Vec::new();
     for (workstream, tab) in project.workstreams.iter().zip(0..) {
         for terminal in &workstream.terminals {
@@ -207,14 +213,14 @@ fn session(project: &api::Project) -> Option<api::Session> {
             });
         }
     }
-    Some(api::Session {
+    api::Session {
         name: project.name.clone(),
         started_at: None,
         panes: Some(api::Panes { panes }),
         clients: Some(api::Clients { clients: Vec::new() }),
         socket: 0,
         mux: Some(Mux::Own(key.into())),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -288,9 +294,8 @@ mod tests {
     #[test]
     fn a_project_is_a_session_whose_tabs_are_its_workstreams_and_panes_its_terminals() {
         let host = host();
-        let projected = Projected::of(&host);
         let mut adapted = host.clone();
-        projected.adapt(&mut adapted);
+        Projected::adapted(&mut adapted).unwrap();
         assert_eq!(adapted.sessions.len(), 1, "own sessions give way to projects");
         let session = &adapted.sessions[0];
         assert_eq!(session.name, "bitwarden backup");
@@ -309,18 +314,59 @@ mod tests {
 
     #[test]
     fn a_pane_or_tab_of_a_project_row_leads_back_to_its_workstream_and_terminal() {
-        let projected = Projected::of(&host());
+        let projected = Projected::adapted(&mut host()).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
         let terminal = TerminalId::of(21).unwrap();
         assert_eq!(projected.of_pane(pane), Some((workstream(11), terminal)));
-        assert_eq!(projected.pane_of(terminal), Some(pane));
-        assert_eq!(projected.pane_of(TerminalId::of(22).unwrap()), None, "a lost one is no pane");
+        let project = &projected.projects()[0];
+        assert_eq!(project.pane_of(terminal), Some(pane));
+        assert_eq!(project.pane_of(TerminalId::of(22).unwrap()), None, "a lost one is no pane");
         let (tabs, titles) = projected.tabs(workstream(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
         let lost = TerminalId::of(22).unwrap();
         assert_eq!(titles.get(&lost).map(String::as_str), Some("sleep 600"));
+    }
+
+    fn kept(host: &mut Host) -> &mut api::Project {
+        let held = host.projects.as_mut().and_then(|projects| projects.held.as_mut());
+        let Some(Held::Kept(kept)) = held else {
+            panic!("the host keeps projects");
+        };
+        &mut kept.projects[0]
+    }
+
+    #[test]
+    fn a_pane_two_terminals_claim_leads_to_neither() {
+        let mut host = host();
+        let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+        let remade = api::TerminalKey { id: 4, made_at };
+        let again = terminal(24, terminal::Found::Key(remade), None);
+        kept(&mut host).workstreams[1].terminals.push(again);
+        let projected = Projected::adapted(&mut host).unwrap();
+        let project_key = key_of(ProjectId::of(7).unwrap());
+        let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
+        assert_eq!(projected.of_pane(pane), None);
+        assert_eq!(projected.key_of(pane), None);
+        let five = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
+        assert_eq!(projected.of_pane(five), Some((workstream(12), TerminalId::of(23).unwrap())));
+    }
+
+    #[test]
+    fn a_project_workstream_or_terminal_of_id_0_is_refused_and_own_sessions_still_go() {
+        let zeroed: [fn(&mut api::Project); 3] = [
+            |project| project.id = 0,
+            |project| project.workstreams[1].id = 0,
+            |project| project.workstreams[0].terminals[1].id = 0,
+        ];
+        for zero in zeroed {
+            let mut host = host();
+            zero(kept(&mut host));
+            let refused = Projected::adapted(&mut host).unwrap_err();
+            assert!(refused.contains("has id 0"), "{refused}");
+            assert!(host.sessions.is_empty(), "{:?}", host.sessions);
+        }
     }
 }

@@ -1,17 +1,17 @@
 use std::collections::BTreeSet;
 use std::pin::pin;
-use std::thread;
 
 use tokio::runtime;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
-use tonic::Status;
+use tonic::{Code, Status};
 
 use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
 use crate::projects::{Size, TerminalId, WorkstreamId, FRAME_CELLS, PANES_MAX};
+use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
@@ -108,7 +108,8 @@ impl Laid {
         let focused = match self.shown? {
             Shown::Tiled { focused } | Shown::Full(focused) => focused,
         };
-        self.panes.iter().find(|pane| pane.terminal == focused)
+        let pane = self.panes.iter().find(|pane| pane.terminal == focused);
+        Some(pane.expect("`heard` reads a view only if it lays out the terminal it focuses"))
     }
 
     #[must_use]
@@ -188,9 +189,11 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
             if one.terminal == other.terminal {
                 return Err(format!("a view lays out terminal {} twice", one.terminal));
             }
-            if one.key().is_some() && one.key() == other.key() {
-                let (one, other) = (one.terminal, other.terminal);
-                return Err(format!("terminals {one} and {other} share a key"));
+            if let (Some(key), Some(other_key)) = (one.key(), other.key())
+                && key.id == other_key.id
+            {
+                let (one, other, pane) = (one.terminal, other.terminal, key.id);
+                return Err(format!("terminals {one} and {other} share luneta-mux's pane {pane}"));
             }
             if one.rect.overlaps(other.rect) {
                 return Err(format!("terminal {} is laid over {}", other.terminal, one.terminal));
@@ -209,14 +212,21 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
 pub enum Heard {
     Laid(Laid),
     Refused(String),
+    Forgotten(String),
     Lost(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Beside {
+    Largest,
+    Focused,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Asked {
     Size(Size),
     Go(WorkstreamId),
-    Open { towards: Option<show_request::Towards>, argv: Vec<String> },
+    Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(show_request::focus::To),
     Fullscreen,
@@ -228,11 +238,11 @@ impl Asked {
         let event = match self {
             Asked::Size(size) => Event::Size(size_said(size)),
             Asked::Go(workstream) => Event::Go(workstream.get()),
-            Asked::Open { towards, argv } => {
-                use show_request::open::Beside;
-                let beside = match towards {
-                    None => Beside::Largest(()),
-                    Some(towards) => Beside::Towards(towards.into()),
+            Asked::Open { beside, argv } => {
+                use show_request::open::Beside as Said;
+                let beside = match beside {
+                    Beside::Largest => Said::Largest(()),
+                    Beside::Focused => Said::Focused(()),
                 };
                 Event::Open(show_request::Open { beside: Some(beside), argv })
             },
@@ -250,20 +260,16 @@ fn size_said(size: Size) -> show_request::Size {
 }
 
 pub struct Show {
-    said: mpsc::Sender<Asked>,
-    giving_up: mpsc::Sender<String>,
+    outbox: Outbox<Asked>,
 }
 
 impl Show {
     pub fn ask(&self, asked: Asked) {
-        match self.said.try_send(asked) {
-            Ok(()) | Err(TrySendError::Closed(_)) => {},
-            Err(TrySendError::Full(_)) => self.give_up(untaken()),
-        }
+        self.outbox.say(asked);
     }
 
     pub fn give_up(&self, why: String) {
-        let _ = self.giving_up.try_send(why);
+        self.outbox.give_up(why);
     }
 }
 
@@ -275,67 +281,54 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     folder: Folder,
     workstream: WorkstreamId,
     size: Size,
-    mut told: Told,
+    told: Told,
 ) -> Show {
-    let (said, saying) = mpsc::channel(SAID_MAX);
-    let (giving_up, given_up) = mpsc::channel(1);
-    let (handing, handed) = std::sync::mpsc::sync_channel::<Told>(1);
-    let showing = move || {
-        let mut told = handed.recv().expect("`show` hands its thread `told` as it starts");
+    let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
+    let showing = move |mut told: Told| {
         let built = runtime::Builder::new_current_thread().enable_all().build();
         let size = Some(size_said(size));
         let hello = show_request::Hello { workstream: workstream.get(), size };
         let last = match built {
-            Ok(runtime) => runtime.block_on(stream(&folder, hello, saying, given_up, &mut told)),
-            Err(error) => format!("no runtime: {error}"),
+            Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
+            Err(error) => Heard::Lost(format!("no runtime: {error}")),
         };
-        told(Heard::Lost(last));
+        told(last);
     };
-    match thread::Builder::new().name("lunetad view".to_owned()).spawn(showing) {
-        Ok(_) => handing.send(told).expect("the thread waits on `told` before all else"),
-        Err(error) => told(Heard::Lost(format!("no thread for a view of lunetad's: {error}"))),
+    if let Err((mut told, error)) = streams::on_thread("lunetad view", told, showing) {
+        told(Heard::Lost(format!("no thread for a view of lunetad's: {error}")));
     }
-    Show { said, giving_up }
-}
-
-enum Next {
-    Said(Result<api::ShowResponse, Status>),
-    LetGo,
-    Asked(Asked),
-    GaveUp(String),
+    Show { outbox }
 }
 
 async fn stream(
     folder: &Folder,
     hello: show_request::Hello,
-    asked: mpsc::Receiver<Asked>,
-    given_up: mpsc::Receiver<String>,
+    inbox: Inbox<Asked>,
     told: &mut impl FnMut(Heard),
-) -> String {
+) -> Heard {
     let mut daemon = match crate::connect(folder).await {
         Ok(daemon) => daemon,
-        Err(error) => return format!("lunetad is not reached: {error}"),
+        Err(error) => return Heard::Lost(format!("lunetad is not reached: {error}")),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
     let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
     let hearing = match daemon.show(said).await {
         Ok(hearing) => hearing.into_inner(),
-        Err(status) => return refusal(&status),
+        Err(status) => return ended(&status),
     };
-    let hearing = hearing.map(Next::Said).chain(tokio_stream::once(Next::LetGo));
-    let asked = ReceiverStream::new(asked).map(Next::Asked);
-    let given_up = ReceiverStream::new(given_up).map(Next::GaveUp);
-    let mut next = pin!(hearing.merge(asked).merge(given_up));
+    let mut next = pin!(inbox.merged(hearing));
     loop {
         let said = match next.next().await {
-            Some(Next::Said(Ok(said))) => said,
-            Some(Next::Said(Err(status))) => return refusal(&status),
-            Some(Next::LetGo) | None => return "lunetad let go of luneta's view".to_owned(),
-            Some(Next::GaveUp(why)) => return why,
-            Some(Next::Asked(asked)) => {
+            Some(Next::Heard(Ok(said))) => said,
+            Some(Next::Heard(Err(status))) => return ended(&status),
+            Some(Next::LetGo) | None => {
+                return Heard::Lost("lunetad let go of luneta's view".to_owned());
+            },
+            Some(Next::GaveUp(why)) => return Heard::Lost(why),
+            Some(Next::Said(asked)) => {
                 if let Err(TrySendError::Full(_)) = sending.try_send(asked.said()) {
-                    return untaken();
+                    return Heard::Lost(untaken());
                 }
                 continue;
             },
@@ -343,11 +336,20 @@ async fn stream(
         match said.event {
             Some(show_response::Event::Laid(laid)) => match Laid::heard(laid) {
                 Ok(laid) => told(Heard::Laid(laid)),
-                Err(why) => return format!("lunetad said what luneta cannot follow: {why}"),
+                Err(why) => {
+                    return Heard::Lost(format!("lunetad said what luneta cannot follow: {why}"));
+                },
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
-            None => return "lunetad said nothing to luneta's view".to_owned(),
+            None => return Heard::Lost("lunetad said nothing to luneta's view".to_owned()),
         }
+    }
+}
+
+fn ended(status: &Status) -> Heard {
+    match status.code() {
+        Code::NotFound => Heard::Forgotten(refusal(status)),
+        _ => Heard::Lost(refusal(status)),
     }
 }
 
@@ -412,12 +414,26 @@ mod tests {
     }
 
     #[test]
+    fn a_view_ends_forgotten_only_when_lunetad_finds_no_workstream() {
+        let forgotten = Status::not_found("workstream 9 is forgotten");
+        assert_eq!(ended(&forgotten), Heard::Forgotten("workstream 9 is forgotten".to_owned()));
+        let gone = Status::unavailable("the views have stopped");
+        assert_eq!(ended(&gone), Heard::Lost("the views have stopped".to_owned()));
+        assert_eq!(ended(&Status::internal("")), Heard::Lost("Internal error".to_owned()));
+    }
+
+    #[test]
     fn a_view_that_does_not_tile_or_focus_as_one_does_is_not_read() {
         let gap = vec![placed(1, (0, 0, 40, 24), None), placed(2, (41, 0, 39, 24), None)];
         let over = vec![placed(1, (0, 0, 41, 24), None), placed(2, (40, 0, 40, 24), None)];
         let off = vec![placed(1, (0, 0, 40, 24), None), placed(2, (40, 0, 41, 24), None)];
         let twice = vec![placed(1, (0, 0, 40, 24), None), placed(1, (40, 0, 40, 24), None)];
         let shared = vec![placed(1, (0, 0, 40, 24), Some(3)), placed(2, (40, 0, 40, 24), Some(3))];
+        let mut remade = placed(2, (40, 0, 40, 24), Some(3));
+        if let Some(show_response::pane::Found::Key(key)) = &mut remade.found {
+            key.made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+        }
+        let one_id = vec![placed(1, (0, 0, 40, 24), Some(3)), remade];
         let unframed = vec![placed(1, (0, 0, 2, 24), None), placed(2, (2, 0, 78, 24), None)];
         let one = vec![placed(1, (0, 0, 80, 24), None)];
         for refused in [
@@ -426,6 +442,7 @@ mod tests {
             laid(off, Some(1), None),
             laid(twice, Some(1), None),
             laid(shared, Some(1), None),
+            laid(one_id, Some(1), None),
             laid(unframed, Some(1), None),
             laid(halves(), None, None),
             laid(halves(), Some(3), None),

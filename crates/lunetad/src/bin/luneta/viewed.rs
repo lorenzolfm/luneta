@@ -13,7 +13,7 @@ use lunetad::mux::own::attach::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
-use lunetad::{Asked, Found, Heard, Laid, Pane, Rect as Placed, Show, Shown};
+use lunetad::{Asked, Beside, Found, Heard, Laid, Pane, Rect as Placed, Show, Shown};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -60,6 +60,7 @@ enum Moused {
 pub enum Heeded {
     Quiet,
     Note(String),
+    Forgotten(String),
     Lost(String),
 }
 
@@ -136,6 +137,8 @@ impl View {
             (Rows::Whole(lines), _) => lines.clone(),
             (Rows::Changed(rows), Some(screen)) if screen.size == frame.size() => {
                 let mut lines = screen.lines;
+                let count = usize::from(screen.size.rows.get());
+                assert_eq!(lines.len(), count, "a screen holds a line for each of its rows");
                 for (index, line) in rows {
                     lines[usize::from(*index)] = line.clone();
                 }
@@ -180,7 +183,12 @@ impl View {
             Some(Shown::Tiled { .. }) | None => None,
         };
         let shown = |pane: &&Pane| full.is_none_or(|full| full == pane.terminal);
-        laid.panes().iter().filter(shown).map(|pane| (pane, self.placed(pane))).collect()
+        let drawn: Vec<(&Pane, Placed)> =
+            laid.panes().iter().filter(shown).map(|pane| (pane, self.placed(pane))).collect();
+        if full.is_some() {
+            assert_eq!(drawn.len(), 1, "a full view draws only the terminal it is full of");
+        }
+        drawn
     }
 
     fn focused_screen(&self) -> Option<(Rect, TerminalKey, &Screen)> {
@@ -447,12 +455,16 @@ impl Viewed {
         match heard {
             Heard::Laid(laid) => {
                 if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
-                    self.ask(Asked::Open { towards: None, argv: Vec::new() });
+                    self.ask(Asked::Open { beside: Beside::Largest, argv: Vec::new() });
                 }
                 self.watch();
                 Heeded::Quiet
             },
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
+            Heard::Forgotten(why) => {
+                self.show = None;
+                Heeded::Forgotten(why)
+            },
             Heard::Lost(why) => {
                 self.show = None;
                 Heeded::Lost(why)
@@ -502,10 +514,12 @@ impl Viewed {
                 return Heeded::Note(format!("luneta's view of luneta-mux: {why}"));
             },
         };
-        let key = watching.showing.iter().find(|key| key.id == frame.pane()).copied();
-        let Some(key) = key else {
+        watching.viewer.framed();
+        let mut keys = watching.showing.iter().filter(|key| key.id == frame.pane());
+        let Some(key) = keys.next().copied() else {
             return Heeded::Quiet;
         };
+        assert_eq!(keys.next(), None, "a view's keys name each pane of luneta-mux's once");
         match self.view.framed(key, &frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
@@ -551,7 +565,12 @@ impl Viewed {
             return;
         }
         self.opened.insert(workstream);
-        self.ask(Asked::Open { towards: None, argv });
+        self.ask(Asked::Open { beside: Beside::Largest, argv });
+    }
+
+    pub fn open_beside_focused(&mut self, argv: Vec<String>) {
+        self.opened.insert(self.view.workstream);
+        self.ask(Asked::Open { beside: Beside::Focused, argv });
     }
 
     pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<TerminalId, String>) {

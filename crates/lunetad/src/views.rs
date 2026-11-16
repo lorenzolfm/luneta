@@ -72,6 +72,7 @@ pub enum Asked {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Beside {
     Largest,
+    Focused,
     Towards(Towards),
 }
 
@@ -98,6 +99,7 @@ impl Asked {
                 use show_request::open::Beside as Said;
                 let beside = match beside.ok_or("open: it says no side to open beside")? {
                     Said::Largest(()) => Beside::Largest,
+                    Said::Focused(()) => Beside::Focused,
                     Said::Towards(towards) => Beside::Towards(towards_of(towards)?),
                 };
                 if argv.first().is_some_and(String::is_empty) {
@@ -451,6 +453,13 @@ impl Views {
                 let at = focus.ok_or("the view holds no terminal to open beside")?;
                 let room = tree.room(at, towards, terminal, size);
                 let inner = room.ok_or_else(|| format!("terminal {at} has no room beside it"))?;
+                (Placed::Beside { at, towards }, inner)
+            },
+            (Some(tree), Beside::Focused) => {
+                let at = focus.ok_or("the view holds no terminal to open beside")?;
+                let room = tree.room_beside(at, terminal, size);
+                let roomless = || format!("terminal {at} has no room beside it");
+                let (towards, inner) = room.ok_or_else(roomless)?;
                 (Placed::Beside { at, towards }, inner)
             },
             (Some(tree), Beside::Largest) => {
@@ -1033,6 +1042,9 @@ mod tests {
         let largest = || Some(open::Beside::Largest(()));
         let open = show_request::Open { beside: largest(), argv: vec![] };
         let asked = Asked::Open { beside: Beside::Largest, argv: vec![] };
+        assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
+        let open = show_request::Open { beside: Some(open::Beside::Focused(())), argv: vec![] };
+        let asked = Asked::Open { beside: Beside::Focused, argv: vec![] };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let refused = [
             Event::Go(0),

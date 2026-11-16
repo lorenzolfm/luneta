@@ -73,7 +73,10 @@ pub fn add_workstream(
 
 pub fn renamed(from: &str, to: &str) -> Option<Result<(), String>> {
     let path = lunetad::folder::find()?;
-    let projects = kept(&path).ok()?;
+    let projects = match kept(&path) {
+        Ok(projects) => projects,
+        Err(unkept) => return Some(Err(format!("lunetad lists no projects to rename: {unkept}"))),
+    };
     let named = projects.iter().find(|project| project.name == from)?;
     let project = named.id;
     let change = Change::RenameProject(RenameProject { project, to: to.to_owned() });

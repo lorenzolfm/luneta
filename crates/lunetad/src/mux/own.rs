@@ -218,15 +218,7 @@ fn environ() -> Vec<OsString> {
 }
 
 pub fn here() -> Result<Option<OwnPane>, String> {
-    let environ: Vec<OsString> = std::env::vars_os()
-        .map(|(name, value)| {
-            let mut entry = name;
-            entry.push("=");
-            entry.push(value);
-            entry
-        })
-        .collect();
-    here_in(&environ)
+    here_in(&environ())
 }
 
 fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {
