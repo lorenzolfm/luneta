@@ -431,7 +431,7 @@ fn session(
 }
 
 fn own_made(at: OwnKey, mover: Mover, to: &SessionName, cwd: &Directory) -> Result<(), String> {
-    let made = own_sessions::made(to, cwd)?;
+    let made = own_sessions::made(to, cwd).map_err(|unmade| unmade.to_string())?;
     let went = server::keyed(at).and_then(|at| at.went(mover, Place::Session(made)));
     went.map_err(|failure| format!("made {to}, and took no client there: {failure}"))
 }

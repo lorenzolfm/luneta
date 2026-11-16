@@ -61,7 +61,7 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
-use crate::names::{Starts, Taken, Unusable};
+use crate::names::{Holder, Starts, Unusable};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
@@ -1019,7 +1019,7 @@ impl Daemon for Host {
         }
         let made = task::spawn_blocking(move || -> Result<server::Made, Status> {
             names::unused(&name).map_err(|unusable| match unusable {
-                Unusable::Taken(_, Taken::Own) => Status::already_exists(unusable.to_string()),
+                Unusable::Taken(_, Holder::Own) => Status::already_exists(unusable.to_string()),
                 unusable => Status::failed_precondition(unusable.to_string()),
             })?;
             let shell = opens::your_shell();

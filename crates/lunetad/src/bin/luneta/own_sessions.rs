@@ -5,15 +5,14 @@ use std::time::Duration;
 use lunetad::api::{NewOwnRequest, On, OwnSession};
 use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{self, server, OwnId, OwnKey};
-use lunetad::{log, Directory, SessionName};
+use lunetad::{Destination, Directory, SessionName};
 use tonic::{Code, Status};
 
 use crate::daemon;
-use crate::machines::Machine;
 
 const MAKING: Duration = Duration::from_secs(20);
 
-pub fn holding() -> Result<Option<OwnKey>, String> {
+pub fn runs_in() -> Result<Option<OwnKey>, String> {
     own::here().map(|pane| pane.map(|pane| pane.session))
 }
 
@@ -27,16 +26,15 @@ impl Elsewhere {
     }
 }
 
-pub fn elsewhere(to: To, name: &SessionName) -> Result<Elsewhere, String> {
-    match holding() {
-        Ok(held) if held == Some(to.session()) => {
-            Err(format!("luneta runs in {name}, and goes nowhere it shows itself"))
-        },
-        Ok(_) => Ok(Elsewhere(to)),
-        Err(why) => {
-            Err(format!("{why}, so luneta may run in {name}, and goes nowhere it shows itself"))
-        },
+pub fn elsewhere(
+    runs_in: Option<OwnKey>,
+    to: To,
+    name: &SessionName,
+) -> Result<Elsewhere, String> {
+    if runs_in == Some(to.session()) {
+        return Err(format!("luneta runs in {name}, and goes nowhere it shows itself"));
     }
+    Ok(Elsewhere(to))
 }
 
 pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
@@ -49,27 +47,32 @@ pub fn directory(dir: &Path) -> Result<Directory, String> {
     cwd.ok_or_else(|| format!("{} is no directory an own session starts in", dir.display()))
 }
 
-pub fn newest(passed: &[OwnKey]) -> Option<Elsewhere> {
-    let sessions = server::sessions()
-        .inspect_err(|failure| log::say(&format!("no own session to go on in: {failure}")))
-        .ok()?;
-    let held = holding()
-        .inspect_err(|why| log::say(&format!("no own session to go on in: {why}")))
-        .ok()?;
-    let newest = newest_of(sessions.iter().map(server::Listing::key), held, passed)?;
-    let listing = sessions.iter().find(|listing| listing.key() == newest)?;
-    elsewhere(To::Session(newest), &listing.name)
-        .inspect_err(|why| log::say(&format!("no own session to go on in: {why}")))
-        .ok()
+pub fn newest(
+    runs_in: Option<OwnKey>,
+    passed: &[OwnKey],
+) -> Result<Option<Elsewhere>, String> {
+    let sessions = server::sessions().map_err(|failure| failure.to_string())?;
+    let Some(newest) = newest_of(&sessions, server::Listing::key, runs_in, passed) else {
+        return Ok(None);
+    };
+    let to = elsewhere(runs_in, To::Session(newest.key()), &newest.name);
+    Ok(Some(to.expect("newest_of passes over the session luneta runs in")))
 }
 
-fn newest_of(
-    sessions: impl Iterator<Item = OwnKey>,
-    held: Option<OwnKey>,
+fn newest_of<'a, T>(
+    sessions: &'a [T],
+    key: impl Fn(&T) -> OwnKey,
+    runs_in: Option<OwnKey>,
     passed: &[OwnKey],
-) -> Option<OwnKey> {
-    let free = sessions.filter(|key| Some(*key) != held && !passed.contains(key));
-    free.max_by_key(|key| (key.made, key.id))
+) -> Option<&'a T> {
+    let free = sessions.iter().filter(|session| {
+        let key = key(session);
+        Some(key) != runs_in && !passed.contains(&key)
+    });
+    free.max_by_key(|session| {
+        let key = key(session);
+        (key.made, key.id)
+    })
 }
 
 #[derive(Debug)]
@@ -83,12 +86,6 @@ impl fmt::Display for Unmade {
         match self {
             Unmade::Taken(said) | Unmade::Failed(said) => f.write_str(said),
         }
-    }
-}
-
-impl From<Unmade> for String {
-    fn from(unmade: Unmade) -> Self {
-        unmade.to_string()
     }
 }
 
@@ -118,55 +115,71 @@ pub struct First<'a> {
 }
 
 pub fn made(name: &SessionName, cwd: &Directory) -> Result<OwnKey, Unmade> {
-    made_on(&Machine::Local, name, cwd, None)
+    made_here(name, cwd, None)
 }
 
-pub fn made_on(
-    on: &Machine,
+pub fn made_here(
     name: &SessionName,
     cwd: &Directory,
     first: Option<First<'_>>,
 ) -> Result<OwnKey, Unmade> {
-    let folder = lunetad::folder::find()
-        .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("no runtime: {error}"))?;
-    let request = NewOwnRequest {
-        on: match on {
-            Machine::Local => None,
-            Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
-        },
-        name: name.as_str().to_owned(),
-        cwd: cwd.as_str().to_owned(),
-        command: first.as_ref().map_or_else(Vec::new, |first| first.command.to_vec()),
-        tab: first.map(|first| first.tab.to_owned()),
-    };
-    let making = async {
-        let mut daemon = daemon::current(&folder).await?.daemon;
-        let made = daemon.new_own(request).await.map_err(|status| unmade(&status))?;
-        Ok::<_, Unmade>(made.into_inner())
-    };
-    let made = runtime.block_on(async { tokio::time::timeout(MAKING, making).await });
-    let made = made.map_err(|_| format!("lunetad made no session in {}s", MAKING.as_secs()))??;
+    let made = asked(new_own(None, name, cwd, first))?;
     if made.made_at.is_some() {
         let session = OwnSession { id: made.session, made_at: made.made_at };
         return Ok(OwnKey::of(&session).map_err(|why| format!("lunetad made {why}"))?);
     }
     let id = OwnId::new(made.session).ok_or("lunetad made an own session of id 0")?;
-    if let Machine::Remote(destination) = on {
-        let untold = format!("lunetad of {destination} did not say when it made {name}");
-        return Err(Unmade::Failed(untold));
-    }
     match named(name)? {
         Some(key) if key.id == id => Ok(key),
         _ => Err(Unmade::Failed(format!("own session {id}, {name}, no longer runs"))),
     }
 }
 
+pub fn made_there(
+    destination: &Destination,
+    name: &SessionName,
+    cwd: &Directory,
+    first: Option<First<'_>>,
+) -> Result<(), Unmade> {
+    let on = On { destination: destination.to_string() };
+    asked(new_own(Some(on), name, cwd, first)).map(drop)
+}
+
+fn new_own(
+    on: Option<On>,
+    name: &SessionName,
+    cwd: &Directory,
+    first: Option<First<'_>>,
+) -> NewOwnRequest {
+    NewOwnRequest {
+        on,
+        name: name.as_str().to_owned(),
+        cwd: cwd.as_str().to_owned(),
+        command: first.as_ref().map_or_else(Vec::new, |first| first.command.to_vec()),
+        tab: first.map(|first| first.tab.to_owned()),
+    }
+}
+
+fn asked(request: NewOwnRequest) -> Result<lunetad::api::NewOwnResponse, Unmade> {
+    let folder = lunetad::folder::find()
+        .ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to find lunetad in")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("no runtime: {error}"))?;
+    let making = async {
+        let mut daemon = daemon::current(&folder).await?.daemon;
+        let made = daemon.new_own(request).await.map_err(|status| unmade(&status))?;
+        Ok::<_, Unmade>(made.into_inner())
+    };
+    let made = runtime.block_on(async { tokio::time::timeout(MAKING, making).await });
+    made.map_err(|_| format!("lunetad made no session in {}s", MAKING.as_secs()))?
+}
+
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use lunetad::mux::own::OwnMade;
 
     use super::*;
@@ -176,9 +189,30 @@ mod tests {
     }
 
     #[test]
+    fn luneta_goes_anywhere_but_into_the_session_it_runs_in() {
+        use lunetad::mux::own::OwnPane;
+
+        let name = SessionName::parse("project").unwrap();
+        let (here, there) = (key(1, 10), key(2, 20));
+        let into = [
+            To::Session(here),
+            To::Tab { session: here, tab: NonZeroU32::MIN },
+            To::Pane(OwnPane::new(here, 3).unwrap()),
+        ];
+        let refused = "luneta runs in project, and goes nowhere it shows itself";
+        for to in into {
+            assert_eq!(elsewhere(Some(here), to, &name), Err(refused.to_owned()), "{to:?}");
+            assert_eq!(elsewhere(Some(there), to, &name).map(Elsewhere::to), Ok(to));
+            assert_eq!(elsewhere(None, to, &name).map(Elsewhere::to), Ok(to));
+        }
+    }
+
+    #[test]
     fn luneta_goes_on_in_the_newest_own_session_it_did_not_pass() {
         let sessions = [key(1, 10), key(2, 30), key(3, 20)];
-        let newest = |held, passed: &[OwnKey]| newest_of(sessions.into_iter(), held, passed);
+        let newest = |runs_in, passed: &[OwnKey]| {
+            newest_of(&sessions, |key| *key, runs_in, passed).copied()
+        };
         assert_eq!(newest(None, &[]), Some(key(2, 30)));
         assert_eq!(newest(Some(key(2, 30)), &[]), Some(key(3, 20)));
         assert_eq!(newest(None, &[key(2, 30)]), Some(key(3, 20)));

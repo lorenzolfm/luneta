@@ -57,7 +57,7 @@ use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::prune;
-use crate::own_sessions::{self, Elsewhere};
+use crate::own_sessions::{self, Elsewhere, Unmade};
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -72,7 +72,12 @@ use crate::zellij::{self, After, Close, Closes, SessionName, Turned};
 
 pub enum Made {
     Own(Result<Elsewhere, String>),
-    Pulled { menu: u64, on: Machine, session: SessionName, made: Result<OwnKey, String> },
+    Pulled { menu: u64, session: SessionName, made: Result<Pulled, String> },
+}
+
+pub enum Pulled {
+    Here(OwnKey),
+    There(Destination),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,10 +162,10 @@ const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTR
 const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
 
 pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 10] = [
-    (SWAP, "Sidebar or zellij"),
+    (SWAP, "Sidebar or panes"),
     (NEXT, "Next pane"),
     (COLLAPSE, "Collapse sidebar"),
-    (MENU, "Menu over zellij"),
+    (MENU, "Menu over panes"),
     (SESSIONS, "Pick a session"),
     (AGENTS, "Pick an agent"),
     (DIRS, "Pick a directory"),
@@ -180,18 +185,19 @@ impl Focus {
         Focus { side, over: None }
     }
 
-    fn zellij(&self) -> bool {
+    fn session(&self) -> bool {
         match (self.side, &self.over) {
-            (Side::Zellij | Side::Collapsed, None) => true,
+            (Side::Session | Side::Collapsed, None) => true,
             (Side::Sidebar, None) | (_, Some(_)) => false,
         }
     }
 
-    fn zellij_told(&self) -> bool {
+    fn session_told(&self) -> bool {
         match (self.side, &self.over) {
-            (Side::Zellij | Side::Collapsed, None | Some(Over::Dictation(_, Where::Zellij(_)))) => {
-                true
-            },
+            (
+                Side::Session | Side::Collapsed,
+                None | Some(Over::Dictation(_, Where::Session(_))),
+            ) => true,
             (Side::Sidebar, _) | (_, Some(_)) => false,
         }
     }
@@ -199,16 +205,16 @@ impl Focus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {
-    Zellij,
+    Session,
     Sidebar,
     Collapsed,
 }
 
 impl Side {
-    fn zellij(self) -> Side {
+    fn session(self) -> Side {
         match self {
             Side::Collapsed => Side::Collapsed,
-            Side::Zellij | Side::Sidebar => Side::Zellij,
+            Side::Session | Side::Sidebar => Side::Session,
         }
     }
 }
@@ -231,21 +237,21 @@ struct Fetch {
 
 #[derive(Debug)]
 enum Where {
-    Zellij(Option<HereAgent>),
+    Session(Option<HereAgent>),
     Ask(Ask),
     Issue(Issue),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LastPress {
-    Zellij,
+    Session,
     Elsewhere,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
     Nothing,
-    Zellij,
+    Session,
     Selecting,
     Edge { dragged: bool },
     Taken,
@@ -372,6 +378,7 @@ struct App {
     dir: PathBuf,
     ended: bool,
     gave_up: Option<String>,
+    runs_in: Option<OwnKey>,
     own_lost: Vec<OwnKey>,
     deleting: Vec<JoinHandle<()>>,
     naming: Naming,
@@ -389,11 +396,19 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         Ok(runtime) => News::within(runtime),
         Err(why) => News::unshared(why),
     };
-    let start = match session {
-        Some(session) => starts::own(&session, &dir),
-        None => starts::bare(&dir, &news),
+    let start = match (session, own_sessions::runs_in()) {
+        (Some(session), Ok(runs_in)) => {
+            starts::own(&session, &dir, runs_in).map(|to| (to, runs_in))
+        },
+        (None, Ok(runs_in)) => starts::bare(&dir, &news, runs_in).map(|to| (to, runs_in)),
+        (Some(session), Err(why)) => {
+            Err(format!("{why}, so luneta may run in {session}, and goes nowhere it shows itself"))
+        },
+        (None, Err(why)) => {
+            Err(format!("{why}, so luneta may run in any own session, and joins none: unset them"))
+        },
     };
-    let start = match start {
+    let (start, runs_in) = match start {
         Ok(start) => start,
         Err(refusal) => return did_not_start(&refusal),
     };
@@ -428,7 +443,7 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         }
         run_in(
             &mut terminal,
-            start,
+            (start, runs_in),
             news,
             folder,
             unkept,
@@ -488,7 +503,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    session: Elsewhere,
+    (session, runs_in): (Elsewhere, Option<OwnKey>),
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -568,7 +583,7 @@ fn run_in(
         width,
         held: Held::Nothing,
         last_press: LastPress::Elsewhere,
-        focus: Focus::on(Side::Zellij),
+        focus: Focus::on(Side::Session),
         focused,
         burst: None,
         settling: Settling::default(),
@@ -599,6 +614,7 @@ fn run_in(
         dir: dir.to_owned(),
         ended: false,
         gave_up: None,
+        runs_in,
         own_lost: Vec::new(),
         deleting: Vec::new(),
         naming: Naming::Idle,
@@ -1109,31 +1125,31 @@ impl App {
             return;
         }
         if chord == SWAP {
-            let other = if self.focus.zellij() { Side::Sidebar } else { Side::Zellij };
+            let other = if self.focus.session() { Side::Sidebar } else { Side::Session };
             self.give(Focus::on(other));
             return;
         }
         if chord == COLLAPSE {
             let collapsed = self.focus.side == Side::Collapsed;
-            self.give(Focus::on(if collapsed { Side::Zellij } else { Side::Collapsed }));
+            self.give(Focus::on(if collapsed { Side::Session } else { Side::Collapsed }));
             return;
         }
         if chord == NEXT {
             self.next();
             return;
         }
-        if self.focus.zellij() && !self.sidebar.pressed() {
+        if self.focus.session() && !self.sidebar.pressed() {
             if chord == images::KEY && self.key_for_image(key) {
                 return;
             }
-            self.key_to_zellij(key);
+            self.key_to_session(key);
         } else {
             let asked = self.sidebar.key(key, SystemTime::now());
             self.follow(asked);
         }
     }
 
-    fn key_to_zellij(&mut self, key: &KeyEvent) {
+    fn key_to_session(&mut self, key: &KeyEvent) {
         self.right.attached.key(key);
     }
 
@@ -1163,8 +1179,8 @@ impl App {
         self.sidebar.image_going(None);
         match went {
             Went::NoImage { key, on } => {
-                if self.focus.zellij() && self.sidebar.far_agent() == Some(&on) {
-                    self.key_to_zellij(&key);
+                if self.focus.session() && self.sidebar.far_agent() == Some(&on) {
+                    self.key_to_session(&key);
                 }
             },
             Went::Kept { on, path } => {
@@ -1192,13 +1208,13 @@ impl App {
         let at = Position::new(mouse.column, mouse.row);
         self.pointer = Some(at);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        let under = matches!(self.held, Held::Zellij | Held::Selecting);
+        let under = matches!(self.held, Held::Session | Held::Selecting);
         if self.focus.over.is_some() && under && !down {
             if !self.select(mouse) {
                 if let MouseEventKind::Up(_) = mouse.kind {
                     self.held = Held::Nothing;
                 }
-                self.zellij_mouse(mouse);
+                self.session_mouse(mouse);
             }
             return;
         }
@@ -1289,15 +1305,15 @@ impl App {
                 _ => self.held = Held::Nothing,
             }
         }
-        let (sidebar, zellij) = self.areas;
+        let (sidebar, right) = self.areas;
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
             return;
         }
-        let over_zellij = mouse.column >= zellij.x;
-        let held = matches!(self.held, Held::Zellij | Held::Selecting);
-        if held || (over_zellij && !self.sidebar.pressed()) {
+        let over_session = mouse.column >= right.x;
+        let held = matches!(self.held, Held::Session | Held::Selecting);
+        if held || (over_session && !self.sidebar.pressed()) {
             let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
-            if of_a_press && self.last_press != LastPress::Zellij {
+            if of_a_press && self.last_press != LastPress::Session {
                 return;
             }
             if self.select(mouse) {
@@ -1305,19 +1321,19 @@ impl App {
             }
             match mouse.kind {
                 MouseEventKind::Down(_) => {
-                    self.held = Held::Zellij;
-                    self.last_press = LastPress::Zellij;
+                    self.held = Held::Session;
+                    self.last_press = LastPress::Session;
                     self.leave();
                 },
                 MouseEventKind::Up(_) => self.held = Held::Nothing,
                 _ => {},
             }
-            self.zellij_mouse(mouse);
+            self.session_mouse(mouse);
             return;
         }
         if self.focus.side == Side::Collapsed {
             if down {
-                self.give(Focus::on(Side::Zellij));
+                self.give(Focus::on(Side::Session));
                 self.burst = Some(Burst::new(at, Instant::now()));
             }
             return;
@@ -1359,15 +1375,15 @@ impl App {
         }
     }
 
-    fn zellij_mouse(&mut self, mouse: MouseEvent) {
-        let at = self.zellij_cell(mouse);
+    fn session_mouse(&mut self, mouse: MouseEvent) {
+        let at = self.session_cell(mouse);
         let Some(to) = self.right.attached.mouse(mouse, at, self.areas.1) else {
             return;
         };
         let Some(listed) = self.sidebar.own_listed(to.session()) else {
             return self.sidebar.notify("lunetad lists no session luneta's client is in".to_owned());
         };
-        let to = match own_sessions::elsewhere(to, listed.name()) {
+        let to = match own_sessions::elsewhere(self.runs_in, to, listed.name()) {
             Ok(to) => to,
             Err(why) => return self.sidebar.notify(why),
         };
@@ -1378,21 +1394,21 @@ impl App {
         }
     }
 
-    fn zellij_cell(&self, mouse: MouseEvent) -> attached::Spot {
-        let (_, zellij) = self.areas;
-        let column = mouse.column.saturating_sub(zellij.x).min(zellij.width.saturating_sub(1));
-        let row = mouse.row.saturating_sub(zellij.y).min(zellij.height.saturating_sub(1));
+    fn session_cell(&self, mouse: MouseEvent) -> attached::Spot {
+        let (_, right) = self.areas;
+        let column = mouse.column.saturating_sub(right.x).min(right.width.saturating_sub(1));
+        let row = mouse.row.saturating_sub(right.y).min(right.height.saturating_sub(1));
         attached::Spot { row, column }
     }
 
     fn select(&mut self, mouse: MouseEvent) -> bool {
-        let at = self.zellij_cell(mouse);
+        let at = self.session_cell(mouse);
         let own = &mut self.right;
         match (mouse.kind, self.held) {
             (MouseEventKind::Down(_), _) if own.attached.selects(mouse, at) => {
                 own.attached.select_from(at);
                 self.held = Held::Selecting;
-                self.last_press = LastPress::Zellij;
+                self.last_press = LastPress::Session;
                 self.leave();
                 true
             },
@@ -1413,15 +1429,15 @@ impl App {
             },
             (
                 _,
-                Held::Nothing | Held::Zellij | Held::Selecting | Held::Edge { .. } | Held::Taken,
+                Held::Nothing | Held::Session | Held::Selecting | Held::Edge { .. } | Held::Taken,
             ) => false,
         }
     }
 
     fn resize(&mut self, mouse: MouseEvent) -> bool {
-        let (sidebar, zellij) = self.areas;
+        let (sidebar, right) = self.areas;
         if let MouseEventKind::Drag(_) = mouse.kind {
-            let terminal = sidebar.width + zellij.width;
+            let terminal = sidebar.width + right.width;
             self.width.drag(mouse.column.saturating_sub(sidebar.x), terminal);
             self.held = Held::Edge { dragged: true };
             return true;
@@ -1487,12 +1503,13 @@ impl App {
                 zellij::turn(menu, &on, turned, turn, &self.events);
             },
             Asked::StartOwn { starts } => {
+                let runs_in = self.runs_in;
                 self.name_own(move || {
                     let unmade = |why| format!("menu: no own session made: {why}");
                     let (name, _, dir) = lunetad::names::free_at(starts).map_err(unmade)?;
                     let made = own_sessions::made(&name, &dir);
                     let made = made.map_err(|why| unmade(why.to_string()))?;
-                    own_sessions::elsewhere(To::Session(made), &name).map_err(unmade)
+                    own_sessions::elsewhere(runs_in, To::Session(made), &name).map_err(unmade)
                 });
                 self.leave();
             },
@@ -1501,11 +1518,21 @@ impl App {
                     return;
                 }
                 self.naming_on(move || {
-                    let first = own_sessions::First { tab: &name, command: &command };
+                    let first = Some(own_sessions::First { tab: &name, command: &command });
                     let made = caught(|| {
-                        Ok(own_sessions::made_on(&on, &session, &tab_cwd, Some(first))?)
+                        let made = match on {
+                            Machine::Local => own_sessions::made_here(&session, &tab_cwd, first)
+                                .map(Pulled::Here),
+                            Machine::Remote(destination) => {
+                                own_sessions::made_there(&destination, &session, &tab_cwd, first)
+                                    .map(|()| Pulled::There(destination))
+                            },
+                        };
+                        made.map_err(|unmade| match unmade {
+                            Unmade::Taken(said) | Unmade::Failed(said) => said,
+                        })
                     });
-                    Made::Pulled { menu, on, session, made }
+                    Made::Pulled { menu, session, made }
                 });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
@@ -1566,14 +1593,14 @@ impl App {
             Picked::Close => self.give(Focus::on(self.focus.side)),
             Picked::Go { on, place } => {
                 self.go(&on, &place, None);
-                self.give(Focus::on(self.focus.side.zellij()));
+                self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Start { on: Machine::Local, session } => {
                 match own_sessions::directory(&self.dir) {
                     Ok(cwd) => self.make_own(session, cwd),
                     Err(why) => self.sidebar.notify(format!("no own session made: {why}")),
                 }
-                self.give(Focus::on(self.focus.side.zellij()));
+                self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Start { on: Machine::Remote(_), .. }
             | Picked::Make { on: Machine::Remote(_), .. } => {
@@ -1584,7 +1611,7 @@ impl App {
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
                 self.make_own(session, cwd);
-                self.give(Focus::on(self.focus.side.zellij()));
+                self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Plan { on, session, deletes } => {
                 let plan = self.sidebar.plan(&on, &session, deletes);
@@ -1595,7 +1622,7 @@ impl App {
             },
             Picked::Delete { on, act: Act::Leave { session, whose, to } } => {
                 self.go(&on, &to, Some(After::Kill { session, whose }));
-                self.give(Focus::on(self.focus.side.zellij()));
+                self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
         }
@@ -1612,7 +1639,7 @@ impl App {
     }
 
     fn file_issue(&mut self) {
-        let had = self.focus.zellij_told();
+        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
         let Some(Over::Issue(issue)) = open else {
             return;
@@ -1624,7 +1651,7 @@ impl App {
     }
 
     fn close_issue(&mut self) {
-        let had = self.focus.zellij_told();
+        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Issue(_)));
         if let Some(Over::Issue(issue)) = open {
             issue.close(&mut self.unfiled);
@@ -1633,9 +1660,9 @@ impl App {
     }
 
     fn dictate(&mut self) -> bool {
-        let (zellij, had) = (self.focus.zellij(), self.focus.zellij_told());
+        let (on_session, had) = (self.focus.session(), self.focus.session_told());
         let under = match self.focus.over.take() {
-            None if zellij => Where::Zellij(self.sidebar.here_agent()),
+            None if on_session => Where::Session(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
             Some(Over::Issue(issue)) => Where::Issue(issue),
             other => {
@@ -1661,7 +1688,7 @@ impl App {
     }
 
     fn nameable(&self, number: u64, under: &Where) -> Skills {
-        let Where::Zellij(Some(agent)) = under else {
+        let Where::Session(Some(agent)) = under else {
             return Skills::Found(Vec::new());
         };
         let said = move |skills| Event::Nameable { number, skills };
@@ -1703,14 +1730,14 @@ impl App {
     }
 
     fn undictate(&mut self, dictated: Option<Dictated>) {
-        let had = self.focus.zellij_told();
+        let had = self.focus.session_told();
         let open = self.focus.over.take_if(|over| matches!(over, Over::Dictation(..)));
         let Some(Over::Dictation(_, under)) = open else {
             return;
         };
         let side = self.focus.side;
         match under {
-            Where::Zellij(agent) => {
+            Where::Session(agent) => {
                 self.give_from(had, Focus::on(side));
                 let Some(dictated) = dictated else {
                     return;
@@ -1723,7 +1750,7 @@ impl App {
                     self.paste(&paste);
                 }
                 if sends {
-                    self.key_to_zellij(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    self.key_to_session(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 }
             },
             Where::Ask(mut ask) => {
@@ -1801,7 +1828,7 @@ impl App {
             Some(why) => Err(why),
             None => self.sidebar.own_target(place),
         };
-        let target = target.and_then(|to| own_sessions::elsewhere(to, session));
+        let target = target.and_then(|to| own_sessions::elsewhere(self.runs_in, to, session));
         let to = match target {
             Ok(target) => target,
             Err(why) => {
@@ -1829,10 +1856,10 @@ impl App {
         let going = Going { to: to.to(), after };
         self.right = Own { attached, phase: Phase::Coming { going } };
         self.sidebar.attaching(to.to().session());
-        if matches!(self.held, Held::Zellij | Held::Selecting) {
+        if matches!(self.held, Held::Session | Held::Selecting) {
             self.held = Held::Nothing;
         }
-        if !(self.focused && self.focus.zellij_told()) {
+        if !(self.focused && self.focus.session_told()) {
             self.tell_focus(false);
         }
         self.watch();
@@ -1847,6 +1874,7 @@ impl App {
                 self.sidebar.notify(format!("luneta-mux refused: {reason}"));
             },
             Heard::Went(went) => {
+                assert_ne!(Some(went.pane.session), self.runs_in, "it went where luneta runs");
                 let after = own.phase.went(&went);
                 self.sidebar.went_own(went.pane, went.client);
                 if let Some(after) = after {
@@ -1898,10 +1926,11 @@ impl App {
     }
 
     fn make_own(&mut self, session: SessionName, cwd: Directory) {
+        let runs_in = self.runs_in;
         self.name_own(move || {
             let unmade = |why: String| format!("no own session made: {why}");
             let made = own_sessions::made(&session, &cwd).map_err(|why| unmade(why.to_string()))?;
-            own_sessions::elsewhere(To::Session(made), &session).map_err(unmade)
+            own_sessions::elsewhere(runs_in, To::Session(made), &session).map_err(unmade)
         });
     }
 
@@ -1935,33 +1964,25 @@ impl App {
         match made {
             Made::Own(Ok(made)) => self.go_made_own(made),
             Made::Own(Err(why)) => self.sidebar.notify(why),
-            Made::Pulled { menu, on, session, made } => {
-                self.pulled_made(menu, &on, &session, made);
-            },
+            Made::Pulled { menu, session, made } => self.pulled_made(menu, &session, made),
         }
     }
 
-    fn pulled_made(
-        &mut self,
-        menu: u64,
-        on: &Machine,
-        session: &SessionName,
-        made: Result<OwnKey, String>,
-    ) {
+    fn pulled_made(&mut self, menu: u64, session: &SessionName, made: Result<Pulled, String>) {
         let held = self.sidebar.made_for(menu);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
-        match (on, held) {
-            (Machine::Local, Some(sidebar::Held::Open)) => {
-                match own_sessions::elsewhere(To::Session(made), session) {
+        match (made, held) {
+            (Pulled::Here(made), Some(sidebar::Held::Open)) => {
+                match own_sessions::elsewhere(self.runs_in, To::Session(made), session) {
                     Ok(made) => self.go_made_own(made),
                     Err(why) => self.sidebar.notify(format!("menu: made {session}: {why}")),
                 }
             },
-            (Machine::Local, _) => self.sidebar.notify(format!("menu: made {session}")),
-            (Machine::Remote(destination), _) => self.sidebar.notify(format!(
+            (Pulled::Here(_), _) => self.sidebar.notify(format!("menu: made {session}")),
+            (Pulled::There(destination), _) => self.sidebar.notify(format!(
                 "menu: made {session} on {destination}, where luneta goes to no session yet"
             )),
         }
@@ -1977,7 +1998,7 @@ impl App {
     }
 
     fn give(&mut self, focus: Focus) {
-        let had = self.focus.zellij_told();
+        let had = self.focus.session_told();
         self.give_from(had, focus);
     }
 
@@ -1986,7 +2007,7 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
         }
-        let has = focus.zellij_told();
+        let has = focus.session_told();
         self.sidebar.focus(match (&focus.over, focus.side) {
             (None, Side::Sidebar) => Keys::Sidebar,
             (Some(Over::Menu), side) => Keys::Menu { lent: side == Side::Sidebar },
@@ -2011,7 +2032,7 @@ impl App {
                     | Over::Picker(_)
                     | Over::Dictation(..),
                 ),
-                Side::Zellij | Side::Collapsed,
+                Side::Session | Side::Collapsed,
             ) => Keys::Zellij,
         });
         self.focus = focus;
@@ -2035,7 +2056,7 @@ impl App {
             ) => false,
         };
         if leaves {
-            self.give(Focus::on(self.focus.side.zellij()));
+            self.give(Focus::on(self.focus.side.session()));
         }
     }
 
@@ -2050,7 +2071,7 @@ impl App {
             self.pointer = None;
             self.sidebar.let_go();
         }
-        if self.focus.zellij_told() {
+        if self.focus.session_told() {
             self.tell_focus(focused);
         }
     }
@@ -2061,9 +2082,14 @@ impl App {
     }
 
     fn newest_here(&mut self) {
-        match own_sessions::newest(&self.own_lost) {
-            Some(newest) => self.attach(newest, None),
-            None => self.end("no own session runs to go on in"),
+        match own_sessions::newest(self.runs_in, &self.own_lost) {
+            Ok(Some(newest)) => self.attach(newest, None),
+            Ok(None) => self.end("no own session runs to go on in"),
+            Err(why) => {
+                let why = format!("no own session to go on in: {why}");
+                self.end(&why);
+                self.gave_up = Some(why);
+            },
         }
     }
 
@@ -2094,9 +2120,9 @@ impl App {
         terminal.draw(|frame| {
             let collapsed = self.focus.side == Side::Collapsed;
             let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
-            let (sidebar, zellij) = areas(frame.area(), own);
-            self.areas = (sidebar, zellij);
-            let size = window(zellij);
+            let (sidebar, right) = areas(frame.area(), own);
+            self.areas = (sidebar, right);
+            let size = window(right);
             self.right.attached.resize(size.columns, size.lines);
             let buffer = frame.buffer_mut();
             let beside = if collapsed {
@@ -2106,37 +2132,37 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let cursor = self.right.attached.draw(buffer, zellij);
+            let cursor = self.right.attached.draw(buffer, right);
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
-                    briefing.draw(buffer, zellij, now);
+                    briefing.draw(buffer, right, now);
                     Drawn::Nothing
                 },
                 Some(Over::Ask(ask)) => {
-                    ask.draw(buffer, zellij, now);
+                    ask.draw(buffer, right, now);
                     Drawn::Nothing
                 },
                 Some(Over::Issue(issue)) => {
-                    issue.draw(buffer, zellij, now);
+                    issue.draw(buffer, right, now);
                     Drawn::Nothing
                 },
-                Some(Over::Picker(picker)) => picker.draw(buffer, zellij, now),
+                Some(Over::Picker(picker)) => picker.draw(buffer, right, now),
                 Some(Over::Dictation(dictation, under)) => {
                     match under {
-                        Where::Ask(ask) => ask.draw(buffer, zellij, now),
-                        Where::Issue(issue) => issue.draw(buffer, zellij, now),
-                        Where::Zellij(_) => {},
+                        Where::Ask(ask) => ask.draw(buffer, right, now),
+                        Where::Issue(issue) => issue.draw(buffer, right, now),
+                        Where::Session(_) => {},
                     }
-                    dictation.draw(buffer, zellij, (now, Instant::now()));
+                    dictation.draw(buffer, right, (now, Instant::now()));
                     Drawn::Nothing
                 },
                 Some(Over::Note(note)) => {
-                    menu::draw_note(buffer, zellij, note);
+                    menu::draw_note(buffer, right, note);
                     Drawn::Nothing
                 },
                 Some(Over::Menu) => {
                     let floating = self.sidebar.floating();
-                    floating.map_or_default(|menu| menu.draw(buffer, zellij, now))
+                    floating.map_or_default(|menu| menu.draw(buffer, right, now))
                 },
                 None => beside,
             };
@@ -2144,7 +2170,7 @@ impl App {
                 drawn.light(buffer, pointer);
                 self.sidebar.aloud_buttons().light(buffer, pointer);
             }
-            if self.focus.zellij()
+            if self.focus.session()
                 && let Some(cursor) = cursor
             {
                 frame.set_cursor_position(cursor);
@@ -2156,12 +2182,11 @@ impl App {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
         }
-        let title = self.sidebar.own_title();
-        if title != self.title {
-            if let Some(title) = &title {
-                execute!(terminal.backend_mut(), SetTitle(title))?;
-            }
-            self.title = title;
+        if let Some(title) = self.sidebar.own_title()
+            && self.title.as_deref() != Some(title)
+        {
+            execute!(terminal.backend_mut(), SetTitle(title))?;
+            self.title = Some(title.to_owned());
         }
         Ok(())
     }
@@ -2333,13 +2358,13 @@ mod tests {
         let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
         let mut screen = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
-        let zellij = Position::new(15, 3);
-        frame(&mut terminal, "⠋", zellij);
+        let right = Position::new(15, 3);
+        frame(&mut terminal, "⠋", right);
         for write in written.take() {
             parser.advance(&mut screen, &write);
         }
         assert_eq!(shown(&screen), Some((3, 15)));
-        frame(&mut terminal, "⠙", zellij);
+        frame(&mut terminal, "⠙", right);
         let writes = written.take();
         assert!(writes.len() > 1, "a frame goes out in more than one write");
         for write in writes {

@@ -17,7 +17,7 @@ struct Running {
     seen: Option<SystemTime>,
 }
 
-pub fn own(named: &SessionName, dir: &Path) -> Result<Elsewhere, String> {
+pub fn own(named: &SessionName, dir: &Path, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
     let running = zellij::running()?;
     if running.iter().any(|(name, _)| name == named) {
         return Err(format!("{named} is a session of zellij's: name another for an own one"));
@@ -33,16 +33,13 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<Elsewhere, String> {
             Err(Unmade::Failed(why)) => return Err(format!("no own session made: {why}")),
         }
     };
-    own_sessions::elsewhere(To::Session(session), named)
+    own_sessions::elsewhere(runs_in, To::Session(session), named)
 }
 
-pub fn bare(dir: &Path, news: &News) -> Result<Elsewhere, String> {
+pub fn bare(dir: &Path, news: &News, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
     let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
-    let held = own_sessions::holding().map_err(|why| {
-        format!("{why}, so luneta may run in any own session, and joins none: unset them")
-    })?;
-    let free = sessions.iter().filter(|listing| Some(listing.key()) != held);
+    let free = sessions.iter().filter(|listing| Some(listing.key()) != runs_in);
     let free: Vec<Running> = free
         .map(|listing| Running {
             key: listing.key(),
@@ -51,20 +48,19 @@ pub fn bare(dir: &Path, news: &News) -> Result<Elsewhere, String> {
         })
         .collect();
     if let Some(joined) = to_join(&free, named.as_ref()) {
-        let name = free.iter().find(|session| session.key == joined).map(|session| &session.name);
-        let name = name.expect("luneta joins a session it found");
-        return own_sessions::elsewhere(To::Session(joined), name);
+        let to = own_sessions::elsewhere(runs_in, To::Session(joined.key), &joined.name);
+        return Ok(to.expect("a bare luneta joins none of the sessions it runs in"));
     }
     match named {
-        Some(named) => own(&named, dir),
+        Some(named) => own(&named, dir, runs_in),
         None => Err(format!("{} names no own session: name one", dir.display())),
     }
 }
 
-fn to_join(running: &[Running], named: Option<&SessionName>) -> Option<OwnKey> {
+fn to_join<'a>(running: &'a [Running], named: Option<&SessionName>) -> Option<&'a Running> {
     let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key.made);
     let ranked = |a: &&Running, b: &&Running| (rank(a), &a.name).cmp(&(rank(b), &b.name));
-    running.iter().max_by(ranked).map(|session| session.key)
+    running.iter().max_by(ranked)
 }
 
 #[cfg(test)]
@@ -93,11 +89,11 @@ mod tests {
         let named = named.map(name);
         let mut order = Vec::with_capacity(sessions.len());
         for _ in 0..sessions.len() {
-            let joined = to_join(&sessions, named.as_ref()).unwrap();
+            let joined = to_join(&sessions, named.as_ref()).unwrap().key;
             sessions.retain(|session| session.key != joined);
             order.push(joined.id.get());
         }
-        assert_eq!(to_join(&sessions, named.as_ref()), None);
+        assert!(to_join(&sessions, named.as_ref()).is_none());
         order
     }
 

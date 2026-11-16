@@ -857,6 +857,7 @@ pub struct Sidebar {
     this: String,
     away: Option<String>,
     seat: Option<OwnSeat>,
+    seat_name: Option<String>,
     on: Machine,
     folds: Folds,
     news: News,
@@ -1283,9 +1284,8 @@ impl Sidebar {
         self.seat
     }
 
-    pub fn own_title(&self) -> Option<String> {
-        let seat = self.own_seat()?;
-        Some(self.own_listed(seat.session())?.name.to_string())
+    pub fn own_title(&self) -> Option<&str> {
+        self.seat_name.as_deref()
     }
 
     pub fn own_listed(&self, key: OwnKey) -> Option<Listed> {
@@ -1558,6 +1558,10 @@ impl Sidebar {
     }
 
     fn rebuild(&mut self) {
+        let seat_listed = self.own_seat().and_then(|seat| self.own_listed(seat.session()));
+        if let Some(listed) = seat_listed {
+            self.seat_name = Some(listed.name.to_string());
+        }
         let here_pane = self.here_place().ok();
         let aloud = self.aloud.as_ref().and_then(aloud::Shown::from);
         let Some(host) = &self.host else {
@@ -2759,8 +2763,8 @@ impl Sidebar {
                     Asked::Open { menu: number, on, open: opened }
                 } else {
                     self.drop_menu(number);
-                    let zellij_s = format!("{session} is one of zellij's sessions");
-                    self.say(format!("menu: {zellij_s}: {}", menu::OWN_ONLY));
+                    let refused = format!("{session} is one of zellij's sessions");
+                    self.say(format!("menu: {refused}: {}", menu::OWN_ONLY));
                     Asked::Nothing
                 }
             },
@@ -5353,6 +5357,19 @@ mod tests {
     }
 
     #[test]
+    fn the_title_keeps_the_name_of_the_last_session_listed_where_luneta_sits() {
+        let mut sidebar = own_two_sessions();
+        assert_eq!(sidebar.own_title(), None);
+        sit(&mut sidebar, &own_pane_of("older", 1, 10, 1));
+        assert_eq!(sidebar.own_title(), Some("older"));
+        let unlisted = OwnKey { id: OwnId::new(3).unwrap(), made: OwnMade::from_nanos(0) };
+        sidebar.attaching(unlisted);
+        assert_eq!(sidebar.own_title(), Some("older"));
+        sit(&mut sidebar, &own_pane_of("newer", 2, 20, 1));
+        assert_eq!(sidebar.own_title(), Some("newer"));
+    }
+
+    #[test]
     fn the_next_pane_is_the_one_listed_after_luneta_s() {
         let older = |pane| own_pane_of("older", 1, 10, pane);
         let newer = own_pane_of("newer", 2, 20, 1);
@@ -7137,7 +7154,7 @@ mod tests {
             " n p  new pane",
             " d d  delete the row",
             " BS   back a group",
-            " Ctrl a       Sidebar or zellij",
+            " Ctrl a       Sidebar or panes",
             " Alt Shift u  Stop reading",
         ] {
             assert!(listed.iter().any(|shown| shown == line), "{line:?} in {listed:#?}");
@@ -8052,7 +8069,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_floats_over_zellij_for_the_pane_zellij_is_on() {
+    fn the_menu_floats_over_the_session_for_the_pane_luneta_is_on() {
         let mut sidebar = fresh();
         let mut host = host(
             vec![
@@ -8174,7 +8191,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_over_zellij_says_over_zellij_what_went_wrong() {
+    fn the_menu_over_the_session_says_over_it_what_went_wrong() {
         let mut sidebar = fresh();
         let unknown = Pane { cwd: None, ..pane(1, 0, "/w/b", "fish") };
         sidebar.heard(host(vec![own_session("only", 1, 10, vec![unknown])], Vec::new()));

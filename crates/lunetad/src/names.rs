@@ -90,7 +90,7 @@ fn home() -> Result<Directory, String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Taken {
+pub enum Holder {
     Zellij,
     Kept,
     Own,
@@ -98,18 +98,18 @@ pub enum Taken {
 
 #[derive(Debug)]
 pub enum Unusable {
-    Taken(SessionName, Taken),
+    Taken(SessionName, Holder),
     Unknown(String),
 }
 
 impl fmt::Display for Unusable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unusable::Taken(to, Taken::Zellij) => write!(f, "{to} runs already"),
-            Unusable::Taken(to, Taken::Kept) => {
+            Unusable::Taken(to, Holder::Zellij) => write!(f, "{to} runs already"),
+            Unusable::Taken(to, Holder::Kept) => {
                 write!(f, "zellij keeps {to}, which ended, to bring back")
             },
-            Unusable::Taken(to, Taken::Own) => write!(f, "{to} runs already, as an own session"),
+            Unusable::Taken(to, Holder::Own) => write!(f, "{to} runs already, as an own session"),
             Unusable::Unknown(why) => f.write_str(why),
         }
     }
@@ -125,7 +125,7 @@ pub fn unused(to: &SessionName) -> Result<SystemTime, Unusable> {
     let since = unused_by_zellij(to)?;
     let named = server::named(to).map_err(|failure| Unusable::Unknown(failure.to_string()))?;
     if named.is_some() {
-        return Err(Unusable::Taken(to.clone(), Taken::Own));
+        return Err(Unusable::Taken(to.clone(), Holder::Own));
     }
     Ok(since)
 }
@@ -134,12 +134,12 @@ pub fn unused_by_zellij(to: &SessionName) -> Result<SystemTime, Unusable> {
     let since = SystemTime::now();
     let running = running_in(&Zellij::socket_folder()).map_err(Unusable::Unknown)?;
     if running.iter().any(|(name, _)| name == to) {
-        return Err(Unusable::Taken(to.clone(), Taken::Zellij));
+        return Err(Unusable::Taken(to.clone(), Holder::Zellij));
     }
     let unknown =
         |why| Unusable::Unknown(format!("luneta cannot tell whether zellij keeps {to}: {why}"));
     if Zellij::kept().map_err(unknown)?.contains(to) {
-        return Err(Unusable::Taken(to.clone(), Taken::Kept));
+        return Err(Unusable::Taken(to.clone(), Holder::Kept));
     }
     Ok(since)
 }
