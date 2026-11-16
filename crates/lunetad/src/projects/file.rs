@@ -7,8 +7,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Below, Change, Dir, Id, Name, Project, Projects, Workstream};
-use super::{NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, WORKSTREAMS_MAX};
+use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
+use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Runs, Session, Terminal};
+use super::{TerminalId, WorkstreamId};
+use super::{View, Workstream};
+use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
+use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
+use crate::agent::Harness;
 use crate::core::Command;
 use crate::log;
 use crate::state::{self, Unset};
@@ -21,7 +26,9 @@ const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+const WITHOUT_VIEWS: u32 = 1;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -31,9 +38,19 @@ const NAME_BYTES_MAX: usize = CHAR_BYTES_MAX * NAME_CHARS_MAX;
 
 const ENTRY_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + NAME_BYTES_MAX) + 256;
 
-const FILE_BYTES_MAX: usize = 8 * 1024 * 1024;
+const TERMINAL_BYTES_MAX: usize =
+    ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + LINE_BYTES_MAX + SESSION_BYTES_MAX) + 256;
 
-const _: () = assert!((PROJECTS_MAX + WORKSTREAMS_MAX) * ENTRY_BYTES_MAX <= FILE_BYTES_MAX);
+const SPLIT_BYTES_MAX: usize = 128;
+
+const FILE_BYTES_MAX: usize = 32 * 1024 * 1024;
+
+const _: () = assert!(
+    (PROJECTS_MAX + WORKSTREAMS_MAX) * ENTRY_BYTES_MAX
+        + TERMINALS_MAX * TERMINAL_BYTES_MAX
+        + WORKSTREAMS_MAX * NODES_MAX * SPLIT_BYTES_MAX
+        <= FILE_BYTES_MAX
+);
 
 #[derive(Deserialize)]
 struct Versioned {
@@ -65,6 +82,67 @@ struct KeptWorkstream {
     name: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     below: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<KeptView>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full: Option<String>,
+    tree: Vec<KeptNode>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+enum KeptNode {
+    Split(KeptSplit),
+    Terminal(KeptTerminal),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptSplit {
+    towards: KeptTowards,
+    share: u32,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum KeptTowards {
+    Right,
+    Down,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptTerminal {
+    id: String,
+    folder: String,
+    runs: KeptRuns,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+enum KeptRuns {
+    Shell,
+    Command(String),
+    Agent(KeptAgent),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptAgent {
+    harness: KeptHarness,
+    session: String,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum KeptHarness {
+    ClaudeCode,
+    Pi,
 }
 
 pub struct Store {
@@ -73,7 +151,7 @@ pub struct Store {
 }
 
 enum Keeping {
-    Kept { file: PathBuf, projects: Projects, _lock: File },
+    Kept { file: PathBuf, projects: Projects, written: Projects, _lock: File },
     Unkept(String),
 }
 
@@ -108,23 +186,70 @@ impl Store {
         }
     }
 
+    #[must_use]
+    pub fn projects(&self) -> Option<&Projects> {
+        match &self.keeping {
+            Keeping::Kept { projects, .. } => Some(projects),
+            Keeping::Unkept(_) => None,
+        }
+    }
+
+    pub fn fresh(&self) -> Result<TerminalId, Failed> {
+        match &self.keeping {
+            Keeping::Kept { projects, .. } => {
+                let fresh = projects.fresh(&mut Id::random);
+                fresh.map(TerminalId::new).map_err(Failed::Refused)
+            },
+            Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
+        }
+    }
+
     pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
-        let (file, projects) = match &mut self.keeping {
-            Keeping::Kept { file, projects, .. } => (file, projects),
+        let at_once = change.kept_at_once();
+        let projects = match &mut self.keeping {
+            Keeping::Kept { projects, .. } => projects,
             Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
         };
-        if let Err(why) = unchanged(file, projects) {
+        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
+        if changed == *projects {
+            return Ok(made);
+        }
+        if at_once {
+            self.written_as(&changed)?;
+        }
+        let Keeping::Kept { projects, .. } = &mut self.keeping else {
+            unreachable!("projects written are kept");
+        };
+        *projects = changed;
+        self.tell()?;
+        Ok(made)
+    }
+
+    pub fn flush(&mut self) -> Result<(), Failed> {
+        let Keeping::Kept { projects, written, .. } = &self.keeping else {
+            return Ok(());
+        };
+        if projects == written {
+            return Ok(());
+        }
+        let projects = projects.clone();
+        self.written_as(&projects)
+    }
+
+    fn written_as(&mut self, changed: &Projects) -> Result<(), Failed> {
+        let Keeping::Kept { file, written, .. } = &mut self.keeping else {
+            unreachable!("only kept projects are written");
+        };
+        if let Err(why) = unchanged(file, written) {
             log::say(&why);
             self.keeping = Keeping::Unkept(why.clone());
             let _ = self.tell();
             return Err(Failed::NotKept(why));
         }
-        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
         let unwritten = |error: io::Error| Failed::Unwritten(format!("{}: {error}", file.display()));
-        write(file, &changed).map_err(unwritten)?;
-        *projects = changed;
-        self.tell()?;
-        Ok(made)
+        write(file, changed).map_err(unwritten)?;
+        *written = changed.clone();
+        Ok(())
     }
 
     fn tell(&self) -> Result<(), Failed> {
@@ -143,7 +268,10 @@ impl Keeping {
             Err(why) => return Keeping::Unkept(why),
         };
         match read(&file) {
-            Ok(projects) => Keeping::Kept { file, projects, _lock: lock },
+            Ok(projects) => {
+                let written = projects.clone();
+                Keeping::Kept { file, projects, written, _lock: lock }
+            },
             Err(why) => Keeping::Unkept(left(&file, &why)),
         }
     }
@@ -199,10 +327,15 @@ fn read(file: &Path) -> Result<Projects, String> {
 
 fn parse(text: &str) -> Result<Projects, String> {
     let Versioned { version } = serde_json::from_str(text).map_err(|error| error.to_string())?;
-    if version != VERSION {
-        return Err(format!("it is of version {version}, and this lunetad reads only {VERSION}"));
+    if version != VERSION && version != WITHOUT_VIEWS {
+        let read = format!("this lunetad reads only {WITHOUT_VIEWS} and {VERSION}");
+        return Err(format!("it is of version {version}, and {read}"));
     }
     let kept: Kept = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let workstreams = kept.projects.iter().flat_map(|project| &project.workstreams);
+    if version == WITHOUT_VIEWS && workstreams.into_iter().any(|it| it.view.is_some()) {
+        return Err(format!("it is of version {WITHOUT_VIEWS}, which holds no views"));
+    }
     let projects = kept.projects.into_iter().map(KeptProject::read);
     Projects::checked(projects.collect::<Result<_, _>>()?)
 }
@@ -230,10 +363,16 @@ impl KeptProject {
 
 impl KeptWorkstream {
     fn read(self) -> Result<Workstream, String> {
+        let id: WorkstreamId = self.id.parse()?;
+        let view = match self.view {
+            None => View::default(),
+            Some(view) => view.read().map_err(|why| format!("workstream {id}'s view: {why}"))?,
+        };
         Ok(Workstream {
-            id: self.id.parse()?,
+            id,
             renamed: self.name.as_deref().map(Name::parse).transpose()?,
             below: Below::parse(&self.below)?,
+            view,
         })
     }
 
@@ -242,6 +381,95 @@ impl KeptWorkstream {
             id: workstream.id.to_string(),
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
             below: workstream.below.0.clone(),
+            view: KeptView::of(&workstream.view),
+        }
+    }
+}
+
+impl KeptView {
+    fn read(self) -> Result<View, String> {
+        let full = self.full.as_deref().map(str::parse).transpose()?;
+        let tree = self.tree.into_iter().map(|node| match node {
+            KeptNode::Split(KeptSplit { towards, share }) => {
+                Ok(Preordered::Split { towards: towards.read(), share })
+            },
+            KeptNode::Terminal(terminal) => terminal.read().map(Preordered::Pane),
+        });
+        View::read(tree.collect::<Result<_, String>>()?, full)
+    }
+
+    fn of(view: &View) -> Option<KeptView> {
+        let tree = view.tree()?.preorder().into_iter().map(|node| match node {
+            Preordered::Split { towards, share } => {
+                KeptNode::Split(KeptSplit { towards: KeptTowards::of(towards), share })
+            },
+            Preordered::Pane(terminal) => KeptNode::Terminal(KeptTerminal::of(terminal)),
+        });
+        Some(KeptView { full: view.full().map(|full| full.to_string()), tree: tree.collect() })
+    }
+}
+
+impl KeptTowards {
+    fn read(self) -> Towards {
+        match self {
+            KeptTowards::Right => Towards::Right,
+            KeptTowards::Down => Towards::Down,
+        }
+    }
+
+    fn of(towards: Towards) -> KeptTowards {
+        match towards {
+            Towards::Right => KeptTowards::Right,
+            Towards::Down => KeptTowards::Down,
+        }
+    }
+}
+
+impl KeptTerminal {
+    fn read(self) -> Result<Terminal, String> {
+        let id: TerminalId = self.id.parse()?;
+        let why = |why: String| format!("terminal {id}: {why}");
+        let folder = Dir::parse(&self.folder).map_err(why)?;
+        let runs = match self.runs {
+            KeptRuns::Shell => Runs::Shell,
+            KeptRuns::Command(line) => Runs::Command(Line::parse(&line).map_err(why)?),
+            KeptRuns::Agent(KeptAgent { harness, session }) => Runs::Agent {
+                harness: harness.read(),
+                session: Session::parse(&session).map_err(why)?,
+            },
+        };
+        Ok(Terminal::new(id, folder, runs))
+    }
+
+    fn of(terminal: &Terminal) -> KeptTerminal {
+        let runs = match terminal.runs() {
+            Runs::Shell => KeptRuns::Shell,
+            Runs::Command(line) => KeptRuns::Command(line.as_str().to_owned()),
+            Runs::Agent { harness, session } => KeptRuns::Agent(KeptAgent {
+                harness: KeptHarness::of(*harness),
+                session: session.as_str().to_owned(),
+            }),
+        };
+        KeptTerminal {
+            id: terminal.id().to_string(),
+            folder: terminal.folder().as_str().to_owned(),
+            runs,
+        }
+    }
+}
+
+impl KeptHarness {
+    fn read(self) -> Harness {
+        match self {
+            KeptHarness::ClaudeCode => Harness::ClaudeCode,
+            KeptHarness::Pi => Harness::Pi,
+        }
+    }
+
+    fn of(harness: Harness) -> KeptHarness {
+        match harness {
+            Harness::ClaudeCode => KeptHarness::ClaudeCode,
+            Harness::Pi => KeptHarness::Pi,
         }
     }
 }
@@ -277,6 +505,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
+    use super::super::{Placed, ProjectId};
     use super::*;
 
     fn dir(text: &str) -> Dir {
@@ -310,7 +539,7 @@ mod tests {
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
         let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
-        let vault = made.unwrap().unwrap();
+        let vault = ProjectId::new(made.unwrap().unwrap());
         store.change(Change::AddProject { dir: dir("/w/luneta"), name: None }).unwrap();
         let top = dir("/home/me/Vault");
         store.change(Change::AddWorkstream { project: vault, folder: top, name: None }).unwrap();
@@ -343,14 +572,15 @@ mod tests {
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
-        let top = Change::AddWorkstream { project: ids[0], folder: dir("/w/luneta"), name: None };
+        let project = ProjectId::new(ids[0]);
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(top, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
         let folder = dir("/w/luneta/main");
-        let main = Change::AddWorkstream { project: ids[0], folder, name: named };
+        let main = Change::AddWorkstream { project, folder, name: named };
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let want = r#"{
-  "version": 1,
+  "version": 2,
   "projects": [
     {
       "id": "0000000000000001",
@@ -371,7 +601,112 @@ mod tests {
 }
 "#;
         assert_eq!(written(&projects), want);
+        assert_eq!(parse(want), Ok(projects.clone()));
+        let before = want.replace(r#""version": 2"#, r#""version": 1"#);
+        assert_eq!(parse(&before), Ok(projects));
+    }
+
+    #[test]
+    fn a_view_is_kept_as_its_terminals_in_preorder_with_what_each_runs() {
+        let mut projects = Projects::default();
+        let ids = [1, 2].map(|id| Id::of(id).unwrap());
+        let mut drawn = ids.into_iter();
+        let mut draw = || Ok(drawn.next().unwrap());
+        let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
+        (projects, _) = projects.changed(change, &mut draw).unwrap();
+        let project = ProjectId::new(ids[0]);
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
+        (projects, _) = projects.changed(top, &mut draw).unwrap();
+        let workstream = WorkstreamId::new(ids[1]);
+        let size = super::super::Size::of(80, 24).unwrap();
+        let [shell, vim, agent] = [4, 5, 6].map(|id| TerminalId::of(id).unwrap());
+        let runs = [
+            (shell, Runs::Shell, Placed::Alone),
+            (vim, Runs::Command(Line::parse("vim notes").unwrap()), Placed::Beside {
+                at: shell,
+                towards: Towards::Right,
+            }),
+            (
+                agent,
+                Runs::Agent {
+                    harness: Harness::ClaudeCode,
+                    session: Session::parse("7c22-ab").unwrap(),
+                },
+                Placed::Beside { at: vim, towards: Towards::Down },
+            ),
+        ];
+        for (id, runs, placed) in runs {
+            let terminal = Terminal::new(id, dir("/w/luneta/main"), runs);
+            let open = Change::Open { workstream, terminal, placed, size };
+            (projects, _) = projects.changed(open, &mut draw).unwrap();
+        }
+        let fill = Change::Fill { workstream, full: Some(vim) };
+        (projects, _) = projects.changed(fill, &mut draw).unwrap();
+        let want = r#"{
+  "version": 2,
+  "projects": [
+    {
+      "id": "0000000000000001",
+      "name": "luneta",
+      "dir": "/w/luneta",
+      "workstreams": [
+        {
+          "id": "0000000000000002",
+          "view": {
+            "full": "0000000000000005",
+            "tree": [
+              {
+                "split": {
+                  "towards": "right",
+                  "share": 500000
+                }
+              },
+              {
+                "terminal": {
+                  "id": "0000000000000004",
+                  "folder": "/w/luneta/main",
+                  "runs": "shell"
+                }
+              },
+              {
+                "split": {
+                  "towards": "down",
+                  "share": 500000
+                }
+              },
+              {
+                "terminal": {
+                  "id": "0000000000000005",
+                  "folder": "/w/luneta/main",
+                  "runs": {
+                    "command": "vim notes"
+                  }
+                }
+              },
+              {
+                "terminal": {
+                  "id": "0000000000000006",
+                  "folder": "/w/luneta/main",
+                  "runs": {
+                    "agent": {
+                      "harness": "claude-code",
+                      "session": "7c22-ab"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+"#;
+        assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects));
+        let before = want.replace(r#""version": 2"#, r#""version": 1"#);
+        assert_eq!(parse(&before), Err("it is of version 1, which holds no views".to_owned()));
     }
 
     #[test]
@@ -379,8 +714,8 @@ mod tests {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 2, "projects": []}"#, "of version 2, and this lunetad reads only 1"),
-            (r#"{"version": 1, "projects": [], "views": []}"#, "unknown field `views`"),
+            (r#"{"version": 3, "projects": []}"#, "version 3, and this lunetad reads only 1 and 2"),
+            (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
                 r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a"},
@@ -392,6 +727,30 @@ mod tests {
                 r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "below": "../b"}]}]}"#,
                 "`..`",
+            ),
+            (
+                r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "view": {"tree": [{"terminal": {
+                "id": "0000000000000001", "folder": "/a", "runs": "shell"}}]}}]}]}"#,
+                "comes twice",
+            ),
+            (
+                r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "view": {"full": "0000000000000003",
+                "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
+                "runs": "shell"}}]}}]}]}"#,
+                "a view of one terminal shows it whole already",
+            ),
+            (
+                r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "view": {"tree": []}}]}]}"#,
+                "workstream 0000000000000002's view: a view holds no terminal",
+            ),
+            (
+                r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "view": {"tree": [{"terminal": {
+                "id": "0000000000000003", "folder": "/a", "runs": {"command": "a\u0007"}}}]}}]}]}"#,
+                "terminal 0000000000000003: a command line holds a control character",
             ),
         ];
         for (text, why) in refused {
@@ -419,7 +778,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, " ".repeat(FILE_BYTES_MAX + 1)).unwrap();
         let store = Store::at(Ok(file), channel().0).unwrap();
-        assert!(store.unkept().unwrap().contains("over 8388608 bytes"));
+        assert!(store.unkept().unwrap().contains("over 33554432 bytes"));
     }
 
     #[test]
@@ -524,5 +883,43 @@ mod tests {
         assert_eq!(store.unkept(), Some(why.as_str()));
         assert_eq!(heard(&commands).last(), Some(&Err(why)));
         assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+    }
+
+    #[test]
+    fn a_change_to_a_view_alone_is_written_when_flushed_or_with_the_next_change() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
+        let project = ProjectId::new(project.unwrap().unwrap());
+        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
+        let size = super::super::Size::of(80, 24).unwrap();
+        let [one, two] = [store.fresh().unwrap(), TerminalId::of(u64::MAX).unwrap()];
+        let opened = |id, placed| {
+            let terminal = Terminal::new(id, dir("/a"), Runs::Shell);
+            Change::Open { workstream, terminal, placed, size }
+        };
+        store.change(opened(one, Placed::Alone)).unwrap();
+        let beside = Placed::Beside { at: one, towards: Towards::Right };
+        store.change(opened(two, beside)).unwrap();
+        let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
+        let full = |projects: &Projects| projects.find(workstream).unwrap().1.view().full();
+
+        store.change(Change::Fill { workstream, full: Some(two) }).unwrap();
+        assert_eq!(full(store.projects().unwrap()), Some(two));
+        assert_eq!(full(&read()), None, "a fill waits for the flush");
+        let told = heard(&commands).pop().unwrap().unwrap();
+        assert_eq!(full(&told), Some(two), "the core hears a fill at once");
+        store.flush().unwrap();
+        assert_eq!(full(&read()), Some(two));
+
+        store.change(Change::Fill { workstream, full: None }).unwrap();
+        store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
+        let kept = *store.projects().unwrap() == read();
+        assert!(kept, "a change kept at once takes the rest along");
+        store.flush().unwrap();
+        assert_eq!(read(), *store.projects().unwrap());
     }
 }

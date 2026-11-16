@@ -734,6 +734,15 @@ impl Daemon for StandIn {
     async fn say(&self, _: Request<api::SayRequest>) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("a stand-in reads nothing aloud"))
     }
+
+    type ShowStream = tokio_stream::Empty<Result<api::ShowResponse, Status>>;
+
+    async fn show(
+        &self,
+        _: Request<Streaming<api::ShowRequest>>,
+    ) -> Result<Response<Self::ShowStream>, Status> {
+        Err(Status::unimplemented("a stand-in shows no view"))
+    }
 }
 
 #[test]

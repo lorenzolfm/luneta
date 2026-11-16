@@ -43,6 +43,7 @@ service Daemon {
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc NewOwn(NewOwnRequest) returns (NewOwnResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
+  rpc Show(stream ShowRequest) returns (stream ShowResponse);
 }
 
 message On {
@@ -1014,4 +1015,113 @@ message ChangeProjectsRequest {
 
 message ChangeProjectsResponse {
   optional fixed64 made = 1;
+}
+
+message ShowRequest {
+  oneof event {
+    Hello hello = 1;
+    Size size = 2;
+    fixed64 go = 3;
+    Open open = 4;
+    google.protobuf.Empty close = 5;
+    Focus focus = 6;
+    Resize resize = 7;
+    Move move = 8;
+    google.protobuf.Empty fullscreen = 9;
+  }
+
+  message Hello {
+    fixed64 workstream = 1;
+    Size size = 2;
+  }
+
+  message Size {
+    uint32 columns = 1;
+    uint32 rows = 2;
+  }
+
+  message Open {
+    oneof beside {
+      google.protobuf.Empty largest = 1;
+      Towards towards = 2;
+    }
+    repeated string argv = 3;
+  }
+
+  message Focus {
+    oneof to {
+      Direction direction = 1;
+      Order order = 2;
+      fixed64 terminal = 3;
+    }
+  }
+
+  message Resize {
+    Direction direction = 1;
+    bool grow = 2;
+  }
+
+  message Move {
+    oneof to {
+      Direction direction = 1;
+      Order order = 2;
+    }
+  }
+
+  enum Towards {
+    TOWARDS_UNSPECIFIED = 0;
+    TOWARDS_RIGHT = 1;
+    TOWARDS_DOWN = 2;
+  }
+
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DIRECTION_LEFT = 1;
+    DIRECTION_RIGHT = 2;
+    DIRECTION_UP = 3;
+    DIRECTION_DOWN = 4;
+  }
+
+  enum Order {
+    ORDER_UNSPECIFIED = 0;
+    ORDER_NEXT = 1;
+    ORDER_PREVIOUS = 2;
+  }
+}
+
+message ShowResponse {
+  oneof event {
+    Laid laid = 1;
+    string refused = 2;
+  }
+
+  message Laid {
+    fixed64 workstream = 1;
+    ShowRequest.Size size = 2;
+    repeated Pane panes = 3;
+    optional fixed64 focused = 4;
+    optional fixed64 full = 5;
+  }
+
+  message Pane {
+    fixed64 terminal = 1;
+    Rect rect = 2;
+    oneof found {
+      TerminalKey key = 3;
+      google.protobuf.Empty lost = 4;
+      google.protobuf.Empty looking = 5;
+    }
+  }
+
+  message Rect {
+    uint32 column = 1;
+    uint32 row = 2;
+    uint32 columns = 3;
+    uint32 rows = 4;
+  }
+}
+
+message TerminalKey {
+  uint32 id = 1;
+  google.protobuf.Timestamp made_at = 2;
 }

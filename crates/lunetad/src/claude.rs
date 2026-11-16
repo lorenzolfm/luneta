@@ -238,6 +238,8 @@ mod tests {
             claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
         unset.sort_unstable();
         let own = ["LUNETA_MUX_MADE", "LUNETA_MUX_PANE", "LUNETA_MUX_SESSION"].map(OsStr::new);
+        let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"].map(OsStr::new);
+        let own = [own.as_slice(), &terminal].concat();
         let zellij = ["ZELLIJ", "ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"].map(OsStr::new);
         assert_eq!(unset, [own.as_slice(), &zellij].concat());
         let heard = Command::new("cat").stdin(told).output().unwrap();

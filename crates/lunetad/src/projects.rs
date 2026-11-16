@@ -16,12 +16,18 @@ use crate::core::{self, Command};
 use crate::watch::Troubles;
 
 mod file;
+pub(crate) mod layout;
+mod view;
 
 pub use file::{Failed, Store};
+pub use layout::Size;
+pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;
 
 pub const WORKSTREAMS_MAX: usize = 512;
+
+pub const TERMINALS_MAX: usize = 1024;
 
 pub const NAME_CHARS_MAX: usize = 64;
 
@@ -75,6 +81,53 @@ impl FromStr for Id {
         id.ok_or_else(|| format!("{text:?} is no id: an id is 16 hex digits, not all 0"))
     }
 }
+
+macro_rules! id_of {
+    ($kind:ident) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $kind(Id);
+
+        impl $kind {
+            #[must_use]
+            pub fn new(id: Id) -> $kind {
+                $kind(id)
+            }
+
+            #[must_use]
+            pub fn of(id: u64) -> Option<$kind> {
+                Id::of(id).map($kind)
+            }
+
+            #[must_use]
+            pub fn id(self) -> Id {
+                self.0
+            }
+
+            #[must_use]
+            pub fn get(self) -> u64 {
+                self.0.get()
+            }
+        }
+
+        impl fmt::Display for $kind {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl FromStr for $kind {
+            type Err = String;
+
+            fn from_str(text: &str) -> Result<$kind, String> {
+                text.parse().map($kind)
+            }
+        }
+    };
+}
+
+id_of!(ProjectId);
+id_of!(WorkstreamId);
+id_of!(TerminalId);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name(String);
@@ -201,7 +254,7 @@ impl Below {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
-    id: Id,
+    id: ProjectId,
     name: Name,
     dir: Dir,
     workstreams: Vec<Workstream>,
@@ -209,7 +262,7 @@ pub struct Project {
 
 impl Project {
     #[must_use]
-    pub fn id(&self) -> Id {
+    pub fn id(&self) -> ProjectId {
         self.id
     }
 
@@ -236,14 +289,15 @@ impl Project {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workstream {
-    id: Id,
+    id: WorkstreamId,
     renamed: Option<Name>,
     below: Below,
+    view: View,
 }
 
 impl Workstream {
     #[must_use]
-    pub fn id(&self) -> Id {
+    pub fn id(&self) -> WorkstreamId {
         self.id
     }
 
@@ -256,6 +310,11 @@ impl Workstream {
     pub fn below(&self) -> &Below {
         &self.below
     }
+
+    #[must_use]
+    pub fn view(&self) -> &View {
+        &self.view
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -266,13 +325,31 @@ pub struct Projects {
 #[derive(Debug)]
 pub enum Change {
     AddProject { dir: Dir, name: Option<Name> },
-    AddWorkstream { project: Id, folder: Dir, name: Option<Name> },
-    RenameProject { project: Id, to: Name },
-    RenameWorkstream { workstream: Id, to: Option<Name> },
-    MoveProject { project: Id, to: usize },
-    MoveWorkstream { workstream: Id, to: usize },
-    ForgetProject { project: Id },
-    ForgetWorkstream { workstream: Id },
+    AddWorkstream { project: ProjectId, folder: Dir, name: Option<Name> },
+    RenameProject { project: ProjectId, to: Name },
+    RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
+    MoveProject { project: ProjectId, to: usize },
+    MoveWorkstream { workstream: WorkstreamId, to: usize },
+    ForgetProject { project: ProjectId },
+    ForgetWorkstream { workstream: WorkstreamId },
+    Open { workstream: WorkstreamId, terminal: Terminal, placed: Placed, size: Size },
+    Close { terminal: TerminalId },
+    Resize {
+        terminal: TerminalId,
+        direction: layout::Direction,
+        change: layout::Change,
+        size: Size,
+    },
+    Swap { one: TerminalId, other: TerminalId },
+    Fill { workstream: WorkstreamId, full: Option<TerminalId> },
+    Ran(Vec<Ran>),
+}
+
+#[derive(Debug)]
+pub struct Ran {
+    pub terminal: TerminalId,
+    pub folder: Dir,
+    pub runs: Runs,
 }
 
 impl Change {
@@ -291,34 +368,56 @@ impl Change {
             },
             Asked::AddWorkstream(asked::AddWorkstream { project, folder, name: named }) => {
                 Change::AddWorkstream {
-                    project: id("project", project)?,
+                    project: id("project", project).map(ProjectId)?,
                     folder: Dir::found(&folder).map_err(field("folder"))?,
                     name: name(named).map_err(field("name"))?,
                 }
             },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
-                project: id("project", project)?,
+                project: id("project", project).map(ProjectId)?,
                 to: Name::parse(&to).map_err(field("to"))?,
             },
             Asked::RenameWorkstream(asked::RenameWorkstream { workstream, to }) => {
                 Change::RenameWorkstream {
-                    workstream: id("workstream", workstream)?,
+                    workstream: id("workstream", workstream).map(WorkstreamId)?,
                     to: name(to).map_err(field("to"))?,
                 }
             },
             Asked::MoveProject(asked::MoveProject { project, to }) => {
-                Change::MoveProject { project: id("project", project)?, to: place(to) }
+                let project = id("project", project).map(ProjectId)?;
+                Change::MoveProject { project, to: place(to) }
             },
             Asked::MoveWorkstream(asked::MoveWorkstream { workstream, to }) => {
-                Change::MoveWorkstream { workstream: id("workstream", workstream)?, to: place(to) }
+                let workstream = id("workstream", workstream).map(WorkstreamId)?;
+                Change::MoveWorkstream { workstream, to: place(to) }
             },
             Asked::ForgetProject(asked::ForgetProject { project }) => {
-                Change::ForgetProject { project: id("project", project)? }
+                Change::ForgetProject { project: id("project", project).map(ProjectId)? }
             },
             Asked::ForgetWorkstream(asked::ForgetWorkstream { workstream }) => {
-                Change::ForgetWorkstream { workstream: id("workstream", workstream)? }
+                let workstream = id("workstream", workstream).map(WorkstreamId)?;
+                Change::ForgetWorkstream { workstream }
             },
         })
+    }
+
+    #[must_use]
+    pub fn kept_at_once(&self) -> bool {
+        match self {
+            Change::AddProject { .. }
+            | Change::AddWorkstream { .. }
+            | Change::RenameProject { .. }
+            | Change::RenameWorkstream { .. }
+            | Change::MoveProject { .. }
+            | Change::MoveWorkstream { .. }
+            | Change::ForgetProject { .. }
+            | Change::ForgetWorkstream { .. }
+            | Change::Open { .. }
+            | Change::Close { .. } => true,
+            Change::Resize { .. } | Change::Swap { .. } | Change::Fill { .. } | Change::Ran(_) => {
+                false
+            },
+        }
     }
 }
 
@@ -392,11 +491,17 @@ impl Projects {
         if let Some(long) = projects.workstream_folders().find(|it| it.0.len() > PATH_BYTES_MAX) {
             return Err(format!("{}: a path is longer than {PATH_BYTES_MAX} bytes", long.0));
         }
+        if projects.terminal_count() > TERMINALS_MAX {
+            return Err(format!("it holds over {TERMINALS_MAX} terminals"));
+        }
         let Projects { projects } = projects;
         let mut ids = BTreeSet::new();
         for (at, project) in projects.iter().enumerate() {
-            let workstreams = project.workstreams.iter().map(|workstream| workstream.id);
-            for id in std::iter::once(project.id).chain(workstreams) {
+            let workstreams = project.workstreams.iter().map(|workstream| workstream.id.0);
+            let terminals = project.workstreams.iter().flat_map(|workstream| {
+                workstream.view.terminals().map(|terminal| layout::Leaf::id(terminal).0)
+            });
+            for id in std::iter::once(project.id.0).chain(workstreams).chain(terminals) {
                 if !ids.insert(id) {
                     return Err(format!("the id {id} comes twice"));
                 }
@@ -442,7 +547,8 @@ impl Projects {
                     return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
                 }
                 let id = self.fresh(&mut draw)?;
-                changed.projects.push(Project { id, name, dir, workstreams: Vec::new() });
+                let project = Project { id: ProjectId(id), name, dir, workstreams: Vec::new() };
+                changed.projects.push(project);
                 Some(id)
             },
             Change::AddWorkstream { project, folder, name } => {
@@ -455,7 +561,9 @@ impl Projects {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
                 let id = self.fresh(&mut draw)?;
-                project.workstreams.push(Workstream { id, renamed: name, below });
+                let view = View::default();
+                let workstream = Workstream { id: WorkstreamId(id), renamed: name, below, view };
+                project.workstreams.push(workstream);
                 Some(id)
             },
             Change::RenameProject { project, to } => {
@@ -488,7 +596,52 @@ impl Projects {
             },
             Change::ForgetWorkstream { workstream } => {
                 let (project, at) = changed.workstream(workstream)?;
+                let held = project.workstreams[at].view.len();
+                if held > 0 {
+                    return Err(format!("workstream {workstream} holds {held} terminals still"));
+                }
                 project.workstreams.remove(at);
+                None
+            },
+            Change::Open { workstream, terminal, placed, size } => {
+                let id = layout::Leaf::id(&terminal);
+                if self.holds(id.0) {
+                    return Err(format!("the id {id} is taken"));
+                }
+                if self.terminal_count() >= TERMINALS_MAX {
+                    let many = format!("there are {TERMINALS_MAX} terminals");
+                    return Err(format!("{many}, as many as are kept"));
+                }
+                let (project, at) = changed.workstream(workstream)?;
+                project.workstreams[at].view.opened(terminal, placed, size)?;
+                None
+            },
+            Change::Close { terminal } => {
+                changed.view_of(terminal)?.closed(terminal);
+                None
+            },
+            Change::Resize { terminal, direction, change, size } => {
+                changed.view_of(terminal)?.resized(terminal, direction, change, size)?;
+                None
+            },
+            Change::Swap { one, other } => {
+                let view = changed.view_of(one)?;
+                if !view.holds(other) {
+                    return Err(format!("terminals {one} and {other} are in two views"));
+                }
+                view.swapped(one, other)?;
+                None
+            },
+            Change::Fill { workstream, full } => {
+                let (project, at) = changed.workstream(workstream)?;
+                project.workstreams[at].view.filled(full)?;
+                None
+            },
+            Change::Ran(ran) => {
+                for Ran { terminal, folder, runs } in ran {
+                    let view = changed.view_of(terminal)?;
+                    view.terminal_mut(terminal).expect("its view holds it").ran(folder, runs);
+                }
                 None
             },
         };
@@ -496,7 +649,7 @@ impl Projects {
         Ok((changed, made))
     }
 
-    fn fresh(&self, draw: &mut impl FnMut() -> io::Result<Id>) -> Result<Id, String> {
+    pub fn fresh(&self, draw: &mut impl FnMut() -> io::Result<Id>) -> Result<Id, String> {
         for _ in 0..FRESH_TRIES {
             let id = draw().map_err(|error| format!("no id is drawn: {error}"))?;
             if !self.holds(id) {
@@ -510,18 +663,59 @@ impl Projects {
         self.projects.iter().map(|project| project.workstreams.len()).sum()
     }
 
-    fn holds(&self, id: Id) -> bool {
-        self.projects.iter().any(|project| {
-            project.id == id || project.workstreams.iter().any(|workstream| workstream.id == id)
+    fn terminal_count(&self) -> usize {
+        self.workstreams().map(|(_, workstream)| workstream.view.len()).sum()
+    }
+
+    pub fn workstreams(&self) -> impl Iterator<Item = (&Project, &Workstream)> {
+        self.projects
+            .iter()
+            .flat_map(|project| project.workstreams.iter().map(move |it| (project, it)))
+    }
+
+    #[must_use]
+    pub fn find(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
+        self.workstreams().find(|(_, it)| it.id == workstream)
+    }
+
+    #[must_use]
+    pub fn holding(&self, terminal: TerminalId) -> Option<(&Workstream, &Terminal)> {
+        self.workstreams().find_map(|(_, workstream)| {
+            let tree = workstream.view.tree()?;
+            Some((workstream, tree.get(terminal)?))
         })
     }
 
-    fn project(&mut self, id: Id) -> Result<&mut Project, String> {
+    pub fn terminals(&self) -> impl Iterator<Item = (&Workstream, &Terminal)> {
+        self.workstreams()
+            .flat_map(|(_, workstream)| workstream.view.terminals().map(move |it| (workstream, it)))
+    }
+
+    #[must_use]
+    pub fn holds(&self, id: Id) -> bool {
+        self.projects.iter().any(|project| {
+            project.id.0 == id
+                || project.workstreams.iter().any(|workstream| {
+                    workstream.id.0 == id || workstream.view.holds(TerminalId(id))
+                })
+        })
+    }
+
+    fn view_of(&mut self, terminal: TerminalId) -> Result<&mut View, String> {
+        self.projects
+            .iter_mut()
+            .flat_map(|project| project.workstreams.iter_mut())
+            .map(|workstream| &mut workstream.view)
+            .find(|view| view.holds(terminal))
+            .ok_or_else(|| unknown("terminal", terminal))
+    }
+
+    fn project(&mut self, id: ProjectId) -> Result<&mut Project, String> {
         let project = self.projects.iter_mut().find(|project| project.id == id);
         project.ok_or_else(|| unknown("project", id))
     }
 
-    fn workstream(&mut self, id: Id) -> Result<(&mut Project, usize), String> {
+    fn workstream(&mut self, id: WorkstreamId) -> Result<(&mut Project, usize), String> {
         self.projects
             .iter_mut()
             .find_map(|project| {
@@ -543,7 +737,7 @@ fn nested(dir: &Dir, other: &Project) -> String {
     format!("{} holds {other_dir}, project {name}'s folder", dir.0)
 }
 
-fn unknown(what: &str, id: Id) -> String {
+fn unknown(what: &str, id: impl fmt::Display) -> String {
     format!("no {what} has the id {id}")
 }
 
@@ -637,12 +831,12 @@ mod tests {
         made.unwrap()
     }
 
-    fn project(projects: &mut Projects, at: &str) -> Id {
-        add(projects, Change::AddProject { dir: dir(at), name: None })
+    fn project(projects: &mut Projects, at: &str) -> ProjectId {
+        ProjectId(add(projects, Change::AddProject { dir: dir(at), name: None }))
     }
 
-    fn workstream(projects: &mut Projects, project: Id, at: &str) -> Id {
-        add(projects, Change::AddWorkstream { project, folder: dir(at), name: None })
+    fn workstream(projects: &mut Projects, project: ProjectId, at: &str) -> WorkstreamId {
+        WorkstreamId(add(projects, Change::AddWorkstream { project, folder: dir(at), name: None }))
     }
 
     #[test]
@@ -765,7 +959,7 @@ mod tests {
         let b = project(&mut projects, "/b");
         let c = project(&mut projects, "/c");
         (projects, _) = change(&projects, Change::MoveProject { project: c, to: 0 }).unwrap();
-        let ids: Vec<Id> = projects.all().iter().map(Project::id).collect();
+        let ids: Vec<ProjectId> = projects.all().iter().map(Project::id).collect();
         assert_eq!(ids, [c, a, b]);
         let past = change(&projects, Change::MoveProject { project: a, to: 3 });
         assert!(past.unwrap_err().contains("past the last of 3 places"));
@@ -774,7 +968,7 @@ mod tests {
         let two = workstream(&mut projects, b, "/b/two");
         let first = Change::MoveWorkstream { workstream: two, to: 0 };
         (projects, _) = change(&projects, first).unwrap();
-        let ids: Vec<Id> = projects.all()[2].workstreams().iter().map(Workstream::id).collect();
+        let ids: Vec<_> = projects.all()[2].workstreams().iter().map(Workstream::id).collect();
         assert_eq!(ids, [two, one]);
     }
 
@@ -796,12 +990,12 @@ mod tests {
     fn a_drawn_id_already_taken_is_drawn_again() {
         let mut projects = Projects::default();
         let first = project(&mut projects, "/a");
-        let mut draws = [first, first, Id::of(7).unwrap()].into_iter();
+        let mut draws = [first.0, first.0, Id::of(7).unwrap()].into_iter();
         let change = Change::AddProject { dir: dir("/b"), name: None };
         let (_, made) = projects.changed(change, || Ok(draws.next().unwrap())).unwrap();
         assert_eq!(made, Id::of(7));
         let always = Change::AddProject { dir: dir("/b"), name: None };
-        let refused = projects.changed(always, || Ok(first));
+        let refused = projects.changed(always, || Ok(first.0));
         assert!(refused.unwrap_err().contains("were all taken"));
     }
 
@@ -838,6 +1032,89 @@ mod tests {
         let unread = gone(&at(&locked.join("inner")));
         fs::set_permissions(&locked, permissions(0o755)).unwrap();
         assert_eq!(unread.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
+
+    fn opened(
+        projects: &mut Projects,
+        workstream: WorkstreamId,
+        id: u64,
+        placed: Placed,
+    ) -> TerminalId {
+        let terminal = TerminalId::of(id).unwrap();
+        let made = Terminal::new(terminal, dir("/w/luneta"), Runs::Shell);
+        let size = Size::of(80, 24).unwrap();
+        let open = Change::Open { workstream, terminal: made, placed, size };
+        (*projects, _) = change(projects, open).unwrap();
+        terminal
+    }
+
+    fn view(projects: &Projects, workstream: WorkstreamId) -> &View {
+        projects.find(workstream).unwrap().1.view()
+    }
+
+    #[test]
+    fn a_view_opens_closes_and_fills_itself_with_one_of_its_terminals() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta");
+        assert!(view(&projects, main).is_empty());
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let two = opened(&mut projects, main, 101, right);
+        assert_eq!(view(&projects, main).tree().unwrap().panes(), [one, two]);
+        assert_eq!(projects.holding(two).map(|(it, _)| it.id()), Some(main));
+
+        (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
+        assert_eq!(view(&projects, main).tree().unwrap().panes(), [two, one]);
+        let fill = |full| Change::Fill { workstream: main, full };
+        (projects, _) = change(&projects, fill(Some(two))).unwrap();
+        assert_eq!(view(&projects, main).full(), Some(two));
+        let swap = change(&projects, Change::Swap { one, other: two });
+        assert!(swap.unwrap_err().contains("moves none"), "a full view moves no terminal");
+        let (direction, grow) = (layout::Direction::Left, layout::Change::Grow);
+        let size = Size::of(80, 24).unwrap();
+        let resize = Change::Resize { terminal: one, direction, change: grow, size };
+        assert!(change(&projects, resize).unwrap_err().contains("resized by none"));
+        let gone = TerminalId::of(7).unwrap();
+        assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no terminal"));
+
+        (projects, _) = change(&projects, Change::Close { terminal: two }).unwrap();
+        assert_eq!(view(&projects, main).full(), None, "a view of one fills itself with none");
+        assert!(change(&projects, fill(Some(one))).unwrap_err().contains("whole already"));
+        let refused = change(&projects, Change::ForgetWorkstream { workstream: main });
+        assert!(refused.unwrap_err().contains("holds 1 terminals still"));
+        (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
+        assert!(view(&projects, main).is_empty());
+        (projects, _) = change(&projects, Change::ForgetWorkstream { workstream: main }).unwrap();
+        assert_eq!(projects.all()[0].workstreams(), []);
+    }
+
+    #[test]
+    fn a_terminal_is_placed_only_where_its_view_has_it_and_its_id_is_free() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let size = Size::of(80, 24).unwrap();
+        let terminal = |id| {
+            Terminal::new(TerminalId::of(id).unwrap(), dir("/w/luneta"), Runs::Shell)
+        };
+        let open = |id, placed| {
+            Change::Open { workstream: main, terminal: terminal(id), placed, size }
+        };
+        let at = TerminalId::of(9).unwrap();
+        let nowhere = Placed::Beside { at, towards: layout::Towards::Down };
+        assert!(change(&projects, open(100, nowhere)).unwrap_err().contains("view is empty"));
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        assert!(change(&projects, open(101, Placed::Alone)).unwrap_err().contains("already"));
+        assert!(change(&projects, open(100, nowhere)).unwrap_err().contains("is taken"));
+        assert!(change(&projects, open(main.get(), nowhere)).unwrap_err().contains("is taken"));
+        let tiny = Size::of(5, 3).unwrap();
+        let beside = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let (terminal, placed) = (terminal(102), beside);
+        let cramped = Change::Open { workstream: main, terminal, placed, size: tiny };
+        assert!(change(&projects, cramped).unwrap_err().contains("no room"));
+        let drawn = projects.fresh(&mut || Ok(one.0));
+        assert!(drawn.unwrap_err().contains("were all taken"), "a terminal's id is drawn once");
     }
 
     fn pull_request(state: State, failed: u32) -> PullRequest {

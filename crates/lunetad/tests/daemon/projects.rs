@@ -22,19 +22,19 @@ fn changed(host: &Host, change: Change) -> Result<u64, Status> {
     })
 }
 
-fn project(host: &Host, dir: &Path, name: Option<&str>) -> u64 {
+pub fn project(host: &Host, dir: &Path, name: Option<&str>) -> u64 {
     let dir = dir.to_str().unwrap().to_owned();
     let add = AddProject { dir, name: name.map(str::to_owned) };
     changed(host, Change::AddProject(add)).unwrap()
 }
 
-fn workstream(host: &Host, project: u64, folder: &Path) -> u64 {
+pub fn workstream(host: &Host, project: u64, folder: &Path) -> u64 {
     let folder = folder.to_str().unwrap().to_owned();
     let add = AddWorkstream { project, folder, name: None };
     changed(host, Change::AddWorkstream(add)).unwrap()
 }
 
-fn kept(host: &Host) -> PathBuf {
+pub fn kept(host: &Host) -> PathBuf {
     host.home.path().join(".local/state/luneta/projects")
 }
 
@@ -147,12 +147,12 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     let host = Host::new();
     let file = kept(&host);
     fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let newer = "{\"version\": 2, \"projects\": [], \"views\": []}\n";
+    let newer = "{\"version\": 3, \"projects\": [], \"views\": []}\n";
     fs::write(&file, newer).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut daemon = start(host.vars()).unwrap();
     let said = daemon.said_after(Duration::ZERO).join("\n");
-    assert!(said.contains("of version 2, and this lunetad reads only 1"), "{said}");
+    assert!(said.contains("of version 3, and this lunetad reads only 1 and 2"), "{said}");
 
     let add = AddProject { dir: text(scratch.path()), name: None };
     let refused = changed(&host, Change::AddProject(add)).unwrap_err();

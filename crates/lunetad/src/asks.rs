@@ -675,7 +675,8 @@ mod tests {
         assert_eq!(pi, format!("{you}\n{line}\n\ngo"));
         let zellij = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
         let own = ["LUNETA_MUX_SESSION", "LUNETA_MUX_MADE", "LUNETA_MUX_PANE"];
-        let panes = zellij.into_iter().chain(own);
+        let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
+        let panes = zellij.into_iter().chain(own).chain(terminal);
         for name in panes.chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
