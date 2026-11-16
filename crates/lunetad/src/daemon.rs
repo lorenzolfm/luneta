@@ -1030,6 +1030,8 @@ impl Daemon for Host {
             let stopped = "it is kept, but the daemon's core has stopped";
             store.change(change).map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
+                Failed::Refused(why) => Status::invalid_argument(why),
+                Failed::Unwritten(why) => Status::internal(why),
                 Failed::KeptUntold => Status::unavailable(stopped),
             })
         });

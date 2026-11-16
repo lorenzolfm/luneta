@@ -80,6 +80,8 @@ enum Keeping {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Failed {
     NotKept(String),
+    Refused(String),
+    Unwritten(String),
     KeptUntold,
 }
 
@@ -117,8 +119,8 @@ impl Store {
             let _ = self.tell();
             return Err(Failed::NotKept(why));
         }
-        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::NotKept)?;
-        let unwritten = |error: io::Error| Failed::NotKept(format!("{}: {error}", file.display()));
+        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
+        let unwritten = |error: io::Error| Failed::Unwritten(format!("{}: {error}", file.display()));
         write(file, &changed).map_err(unwritten)?;
         *projects = changed;
         self.tell()?;
@@ -272,6 +274,7 @@ fn write(file: &Path, projects: &Projects) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
     use super::*;
@@ -445,6 +448,39 @@ mod tests {
         let [kept] = heard(&commands).try_into().unwrap();
         let kept = kept.unwrap();
         assert_eq!(kept.all()[0].dir().as_str(), "/c");
+    }
+
+    #[test]
+    fn a_refused_or_unwritten_change_says_so_and_the_store_keeps_on() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        let written = fs::read_to_string(&file).unwrap();
+        assert_eq!(heard(&commands).len(), 2);
+
+        let inside = Change::AddProject { dir: dir("/a/b"), name: None };
+        let Err(Failed::Refused(why)) = store.change(inside) else {
+            panic!("a project inside another is kept");
+        };
+        assert!(why.contains("/a/b is inside /a"), "{why}");
+
+        let folder = file.parent().unwrap();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
+        let unwritten = store.change(Change::AddProject { dir: dir("/c"), name: None });
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let Err(Failed::Unwritten(why)) = unwritten else {
+            panic!("a change into a folder that refuses writes is kept: {unwritten:?}");
+        };
+        assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
+
+        assert_eq!(store.unkept(), None);
+        assert_eq!(heard(&commands), []);
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+        store.change(Change::AddProject { dir: dir("/c"), name: None }).unwrap();
+        let [kept] = heard(&commands).try_into().unwrap();
+        assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
     }
 
     #[test]

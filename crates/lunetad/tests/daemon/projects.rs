@@ -136,6 +136,10 @@ fn a_workstream_whose_folder_goes_is_kept_and_said_to_be_missing() {
     let refused = changed(&host, Change::AddWorkstream(add)).unwrap_err();
     assert_eq!(refused.code(), Code::InvalidArgument);
     assert!(refused.message().starts_with("folder: "), "{}", refused.message());
+    let inside = AddProject { dir: text(&below), name: None };
+    let refused = changed(&host, Change::AddProject(inside)).unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert!(refused.message().contains("is inside"), "{}", refused.message());
 }
 
 #[test]
