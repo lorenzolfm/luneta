@@ -1,6 +1,6 @@
 use crate::agent::Harness;
 
-use super::layout::{Leaf, Preordered, Removed, Towards, Tree, PANES_MAX};
+use super::layout::{self, Direction, Leaf, Preordered, Removed, Towards, Tree, PANES_MAX};
 use super::{Dir, Id, Size};
 
 pub const LINE_BYTES_MAX: usize = 1024;
@@ -110,10 +110,7 @@ pub enum Placed {
 impl View {
     pub fn read(preorder: Vec<Preordered<Terminal>>, full: Option<Id>) -> Result<View, String> {
         if preorder.is_empty() {
-            return match full {
-                None => Ok(View(None)),
-                Some(full) => Err(format!("an empty view fills itself with terminal {full}")),
-            };
+            return Err("a view holds no terminal, and so is kept as no view".to_owned());
         }
         let tree = Tree::of_preorder(preorder)?;
         if let Some(full) = full {
@@ -153,10 +150,6 @@ impl View {
 
     pub(super) fn terminal_mut(&mut self, terminal: Id) -> Option<&mut Terminal> {
         self.0.as_mut()?.tree.get_mut(terminal)
-    }
-
-    pub(super) fn tree_mut(&mut self) -> Option<&mut Tree<Terminal>> {
-        self.0.as_mut().map(|laid| &mut laid.tree)
     }
 
     pub(super) fn opened(
@@ -229,9 +222,30 @@ impl View {
         Ok(())
     }
 
-    pub(super) fn swapped(&mut self, one: Id, other: Id) {
+    pub(super) fn resized(
+        &mut self,
+        terminal: Id,
+        direction: Direction,
+        change: layout::Change,
+        size: Size,
+    ) -> Result<(), String> {
+        let laid = self.0.as_mut().expect("a resized terminal is in the view");
+        if laid.full.is_some() {
+            return Err("a view one terminal fills is resized by none".to_owned());
+        }
+        if !laid.tree.resize(terminal, direction, change, size) {
+            return Err(format!("no border of terminal {terminal} moves that way"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn swapped(&mut self, one: Id, other: Id) -> Result<(), String> {
         let laid = self.0.as_mut().expect("swapped terminals are in the view");
+        if laid.full.is_some() {
+            return Err("a view one terminal fills moves none of them".to_owned());
+        }
         laid.tree.swap(one, other);
+        Ok(())
     }
 }
 

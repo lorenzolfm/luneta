@@ -738,6 +738,11 @@ mod tests {
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "view": {"tree": []}}]}]}"#,
+                "workstream 0000000000000002's view: a view holds no terminal",
+            ),
+            (
+                r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "view": {"tree": [{"terminal": {
                 "id": "0000000000000003", "folder": "/a", "runs": {"command": "a\u0007"}}}]}}]}]}"#,
                 "terminal 0000000000000003: a command line holds a control character",

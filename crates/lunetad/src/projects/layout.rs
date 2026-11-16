@@ -48,11 +48,8 @@ impl Size {
     }
 
     #[must_use]
-    pub fn smallest(sizes: impl IntoIterator<Item = Size>) -> Option<Size> {
-        sizes.into_iter().reduce(|one, other| Size {
-            columns: one.columns.min(other.columns),
-            rows: one.rows.min(other.rows),
-        })
+    pub fn least(self, other: Size) -> Size {
+        Size { columns: self.columns.min(other.columns), rows: self.rows.min(other.rows) }
     }
 }
 
@@ -843,9 +840,7 @@ mod tests {
         assert_eq!(Size::of(0, 24), Err("columns is 0".to_owned()));
         assert_eq!(Size::of(80, 1001), Err("rows is over 1000".to_owned()));
         assert_eq!(Size::of(1 << 16, 24), Err("columns is over 1000".to_owned()));
-        let smallest = Size::smallest([size(80, 10), size(40, 24)]);
-        assert_eq!(smallest, Some(size(40, 10)));
-        assert_eq!(Size::smallest([]), None);
+        assert_eq!(size(80, 10).least(size(40, 24)), size(40, 10));
     }
 
     #[test]

@@ -31,8 +31,6 @@ const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
 
 const TAG: &str = "luneta terminal ";
 
-const UNSHOWN: (u32, u32) = (80, 24);
-
 const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh"];
 
 const _: () = assert!(ANSWERS_MAX > 1);
@@ -97,9 +95,9 @@ impl Asked {
             Event::Go(workstream) => Asked::Go(id("go", workstream)?),
             Event::Open(show_request::Open { beside, argv }) => {
                 use show_request::open::Beside as Said;
-                let beside = match beside {
-                    None | Some(Said::Largest(())) => Beside::Largest,
-                    Some(Said::Towards(towards)) => Beside::Towards(towards_of(towards)?),
+                let beside = match beside.ok_or("open: it says no side to open beside")? {
+                    Said::Largest(()) => Beside::Largest,
+                    Said::Towards(towards) => Beside::Towards(towards_of(towards)?),
                 };
                 if argv.first().is_some_and(String::is_empty) {
                     return Err("open: the program to run is named by no word".to_owned());
@@ -201,7 +199,6 @@ pub fn start(
         listed: BTreeMap::new(),
         looked: false,
         last_focus: BTreeMap::new(),
-        last_size: BTreeMap::new(),
         troubles: Troubles::default(),
         shell: opens::your_shell(),
     };
@@ -220,7 +217,6 @@ struct Views {
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
     last_focus: BTreeMap<Id, Id>,
-    last_size: BTreeMap<Id, Size>,
     troubles: Troubles,
     shell: OsString,
 }
@@ -344,7 +340,7 @@ impl Views {
 
     fn asked(&mut self, client: ClientId, asked: Asked) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
-        let size = self.size_of(workstream);
+        let size = self.size_of(client);
         let focus = self.clients[&client].focus;
         let focused = || focus.ok_or_else(|| "the view holds no terminal".to_owned());
         match asked {
@@ -371,9 +367,6 @@ impl Views {
                 self.focus(client, to)?;
             },
             Asked::Resize { direction, change } => {
-                if self.view(workstream)?.full().is_some() {
-                    return Err("a view one terminal fills is resized by none".to_owned());
-                }
                 let terminal = focused()?;
                 self.changed(Change::Resize { terminal, direction, change, size })?;
             },
@@ -424,11 +417,10 @@ impl Views {
         Ok(())
     }
 
-    fn size_of(&self, workstream: Id) -> Size {
-        let shown = self.clients.values().filter(|client| client.workstream == workstream);
-        Size::smallest(shown.map(|client| client.size))
-            .or_else(|| self.last_size.get(&workstream).copied())
-            .unwrap_or_else(|| Size::of(UNSHOWN.0, UNSHOWN.1).expect("80 by 24 is a size"))
+    fn size_of(&self, client: ClientId) -> Size {
+        let Client { workstream, size, .. } = self.clients[&client];
+        let shown = self.clients.values().filter(|it| it.workstream == workstream);
+        shown.map(|it| it.size).fold(size, Size::least)
     }
 
     fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
@@ -437,7 +429,7 @@ impl Views {
             _ => Runs::Command(Line::parse(&quoted(argv)).map_err(|why| format!("open: {why}"))?),
         };
         let Client { workstream, focus, .. } = self.clients[&client];
-        let size = self.size_of(workstream);
+        let size = self.size_of(client);
         let terminal = self.store.fresh().map_err(said)?;
         let projects = self.kept()?;
         let (project, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
@@ -648,7 +640,7 @@ impl Views {
     }
 
     fn settle(&mut self) {
-        let Views { store, clients, known, looked, last_size, last_focus, mux, troubles, .. } = self;
+        let Views { store, clients, known, looked, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             for (_, client) in std::mem::take(clients) {
@@ -674,17 +666,15 @@ impl Views {
         for id in gone {
             clients.remove(&id);
         }
-        last_size.retain(|workstream, _| projects.find(*workstream).is_some());
         last_focus.retain(|workstream, terminal| {
             projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
         });
-        let shown: BTreeSet<Id> = clients.values().map(|client| client.workstream).collect();
-        for workstream in shown {
-            let size = Size::smallest(
-                clients.values().filter(|it| it.workstream == workstream).map(|it| it.size),
-            );
-            let size = size.expect("a workstream shown has a client");
-            last_size.insert(workstream, size);
+        let mut sizes: BTreeMap<Id, Size> = BTreeMap::new();
+        for client in clients.values() {
+            let size = sizes.entry(client.workstream).or_insert(client.size);
+            *size = size.least(client.size);
+        }
+        for (&workstream, &size) in &sizes {
             let (_, found) = projects.find(workstream).expect("a client's workstream is held");
             let Some(tree) = found.view().tree() else {
                 continue;
@@ -712,7 +702,7 @@ impl Views {
         for (id, client) in clients.iter_mut() {
             let found = projects.find(client.workstream);
             let (_, found) = found.expect("a client's workstream is held");
-            let size = last_size[&client.workstream];
+            let size = sizes[&client.workstream];
             let laid = laid(found, size, client.focus, known, *looked);
             if client.said.as_ref() == Some(&laid) {
                 continue;
@@ -999,14 +989,19 @@ mod tests {
         let towards = Beside::Towards(Towards::Right);
         let asked = Asked::Open { beside: towards, argv: vec![] };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
+        let largest = || Some(open::Beside::Largest(()));
+        let open = show_request::Open { beside: largest(), argv: vec![] };
+        let asked = Asked::Open { beside: Beside::Largest, argv: vec![] };
+        assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None }),
             Event::Resize(show_request::Resize { direction: 0, grow: true }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
-            Event::Open(show_request::Open { beside: None, argv: vec![String::new()] }),
+            Event::Open(show_request::Open { beside: None, argv: vec![] }),
+            Event::Open(show_request::Open { beside: largest(), argv: vec![String::new()] }),
             Event::Open(show_request::Open {
-                beside: None,
+                beside: largest(),
                 argv: vec!["x".to_owned(); ARGV_MAX + 1],
             }),
             Event::Hello(show_request::Hello { workstream: 1, size: None }),

@@ -329,6 +329,9 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     shown.until("the view full", |laid| laid.full == Some(right));
     shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
     assert!(shown.until_refused().contains("resized by none"));
+    let to = Some(r#move::To::Direction(show_request::Direction::Right.into()));
+    shown.ask(Event::Move(show_request::Move { to }));
+    assert!(shown.until_refused().contains("moves none"));
 }
 
 #[test]

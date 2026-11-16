@@ -564,11 +564,7 @@ impl Projects {
                 None
             },
             Change::Resize { terminal, direction, change, size } => {
-                let view = changed.view_of(terminal)?;
-                let tree = view.tree_mut().expect("a view that holds a terminal is laid");
-                if !tree.resize(terminal, direction, change, size) {
-                    return Err(format!("no border of terminal {terminal} moves that way"));
-                }
+                changed.view_of(terminal)?.resized(terminal, direction, change, size)?;
                 None
             },
             Change::Swap { one, other } => {
@@ -576,7 +572,7 @@ impl Projects {
                 if !view.holds(other) {
                     return Err(format!("terminals {one} and {other} are in two views"));
                 }
-                view.swapped(one, other);
+                view.swapped(one, other)?;
                 None
             },
             Change::Fill { workstream, full } => {
@@ -1006,11 +1002,17 @@ mod tests {
         assert_eq!(view(&projects, main).tree().unwrap().panes(), [one, two]);
         assert_eq!(projects.holding(two).map(|(it, _)| it.id()), Some(main));
 
+        (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
+        assert_eq!(view(&projects, main).tree().unwrap().panes(), [two, one]);
         let fill = |full| Change::Fill { workstream: main, full };
         (projects, _) = change(&projects, fill(Some(two))).unwrap();
         assert_eq!(view(&projects, main).full(), Some(two));
-        (projects, _) = change(&projects, Change::Swap { one, other: two }).unwrap();
-        assert_eq!(view(&projects, main).tree().unwrap().panes(), [two, one]);
+        let swap = change(&projects, Change::Swap { one, other: two });
+        assert!(swap.unwrap_err().contains("moves none"), "a full view moves no terminal");
+        let (direction, grow) = (layout::Direction::Left, layout::Change::Grow);
+        let size = Size::of(80, 24).unwrap();
+        let resize = Change::Resize { terminal: one, direction, change: grow, size };
+        assert!(change(&projects, resize).unwrap_err().contains("resized by none"));
         let gone = Id::of(7).unwrap();
         assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no terminal"));
 
