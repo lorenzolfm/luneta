@@ -37,6 +37,14 @@ pub fn elsewhere(
     Ok(Elsewhere(to))
 }
 
+pub fn free<T>(
+    runs_in: Option<OwnKey>,
+    sessions: impl IntoIterator<Item = (OwnKey, T)>,
+) -> impl Iterator<Item = (Elsewhere, T)> {
+    let free = sessions.into_iter().filter(move |(key, _)| Some(*key) != runs_in);
+    free.map(|(key, session)| (Elsewhere(To::Session(key)), session))
+}
+
 pub fn named(name: &SessionName) -> Result<Option<OwnKey>, String> {
     let named = server::named(name).map_err(|failure| failure.to_string())?;
     Ok(named.map(|own| own.key()))
@@ -52,27 +60,17 @@ pub fn newest(
     passed: &[OwnKey],
 ) -> Result<Option<Elsewhere>, String> {
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
-    let Some(newest) = newest_of(&sessions, server::Listing::key, runs_in, passed) else {
-        return Ok(None);
-    };
-    let to = elsewhere(runs_in, To::Session(newest.key()), &newest.name);
-    Ok(Some(to.expect("newest_of passes over the session luneta runs in")))
+    Ok(newest_of(sessions.iter().map(server::Listing::key), runs_in, passed))
 }
 
-fn newest_of<'a, T>(
-    sessions: &'a [T],
-    key: impl Fn(&T) -> OwnKey,
+fn newest_of(
+    sessions: impl Iterator<Item = OwnKey>,
     runs_in: Option<OwnKey>,
     passed: &[OwnKey],
-) -> Option<&'a T> {
-    let free = sessions.iter().filter(|session| {
-        let key = key(session);
-        Some(key) != runs_in && !passed.contains(&key)
-    });
-    free.max_by_key(|session| {
-        let key = key(session);
-        (key.made, key.id)
-    })
+) -> Option<Elsewhere> {
+    let unpassed = sessions.filter(|key| !passed.contains(key)).map(|key| (key, key));
+    let newest = free(runs_in, unpassed).max_by_key(|(_, key)| (key.made, key.id));
+    newest.map(|(to, _)| to)
 }
 
 #[derive(Debug)]
@@ -211,7 +209,7 @@ mod tests {
     fn luneta_goes_on_in_the_newest_own_session_it_did_not_pass() {
         let sessions = [key(1, 10), key(2, 30), key(3, 20)];
         let newest = |runs_in, passed: &[OwnKey]| {
-            newest_of(&sessions, |key| *key, runs_in, passed).copied()
+            newest_of(sessions.into_iter(), runs_in, passed).map(|to| to.to().session())
         };
         assert_eq!(newest(None, &[]), Some(key(2, 30)));
         assert_eq!(newest(Some(key(2, 30)), &[]), Some(key(3, 20)));

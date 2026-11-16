@@ -12,9 +12,15 @@ use crate::own_sessions::{self, Elsewhere, Unmade};
 use crate::zellij::{self, SessionName};
 
 struct Running {
-    key: OwnKey,
+    to: Elsewhere,
     name: SessionName,
     seen: Option<SystemTime>,
+}
+
+impl Running {
+    fn key(&self) -> OwnKey {
+        self.to.to().session()
+    }
 }
 
 pub fn own(named: &SessionName, dir: &Path, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
@@ -39,17 +45,16 @@ pub fn own(named: &SessionName, dir: &Path, runs_in: Option<OwnKey>) -> Result<E
 pub fn bare(dir: &Path, news: &News, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
     let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
-    let free = sessions.iter().filter(|listing| Some(listing.key()) != runs_in);
-    let free: Vec<Running> = free
-        .map(|listing| Running {
-            key: listing.key(),
+    let listed = sessions.iter().map(|listing| (listing.key(), listing));
+    let free: Vec<Running> = own_sessions::free(runs_in, listed)
+        .map(|(to, listing)| Running {
+            to,
             name: listing.name.clone(),
             seen: news.last_seen(Session::own(listing.made, listing.id)),
         })
         .collect();
     if let Some(joined) = to_join(&free, named.as_ref()) {
-        let to = own_sessions::elsewhere(runs_in, To::Session(joined.key), &joined.name);
-        return Ok(to.expect("a bare luneta joins none of the sessions it runs in"));
+        return Ok(joined.to);
     }
     match named {
         Some(named) => own(&named, dir, runs_in),
@@ -58,7 +63,7 @@ pub fn bare(dir: &Path, news: &News, runs_in: Option<OwnKey>) -> Result<Elsewher
 }
 
 fn to_join<'a>(running: &'a [Running], named: Option<&SessionName>) -> Option<&'a Running> {
-    let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key.made);
+    let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key().made);
     let ranked = |a: &&Running, b: &&Running| (rank(a), &a.name).cmp(&(rank(b), &b.name));
     running.iter().max_by(ranked)
 }
@@ -78,7 +83,8 @@ mod tests {
     fn running(id: u64, made: u64, seen: Option<u64>) -> Running {
         let made = OwnMade::from_nanos(made * 1_000_000_000);
         let key = OwnKey { id: OwnId::new(id).unwrap(), made };
-        Running { key, name: name(&format!("s{id}")), seen: seen.map(at) }
+        let (to, ()) = own_sessions::free(None, [(key, ())]).next().unwrap();
+        Running { to, name: name(&format!("s{id}")), seen: seen.map(at) }
     }
 
     fn name(name: &str) -> SessionName {
@@ -89,8 +95,8 @@ mod tests {
         let named = named.map(name);
         let mut order = Vec::with_capacity(sessions.len());
         for _ in 0..sessions.len() {
-            let joined = to_join(&sessions, named.as_ref()).unwrap().key;
-            sessions.retain(|session| session.key != joined);
+            let joined = to_join(&sessions, named.as_ref()).unwrap().key();
+            sessions.retain(|session| session.key() != joined);
             order.push(joined.id.get());
         }
         assert!(to_join(&sessions, named.as_ref()).is_none());

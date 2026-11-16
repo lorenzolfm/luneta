@@ -1081,7 +1081,6 @@ pub enum Wants {
     Make {
         session: SessionName,
         cwd: Directory,
-        tab_cwd: Directory,
         name: String,
         command: Vec<String>,
     },
@@ -1709,9 +1708,9 @@ impl Menu {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { cwd, name }, _) => {
-                let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
-                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
+            (At::Clone { name, .. }, _) => {
+                let (session, cwd, tab) = (name.clone(), dir, work.tab());
+                let wants = Wants::Make { session, cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -4276,8 +4275,7 @@ mod tests {
             wants,
             Wants::Make {
                 session: name.clone(),
-                cwd: directory("/w/cdk"),
-                tab_cwd: directory("/w/cdk/feat-x"),
+                cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
             }

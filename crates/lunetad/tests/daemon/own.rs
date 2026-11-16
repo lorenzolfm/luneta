@@ -135,7 +135,7 @@ impl Owned {
                 let size = Some(mux_api::Size { columns: 80, rows: 24 });
                 let is = Some(mux_api::place::Is::Session(session));
                 let to = Some(mux_api::Place { is, made_at });
-                let hello = mux_api::Hello { to, size, colours: None };
+                let hello = mux_api::Hello { to, size, colours: None, runs_in: None };
                 let hello = Some(mux_api::to_server::Event::Hello(hello));
                 let hello = mux_api::ToServer { event: hello };
                 let said = std::iter::once(hello).chain(said);
@@ -567,13 +567,19 @@ fn an_own_pane_s_screen_dumps_by_its_session_s_name() {
 #[test]
 fn an_own_session_s_first_tab_takes_its_name_and_runs_its_command() {
     let owned = Owned::new();
-    let request = NewOwnRequest {
+    let named = |tab: &str| NewOwnRequest {
         on: None,
         name: "pulled".to_owned(),
         cwd: owned.home(),
         command: ["sh", "-c", "echo pulled ran; exec sleep 600"].map(str::to_owned).to_vec(),
-        tab: Some("#2736".to_owned()),
+        tab: Some(tab.to_owned()),
     };
+    let request = named("");
+    let refused = owned.ask(|mut daemon| async move { daemon.new_own(request).await });
+    let refused = refused.unwrap_err();
+    let empty = (Code::InvalidArgument, "luneta-mux: tab is empty");
+    assert_eq!((refused.code(), refused.message()), empty);
+    let request = named("#2736");
     let made = owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let pane = eventually("the host lists the tab", || {
         owned.listed("pulled").panes?.panes.into_iter().next()

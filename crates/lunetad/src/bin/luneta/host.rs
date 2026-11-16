@@ -90,6 +90,9 @@ const NAMING: &str = "menu: luneta names a session already: try again once it ha
 
 const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
+const LANDED_IN_ITSELF: &str =
+    "luneta-mux took luneta's client into the session luneta runs in, and luneta left it";
+
 pub enum Event {
     Input(Input),
     Answered(Answer),
@@ -569,7 +572,7 @@ fn run_in(
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let started = 1;
     sidebar.attaching(session.to().session());
-    let hello = hello(session.to(), areas.1, colours);
+    let hello = hello(session, runs_in, areas.1, colours);
     let attached = Attached::start(started, hello, &events);
     let going = Going { to: session.to(), after: None };
     let right = Own { attached, phase: Phase::Coming { going } };
@@ -630,10 +633,11 @@ fn run_in(
     Ok(app.failure())
 }
 
-fn hello(to: To, area: Rect, colours: Colours) -> Hello {
+fn hello(to: Elsewhere, runs_in: Option<OwnKey>, area: Rect, colours: Colours) -> Hello {
     let size = window(area);
     let (foreground, background) = colours.both();
-    Hello { to, size: attached::laid_size(size.columns, size.lines), foreground, background }
+    let (to, size) = (to.to(), attached::laid_size(size.columns, size.lines));
+    Hello { to, runs_in, size, foreground, background }
 }
 
 fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -1513,7 +1517,7 @@ impl App {
                 });
                 self.leave();
             },
-            Asked::Make { menu, on, session, tab_cwd, name, command, .. } => {
+            Asked::Make { menu, on, session, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
                     return;
                 }
@@ -1521,10 +1525,11 @@ impl App {
                     let first = Some(own_sessions::First { tab: &name, command: &command });
                     let made = caught(|| {
                         let made = match on {
-                            Machine::Local => own_sessions::made_here(&session, &tab_cwd, first)
-                                .map(Pulled::Here),
+                            Machine::Local => {
+                                own_sessions::made_here(&session, &cwd, first).map(Pulled::Here)
+                            },
                             Machine::Remote(destination) => {
-                                own_sessions::made_there(&destination, &session, &tab_cwd, first)
+                                own_sessions::made_there(&destination, &session, &cwd, first)
                                     .map(|()| Pulled::There(destination))
                             },
                         };
@@ -1849,7 +1854,7 @@ impl App {
 
     fn attach(&mut self, to: Elsewhere, after: Option<After>) {
         let number = self.started + 1;
-        let hello = hello(to.to(), self.areas.1, self.colours);
+        let hello = hello(to, self.runs_in, self.areas.1, self.colours);
         let attached = Attached::start(number, hello, &self.events);
         self.started = number;
         self.give_way();
@@ -1873,8 +1878,11 @@ impl App {
             Heard::Refused(reason) => {
                 self.sidebar.notify(format!("luneta-mux refused: {reason}"));
             },
+            Heard::Went(went) if Some(went.pane.session) == self.runs_in => {
+                self.sidebar.notify(LANDED_IN_ITSELF.to_owned());
+                self.newest_here();
+            },
             Heard::Went(went) => {
-                assert_ne!(Some(went.pane.session), self.runs_in, "it went where luneta runs");
                 let after = own.phase.went(&went);
                 self.sidebar.went_own(went.pane, went.client);
                 if let Some(after) = after {

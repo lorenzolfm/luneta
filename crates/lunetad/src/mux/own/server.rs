@@ -120,6 +120,7 @@ pub(super) fn refused(status: &Status) -> Failure {
     };
     match status.code() {
         Code::AlreadyExists => Failure::Taken(said),
+        Code::InvalidArgument => Failure::Invalid(said),
         _ => Failure::Own(said),
     }
 }

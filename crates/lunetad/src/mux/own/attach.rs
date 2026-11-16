@@ -110,6 +110,7 @@ impl Size {
 #[derive(Clone, Copy, Debug)]
 pub struct Hello {
     pub to: To,
+    pub runs_in: Option<OwnKey>,
     pub size: Size,
     pub foreground: Option<[u8; 3]>,
     pub background: Option<[u8; 3]>,
@@ -126,10 +127,15 @@ impl Hello {
             foreground: self.foreground.map(rgb),
             background: self.background.map(rgb),
         };
+        let runs_in = self.runs_in.map(|session| api::RunsIn {
+            session: session.id.get(),
+            made_at: Some(session.made.into()),
+        });
         let hello = api::Hello {
             to: Some(self.to.said()),
             size: Some(self.size.said()),
             colours: Some(colours),
+            runs_in,
         };
         api::ToServer { event: Some(to_server::Event::Hello(hello)) }
     }

@@ -1027,6 +1027,7 @@ impl Daemon for Host {
             let made = server::made(&name, tab.as_deref(), &cwd, runs);
             made.map_err(|failure| match failure {
                 Failure::Taken(_) => Status::already_exists(failure.to_string()),
+                Failure::Invalid(_) => Status::invalid_argument(failure.to_string()),
                 failure => Status::failed_precondition(failure.to_string()),
             })
         });

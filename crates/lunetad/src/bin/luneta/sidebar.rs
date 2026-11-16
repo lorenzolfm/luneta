@@ -768,7 +768,6 @@ pub enum Asked {
         on: Machine,
         session: SessionName,
         cwd: Directory,
-        tab_cwd: Directory,
         name: String,
         command: Vec<String>,
     },
@@ -2791,8 +2790,8 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session: session.name, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { session, cwd, tab_cwd, name, command } => {
-                Asked::Make { menu: number, on, session, cwd, tab_cwd, name, command }
+            Wants::Make { session, cwd, name, command } => {
+                Asked::Make { menu: number, on, session, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
@@ -7578,8 +7577,7 @@ mod tests {
             menu: 1,
             on: Machine::Local,
             session: session_name("newer-2"),
-            cwd: directory("/w/n"),
-            tab_cwd: directory("/w/n/feat"),
+            cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
             command: Vec::new(),
         };

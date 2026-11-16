@@ -213,9 +213,8 @@ pub struct Attached {
 
 impl Attached {
     pub async fn new(mux: &mut MuxClient<Channel>, to: api::Place, size: api::Size) -> Attached {
-        Attached::hello(mux, api::Hello { to: Some(to), size: Some(size), colours: None })
-            .await
-            .unwrap()
+        let hello = api::Hello { to: Some(to), size: Some(size), colours: None, runs_in: None };
+        Attached::hello(mux, hello).await.unwrap()
     }
 
     pub async fn hello(
