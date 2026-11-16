@@ -195,7 +195,7 @@ pub fn start(
         store,
         core,
         follower,
-        mux: Terminals::default(),
+        mux: Terminals,
         clients: BTreeMap::new(),
         arrivals: 0,
         known: BTreeMap::new(),

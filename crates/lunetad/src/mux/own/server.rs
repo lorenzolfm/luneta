@@ -447,14 +447,11 @@ fn terminal_of(terminal: api::Terminal) -> Result<Terminal, String> {
     Ok(Terminal { key, tag: terminal.tag, size, cwd: terminal.cwd, is })
 }
 
-#[derive(Default)]
-pub struct Terminals {
-    server: Option<Server>,
-}
+pub struct Terminals;
 
 impl Terminals {
     pub fn made(
-        &mut self,
+        &self,
         cwd: &Directory,
         runs: Runs<'_>,
         tag: Vec<u8>,
@@ -464,86 +461,50 @@ impl Terminals {
         let (columns, rows) = size.get();
         let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
         let request = api::NewTerminalRequest { opens: Some(opens), tag, size };
-        let (server, made) = on_started(self.server.take(), |server| {
+        let (_, made) = on_started(|server| {
             let request = request.clone();
             server.ask(|mut client| async move { client.new_terminal(request).await })
         })?;
-        self.server = Some(server);
         TerminalKey::read(made.terminal).map_err(Failure::Unread)
     }
 
-    pub fn tagged(&mut self, tag: &[u8]) -> Result<Option<TerminalKey>, Failure> {
-        let mut kept = self.server.take();
-        for _ in 0..2 {
-            let reused = kept.is_some();
-            let server = match kept.take() {
-                Some(server) => server,
-                None => match Server::reached()? {
-                    Some(server) => server,
-                    None => return Ok(None),
-                },
-            };
-            let request = api::ListRequest {};
-            match server.ask(|mut client| async move { client.list(request).await }) {
-                Ok(listing) => {
-                    self.server = Some(server);
-                    let found = listing.terminals.into_iter().find(|terminal| terminal.tag == tag);
-                    let key = found.map(|terminal| TerminalKey::read(terminal.key));
-                    return key.transpose().map_err(Failure::Unread);
-                },
-                Err(_) if reused => {},
-                Err(status) => return Err(refused(&status)),
-            }
-        }
-        unreachable!("a second ask of luneta-mux is on a server reached afresh")
+    pub fn tagged(&self, tag: &[u8]) -> Result<Option<TerminalKey>, Failure> {
+        let Some(server) = Server::reached()? else {
+            return Ok(None);
+        };
+        let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
+        let terminals = listed.map_err(|status| refused(&status))?.terminals;
+        let found = terminals.into_iter().find(|terminal| terminal.tag == tag);
+        let key = found.map(|terminal| TerminalKey::read(terminal.key));
+        key.transpose().map_err(Failure::Unread)
     }
 
-    pub fn sized(&mut self, key: TerminalKey, size: Size) -> Result<(), Failure> {
+    pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
         let (columns, rows) = size.get();
         let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
         let request = api::SizeTerminalRequest { terminal: Some(key.said()), size };
-        self.asked(|server| {
-            server.ask(|mut client| async move { client.size_terminal(request).await }).map(drop)
-        })
+        let asked = reached()?.ask(|mut client| async move { client.size_terminal(request).await });
+        asked.map(drop).map_err(|status| refused(&status))
     }
 
-    pub fn closed(&mut self, key: TerminalKey) -> Result<(), Failure> {
+    pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
-        self.asked(|server| {
-            match server.ask(|mut client| async move { client.close_terminal(request).await }) {
-                Err(status) if status.code() == Code::NotFound => Ok(()),
-                asked => asked.map(drop),
-            }
-        })
-    }
-
-    fn asked(&mut self, ask: impl FnOnce(&Server) -> Result<(), Status>) -> Result<(), Failure> {
-        let gone = || Failure::Own("luneta-mux runs no more".to_owned());
-        let server = match self.server.take() {
-            Some(server) => server,
-            None => Server::reached()?.ok_or_else(gone)?,
-        };
-        let asked = ask(&server);
-        if !matches!(&asked, Err(status) if status.code() == Code::Unavailable) {
-            self.server = Some(server);
+        match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
+            Err(status) if status.code() == Code::NotFound => Ok(()),
+            asked => asked.map(drop).map_err(|status| refused(&status)),
         }
-        asked.map_err(|status| refused(&status))
     }
 }
 
+fn reached() -> Result<Server, Failure> {
+    Server::reached()?.ok_or_else(|| Failure::Own("luneta-mux runs no more".to_owned()))
+}
+
 fn on_started<T>(
-    server: Option<Server>,
     mut ask: impl FnMut(&Server) -> Result<T, Status>,
 ) -> Result<(Server, T), Failure> {
     let deadline = Instant::now() + MAKING;
-    let mut runtime = match server {
-        Some(server) => match ask(&server) {
-            Ok(answer) => return Ok((server, answer)),
-            Err(status) if status.code() == Code::Unavailable => server.into_runtime(),
-            Err(status) => return Err(refused(&status)),
-        },
-        None => runtime()?,
-    };
+    let mut runtime = runtime()?;
     loop {
         if Instant::now() >= deadline {
             return Err(Failure::Own("no server answered in time".to_owned()));
@@ -767,7 +728,7 @@ pub fn made(
         opens: Some(opens(cwd, runs)?),
         tab: tab.map(str::to_owned),
     };
-    let (server, made) = on_started(None, |server| {
+    let (server, made) = on_started(|server| {
         let request = request.clone();
         server.ask(|mut client| async move { client.new_session(request).await })
     })?;

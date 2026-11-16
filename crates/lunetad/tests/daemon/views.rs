@@ -81,8 +81,9 @@ impl<'a> Shown<'a> {
         }
         loop {
             let heard = self.heard_in_time();
-            let last = &self.laid;
-            let heard = heard.unwrap_or_else(|_| panic!("never heard: {what}, last {last:?}"));
+            let (last, refused) = (&self.laid, &self.refused);
+            let never = |_| panic!("never heard: {what}, last {last:?}, refused {refused:?}");
+            let heard = heard.unwrap_or_else(never);
             let word = heard.unwrap().expect("the view goes on");
             match word.event.expect("a word says something") {
                 show_response::Event::Laid(laid) => {
@@ -345,6 +346,15 @@ fn a_view_keeps_its_terminals_as_lost_when_the_mux_dies() {
     assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.contains(&format!("{terminal:016x}")), "a lost terminal is kept: {file}");
+
+    let opened = shown.open();
+    assert_eq!(shown.refused, Vec::<String>::new(), "the first open after the mux died is made");
+    let laid = shown.laid.clone().unwrap();
+    let found = |id| laid.panes.iter().find(|pane| pane.terminal == id).unwrap();
+    assert!(key(found(opened)).is_some(), "the terminal opened runs in a new mux");
+    assert!(lost(found(terminal)), "the terminal lost stays lost");
+    shown.ask(Event::Close(()));
+    shown.until("the terminal opened closed", |laid| laid.panes.len() == 1);
     shown.ask(Event::Close(()));
     shown.until("the lost terminal closed", |laid| laid.panes.is_empty());
 }
