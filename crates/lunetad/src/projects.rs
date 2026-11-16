@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read as _};
+use std::io::{self, ErrorKind, Read as _};
 use std::num::NonZeroU64;
 use std::path::{Component, Path};
 use std::str::FromStr;
@@ -13,16 +13,17 @@ use luneta_protocol::github::{PullRequest, State, Verdict};
 
 use crate::api;
 use crate::core::{self, Command};
+use crate::watch::Troubles;
 
 mod file;
 
-pub use file::Store;
+pub use file::{Failed, Store};
 
 pub const PROJECTS_MAX: usize = 64;
 
 pub const WORKSTREAMS_MAX: usize = 512;
 
-pub const NAME_MAX: usize = 64;
+pub const NAME_CHARS_MAX: usize = 64;
 
 pub const PATH_BYTES_MAX: usize = 4096;
 
@@ -69,7 +70,8 @@ impl FromStr for Id {
     fn from_str(text: &str) -> Result<Id, String> {
         let digit = |byte: u8| matches!(byte, b'0'..=b'9' | b'a'..=b'f');
         let hex = text.len() == 16 && text.bytes().all(digit);
-        let id = hex.then(|| u64::from_str_radix(text, 16).ok()).flatten().and_then(Id::of);
+        let parsed = || u64::from_str_radix(text, 16).expect("16 hex digits fit a u64");
+        let id = hex.then(parsed).and_then(Id::of);
         id.ok_or_else(|| format!("{text:?} is no id: an id is 16 hex digits, not all 0"))
     }
 }
@@ -85,8 +87,8 @@ impl Name {
         if text.trim() != text {
             return Err(format!("the name {text:?} begins or ends with a space"));
         }
-        if text.chars().count() > NAME_MAX {
-            return Err(format!("the name {text:?} is longer than {NAME_MAX} characters"));
+        if text.chars().count() > NAME_CHARS_MAX {
+            return Err(format!("the name {text:?} is longer than {NAME_CHARS_MAX} characters"));
         }
         if text.chars().any(char::is_control) {
             return Err(format!("the name {text:?} holds a control character"));
@@ -130,11 +132,13 @@ impl Dir {
 
     #[must_use]
     pub fn below(&self, folder: &Dir) -> Option<Below> {
-        if folder == self {
-            return Some(Below(String::new()));
-        }
-        let rest = folder.0.strip_prefix(&self.0)?.strip_prefix('/')?;
-        Some(Below(rest.to_owned()))
+        let below = if folder == self {
+            Below(String::new())
+        } else {
+            Below(folder.0.strip_prefix(&self.0)?.strip_prefix('/')?.to_owned())
+        };
+        assert_eq!(&self.join(&below), folder);
+        Some(below)
     }
 
     #[must_use]
@@ -364,7 +368,7 @@ impl Projects {
             return Err(format!("it holds over {PROJECTS_MAX} projects"));
         }
         let projects = Projects { projects };
-        if projects.workstreams() > WORKSTREAMS_MAX {
+        if projects.workstream_count() > WORKSTREAMS_MAX {
             return Err(format!("it holds over {WORKSTREAMS_MAX} workstreams"));
         }
         if let Some(long) = projects.workstream_folders().find(|it| it.0.len() > PATH_BYTES_MAX) {
@@ -404,7 +408,7 @@ impl Projects {
     pub fn changed(
         &self,
         change: Change,
-        mut fresh: impl FnMut() -> io::Result<Id>,
+        mut draw: impl FnMut() -> io::Result<Id>,
     ) -> Result<(Projects, Option<Id>), String> {
         let mut changed = self.clone();
         let made = match change {
@@ -419,12 +423,12 @@ impl Projects {
                 if self.projects.len() >= PROJECTS_MAX {
                     return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
                 }
-                let id = self.fresh(&mut fresh)?;
+                let id = self.fresh(&mut draw)?;
                 changed.projects.push(Project { id, name, dir, workstreams: Vec::new() });
                 Some(id)
             },
             Change::AddWorkstream { project, folder, name } => {
-                if self.workstreams() >= WORKSTREAMS_MAX {
+                if self.workstream_count() >= WORKSTREAMS_MAX {
                     let many = format!("there are {WORKSTREAMS_MAX} workstreams");
                     return Err(format!("{many}, as many as are kept"));
                 }
@@ -432,7 +436,7 @@ impl Projects {
                 let below = project.dir.below(&folder).ok_or_else(|| {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
-                let id = self.fresh(&mut fresh)?;
+                let id = self.fresh(&mut draw)?;
                 project.workstreams.push(Workstream { id, renamed: name, below });
                 Some(id)
             },
@@ -474,9 +478,9 @@ impl Projects {
         Ok((changed, made))
     }
 
-    fn fresh(&self, random: &mut impl FnMut() -> io::Result<Id>) -> Result<Id, String> {
+    fn fresh(&self, draw: &mut impl FnMut() -> io::Result<Id>) -> Result<Id, String> {
         for _ in 0..FRESH_TRIES {
-            let id = random().map_err(|error| format!("no id is drawn: {error}"))?;
+            let id = draw().map_err(|error| format!("no id is drawn: {error}"))?;
             if !self.holds(id) {
                 return Ok(id);
             }
@@ -484,7 +488,7 @@ impl Projects {
         Err(format!("{FRESH_TRIES} ids drawn were all taken"))
     }
 
-    fn workstreams(&self) -> usize {
+    fn workstream_count(&self) -> usize {
         self.projects.iter().map(|project| project.workstreams.len()).sum()
     }
 
@@ -538,12 +542,26 @@ fn moved<T>(items: &mut Vec<T>, at: usize, to: usize) -> Result<(), String> {
 
 pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
     thread::Builder::new().name("folders".to_owned()).spawn(move || {
+        let mut troubles = Troubles::default();
         loop {
-            let Some(folders) = core::ask(&core, Command::Folders) else {
+            let Some(folders) = core::ask(&core, Command::ProjectFolders) else {
                 return;
             };
-            let gone = |folder: &Dir| !fs::metadata(folder.as_str()).is_ok_and(|it| it.is_dir());
-            let missing = folders.into_iter().filter(|folder| gone(folder)).collect();
+            let mut missing = BTreeSet::new();
+            for folder in folders {
+                match gone(&folder) {
+                    Ok(true) => {
+                        missing.insert(folder);
+                    },
+                    Ok(false) => {},
+                    Err(error) => {
+                        let folder = folder.as_str();
+                        let why = format!("{folder}: {error}, and so it is not said to be missing");
+                        troubles.say(why);
+                    },
+                }
+            }
+            troubles.done();
             if core.send(Command::Missing(missing)).is_err() {
                 return;
             }
@@ -553,9 +571,20 @@ pub fn follow(core: SyncSender<Command>, sweep: Duration) -> io::Result<()> {
     Ok(())
 }
 
+fn gone(folder: &Dir) -> io::Result<bool> {
+    match fs::metadata(folder.as_str()) {
+        Ok(metadata) => Ok(!metadata.is_dir()),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(true)
+        },
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use luneta_protocol::github::Checks;
 
@@ -601,8 +630,8 @@ mod tests {
     #[test]
     fn a_name_is_said_text_of_bounded_length() {
         assert_eq!(Name::parse("bitwarden backup").unwrap().as_str(), "bitwarden backup");
-        assert!(Name::parse(&"a".repeat(NAME_MAX)).is_ok());
-        for refused in ["", " a", "a ", "a\nb", &"a".repeat(NAME_MAX + 1)] {
+        assert!(Name::parse(&"a".repeat(NAME_CHARS_MAX)).is_ok());
+        for refused in ["", " a", "a ", "a\nb", &"a".repeat(NAME_CHARS_MAX + 1)] {
             assert!(Name::parse(refused).is_err(), "{refused:?}");
         }
     }
@@ -772,6 +801,25 @@ mod tests {
         }
         let over = Change::AddWorkstream { project: first, folder: dir("/p0"), name: None };
         assert!(change(&projects, over).unwrap_err().contains("as many as are kept"));
+    }
+
+    #[test]
+    fn a_folder_is_gone_only_when_nothing_or_no_folder_is_there() {
+        let scratch = tempfile::tempdir().unwrap();
+        let at = |path: &Path| dir(path.to_str().unwrap());
+        let real = fs::canonicalize(scratch.path()).unwrap();
+        let (file, locked) = (real.join("file"), real.join("locked"));
+        fs::write(&file, "").unwrap();
+        fs::create_dir_all(locked.join("inner")).unwrap();
+        assert!(!gone(&at(&real)).unwrap());
+        assert!(gone(&at(&file)).unwrap());
+        assert!(gone(&at(&real.join("nowhere"))).unwrap());
+        assert!(gone(&at(&file.join("below"))).unwrap());
+        let permissions = |mode| fs::Permissions::from_mode(mode);
+        fs::set_permissions(&locked, permissions(0o000)).unwrap();
+        let unread = gone(&at(&locked.join("inner")));
+        fs::set_permissions(&locked, permissions(0o755)).unwrap();
+        assert_eq!(unread.unwrap_err().kind(), ErrorKind::PermissionDenied);
     }
 
     fn pull_request(state: State, failed: u32) -> PullRequest {

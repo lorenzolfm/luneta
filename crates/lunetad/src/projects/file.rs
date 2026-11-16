@@ -1,18 +1,26 @@
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::SyncSender;
 
 use serde::{Deserialize, Serialize};
 
 use super::{Below, Change, Dir, Id, Name, Project, Projects, Workstream};
-use super::{NAME_MAX, PATH_BYTES_MAX, PROJECTS_MAX, WORKSTREAMS_MAX};
+use super::{NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, WORKSTREAMS_MAX};
+use crate::core::Command;
 use crate::state::{self, Unset};
 
 pub const FILE: &str = "projects";
 
 const VERSION: u32 = 1;
 
-const ENTRY_BYTES_MAX: usize = 2 * (PATH_BYTES_MAX + 4 * NAME_MAX) + 256;
+const CHAR_BYTES_MAX: usize = 4;
+
+const ESCAPED_BYTES_PER_BYTE: usize = 2;
+
+const NAME_BYTES_MAX: usize = CHAR_BYTES_MAX * NAME_CHARS_MAX;
+
+const ENTRY_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + NAME_BYTES_MAX) + 256;
 
 const FILE_BYTES_MAX: usize = 8 * 1024 * 1024;
 
@@ -53,30 +61,34 @@ struct KeptWorkstream {
 pub struct Store {
     file: Result<PathBuf, String>,
     projects: Projects,
+    core: SyncSender<Command>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Failed {
+    NotKept(String),
+    KeptUntold,
 }
 
 impl Store {
-    #[must_use]
-    pub fn open() -> Store {
-        Store::at(state::path(FILE))
+    pub fn open(core: SyncSender<Command>) -> io::Result<Store> {
+        Store::at(state::path(FILE), core)
     }
 
-    #[must_use]
-    pub fn at(file: Result<PathBuf, Unset>) -> Store {
-        let file = match file {
-            Ok(file) => file,
-            Err(unset) => {
-                let why = format!("projects are kept nowhere: {unset}");
-                return Store { file: Err(why), projects: Projects::default() };
+    pub fn at(file: Result<PathBuf, Unset>, core: SyncSender<Command>) -> io::Result<Store> {
+        let (file, projects) = match file {
+            Err(unset) => (Err(format!("projects are kept nowhere: {unset}")), Projects::default()),
+            Ok(file) => match read(&file) {
+                Ok(projects) => (Ok(file), projects),
+                Err(why) => {
+                    let why = format!("{}: {why}, and so it is left as it is", file.display());
+                    (Err(why), Projects::default())
+                },
             },
         };
-        match read(&file) {
-            Ok(projects) => Store { file: Ok(file), projects },
-            Err(why) => {
-                let why = format!("{}: {why}, and so it is left as it is", file.display());
-                Store { file: Err(why), projects: Projects::default() }
-            },
-        }
+        let store = Store { file, projects, core };
+        store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
+        Ok(store)
     }
 
     #[must_use]
@@ -84,17 +96,20 @@ impl Store {
         self.file.as_ref().err().map(String::as_str)
     }
 
-    #[must_use]
-    pub fn projects(&self) -> &Projects {
-        &self.projects
+    pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
+        let file = self.file.as_ref().map_err(|why| Failed::NotKept(why.clone()))?;
+        let changed = self.projects.changed(change, Id::random);
+        let (projects, made) = changed.map_err(Failed::NotKept)?;
+        let unwritten = |error: io::Error| Failed::NotKept(format!("{}: {error}", file.display()));
+        write(file, &projects).map_err(unwritten)?;
+        self.projects = projects;
+        self.tell()?;
+        Ok(made)
     }
 
-    pub fn change(&mut self, change: Change) -> Result<Option<Id>, String> {
-        let file = self.file.as_ref().map_err(Clone::clone)?;
-        let (projects, made) = self.projects.changed(change, Id::random)?;
-        write(file, &projects).map_err(|error| format!("{}: {error}", file.display()))?;
-        self.projects = projects;
-        Ok(made)
+    fn tell(&self) -> Result<(), Failed> {
+        let told = self.core.send(Command::Projects(self.projects.clone()));
+        told.map_err(|_| Failed::KeptUntold)
     }
 }
 
@@ -173,20 +188,38 @@ fn written(projects: &Projects) -> String {
 
 fn write(file: &Path, projects: &Projects) -> io::Result<()> {
     let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let above = folder.parent().expect("a folder of `state::path` is in a folder");
     fs::create_dir_all(folder)?;
     let mut unfinished = tempfile::Builder::new().prefix(".projects.").tempfile_in(folder)?;
     unfinished.write_all(written(projects).as_bytes())?;
     unfinished.as_file().sync_all()?;
     unfinished.persist(file).map_err(|error| error.error)?;
-    Ok(())
+    File::open(folder)?.sync_all()?;
+    File::open(above)?.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::{self, Receiver};
+
     use super::*;
 
     fn dir(text: &str) -> Dir {
         Dir::parse(text).unwrap()
+    }
+
+    fn channel() -> (SyncSender<Command>, Receiver<Command>) {
+        mpsc::sync_channel(16)
+    }
+
+    fn heard(commands: &Receiver<Command>) -> Vec<Projects> {
+        let told = |command| {
+            let Command::Projects(projects) = command else {
+                panic!("a store tells the core only what it keeps");
+            };
+            projects
+        };
+        commands.try_iter().map(told).collect()
     }
 
     fn file_in(scratch: &tempfile::TempDir) -> PathBuf {
@@ -197,7 +230,8 @@ mod tests {
     fn what_a_store_keeps_comes_back_when_it_opens_again() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
-        let mut store = Store::at(Ok(file.clone()));
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
         let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
@@ -208,9 +242,15 @@ mod tests {
         let (sub, named) = (dir("/home/me/Vault/a/b"), Some(Name::parse("release").unwrap()));
         store.change(Change::AddWorkstream { project: vault, folder: sub, name: named }).unwrap();
 
-        let again = Store::at(Ok(file.clone()));
+        let mut told = heard(&commands);
+        assert_eq!(told.len(), 5);
+        assert_eq!(told[0], Projects::default());
+        let kept = told.pop().unwrap();
+        assert_eq!(kept.all().len(), 2);
+
+        let again = Store::at(Ok(file.clone()), core).unwrap();
         assert_eq!(again.unkept(), None);
-        assert_eq!(again.projects(), store.projects());
+        assert_eq!(heard(&commands), [kept]);
         let left: Vec<String> = fs::read_dir(file.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -282,13 +322,15 @@ mod tests {
             let file = file_in(&scratch);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(&file, text).unwrap();
-            let mut store = Store::at(Ok(file.clone()));
+            let (core, commands) = channel();
+            let mut store = Store::at(Ok(file.clone()), core).unwrap();
             let unkept = store.unkept().unwrap().to_owned();
             assert!(unkept.contains(why), "{unkept:?} for {text}");
             assert!(unkept.ends_with("and so it is left as it is"), "{unkept}");
-            assert_eq!(store.projects(), &Projects::default());
+            assert_eq!(heard(&commands), [Projects::default()]);
             let change = Change::AddProject { dir: dir("/c"), name: None };
-            assert_eq!(store.change(change), Err(unkept));
+            assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
+            assert_eq!(heard(&commands), []);
             assert_eq!(fs::read_to_string(&file).unwrap(), text);
         }
     }
@@ -299,16 +341,33 @@ mod tests {
         let file = file_in(&scratch);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, " ".repeat(FILE_BYTES_MAX + 1)).unwrap();
-        let store = Store::at(Ok(file));
+        let store = Store::at(Ok(file), channel().0).unwrap();
         assert!(store.unkept().unwrap().contains("over 8388608 bytes"));
     }
 
     #[test]
     fn with_no_state_folder_nothing_is_kept_and_it_says_why() {
-        let mut store = Store::at(Err(Unset));
+        let (core, _commands) = channel();
+        let mut store = Store::at(Err(Unset), core).unwrap();
         let unkept = store.unkept().unwrap().to_owned();
         assert!(unkept.starts_with("projects are kept nowhere: neither XDG_STATE_HOME"));
         let change = Change::AddProject { dir: dir("/c"), name: None };
-        assert_eq!(store.change(change), Err(unkept));
+        assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
+    }
+
+    #[test]
+    fn a_change_kept_with_no_core_to_hear_it_says_so() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        drop(commands);
+        let change = Change::AddProject { dir: dir("/c"), name: None };
+        assert_eq!(store.change(change), Err(Failed::KeptUntold));
+
+        let (core, commands) = channel();
+        Store::at(Ok(file), core).unwrap();
+        let [kept] = heard(&commands).try_into().unwrap();
+        assert_eq!(kept.all()[0].dir().as_str(), "/c");
     }
 }

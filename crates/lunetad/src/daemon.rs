@@ -57,7 +57,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes, Whose};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Change, Id, Store};
+use crate::projects::{Change, Failed, Id, Store};
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -157,11 +157,10 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let github = wake_github.clone();
     let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
     let core = core::start(wakes)?;
-    let store = Store::open();
+    let store = Store::open(core.clone())?;
     if let Some(why) = store.unkept() {
         log::say(why);
     }
-    let _ = core.send(Command::Projects(store.projects().clone()));
     let store = Arc::new(Mutex::new(store));
     projects::follow(core.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
@@ -1024,14 +1023,15 @@ impl Daemon for Host {
             return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
-        let (store, core) = (Arc::clone(&self.store), self.core.clone());
+        let store = Arc::clone(&self.store);
         let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
             let change = Change::of_api(change).map_err(Status::invalid_argument)?;
             let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
-            let made = store.change(change).map_err(Status::failed_precondition)?;
-            let stopped = || Status::unavailable("the daemon's core has stopped");
-            core.send(Command::Projects(store.projects().clone())).map_err(|_| stopped())?;
-            Ok(made)
+            let stopped = "it is kept, but the daemon's core has stopped";
+            store.change(change).map_err(|failed| match failed {
+                Failed::NotKept(why) => Status::failed_precondition(why),
+                Failed::KeptUntold => Status::unavailable(stopped),
+            })
         });
         let made = changed.await.map_err(|error| unfinished(&error))??;
         Ok(Response::new(ChangeProjectsResponse { made: made.map(Id::get) }))

@@ -69,7 +69,7 @@ pub enum Command {
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
     Sessions(oneshot::Sender<Vec<Addressed>>),
     Dirs(oneshot::Sender<BTreeSet<String>>),
-    Folders(oneshot::Sender<BTreeSet<Dir>>),
+    ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     Claudes(oneshot::Sender<Vec<Agent>>),
@@ -224,7 +224,14 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
-            Command::Missing(now) => known.missing = now,
+            Command::Missing(now) if now == known.missing => continue,
+            Command::Missing(now) => {
+                let before = known.dirs();
+                known.missing = now;
+                if !known.dirs().is_subset(&before) {
+                    wake(&wakes.git);
+                }
+            },
             Command::Remote { destination, reached } => {
                 let Some((_, was)) = known.remotes.iter_mut().find(|(it, _)| *it == destination)
                 else {
@@ -252,7 +259,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let _ = answer.send(known.dirs());
                 continue;
             },
-            Command::Folders(answer) => {
+            Command::ProjectFolders(answer) => {
                 let _ = answer.send(known.projects.folders().collect());
                 continue;
             },
@@ -420,8 +427,9 @@ impl Known {
         let owns = self.owns.iter().flat_map(|own| &own.panes);
         let cwds = self.panes.values().flatten().chain(owns).filter_map(|pane| pane.cwd.as_ref());
         let cwds = cwds.map(|cwd| cwd.as_str().to_owned());
-        let folders = self.projects.workstream_folders().map(|folder| folder.as_str().to_owned());
-        cwds.chain(folders).collect()
+        let present = |folder: &Dir| !self.missing.contains(folder);
+        let folders = self.projects.workstream_folders().filter(present);
+        cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
     }
 
     fn forget_dirs(&mut self) {
