@@ -21,14 +21,19 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
+use lunetad::api::show_request::focus;
 use lunetad::api::Host;
+use lunetad::asks::User;
+use lunetad::closes::Whose;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
-use lunetad::mux::own::attach::{self as own_attach, Heard, Hello, To};
-use lunetad::mux::own::OwnKey;
+use lunetad::mux::own::viewer::{Greeting, Seen};
+use lunetad::mux::own::{OwnClientId, OwnMade, OwnPane};
+use lunetad::mux::TerminalKey;
+use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
-use lunetad::{Destination, Directory};
+use lunetad::{Asked as Shown, Destination, Directory};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::{DefaultTerminal, Terminal};
@@ -37,7 +42,7 @@ use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
 use crate::ask::{self, Ask, Keyed};
-use crate::attached::{self, Attached};
+use crate::attached;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
@@ -57,7 +62,6 @@ use crate::named;
 use crate::news::{self, News};
 use crate::order::{self, Order};
 use crate::prune;
-use crate::own_sessions::{self, Elsewhere, Unmade};
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
@@ -66,18 +70,20 @@ use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
-use crate::starts;
+use crate::projected::{self, Projected};
+use crate::viewed::{self, Heeded, Viewed};
+use crate::workstreams;
 use crate::width::Width;
-use crate::zellij::{self, After, Close, Closes, SessionName, Turned};
+use crate::zellij::{self, After, Close, Closes, Open, SessionName, Turned};
 
 pub enum Made {
-    Own(Result<Elsewhere, String>),
-    Pulled { menu: u64, session: SessionName, made: Result<Pulled, String> },
+    Workstream { made: Result<WorkstreamId, String>, argv: Vec<String> },
+    Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
-pub enum Pulled {
-    Here(OwnKey),
-    There(Destination),
+pub struct Pulled {
+    workstream: WorkstreamId,
+    argv: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,14 +96,16 @@ const NAMING: &str = "menu: luneta names a session already: try again once it ha
 
 const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
-const LANDED_IN_ITSELF: &str =
-    "luneta-mux took luneta's client into the session luneta runs in, and luneta left it";
+pub const NOT_YET: &str = "luneta does not do that to a workstream yet";
+
+const CLIENT: u64 = 1;
 
 pub enum Event {
     Input(Input),
     Answered(Answer),
     InputEnded(io::Error),
-    Own(u64, Heard),
+    Shown(u64, lunetad::Heard),
+    Seen { number: u64, watcher: u64, seen: Seen },
     Reached { claude_folder: Option<PathBuf> },
     Daemon(Result<Host, String>),
     Notice(String),
@@ -260,52 +268,6 @@ enum Held {
     Taken,
 }
 
-struct Own {
-    attached: Attached,
-    phase: Phase,
-}
-
-enum Phase {
-    Coming { going: Going },
-    In { going: Option<Going> },
-}
-
-struct Going {
-    to: To,
-    after: Option<After>,
-}
-
-impl Phase {
-    fn going(&mut self, going: Going) -> Option<After> {
-        let before = match self {
-            Phase::Coming { going: was } => Some(std::mem::replace(was, going)),
-            Phase::In { going: was } => was.replace(going),
-        };
-        before.and_then(|before| before.after)
-    }
-
-    fn went(&mut self, went: &own_attach::Went) -> Option<After> {
-        let going = match std::mem::replace(self, Phase::In { going: None }) {
-            Phase::Coming { going } => Some(going),
-            Phase::In { going } => going,
-        };
-        match going {
-            Some(going) if going.to.reached(went) => going.after,
-            going => {
-                *self = Phase::In { going };
-                None
-            },
-        }
-    }
-
-    fn undone(&mut self) -> Option<After> {
-        match self {
-            Phase::Coming { going } => going.after.take(),
-            Phase::In { going } => going.take().and_then(|going| going.after),
-        }
-    }
-}
-
 pub struct Inbox {
     events: Receiver<Event>,
     aside: VecDeque<Event>,
@@ -343,8 +305,10 @@ impl Inbox {
 }
 
 struct App {
-    right: Own,
-    started: u64,
+    right: Viewed,
+    projected: Projected,
+    seated: Option<OwnPane>,
+    lunetad: PathBuf,
     sidebar: Sidebar,
     areas: (Rect, Rect),
     width: Width,
@@ -381,15 +345,13 @@ struct App {
     dir: PathBuf,
     ended: bool,
     gave_up: Option<String>,
-    runs_in: Option<OwnKey>,
-    own_lost: Vec<OwnKey>,
     deleting: Vec<JoinHandle<()>>,
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
 }
 
-pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
+pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> ExitCode {
     let unkept = log::start(Process::Luneta).err();
     let dir = match env::current_dir() {
         Ok(dir) => dir,
@@ -399,22 +361,21 @@ pub fn run(session: Option<SessionName>, folder: Result<PathBuf, String>) -> Exi
         Ok(runtime) => News::within(runtime),
         Err(why) => News::unshared(why),
     };
-    let start = match (session, own_sessions::runs_in()) {
-        (Some(session), Ok(runs_in)) => {
-            starts::own(&session, &dir, runs_in).map(|to| (to, runs_in))
-        },
-        (None, Ok(runs_in)) => starts::bare(&dir, &news, runs_in).map(|to| (to, runs_in)),
-        (Some(session), Err(why)) => {
-            Err(format!("{why}, so luneta may run in {session}, and goes nowhere it shows itself"))
-        },
-        (None, Err(why)) => {
-            Err(format!("{why}, so luneta may run in any own session, and joins none: unset them"))
-        },
+    let lunetad = match &folder {
+        Ok(lunetad) => lunetad.clone(),
+        Err(why) => return did_not_start(why),
     };
-    let (start, runs_in) = match start {
+    let cwd = workstreams::real(&dir);
+    let named = session.map(SessionName::as_str);
+    let seen = |project| {
+        let kept = crate::ledger::Session::own(OwnMade::from_nanos(0), projected::own_id(project));
+        news.last_seen(kept)
+    };
+    let start = match workstreams::start(&lunetad, named, &cwd, seen) {
         Ok(start) => start,
-        Err(refusal) => return did_not_start(&refusal),
+        Err(refusal) => return did_not_start(&format!("no workstream to show: {refusal}")),
     };
+    let runs_in = lunetad::mux::own::terminal_here();
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => return did_not_start(&format!("no terminal: {error}")),
@@ -506,7 +467,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    (session, runs_in): (Elsewhere, Option<OwnKey>),
+    (start, runs_in): (WorkstreamId, Option<TerminalKey>),
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -570,17 +531,16 @@ fn run_in(
         },
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
-    let started = 1;
-    sidebar.attaching(session.to().session());
-    let hello = hello(session, runs_in, areas.1, colours);
-    let attached = Attached::start(started, hello, &events);
-    let going = Going { to: session.to(), after: None };
-    let right = Own { attached, phase: Phase::Coming { going } };
+    let lunetad = daemon.clone().unwrap_or_default();
+    let (size, greeting) = (view_size(areas.1), greeting(runs_in, colours));
+    let right = Viewed::start(1, lunetad.clone(), start, size, greeting, &events);
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
         right,
-        started,
+        projected: Projected::default(),
+        seated: None,
+        lunetad,
         sidebar,
         areas,
         width,
@@ -617,8 +577,6 @@ fn run_in(
         dir: dir.to_owned(),
         ended: false,
         gave_up: None,
-        runs_in,
-        own_lost: Vec::new(),
         deleting: Vec::new(),
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
@@ -633,11 +591,14 @@ fn run_in(
     Ok(app.failure())
 }
 
-fn hello(to: Elsewhere, runs_in: Option<OwnKey>, area: Rect, colours: Colours) -> Hello {
-    let size = window(area);
+fn greeting(runs_in: Option<TerminalKey>, colours: Colours) -> Greeting {
     let (foreground, background) = colours.both();
-    let (to, size) = (to.to(), attached::laid_size(size.columns, size.lines));
-    Hello { to, runs_in, size, foreground, background }
+    Greeting { runs_in, foreground, background }
+}
+
+fn view_size(area: Rect) -> lunetad::projects::Size {
+    let size = window(area);
+    viewed::view_size(size.columns, size.lines)
 }
 
 fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -703,20 +664,32 @@ impl App {
     fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let relists = matches!(
             event,
-            Event::Daemon(_) | Event::Own(_, Heard::Went(_))
+            Event::Daemon(_) | Event::Shown(_, lunetad::Heard::Laid(_))
         );
         match event {
             Event::Input(input) => self.input(input),
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
-            Event::Own(number, heard) => {
-                if self.right.attached.number() == number {
-                    self.own_heard(heard);
+            Event::Shown(number, heard) => {
+                if self.right.number() == number {
+                    let heeded = self.right.heard(heard);
+                    self.heeded(heeded);
+                }
+            },
+            Event::Seen { number, watcher, seen } => {
+                if self.right.number() == number {
+                    let heeded = self.right.seen(watcher, seen);
+                    self.heeded(heeded);
                 }
             },
             Event::Reached { claude_folder } => self.claude_folder = claude_folder,
-            Event::Daemon(Ok(host)) => {
+            Event::Daemon(Ok(mut host)) => {
+                self.projected = Projected::of(&host);
+                self.projected.adapt(&mut host);
+                let (tabs, titles) = self.projected.tabs(self.right.workstream());
+                self.right.tabs(tabs, titles);
                 self.sidebar.heard(host);
+                self.seat();
                 if let Some(machines) = self.sidebar.reaches() {
                     let acts = self.alerts.heard(machines, Instant::now());
                     self.alert(acts);
@@ -779,7 +752,7 @@ impl App {
             Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
                 Some(sidebar::Held::Open) => {
                     let place = Place::Pane(turned.place().clone());
-                    if !self.go(&on, &place, Some(After::IntoTab(owed, turned))) {
+                    if !self.go(&on, &place, Some(After::IntoTab(owed))) {
                         self.sidebar.drop_menu(menu);
                     }
                 },
@@ -975,6 +948,7 @@ impl App {
             picker.ticked(now);
         }
         self.ask_picker();
+        self.right.ticked();
     }
 
     fn ask_picker(&mut self) {
@@ -1154,15 +1128,15 @@ impl App {
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
-        self.right.attached.key(key);
+        self.right.key(key);
     }
 
     fn paste(&mut self, text: &str) {
-        self.right.attached.paste(text);
+        self.right.paste(text);
     }
 
     fn tell_focus(&mut self, has: bool) {
-        self.right.attached.focus(has);
+        self.right.focus(has);
     }
 
     fn key_for_image(&mut self, key: &KeyEvent) -> bool {
@@ -1381,22 +1355,8 @@ impl App {
 
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
-        let Some(to) = self.right.attached.mouse(mouse, at, self.areas.1) else {
-            return;
-        };
-        let session = to.session();
-        let name = self.sidebar.own_listed(session).map_or_else(
-            || format!("own session {}", session.id),
-            |listed| listed.name().to_string(),
-        );
-        let to = match own_sessions::elsewhere(self.runs_in, to, name) {
-            Ok(to) => to,
-            Err(why) => return self.sidebar.notify(why),
-        };
-        let own = &mut self.right;
-        own.attached.go(to);
-        if let Some(before) = own.phase.going(Going { to: to.to(), after: None }) {
-            before.untold(&self.events);
+        if let Some(workstream) = self.right.mouse(mouse, at, self.areas.1.width) {
+            self.go_workstream(workstream, None);
         }
     }
 
@@ -1411,24 +1371,24 @@ impl App {
         let at = self.session_cell(mouse);
         let own = &mut self.right;
         match (mouse.kind, self.held) {
-            (MouseEventKind::Down(_), _) if own.attached.selects(mouse, at) => {
-                own.attached.select_from(at);
+            (MouseEventKind::Down(_), _) if own.selects(mouse, at) => {
+                own.select_from(at);
                 self.held = Held::Selecting;
                 self.last_press = LastPress::Session;
                 self.leave();
                 true
             },
             (MouseEventKind::Down(_), _) => {
-                own.attached.unselect();
+                own.unselect();
                 false
             },
             (MouseEventKind::Drag(_), Held::Selecting) => {
-                own.attached.select_to(at);
+                own.select_to(at);
                 true
             },
             (MouseEventKind::Up(_), Held::Selecting) => {
                 self.held = Held::Nothing;
-                if let Some(text) = own.attached.selected() {
+                if let Some(text) = own.selected() {
                     let _ = self.events.send(Event::CopyText(text));
                 }
                 true
@@ -1485,6 +1445,7 @@ impl App {
             Asked::Closes { menu, on, session, pane } => {
                 zellij::closes(menu, &on, session, pane, &self.events);
             },
+            Asked::Delete { on, act } if self.of_project(&act) => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
                 Act::Pane { session, whose, pane } => {
                     zellij::close(&on, session, whose, Close::Pane(pane), &self.events);
@@ -1497,11 +1458,15 @@ impl App {
                     self.deleting.retain(|deleting| !deleting.is_finished());
                     self.deleting.push(zellij::kill(&on, session, whose, &self.events));
                 },
-                Act::Leave { session, whose, to } => {
-                    self.go(&on, &to, Some(After::Kill { session, whose }));
+                Act::Leave { session, to, .. } => {
+                    self.go(&on, &to, Some(After::Kill { session }));
                 },
             },
-            Asked::Open { menu, on, open } => zellij::open(menu, &on, open, &self.events),
+            Asked::Open { menu, on, open } => {
+                if !self.project_open(menu, &on, &open) {
+                    zellij::open(menu, &on, open, &self.events);
+                }
+            },
             Asked::Tabs { menu, on, session, pane } => {
                 zellij::other_tabs(menu, &on, session, pane, &self.events);
             },
@@ -1509,37 +1474,28 @@ impl App {
                 zellij::turn(menu, &on, turned, turn, &self.events);
             },
             Asked::StartOwn { starts } => {
-                let runs_in = self.runs_in;
-                self.name_own(move || {
-                    let unmade = |why| format!("menu: no own session made: {why}");
-                    let (name, _, dir) = lunetad::names::free_at(starts).map_err(unmade)?;
-                    let made = own_sessions::made(&name, &dir);
-                    let made = made.map_err(|why| unmade(why.to_string()))?;
-                    own_sessions::elsewhere(runs_in, To::Session(made), &name).map_err(unmade)
-                });
+                match lunetad::names::free_at(starts) {
+                    Ok((name, _, dir)) => self.make_workstream(Some(name), dir),
+                    Err(why) => self.sidebar.notify(format!("menu: no workstream made: {why}")),
+                }
                 self.leave();
             },
             Asked::Make { menu, on, session, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
                     return;
                 }
+                let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
-                    let first = Some(own_sessions::First { tab: &name, command: &command });
-                    let made = caught(|| {
-                        let made = match on {
-                            Machine::Local => {
-                                own_sessions::made_here(&session, &cwd, first).map(Pulled::Here)
-                            },
-                            Machine::Remote(destination) => {
-                                own_sessions::made_there(&destination, &session, &cwd, first)
-                                    .map(|()| Pulled::There(destination))
-                            },
-                        };
-                        made.map_err(|unmade| match unmade {
-                            Unmade::Taken(said) | Unmade::Failed(said) => said,
-                        })
+                    let made = caught(|| match on {
+                        Machine::Local => {
+                            let cwd = workstreams::real(Path::new(cwd.as_str()));
+                            let session = session.as_str();
+                            let made = workstreams::pulled(&lunetad, session, &cwd, &name)?;
+                            Ok(Pulled { workstream: made, argv: command })
+                        },
+                        Machine::Remote(_) => Err(menu::HERE_ONLY.to_owned()),
                     });
-                    Made::Pulled { menu, session, made }
+                    Made::Pulled { menu, made }
                 });
             },
             Asked::Pull { menu, on, work, wanted, worked, others } => {
@@ -1594,6 +1550,73 @@ impl App {
         }
     }
 
+    fn of_project(&self, act: &Act) -> bool {
+        let whose = match act {
+            Act::Pane { whose, .. }
+            | Act::Tab { whose, .. }
+            | Act::Kill { whose, .. }
+            | Act::Leave { whose, .. } => whose,
+        };
+        matches!(whose, Whose::Own(key) if self.projected.project(*key).is_some())
+    }
+
+    fn project_act(&mut self, on: &Machine, act: &Act) {
+        let (Machine::Local, Act::Pane { whose: Whose::Own(key), pane, .. }) = (on, act) else {
+            return self.sidebar.notify(format!("menu: {NOT_YET}"));
+        };
+        let held = OwnPane::new(*key, *pane).and_then(|pane| self.projected.key_of(pane));
+        let Some(terminal) = held else {
+            return self.sidebar.notify(format!("menu: lunetad lists no terminal {pane}"));
+        };
+        let events = self.events.clone();
+        thread::spawn(move || {
+            if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
+                let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
+            }
+        });
+    }
+
+    fn project_open(&mut self, menu: u64, on: &Machine, open: &Open) -> bool {
+        let session = open.session();
+        let project = self.projected.projects().iter().find(|it| it.name == session.as_str());
+        let Some(project) = project else {
+            return false;
+        };
+        self.sidebar.drop_menu(menu);
+        if *on != Machine::Local {
+            self.sidebar.notify(format!("menu: {}", menu::HERE_ONLY));
+            return true;
+        }
+        match open {
+            Open::Pane { beside, command, .. } => {
+                let pane = OwnPane::new(project.key, *beside);
+                let Some((workstream, terminal)) = pane.and_then(|it| self.projected.of_pane(it))
+                else {
+                    self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
+                    return true;
+                };
+                self.go_workstream(workstream, Some(terminal));
+                let argv = command.clone();
+                self.right.ask(Shown::Open { towards: None, argv });
+            },
+            Open::Tab { tab, .. } => {
+                let (lunetad, id) = (self.lunetad.clone(), project.id);
+                let (cwd, name, argv) = (tab.cwd.clone(), tab.name.clone(), tab.command.clone());
+                if self.refuse_naming(None) {
+                    return true;
+                }
+                self.naming_on(move || {
+                    let made = caught(|| {
+                        workstreams::add_workstream(&lunetad, id, cwd.as_str(), name.as_deref())
+                    });
+                    let made = made.map_err(|why| format!("menu: no workstream made: {why}"));
+                    Made::Workstream { made, argv }
+                });
+            },
+        }
+        true
+    }
+
     fn picked(&mut self, picked: Picked) {
         match picked {
             Picked::Nothing => {},
@@ -1603,9 +1626,9 @@ impl App {
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Start { on: Machine::Local, session } => {
-                match own_sessions::directory(&self.dir) {
-                    Ok(cwd) => self.make_own(session, cwd),
-                    Err(why) => self.sidebar.notify(format!("no own session made: {why}")),
+                match Directory::parse(self.dir.to_string_lossy().into_owned()) {
+                    Ok(cwd) => self.make_workstream(Some(session), cwd),
+                    Err(why) => self.sidebar.notify(format!("no workstream made: {why}")),
                 }
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -1617,7 +1640,7 @@ impl App {
                 self.sidebar.notify(format!("picker: zellij keeps {session}: {}", menu::OWN_ONLY));
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
-                self.make_own(session, cwd);
+                self.make_workstream(Some(session), cwd);
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -1627,8 +1650,12 @@ impl App {
                     self.picked(did);
                 }
             },
-            Picked::Delete { on, act: Act::Leave { session, whose, to } } => {
-                self.go(&on, &to, Some(After::Kill { session, whose }));
+            Picked::Delete { on, act } if self.of_project(&act) => {
+                self.project_act(&on, &act);
+                self.give(Focus::on(self.focus.side.session()));
+            },
+            Picked::Delete { on, act: Act::Leave { session, to, .. } } => {
+                self.go(&on, &to, Some(After::Kill { session }));
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
@@ -1639,7 +1666,12 @@ impl App {
         let Some(Over::Ask(ask)) = &self.focus.over else {
             return;
         };
-        let user = self.sidebar.user(&ask.machine());
+        let user = match self.sidebar.user(&ask.machine()) {
+            User::Own { pane, .. } if self.projected.project(pane.session).is_some() => {
+                User::Untold
+            },
+            user => user,
+        };
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
             ask.send(user, self.sidebar.agent(), &self.events);
         }
@@ -1811,144 +1843,107 @@ impl App {
     }
 
     fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
-        self.own_lost.clear();
-        if place.listed().own() {
-            return self.go_own(machine, place, after);
+        let gone = self.go_project(machine, place);
+        if let Err(why) = &gone {
+            self.sidebar.notify(why.clone());
         }
-        let session = place.listed().name();
-        self.sidebar.notify(format!("{session} is one of zellij's sessions: {}", menu::OWN_ONLY));
         if let Some(after) = after {
             after.untold(&self.events);
         }
-        false
+        gone.is_ok()
     }
 
-    fn go_own(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
-        let session = place.listed().name();
-        let refusal = match machine {
-            Machine::Local => None,
-            Machine::Remote(destination) => Some(format!(
-                "luneta cannot go to {session}, an own session of {destination}'s, yet"
-            )),
+    fn go_project(&mut self, machine: &Machine, place: &Place) -> Result<(), String> {
+        let listed = place.listed();
+        let session = listed.name();
+        let Some(key) = listed.own_key() else {
+            return Err(format!("{session} is one of zellij's sessions: {}", menu::OWN_ONLY));
         };
-        let target = match refusal {
-            Some(why) => Err(why),
-            None => self.sidebar.own_target(place),
-        };
-        let target = target.and_then(|to| own_sessions::elsewhere(self.runs_in, to, session));
-        let to = match target {
-            Ok(target) => target,
-            Err(why) => {
-                self.sidebar.notify(why);
-                if let Some(after) = after {
-                    after.untold(&self.events);
-                }
-                return false;
-            },
-        };
-        let own = &mut self.right;
-        own.attached.go(to);
-        if let Some(before) = own.phase.going(Going { to: to.to(), after }) {
-            before.untold(&self.events);
+        if let Machine::Remote(destination) = machine {
+            return Err(format!("luneta cannot go to {session}, a project of {destination}'s, yet"));
         }
-        true
+        let project = self.projected.project(key);
+        let project = project.ok_or_else(|| format!("{session} is no project lunetad keeps"))?;
+        let Some(pane) = place.pane() else {
+            let shown = self.right.workstream();
+            if project.workstreams.iter().any(|it| it.id == shown) {
+                return Ok(());
+            }
+            let first = project.workstreams.first();
+            let first = first.ok_or_else(|| format!("{session} holds no workstream"))?;
+            self.go_workstream(first.id, None);
+            return Ok(());
+        };
+        let pane = OwnPane::new(key, pane).ok_or("a pane of id 0")?;
+        let (workstream, terminal) = self.projected.of_pane(pane).ok_or_else(|| {
+            format!("lunetad lists no terminal {} in {session}", pane.id)
+        })?;
+        self.go_workstream(workstream, Some(terminal));
+        Ok(())
     }
 
-    fn attach(&mut self, to: Elsewhere, after: Option<After>) {
-        let number = self.started + 1;
-        let hello = hello(to, self.runs_in, self.areas.1, self.colours);
-        let attached = Attached::start(number, hello, &self.events);
-        self.started = number;
-        self.give_way();
-        let going = Going { to: to.to(), after };
-        self.right = Own { attached, phase: Phase::Coming { going } };
-        self.sidebar.attaching(to.to().session());
-        if matches!(self.held, Held::Session | Held::Selecting) {
-            self.held = Held::Nothing;
+    fn go_workstream(&mut self, workstream: WorkstreamId, terminal: Option<TerminalId>) {
+        self.right.go(workstream);
+        let (tabs, titles) = self.projected.tabs(workstream);
+        self.right.tabs(tabs, titles);
+        if let Some(terminal) = terminal {
+            self.right.ask(Shown::Focus(focus::To::Terminal(terminal.get())));
         }
-        if !(self.focused && self.focus.session_told()) {
-            self.tell_focus(false);
-        }
-        self.watch();
+        self.seat();
     }
 
-    fn own_heard(&mut self, heard: Heard) {
-        let own = &mut self.right;
-        own.attached.heard(&heard);
-        match heard {
-            Heard::Frame(_) | Heard::Layout(_) => {},
-            Heard::Refused(reason) => {
-                self.sidebar.notify(format!("luneta-mux refused: {reason}"));
-            },
-            Heard::Went(went) if Some(went.pane.session) == self.runs_in => {
-                self.sidebar.notify(LANDED_IN_ITSELF.to_owned());
-                self.newest_here();
-            },
-            Heard::Went(went) => {
-                let after = own.phase.went(&went);
-                self.sidebar.went_own(went.pane, went.client);
-                if let Some(after) = after {
-                    zellij::came_here(after, &self.events);
-                }
-            },
-            Heard::Stayed(reason) => {
-                let after = own.phase.undone();
-                let note = format!("luneta-mux did not take luneta's client there: {reason}");
-                self.sidebar.notify(note);
-                if let Some(after) = after {
-                    after.untold(&self.events);
-                }
-            },
-            Heard::Ended => self.own_ended(None),
-            Heard::Lost(why) => self.own_ended(Some(why)),
-        }
-    }
-
-    fn own_ended(&mut self, lost: Option<String>) {
-        let own = &mut self.right;
-        let (coming, going) = match std::mem::replace(&mut own.phase, Phase::In { going: None }) {
-            Phase::Coming { going } => (true, Some(going)),
-            Phase::In { going } => (false, going),
-        };
-        if let Some(after) = going.and_then(|going| going.after) {
-            after.untold(&self.events);
-        }
-        let Some(why) = lost else {
-            return self.newest_here();
-        };
-        let note = format!("luneta's client of an own session: {why}");
-        if coming {
-            self.end(&note);
-            self.gave_up = Some(why);
+    fn seat(&mut self) {
+        let workstream = self.right.workstream();
+        let Some((project, _)) = self.projected.holding(workstream) else {
             return;
+        };
+        let key = project.key;
+        let pane = self.right.focused().and_then(|focused| self.projected.pane_of(focused));
+        let seated = self.sidebar.own_seat().map(sidebar::OwnSeat::session);
+        if seated != Some(key) {
+            self.sidebar.attaching(key);
+            self.seated = None;
         }
-        self.sidebar.notify(note);
-        if let Some(seat) = self.sidebar.own_seat() {
-            self.own_lost.push(seat.session());
+        if let Some(pane) = pane
+            && self.seated != Some(pane)
+        {
+            let client = OwnClientId::new(CLIENT).expect("the client's id is not 0");
+            self.sidebar.went_own(pane, client);
+            self.seated = Some(pane);
         }
-        self.newest_here();
     }
 
-    fn give_way(&mut self) {
-        if let Some(after) = self.right.phase.undone() {
-            after.untold(&self.events);
+    fn heeded(&mut self, heeded: Heeded) {
+        match heeded {
+            Heeded::Quiet => {},
+            Heeded::Note(note) => self.sidebar.notify(note),
+            Heeded::Lost(why) if why.contains("is forgotten") => {
+                let first = self.projected.projects().iter().flat_map(|it| &it.workstreams).next();
+                match first.map(|it| it.id) {
+                    Some(first) => self.go_workstream(first, None),
+                    None => self.end("no workstream is left to show"),
+                }
+                self.sidebar.notify(format!("lunetad's view: {why}"));
+            },
+            Heeded::Lost(why) => self.sidebar.notify(format!("lunetad's view: {why}")),
         }
+        self.seat();
     }
 
-    fn make_own(&mut self, session: SessionName, cwd: Directory) {
-        let runs_in = self.runs_in;
-        self.name_own(move || {
-            let unmade = |why: String| format!("no own session made: {why}");
-            let made = own_sessions::made(&session, &cwd).map_err(|why| unmade(why.to_string()))?;
-            own_sessions::elsewhere(runs_in, To::Session(made), &session).map_err(unmade)
-        });
-    }
-
-    fn name_own(&mut self, made: impl FnOnce() -> Result<Elsewhere, String> + Send + 'static) {
+    fn make_workstream(&mut self, name: Option<SessionName>, cwd: Directory) {
         if self.refuse_naming(None) {
             return;
         }
-        self.naming_on(move || Made::Own(caught(made)));
+        let lunetad = self.lunetad.clone();
+        self.naming_on(move || {
+            let made = caught(|| {
+                let named = name.as_ref().map(SessionName::as_str);
+                let cwd = workstreams::real(Path::new(cwd.as_str()));
+                workstreams::start(&lunetad, named, &cwd, |_| None)
+            });
+            let made = made.map_err(|why| format!("no workstream made: {why}"));
+            Made::Workstream { made, argv: Vec::new() }
+        });
     }
 
     fn refuse_naming(&mut self, menu: Option<u64>) -> bool {
@@ -1972,39 +1967,27 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Own(Ok(made)) => self.go_made_own(made),
-            Made::Own(Err(why)) => self.sidebar.notify(why),
-            Made::Pulled { menu, session, made } => self.pulled_made(menu, &session, made),
+            Made::Workstream { made: Ok(made), argv } => self.go_opening(made, argv),
+            Made::Workstream { made: Err(why), .. } => self.sidebar.notify(why),
+            Made::Pulled { menu, made } => self.pulled_made(menu, made),
         }
     }
 
-    fn pulled_made(&mut self, menu: u64, session: &SessionName, made: Result<Pulled, String>) {
-        let held = self.sidebar.made_for(menu);
+    fn go_opening(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
+        self.go_workstream(workstream, None);
+        if !argv.is_empty() {
+            self.right.open_in(workstream, argv);
+        }
+    }
+
+    fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
+        self.sidebar.made_for(menu);
         let made = match made {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
-        match (made, held) {
-            (Pulled::Here(made), Some(sidebar::Held::Open)) => {
-                match own_sessions::elsewhere(self.runs_in, To::Session(made), session) {
-                    Ok(made) => self.go_made_own(made),
-                    Err(why) => self.sidebar.notify(format!("menu: made {session}: {why}")),
-                }
-            },
-            (Pulled::Here(_), _) => self.sidebar.notify(format!("menu: made {session}")),
-            (Pulled::There(destination), _) => self.sidebar.notify(format!(
-                "menu: made {session} on {destination}, where luneta goes to no session yet"
-            )),
-        }
-    }
-
-    fn go_made_own(&mut self, made: Elsewhere) {
-        self.own_lost.clear();
-        let own = &mut self.right;
-        own.attached.go(made);
-        if let Some(before) = own.phase.going(Going { to: made.to(), after: None }) {
-            before.untold(&self.events);
-        }
+        let Pulled { workstream, argv } = made;
+        self.go_opening(workstream, argv);
     }
 
     fn give(&mut self, focus: Focus) {
@@ -2091,18 +2074,6 @@ impl App {
         self.ended = true;
     }
 
-    fn newest_here(&mut self) {
-        match own_sessions::newest(self.runs_in, &self.own_lost) {
-            Ok(Some(newest)) => self.attach(newest, None),
-            Ok(None) => self.end("no own session runs to go on in"),
-            Err(why) => {
-                let why = format!("no own session to go on in: {why}");
-                self.end(&why);
-                self.gave_up = Some(why);
-            },
-        }
-    }
-
     fn answered(&mut self, answer: Answer, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match answer {
             Answer::Foreground(_) | Answer::Background(_) => self.colours.hear(answer),
@@ -2133,7 +2104,7 @@ impl App {
             let (sidebar, right) = areas(frame.area(), own);
             self.areas = (sidebar, right);
             let size = window(right);
-            self.right.attached.resize(size.columns, size.lines);
+            self.right.resize(size.columns, size.lines);
             let buffer = frame.buffer_mut();
             let beside = if collapsed {
                 self.sidebar.draw_collapsed(buffer, sidebar, now);
@@ -2142,7 +2113,7 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let cursor = self.right.attached.draw(buffer, right);
+            let cursor = self.right.draw(buffer, right);
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
                     briefing.draw(buffer, right, now);
@@ -2187,7 +2158,7 @@ impl App {
             }
             self.drawn = drawn;
         })?;
-        let cursor = self.right.attached.cursor_style();
+        let cursor = self.right.cursor_style();
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
@@ -2249,7 +2220,6 @@ fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::num::NonZeroU32;
     use std::rc::Rc;
 
     use alacritty_terminal::event::VoidListener;
@@ -2257,43 +2227,9 @@ mod tests {
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
-    use lunetad::mux::own::{OwnClientId, OwnMade, OwnPane};
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
-
-    #[test]
-    fn a_go_s_after_waits_for_the_client_to_be_where_it_went() {
-        let key = |id, made| OwnKey {
-            id: lunetad::mux::own::OwnId::new(id).unwrap(),
-            made: OwnMade::from_nanos(made * 1_000_000_000_u64),
-        };
-        let (here, there) = (key(1, 10), key(2, 20));
-        let kill = || {
-            let whose = lunetad::closes::Whose::Own(here);
-            Some(After::Kill { session: SessionName::running("here").unwrap(), whose })
-        };
-        let went = |session, tab| {
-            let tab = NonZeroU32::new(tab).unwrap();
-            let client = OwnClientId::new(1).unwrap();
-            own_attach::Went { pane: OwnPane::new(session, 9).unwrap(), tab, client }
-        };
-        let is_kill = |after: Option<After>| matches!(after, Some(After::Kill { .. }));
-        let going = Going { to: To::Session(there), after: kill() };
-        let mut phase = Phase::Coming { going };
-        assert!(phase.went(&went(here, 3)).is_none());
-        assert!(matches!(phase, Phase::In { going: Some(_) }), "it came, and still goes");
-        assert!(is_kill(phase.went(&went(there, 4))));
-        assert!(matches!(phase, Phase::In { going: None }));
-        let to = To::Tab { session: there, tab: NonZeroU32::new(5).unwrap() };
-        assert!(phase.going(Going { to, after: kill() }).is_none());
-        assert!(phase.went(&went(there, 4)).is_none(), "another tab of the session");
-        assert!(is_kill(phase.going(Going { to: To::Session(here), after: None })));
-        assert!(phase.undone().is_none());
-        assert!(phase.going(Going { to: To::Session(here), after: kill() }).is_none());
-        assert!(is_kill(phase.undone()));
-        assert!(matches!(phase, Phase::In { going: None }));
-    }
 
     #[test]
     fn what_to_copy_goes_out_as_osc_52() {

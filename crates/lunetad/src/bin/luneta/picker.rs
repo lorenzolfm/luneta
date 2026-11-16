@@ -36,6 +36,7 @@ use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
+use crate::workstreams;
 use crate::zellij::{self, Closes, SessionName};
 
 const TITLE: &str = "luneta";
@@ -226,7 +227,10 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Rename { on, from, to } => {
                 let renamed = match &on {
-                    Machine::Local => Mux::Zellij(&from).renamed(&to),
+                    Machine::Local => match workstreams::renamed(from.as_str(), to.as_str()) {
+                        Some(renamed) => renamed,
+                        None => Mux::Zellij(&from).renamed(&to),
+                    },
                     Machine::Remote(destination) => {
                         reach(destination).and_then(|mut away| away.rename(&from, &to))
                     },

@@ -500,11 +500,9 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let show = lunetad::show(folder, workstream, size, move |it| drop(heard.send(it)));
-    let laid = || loop {
-        match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
-            Heard::Laid(laid) => return laid,
-            Heard::Refused(why) | Heard::Lost(why) => panic!("the view is not laid out: {why}"),
-        }
+    let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
+        Heard::Laid(laid) => laid,
+        Heard::Refused(why) | Heard::Lost(why) => panic!("the view is not laid out: {why}"),
     };
     assert_eq!(laid().panes().len(), 0);
     show.ask(Asked::Open { towards: None, argv: vec!["sh".to_owned()] });

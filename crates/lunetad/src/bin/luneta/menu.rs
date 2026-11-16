@@ -464,8 +464,8 @@ impl Entry {
             | Entry::Start { .. }
             | Entry::Last(_)
             | Entry::Checks
-            | Entry::New(New::Tab) => pane.then_some(self),
-            Entry::New(New::Pane) | Entry::Turn(_) => (pane && !target.own()).then_some(self),
+            | Entry::New(New::Tab | New::Pane) => pane.then_some(self),
+            Entry::Turn(_) => (pane && !target.own()).then_some(self),
             Entry::New(New::Session) => (!session).then_some(self),
             Entry::Issue => target.repository().is_some().then_some(self),
             Entry::New(New::Machine)
@@ -1047,16 +1047,6 @@ pub enum Opens {
     Tab { name: Option<String>, command: Vec<String> },
 }
 
-impl Opens {
-    fn agent(session: &Listed, beside: u32, command: Vec<String>) -> Opens {
-        if session.own() {
-            Opens::Tab { name: None, command }
-        } else {
-            Opens::Pane { beside, command }
-        }
-    }
-}
-
 #[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
 pub enum Did {
     Stays(Menu, Wants),
@@ -1411,7 +1401,7 @@ impl Menu {
                 (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
                         let command = agents::on_skill(keys.agent.harness(), &skill, None);
-                        let opens = Opens::agent(&session, pane, command);
+                        let opens = Opens::Pane { beside: pane, command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
@@ -1701,7 +1691,7 @@ impl Menu {
                 Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
             },
             (At::There((session, pane)), Pull::Agent) => {
-                let opens = Opens::agent(&session, pane, command);
+                let opens = Opens::Pane { beside: pane, command };
                 opening(session, pane, opens)
             },
             (At::Session((session, pane)), _) => {
@@ -1757,7 +1747,7 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::agent(&session, pane, command);
+        let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -1787,7 +1777,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::agent(&session, pane, command);
+        let opens = Opens::Pane { beside: pane, command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)
@@ -2884,7 +2874,7 @@ mod tests {
     }
 
     #[test]
-    fn an_own_session_s_pane_opens_its_agents_in_a_tab_and_turns_none() {
+    fn an_own_session_s_pane_opens_its_agents_beside_it_and_turns_none() {
         let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
         let own_row = || Target::Pane(Machine::Local, PaneRow { session: own.clone(), ..row() });
         let (menu, _) = stays(opened(own_row(), None));
@@ -2892,13 +2882,13 @@ mod tests {
         assert!(lines.iter().all(|line| !line.contains("Turn")), "{lines:?}");
         let (menu, _) = stays(opened(own_row(), Some('n')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
+            " p  new pane",
             " t  new tab",
             " s  new session",
-            " m  new machine",
         ]);
         let (_, wants) = stays(stays(opened(own_row(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
-        let opens = Opens::Tab { name: None, command };
+        let opens = Opens::Pane { beside: 4, command };
         assert_eq!(wants, Wants::Open { session: own.clone(), pane: 4, cwd: main_dir(), opens });
         assert!(Menu::open(1, own_row(), Some('t'), PICKED).is_none());
     }

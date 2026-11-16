@@ -23,7 +23,6 @@ use lunetad::asks::User;
 use lunetad::closes::Whose;
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
-use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnMade, OwnPane};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
@@ -1302,19 +1301,6 @@ impl Sidebar {
             self.folds.set(Fold::Machine(&Machine::Local), false);
             self.folds.set(Fold::Session(&Machine::Local, &listed.name), false);
         }
-    }
-
-    pub fn own_target(&self, place: &Place) -> Result<To, String> {
-        let listed = place.listed();
-        let session = listed.own_key();
-        let session = session.ok_or_else(|| format!("{} is no own session", listed.name))?;
-        let Some(pane) = place.pane() else {
-            return Ok(To::Session(session));
-        };
-        let tab = self.pane_of(&Machine::Local, listed, pane).and_then(|pane| pane.tab_id);
-        let tab = tab.and_then(NonZeroU32::new);
-        let tab = tab.ok_or_else(|| format!("lunetad lists no tab of {}:{pane}", listed.name))?;
-        Ok(To::Tab { session, tab })
     }
 
     fn seats_here(own_seat: Option<OwnSeat>, listed: &Listed) -> bool {
@@ -7340,8 +7326,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
-        assert_eq!(lines[12..], [
+        assert_eq!(lines[11..], [
             "─ New ─────────── luneta/main ─",
+            " p  new pane",
             " t  new tab",
             " s  new session",
             " m  new machine",
@@ -8146,10 +8133,9 @@ mod tests {
         type_in(&mut sidebar, "c");
         let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
-        let tab = Tab { cwd, name: None, command };
-        let tab = Open::Tab { session: older, tab, alone_since: None };
-        let tab = Asked::Open { menu: 2, on: Machine::Local, open: tab };
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
+        let pane = Open::Pane { session: older, beside: 1, cwd, command };
+        let pane = Asked::Open { menu: 2, on: Machine::Local, open: pane };
+        assert_eq!(sidebar.key(&char('t'), moment(160_000)), pane);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
     }

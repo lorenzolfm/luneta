@@ -201,6 +201,22 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
     Some(OwnPane { session: OwnKey { id, made }, id: pane })
 }
 
+#[must_use]
+pub fn terminal_here() -> Option<TerminalKey> {
+    terminal_in(&environ())
+}
+
+fn environ() -> Vec<OsString> {
+    std::env::vars_os()
+        .map(|(name, value)| {
+            let mut entry = name;
+            entry.push("=");
+            entry.push(value);
+            entry
+        })
+        .collect()
+}
+
 pub fn here() -> Result<Option<OwnPane>, String> {
     let environ: Vec<OsString> = std::env::vars_os()
         .map(|(name, value)| {
