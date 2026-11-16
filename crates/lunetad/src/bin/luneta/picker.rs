@@ -104,7 +104,7 @@ pub struct Runs {
 #[derive(Clone, Debug)]
 pub struct Live {
     pub place: Place,
-    pub started: SystemTime,
+    pub started: Option<SystemTime>,
     pub panes: Vec<Shown>,
     pub focus: Option<u32>,
     pub waiting: usize,
@@ -1509,8 +1509,8 @@ impl Picker {
                         let (dot, style) = Mark::Waiting.glyph(frame);
                         right.push(Span::styled(format!("{dot}{} ", live.waiting), style));
                     }
-                    if let Some(live) = live {
-                        let age = format!("{} ago", sidebar::age(live.started, now));
+                    if let Some(started) = live.and_then(|live| live.started) {
+                        let age = format!("{} ago", sidebar::age(started, now));
                         right.push(Span::styled(age, Style::new().fg(gruvbox::GREY)));
                     }
                     (None, bold, right)
@@ -2177,7 +2177,7 @@ mod tests {
     fn live(name: &str, started: u64, focus: Option<u32>) -> Live {
         Live {
             place: Place::Session(listed(name, started)),
-            started: UNIX_EPOCH + Duration::from_secs(started),
+            started: Some(UNIX_EPOCH + Duration::from_secs(started)),
             panes: vec![Shown { id: 0, tab: "Tab #1".to_owned(), label: format!("{name}/w") }],
             focus,
             waiting: 0,

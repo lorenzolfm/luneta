@@ -28,7 +28,7 @@ use lunetad::closes::Whose;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
-use lunetad::mux::own::{OwnClientId, OwnMade, OwnPane};
+use lunetad::mux::own::{OwnClientId, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
@@ -70,7 +70,7 @@ use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
-use crate::projected::{self, Projected};
+use crate::projected::Projected;
 use crate::viewed::{self, Heeded, Viewed};
 use crate::workstreams;
 use crate::width::Width;
@@ -368,8 +368,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
     let cwd = workstreams::real(&dir);
     let named = session.map(SessionName::as_str);
     let seen = |project| {
-        let kept = crate::ledger::Session::own(OwnMade::from_nanos(0), projected::own_id(project));
-        news.last_seen(kept)
+        news.last_seen(crate::ledger::Session::Project(project))
     };
     let start = match workstreams::start(&lunetad, named, &cwd, seen) {
         Ok(start) => start,

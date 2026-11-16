@@ -57,6 +57,7 @@ use crate::news::News;
 use crate::order::{Colour, Order, Tabbed};
 use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
 use crate::printed::Printed;
+use crate::projected;
 use crate::prune;
 use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
@@ -138,7 +139,10 @@ impl Listed {
             Mux::Zellij(zellij) => ledger::Session::new(started, NonZeroU64::new(zellij.socket)?)?,
             Mux::Own(own) => {
                 let key = OwnKey::of(&own).ok()?;
-                ledger::Session::own(key.made, key.id)
+                match projected::project_of(key) {
+                    Some(project) => ledger::Session::Project(project),
+                    None => ledger::Session::own(key.made, key.id),
+                }
             },
         };
         Some(Listed { name, kept })
@@ -149,16 +153,20 @@ impl Listed {
     }
 
     pub fn own_key(&self) -> Option<OwnKey> {
-        match self.kept {
-            ledger::Session::Zellij { .. } => None,
-            ledger::Session::Own { made_ns, id } => {
-                Some(OwnKey { id, made: OwnMade::from_nanos(made_ns) })
-            },
+        match self.whose() {
+            Whose::Own(key) => Some(key),
+            Whose::Zellij(_) => None,
         }
     }
 
     pub fn whose(&self) -> Whose {
-        self.own_key().map_or_else(|| Whose::Zellij(self.kept.started()), Whose::Own)
+        match self.kept {
+            ledger::Session::Zellij { started_ns, .. } => Whose::Zellij(ledger::moment(started_ns)),
+            ledger::Session::Own { made_ns, id } => {
+                Whose::Own(OwnKey { id, made: OwnMade::from_nanos(made_ns) })
+            },
+            ledger::Session::Project(project) => Whose::Own(projected::key_of(project)),
+        }
     }
 
     pub fn at(&self) -> Where<'_> {

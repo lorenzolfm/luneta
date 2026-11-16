@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lunetad::mux::own::{OwnId, OwnMade};
+use lunetad::projects::ProjectId;
 use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
 
@@ -16,9 +17,12 @@ use crate::state;
 pub enum Session {
     Zellij { started_ns: u64, socket: NonZeroU64 },
     Own { made_ns: u64, id: OwnId },
+    Project(ProjectId),
 }
 
 const OWN_PREFIX: &str = "own-";
+
+const PROJECT_PREFIX: &str = "project-";
 
 impl Session {
     pub fn new(started: SystemTime, socket: NonZeroU64) -> Option<Self> {
@@ -33,10 +37,11 @@ impl Session {
         Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
 
-    pub fn started(self) -> SystemTime {
+    pub fn started(self) -> Option<SystemTime> {
         match self {
-            Session::Zellij { started_ns, .. } => moment(started_ns),
-            Session::Own { made_ns, .. } => moment(made_ns),
+            Session::Zellij { started_ns, .. } => Some(moment(started_ns)),
+            Session::Own { made_ns, .. } => Some(moment(made_ns)),
+            Session::Project(_) => None,
         }
     }
 
@@ -44,11 +49,14 @@ impl Session {
         match self {
             Session::Zellij { started_ns, socket } => format!("{started_ns}-{socket}"),
             Session::Own { made_ns, id } => format!("{OWN_PREFIX}{made_ns}-{id}"),
+            Session::Project(project) => format!("{PROJECT_PREFIX}{project}"),
         }
     }
 
     fn read(name: &str) -> Option<Self> {
-        let session = if let Some(own) = name.strip_prefix(OWN_PREFIX) {
+        let session = if let Some(project) = name.strip_prefix(PROJECT_PREFIX) {
+            Session::Project(project.parse().ok()?)
+        } else if let Some(own) = name.strip_prefix(OWN_PREFIX) {
             let (made_ns, id) = own.split_once('-')?;
             Session::Own { made_ns: made_ns.parse().ok()?, id: OwnId::new(id.parse().ok()?)? }
         } else {
@@ -115,7 +123,7 @@ fn nanos(at: SystemTime) -> Option<u64> {
     u64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 
-fn moment(nanos: u64) -> SystemTime {
+pub fn moment(nanos: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
 }
 
@@ -348,7 +356,13 @@ mod tests {
         assert_eq!(again.latest(own), Some(at(5)));
         assert_eq!(again.latest(next), Some(at(6)));
         assert_eq!(again.latest(zellij), Some(at(7)));
-        assert_eq!(own.started(), at(10));
+        assert_eq!(own.started(), Some(at(10)));
+        let project = Session::Project(ProjectId::of(0x2a).unwrap());
+        ledger.set(Key { session: project, pane: 3 }, Some(at(8)));
+        let again = Ledger::within(scratch.path().to_owned());
+        assert_eq!(again.latest(project), Some(at(8)));
+        assert_eq!(project.name(), "project-000000000000002a");
+        assert_eq!((Session::read("project-2a"), project.started()), (None, None));
     }
 
     #[test]
