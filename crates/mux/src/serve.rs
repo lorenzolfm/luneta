@@ -15,13 +15,13 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
 use crate::asked::{
-    self, At, Dumped, Heard, Name, Opens, Place, SessionName, Shows, Size, Tag, TerminalKey,
+    self, At, Dumped, Heard, Name, Opens, Place, SessionName, Size, Tag, TerminalKey, ViewerHeard,
     TurnTo, Who,
 };
 use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::mux::{LaidOut, Layouts, Mux};
-use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
+use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
 pub const FIRST_SESSION: Duration = Duration::from_secs(30);
@@ -253,21 +253,21 @@ async fn listen_to_viewer(
     mux: Arc<Mux>,
     client: ClientId,
     mut heard: Streaming<api::FromViewer>,
-    out: Out,
+    out: ViewerOut,
 ) {
-    let refused = loop {
+    let ending = loop {
         let message = match heard.message().await {
             Ok(Some(message)) => message,
             Ok(None) => break None,
             Err(refusal) => break Some(refusal),
         };
-        let said = match asked::shows(message) {
+        let said = match asked::viewer_heard(message) {
             Ok(said) => said,
             Err(refusal) => break Some(refusal),
         };
         let taken = match said {
-            Shows::Showing(keys) => mux.show(client, &keys),
-            Shows::Typed(terminal, input) => match mux.typed(client, terminal) {
+            ViewerHeard::Showing(keys) => mux.show(client, &keys),
+            ViewerHeard::Typed(terminal, input) => match mux.typed(client, terminal) {
                 Ok(handle) => {
                     handle.send(ToPane::Input(client, input)).await;
                     Ok(())
@@ -277,16 +277,16 @@ async fn listen_to_viewer(
         };
         if let Err(refusal) = taken {
             let reason = refusal.message().to_owned();
-            let refused = api::to_client::Event::Refused(api::Refused { reason });
-            if out.send(Ok(api::ToClient { event: Some(refused) })).await.is_err() {
+            let refused = api::to_viewer::Event::Refused(api::Refused { reason });
+            if out.send(Ok(api::ToViewer { event: Some(refused) })).await.is_err() {
                 eprintln!("luneta-mux: viewer {client} went before it heard it was refused");
             }
         }
     };
-    if let Some(refusal) = refused
+    if let Some(refusal) = ending
         && let Err(TrySendError::Full(_)) = out.try_send(Err(refusal))
     {
-        eprintln!("luneta-mux: viewer {client} had no room for its refusal");
+        eprintln!("luneta-mux: viewer {client} had no room for its ending refusal");
     }
     mux.unview(client);
 }
@@ -394,7 +394,7 @@ impl Stream for UntilEnded {
 }
 
 pub struct Viewed {
-    going: ReceiverStream<Said>,
+    going: ReceiverStream<Result<api::ToViewer, Status>>,
     let_go: oneshot::Receiver<()>,
     ended: bool,
 }
@@ -409,7 +409,7 @@ impl Stream for Viewed {
         match Pin::new(&mut self.going).poll_next(context) {
             Poll::Ready(Some(said)) => {
                 self.ended = said.is_err();
-                Poll::Ready(Some(said.map(viewed)))
+                Poll::Ready(Some(said))
             },
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
@@ -421,16 +421,6 @@ impl Stream for Viewed {
             },
         }
     }
-}
-
-fn viewed(said: api::ToClient) -> api::ToViewer {
-    use api::to_client::Event;
-    let event = match said.event {
-        Some(Event::Frame(frame)) => api::to_viewer::Event::Frame(frame),
-        Some(Event::Refused(refused)) => api::to_viewer::Event::Refused(refused),
-        other => unreachable!("a viewer hears frames and refusals alone, not {other:?}"),
-    };
-    api::ToViewer { event: Some(event) }
 }
 
 pub async fn serve(claim: Claim) -> io::Result<()> {

@@ -9,11 +9,11 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{
     Act, At, Colours, Ends, FocusTo, Greeting, Hello, Is, MoveTo, Name, Opening, Opens, Place,
-    Runs, RunsIn, SessionName, Size, Tag, TerminalKey, TurnTo, Who,
+    Runs, RunsIn, SHOWN_MAX, SessionName, Size, Tag, TerminalKey, TurnTo, Who,
 };
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::layout::{self, Direction, Leaf, Order, Rect, Removed, Tree};
-use crate::pane::{self, Exit, Handle, Out, Viewer, Wanted};
+use crate::pane::{self, Exit, Frames, Handle, Out, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
 const FIRST_SIZE: Size = Size {
@@ -30,6 +30,7 @@ pub const PANES_MAX: usize = 1024;
 pub const CLIENTS_MAX: usize = 256;
 
 const _: () = assert!(TABS_MAX <= PANES_MAX);
+const _: () = assert!(SHOWN_MAX <= PANES_MAX);
 
 pub type Layouts = watch::Receiver<Option<LaidOut>>;
 
@@ -124,7 +125,7 @@ struct Seat {
 }
 
 struct Viewing {
-    out: Out,
+    out: ViewerOut,
     colours: Colours,
     runs_in: Option<TerminalKey>,
     shows: Vec<Shown>,
@@ -276,6 +277,8 @@ impl Mux {
             model.refuse_if_ended()?;
             model.refuse_if_no_room_for_a_pane()?;
             let id = PaneId::next(&mut model.last.pane);
+            assert!(model.pane(id).is_err(), "terminal {id} is no tab's pane");
+            assert!(model.terminal_place(id).is_none(), "terminal {id} is new");
             let key = TerminalKey { id, made: SystemTime::now() };
             let pane = spawned(self, id, &terminal_vars(key)?, opens, size)?;
             model.terminals.push(Terminal { key, tag, size, pane });
@@ -312,7 +315,7 @@ impl Mux {
     pub fn view(
         &self,
         greeting: Greeting,
-        out: Out,
+        out: ViewerOut,
         gone: oneshot::Sender<()>,
     ) -> Result<ClientId, Status> {
         self.change(|model| {
@@ -321,7 +324,9 @@ impl Mux {
             let client = ClientId::next(&mut model.last.client);
             let Greeting { colours, runs_in } = greeting;
             let viewing = Viewing { out, colours, runs_in, shows: Vec::new(), _gone: gone };
-            model.viewing.insert(client, viewing);
+            assert!(!model.clients.contains_key(&client), "viewer {client} is no client");
+            let was = model.viewing.insert(client, viewing);
+            assert!(was.is_none(), "viewer {client} is new");
             Ok(client)
         })
     }
@@ -337,7 +342,8 @@ impl Mux {
         let shown = shown.ok_or_else(|| {
             Status::failed_precondition(format!("terminal {terminal} is not shown"))
         })?;
-        Ok(model.terminal(shown.key)?.pane.handle.clone())
+        let terminal = model.terminal(shown.key).expect("a shown terminal is the model's");
+        Ok(terminal.pane.handle.clone())
     }
 
     pub fn unview(&self, client: ClientId) {
@@ -368,6 +374,7 @@ impl Mux {
             model.refuse_if_no_room_for_a_client()?;
             let pane = model.pane_of_place(hello.to, hello.runs_in)?;
             let client = ClientId::next(&mut model.last.client);
+            assert!(!model.viewing.contains_key(&client), "client {client} is no viewer");
             let attached = api::ToClient {
                 event: Some(api::to_client::Event::Attached(api::Attached {
                     client: client.said(),
@@ -423,7 +430,7 @@ impl Mux {
 
     pub fn titled(&self, pane: PaneId, title: String, cwd: Option<PathBuf>) {
         self.change(|model| {
-            if let Some(pane) = model.pane_mut(pane) {
+            if let Some(pane) = model.any_pane_mut(pane) {
                 pane.title = title;
                 if let Some(cwd) = cwd {
                     pane.cwd = cwd;
@@ -435,7 +442,7 @@ impl Mux {
     pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
         self.change(|model| {
             if let Some(Pane { program: Program::Runs { foreground: was, ran: said, .. }, .. }) =
-                model.pane_mut(pane)
+                model.any_pane_mut(pane)
             {
                 (*was, *said) = (foreground, ran);
             }
@@ -444,7 +451,7 @@ impl Mux {
 
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
         self.change(|model| {
-            let Some(found) = model.pane_mut(pane) else {
+            let Some(found) = model.any_pane_mut(pane) else {
                 return true;
             };
             if let Program::Runs { ends: Ends::Closes, .. } = found.program {
@@ -524,18 +531,21 @@ impl Model {
                 runs_in.id
             )));
         }
+        assert!(keys.len() <= SHOWN_MAX);
+        for key in keys {
+            self.terminal(*key)?;
+        }
+        let before: BTreeMap<TerminalKey, u64> =
+            viewing.shows.iter().map(|shown| (shown.key, shown.came)).collect();
         let mut now = Vec::with_capacity(keys.len());
         for key in keys {
-            let before = viewing.shows.iter().find(|shown| shown.key == *key);
-            let came = before.map_or_else(
-                || {
-                    self.last.came += 1;
-                    self.last.came
-                },
-                |before| before.came,
-            );
+            let came = before.get(key).copied().unwrap_or_else(|| {
+                self.last.came += 1;
+                self.last.came
+            });
             now.push(Shown { key: *key, came });
         }
+        assert_eq!(now.len(), keys.len());
         self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
         Ok(())
     }
@@ -786,13 +796,17 @@ impl Model {
     }
 
     fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Pane> {
-        if let Some(place) = self.terminal_place(pane) {
-            return Some(&mut self.terminals[place].pane);
-        }
         self.sessions
             .iter_mut()
             .flat_map(|session| session.tabs.iter_mut())
             .find_map(|tab| tab.tree.get_mut(pane))
+    }
+
+    fn any_pane_mut(&mut self, pane: PaneId) -> Option<&mut Pane> {
+        if let Some(place) = self.terminal_place(pane) {
+            return Some(&mut self.terminals[place].pane);
+        }
+        self.pane_mut(pane)
     }
 
     fn pane_of_place(&self, place: Place, runs_in: Option<RunsIn>) -> Result<PaneId, Status> {
@@ -902,6 +916,9 @@ impl Model {
         if let Some(place) = self.terminal_place(pane) {
             let closed = self.terminals.remove(place);
             closed.pane.handle.close();
+            for viewing in self.viewing.values_mut() {
+                viewing.shows.retain(|shown| shown.key != closed.key);
+            }
             self.end_if_empty();
             return;
         }
@@ -1006,7 +1023,7 @@ impl Model {
                     .iter()
                     .map(|(client, seat)| Viewer {
                         client: *client,
-                        out: seat.out.clone(),
+                        frames: Frames::Client(seat.out.clone()),
                         colours: seat.colours,
                         came: seat.came,
                     })
@@ -1021,11 +1038,20 @@ impl Model {
         }
         assert!(seated_by_tab.next().is_none(), "settle seats no tab it did not see");
         assert_eq!(laid_out, self.clients.len(), "every client sits on a pane of the model");
+        assert!(self.clients.len() + self.viewing.len() <= CLIENTS_MAX);
+        let panes: usize = self.tabs().map(|(_, tab)| tab.tree.len()).sum();
+        assert!(panes + self.terminals.len() <= PANES_MAX);
         let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
         for (client, viewing) in &self.viewing {
+            assert!(viewing.shows.len() <= SHOWN_MAX);
+            if let Some(runs_in) = viewing.runs_in {
+                let shown = viewing.shows.iter().any(|shown| shown.key == runs_in);
+                assert!(!shown, "viewer {client} shows terminal {}, which it runs in", runs_in.id);
+            }
             for shown in &viewing.shows {
-                let (out, colours) = (viewing.out.clone(), viewing.colours);
-                let viewer = Viewer { client: *client, out, colours, came: shown.came };
+                let frames = Frames::Viewer(viewing.out.clone());
+                let viewer =
+                    Viewer { client: *client, frames, colours: viewing.colours, came: shown.came };
                 by_terminal.entry(shown.key).or_default().push(viewer);
             }
         }
@@ -1033,6 +1059,7 @@ impl Model {
             let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
             terminal.pane.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
         }
+        assert!(by_terminal.is_empty(), "every shown terminal is the model's");
     }
 
     fn listing(&self) -> api::Listing {

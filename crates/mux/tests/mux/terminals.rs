@@ -309,3 +309,56 @@ fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
         assert_eq!((refusal.code(), refusal.message()), (Code::InvalidArgument, repeated.as_str()));
     });
 }
+
+#[test]
+fn showing_a_terminal_the_mux_does_not_hold_is_refused_and_the_viewer_goes_on() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[made_at_another_time(key)]).await;
+        viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
+        assert_eq!(viewer.refused, [format!("no terminal {} made then", key.id)]);
+        viewer.show(&[key]).await;
+        viewer.type_line(key.id, "echo $((6 * 7))").await;
+        viewer.until_row(key.id, "42").await;
+    });
+}
+
+#[test]
+fn a_closed_terminal_leaves_what_its_viewers_show() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let one = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
+        let two = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[one, two]).await;
+        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(one) }).await.unwrap();
+        viewer.type_line(one.id, "").await;
+        viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
+        assert_eq!(viewer.refused, [format!("terminal {} is not shown", one.id)]);
+        viewer.type_line(two.id, "echo $((6 * 7))").await;
+        viewer.until_row(two.id, "42").await;
+    });
+}
+
+#[test]
+fn a_terminal_is_reached_by_its_key_and_not_as_a_pane() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        new_session(&mut mux, "work", shell()).await;
+        let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
+        let no_pane = format!("no pane {}", key.id);
+        let closed = mux.close_pane(api::ClosePaneRequest { pane: key.id }).await.unwrap_err();
+        let dumped =
+            api::DumpRequest { pane: key.id, dumped: api::Dumped::Text.into(), terminal: None };
+        let dumped = mux.dump(dumped).await.unwrap_err();
+        for refusal in [closed, dumped] {
+            assert_eq!((refusal.code(), refusal.message()), (Code::NotFound, no_pane.as_str()));
+        }
+        assert!(terminal(&listed(&mut mux).await, &key).is_some());
+    });
+}

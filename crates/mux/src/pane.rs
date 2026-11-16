@@ -65,6 +65,8 @@ const _: () = assert!(MESSAGES_PER_TURN <= MESSAGES_MAX);
 
 pub type Out = mpsc::Sender<Result<api::ToClient, Status>>;
 
+pub type ViewerOut = mpsc::Sender<Result<api::ToViewer, Status>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     Code(i32),
@@ -93,9 +95,59 @@ impl Exit {
 #[derive(Clone)]
 pub struct Viewer {
     pub client: ClientId,
-    pub out: Out,
+    pub frames: Frames,
     pub colours: Colours,
     pub came: u64,
+}
+
+#[derive(Clone)]
+pub enum Frames {
+    Client(Out),
+    Viewer(ViewerOut),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    Taken,
+    Full,
+    Closed,
+}
+
+impl Frames {
+    fn capacity(&self) -> usize {
+        match self {
+            Frames::Client(out) => out.capacity(),
+            Frames::Viewer(out) => out.capacity(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Frames::Client(out) => out.is_closed(),
+            Frames::Viewer(out) => out.is_closed(),
+        }
+    }
+
+    fn send(&self, frame: api::Frame) -> Sent {
+        match self {
+            Frames::Client(out) => {
+                let event = Some(api::to_client::Event::Frame(frame));
+                sent(&out.try_send(Ok(api::ToClient { event })))
+            },
+            Frames::Viewer(out) => {
+                let event = Some(api::to_viewer::Event::Frame(frame));
+                sent(&out.try_send(Ok(api::ToViewer { event })))
+            },
+        }
+    }
+}
+
+fn sent<T>(sent: &Result<(), TrySendError<T>>) -> Sent {
+    match sent {
+        Ok(()) => Sent::Taken,
+        Err(TrySendError::Full(_)) => Sent::Full,
+        Err(TrySendError::Closed(_)) => Sent::Closed,
+    }
 }
 
 #[derive(Clone)]
@@ -717,7 +769,7 @@ impl Thread {
     }
 
     fn frame(&mut self) -> io::Result<()> {
-        self.watchers.retain(|watcher| !watcher.viewer.out.is_closed());
+        self.watchers.retain(|watcher| !watcher.viewer.frames.is_closed());
         if self.watchers.is_empty() {
             self.dirty = false;
             return Ok(());
@@ -740,7 +792,7 @@ impl Thread {
         let scrollback = self.screen.scrollback();
         let mut views: Vec<(usize, View)> = Vec::new();
         for watcher in &mut self.watchers {
-            if watcher.viewer.out.capacity() <= FOR_WORDS {
+            if watcher.viewer.frames.capacity() <= FOR_WORDS {
                 watcher.owed = true;
                 continue;
             }
@@ -764,14 +816,13 @@ impl Thread {
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
             let said = frame::said(self.pane, view, before, flags);
-            let message = api::ToClient { event: Some(api::to_client::Event::Frame(said)) };
-            match watcher.viewer.out.try_send(Ok(message)) {
-                Ok(()) => {
+            match watcher.viewer.frames.send(said) {
+                Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });
                     watcher.owed = false;
                 },
-                Err(TrySendError::Full(_)) => watcher.owed = true,
-                Err(TrySendError::Closed(_)) => watcher.owed = false,
+                Sent::Full => watcher.owed = true,
+                Sent::Closed => watcher.owed = false,
             }
         }
         assert!(views.len() <= self.watchers.len());

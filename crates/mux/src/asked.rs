@@ -465,7 +465,7 @@ pub struct Greeting {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Shows {
+pub enum ViewerHeard {
     Showing(Vec<TerminalKey>),
     Typed(PaneId, Input),
 }
@@ -481,7 +481,7 @@ pub fn greeting(api::FromViewer { event }: api::FromViewer) -> Result<Greeting, 
     })
 }
 
-pub fn shows(message: api::FromViewer) -> Result<Shows, Status> {
+pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
     use api::from_viewer::Event;
     Ok(match present("event", message.event)? {
         Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
@@ -489,15 +489,20 @@ pub fn shows(message: api::FromViewer) -> Result<Shows, Status> {
             if terminals.len() > SHOWN_MAX {
                 return Err(refused("showing.terminals", format_args!("are over {SHOWN_MAX}")));
             }
-            let mut keys: Vec<TerminalKey> = Vec::with_capacity(terminals.len());
-            for key in terminals {
-                let key = TerminalKey::parse("showing.terminals", Some(key))?;
-                if keys.iter().any(|shown| shown.id == key.id) {
-                    return Err(refused("showing.terminals", format_args!("repeat {}", key.id)));
-                }
-                keys.push(key);
+            let keys: Vec<TerminalKey> = terminals
+                .into_iter()
+                .map(|key| TerminalKey::parse("showing.terminals", Some(key)))
+                .collect::<Result<_, _>>()?;
+            let mut ids: Vec<PaneId> = keys.iter().map(|key| key.id).collect();
+            ids.sort_unstable();
+            let repeated = ids.windows(2).find_map(|pair| match *pair {
+                [one, other] if one == other => Some(one),
+                _ => None,
+            });
+            if let Some(repeated) = repeated {
+                return Err(refused("showing.terminals", format_args!("repeat {repeated}")));
             }
-            Shows::Showing(keys)
+            ViewerHeard::Showing(keys)
         },
         Event::Typed(api::Typed { terminal, event }) => {
             use api::typed::Event as Typed;
@@ -508,7 +513,7 @@ pub fn shows(message: api::FromViewer) -> Result<Shows, Status> {
                 Typed::Focus(api::Focus { focused }) => Input::Focus(focused),
                 Typed::Scroll(api::Scroll { back }) => Input::Scroll(back),
             };
-            Shows::Typed(PaneId::parse("typed.terminal", terminal)?, input)
+            ViewerHeard::Typed(PaneId::parse("typed.terminal", terminal)?, input)
         },
     })
 }
