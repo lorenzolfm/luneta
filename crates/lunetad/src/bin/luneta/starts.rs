@@ -2,24 +2,28 @@ use std::time::SystemTime;
 
 use std::path::Path;
 
+use lunetad::mux::own::attach::To;
 use lunetad::mux::own::{server, OwnKey};
 use lunetad::names::session_for;
-use lunetad::{log, Destination};
 
-use crate::away;
 use crate::ledger::Session;
 use crate::news::News;
-use crate::own_sessions::{self, Unmade};
-use crate::sidebar::Sidebar;
-use crate::zellij::{self, Refuge, SessionName};
+use crate::own_sessions::{self, Elsewhere, Unmade};
+use crate::zellij::{self, SessionName};
 
 struct Running {
-    key: OwnKey,
+    to: Elsewhere,
     name: SessionName,
     seen: Option<SystemTime>,
 }
 
-pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
+impl Running {
+    fn key(&self) -> OwnKey {
+        self.to.to().session()
+    }
+}
+
+pub fn own(named: &SessionName, dir: &Path, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
     let running = zellij::running()?;
     if running.iter().any(|(name, _)| name == named) {
         return Err(format!("{named} is a session of zellij's: name another for an own one"));
@@ -35,60 +39,33 @@ pub fn own(named: &SessionName, dir: &Path) -> Result<OwnKey, String> {
             Err(Unmade::Failed(why)) => return Err(format!("no own session made: {why}")),
         }
     };
-    if let Some(refusal) = own_sessions::refusal(session, named) {
-        return Err(refusal);
-    }
-    Ok(session)
+    own_sessions::elsewhere(runs_in, To::Session(session), named)
 }
 
-pub fn bare(dir: &Path, news: &News) -> Result<OwnKey, String> {
+pub fn bare(dir: &Path, news: &News, runs_in: Option<OwnKey>) -> Result<Elsewhere, String> {
     let named = session_for(dir);
     let sessions = server::sessions().map_err(|failure| failure.to_string())?;
-    let held = own_sessions::holding().map_err(|why| {
-        format!("{why}, so luneta may run in any own session, and joins none: unset them")
-    })?;
-    let free = sessions.iter().filter(|listing| Some(listing.key()) != held);
-    let free: Vec<Running> = free
-        .map(|listing| Running {
-            key: listing.key(),
+    let listed = sessions.iter().map(|listing| (listing.key(), listing));
+    let free: Vec<Running> = own_sessions::free(runs_in, listed)
+        .map(|(to, listing)| Running {
+            to,
             name: listing.name.clone(),
             seen: news.last_seen(Session::own(listing.made, listing.id)),
         })
         .collect();
     if let Some(joined) = to_join(&free, named.as_ref()) {
-        return Ok(joined);
+        return Ok(joined.to);
     }
     match named {
-        Some(named) => own(&named, dir),
+        Some(named) => own(&named, dir, runs_in),
         None => Err(format!("{} names no own session: name one", dir.display())),
     }
 }
 
-pub fn away(sidebar: &Sidebar, tried: &[Destination]) -> Option<(Destination, Refuge)> {
-    for (destination, refuges) in sidebar.refuges_away(tried, zellij::within()) {
-        let sessions = match refuges {
-            Ok(sessions) => sessions,
-            Err(why) => {
-                log::say(&format!("{destination}: no session to go on in: {why}"));
-                continue;
-            },
-        };
-        match zellij::answering_away(&destination, sessions, away::QUICK) {
-            Ok(Some(refuge)) => return Some((destination, refuge)),
-            Ok(None) => log::say(&format!("{destination}: no session to go on in answers")),
-            Err(why) => {
-                log::say(&format!("no session of another machine's to go on in: {why}"));
-                break;
-            },
-        }
-    }
-    None
-}
-
-fn to_join(running: &[Running], named: Option<&SessionName>) -> Option<OwnKey> {
-    let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key.made);
+fn to_join<'a>(running: &'a [Running], named: Option<&SessionName>) -> Option<&'a Running> {
+    let rank = |session: &Running| (named == Some(&session.name), session.seen, session.key().made);
     let ranked = |a: &&Running, b: &&Running| (rank(a), &a.name).cmp(&(rank(b), &b.name));
-    running.iter().max_by(ranked).map(|session| session.key)
+    running.iter().max_by(ranked)
 }
 
 #[cfg(test)]
@@ -106,7 +83,8 @@ mod tests {
     fn running(id: u64, made: u64, seen: Option<u64>) -> Running {
         let made = OwnMade::from_nanos(made * 1_000_000_000);
         let key = OwnKey { id: OwnId::new(id).unwrap(), made };
-        Running { key, name: name(&format!("s{id}")), seen: seen.map(at) }
+        let (to, ()) = own_sessions::free(None, [(key, ())]).next().unwrap();
+        Running { to, name: name(&format!("s{id}")), seen: seen.map(at) }
     }
 
     fn name(name: &str) -> SessionName {
@@ -117,11 +95,11 @@ mod tests {
         let named = named.map(name);
         let mut order = Vec::with_capacity(sessions.len());
         for _ in 0..sessions.len() {
-            let joined = to_join(&sessions, named.as_ref()).unwrap();
-            sessions.retain(|session| session.key != joined);
+            let joined = to_join(&sessions, named.as_ref()).unwrap().key();
+            sessions.retain(|session| session.key() != joined);
             order.push(joined.id.get());
         }
-        assert_eq!(to_join(&sessions, named.as_ref()), None);
+        assert!(to_join(&sessions, named.as_ref()).is_none());
         order
     }
 

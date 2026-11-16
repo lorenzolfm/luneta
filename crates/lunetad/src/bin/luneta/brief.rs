@@ -1021,7 +1021,7 @@ Its transcript is unknown: Claude Code names none for it.
     }
 
     #[test]
-    fn a_brief_shows_over_zellij_until_a_key_closes_it() {
+    fn a_brief_shows_over_the_session_until_a_key_closes_it() {
         let mut briefing = asked(1, "Brief of every session");
         assert_eq!(
             shown(&briefing, 66, 9),

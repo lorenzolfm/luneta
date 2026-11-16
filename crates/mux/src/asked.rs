@@ -390,6 +390,26 @@ pub struct Hello {
     pub to: Place,
     pub size: Size,
     pub colours: Colours,
+    pub runs_in: Option<RunsIn>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunsIn {
+    pub session: SessionId,
+    pub made: SystemTime,
+}
+
+impl RunsIn {
+    pub fn parse(field: &str, runs_in: Option<api::RunsIn>) -> Result<Option<RunsIn>, Status> {
+        let Some(runs_in) = runs_in else {
+            return Ok(None);
+        };
+        let session = SessionId::parse(&format!("{field}.session"), runs_in.session)?;
+        let made_at = format!("{field}.made_at");
+        let made = SystemTime::try_from(present(&made_at, runs_in.made_at)?)
+            .map_err(|why| refused(&made_at, why))?;
+        Ok(Some(RunsIn { session, made }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,6 +461,7 @@ pub fn hello(api::ToServer { event }: api::ToServer) -> Result<Hello, Status> {
         to: Place::parse("hello.to", hello.to)?,
         size: Size::parse("hello.size", hello.size)?,
         colours: Colours::parse("hello.colours", hello.colours)?,
+        runs_in: RunsIn::parse("hello.runs_in", hello.runs_in)?,
     })
 }
 
@@ -814,6 +835,7 @@ mod tests {
                 to: Some(api::Place { is: Some(api::place::Is::Session(1)), made_at: Some(at()) }),
                 size: Some(api::Size { columns: 80, rows: 24 }),
                 colours: None,
+                runs_in: None,
             })),
         };
         let focus = api::ToServer {

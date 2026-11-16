@@ -24,6 +24,7 @@ service Mux {
 message NewSessionRequest {
   string name = 1;
   Opens opens = 2;
+  optional string tab = 3;
 }
 
 message NewSessionResponse {
@@ -360,6 +361,12 @@ message Hello {
   Place to = 1;
   Size size = 2;
   Colours colours = 3;
+  RunsIn runs_in = 4;
+}
+
+message RunsIn {
+  uint64 session = 1;
+  google.protobuf.Timestamp made_at = 2;
 }
 
 message Colours {

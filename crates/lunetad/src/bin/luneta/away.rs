@@ -9,12 +9,11 @@ use lunetad::api::keep_checks_response::{self, failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
-    closes_response, AskResponse, CheckNameRequest, Client, ClosesRequest, DeleteExitedRequest,
-    DumpScreenRequest, GoRequest, IssueRepositoriesRequest, KeepChecksRequest, KeepPrintedRequest,
-    KillRequest, ListClientsRequest,
+    closes_response, AskResponse, ClosesRequest, DeleteExitedRequest, DumpScreenRequest,
+    IssueRepositoriesRequest, KeepChecksRequest, KeepPrintedRequest, KillRequest,
     ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
-    ListSkillsRequest, NameSessionRequest, NameSessionResponse, On, OtherTabsRequest,
-    RefugeRequest, RefugeResponse, RenameSessionRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
+    ListSkillsRequest, On, OtherTabsRequest, RenameSessionRequest, TurnIntoPanesRequest,
+    TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
@@ -40,11 +39,8 @@ use tonic::{Code, Response, Status, Streaming};
 
 use crate::agents::Harness;
 use crate::daemon;
-use crate::zellij::Starts;
 
 pub const ANSWER: Duration = Duration::from_secs(6);
-
-pub const QUICK: Duration = Duration::from_secs(1);
 
 const SLOW: Duration = Duration::from_secs(1);
 
@@ -69,35 +65,6 @@ impl Away {
             Err(_) => return Err(format!("lunetad did not answer in {}s", patience.as_secs_f32())),
         };
         Ok(Away { runtime, daemon, on: destination.clone(), patience })
-    }
-
-    pub fn go(
-        &mut self,
-        at: &SessionName,
-        to: &SessionName,
-        pane: Option<u32>,
-    ) -> Result<(), String> {
-        let (at, to) = (at.to_string(), to.to_string());
-        let request = GoRequest { on: Some(self.on()), at, to, pane };
-        self.ask(|mut daemon| async move { daemon.go(request).await })
-    }
-
-    pub fn name(
-        &mut self,
-        starts: &Starts,
-    ) -> Result<(SessionName, Option<SystemTime>, Directory), String> {
-        let dir = starts.dir().map(str::to_owned);
-        let request = NameSessionRequest { on: Some(self.on()), dir };
-        let named = self.answer(|mut daemon| async move { daemon.name_session(request).await })?;
-        named_by(&self.on, starts, named)
-    }
-
-    pub fn check(&mut self, to: &SessionName) -> Result<SystemTime, String> {
-        let request = CheckNameRequest { on: Some(self.on()), name: to.to_string() };
-        let checked = self.ask(|mut daemon| async move { daemon.check_name(request).await })?;
-        let on = &self.on;
-        let at = checked.named_at.ok_or_else(|| format!("{on}: lunetad checked {to} at no time"))?;
-        SystemTime::try_from(at).map_err(|why| format!("{on}: lunetad checked {to} at {why}"))
     }
 
     pub fn dirs(&mut self) -> Result<Vec<Dir>, String> {
@@ -127,18 +94,6 @@ impl Away {
         let request = DumpScreenRequest { on: Some(self.on()), session: session.to_string(), pane };
         let dumped = self.ask(|mut daemon| async move { daemon.dump_screen(request).await })?;
         Ok((dumped.pane, dumped.screen))
-    }
-
-    pub fn clients(&mut self, session: &str) -> Result<Vec<Client>, String> {
-        let request = ListClientsRequest { on: Some(self.on()), session: session.to_owned() };
-        let listed = self.ask(|mut daemon| async move { daemon.list_clients(request).await })?;
-        Ok(listed.clients)
-    }
-
-    pub fn refuge(&mut self, seats: &[SessionName]) -> Result<RefugeResponse, String> {
-        let seats = seats.iter().map(SessionName::to_string).collect();
-        let request = RefugeRequest { on: Some(self.on()), seats };
-        self.ask(|mut daemon| async move { daemon.refuge(request).await })
     }
 
     pub fn open(&mut self, open: &Open) -> Result<Opened, String> {
@@ -524,30 +479,6 @@ async fn heard(
     }
 }
 
-fn named_by(
-    on: &Destination,
-    starts: &Starts,
-    answer: Result<NameSessionResponse, Status>,
-) -> Result<(SessionName, Option<SystemTime>, Directory), String> {
-    let NameSessionResponse { name, named_at, dir } = match (answer, starts) {
-        (Ok(answer), _) => answer,
-        (Err(status), Starts::Home) if status.code() == Code::InvalidArgument => {
-            let older = "its lunetad, or this one, is older than a session in its home";
-            return Err(format!("{on}: {older}"));
-        },
-        (Err(status), _) => return Err(on.said(&status)),
-    };
-    let name = SessionName::parse(&name)
-        .map_err(|why| format!("{on}: lunetad named a session \"{name}\": {why}"))?;
-    let dir = match (dir, starts) {
-        (Some(dir), _) => Directory::parse(dir)
-            .map_err(|why| format!("{on}: lunetad named {name} for a directory: {why}"))?,
-        (None, Starts::In(dir)) => dir.clone(),
-        (None, Starts::Home) => return Err(format!("{on}: lunetad named {name} for no directory")),
-    };
-    Ok((name, named_at.and_then(|at| SystemTime::try_from(at).ok()), dir))
-}
-
 fn dirs_of(answer: ListDirsResponse) -> Vec<Dir> {
     let dir = |dir: lunetad::api::list_dirs_response::Dir| {
         let name = SessionName::parse(&dir.name).ok()?;
@@ -617,45 +548,6 @@ mod tests {
         assert_eq!(none, (Vec::new(), Some(Err(why))));
 
         assert_eq!(heard_of(stuck(Vec::new()), false), (Vec::new(), None));
-    }
-
-    #[test]
-    fn a_session_is_named_there_by_a_daemon_old_or_new() {
-        let on = "nixos".parse().unwrap();
-        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let answer = |name: &str, at: Option<SystemTime>, dir: Option<&str>| {
-            let (name, named_at, dir) = (name.to_owned(), at.map(Into::into), dir.map(Into::into));
-            Ok(NameSessionResponse { name, named_at, dir })
-        };
-        let path = |path: &str| Directory::parse(path.to_owned()).unwrap();
-        let cdk = SessionName::running("cdk-2").unwrap();
-        let dir = Starts::In(path("/w/cdk"));
-        let named = named_by(&on, &dir, answer("cdk-2", Some(at), Some("/w/cdk")));
-        assert_eq!(named, Ok((cdk.clone(), Some(at), path("/w/cdk"))));
-        let named = named_by(&on, &dir, answer("cdk-2", None, None));
-        assert_eq!(named, Ok((cdk, None, path("/w/cdk"))));
-        let why = "nixos: lunetad named a session \"../x\": name cannot contain '/'";
-        assert_eq!(named_by(&on, &dir, answer("../x", None, None)), Err(why.to_owned()));
-        let long = "x".repeat(lunetad::SESSION_NAME_BYTES_MAX + 1);
-        let why = "name must be shorter than 61 bytes";
-        let why = format!("nixos: lunetad named a session \"{long}\": {why}");
-        assert_eq!(named_by(&on, &dir, answer(&long, None, None)), Err(why));
-
-        let me = SessionName::running("me").unwrap();
-        let named = named_by(&on, &Starts::Home, answer("me", Some(at), Some("/home/me")));
-        assert_eq!(named, Ok((me, Some(at), path("/home/me"))));
-        let why = "nixos: lunetad named me for no directory".to_owned();
-        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at), None)), Err(why));
-        let why = "nixos: lunetad named me for a directory: \"me\" is no absolute path".to_owned();
-        assert_eq!(named_by(&on, &Starts::Home, answer("me", Some(at), Some("me"))), Err(why));
-        let empty = || Err(Status::invalid_argument("dir: \"\" is no absolute path"));
-        let older = "nixos: its lunetad, or this one, is older than a session in its home";
-        assert_eq!(named_by(&on, &Starts::Home, empty()), Err(older.to_owned()));
-        let said = "nixos: dir: \"\" is no absolute path".to_owned();
-        assert_eq!(named_by(&on, &dir, empty()), Err(said));
-        let unreached = Err(Status::unavailable("lunetad does not reach nixos now"));
-        let said = "nixos: lunetad does not reach nixos now".to_owned();
-        assert_eq!(named_by(&on, &Starts::Home, unreached), Err(said));
     }
 
     #[test]

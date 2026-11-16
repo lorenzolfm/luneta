@@ -1081,7 +1081,6 @@ pub enum Wants {
     Make {
         session: SessionName,
         cwd: Directory,
-        tab_cwd: Directory,
         name: String,
         command: Vec<String>,
     },
@@ -1091,7 +1090,6 @@ pub enum Wants {
 pub enum Done {
     Nothing,
     Wrong(String),
-    Start(Machine, Starts),
     Own(Starts),
     Go(Machine, Place),
     Act(Machine, Act),
@@ -1142,7 +1140,6 @@ enum Stage {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Opening {
     In(Listed),
-    Made(SessionName),
     Turned(Listed),
 }
 
@@ -1229,9 +1226,6 @@ impl Menu {
             | Stage::Pull { step: Step::Waiting(Wait::Opening(session)), .. } => {
                 Some(Opening::In(session.clone()))
             },
-            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => {
-                Some(Opening::Made(session.clone()))
-            },
             Stage::Turning { session, .. } => Some(Opening::Turned(session.clone())),
             Stage::Choosing(_)
             | Stage::Planning { .. }
@@ -1303,6 +1297,13 @@ impl Menu {
             | Stage::Turning { .. }
             | Stage::Pull { step: Step::Choosing { .. }, .. }
             | Stage::Ssh { .. } => None,
+        }
+    }
+
+    pub fn made(&self) -> Option<&SessionName> {
+        match &self.stage {
+            Stage::Pull { step: Step::Waiting(Wait::Making(session)), .. } => Some(session),
+            _ => None,
         }
     }
 
@@ -1707,9 +1708,9 @@ impl Menu {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { cwd, name }, _) => {
-                let (session, tab_cwd, tab) = (name.clone(), dir, work.tab());
-                let wants = Wants::Make { session, cwd, tab_cwd, name: tab, command };
+            (At::Clone { name, .. }, _) => {
+                let (session, cwd, tab) = (name.clone(), dir, work.tab());
+                let wants = Wants::Make { session, cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -2021,10 +2022,14 @@ impl Menu {
     }
 }
 
+pub const OWN_ONLY: &str = "luneta goes to its own sessions only, now";
+
+pub const HERE_ONLY: &str = "luneta makes and goes to sessions of this machine only, for now";
+
 fn new_session(on: &Machine, starts: Starts) -> Done {
     match on {
         Machine::Local => Done::Own(starts),
-        Machine::Remote(_) => Done::Start(on.clone(), starts),
+        Machine::Remote(_) => Done::Wrong(format!("menu: {HERE_ONLY}")),
     }
 }
 
@@ -3329,12 +3334,13 @@ mod tests {
         assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: Vec::new() }));
         assert_eq!(menu.target(), &pane);
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
-        assert_eq!(closed(menu.key(&char('s'))), Done::Start(vps(), Starts::In(main_dir())));
+        let away = Done::Wrong(format!("menu: {HERE_ONLY}"));
+        assert_eq!(closed(menu.key(&char('s'))), away);
 
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
-        let done = closed(menu.planned(plan(Closes::Pane, Vec::new())));
+        let done = closed(menu.planned(Ok(plan(Closes::Pane, Vec::new()))));
         let name = || listed().name().clone();
         let act = Act::Pane { session: name(), whose: listed().whose(), pane: 4 };
         assert_eq!(done, Done::Act(vps(), act));
@@ -3779,7 +3785,7 @@ mod tests {
         assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
-    fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Result<Plan, String> {
+    fn plan(closes: Closes, agents: Vec<(u32, Doing)>) -> Plan {
         let session = listed();
         let subject = Subject {
             session: &session,
@@ -3797,7 +3803,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         assert_eq!(menu.planning(), Some((&listed(), 4)));
-        let done = closed(menu.planned(plan(Closes::Pane, vec![(4, Doing::Idle)])));
+        let done = closed(menu.planned(Ok(plan(Closes::Pane, vec![(4, Doing::Idle)]))));
         let (session, whose) = (listed().name().clone(), listed().whose());
         let act = Act::Pane { session, whose, pane: 4 };
         assert_eq!(done, Done::Act(Machine::Local, act));
@@ -3812,7 +3818,7 @@ mod tests {
         let busy = || vec![(4, Doing::Busy)];
         let (menu, _) = stays(opened(pane_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('d')));
-        let (menu, wants) = stays(menu.planned(plan(Closes::Pane, busy())));
+        let (menu, wants) = stays(menu.planned(Ok(plan(Closes::Pane, busy()))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
@@ -3825,24 +3831,24 @@ mod tests {
         );
         let (menu, _) = stays(menu.key(&char('n')));
         let (menu, _) = stays(menu.key(&char('d')));
-        let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy())));
+        let (menu, _) = stays(menu.planned(Ok(plan(Closes::Pane, busy()))));
         let (menu, wants) = stays(menu.key(&char('d')));
         assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
         let tab = || Closes::Tab { id: TabId(2), panes: vec![4, 5] };
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
-        let (menu, wants) = stays(menu.planned(plan(tab(), at_work)));
+        let (menu, wants) = stays(menu.planned(Ok(plan(tab(), at_work))));
         assert_eq!(wants, Wants::Nothing);
         let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close its tab? 2 agents, 1", " busy, 1 waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let busier = || vec![(4, Doing::Busy), (5, Doing::Busy)];
-        let (menu, wants) = stays(menu.planned(plan(tab(), busier())));
+        let (menu, wants) = stays(menu.planned(Ok(plan(tab(), busier()))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" Close its tab? 2 agents, 2", " busy"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let (session, whose) = (listed().name().clone(), listed().whose());
         let act = Act::Tab { session, whose, tab: TabId(2), panes: vec![4, 5] };
-        assert_eq!(closed(menu.planned(plan(tab(), busier()))), Done::Act(Machine::Local, act));
+        assert_eq!(closed(menu.planned(Ok(plan(tab(), busier())))), Done::Act(Machine::Local, act));
     }
 
     #[test]
@@ -3860,7 +3866,7 @@ mod tests {
         };
         let whose = session.whose();
         let leave = Act::Leave { session: listed().name().clone(), whose, to: elo };
-        let done = closed(menu.planned(close::plan(&subject)));
+        let done = closed(menu.planned(Ok(close::plan(&subject))));
         assert_eq!(done, Done::Act(Machine::Local, leave));
     }
 
@@ -3973,7 +3979,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         assert_eq!(clicked(&menu, "close the pane"), None);
         let busy = vec![(4, Doing::Busy)];
-        let (menu, _) = stays(menu.planned(plan(Closes::Pane, busy)));
+        let (menu, _) = stays(menu.planned(Ok(plan(Closes::Pane, busy))));
         assert_eq!(clicked(&menu, "<y>"), Some(pressed(KeyCode::Char('y'))));
         assert_eq!(clicked(&menu, "Close the pane?"), None);
     }
@@ -4269,13 +4275,12 @@ mod tests {
             wants,
             Wants::Make {
                 session: name.clone(),
-                cwd: directory("/w/cdk"),
-                tab_cwd: directory("/w/cdk/feat-x"),
+                cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),
             }
         );
-        assert_eq!(menu.opening(), Some(Opening::Made(name)));
+        assert_eq!((menu.opening(), menu.made()), (None, Some(&name)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Making session cdk…");
         assert!(menu.turning());
         let why = "no session works in cashubtc/cdk".to_owned();

@@ -46,7 +46,8 @@ impl mux_server::Mux for Service {
         let request = request.into_inner();
         let name = SessionName::parse("name", request.name)?;
         let opens = Opens::parse("opens", request.opens)?;
-        let (session, made, tab, pane) = self.mux.new_session(name, &opens)?;
+        let first = request.tab.map(|tab| Name::parse("tab", tab)).transpose()?;
+        let (session, made, tab, pane) = self.mux.new_session(name, first, &opens)?;
         Ok(Response::new(api::NewSessionResponse {
             session: session.said(),
             tab: tab.said(),

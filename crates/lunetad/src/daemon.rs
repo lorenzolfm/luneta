@@ -61,7 +61,7 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
-use crate::names::{Starts, Taken, Unusable};
+use crate::names::{Holder, Starts, Unusable};
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
@@ -1009,23 +1009,25 @@ impl Daemon for Host {
         &self,
         request: Request<NewOwnRequest>,
     ) -> Result<Response<NewOwnResponse>, Status> {
-        let NewOwnRequest { on, name, cwd, command } = request.into_inner();
+        let NewOwnRequest { on, name, cwd, command, tab } = request.into_inner();
         let name = SessionName::parse(&name)
             .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
         let cwd = directory("cwd", cwd)?;
         if let Some(mut daemon) = self.bridged(on)? {
             let (name, cwd) = (name.to_string(), cwd.into());
-            return daemon.new_own(NewOwnRequest { on: None, name, cwd, command }).await;
+            return daemon.new_own(NewOwnRequest { on: None, name, cwd, command, tab }).await;
         }
         let made = task::spawn_blocking(move || -> Result<server::Made, Status> {
             names::unused(&name).map_err(|unusable| match unusable {
-                Unusable::Taken(_, Taken::Own) => Status::already_exists(unusable.to_string()),
+                Unusable::Taken(_, Holder::Own) => Status::already_exists(unusable.to_string()),
                 unusable => Status::failed_precondition(unusable.to_string()),
             })?;
             let shell = opens::your_shell();
-            let made = server::made(&name, &cwd, Runs::of(&command, Runs::Shell(&shell)));
+            let runs = Runs::of(&command, Runs::Shell(&shell));
+            let made = server::made(&name, tab.as_deref(), &cwd, runs);
             made.map_err(|failure| match failure {
                 Failure::Taken(_) => Status::already_exists(failure.to_string()),
+                Failure::Invalid(_) => Status::invalid_argument(failure.to_string()),
                 failure => Status::failed_precondition(failure.to_string()),
             })
         });

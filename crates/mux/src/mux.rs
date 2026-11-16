@@ -9,7 +9,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{
     Act, At, Colours, Ends, FocusTo, Hello, Is, MoveTo, Name, Opening, Opens, Place, Runs,
-    SessionName, Size, TurnTo, Who,
+    RunsIn, SessionName, Size, TurnTo, Who,
 };
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::layout::{self, Direction, Leaf, Order, Rect, Removed, Tree};
@@ -104,6 +104,7 @@ enum Program {
 
 struct Seat {
     pane: PaneId,
+    runs_in: Option<RunsIn>,
     size: Size,
     colours: Colours,
     out: Out,
@@ -155,6 +156,7 @@ impl Mux {
     pub fn new_session(
         self: &Arc<Mux>,
         name: SessionName,
+        first: Option<Name>,
         opens: &Opens,
     ) -> Result<(SessionId, SystemTime, TabId, PaneId), Status> {
         self.change(|model| {
@@ -163,7 +165,8 @@ impl Mux {
             refuse_if_full(model.sessions.len(), SESSIONS_MAX, "sessions")?;
             let session = SessionId::next(&mut model.last.session);
             let made = SystemTime::now();
-            let tab = model.tab(self, (session, made), Name::numbered(1), opens, FIRST_SIZE)?;
+            let first = first.unwrap_or_else(|| Name::numbered(1));
+            let tab = model.tab(self, (session, made), first, opens, FIRST_SIZE)?;
             let ids = (session, made, tab.id, tab.focused);
             let tabs = Tabs::one(tab);
             model.sessions.push(Session { id: session, made, name, tabs, last_typed: None });
@@ -262,7 +265,7 @@ impl Mux {
     ) -> Result<(ClientId, Layouts), Status> {
         self.change(|model| {
             refuse_if_full(model.clients.len(), CLIENTS_MAX, "clients")?;
-            let pane = model.pane_of_place(hello.to)?;
+            let pane = model.pane_of_place(hello.to, hello.runs_in)?;
             let client = ClientId::next(&mut model.last.client);
             let attached = api::ToClient {
                 event: Some(api::to_client::Event::Attached(api::Attached {
@@ -270,9 +273,19 @@ impl Mux {
                 })),
             };
             out.try_send(Ok(attached)).expect("a new client's stream has room for its first word");
-            let (size, colours) = (hello.size, hello.colours);
+            let (size, colours, runs_in) = (hello.size, hello.colours, hello.runs_in);
             let (layout, layouts) = watch::channel(None);
-            let seat = Seat { pane, size, colours, out, layout, came: 0, wents: 0, _gone: gone };
+            let seat = Seat {
+                pane,
+                runs_in,
+                size,
+                colours,
+                out,
+                layout,
+                came: 0,
+                wents: 0,
+                _gone: gone,
+            };
             model.clients.insert(client, seat);
             model.seat_on(client, pane)?;
             Ok((client, layouts))
@@ -622,7 +635,7 @@ impl Model {
             .find_map(|tab| tab.tree.get_mut(pane))
     }
 
-    fn pane_of_place(&self, place: Place) -> Result<PaneId, Status> {
+    fn pane_of_place(&self, place: Place, runs_in: Option<RunsIn>) -> Result<PaneId, Status> {
         let (session, pane) = match place.is {
             Is::Pane(pane) => {
                 let (session, _) = self.pane_at(pane)?;
@@ -640,6 +653,12 @@ impl Model {
         };
         if place.made != session.made {
             return Err(Status::not_found(format!("no session {} made then", session.id)));
+        }
+        if runs_in == Some(RunsIn { session: session.id, made: session.made }) {
+            return Err(Status::failed_precondition(format!(
+                "the client runs in session {}, and goes nowhere it shows itself",
+                session.id
+            )));
         }
         Ok(pane)
     }
@@ -673,8 +692,8 @@ impl Model {
     }
 
     fn take(&mut self, client: ClientId, to: Place) -> Result<(), Status> {
-        self.seat(client)?;
-        let pane = self.pane_of_place(to)?;
+        let runs_in = self.seat(client)?.runs_in;
+        let pane = self.pane_of_place(to, runs_in)?;
         self.seat_on(client, pane)
     }
 

@@ -60,6 +60,54 @@ fn a_go_to_a_closed_tab_is_told_and_the_client_stays() {
 }
 
 #[test]
+fn a_client_goes_nowhere_in_the_session_it_runs_in() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let home = new_session(&mut mux, "home", shell()).await;
+        let work = new_session(&mut mux, "work", shell()).await;
+        let runs_in = api::RunsIn { session: home.session, made_at: home.made_at };
+        let hello = |to| api::Hello {
+            to: Some(to),
+            size: Some(size(40, 10)),
+            colours: None,
+            runs_in: Some(runs_in),
+        };
+        let refused = format!(
+            "the client runs in session {}, and goes nowhere it shows itself",
+            home.session
+        );
+        let refusal = (Code::FailedPrecondition, refused.as_str());
+        let Err(into) = Attached::hello(&mut mux, hello(session(&home))).await else {
+            panic!("a client was taken into the session it runs in");
+        };
+        assert_eq!((into.code(), into.message()), refusal);
+        let mut attached = Attached::hello(&mut mux, hello(session(&work))).await.unwrap();
+        attached.type_line("echo $((6 * 7))").await;
+        attached.until_row("42").await;
+        let movers = [
+            api::go_request::Who::Client(attached.client),
+            api::go_request::Who::LastTypedIn(work.session),
+        ];
+        for who in movers {
+            let go = api::GoRequest { who: Some(who), to: Some(tab(home.tab, &home)) };
+            let stayed = mux.go(go).await.unwrap_err();
+            assert_eq!((stayed.code(), stayed.message()), refusal, "{who:?}");
+        }
+        attached.send(api::to_server::Event::Go(session(&home))).await;
+        let reason = loop {
+            match attached.next().await {
+                Some(api::to_client::Event::Stayed(stayed)) => break stayed.reason,
+                Some(_) => {},
+                None => panic!("the stream ended before it said the client stayed"),
+            }
+        };
+        assert_eq!(reason, refused);
+        assert_eq!(attached.went.session, work.session);
+    });
+}
+
+#[test]
 fn a_place_of_a_session_made_at_another_time_is_refused() {
     run(async {
         let server = Server::start();
@@ -86,7 +134,12 @@ fn a_place_of_a_session_made_at_another_time_is_refused() {
             let went = mux.go(go(place(Some(then)))).await.unwrap().into_inner();
             assert_eq!(went.client, attached.client);
         }
-        let hello = |to| api::Hello { to: Some(to), size: Some(size(40, 10)), colours: None };
+        let hello = |to| api::Hello {
+            to: Some(to),
+            size: Some(size(40, 10)),
+            colours: None,
+            runs_in: None,
+        };
         let Err(stale) = Attached::hello(&mut mux, hello(session(Some(before)))).await else {
             panic!("a client went to a session made at another time");
         };
@@ -200,8 +253,12 @@ fn a_hello_of_no_columns_is_refused_by_its_field() {
         let server = Server::start();
         let mut mux = server.client().await;
         let made = new_session(&mut mux, "work", shell()).await;
-        let hello =
-            api::Hello { to: Some(session(&made)), size: Some(size(0, 10)), colours: None };
+        let hello = api::Hello {
+            to: Some(session(&made)),
+            size: Some(size(0, 10)),
+            colours: None,
+            runs_in: None,
+        };
         let Err(refused) = Attached::hello(&mut mux, hello).await else {
             panic!("a client of no columns was taken");
         };

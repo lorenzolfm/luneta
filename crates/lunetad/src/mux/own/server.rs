@@ -120,6 +120,7 @@ pub(super) fn refused(status: &Status) -> Failure {
     };
     match status.code() {
         Code::AlreadyExists => Failure::Taken(said),
+        Code::InvalidArgument => Failure::Invalid(said),
         _ => Failure::Own(said),
     }
 }
@@ -554,11 +555,17 @@ pub struct Made {
     pub tab: NonZeroU32,
 }
 
-pub fn made(name: &SessionName, cwd: &Directory, runs: Runs<'_>) -> Result<Made, Failure> {
+pub fn made(
+    name: &SessionName,
+    tab: Option<&str>,
+    cwd: &Directory,
+    runs: Runs<'_>,
+) -> Result<Made, Failure> {
     let deadline = Instant::now() + MAKING;
     let request = api::NewSessionRequest {
         name: name.as_str().to_owned(),
         opens: Some(opens(cwd, runs)?),
+        tab: tab.map(str::to_owned),
     };
     let mut runtime = runtime()?;
     loop {

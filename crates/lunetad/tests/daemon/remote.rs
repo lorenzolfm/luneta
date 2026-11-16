@@ -44,7 +44,7 @@ use tonic::{Code, Status};
 
 use crate::demand::{stop, Detached};
 use crate::host::{
-    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars, DROPPED,
+    answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars,
     LUNETA, LUNETAD,
 };
 use crate::sessions::listed;
@@ -59,29 +59,15 @@ impl FakeSsh {
         let ssh = FakeSsh { to: bin.join("ssh-to") };
         fs::create_dir(&ssh.to).unwrap();
         let text = r#"to="${0%/*}/ssh-to"
-quiet= batch= client=
+quiet= batch=
 while [ $# -gt 0 ]; do
     case "$1" in
         -T) quiet=yes; shift ;;
-        -t) client=yes; shift ;;
         -o) [ "$2" = BatchMode=yes ] && batch=yes; shift 2 ;;
         -*) echo "this ssh knows no $1" >&2; exit 255 ;;
         *) break ;;
     esac
 done
-if [ -n "$client" ] && [ -z "$quiet" ]; then
-    destination="$1"
-    shift
-    echo "$*" >> "$to/$destination.clients"
-    if [ -f "$to/$destination.drops" ]; then
-        drops=$(cat "$to/$destination.drops")
-        if [ "$drops" -gt 0 ]; then
-            echo $((drops - 1)) > "$to/$destination.drops"
-            cat "$to/dropped"
-        fi
-    fi
-    exit 0
-fi
 if [ -z "$quiet" ] || [ -z "$batch" ]; then
     echo "this ssh runs nothing on a terminal, or where it could ask" >&2
     exit 255
@@ -111,16 +97,6 @@ exec "$to/$destination"
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
         script(&self.to.join(destination), &format!("sleep {secs}\n{}", bridge(&vars)));
-    }
-
-    pub fn drops_clients(&self, destination: &str, clients: u32) {
-        fs::write(self.to.join("dropped"), DROPPED).unwrap();
-        fs::write(self.to.join(format!("{destination}.drops")), clients.to_string()).unwrap();
-    }
-
-    pub fn clients(&self, destination: &str) -> Vec<String> {
-        let clients = fs::read_to_string(self.to.join(format!("{destination}.clients")));
-        clients.unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
     fn ends_with(&self, destination: &str, code: u8) {

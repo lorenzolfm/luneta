@@ -10,8 +10,6 @@ use lunetad::seats::Where;
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};
 
-const MOVING: &str = "menu: zellij has yet to say which session it is in; try again in a moment";
-
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +37,6 @@ pub enum Deletes {
 pub enum Seat {
     In,
     Elsewhere,
-    Moving,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +129,7 @@ pub struct Plan {
     ending: Result<Ending, Untold>,
 }
 
-pub fn plan(subject: &Subject) -> Result<Plan, String> {
+pub fn plan(subject: &Subject) -> Plan {
     let (session, whose) = (subject.session.name().clone(), subject.session.whose());
     let act = match &subject.deletes {
         Deletes::Pane { pane, closes: Closes::Pane } => {
@@ -147,10 +144,9 @@ pub fn plan(subject: &Subject) -> Result<Plan, String> {
                 Some(to) => Act::Leave { session, whose, to },
                 None => Act::Kill { session, whose },
             },
-            Seat::Moving => return Err(MOVING.to_owned()),
         },
     };
-    Ok(Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold)))
+    Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -256,23 +252,23 @@ mod tests {
         let tab = Closes::Tab { id: TabId(3), panes: vec![4, 5] };
         let luneta = luneta();
         let planned = |seat: Seat, deletes: Deletes| {
-            plan(&subject(&luneta, seat, deletes, Vec::new())).map(|plan| plan.act)
+            plan(&subject(&luneta, seat, deletes, Vec::new())).act
         };
         let (session, whose) = (luneta.name().clone(), luneta.whose());
         assert_eq!(
             planned(Seat::In, pane(Closes::Pane)),
-            Ok(Act::Pane { session: session.clone(), whose, pane: 4 })
+            Act::Pane { session: session.clone(), whose, pane: 4 }
         );
         assert_eq!(
             planned(Seat::In, pane(tab)),
-            Ok(Act::Tab { session: session.clone(), whose, tab: TabId(3), panes: vec![4, 5] })
+            Act::Tab { session: session.clone(), whose, tab: TabId(3), panes: vec![4, 5] }
         );
         let kill = Act::Kill { session: session.clone(), whose };
-        assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), Ok(kill.clone()));
+        assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), kill.clone());
         let leave = Act::Leave { session, whose, to: elsewhere() };
-        assert_eq!(planned(Seat::In, pane(Closes::Session)), Ok(leave.clone()));
-        assert_eq!(planned(Seat::In, Deletes::Session), Ok(leave));
-        assert_eq!(planned(Seat::Elsewhere, Deletes::Session), Ok(kill));
+        assert_eq!(planned(Seat::In, pane(Closes::Session)), leave.clone());
+        assert_eq!(planned(Seat::In, Deletes::Session), leave);
+        assert_eq!(planned(Seat::Elsewhere, Deletes::Session), kill);
     }
 
     #[test]
@@ -281,26 +277,12 @@ mod tests {
         for deletes in [Deletes::Session, pane(Closes::Session)] {
             let agents = vec![(4, Doing::Busy)];
             let alone = Subject { refuge: None, ..subject(&luneta, Seat::In, deletes, agents) };
-            let Ok(planned) = plan(&alone) else {
-                panic!("the only session is killed");
-            };
+            let planned = plan(&alone);
             let whose = luneta.whose();
             assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), whose });
             let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
             assert_eq!(planned.question(), asks);
         }
-    }
-
-    #[test]
-    fn no_session_goes_while_luneta_is_on_its_way_to_one() {
-        let luneta = luneta();
-        for deletes in [Deletes::Session, pane(Closes::Session)] {
-            let planned = plan(&subject(&luneta, Seat::Moving, deletes, Vec::new()));
-            assert_eq!(planned.map(|plan| plan.act), Err(MOVING.to_owned()));
-        }
-        let planned = plan(&subject(&luneta, Seat::Moving, pane(Closes::Pane), Vec::new()));
-        let (session, whose) = (luneta.name().clone(), luneta.whose());
-        assert_eq!(planned.map(|plan| plan.act), Ok(Act::Pane { session, whose, pane: 4 }));
     }
 
     #[test]
@@ -314,8 +296,7 @@ mod tests {
         ];
         let luneta = luneta();
         let question = |deletes: Deletes| {
-            let planned = plan(&subject(&luneta, Seat::Elsewhere, deletes, agents.clone()));
-            planned.ok().and_then(|plan| plan.question())
+            plan(&subject(&luneta, Seat::Elsewhere, deletes, agents.clone())).question()
         };
         assert_eq!(question(pane(Closes::Pane)), None);
         let tab = Closes::Tab { id: TabId(1), panes: vec![4, 5, 8] };
