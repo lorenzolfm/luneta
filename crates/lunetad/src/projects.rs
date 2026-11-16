@@ -362,6 +362,24 @@ impl Stage {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    Missing,
+    Unread,
+    Read(Stage),
+}
+
+impl Seen {
+    #[must_use]
+    pub fn to_api(self) -> api::workstream::Seen {
+        match self {
+            Seen::Missing => api::workstream::Seen::Missing(()),
+            Seen::Unread => api::workstream::Seen::Unread(()),
+            Seen::Read(stage) => api::workstream::Seen::Stage(stage.to_api().into()),
+        }
+    }
+}
+
 impl Projects {
     pub fn checked(projects: Vec<Project>) -> Result<Projects, String> {
         if projects.len() > PROJECTS_MAX {

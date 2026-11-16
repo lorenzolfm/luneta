@@ -493,7 +493,7 @@ message Host {
   repeated Remote remotes = 9;
   optional uint32 unread_hosts = 10;
   repeated Saying sayings = 11;
-  repeated Project projects = 12;
+  Projects projects = 12;
 }
 
 message Say {
@@ -542,7 +542,7 @@ message Remote {
     optional uint32 unread_sockets = 7;
     repeated UnreadFile unread_files = 8;
     repeated Saying sayings = 11;
-    repeated Project projects = 12;
+    Projects projects = 12;
   }
 
   message Unreached {
@@ -919,6 +919,17 @@ message IssueRepository {
   string repository = 2;
 }
 
+message Projects {
+  oneof held {
+    Kept kept = 1;
+    string unkept = 2;
+  }
+
+  message Kept {
+    repeated Project projects = 1;
+  }
+}
+
 message Project {
   fixed64 id = 1;
   string name = 2;
@@ -932,8 +943,11 @@ message Workstream {
   string name = 2;
   bool renamed = 3;
   string folder = 4;
-  bool missing = 5;
-  Stage stage = 6;
+  oneof seen {
+    google.protobuf.Empty missing = 5;
+    Stage stage = 6;
+    google.protobuf.Empty unread = 7;
+  }
 }
 
 enum Stage {

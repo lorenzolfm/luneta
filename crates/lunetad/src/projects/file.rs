@@ -1,16 +1,25 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
+use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::{Below, Change, Dir, Id, Name, Project, Projects, Workstream};
 use super::{NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, WORKSTREAMS_MAX};
 use crate::core::Command;
+use crate::log;
 use crate::state::{self, Unset};
 
 pub const FILE: &str = "projects";
+
+const LOCK: &str = "projects.lock";
+
+const HELD_TRIES: u32 = 40;
+
+const HELD_PAUSE: Duration = Duration::from_millis(50);
 
 const VERSION: u32 = 1;
 
@@ -59,9 +68,13 @@ struct KeptWorkstream {
 }
 
 pub struct Store {
-    file: Result<PathBuf, String>,
-    projects: Projects,
+    keeping: Keeping,
     core: SyncSender<Command>,
+}
+
+enum Keeping {
+    Kept { file: PathBuf, projects: Projects, _lock: File },
+    Unkept(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,41 +89,95 @@ impl Store {
     }
 
     pub fn at(file: Result<PathBuf, Unset>, core: SyncSender<Command>) -> io::Result<Store> {
-        let (file, projects) = match file {
-            Err(unset) => (Err(format!("projects are kept nowhere: {unset}")), Projects::default()),
-            Ok(file) => match read(&file) {
-                Ok(projects) => (Ok(file), projects),
-                Err(why) => {
-                    let why = format!("{}: {why}, and so it is left as it is", file.display());
-                    (Err(why), Projects::default())
-                },
-            },
+        let keeping = match file {
+            Err(unset) => Keeping::Unkept(format!("projects are kept nowhere: {unset}")),
+            Ok(file) => Keeping::of(file),
         };
-        let store = Store { file, projects, core };
+        let store = Store { keeping, core };
         store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
         Ok(store)
     }
 
     #[must_use]
     pub fn unkept(&self) -> Option<&str> {
-        self.file.as_ref().err().map(String::as_str)
+        match &self.keeping {
+            Keeping::Kept { .. } => None,
+            Keeping::Unkept(why) => Some(why),
+        }
     }
 
     pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
-        let file = self.file.as_ref().map_err(|why| Failed::NotKept(why.clone()))?;
-        let changed = self.projects.changed(change, Id::random);
-        let (projects, made) = changed.map_err(Failed::NotKept)?;
+        let (file, projects) = match &mut self.keeping {
+            Keeping::Kept { file, projects, .. } => (file, projects),
+            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
+        };
+        if let Err(why) = unchanged(file, projects) {
+            log::say(&why);
+            self.keeping = Keeping::Unkept(why.clone());
+            let _ = self.tell();
+            return Err(Failed::NotKept(why));
+        }
+        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::NotKept)?;
         let unwritten = |error: io::Error| Failed::NotKept(format!("{}: {error}", file.display()));
-        write(file, &projects).map_err(unwritten)?;
-        self.projects = projects;
+        write(file, &changed).map_err(unwritten)?;
+        *projects = changed;
         self.tell()?;
         Ok(made)
     }
 
     fn tell(&self) -> Result<(), Failed> {
-        let told = self.core.send(Command::Projects(self.projects.clone()));
-        told.map_err(|_| Failed::KeptUntold)
+        let told = match &self.keeping {
+            Keeping::Kept { projects, .. } => Ok(projects.clone()),
+            Keeping::Unkept(why) => Err(why.clone()),
+        };
+        self.core.send(Command::Projects(told)).map_err(|_| Failed::KeptUntold)
     }
+}
+
+impl Keeping {
+    fn of(file: PathBuf) -> Keeping {
+        let lock = match locked(&file) {
+            Ok(lock) => lock,
+            Err(why) => return Keeping::Unkept(why),
+        };
+        match read(&file) {
+            Ok(projects) => Keeping::Kept { file, projects, _lock: lock },
+            Err(why) => Keeping::Unkept(left(&file, &why)),
+        }
+    }
+}
+
+fn locked(file: &Path) -> Result<File, String> {
+    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let path = folder.join(LOCK);
+    let failed = |at: &Path, error: io::Error| {
+        format!("{}: {error}, and so no projects are kept", at.display())
+    };
+    fs::create_dir_all(folder).map_err(|error| failed(folder, error))?;
+    let mut options = OpenOptions::new();
+    let opened = options.create(true).truncate(false).write(true).open(&path);
+    let lock = opened.map_err(|error| failed(&path, error))?;
+    for _ in 0..HELD_TRIES {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => thread::sleep(HELD_PAUSE),
+            Err(TryLockError::Error(error)) => return Err(failed(&path, error)),
+        }
+    }
+    let folder = folder.display();
+    Err(format!("another lunetad keeps the projects in {folder}, and so none are kept here"))
+}
+
+fn unchanged(file: &Path, projects: &Projects) -> Result<(), String> {
+    match read(file) {
+        Ok(now) if now == *projects => Ok(()),
+        Ok(_) => Err(left(file, "it changed since lunetad read it")),
+        Err(why) => Err(left(file, &why)),
+    }
+}
+
+fn left(file: &Path, why: &str) -> String {
+    format!("{}: {why}, and so it is left as it is", file.display())
 }
 
 fn read(file: &Path) -> Result<Projects, String> {
@@ -194,8 +261,13 @@ fn write(file: &Path, projects: &Projects) -> io::Result<()> {
     unfinished.write_all(written(projects).as_bytes())?;
     unfinished.as_file().sync_all()?;
     unfinished.persist(file).map_err(|error| error.error)?;
-    File::open(folder)?.sync_all()?;
-    File::open(above)?.sync_all()
+    let synced = File::open(folder).and_then(|it| it.sync_all());
+    let synced = synced.and_then(|()| File::open(above)?.sync_all());
+    if let Err(error) = synced {
+        let folder = folder.display();
+        log::say(&format!("{folder}: {error}, and so a crash may take back the change kept"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -212,7 +284,7 @@ mod tests {
         mpsc::sync_channel(16)
     }
 
-    fn heard(commands: &Receiver<Command>) -> Vec<Projects> {
+    fn heard(commands: &Receiver<Command>) -> Vec<Result<Projects, String>> {
         let told = |command| {
             let Command::Projects(projects) = command else {
                 panic!("a store tells the core only what it keeps");
@@ -244,18 +316,20 @@ mod tests {
 
         let mut told = heard(&commands);
         assert_eq!(told.len(), 5);
-        assert_eq!(told[0], Projects::default());
+        assert_eq!(told[0], Ok(Projects::default()));
         let kept = told.pop().unwrap();
-        assert_eq!(kept.all().len(), 2);
+        assert_eq!(kept.as_ref().map(|kept| kept.all().len()), Ok(2));
 
+        drop(store);
         let again = Store::at(Ok(file.clone()), core).unwrap();
         assert_eq!(again.unkept(), None);
         assert_eq!(heard(&commands), [kept]);
-        let left: Vec<String> = fs::read_dir(file.parent().unwrap())
+        let mut left: Vec<String> = fs::read_dir(file.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
-        assert_eq!(left, [FILE]);
+        left.sort();
+        assert_eq!(left, [FILE, LOCK]);
     }
 
     #[test]
@@ -327,7 +401,7 @@ mod tests {
             let unkept = store.unkept().unwrap().to_owned();
             assert!(unkept.contains(why), "{unkept:?} for {text}");
             assert!(unkept.ends_with("and so it is left as it is"), "{unkept}");
-            assert_eq!(heard(&commands), [Projects::default()]);
+            assert_eq!(heard(&commands), [Err(unkept.clone())]);
             let change = Change::AddProject { dir: dir("/c"), name: None };
             assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
             assert_eq!(heard(&commands), []);
@@ -365,9 +439,54 @@ mod tests {
         let change = Change::AddProject { dir: dir("/c"), name: None };
         assert_eq!(store.change(change), Err(Failed::KeptUntold));
 
+        drop(store);
         let (core, commands) = channel();
         Store::at(Ok(file), core).unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
+        let kept = kept.unwrap();
         assert_eq!(kept.all()[0].dir().as_str(), "/c");
+    }
+
+    #[test]
+    fn a_second_store_of_one_file_waits_for_the_first_then_keeps_nothing() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, _commands) = channel();
+        let first = Store::at(Ok(file.clone()), core.clone()).unwrap();
+        let mut second = Store::at(Ok(file.clone()), core.clone()).unwrap();
+        let unkept = second.unkept().unwrap().to_owned();
+        assert!(unkept.starts_with("another lunetad keeps the projects in "), "{unkept}");
+        let change = Change::AddProject { dir: dir("/c"), name: None };
+        assert_eq!(second.change(change), Err(Failed::NotKept(unkept)));
+
+        let released = thread::spawn(move || {
+            thread::sleep(HELD_PAUSE * 4);
+            drop(first);
+        });
+        let third = Store::at(Ok(file), core).unwrap();
+        released.join().unwrap();
+        assert_eq!(third.unkept(), None);
+    }
+
+    #[test]
+    fn a_file_changed_behind_its_back_is_never_written_over() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        let written = fs::read_to_string(&file).unwrap();
+        let edited = written.replace(r#""name": "a""#, r#""name": "edited""#);
+        assert_ne!(edited, written);
+        fs::write(&file, &edited).unwrap();
+
+        let change = Change::AddProject { dir: dir("/b"), name: None };
+        let Err(Failed::NotKept(why)) = store.change(change) else {
+            panic!("a change over an edited file is kept");
+        };
+        assert!(why.ends_with("it changed since lunetad read it, and so it is left as it is"));
+        assert_eq!(store.unkept(), Some(why.as_str()));
+        assert_eq!(heard(&commands).last(), Some(&Err(why)));
+        assert_eq!(fs::read_to_string(&file).unwrap(), edited);
     }
 }

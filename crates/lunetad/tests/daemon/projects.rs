@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change};
+use lunetad::api::projects::{Held, Kept};
+use lunetad::api::workstream::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, Stage};
 use tonic::{Code, Status};
 
@@ -36,6 +38,11 @@ fn kept(host: &Host) -> PathBuf {
     host.home.path().join(".local/state/luneta/projects")
 }
 
+fn held(host: &Host) -> Held {
+    let projects = host.host().projects.and_then(|projects| projects.held);
+    projects.expect("lunetad says whether it keeps projects")
+}
+
 fn text(path: &Path) -> String {
     path.to_str().unwrap().to_owned()
 }
@@ -54,39 +61,39 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
     let main = workstream(&host, luneta, &clone.join("main"));
     let backup = project(&host, &vault, Some("bitwarden backup"));
     let notes = workstream(&host, backup, &vault);
-    let want = vec![
-        api::Project {
-            id: luneta,
-            name: "luneta".to_owned(),
-            dir: text(&clone),
-            missing: false,
-            workstreams: vec![api::Workstream {
-                id: main,
-                name: "main".to_owned(),
-                renamed: false,
-                folder: text(&clone.join("main")),
+    let want = Held::Kept(Kept {
+        projects: vec![
+            api::Project {
+                id: luneta,
+                name: "luneta".to_owned(),
+                dir: text(&clone),
                 missing: false,
-                stage: Stage::Working.into(),
-            }],
-        },
-        api::Project {
-            id: backup,
-            name: "bitwarden backup".to_owned(),
-            dir: text(&vault),
-            missing: false,
-            workstreams: vec![api::Workstream {
-                id: notes,
-                name: "Vault".to_owned(),
-                renamed: false,
-                folder: text(&vault),
+                workstreams: vec![api::Workstream {
+                    id: main,
+                    name: "main".to_owned(),
+                    renamed: false,
+                    folder: text(&clone.join("main")),
+                    seen: Some(Seen::Stage(Stage::Working.into())),
+                }],
+            },
+            api::Project {
+                id: backup,
+                name: "bitwarden backup".to_owned(),
+                dir: text(&vault),
                 missing: false,
-                stage: Stage::NoBranch.into(),
-            }],
-        },
-    ];
+                workstreams: vec![api::Workstream {
+                    id: notes,
+                    name: "Vault".to_owned(),
+                    renamed: false,
+                    folder: text(&vault),
+                    seen: Some(Seen::Stage(Stage::NoBranch.into())),
+                }],
+            },
+        ],
+    });
     let seen = |host: &Host| {
-        let projects = host.host().projects;
-        (projects == want).then_some(()).ok_or(projects)
+        let held = held(host);
+        (held == want).then_some(()).ok_or(held)
     };
     eventually("the projects are watched, the branch read", || seen(&host).ok());
     let written = fs::read_to_string(kept(&host)).unwrap();
@@ -107,19 +114,22 @@ fn a_workstream_whose_folder_goes_is_kept_and_said_to_be_missing() {
     let _daemon = start(host.vars()).unwrap();
     let notes = project(&host, &top, None);
     workstream(&host, notes, &below);
-    let missing = |host: &Host| {
-        let projects = host.host().projects;
+    let seen = |host: &Host| {
+        let Held::Kept(Kept { projects }) = held(host) else {
+            panic!("the projects are kept");
+        };
         let [project] = projects.as_slice() else {
             panic!("{projects:?}");
         };
-        (project.missing, project.workstreams[0].missing)
+        (project.missing, project.workstreams[0].seen)
     };
+    let no_branch = Some(Seen::Stage(Stage::NoBranch.into()));
 
     fs::remove_dir(&below).unwrap();
-    let gone = || (missing(&host) == (false, true)).then_some(());
+    let gone = || (seen(&host) == (false, Some(Seen::Missing(())))).then_some(());
     eventually("the folder is said to be missing", gone);
     fs::create_dir(&below).unwrap();
-    let back = || (missing(&host) == (false, false)).then_some(());
+    let back = || (seen(&host) == (false, no_branch)).then_some(());
     eventually("the folder is back", back);
     let nowhere = text(&scratch.join("nowhere"));
     let add = AddWorkstream { project: notes, folder: nowhere, name: None };
@@ -144,6 +154,9 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     let refused = changed(&host, Change::AddProject(add)).unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition);
     assert!(refused.message().ends_with("and so it is left as it is"), "{}", refused.message());
-    assert_eq!(host.host().projects, []);
+    let Held::Unkept(unkept) = held(&host) else {
+        panic!("no projects are kept");
+    };
+    assert_eq!(unkept, refused.message());
     assert_eq!(fs::read_to_string(&file).unwrap(), newer);
 }

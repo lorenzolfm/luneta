@@ -4729,7 +4729,7 @@ mod tests {
             remotes: Vec::new(),
             unread_hosts: Some(0),
             sayings: Vec::new(),
-            projects: Vec::new(),
+            projects: None,
         }
     }
 
@@ -9031,7 +9031,7 @@ mod tests {
             unread_sockets: Some(0),
             unread_files: Vec::new(),
             sayings: Vec::new(),
-            projects: Vec::new(),
+            projects: None,
         })
     }
 
