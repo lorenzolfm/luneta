@@ -555,11 +555,11 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
         let Ok(seen) = seeing.recv_timeout(left) else {
             panic!("the terminal never showed seen-42: {:?}", text_of(&lines));
         };
-        let frame = match seen {
-            Seen::Frame(frame) => frame,
+        let framed = match seen {
+            Seen::Frame(framed) => framed,
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
         };
-        viewer.framed();
+        let frame = framed.frame();
         assert_eq!(frame.pane(), key.id, "the mux shows only the terminal asked for");
         assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
         match frame.rows() {
@@ -601,16 +601,19 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |within: Duration| match seeing.recv_timeout(within) {
-        Ok(Seen::Frame(_)) => true,
+        Ok(Seen::Frame(framed)) => Some(framed),
         Ok(Seen::Refused(why) | Seen::Lost(why)) => panic!("the terminal is not seen: {why}"),
-        Err(_) => false,
+        Err(_) => None,
     };
+    let mut held = Vec::new();
     for told in 0..FRAMES_MAX {
-        assert!(frame(HEARD_IN), "frame {told} of {FRAMES_MAX} came");
+        let framed = frame(HEARD_IN);
+        held.push(framed.unwrap_or_else(|| panic!("frame {told} of {FRAMES_MAX} came")));
     }
     let still = Duration::from_millis(500);
-    assert!(!frame(still), "no frame comes past {FRAMES_MAX} that luneta has yet to take");
-    viewer.framed();
-    assert!(frame(HEARD_IN), "a frame comes once luneta takes one");
-    assert!(!frame(still), "only one frame comes for the one taken");
+    assert!(frame(still).is_none(), "no frame comes past {FRAMES_MAX} that luneta still holds");
+    drop(held.pop());
+    let again = frame(HEARD_IN);
+    assert!(again.is_some(), "a frame comes once luneta lets one go");
+    assert!(frame(still).is_none(), "only one frame comes for the one let go");
 }

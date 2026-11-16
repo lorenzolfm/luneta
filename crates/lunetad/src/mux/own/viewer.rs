@@ -4,7 +4,7 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
@@ -40,9 +40,22 @@ impl Greeting {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
+pub struct Framed {
+    frame: Frame,
+    _taken: OwnedSemaphorePermit,
+}
+
+impl Framed {
+    #[must_use]
+    pub fn frame(&self) -> &Frame {
+        &self.frame
+    }
+}
+
+#[derive(Debug)]
 pub enum Seen {
-    Frame(Frame),
+    Frame(Framed),
     Refused(String),
     Lost(String),
 }
@@ -86,12 +99,6 @@ impl Viewer {
     pub fn give_up(&self, why: String) {
         self.outbox.give_up(why);
     }
-
-    pub fn framed(&self) {
-        let free = self.frames.available_permits();
-        assert!(free < FRAMES_MAX, "a frame is taken that the viewer did not tell");
-        self.frames.add_permits(1);
-    }
 }
 
 impl Drop for Viewer {
@@ -129,7 +136,7 @@ async fn stream(
     socket: &Path,
     greeting: Greeting,
     inbox: Inbox<Saying>,
-    frames: &Semaphore,
+    frames: &Arc<Semaphore>,
     told: &mut impl FnMut(Seen),
 ) -> String {
     let mut client = match connect(socket, None).await {
@@ -159,12 +166,9 @@ async fn stream(
         };
         match said.event {
             Some(to_viewer::Event::Frame(frame)) => match Frame::heard(frame) {
-                Ok(frame) => {
-                    match frames.acquire().await {
-                        Ok(taken) => taken.forget(),
-                        Err(_closed) => return "luneta let go of its viewer".to_owned(),
-                    }
-                    told(Seen::Frame(frame));
+                Ok(frame) => match Arc::clone(frames).acquire_owned().await {
+                    Ok(taken) => told(Seen::Frame(Framed { frame, _taken: taken })),
+                    Err(_closed) => return "luneta let go of its viewer".to_owned(),
                 },
                 Err(why) => return format!("luneta-mux said what luneta cannot read: {why}"),
             },

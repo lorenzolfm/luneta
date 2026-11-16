@@ -506,21 +506,21 @@ impl Viewed {
         let Some(watching) = self.watcher.as_ref().filter(|it| it.number == watcher) else {
             return Heeded::Quiet;
         };
-        let frame = match seen {
-            Seen::Frame(frame) => frame,
+        let framed = match seen {
+            Seen::Frame(framed) => framed,
             Seen::Refused(why) => return Heeded::Note(format!("luneta-mux refused: {why}")),
             Seen::Lost(why) => {
                 self.unwatch();
                 return Heeded::Note(format!("luneta's view of luneta-mux: {why}"));
             },
         };
-        watching.viewer.framed();
+        let frame = framed.frame();
         let mut keys = watching.showing.iter().filter(|key| key.id == frame.pane());
         let Some(key) = keys.next().copied() else {
             return Heeded::Quiet;
         };
         assert_eq!(keys.next(), None, "a view's keys name each pane of luneta-mux's once");
-        match self.view.framed(key, &frame) {
+        match self.view.framed(key, frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
