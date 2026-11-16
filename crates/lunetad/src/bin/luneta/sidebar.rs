@@ -1973,7 +1973,9 @@ impl Sidebar {
         let count = self.rows.len();
         let (next, place) = (0..count).map(|step| (from + step) % count).find_map(|at| {
             match &self.rows[at] {
-                Row::Pane { machine, session, pane, .. } if *machine == self.on => {
+                Row::Pane { machine, session, pane, .. }
+                    if *machine == self.on && session.own() =>
+                {
                     Some((at, Place::Pane(PanePlace { session: session.clone(), pane: *pane })))
                 },
                 Row::Machine { .. } | Row::Session { .. } | Row::Pane { .. } => None,
@@ -2933,7 +2935,6 @@ impl Sidebar {
     }
 
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
-        let session = listed.name().as_str();
         let seat = match self.own_seat() {
             Some(seat) if self.on == *on && listed.own_key() == Some(seat.session()) => Seat::In,
             Some(_) | None => Seat::Elsewhere,
@@ -2953,12 +2954,7 @@ impl Sidebar {
             let (sessions, _) = oldest_first(seen.sessions);
             let mut others = sessions.into_iter().map(|(listed, _)| listed);
             let local = *on == Machine::Local;
-            let namesake = |other: &Listed| {
-                !listed.own() && !other.own() && other.name.as_str() == session
-            };
-            refuge = others.rfind(|other| {
-                other != listed && (local || !other.own()) && !namesake(other)
-            });
+            refuge = others.rfind(|other| local && other != listed && other.own());
         }
         Subject { session: listed, seat, deletes, agents, refuge: refuge.map(Place::Session) }
     }
@@ -5397,6 +5393,16 @@ mod tests {
     }
 
     #[test]
+    fn the_next_pane_passes_over_a_session_of_zellij_s() {
+        let mut sidebar = own_two_sessions();
+        let mut host = sidebar.host.take().expect("heard");
+        host.sessions.push(session("zellij", 15, vec![pane(1, 0, "/w/z", "fish")]));
+        sidebar.heard(host);
+        sit(&mut sidebar, &own_pane_of("older", 1, 10, 2));
+        assert_eq!(sidebar.next_pane(), Some(own_pane_of("newer", 2, 20, 1)));
+    }
+
+    #[test]
     fn going_to_a_folded_session_unfolds_it() {
         let older = |pane| own_pane_of("older", 1, 10, pane);
         let away = || {
@@ -7426,6 +7432,7 @@ mod tests {
             session("twin", 10, panes()),
             own_session("twin", 1, 20, panes()),
             own_session("newest", 2, 30, Vec::new()),
+            session("zellij", 40, Vec::new()),
         ];
         sidebar.heard(host(sessions, Vec::new()));
         let id = OwnId::new(1).unwrap();

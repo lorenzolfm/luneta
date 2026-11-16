@@ -1384,10 +1384,12 @@ impl App {
         let Some(to) = self.right.attached.mouse(mouse, at, self.areas.1) else {
             return;
         };
-        let Some(listed) = self.sidebar.own_listed(to.session()) else {
-            return self.sidebar.notify("lunetad lists no session luneta's client is in".to_owned());
-        };
-        let to = match own_sessions::elsewhere(self.runs_in, to, listed.name()) {
+        let session = to.session();
+        let name = self.sidebar.own_listed(session).map_or_else(
+            || format!("own session {}", session.id),
+            |listed| listed.name().to_string(),
+        );
+        let to = match own_sessions::elsewhere(self.runs_in, to, name) {
             Ok(to) => to,
             Err(why) => return self.sidebar.notify(why),
         };

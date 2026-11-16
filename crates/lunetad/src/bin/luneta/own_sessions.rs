@@ -29,7 +29,7 @@ impl Elsewhere {
 pub fn elsewhere(
     runs_in: Option<OwnKey>,
     to: To,
-    name: &SessionName,
+    name: impl fmt::Display,
 ) -> Result<Elsewhere, String> {
     if runs_in == Some(to.session()) {
         return Err(format!("luneta runs in {name}, and goes nowhere it shows itself"));
