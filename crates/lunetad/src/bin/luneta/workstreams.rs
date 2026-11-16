@@ -7,6 +7,7 @@ use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, Project, WatchRequest};
 use lunetad::projects::{ProjectId, WorkstreamId};
 use tonic::transport::Channel;
+use tonic::Code;
 
 use lunetad::names::session_for;
 
@@ -16,19 +17,37 @@ const ASKING: Duration = Duration::from_secs(15);
 
 type Daemon = DaemonClient<Channel>;
 
-fn asked<T>(
+enum Unmade {
+    Nests(String),
+    Failed(String),
+}
+
+impl From<String> for Unmade {
+    fn from(why: String) -> Unmade {
+        Unmade::Failed(why)
+    }
+}
+
+impl Unmade {
+    fn said(self) -> String {
+        match self {
+            Unmade::Nests(why) | Unmade::Failed(why) => why,
+        }
+    }
+}
+
+fn asked<T, E: From<String>>(
     path: &Path,
-    asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, String>,
-) -> Result<T, String> {
+    asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
+) -> Result<T, E> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| format!("no runtime: {error}"))?;
+        .map_err(|error| E::from(format!("no runtime: {error}")))?;
     runtime.block_on(async {
-        let mut daemon = daemon::current(path).await?.daemon;
-        tokio::time::timeout(ASKING, asking(&mut daemon)).await.map_err(|_| {
-            format!("lunetad did not answer in {}s", ASKING.as_secs())
-        })?
+        let mut daemon = daemon::current(path).await.map_err(E::from)?.daemon;
+        let answered = tokio::time::timeout(ASKING, asking(&mut daemon)).await;
+        answered.map_err(|_| E::from(format!("lunetad did not answer in {}s", ASKING.as_secs())))?
     })
 }
 
@@ -44,19 +63,27 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
     })
 }
 
-fn changed(path: &Path, change: Change) -> Result<Option<u64>, String> {
+fn changed(path: &Path, change: Change) -> Result<Option<u64>, Unmade> {
     asked(path, async |daemon| {
         let request = ChangeProjectsRequest { on: None, change: Some(change) };
-        let made = daemon.change_projects(request).await;
-        Ok(made.map_err(|status| status.message().to_owned())?.into_inner().made)
+        match daemon.change_projects(request).await {
+            Ok(made) => Ok(made.into_inner().made),
+            Err(status) => {
+                let why = status.message().to_owned();
+                Err(match status.code() {
+                    Code::AlreadyExists => Unmade::Nests(why),
+                    _ => Unmade::Failed(why),
+                })
+            },
+        }
     })
 }
 
-pub fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, String> {
+fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unmade> {
     let (dir, name) = (dir.to_owned(), name.map(str::to_owned));
     let change = Change::AddProject(AddProject { dir, name });
     let made = changed(path, change)?.and_then(ProjectId::of);
-    made.ok_or_else(|| "lunetad made no project".to_owned())
+    made.ok_or_else(|| Unmade::Failed("lunetad made no project".to_owned()))
 }
 
 pub fn add_workstream(
@@ -67,7 +94,7 @@ pub fn add_workstream(
 ) -> Result<WorkstreamId, String> {
     let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
     let change = Change::AddWorkstream(AddWorkstream { project, folder, name });
-    let made = changed(path, change)?.and_then(WorkstreamId::of);
+    let made = changed(path, change).map_err(Unmade::said)?.and_then(WorkstreamId::of);
     made.ok_or_else(|| "lunetad made no workstream".to_owned())
 }
 
@@ -75,7 +102,7 @@ pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
     let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
     let (project, to) = (project.get(), to.to_owned());
     let change = Change::RenameProject(RenameProject { project, to });
-    changed(&path, change).map(drop)
+    changed(&path, change).map(drop).map_err(Unmade::said)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {
@@ -136,14 +163,14 @@ pub fn start(
     if let Some(chosen) = chosen(path, &kept(path)?, name, cwd, folder) {
         return chosen;
     }
-    let made = if name.is_some() || session_for(cwd).is_some() {
-        add_project(path, folder, name)
+    let unmade = if name.is_some() || session_for(cwd).is_some() {
+        match add_project(path, folder, name) {
+            Ok(made) => return add_workstream(path, made, folder, None),
+            Err(Unmade::Failed(why)) => return Err(why),
+            Err(Unmade::Nests(why)) => why,
+        }
     } else {
-        Err(format!("{} names no project: name one", cwd.display()))
-    };
-    let unmade = match made {
-        Ok(made) => return add_workstream(path, made, folder, None),
-        Err(unmade) => unmade,
+        format!("{} names no project: name one", cwd.display())
     };
     let projects = kept(path)?;
     if let Some(chosen) = chosen(path, &projects, name, cwd, folder) {
@@ -162,7 +189,7 @@ pub fn pulled(path: &Path, project: &str, cwd: &Path, name: &str) -> Result<Work
     let holding = projects.iter().find(|it| holds(&it.dir, cwd));
     let id = match holding {
         Some(holding) => project_id(holding)?,
-        None => add_project(path, folder, Some(project))?,
+        None => add_project(path, folder, Some(project)).map_err(Unmade::said)?,
     };
     add_workstream(path, id, folder, Some(name))
 }

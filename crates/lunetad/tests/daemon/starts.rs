@@ -284,6 +284,22 @@ fn a_named_luneta_refuses_a_name_two_projects_share() {
 }
 
 #[test]
+fn a_bare_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_another() {
+    let owned = Owned::new();
+    let kept = directory("kept");
+    for at in 0..lunetad::projects::PROJECTS_MAX {
+        let dir = kept.path.join(format!("p{at}"));
+        fs::create_dir(&dir).unwrap();
+        project(&owned.host, Path::new(&real(&dir)), None);
+    }
+    let dir = directory("new");
+    let output = luneta(owned.host.vars(), &dir.path).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    assert!(refusal.contains("projects, as many as are kept"), "{refusal}");
+}
+
+#[test]
 fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
     if !makes_shells() {
         return;

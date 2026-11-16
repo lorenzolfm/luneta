@@ -779,7 +779,10 @@ fn told(out: &Out, word: api::ShowResponse) -> bool {
 
 fn said(failed: Failed) -> String {
     match failed {
-        Failed::NotKept(why) | Failed::Refused(why) | Failed::Unwritten(why) => why,
+        Failed::NotKept(why)
+        | Failed::Nests(why)
+        | Failed::Refused(why)
+        | Failed::Unwritten(why) => why,
         Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
     }
 }

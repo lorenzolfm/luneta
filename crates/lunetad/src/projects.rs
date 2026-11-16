@@ -531,6 +531,19 @@ impl Projects {
     pub fn changed(
         &self,
         change: Change,
+        draw: impl FnMut() -> io::Result<Id>,
+    ) -> Result<(Projects, Option<Id>), Refused> {
+        if let Change::AddProject { dir, .. } = &change
+            && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
+        {
+            return Err(Refused::Nests(nested(dir, other)));
+        }
+        self.changed_by(change, draw).map_err(Refused::Said)
+    }
+
+    fn changed_by(
+        &self,
+        change: Change,
         mut draw: impl FnMut() -> io::Result<Id>,
     ) -> Result<(Projects, Option<Id>), String> {
         let mut changed = self.clone();
@@ -540,9 +553,6 @@ impl Projects {
                     Some(name) => name,
                     None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
                 };
-                if let Some(other) = self.projects.iter().find(|other| other.dir.nests(&dir)) {
-                    return Err(nested(&dir, other));
-                }
                 if self.projects.len() >= PROJECTS_MAX {
                     return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
                 }
@@ -726,6 +736,20 @@ impl Projects {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    Nests(String),
+    Said(String),
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refused::Nests(why) | Refused::Said(why) => formatter.write_str(why),
+        }
+    }
+}
+
 fn nested(dir: &Dir, other: &Project) -> String {
     let (other_dir, name) = (&other.dir.0, &other.name.0);
     if *dir == other.dir {
@@ -814,7 +838,7 @@ mod tests {
         }
     }
 
-    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), String> {
+    fn refused(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), Refused> {
         let mut drawn = counting();
         let taken = |id: &Id| projects.holds(*id);
         projects.changed(change, || loop {
@@ -823,6 +847,10 @@ mod tests {
                 return Ok(id);
             }
         })
+    }
+
+    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), String> {
+        refused(projects, change).map_err(|refused| refused.to_string())
     }
 
     fn add(projects: &mut Projects, change_of: Change) -> Id {
@@ -914,8 +942,11 @@ mod tests {
             ("/w/luneta/main", "is inside /w/luneta"),
             ("/w", "holds /w/luneta"),
         ] {
-            let refused = change(&projects, Change::AddProject { dir: dir(at), name: None });
-            assert!(refused.unwrap_err().contains(why), "{at}");
+            let refused = refused(&projects, Change::AddProject { dir: dir(at), name: None });
+            let Err(Refused::Nests(said)) = refused else {
+                panic!("{at} is refused as nested: {refused:?}");
+            };
+            assert!(said.contains(why), "{at}: {said}");
         }
         project(&mut projects, "/w/luneta-old");
         assert_eq!(projects.all().len(), 2);
@@ -996,7 +1027,7 @@ mod tests {
         assert_eq!(made, Id::of(7));
         let always = Change::AddProject { dir: dir("/b"), name: None };
         let refused = projects.changed(always, || Ok(first.0));
-        assert!(refused.unwrap_err().contains("were all taken"));
+        assert!(refused.unwrap_err().to_string().contains("were all taken"));
     }
 
     #[test]
@@ -1005,8 +1036,11 @@ mod tests {
         for at in 0..PROJECTS_MAX {
             project(&mut projects, &format!("/p{at}"));
         }
-        let over = change(&projects, Change::AddProject { dir: dir("/over"), name: None });
-        assert!(over.unwrap_err().contains("as many as are kept"));
+        let over = refused(&projects, Change::AddProject { dir: dir("/over"), name: None });
+        let Err(Refused::Said(said)) = over else {
+            panic!("a project over the bound is no nested one: {over:?}");
+        };
+        assert!(said.contains("as many as are kept"));
         let first = projects.all()[0].id();
         for _ in 0..WORKSTREAMS_MAX {
             workstream(&mut projects, first, "/p0");

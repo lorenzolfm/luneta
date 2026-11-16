@@ -1078,6 +1078,7 @@ impl Daemon for Host {
             let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;
             changed.map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
+                Failed::Nests(why) => Status::already_exists(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
                 Failed::KeptUntold => Status::unavailable(stopped),

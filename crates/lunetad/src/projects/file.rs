@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
-use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Runs, Session, Terminal};
-use super::{TerminalId, WorkstreamId};
+use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Refused, Runs, Session};
+use super::{Terminal, TerminalId, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -158,6 +158,7 @@ enum Keeping {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Failed {
     NotKept(String),
+    Nests(String),
     Refused(String),
     Unwritten(String),
     KeptUntold,
@@ -210,7 +211,10 @@ impl Store {
             Keeping::Kept { projects, .. } => projects,
             Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
         };
-        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
+        let (changed, made) = projects.changed(change, Id::random).map_err(|refused| match refused {
+            Refused::Nests(why) => Failed::Nests(why),
+            Refused::Said(why) => Failed::Refused(why),
+        })?;
         if changed == *projects {
             return Ok(made);
         }
@@ -820,10 +824,15 @@ mod tests {
         assert_eq!(heard(&commands).len(), 2);
 
         let inside = Change::AddProject { dir: dir("/a/b"), name: None };
-        let Err(Failed::Refused(why)) = store.change(inside) else {
+        let Err(Failed::Nests(why)) = store.change(inside) else {
             panic!("a project inside another is kept");
         };
         assert!(why.contains("/a/b is inside /a"), "{why}");
+        let (project, to) = (ProjectId::new(Id::of(9).unwrap()), Name::parse("x").unwrap());
+        let Err(Failed::Refused(why)) = store.change(Change::RenameProject { project, to }) else {
+            panic!("a rename of no project is kept");
+        };
+        assert!(why.contains("no project"), "{why}");
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
