@@ -193,7 +193,7 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_view_s() {
     let right = one.open();
     let mut other = Shown::new(&owned, workstream, 80, 24);
     other.until("the view where the last client was", |laid| laid.focused == Some(right));
-    let towards_left = focus::To::Towards(show_request::Direction::Left.into());
+    let towards_left = focus::To::Direction(show_request::Direction::Left.into());
     other.ask(Event::Focus(show_request::Focus { to: Some(towards_left) }));
     other.until("the other client on the left", |laid| laid.focused == Some(left));
     assert_eq!(one.laid.as_ref().unwrap().focused, Some(right));
@@ -258,6 +258,10 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
     shown.ask(Event::Fullscreen(()));
     let before = shown.until("the view full", |laid| laid.full.is_some());
     drop(shown);
+    let full = format!(r#""full": "{:016x}""#, before.full.unwrap());
+    eventually("the view full is kept within a sweep", || {
+        fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
+    });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.starts_with("{\n  \"version\": 2,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
@@ -280,7 +284,7 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let left = shown.open();
     let right = shown.open();
     let towards_left = show_request::Direction::Left.into();
-    shown.ask(Event::Resize(show_request::Resize { towards: towards_left, grow: true }));
+    shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[0].rect == Some(rect(0, 0, 36, 24))
     });
@@ -288,13 +292,13 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     eventually("the grown terminal takes its place's size", || {
         (sized(&owned, right) == Some((42, 22))).then_some(())
     });
-    let to = Some(r#move::To::Towards(towards_left));
+    let to = Some(r#move::To::Direction(towards_left));
     shown.ask(Event::Move(show_request::Move { to }));
     let laid = shown.until("the terminals traded", |laid| laid.panes[0].terminal == right);
     assert_eq!((laid.panes[1].terminal, laid.focused), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
     shown.until("the view full", |laid| laid.full == Some(right));
-    shown.ask(Event::Resize(show_request::Resize { towards: towards_left, grow: true }));
+    shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
     assert!(shown.until_refused().contains("resized by none"));
 }
 

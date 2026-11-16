@@ -345,6 +345,25 @@ impl Change {
             },
         })
     }
+
+    #[must_use]
+    pub fn kept_at_once(&self) -> bool {
+        match self {
+            Change::AddProject { .. }
+            | Change::AddWorkstream { .. }
+            | Change::RenameProject { .. }
+            | Change::RenameWorkstream { .. }
+            | Change::MoveProject { .. }
+            | Change::MoveWorkstream { .. }
+            | Change::ForgetProject { .. }
+            | Change::ForgetWorkstream { .. }
+            | Change::Open { .. }
+            | Change::Close { .. } => true,
+            Change::Resize { .. } | Change::Swap { .. } | Change::Fill { .. } | Change::Ran(_) => {
+                false
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,7 +566,9 @@ impl Projects {
             Change::Resize { terminal, direction, change, size } => {
                 let view = changed.view_of(terminal)?;
                 let tree = view.tree_mut().expect("a view that holds a terminal is laid");
-                tree.resize(terminal, direction, change, size);
+                if !tree.resize(terminal, direction, change, size) {
+                    return Err(format!("no border of terminal {terminal} moves that way"));
+                }
                 None
             },
             Change::Swap { one, other } => {

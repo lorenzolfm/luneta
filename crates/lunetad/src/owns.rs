@@ -46,10 +46,10 @@ pub fn follow(
                 watcher = watch::watching(folder, mode, is_socket, &wake, &mut watching);
                 watching.done();
             }
-            let followed = server::followed(|listed, unread, terminals, since| {
-                let held = !listed.is_empty() || !terminals.is_empty();
+            let followed = server::followed(|listed, unread, terminals| {
+                let held = !listed.is_empty() || !terminals.terminals.is_empty();
                 running.store(held || !unread.is_empty(), Ordering::Relaxed);
-                if views.send(views::Command::Listed { terminals, since }).is_err() {
+                if views.send(views::Command::Listed(terminals)).is_err() {
                     return false;
                 }
                 for why in unread {
@@ -74,6 +74,9 @@ pub fn follow(
                 },
             };
             let unreached_now = unlisted.is_none();
+            if !unreached_now {
+                unreached = 0;
+            }
             if let Some(unlisted) = unlisted
                 && views.send(unlisted).is_err()
             {
@@ -88,9 +91,11 @@ pub fn follow(
                 thread::sleep(UNREACHED_PAUSE);
                 continue;
             }
-            unreached = 0;
             match woken.recv_timeout(sweep) {
-                Ok(()) => watch::settle(&woken),
+                Ok(()) => {
+                    watch::settle(&woken);
+                    unreached = 0;
+                },
                 Err(RecvTimeoutError::Timeout) => {},
                 Err(RecvTimeoutError::Disconnected) => return,
             }

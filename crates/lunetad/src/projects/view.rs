@@ -166,6 +166,7 @@ impl View {
         size: Size,
     ) -> Result<(), String> {
         let id = terminal.id;
+        let count = self.len();
         match (&mut self.0, placed) {
             (None, Placed::Alone) => {
                 self.0 = Some(Laid { tree: Tree::one(terminal), full: None });
@@ -188,12 +189,14 @@ impl View {
                 laid.full = None;
             },
         }
+        assert!(self.holds(id), "terminal {id} is in the view it opened in");
+        assert_eq!(self.len(), count + 1, "a view opens one terminal at a time");
         Ok(())
     }
 
     pub(super) fn closed(&mut self, terminal: Id) -> Option<Id> {
         let laid = self.0.as_mut().expect("a closed terminal is in the view");
-        match laid.tree.remove(terminal) {
+        let heir = match laid.tree.remove(terminal) {
             Removed::Last => {
                 self.0 = None;
                 None
@@ -204,7 +207,12 @@ impl View {
                 }
                 Some(heir)
             },
+        };
+        assert!(!self.holds(terminal), "terminal {terminal} left its view");
+        if let Some(heir) = heir {
+            assert!(self.holds(heir), "terminal {heir} took the room of terminal {terminal}");
         }
+        heir
     }
 
     pub(super) fn filled(&mut self, full: Option<Id>) -> Result<(), String> {

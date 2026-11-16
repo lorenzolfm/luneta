@@ -150,7 +150,7 @@ pub struct Store {
 }
 
 enum Keeping {
-    Kept { file: PathBuf, projects: Projects, _lock: File },
+    Kept { file: PathBuf, projects: Projects, written: Projects, _lock: File },
     Unkept(String),
 }
 
@@ -203,25 +203,51 @@ impl Store {
     }
 
     pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
-        let (file, projects) = match &mut self.keeping {
-            Keeping::Kept { file, projects, .. } => (file, projects),
+        let at_once = change.kept_at_once();
+        let projects = match &mut self.keeping {
+            Keeping::Kept { projects, .. } => projects,
             Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
         };
-        if let Err(why) = unchanged(file, projects) {
+        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
+        if changed == *projects {
+            return Ok(made);
+        }
+        if at_once {
+            self.written_as(&changed)?;
+        }
+        let Keeping::Kept { projects, .. } = &mut self.keeping else {
+            unreachable!("projects written are kept");
+        };
+        *projects = changed;
+        self.tell()?;
+        Ok(made)
+    }
+
+    pub fn flush(&mut self) -> Result<(), Failed> {
+        let Keeping::Kept { projects, written, .. } = &self.keeping else {
+            return Ok(());
+        };
+        if projects == written {
+            return Ok(());
+        }
+        let projects = projects.clone();
+        self.written_as(&projects)
+    }
+
+    fn written_as(&mut self, changed: &Projects) -> Result<(), Failed> {
+        let Keeping::Kept { file, written, .. } = &mut self.keeping else {
+            unreachable!("only kept projects are written");
+        };
+        if let Err(why) = unchanged(file, written) {
             log::say(&why);
             self.keeping = Keeping::Unkept(why.clone());
             let _ = self.tell();
             return Err(Failed::NotKept(why));
         }
-        let (changed, made) = projects.changed(change, Id::random).map_err(Failed::Refused)?;
-        if changed == *projects {
-            return Ok(made);
-        }
         let unwritten = |error: io::Error| Failed::Unwritten(format!("{}: {error}", file.display()));
-        write(file, &changed).map_err(unwritten)?;
-        *projects = changed;
-        self.tell()?;
-        Ok(made)
+        write(file, changed).map_err(unwritten)?;
+        *written = changed.clone();
+        Ok(())
     }
 
     fn tell(&self) -> Result<(), Failed> {
@@ -240,7 +266,10 @@ impl Keeping {
             Err(why) => return Keeping::Unkept(why),
         };
         match read(&file) {
-            Ok(projects) => Keeping::Kept { file, projects, _lock: lock },
+            Ok(projects) => {
+                let written = projects.clone();
+                Keeping::Kept { file, projects, written, _lock: lock }
+            },
             Err(why) => Keeping::Unkept(left(&file, &why)),
         }
     }
@@ -844,5 +873,43 @@ mod tests {
         assert_eq!(store.unkept(), Some(why.as_str()));
         assert_eq!(heard(&commands).last(), Some(&Err(why)));
         assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+    }
+
+    #[test]
+    fn a_change_to_a_view_alone_is_written_when_flushed_or_with_the_next_change() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
+        let project = project.unwrap().unwrap();
+        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let workstream = store.change(add).unwrap().unwrap();
+        let size = super::super::Size::of(80, 24).unwrap();
+        let [one, two] = [store.fresh().unwrap(), Id::of(u64::MAX).unwrap()];
+        let opened = |id, placed| {
+            let terminal = Terminal::new(id, dir("/a"), Runs::Shell);
+            Change::Open { workstream, terminal, placed, size }
+        };
+        store.change(opened(one, Placed::Alone)).unwrap();
+        let beside = Placed::Beside { at: one, towards: Towards::Right };
+        store.change(opened(two, beside)).unwrap();
+        let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
+        let full = |projects: &Projects| projects.find(workstream).unwrap().1.view().full();
+
+        store.change(Change::Fill { workstream, full: Some(two) }).unwrap();
+        assert_eq!(full(store.projects().unwrap()), Some(two));
+        assert_eq!(full(&read()), None, "a fill waits for the flush");
+        let told = heard(&commands).pop().unwrap().unwrap();
+        assert_eq!(full(&told), Some(two), "the core hears a fill at once");
+        store.flush().unwrap();
+        assert_eq!(full(&read()), Some(two));
+
+        store.change(Change::Fill { workstream, full: None }).unwrap();
+        store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
+        let kept = *store.projects().unwrap() == read();
+        assert!(kept, "a change kept at once takes the rest along");
+        store.flush().unwrap();
+        assert_eq!(read(), *store.projects().unwrap());
     }
 }

@@ -1050,20 +1050,20 @@ message ShowRequest {
 
   message Focus {
     oneof to {
-      Direction towards = 1;
+      Direction direction = 1;
       Order order = 2;
       fixed64 terminal = 3;
     }
   }
 
   message Resize {
-    Direction towards = 1;
+    Direction direction = 1;
     bool grow = 2;
   }
 
   message Move {
     oneof to {
-      Direction towards = 1;
+      Direction direction = 1;
       Order order = 2;
     }
   }

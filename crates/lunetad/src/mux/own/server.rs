@@ -351,7 +351,7 @@ pub enum Followed {
 }
 
 pub fn followed(
-    mut told: impl FnMut(Vec<Listing>, Vec<String>, Vec<Terminal>, Instant) -> bool,
+    mut told: impl FnMut(Vec<Listing>, Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
     let Ok(server) = Server::reached_on(runtime()?, None)? else {
         return Ok(Followed::Unreached);
@@ -366,11 +366,19 @@ pub fn followed(
         };
         let (listed, mut unread) = read(listing.sessions);
         let (terminals, unread_terminals) = terminals(listing.terminals);
+        let whole = unread_terminals.is_empty();
         unread.extend(unread_terminals);
-        if !told(listed, unread, terminals, since) {
+        if !told(listed, unread, TerminalsListed { terminals, whole, since }) {
             return Ok(Followed::LetGo);
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalsListed {
+    pub terminals: Vec<Terminal>,
+    pub whole: bool,
+    pub since: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,6 +409,7 @@ pub enum Word {
 }
 
 fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>) {
+    let count = listed.len();
     let mut terminals: Vec<Terminal> = Vec::with_capacity(listed.len());
     let mut ids = HashSet::with_capacity(listed.len());
     let mut unread = Vec::new();
@@ -413,6 +422,7 @@ fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>) {
             Err(why) => unread.push(why),
         }
     }
+    assert_eq!(terminals.len() + unread.len(), count, "each terminal listed is read or unread");
     (terminals, unread)
 }
 
@@ -463,14 +473,29 @@ impl Terminals {
     }
 
     pub fn tagged(&mut self, tag: &[u8]) -> Result<Option<TerminalKey>, Failure> {
-        let mut found = None;
-        self.asked(|server| {
+        let mut kept = self.server.take();
+        for _ in 0..2 {
+            let reused = kept.is_some();
+            let server = match kept.take() {
+                Some(server) => server,
+                None => match Server::reached()? {
+                    Some(server) => server,
+                    None => return Ok(None),
+                },
+            };
             let request = api::ListRequest {};
-            let listing = server.ask(|mut client| async move { client.list(request).await })?;
-            found = listing.terminals.into_iter().find(|terminal| terminal.tag == tag);
-            Ok(())
-        })?;
-        found.map(|terminal| TerminalKey::read(terminal.key)).transpose().map_err(Failure::Unread)
+            match server.ask(|mut client| async move { client.list(request).await }) {
+                Ok(listing) => {
+                    self.server = Some(server);
+                    let found = listing.terminals.into_iter().find(|terminal| terminal.tag == tag);
+                    let key = found.map(|terminal| TerminalKey::read(terminal.key));
+                    return key.transpose().map_err(Failure::Unread);
+                },
+                Err(_) if reused => {},
+                Err(status) => return Err(refused(&status)),
+            }
+        }
+        unreachable!("a second ask of luneta-mux is on a server reached afresh")
     }
 
     pub fn sized(&mut self, key: TerminalKey, size: Size) -> Result<(), Failure> {

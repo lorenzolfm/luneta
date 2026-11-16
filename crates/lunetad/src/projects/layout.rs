@@ -458,24 +458,27 @@ impl<L: Leaf> Tree<L> {
         (pane, towards)
     }
 
-    pub fn remove(&mut self, pane: Id) -> Removed<L> {
-        let node = self.leaf(pane).expect("a removed pane is in the tree");
-        if node == ROOT {
-            assert_eq!(self.nodes.len(), 1, "the root is a pane only in a tree of one");
-            return Removed::Last;
-        }
+    #[must_use]
+    pub fn heir(&self, pane: Id) -> Option<Id> {
+        let node = self.leaf(pane).expect("a pane with an heir is in the tree");
+        let (_, sibling) = self.halves_of(node)?;
         let panes = self.panes();
         let place = panes.iter().position(|found| *found == pane);
-        let place = place.expect("a removed pane is in the tree's order");
-        let parent = self.parents()[node].expect("a pane under the root has a parent");
+        let place = place.expect("a pane of the tree is in its order");
+        let heir = if sibling > node { panes[place + 1] } else { panes[place - 1] };
+        assert_ne!(heir, pane, "a pane is no heir of itself");
+        Some(heir)
+    }
+
+    pub fn remove(&mut self, pane: Id) -> Removed<L> {
+        let node = self.leaf(pane).expect("a removed pane is in the tree");
+        let Some(heir) = self.heir(pane) else {
+            assert_eq!(self.nodes.len(), 1, "the root is a pane only in a tree of one");
+            return Removed::Last;
+        };
+        let (parent, sibling) = self.halves_of(node).expect("a pane with an heir has a parent");
         let Node::Split(split) = self.nodes[parent] else {
             unreachable!("node {parent} is a parent, so a split");
-        };
-        let (sibling, heir) = if split.first() == node {
-            (split.second(), panes[place + 1])
-        } else {
-            assert_eq!(split.second(), node, "a pane is one half of its parent");
-            (split.first(), panes[place - 1])
         };
         self.nodes.swap(parent, sibling);
         let gone = self.compact(split.halves, node);
@@ -515,6 +518,7 @@ impl<L: Leaf> Tree<L> {
         (panes.len() > 1).then(|| panes[order.stepped(place, panes.len())])
     }
 
+    #[must_use]
     pub fn resize(&mut self, pane: Id, direction: Direction, change: Change, size: Size) -> bool {
         let (towards, half) = direction.border();
         let leasts = self.leasts();
@@ -557,6 +561,21 @@ impl<L: Leaf> Tree<L> {
         self.nodes.push(old);
         self.nodes.push(Node::Pane(new));
         self.assert_shaped();
+    }
+
+    fn halves_of(&self, node: usize) -> Option<(usize, usize)> {
+        if node == ROOT {
+            return None;
+        }
+        let parent = self.parents()[node].expect("a node under the root has a parent");
+        let Node::Split(split) = self.nodes[parent] else {
+            unreachable!("node {parent} is a parent, so a split");
+        };
+        if split.first() == node {
+            return Some((parent, split.second()));
+        }
+        assert_eq!(split.second(), node, "a node is one half of its parent");
+        Some((parent, split.first()))
     }
 
     fn leaf(&self, pane: Id) -> Option<usize> {
@@ -882,10 +901,12 @@ mod tests {
     fn a_removed_pane_leaves_its_room_to_its_sibling() {
         let at = size(80, 24);
         let mut tree = three(at);
+        assert_eq!([1, 2, 3].map(|id| tree.heir(pane(id))), [2, 3, 2].map(|id| Some(pane(id))));
         assert_eq!(tree.remove(pane(2)), Removed::Out { gone: pane(2), heir: pane(3) });
         assert_eq!(tree.rects(at)[1], (pane(3), rect(40, 0, 40, 24)));
         assert_eq!(tree.remove(pane(3)), Removed::Out { gone: pane(3), heir: pane(1) });
         assert_eq!(tree, Tree::one(pane(1)));
+        assert_eq!(tree.heir(pane(1)), None);
         assert_eq!(tree.remove(pane(1)), Removed::Last);
         assert_eq!(tree.into_lone(), pane(1));
         let mut tree = three(at);

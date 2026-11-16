@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,12 +12,12 @@ use tonic::Status;
 use crate::agent::Agent;
 use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core};
-use crate::mux::own::server::{self, Is, Terminals, Word};
+use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
 use crate::mux::own::TerminalKey;
 use crate::mux::Runs as Opened;
 use crate::projects::layout::{self, Direction, Order, Rect, Towards};
 use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
-use crate::projects::{Size, Store, Terminal, View, Workstream};
+use crate::projects::{Size, Store, Terminal, View, Workstream, LINE_BYTES_MAX};
 use crate::watch::Troubles;
 use crate::{opens, Directory};
 
@@ -27,18 +27,32 @@ pub const ANSWERS_MAX: usize = 64;
 
 const COMMANDS_MAX: usize = 64;
 
+const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
+
 const TAG: &str = "luneta terminal ";
 
 const UNSHOWN: (u32, u32) = (80, 24);
 
+const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh"];
+
+const _: () = assert!(ANSWERS_MAX > 1);
+
 pub type Out = answers::Sender<Result<api::ShowResponse, Status>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClientId(u64);
 
 pub enum Command {
     Change { change: Change, answer: oneshot::Sender<Result<Option<Id>, Failed>> },
-    Came { workstream: Id, size: Size, out: Out, answer: oneshot::Sender<Result<u64, Status>> },
-    Asked { client: u64, asked: Result<Asked, String> },
-    Left(u64),
-    Listed { terminals: Vec<server::Terminal>, since: Instant },
+    Came {
+        workstream: Id,
+        size: Size,
+        out: Out,
+        answer: oneshot::Sender<Result<ClientId, Status>>,
+    },
+    Asked { client: ClientId, asked: Result<Asked, String> },
+    Left(ClientId),
+    Listed(TerminalsListed),
     Unlisted { emptied: Option<Instant> },
 }
 
@@ -49,7 +63,7 @@ pub enum Asked {
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(Focus),
-    Resize { towards: Direction, change: layout::Change },
+    Resize { direction: Direction, change: layout::Change },
     Move(Step),
     Fullscreen,
 }
@@ -68,7 +82,7 @@ pub enum Focus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    Towards(Direction),
+    Direction(Direction),
     Order(Order),
 }
 
@@ -88,25 +102,30 @@ impl Asked {
                 if argv.first().is_some_and(String::is_empty) {
                     return Err("open: the program to run is named by no word".to_owned());
                 }
+                if argv.len() > ARGV_MAX {
+                    return Err(format!("open: a command line is at most {ARGV_MAX} words"));
+                }
                 Asked::Open { beside, argv }
             },
             Event::Close(()) => Asked::Close,
             Event::Focus(show_request::Focus { to }) => {
                 use show_request::focus::To;
                 Asked::Focus(match to.ok_or("focus: it says no terminal to go to")? {
-                    To::Towards(towards) => Focus::Step(Step::Towards(direction_of(towards)?)),
+                    To::Direction(direction) => {
+                        Focus::Step(Step::Direction(direction_of(direction)?))
+                    },
                     To::Order(order) => Focus::Step(Step::Order(order_of(order)?)),
                     To::Terminal(terminal) => Focus::Terminal(id("focus", terminal)?),
                 })
             },
-            Event::Resize(show_request::Resize { towards, grow }) => {
+            Event::Resize(show_request::Resize { direction, grow }) => {
                 let change = if grow { layout::Change::Grow } else { layout::Change::Shrink };
-                Asked::Resize { towards: direction_of(towards)?, change }
+                Asked::Resize { direction: direction_of(direction)?, change }
             },
             Event::Move(show_request::Move { to }) => {
                 use show_request::r#move::To;
                 Asked::Move(match to.ok_or("move: it says nowhere to move to")? {
-                    To::Towards(towards) => Step::Towards(direction_of(towards)?),
+                    To::Direction(direction) => Step::Direction(direction_of(direction)?),
                     To::Order(order) => Step::Order(order_of(order)?),
                 })
             },
@@ -176,14 +195,10 @@ pub fn start(
         mux: Terminals::default(),
         clients: BTreeMap::new(),
         arrivals: 0,
-        keys: BTreeMap::new(),
-        seen: BTreeSet::new(),
-        made: BTreeMap::new(),
-        agent_fronts: BTreeMap::new(),
-        listed: Vec::new(),
-        sized: BTreeMap::new(),
-        sizes: BTreeMap::new(),
-        last: BTreeMap::new(),
+        known: BTreeMap::new(),
+        listed: BTreeMap::new(),
+        last_focus: BTreeMap::new(),
+        last_size: BTreeMap::new(),
         troubles: Troubles::default(),
         shell: opens::your_shell(),
     };
@@ -196,16 +211,12 @@ struct Views {
     core: SyncSender<Core>,
     follower: SyncSender<()>,
     mux: Terminals,
-    clients: BTreeMap<u64, Client>,
+    clients: BTreeMap<ClientId, Client>,
     arrivals: u64,
-    keys: BTreeMap<Id, TerminalKey>,
-    seen: BTreeSet<TerminalKey>,
-    made: BTreeMap<TerminalKey, Instant>,
-    agent_fronts: BTreeMap<Id, u32>,
-    listed: Vec<server::Terminal>,
-    sized: BTreeMap<TerminalKey, Size>,
-    sizes: BTreeMap<Id, Size>,
-    last: BTreeMap<Id, Id>,
+    known: BTreeMap<Id, Known>,
+    listed: BTreeMap<TerminalKey, server::Terminal>,
+    last_focus: BTreeMap<Id, Id>,
+    last_size: BTreeMap<Id, Size>,
     troubles: Troubles,
     shell: OsString,
 }
@@ -218,12 +229,34 @@ struct Client {
     said: Option<api::ShowResponse>,
 }
 
+struct Known {
+    key: TerminalKey,
+    heard: Heard,
+    sized: Option<Size>,
+    agent_front: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heard {
+    Made(Instant),
+    Seen,
+}
+
 fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
+    let mut swept = Instant::now();
     loop {
-        match commands.recv_timeout(sweep) {
+        match commands.recv_timeout(sweep.saturating_sub(swept.elapsed())) {
             Ok(command) => views.heard(command),
-            Err(RecvTimeoutError::Timeout) => views.read_runs(),
-            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {},
+            Err(RecvTimeoutError::Disconnected) => {
+                views.flushed();
+                return;
+            },
+        }
+        if swept.elapsed() >= sweep {
+            views.read_runs();
+            views.flushed();
+            swept = Instant::now();
         }
         views.settle();
         views.troubles.done();
@@ -247,7 +280,7 @@ impl Views {
                     let refused = Some(show_response::Event::Refused(why));
                     let word = api::ShowResponse { event: refused };
                     let held = self.clients.get(&client).expect("a client that asked is held");
-                    if held.out.try_send(Ok(word)).is_err() {
+                    if !told(&held.out, word) {
                         self.clients.remove(&client);
                     }
                 }
@@ -255,22 +288,19 @@ impl Views {
             Command::Left(client) => {
                 self.clients.remove(&client);
             },
-            Command::Listed { terminals, since } => self.heard_listed(terminals, since),
+            Command::Listed(listed) => self.heard_listed(listed),
             Command::Unlisted { emptied } => {
                 if let Some(since) = emptied {
-                    self.heard_listed(Vec::new(), since);
+                    let none = TerminalsListed { terminals: Vec::new(), whole: true, since };
+                    self.heard_listed(none);
                 }
-                self.keys.clear();
-                self.seen.clear();
-                self.made.clear();
-                self.agent_fronts.clear();
+                self.known.clear();
                 self.listed.clear();
-                self.sized.clear();
             },
         }
     }
 
-    fn came(&mut self, workstream: Id, size: Size, out: Out) -> Result<u64, Status> {
+    fn came(&mut self, workstream: Id, size: Size, out: Out) -> Result<ClientId, Status> {
         if self.clients.len() >= CLIENTS_MAX {
             let many = format!("{CLIENTS_MAX} clients show views, as many as may");
             return Err(Status::resource_exhausted(many));
@@ -279,11 +309,12 @@ impl Views {
         let Some((_, shown)) = projects.find(workstream) else {
             return Err(Status::not_found(format!("no workstream has the id {workstream}")));
         };
-        let focus = arrival(shown, self.last.get(&workstream).copied());
+        let focus = arrival(shown, self.last_focus.get(&workstream).copied());
         self.arrivals += 1;
+        let id = ClientId(self.arrivals);
         let client = Client { workstream, size, focus, out, said: None };
-        assert!(self.clients.insert(self.arrivals, client).is_none(), "a client comes once");
-        Ok(self.arrivals)
+        assert!(self.clients.insert(id, client).is_none(), "a client comes once");
+        Ok(id)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -297,7 +328,13 @@ impl Views {
         self.store.change(change).map(drop).map_err(said)
     }
 
-    fn asked(&mut self, client: u64, asked: Asked) -> Result<(), String> {
+    fn flushed(&mut self) {
+        if let Err(failed) = self.store.flush() {
+            self.troubles.say(format!("the views are not written: {}", said(failed)));
+        }
+    }
+
+    fn asked(&mut self, client: ClientId, asked: Asked) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
         let size = self.size_of(workstream);
         let focus = self.clients[&client].focus;
@@ -307,7 +344,7 @@ impl Views {
             Asked::Go(to) => {
                 let projects = self.kept()?;
                 let (_, shown) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
-                let focus = arrival(shown, self.last.get(&to).copied());
+                let focus = arrival(shown, self.last_focus.get(&to).copied());
                 let moved = self.client(client);
                 moved.workstream = to;
                 moved.focus = focus;
@@ -325,12 +362,12 @@ impl Views {
                 let to = self.stepped(workstream, from, step, size)?;
                 self.focus(client, to)?;
             },
-            Asked::Resize { towards, change } => {
+            Asked::Resize { direction, change } => {
                 if self.view(workstream)?.full().is_some() {
                     return Err("a view one terminal fills is resized by none".to_owned());
                 }
                 let terminal = focused()?;
-                self.changed(Change::Resize { terminal, direction: towards, change, size })?;
+                self.changed(Change::Resize { terminal, direction, change, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -348,7 +385,7 @@ impl Views {
         Ok(())
     }
 
-    fn client(&mut self, client: u64) -> &mut Client {
+    fn client(&mut self, client: ClientId) -> &mut Client {
         self.clients.get_mut(&client).expect("a client asked is held")
     }
 
@@ -362,31 +399,35 @@ impl Views {
     fn stepped(&self, workstream: Id, from: Id, step: Step, size: Size) -> Result<Id, String> {
         let tree = self.view(workstream)?.tree().ok_or("the view holds no terminal")?;
         let to = match step {
-            Step::Towards(direction) => tree.neighbour(from, direction, size),
+            Step::Direction(direction) => tree.neighbour(from, direction, size),
             Step::Order(order) => tree.in_order(from, order),
         };
         to.ok_or_else(|| "no other terminal is there".to_owned())
     }
 
-    fn focus(&mut self, client: u64, terminal: Id) -> Result<(), String> {
+    fn focus(&mut self, client: ClientId, terminal: Id) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
         let full = self.view(workstream)?.full();
         if full.is_some_and(|full| full != terminal) {
             self.changed(Change::Fill { workstream, full: None })?;
         }
         self.client(client).focus = Some(terminal);
-        self.last.insert(workstream, terminal);
+        self.last_focus.insert(workstream, terminal);
         Ok(())
     }
 
     fn size_of(&self, workstream: Id) -> Size {
         let shown = self.clients.values().filter(|client| client.workstream == workstream);
         Size::smallest(shown.map(|client| client.size))
-            .or_else(|| self.sizes.get(&workstream).copied())
+            .or_else(|| self.last_size.get(&workstream).copied())
             .unwrap_or_else(|| Size::of(UNSHOWN.0, UNSHOWN.1).expect("80 by 24 is a size"))
     }
 
-    fn open(&mut self, client: u64, beside: Beside, argv: &[String]) -> Result<(), String> {
+    fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
+        let runs = match argv {
+            [] => Runs::Shell,
+            _ => Runs::Command(Line::parse(&quoted(argv)).map_err(|why| format!("open: {why}"))?),
+        };
         let Client { workstream, focus, .. } = self.clients[&client];
         let size = self.size_of(workstream);
         let terminal = self.store.fresh().map_err(said)?;
@@ -407,16 +448,14 @@ impl Views {
             },
         };
         let listed_cwd = focus
-            .and_then(|focus| self.keys.get(&focus))
-            .and_then(|key| self.listed.iter().find(|listed| listed.key == *key))
+            .and_then(|focus| self.known.get(&focus))
+            .and_then(|known| self.listed.get(&known.key))
             .and_then(|listed| Dir::parse(&listed.cwd).ok());
         let folder = listed_cwd.unwrap_or_else(|| project.folder(shown));
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
-        let (opened, runs) = match argv.split_first() {
-            None => (Opened::Shell(&self.shell), Runs::Shell),
-            Some((program, rest)) => {
-                (Opened::Command { program, args: rest }, runs_line(&quoted(argv)))
-            },
+        let opened = match argv.split_first() {
+            None => Opened::Shell(&self.shell),
+            Some((program, rest)) => Opened::Command { program, args: rest },
         };
         let opening = self.mux.made(&cwd, opened, tag(terminal), inner);
         let key = opening.map_err(|failure| failure.to_string())?;
@@ -428,21 +467,29 @@ impl Views {
             }
             return Err(why);
         }
-        self.keys.insert(terminal, key);
-        self.made.insert(key, Instant::now());
-        self.sized.insert(key, inner);
-        if self.seen.is_empty() {
-            let _ = self.follower.try_send(());
+        let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
+        let heard = Heard::Made(Instant::now());
+        let known = Known { key, heard, sized: Some(inner), agent_front: None };
+        assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
+        if heard_none {
+            match self.follower.try_send(()) {
+                Ok(()) | Err(TrySendError::Full(())) => {},
+                Err(TrySendError::Disconnected(())) => {
+                    self.troubles.say("the mux's terminals are followed no more".to_owned());
+                },
+            }
         }
         self.client(client).focus = Some(terminal);
-        self.last.insert(workstream, terminal);
+        self.last_focus.insert(workstream, terminal);
         Ok(())
     }
 
     fn close(&mut self, terminal: Id) -> Result<(), String> {
-        let key = match self.keys.get(&terminal).copied() {
-            Some(key) => Some(key),
-            None => self.mux.tagged(&tag(terminal)).unwrap_or_default(),
+        let key = match self.known.get(&terminal) {
+            Some(known) => Some(known.key),
+            None => self.mux.tagged(&tag(terminal)).map_err(|failure| {
+                format!("terminal {terminal} is not looked for in luneta-mux: {failure}")
+            })?,
         };
         if let Some(key) = key {
             self.mux.closed(key).map_err(|failure| failure.to_string())?;
@@ -452,45 +499,45 @@ impl Views {
 
     fn closed(&mut self, terminal: Id) -> Result<(), String> {
         let projects = self.kept()?;
-        let (workstream, _) = projects.holding(terminal).ok_or("no view holds the terminal")?;
-        let workstream = workstream.id();
-        let mut tree = workstream_tree(projects, workstream);
-        let heir = match tree.remove(terminal) {
-            layout::Removed::Last => None,
-            layout::Removed::Out { heir, .. } => Some(heir),
-        };
+        let (held_in, _) = projects.holding(terminal).ok_or("no view holds the terminal")?;
+        let workstream = held_in.id();
+        let tree = held_in.view().tree().expect("a view that holds a terminal is laid");
+        let heir = tree.heir(terminal);
         self.changed(Change::Close { terminal })?;
-        if let Some(key) = self.keys.remove(&terminal) {
-            self.seen.remove(&key);
-            self.made.remove(&key);
-            self.sized.remove(&key);
-            self.agent_fronts.remove(&terminal);
-        }
+        self.known.remove(&terminal);
         for client in self.clients.values_mut().filter(|client| client.focus == Some(terminal)) {
             client.focus = heir;
         }
-        if self.last.get(&workstream) == Some(&terminal) {
+        if self.last_focus.get(&workstream) == Some(&terminal) {
             match heir {
-                Some(heir) => self.last.insert(workstream, heir),
-                None => self.last.remove(&workstream),
+                Some(heir) => self.last_focus.insert(workstream, heir),
+                None => self.last_focus.remove(&workstream),
             };
         }
+        let projects = self.kept()?;
+        assert!(!projects.holds(terminal), "terminal {terminal} left its view");
+        if let Some(heir) = heir {
+            assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
+        }
+        let focused = self.clients.values().any(|client| client.focus == Some(terminal));
+        assert!(!focused, "no client focuses terminal {terminal}, which closed");
         Ok(())
     }
 
-    fn heard_listed(&mut self, terminals: Vec<server::Terminal>, since: Instant) {
-        self.made.retain(|key, made| {
-            let before = *made < since;
-            if before {
-                self.seen.insert(*key);
+    fn heard_listed(&mut self, listed: TerminalsListed) {
+        let TerminalsListed { terminals, whole, since } = listed;
+        for known in self.known.values_mut() {
+            if let Heard::Made(made) = known.heard
+                && made < since
+            {
+                known.heard = Heard::Seen;
             }
-            !before
-        });
+        }
         let Some(projects) = self.store.projects() else {
-            self.listed = terminals;
+            self.listed = by_key(terminals);
             return;
         };
-        let mut found: BTreeMap<Id, TerminalKey> = BTreeMap::new();
+        let mut found: BTreeMap<Id, (TerminalKey, Option<Size>)> = BTreeMap::new();
         for listed in &terminals {
             let Some(terminal) = tagged(&listed.tag) else {
                 continue;
@@ -501,26 +548,45 @@ impl Views {
                 self.troubles.say(unheld);
                 continue;
             }
-            if found.insert(terminal, listed.key).is_some() {
+            if found.contains_key(&terminal) {
                 let why = format!("two terminals are tagged {terminal}; the first is kept");
                 self.troubles.say(why);
                 continue;
             }
-            if let Some(size) = listed.size {
-                self.sized.insert(listed.key, size);
+            found.insert(terminal, (listed.key, listed.size));
+        }
+        let ended: Vec<Id> = if whole {
+            let gone = |(terminal, known): &(&Id, &Known)| {
+                !found.contains_key(*terminal) && known.heard == Heard::Seen
+            };
+            self.known.iter().filter(gone).map(|(terminal, _)| *terminal).collect()
+        } else {
+            let unread = "a listing is not read whole, and so no terminal is ended";
+            self.troubles.say(unread.to_owned());
+            Vec::new()
+        };
+        let owners: BTreeMap<TerminalKey, Id> =
+            found.iter().map(|(terminal, (key, _))| (*key, *terminal)).collect();
+        self.known.retain(|terminal, known| {
+            owners.get(&known.key).is_none_or(|owner| owner == terminal)
+        });
+        for (terminal, (key, size)) in found {
+            match self.known.get_mut(&terminal) {
+                Some(known) if known.key == key => {
+                    known.heard = Heard::Seen;
+                    if size.is_some() {
+                        known.sized = size;
+                    }
+                },
+                Some(_) | None => {
+                    let known = Known { key, heard: Heard::Seen, sized: size, agent_front: None };
+                    self.known.insert(terminal, known);
+                },
             }
         }
-        let ended: Vec<Id> = self
-            .keys
-            .iter()
-            .filter(|(terminal, key)| !found.contains_key(terminal) && self.seen.contains(key))
-            .map(|(terminal, _)| *terminal)
-            .collect();
-        for (terminal, key) in found {
-            self.keys.insert(terminal, key);
-            self.seen.insert(key);
-        }
-        self.listed = terminals;
+        let keys: BTreeSet<TerminalKey> = self.known.values().map(|known| known.key).collect();
+        assert_eq!(keys.len(), self.known.len(), "no two terminals share a key of luneta-mux");
+        self.listed = by_key(terminals);
         for terminal in ended {
             if let Err(why) = self.closed(terminal) {
                 let stays = format!("terminal {terminal} ended, and stays in its view");
@@ -535,40 +601,33 @@ impl Views {
             return;
         }
         let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
-        let Some(projects) = self.store.projects() else {
+        let Views { store, known, listed, shell, .. } = self;
+        let Some(projects) = store.projects() else {
             return;
         };
         let mut ran = Vec::new();
-        let mut fronts = Vec::new();
-        for (terminal, key) in &self.keys {
-            let Some(listed) = self.listed.iter().find(|listed| listed.key == *key) else {
+        for (terminal, known) in known.iter_mut() {
+            let Some(listed) = listed.get(&known.key) else {
                 continue;
             };
             let Some((_, held)) = projects.holding(*terminal) else {
                 continue;
             };
             let folder = Dir::parse(&listed.cwd).unwrap_or_else(|_| held.folder().clone());
-            let mut runs = runs_of(listed, &agents, held.runs(), &self.shell);
+            let mut runs = runs_of(listed, &agents, held.runs(), shell);
             let front = match &listed.is {
                 Is::Running { front: Some(front), .. } => Some(front.pid),
                 Is::Running { front: None, .. } | Is::Ended => None,
             };
             let was_agent = matches!(held.runs(), Runs::Agent { .. });
-            let same_front = front.is_some() && front == self.agent_fronts.get(terminal).copied();
+            let same_front = front.is_some() && front == known.agent_front;
             if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
                 runs = held.runs().clone();
             }
-            let agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
-            fronts.push((*terminal, agent_front));
+            known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() || runs != *held.runs() {
                 ran.push(Ran { terminal: *terminal, folder, runs });
             }
-        }
-        for (terminal, front) in fronts {
-            match front {
-                Some(pid) => self.agent_fronts.insert(terminal, pid),
-                None => self.agent_fronts.remove(&terminal),
-            };
         }
         if ran.is_empty() {
             return;
@@ -579,7 +638,7 @@ impl Views {
     }
 
     fn settle(&mut self) {
-        let Views { store, clients, keys, sized, sizes, last, mux, troubles, .. } = self;
+        let Views { store, clients, known, last_size, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             for (_, client) in std::mem::take(clients) {
@@ -599,14 +658,14 @@ impl Views {
             if let Some(full) = view.full() {
                 client.focus = Some(full);
             } else if !client.focus.is_some_and(|focus| view.holds(focus)) {
-                client.focus = arrival(shown, last.get(&client.workstream).copied());
+                client.focus = arrival(shown, last_focus.get(&client.workstream).copied());
             }
         }
         for id in gone {
             clients.remove(&id);
         }
-        sizes.retain(|workstream, _| projects.find(*workstream).is_some());
-        last.retain(|workstream, terminal| {
+        last_size.retain(|workstream, _| projects.find(*workstream).is_some());
+        last_focus.retain(|workstream, terminal| {
             projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
         });
         let shown: BTreeSet<Id> = clients.values().map(|client| client.workstream).collect();
@@ -615,7 +674,7 @@ impl Views {
                 clients.values().filter(|it| it.workstream == workstream).map(|it| it.size),
             );
             let size = size.expect("a workstream shown has a client");
-            sizes.insert(workstream, size);
+            last_size.insert(workstream, size);
             let (_, found) = projects.find(workstream).expect("a client's workstream is held");
             let Some(tree) = found.view().tree() else {
                 continue;
@@ -625,18 +684,16 @@ impl Views {
                 let terminal = layout::Leaf::id(terminal);
                 let full = found.view().full() == Some(terminal);
                 let wanted = if full { whole } else { rect.inner() };
-                let Some(key) = keys.get(&terminal).copied() else {
+                let Some(known) = known.get_mut(&terminal) else {
                     continue;
                 };
-                if sized.get(&key) == Some(&wanted) {
+                if known.sized == Some(wanted) {
                     continue;
                 }
-                match mux.sized(key, wanted) {
-                    Ok(()) => {
-                        sized.insert(key, wanted);
-                    },
+                match mux.sized(known.key, wanted) {
+                    Ok(()) => known.sized = Some(wanted),
                     Err(failure) => {
-                        troubles.say(format!("terminal {} is not sized: {failure}", key.id));
+                        troubles.say(format!("terminal {} is not sized: {failure}", known.key.id));
                     },
                 }
             }
@@ -645,12 +702,12 @@ impl Views {
         for (id, client) in clients.iter_mut() {
             let found = projects.find(client.workstream);
             let (_, found) = found.expect("a client's workstream is held");
-            let size = sizes[&client.workstream];
-            let laid = laid(found, size, client.focus, keys);
+            let size = last_size[&client.workstream];
+            let laid = laid(found, size, client.focus, known);
             if client.said.as_ref() == Some(&laid) {
                 continue;
             }
-            if client.out.try_send(Ok(laid.clone())).is_err() {
+            if !told(&client.out, laid.clone()) {
                 slow.push(*id);
                 continue;
             }
@@ -663,6 +720,15 @@ impl Views {
     }
 }
 
+fn told(out: &Out, word: api::ShowResponse) -> bool {
+    if out.capacity() <= 1 {
+        let slow = format!("the client read too slowly, with {ANSWERS_MAX} answers unread");
+        let _ = out.try_send(Err(Status::resource_exhausted(slow)));
+        return false;
+    }
+    out.try_send(Ok(word)).is_ok()
+}
+
 fn said(failed: Failed) -> String {
     match failed {
         Failed::NotKept(why) | Failed::Refused(why) | Failed::Unwritten(why) => why,
@@ -670,9 +736,12 @@ fn said(failed: Failed) -> String {
     }
 }
 
-fn workstream_tree(projects: &Projects, workstream: Id) -> layout::Tree<Terminal> {
-    let (_, found) = projects.find(workstream).expect("a workstream that holds it is held");
-    found.view().tree().expect("a view that holds a terminal is laid").clone()
+fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Terminal> {
+    let count = terminals.len();
+    let listed: BTreeMap<_, _> =
+        terminals.into_iter().map(|terminal| (terminal.key, terminal)).collect();
+    assert_eq!(listed.len(), count, "a listing holds each terminal once");
+    listed
 }
 
 fn arrival(workstream: &Workstream, last: Option<Id>) -> Option<Id> {
@@ -698,17 +767,20 @@ fn laid(
     workstream: &Workstream,
     size: Size,
     focus: Option<Id>,
-    keys: &BTreeMap<Id, TerminalKey>,
+    known: &BTreeMap<Id, Known>,
 ) -> api::ShowResponse {
     let view = workstream.view();
+    if let Some(focus) = focus {
+        assert!(view.holds(focus), "a client focuses terminal {focus} of the view it shows");
+    }
     let (fitted, panes) = match view.tree() {
         None => (size, Vec::new()),
         Some(tree) => {
             let panes = tree.laid(size).into_iter().map(|(terminal, rect)| {
                 let terminal = layout::Leaf::id(terminal);
-                let key = keys.get(&terminal).map(|key| api::TerminalKey {
-                    id: key.id.get(),
-                    made_at: Some(key.made.into()),
+                let key = known.get(&terminal).map(|known| api::TerminalKey {
+                    id: known.key.id.get(),
+                    made_at: Some(known.key.made.into()),
                 });
                 show_response::Pane {
                     terminal: terminal.get(),
@@ -721,9 +793,10 @@ fn laid(
                     key,
                 }
             });
-            (tree.fitted(size), panes.collect())
+            (tree.fitted(size), panes.collect::<Vec<_>>())
         },
     };
+    assert_eq!(panes.len(), view.len(), "a view lays out each of its terminals");
     let (columns, rows) = fitted.get();
     let laid = show_response::Laid {
         workstream: workstream.id().get(),
@@ -756,7 +829,15 @@ fn runs_of(listed: &server::Terminal, agents: &[Agent], before: &Runs, shell: &O
 }
 
 fn runs_line(line: &str) -> Runs {
-    Line::parse(line).map_or(Runs::Shell, Runs::Command)
+    let printable = |char: char| {
+        let control = char.is_control() && !matches!(char, '\n' | '\t');
+        if control { char::REPLACEMENT_CHARACTER } else { char }
+    };
+    let mut kept: String = line.chars().map(printable).collect();
+    let end = (0..=kept.len().min(LINE_BYTES_MAX)).rev().find(|end| kept.is_char_boundary(*end));
+    kept.truncate(end.expect("a string's start is a char's boundary"));
+    assert!(kept.len() <= LINE_BYTES_MAX, "a line kept is cut to {LINE_BYTES_MAX} bytes");
+    Line::parse(&kept).map_or(Runs::Shell, Runs::Command)
 }
 
 fn quoted(argv: &[String]) -> String {
@@ -771,12 +852,25 @@ fn quoted(argv: &[String]) -> String {
 }
 
 fn is_shell(argv: &[String], shell: &OsString) -> bool {
-    let Some(first) = argv.first() else {
+    let Some((first, rest)) = argv.split_first() else {
         return false;
     };
     let name = |path: &Path| path.file_name().map(|name| name.to_string_lossy().into_owned());
-    let named = name(Path::new(first.trim_start_matches('-')));
-    named.is_some_and(|named| named.ends_with("sh") || Some(named) == name(Path::new(shell)))
+    let Some(named) = name(Path::new(first.trim_start_matches('-'))) else {
+        return false;
+    };
+    let yours = name(Path::new(shell)).is_some_and(|yours| yours == named);
+    if !yours && !SHELLS.contains(&named.as_str()) {
+        return false;
+    }
+    rest.iter().all(|word| is_shell_option(word))
+}
+
+fn is_shell_option(word: &str) -> bool {
+    if let Some(long) = word.strip_prefix("--") {
+        return !long.is_empty() && long != "command";
+    }
+    word.strip_prefix('-').is_some_and(|short| !short.is_empty() && !short.contains('c'))
 }
 
 #[cfg(test)]
@@ -822,6 +916,10 @@ mod tests {
         Runs::Command(Line::parse(line).unwrap())
     }
 
+    fn own(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|word| (*word).to_owned()).collect()
+    }
+
     #[test]
     fn a_terminal_runs_its_agent_its_command_or_its_shell() {
         let shell = OsString::from("/bin/fish");
@@ -844,9 +942,18 @@ mod tests {
         assert_eq!(of(&running(None, None), &[]), before);
         assert_eq!(of(&running(None, Some(Word::Going(None))), &[]), before);
         assert_eq!(of(&listed(Is::Ended), &[agent(20)]), before);
-        let long = "x".repeat(crate::projects::LINE_BYTES_MAX + 1);
+        let long = "é".repeat(LINE_BYTES_MAX);
         let too_long = running(Some((20, &[long.as_str()])), None);
-        assert_eq!(of(&too_long, &[]), Runs::Shell);
+        let cut = "é".repeat(LINE_BYTES_MAX / 2 - 1);
+        assert_eq!(of(&too_long, &[]), command(&format!("'{cut}")), "a line is cut on a char");
+        let bell = running(Some((20, &["printf", "\u{7}"])), None);
+        assert_eq!(of(&bell, &[]), command("printf '\u{fffd}'"));
+        for argv in [&["ssh", "box"][..], &["bash", "-c", "make"], &["bash", "-lc", "make"]] {
+            assert_eq!(of(&running(Some((10, argv)), None), &[]), command(&quoted(&own(argv))));
+        }
+        for argv in [&["-zsh"][..], &["fish", "--login"], &["bash", "-i"]] {
+            assert_eq!(of(&running(Some((10, argv)), None), &[]), Runs::Shell, "{argv:?}");
+        }
     }
 
     #[test]
@@ -879,9 +986,13 @@ mod tests {
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None }),
-            Event::Resize(show_request::Resize { towards: 0, grow: true }),
+            Event::Resize(show_request::Resize { direction: 0, grow: true }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
             Event::Open(show_request::Open { beside: None, argv: vec![String::new()] }),
+            Event::Open(show_request::Open {
+                beside: None,
+                argv: vec!["x".to_owned(); ARGV_MAX + 1],
+            }),
             Event::Hello(show_request::Hello { workstream: 1, size: None }),
         ];
         for event in refused {
