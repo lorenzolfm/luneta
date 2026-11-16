@@ -14,11 +14,14 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
-use crate::asked::{self, At, Dumped, Heard, Name, Opens, Place, SessionName, TurnTo, Who};
+use crate::asked::{
+    self, At, Dumped, Heard, Name, Opens, Place, SessionName, Size, Tag, TerminalKey, ViewerHeard,
+    TurnTo, Who,
+};
 use crate::folder::Claim;
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::mux::{LaidOut, Layouts, Mux};
-use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX};
+use crate::pane::{CLIENT_MESSAGES, Out, ToPane, UNREAD_BYTES_MAX, ViewerOut};
 use crate::pty;
 
 pub const FIRST_SESSION: Duration = Duration::from_secs(30);
@@ -120,12 +123,23 @@ impl mux_server::Mux for Service {
 
     async fn dump(&self, request: Request<api::DumpRequest>) -> Answer<api::DumpResponse> {
         let request = request.into_inner();
-        let pane = PaneId::parse("pane", request.pane)?;
         let dumped = Dumped::parse("dumped", request.dumped)?;
-        let handle = self.mux.pane(pane)?;
+        let (handle, what) = match (request.pane, request.terminal) {
+            (pane, None) => {
+                let pane = PaneId::parse("pane", pane)?;
+                (self.mux.pane(pane)?, format!("pane {pane}"))
+            },
+            (0, terminal) => {
+                let key = TerminalKey::parse("terminal", terminal)?;
+                (self.mux.terminal(key)?, format!("terminal {}", key.id))
+            },
+            (_, Some(_)) => {
+                return Err(Status::invalid_argument("pane and terminal are both set"));
+            },
+        };
         let (answer, answered) = oneshot::channel();
         handle.send(ToPane::Dump(dumped, answer)).await;
-        let gone = || Status::not_found(format!("pane {pane} ended"));
+        let gone = || Status::not_found(format!("{what} ended"));
         let text = answered.await.map_err(|_| gone())??;
         Ok(Response::new(api::DumpResponse { text }))
     }
@@ -139,6 +153,62 @@ impl mux_server::Mux for Service {
     async fn watch(&self, _: Request<api::WatchRequest>) -> Answer<Self::WatchStream> {
         let listings = WatchStream::new(self.mux.watched()).map_while(|listing| listing.map(Ok));
         Ok(Response::new(Box::pin(listings)))
+    }
+
+    async fn new_terminal(
+        &self,
+        request: Request<api::NewTerminalRequest>,
+    ) -> Answer<api::NewTerminalResponse> {
+        let request = request.into_inner();
+        let opens = Opens::parse("opens", request.opens)?;
+        let tag = Tag::parse("tag", request.tag)?;
+        let size = Size::parse("size", request.size)?;
+        let key = self.mux.new_terminal(&opens, tag, size)?;
+        Ok(Response::new(api::NewTerminalResponse { terminal: Some(key.said()) }))
+    }
+
+    async fn close_terminal(
+        &self,
+        request: Request<api::CloseTerminalRequest>,
+    ) -> Answer<api::CloseTerminalResponse> {
+        let key = TerminalKey::parse("terminal", request.into_inner().terminal)?;
+        self.mux.close_terminal(key)?;
+        Ok(Response::new(api::CloseTerminalResponse {}))
+    }
+
+    async fn size_terminal(
+        &self,
+        request: Request<api::SizeTerminalRequest>,
+    ) -> Answer<api::SizeTerminalResponse> {
+        let request = request.into_inner();
+        let key = TerminalKey::parse("terminal", request.terminal)?;
+        self.mux.size_terminal(key, Size::parse("size", request.size)?)?;
+        Ok(Response::new(api::SizeTerminalResponse {}))
+    }
+
+    async fn tag_terminal(
+        &self,
+        request: Request<api::TagTerminalRequest>,
+    ) -> Answer<api::TagTerminalResponse> {
+        let request = request.into_inner();
+        let key = TerminalKey::parse("terminal", request.terminal)?;
+        self.mux.tag_terminal(key, Tag::parse("tag", request.tag)?)?;
+        Ok(Response::new(api::TagTerminalResponse {}))
+    }
+
+    type ShowStream = Viewed;
+
+    async fn show(&self, request: Request<Streaming<api::FromViewer>>) -> Answer<Self::ShowStream> {
+        let mut heard = request.into_inner();
+        let first = tokio::time::timeout(HELLO_WAIT, heard.message()).await;
+        let first = first.map_err(|_| Status::deadline_exceeded("no hello came in time"))??;
+        let first = first.ok_or_else(|| Status::invalid_argument("no hello came"))?;
+        let greeting = asked::greeting(first)?;
+        let (out, going) = mpsc::channel(CLIENT_MESSAGES);
+        let (gone, let_go) = oneshot::channel();
+        let client = self.mux.view(greeting, out.clone(), gone)?;
+        tokio::spawn(listen_to_viewer(Arc::clone(&self.mux), client, heard, out));
+        Ok(Response::new(Viewed { going: ReceiverStream::new(going), let_go, ended: false }))
     }
 
     type AttachStream = UntilEnded;
@@ -177,6 +247,48 @@ async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToSer
         eprintln!("luneta-mux: client {client} had no room for its refusal");
     }
     mux.detach(client);
+}
+
+async fn listen_to_viewer(
+    mux: Arc<Mux>,
+    client: ClientId,
+    mut heard: Streaming<api::FromViewer>,
+    out: ViewerOut,
+) {
+    let ending = loop {
+        let message = match heard.message().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break None,
+            Err(refusal) => break Some(refusal),
+        };
+        let said = match asked::viewer_heard(message) {
+            Ok(said) => said,
+            Err(refusal) => break Some(refusal),
+        };
+        let refusals = match said {
+            ViewerHeard::Showing(keys) => mux.show(client, &keys).unwrap_or_else(|all| vec![all]),
+            ViewerHeard::Typed(terminal, input) => match mux.typed(client, terminal) {
+                Ok(handle) => {
+                    handle.send(ToPane::Input(client, input)).await;
+                    Vec::new()
+                },
+                Err(refusal) => vec![refusal],
+            },
+        };
+        for refusal in refusals {
+            let reason = refusal.message().to_owned();
+            let refused = api::to_viewer::Event::Refused(api::Refused { reason });
+            if out.send(Ok(api::ToViewer { event: Some(refused) })).await.is_err() {
+                eprintln!("luneta-mux: viewer {client} went before it heard it was refused");
+            }
+        }
+    };
+    if let Some(refusal) = ending
+        && let Err(TrySendError::Full(_)) = out.try_send(Err(refusal))
+    {
+        eprintln!("luneta-mux: viewer {client} had no room for its ending refusal");
+    }
+    mux.unview(client);
 }
 
 fn laid(layouts: Layouts) -> Laid {
@@ -270,6 +382,36 @@ impl Stream for UntilEnded {
                 next
             },
             Poll::Ready(None) => next,
+            Poll::Pending => {
+                if Pin::new(&mut self.let_go).poll(context).is_ready() {
+                    self.ended = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Pending
+            },
+        }
+    }
+}
+
+pub struct Viewed {
+    going: ReceiverStream<Result<api::ToViewer, Status>>,
+    let_go: oneshot::Receiver<()>,
+    ended: bool,
+}
+
+impl Stream for Viewed {
+    type Item = Result<api::ToViewer, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut self.going).poll_next(context) {
+            Poll::Ready(Some(said)) => {
+                self.ended = said.is_err();
+                Poll::Ready(Some(said))
+            },
+            Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
                 if Pin::new(&mut self.let_go).poll(context).is_ready() {
                     self.ended = true;

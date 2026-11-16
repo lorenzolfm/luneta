@@ -54,6 +54,8 @@ impl Server {
             .env_remove("LUNETA_MUX_SESSION")
             .env_remove("LUNETA_MUX_MADE")
             .env_remove("LUNETA_MUX_PANE")
+            .env_remove("LUNETA_MUX_TERMINAL")
+            .env_remove("LUNETA_MUX_TERMINAL_MADE")
             .stdin(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = command.spawn().unwrap();
@@ -153,6 +155,17 @@ pub async fn new_tab(
     mux.new_tab(request).await.unwrap().into_inner()
 }
 
+pub async fn new_terminal(
+    mux: &mut MuxClient<Channel>,
+    opens: api::Opens,
+    tag: &[u8],
+    size: api::Size,
+) -> api::TerminalKey {
+    let request =
+        api::NewTerminalRequest { opens: Some(opens), tag: tag.to_vec(), size: Some(size) };
+    mux.new_terminal(request).await.unwrap().into_inner().terminal.unwrap()
+}
+
 pub fn session(made: &api::NewSessionResponse) -> api::Place {
     api::Place { is: Some(api::place::Is::Session(made.session)), made_at: made.made_at }
 }
@@ -248,22 +261,9 @@ impl Attached {
     }
 
     pub async fn type_line(&self, text: &str) {
-        for character in text.chars() {
-            let key = api::Key {
-                press: api::Press::Down.into(),
-                modifiers: None,
-                key: Some(api::key::Key::Character(character.into())),
-                text: character.to_string(),
-            };
+        for key in line_keys(text) {
             self.send(api::to_server::Event::Key(key)).await;
         }
-        let enter = api::Key {
-            press: api::Press::Down.into(),
-            modifiers: None,
-            key: Some(api::key::Key::Named(api::Named::Enter.into())),
-            text: String::new(),
-        };
-        self.send(api::to_server::Event::Key(enter)).await;
     }
 
     pub async fn next(&mut self) -> Option<api::to_client::Event> {
@@ -326,27 +326,130 @@ impl Attached {
     }
 
     fn apply(&mut self, frame: &api::Frame) {
-        match frame.rows.as_ref().unwrap() {
-            api::frame::Rows::Whole(whole) => {
-                let rows = whole.lines.iter().map(line_text).collect();
-                self.screens.insert(frame.pane, (rows, frame.clone()));
-            },
-            api::frame::Rows::Changed(changed) => {
-                let Some((rows, last)) = self.screens.get_mut(&frame.pane) else {
-                    return;
-                };
-                for row in &changed.rows {
-                    let index = usize::try_from(row.index).unwrap();
-                    rows[index] = line_text(row.line.as_ref().unwrap());
-                }
-                *last = frame.clone();
-            },
+        applied(&mut self.screens, frame);
+    }
+}
+
+type Screens = BTreeMap<u32, (Vec<String>, api::Frame)>;
+
+pub struct Viewer {
+    pub refused: Vec<String>,
+    screens: Screens,
+    to: mpsc::Sender<api::FromViewer>,
+    from: Streaming<api::ToViewer>,
+}
+
+impl Viewer {
+    pub async fn new(mux: &mut MuxClient<Channel>) -> Viewer {
+        Viewer::hello(mux, api::Greeting::default()).await.unwrap()
+    }
+
+    pub async fn hello(
+        mux: &mut MuxClient<Channel>,
+        greeting: api::Greeting,
+    ) -> Result<Viewer, tonic::Status> {
+        let (to, said) = mpsc::channel(64);
+        to.send(viewer_said(api::from_viewer::Event::Hello(greeting))).await.unwrap();
+        let from = mux.show(ReceiverStream::new(said)).await?.into_inner();
+        Ok(Viewer { refused: Vec::new(), screens: BTreeMap::new(), to, from })
+    }
+
+    pub async fn send(&self, said: api::from_viewer::Event) {
+        self.to.send(viewer_said(said)).await.unwrap();
+    }
+
+    pub async fn show(&self, terminals: &[api::TerminalKey]) {
+        let showing = api::Showing { terminals: terminals.to_vec() };
+        self.send(api::from_viewer::Event::Showing(showing)).await;
+    }
+
+    pub async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
+        for key in line_keys(text) {
+            let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
+            self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
         }
     }
+
+    pub async fn next(&mut self) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
+        let next = tokio::time::timeout(PATIENCE, self.from.message()).await;
+        let Some(message) = next.expect("the server said something in time")? else {
+            return Ok(None);
+        };
+        let event = message.event.expect("a viewer hears an event");
+        match &event {
+            api::to_viewer::Event::Frame(frame) => applied(&mut self.screens, frame),
+            api::to_viewer::Event::Refused(refused) => self.refused.push(refused.reason.clone()),
+        }
+        Ok(Some(event))
+    }
+
+    pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
+        while !test(self) {
+            let next = self.next().await.unwrap();
+            assert!(next.is_some(), "the stream ended before {what}");
+        }
+    }
+
+    pub async fn until_row(&mut self, terminal: u32, text: &str) {
+        self.until(&format!("a row of terminal {terminal} reads {text:?}"), |viewer| {
+            viewer.rows_of(terminal).iter().any(|row| row == text)
+        })
+        .await;
+    }
+
+    pub fn rows_of(&self, terminal: u32) -> &[String] {
+        self.screens.get(&terminal).map_or(&[], |(rows, _)| rows)
+    }
+
+    pub fn frame_of(&self, terminal: u32) -> Option<&api::Frame> {
+        self.screens.get(&terminal).map(|(_, frame)| frame)
+    }
+}
+
+fn applied(screens: &mut Screens, frame: &api::Frame) {
+    match frame.rows.as_ref().unwrap() {
+        api::frame::Rows::Whole(whole) => {
+            let rows = whole.lines.iter().map(line_text).collect();
+            screens.insert(frame.pane, (rows, frame.clone()));
+        },
+        api::frame::Rows::Changed(changed) => {
+            let Some((rows, last)) = screens.get_mut(&frame.pane) else {
+                return;
+            };
+            for row in &changed.rows {
+                let index = usize::try_from(row.index).unwrap();
+                rows[index] = line_text(row.line.as_ref().unwrap());
+            }
+            *last = frame.clone();
+        },
+    }
+}
+
+fn line_keys(text: &str) -> Vec<api::Key> {
+    let mut keys: Vec<api::Key> = text
+        .chars()
+        .map(|character| api::Key {
+            press: api::Press::Down.into(),
+            modifiers: None,
+            key: Some(api::key::Key::Character(character.into())),
+            text: character.to_string(),
+        })
+        .collect();
+    keys.push(api::Key {
+        press: api::Press::Down.into(),
+        modifiers: None,
+        key: Some(api::key::Key::Named(api::Named::Enter.into())),
+        text: String::new(),
+    });
+    keys
 }
 
 fn event(said: api::to_server::Event) -> api::ToServer {
     api::ToServer { event: Some(said) }
+}
+
+fn viewer_said(said: api::from_viewer::Event) -> api::FromViewer {
+    api::FromViewer { event: Some(said) }
 }
 
 fn line_text(line: &api::Line) -> String {

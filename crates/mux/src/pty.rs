@@ -22,6 +22,12 @@ pub const MADE_VAR: &str = "LUNETA_MUX_MADE";
 
 pub const PANE_VAR: &str = "LUNETA_MUX_PANE";
 
+pub const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
+
+pub const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
+
+const OWN_VARS: [&str; 5] = [SESSION_VAR, MADE_VAR, PANE_VAR, TERMINAL_VAR, TERMINAL_MADE_VAR];
+
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
 const TERM: &str = "xterm-256color";
@@ -112,7 +118,7 @@ impl Pty {
         command.current_dir(&opens.cwd);
         command.stdin(self.far.try_clone()?).stdout(self.far.try_clone()?);
         command.stderr(self.far.try_clone()?);
-        for name in ZELLIJ_VARS {
+        for name in ZELLIJ_VARS.iter().chain(&OWN_VARS) {
             command.env_remove(name);
         }
         command.env("TERM", TERM).env("COLORTERM", "truecolor");

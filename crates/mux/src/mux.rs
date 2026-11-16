@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,12 +7,12 @@ use tonic::Status;
 
 use crate::api;
 use crate::asked::{
-    Act, At, Colours, Ends, FocusTo, Hello, Is, MoveTo, Name, Opening, Opens, Place, Runs,
-    RunsIn, SessionName, Size, TurnTo, Who,
+    Act, At, Colours, Ends, FocusTo, Greeting, Hello, Is, MoveTo, Name, Opening, Opens, Place,
+    Runs, RunsIn, SHOWN_MAX, SessionName, Size, Tag, TerminalKey, TurnTo, Who,
 };
 use crate::id::{ClientId, PaneId, SessionId, TabId};
 use crate::layout::{self, Direction, Leaf, Order, Rect, Removed, Tree};
-use crate::pane::{self, Exit, Handle, Out, Viewer, Wanted};
+use crate::pane::{self, Exit, Frames, Handle, Out, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
 const FIRST_SIZE: Size = Size {
@@ -30,6 +29,7 @@ pub const PANES_MAX: usize = 1024;
 pub const CLIENTS_MAX: usize = 256;
 
 const _: () = assert!(TABS_MAX <= PANES_MAX);
+const _: () = assert!(SHOWN_MAX <= PANES_MAX);
 
 pub type Layouts = watch::Receiver<Option<LaidOut>>;
 
@@ -48,7 +48,9 @@ pub struct Mux {
 struct Model {
     last: Ids,
     sessions: Vec<Session>,
+    terminals: Vec<Terminal>,
     clients: BTreeMap<ClientId, Seat>,
+    viewing: BTreeMap<ClientId, Viewing>,
     ended: bool,
 }
 
@@ -92,9 +94,16 @@ struct Pane {
     id: PaneId,
     name: Option<Name>,
     title: String,
-    cwd: PathBuf,
+    cwd: String,
     program: Program,
     handle: Handle,
+}
+
+struct Terminal {
+    key: TerminalKey,
+    tag: Tag,
+    size: Size,
+    pane: Pane,
 }
 
 enum Program {
@@ -114,6 +123,14 @@ struct Seat {
     _gone: oneshot::Sender<()>,
 }
 
+struct Viewing {
+    out: ViewerOut,
+    colours: Colours,
+    runs_in: Option<TerminalKey>,
+    shows: BTreeMap<TerminalKey, u64>,
+    _gone: oneshot::Sender<()>,
+}
+
 impl Mux {
     #[must_use]
     pub fn new() -> Arc<Mux> {
@@ -126,11 +143,7 @@ impl Mux {
     }
 
     pub fn end_if_unused(&self) {
-        self.change(|model| {
-            if model.sessions.is_empty() {
-                model.ended = true;
-            }
-        });
+        self.change(Model::end_if_empty);
     }
 
     fn lock(&self) -> MutexGuard<'_, Model> {
@@ -142,6 +155,8 @@ impl Mux {
         let changed = change(&mut model);
         if model.ended {
             assert!(model.sessions.is_empty(), "the server ended with a session");
+            assert!(model.terminals.is_empty(), "the server ended with a terminal");
+            assert!(model.viewing.is_empty(), "the server ended with a viewer");
         }
         model.settle();
         let listing = (!model.ended).then(|| model.listing());
@@ -245,6 +260,95 @@ impl Mux {
         })
     }
 
+    pub fn new_terminal(
+        self: &Arc<Mux>,
+        opens: &Opens,
+        tag: Tag,
+        size: Size,
+    ) -> Result<TerminalKey, Status> {
+        self.change(|model| {
+            model.refuse_if_ended()?;
+            model.refuse_if_no_room_for_a_pane()?;
+            let id = PaneId::next(&mut model.last.pane);
+            assert!(model.pane(id).is_err(), "terminal {id} is no tab's pane");
+            assert!(model.terminal_place(id).is_none(), "terminal {id} is new");
+            let key = TerminalKey { id, made: SystemTime::now() };
+            let pane = spawned(self, id, &terminal_vars(key)?, opens, size)?;
+            model.terminals.push(Terminal { key, tag, size, pane });
+            Ok(key)
+        })
+    }
+
+    pub fn close_terminal(&self, key: TerminalKey) -> Result<(), Status> {
+        self.change(|model| {
+            model.terminal(key)?;
+            model.close_pane(key.id);
+            Ok(())
+        })
+    }
+
+    pub fn size_terminal(&self, key: TerminalKey, size: Size) -> Result<(), Status> {
+        self.change(|model| {
+            model.terminal_mut(key)?.size = size;
+            Ok(())
+        })
+    }
+
+    pub fn tag_terminal(&self, key: TerminalKey, tag: Tag) -> Result<(), Status> {
+        self.change(|model| {
+            model.terminal_mut(key)?.tag = tag;
+            Ok(())
+        })
+    }
+
+    pub fn terminal(&self, key: TerminalKey) -> Result<Handle, Status> {
+        Ok(self.lock().terminal(key)?.pane.handle.clone())
+    }
+
+    pub fn view(
+        &self,
+        greeting: Greeting,
+        out: ViewerOut,
+        gone: oneshot::Sender<()>,
+    ) -> Result<ClientId, Status> {
+        self.change(|model| {
+            model.refuse_if_ended()?;
+            model.refuse_if_no_room_for_a_client()?;
+            let client = ClientId::next(&mut model.last.client);
+            let Greeting { colours, runs_in } = greeting;
+            let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
+            assert!(!model.clients.contains_key(&client), "viewer {client} is no client");
+            let was = model.viewing.insert(client, viewing);
+            assert!(was.is_none(), "viewer {client} is new");
+            Ok(client)
+        })
+    }
+
+    pub fn show(
+        &self,
+        client: ClientId,
+        keys: &BTreeSet<TerminalKey>,
+    ) -> Result<Vec<Status>, Status> {
+        self.change(|model| model.show(client, keys))
+    }
+
+    pub fn typed(&self, client: ClientId, terminal: TerminalKey) -> Result<Handle, Status> {
+        let model = self.lock();
+        let viewing = model.viewing.get(&client).ok_or_else(|| no_client(client))?;
+        if !viewing.shows.contains_key(&terminal) {
+            let not_shown = format!("terminal {} is not shown", terminal.id);
+            return Err(Status::failed_precondition(not_shown));
+        }
+        let terminal = model.terminal(terminal).expect("a shown terminal is the model's");
+        Ok(terminal.pane.handle.clone())
+    }
+
+    pub fn unview(&self, client: ClientId) {
+        self.change(|model| {
+            model.viewing.remove(&client);
+        });
+    }
+
     pub fn act(self: &Arc<Mux>, client: ClientId, act: Act) -> Result<(), Status> {
         self.change(|model| model.act(self, client, act))
     }
@@ -264,9 +368,10 @@ impl Mux {
         gone: oneshot::Sender<()>,
     ) -> Result<(ClientId, Layouts), Status> {
         self.change(|model| {
-            refuse_if_full(model.clients.len(), CLIENTS_MAX, "clients")?;
+            model.refuse_if_no_room_for_a_client()?;
             let pane = model.pane_of_place(hello.to, hello.runs_in)?;
             let client = ClientId::next(&mut model.last.client);
+            assert!(!model.viewing.contains_key(&client), "client {client} is no viewer");
             let attached = api::ToClient {
                 event: Some(api::to_client::Event::Attached(api::Attached {
                     client: client.said(),
@@ -320,9 +425,9 @@ impl Mux {
         self.change(|model| model.close_pane(pane));
     }
 
-    pub fn titled(&self, pane: PaneId, title: String, cwd: Option<PathBuf>) {
+    pub fn titled(&self, pane: PaneId, title: String, cwd: Option<String>) {
         self.change(|model| {
-            if let Some(pane) = model.pane_mut(pane) {
+            if let Some(pane) = model.any_pane_mut(pane) {
                 pane.title = title;
                 if let Some(cwd) = cwd {
                     pane.cwd = cwd;
@@ -334,7 +439,7 @@ impl Mux {
     pub fn looked(&self, pane: PaneId, foreground: Option<api::Foreground>, ran: Option<api::Ran>) {
         self.change(|model| {
             if let Some(Pane { program: Program::Runs { foreground: was, ran: said, .. }, .. }) =
-                model.pane_mut(pane)
+                model.any_pane_mut(pane)
             {
                 (*was, *said) = (foreground, ran);
             }
@@ -343,7 +448,7 @@ impl Mux {
 
     pub fn ended(&self, pane: PaneId, exit: Exit) -> bool {
         self.change(|model| {
-            let Some(found) = model.pane_mut(pane) else {
+            let Some(found) = model.any_pane_mut(pane) else {
                 return true;
             };
             if let Program::Runs { ends: Ends::Closes, .. } = found.program {
@@ -359,7 +464,7 @@ impl Mux {
 impl Model {
     fn refuse_if_ended(&self) -> Result<(), Status> {
         if self.ended {
-            return Err(Status::unavailable("luneta-mux is ending, as its last session did"));
+            return Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"));
         }
         Ok(())
     }
@@ -380,8 +485,70 @@ impl Model {
     }
 
     fn refuse_if_no_room_for_a_pane(&self) -> Result<(), Status> {
-        let panes = self.tabs().map(|(_, tab)| tab.tree.len()).sum();
-        refuse_if_full(panes, PANES_MAX, "panes")
+        let panes: usize = self.tabs().map(|(_, tab)| tab.tree.len()).sum();
+        refuse_if_full(panes + self.terminals.len(), PANES_MAX, "panes")
+    }
+
+    fn refuse_if_no_room_for_a_client(&self) -> Result<(), Status> {
+        refuse_if_full(self.clients.len() + self.viewing.len(), CLIENTS_MAX, "clients")
+    }
+
+    fn end_if_empty(&mut self) {
+        if self.sessions.is_empty() && self.terminals.is_empty() {
+            self.ended = true;
+            self.viewing.clear();
+        }
+    }
+
+    fn terminal_place(&self, pane: PaneId) -> Option<usize> {
+        self.terminals.iter().position(|found| found.key.id == pane)
+    }
+
+    fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
+        self.terminals
+            .iter()
+            .find(|found| found.key == key)
+            .ok_or_else(|| Status::not_found(format!("no terminal {} made then", key.id)))
+    }
+
+    fn terminal_mut(&mut self, key: TerminalKey) -> Result<&mut Terminal, Status> {
+        self.terminals
+            .iter_mut()
+            .find(|found| found.key == key)
+            .ok_or_else(|| Status::not_found(format!("no terminal {} made then", key.id)))
+    }
+
+    fn show(
+        &mut self,
+        client: ClientId,
+        keys: &BTreeSet<TerminalKey>,
+    ) -> Result<Vec<Status>, Status> {
+        let viewing = self.viewing.get(&client).ok_or_else(|| no_client(client))?;
+        if let Some(runs_in) = viewing.runs_in
+            && keys.contains(&runs_in)
+        {
+            return Err(Status::failed_precondition(format!(
+                "the viewer runs in terminal {}, and never shows itself",
+                runs_in.id
+            )));
+        }
+        assert!(keys.len() <= SHOWN_MAX);
+        let mut now = BTreeMap::new();
+        let mut gone = Vec::new();
+        for key in keys {
+            if let Err(refusal) = self.terminal(*key) {
+                gone.push(refusal);
+                continue;
+            }
+            let came = viewing.shows.get(key).copied().unwrap_or_else(|| {
+                self.last.came += 1;
+                self.last.came
+            });
+            now.insert(*key, came);
+        }
+        assert_eq!(now.len() + gone.len(), keys.len());
+        self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
+        Ok(gone)
     }
 
     fn tabs(&self) -> impl Iterator<Item = (&Session, &Tab)> {
@@ -400,7 +567,8 @@ impl Model {
         self.refuse_if_no_room_for_a_pane()?;
         let tab = TabId::next(&mut self.last.tab);
         let id = PaneId::next(&mut self.last.pane);
-        let pane = spawned(mux, session, id, opens, layout::lone(size))?;
+        let vars = pane_vars(session.0, session.1, id)?;
+        let pane = spawned(mux, id, &vars, opens, layout::lone(size))?;
         Ok(Tab::one(tab, name, pane, size))
     }
 
@@ -423,7 +591,7 @@ impl Model {
         };
         let (beside, towards, size) = room.ok_or_else(|| no_room(tab))?;
         let made = self.session(session).expect("a tab's session is the model's").made;
-        let pane = spawned(mux, (session, made), new, opens, size)?;
+        let pane = spawned(mux, new, &pane_vars(session, made, new)?, opens, size)?;
         let found = self.tab_mut(tab);
         found.tree.split(beside, towards, pane);
         found.fullscreen = false;
@@ -635,6 +803,13 @@ impl Model {
             .find_map(|tab| tab.tree.get_mut(pane))
     }
 
+    fn any_pane_mut(&mut self, pane: PaneId) -> Option<&mut Pane> {
+        if let Some(place) = self.terminal_place(pane) {
+            return Some(&mut self.terminals[place].pane);
+        }
+        self.pane_mut(pane)
+    }
+
     fn pane_of_place(&self, place: Place, runs_in: Option<RunsIn>) -> Result<PaneId, Status> {
         let (session, pane) = match place.is {
             Is::Pane(pane) => {
@@ -664,7 +839,7 @@ impl Model {
     }
 
     fn seat(&self, client: ClientId) -> Result<&Seat, Status> {
-        self.clients.get(&client).ok_or_else(|| Status::not_found(format!("no client {client}")))
+        self.clients.get(&client).ok_or_else(|| no_client(client))
     }
 
     fn seated_on(&self, on: impl Fn(PaneId) -> bool) -> Vec<ClientId> {
@@ -739,6 +914,15 @@ impl Model {
     }
 
     fn close_pane(&mut self, pane: PaneId) {
+        if let Some(place) = self.terminal_place(pane) {
+            let closed = self.terminals.remove(place);
+            closed.pane.handle.close();
+            for viewing in self.viewing.values_mut() {
+                viewing.shows.remove(&closed.key);
+            }
+            self.end_if_empty();
+            return;
+        }
         let Ok((session, tab)) = self.pane_at(pane) else {
             return;
         };
@@ -792,9 +976,7 @@ impl Model {
                 let _ = seat.out.try_send(Ok(word));
             }
         }
-        if self.sessions.is_empty() {
-            self.ended = true;
-        }
+        self.end_if_empty();
     }
 
     fn settle(&mut self) {
@@ -842,7 +1024,7 @@ impl Model {
                     .iter()
                     .map(|(client, seat)| Viewer {
                         client: *client,
-                        out: seat.out.clone(),
+                        frames: Frames::Client(seat.out.clone()),
                         colours: seat.colours,
                         came: seat.came,
                     })
@@ -857,6 +1039,28 @@ impl Model {
         }
         assert!(seated_by_tab.next().is_none(), "settle seats no tab it did not see");
         assert_eq!(laid_out, self.clients.len(), "every client sits on a pane of the model");
+        assert!(self.clients.len() + self.viewing.len() <= CLIENTS_MAX);
+        let panes: usize = self.tabs().map(|(_, tab)| tab.tree.len()).sum();
+        assert!(panes + self.terminals.len() <= PANES_MAX);
+        let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
+        for (client, viewing) in &self.viewing {
+            assert!(viewing.shows.len() <= SHOWN_MAX);
+            if let Some(runs_in) = viewing.runs_in {
+                let shown = viewing.shows.contains_key(&runs_in);
+                assert!(!shown, "viewer {client} shows terminal {}, which it runs in", runs_in.id);
+            }
+            for (key, came) in &viewing.shows {
+                let frames = Frames::Viewer(viewing.out.clone());
+                let colours = viewing.colours;
+                let viewer = Viewer { client: *client, frames, colours, came: *came };
+                by_terminal.entry(*key).or_default().push(viewer);
+            }
+        }
+        for terminal in &self.terminals {
+            let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
+            terminal.pane.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
+        }
+        assert!(by_terminal.is_empty(), "every shown terminal is the model's");
     }
 
     fn listing(&self) -> api::Listing {
@@ -867,7 +1071,8 @@ impl Model {
             current_tab: session.tabs.current().id.said(),
             made_at: Some(session.made.into()),
         });
-        api::Listing { sessions: sessions.collect() }
+        let terminals = self.terminals.iter().map(Terminal::said);
+        api::Listing { sessions: sessions.collect(), terminals: terminals.collect() }
     }
 
     fn tab_said(&self, tab: &Tab) -> api::Tab {
@@ -889,11 +1094,10 @@ impl Model {
             },
             Program::Ended(exit) => (api::pane::Program::Ended(exit.said()), None, None),
         };
-        let cwd = pane.cwd.to_str().expect("a pane's cwd was said in UTF-8");
         api::Pane {
             id: pane.id.said(),
             title: pane.title.clone(),
-            cwd: cwd.to_owned(),
+            cwd: pane.cwd.clone(),
             program: Some(program),
             foreground,
             ran,
@@ -902,6 +1106,27 @@ impl Model {
                 .map(|(id, seat)| api::Client { id: id.said(), size: Some(seat.size.said()) })
                 .collect(),
             name: pane.name.as_ref().map(|name| name.as_str().to_owned()),
+        }
+    }
+}
+
+impl Terminal {
+    fn said(&self) -> api::Terminal {
+        let pane = &self.pane;
+        let program = match &pane.program {
+            Program::Runs { pid, foreground, ran, .. } => {
+                let (foreground, ran) = (foreground.clone(), ran.clone());
+                api::terminal::Program::Runs(api::Running { pid: *pid, foreground, ran })
+            },
+            Program::Ended(exit) => api::terminal::Program::Ended(exit.said()),
+        };
+        api::Terminal {
+            key: Some(self.key.said()),
+            tag: self.tag.said(),
+            size: Some(self.size.said()),
+            title: pane.title.clone(),
+            cwd: pane.cwd.clone(),
+            program: Some(program),
         }
     }
 }
@@ -1040,26 +1265,43 @@ impl Tabs {
     }
 }
 
+fn nanos(made: SystemTime) -> Result<u64, Status> {
+    let made = made.duration_since(UNIX_EPOCH).ok();
+    made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
+        Status::failed_precondition("the clock says a time before 1970, or after 2554")
+    })
+}
+
+fn pane_vars(
+    session: SessionId,
+    made: SystemTime,
+    pane: PaneId,
+) -> Result<Vec<(&'static str, String)>, Status> {
+    Ok(vec![
+        (pty::SESSION_VAR, session.to_string()),
+        (pty::MADE_VAR, nanos(made)?.to_string()),
+        (pty::PANE_VAR, pane.to_string()),
+    ])
+}
+
+fn terminal_vars(key: TerminalKey) -> Result<Vec<(&'static str, String)>, Status> {
+    Ok(vec![
+        (pty::TERMINAL_VAR, key.id.to_string()),
+        (pty::TERMINAL_MADE_VAR, nanos(key.made)?.to_string()),
+    ])
+}
+
 fn spawned(
     mux: &Arc<Mux>,
-    (session, made): (SessionId, SystemTime),
     pane: PaneId,
+    vars: &[(&str, String)],
     opens: &Opens,
     size: Size,
 ) -> Result<Pane, Status> {
-    let made = made.duration_since(UNIX_EPOCH).ok();
-    let made = made.and_then(|since| u64::try_from(since.as_nanos()).ok()).ok_or_else(|| {
-        Status::failed_precondition("the clock says a time before 1970, or after 2554")
-    })?;
     let failed =
         |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
     let pty = Pty::opened(size).map_err(|error| failed("no pseudoterminal opened", error))?;
-    let vars = [
-        (pty::SESSION_VAR, session.to_string()),
-        (pty::MADE_VAR, made.to_string()),
-        (pty::PANE_VAR, pane.to_string()),
-    ];
-    let child = pty.spawned(opens, &vars).map_err(|error| {
+    let child = pty.spawned(opens, vars).map_err(|error| {
         Status::failed_precondition(format!("opens did not start: {error}"))
     })?;
     let started = pane::start(Arc::clone(mux), pane, pty, child, size)
@@ -1072,6 +1314,10 @@ fn spawned(
         program: Program::Runs { pid: started.pid, ends: opens.ends, foreground: None, ran: None },
         handle: started.handle,
     })
+}
+
+fn no_client(client: ClientId) -> Status {
+    Status::not_found(format!("no client {client}"))
 }
 
 fn no_room(tab: TabId) -> Status {

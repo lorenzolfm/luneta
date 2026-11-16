@@ -3,7 +3,7 @@ use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +65,8 @@ const _: () = assert!(MESSAGES_PER_TURN <= MESSAGES_MAX);
 
 pub type Out = mpsc::Sender<Result<api::ToClient, Status>>;
 
+pub type ViewerOut = mpsc::Sender<Result<api::ToViewer, Status>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
     Code(i32),
@@ -93,9 +95,59 @@ impl Exit {
 #[derive(Clone)]
 pub struct Viewer {
     pub client: ClientId,
-    pub out: Out,
+    pub frames: Frames,
     pub colours: Colours,
     pub came: u64,
+}
+
+#[derive(Clone)]
+pub enum Frames {
+    Client(Out),
+    Viewer(ViewerOut),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    Taken,
+    Full,
+    Closed,
+}
+
+impl Frames {
+    fn capacity(&self) -> usize {
+        match self {
+            Frames::Client(out) => out.capacity(),
+            Frames::Viewer(out) => out.capacity(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Frames::Client(out) => out.is_closed(),
+            Frames::Viewer(out) => out.is_closed(),
+        }
+    }
+
+    fn send(&self, frame: api::Frame) -> Sent {
+        match self {
+            Frames::Client(out) => {
+                let event = Some(api::to_client::Event::Frame(frame));
+                sent(&out.try_send(Ok(api::ToClient { event })))
+            },
+            Frames::Viewer(out) => {
+                let event = Some(api::to_viewer::Event::Frame(frame));
+                sent(&out.try_send(Ok(api::ToViewer { event })))
+            },
+        }
+    }
+}
+
+fn sent<T>(sent: &Result<(), TrySendError<T>>) -> Sent {
+    match sent {
+        Ok(()) => Sent::Taken,
+        Err(TrySendError::Full(_)) => Sent::Full,
+        Err(TrySendError::Closed(_)) => Sent::Closed,
+    }
 }
 
 #[derive(Clone)]
@@ -717,7 +769,7 @@ impl Thread {
     }
 
     fn frame(&mut self) -> io::Result<()> {
-        self.watchers.retain(|watcher| !watcher.viewer.out.is_closed());
+        self.watchers.retain(|watcher| !watcher.viewer.frames.is_closed());
         if self.watchers.is_empty() {
             self.dirty = false;
             return Ok(());
@@ -740,7 +792,7 @@ impl Thread {
         let scrollback = self.screen.scrollback();
         let mut views: Vec<(usize, View)> = Vec::new();
         for watcher in &mut self.watchers {
-            if watcher.viewer.out.capacity() <= FOR_WORDS {
+            if watcher.viewer.frames.capacity() <= FOR_WORDS {
                 watcher.owed = true;
                 continue;
             }
@@ -764,14 +816,13 @@ impl Thread {
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
             let said = frame::said(self.pane, view, before, flags);
-            let message = api::ToClient { event: Some(api::to_client::Event::Frame(said)) };
-            match watcher.viewer.out.try_send(Ok(message)) {
-                Ok(()) => {
+            match watcher.viewer.frames.send(said) {
+                Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });
                     watcher.owed = false;
                 },
-                Err(TrySendError::Full(_)) => watcher.owed = true,
-                Err(TrySendError::Closed(_)) => watcher.owed = false,
+                Sent::Full => watcher.owed = true,
+                Sent::Closed => watcher.owed = false,
             }
         }
         assert!(views.len() <= self.watchers.len());
@@ -787,7 +838,7 @@ fn host() -> String {
     rustix::system::uname().nodename().to_string_lossy().into_owned()
 }
 
-fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
+fn local_cwd(said: &str, host: &str) -> Option<String> {
     let after = said.strip_prefix("file://")?;
     let (named, path) = after.split_at(after.find('/')?);
     let local = named.is_empty()
@@ -800,7 +851,7 @@ fn local_cwd(said: &str, host: &str) -> Option<PathBuf> {
     if path.contains('\0') {
         return None;
     }
-    Some(PathBuf::from(path.as_ref())).filter(|path| path.is_absolute())
+    Some(path.into_owned()).filter(|path| Path::new(path).is_absolute())
 }
 
 fn wheeled(
@@ -866,10 +917,10 @@ mod tests {
     #[test]
     fn a_cwd_is_one_this_machine_has() {
         let cwd = |said: &str| local_cwd(said, "here");
-        assert_eq!(cwd("file://here/home/a%20b"), Some(PathBuf::from("/home/a b")));
-        assert_eq!(cwd("file://HERE/tmp"), Some(PathBuf::from("/tmp")));
-        assert_eq!(cwd("file:///tmp"), Some(PathBuf::from("/tmp")));
-        assert_eq!(cwd("file://localhost/tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(cwd("file://here/home/a%20b"), Some("/home/a b".to_owned()));
+        assert_eq!(cwd("file://HERE/tmp"), Some("/tmp".to_owned()));
+        assert_eq!(cwd("file:///tmp"), Some("/tmp".to_owned()));
+        assert_eq!(cwd("file://localhost/tmp"), Some("/tmp".to_owned()));
         assert_eq!(cwd("file://there/tmp"), None);
         assert_eq!(cwd("/tmp"), None);
         assert_eq!(cwd("file://here"), None);

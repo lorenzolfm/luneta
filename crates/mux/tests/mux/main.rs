@@ -10,3 +10,5 @@ mod panes;
 mod sessions;
 #[cfg(test)]
 mod shells;
+#[cfg(test)]
+mod terminals;

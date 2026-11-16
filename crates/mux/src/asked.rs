@@ -1,6 +1,7 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::SystemTime;
 
 use libghostty_vt::key::{self as keys, Mods};
@@ -15,6 +16,10 @@ use crate::screen::{Click, RgbColor, Wheel};
 pub const NAME_BYTES_MAX: usize = 255;
 
 pub const SIDE_MAX: u16 = 1000;
+
+pub const TAG_BYTES_MAX: usize = 256;
+
+pub const SHOWN_MAX: usize = 1024;
 
 pub(crate) fn refused(field: &str, why: impl fmt::Display) -> Status {
     Status::invalid_argument(format!("{field} {why}"))
@@ -115,7 +120,7 @@ impl SessionName {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opens {
-    pub cwd: PathBuf,
+    pub cwd: String,
     pub runs: Runs,
     pub ends: Ends,
 }
@@ -138,8 +143,7 @@ impl Opens {
         if opens.cwd.contains('\0') {
             return Err(refused(&format!("{field}.cwd"), "has a NUL"));
         }
-        let cwd = PathBuf::from(opens.cwd);
-        if !cwd.is_absolute() {
+        if !Path::new(&opens.cwd).is_absolute() {
             return Err(refused(&format!("{field}.cwd"), "is not an absolute path"));
         }
         let runs = match present(&format!("{field}.runs"), opens.runs)? {
@@ -166,7 +170,7 @@ impl Opens {
                 return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
             },
         };
-        Ok(Opens { cwd, runs, ends })
+        Ok(Opens { cwd: opens.cwd, runs, ends })
     }
 }
 
@@ -410,6 +414,102 @@ impl RunsIn {
             .map_err(|why| refused(&made_at, why))?;
         Ok(Some(RunsIn { session, made }))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TerminalKey {
+    pub id: PaneId,
+    pub made: SystemTime,
+}
+
+impl TerminalKey {
+    pub fn parse(field: &str, key: Option<api::TerminalKey>) -> Result<TerminalKey, Status> {
+        let key = present(field, key)?;
+        let id = PaneId::parse(&format!("{field}.id"), key.id)?;
+        let made_at = format!("{field}.made_at");
+        let made = SystemTime::try_from(present(&made_at, key.made_at)?)
+            .map_err(|why| refused(&made_at, why))?;
+        Ok(TerminalKey { id, made })
+    }
+
+    #[must_use]
+    pub fn said(self) -> api::TerminalKey {
+        api::TerminalKey { id: self.id.said(), made_at: Some(self.made.into()) }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tag(Vec<u8>);
+
+impl Tag {
+    pub fn parse(field: &str, tag: Vec<u8>) -> Result<Tag, Status> {
+        if tag.is_empty() {
+            return Err(refused(field, "is empty"));
+        }
+        if tag.len() > TAG_BYTES_MAX {
+            return Err(refused(field, format_args!("is over {TAG_BYTES_MAX} bytes")));
+        }
+        Ok(Tag(tag))
+    }
+
+    #[must_use]
+    pub fn said(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Greeting {
+    pub colours: Colours,
+    pub runs_in: Option<TerminalKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewerHeard {
+    Showing(BTreeSet<TerminalKey>),
+    Typed(TerminalKey, Input),
+}
+
+pub fn greeting(api::FromViewer { event }: api::FromViewer) -> Result<Greeting, Status> {
+    let Some(api::from_viewer::Event::Hello(hello)) = event else {
+        return Err(refused("event", "is not hello, as the first must be"));
+    };
+    let runs_in = hello.runs_in.map(|key| TerminalKey::parse("hello.runs_in", Some(key)));
+    Ok(Greeting {
+        colours: Colours::parse("hello.colours", hello.colours)?,
+        runs_in: runs_in.transpose()?,
+    })
+}
+
+pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
+    use api::from_viewer::Event;
+    Ok(match present("event", message.event)? {
+        Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
+        Event::Showing(api::Showing { terminals }) => {
+            if terminals.len() > SHOWN_MAX {
+                return Err(refused("showing.terminals", format_args!("are over {SHOWN_MAX}")));
+            }
+            let mut keys = BTreeSet::new();
+            for key in terminals {
+                let key = TerminalKey::parse("showing.terminals", Some(key))?;
+                if !keys.insert(key) {
+                    return Err(refused("showing.terminals", format_args!("repeat {}", key.id)));
+                }
+            }
+            ViewerHeard::Showing(keys)
+        },
+        Event::Typed(api::Typed { terminal, event }) => {
+            use api::typed::Event as Typed;
+            let input = match present("typed.event", event)? {
+                Typed::Key(key) => key_heard(key)?,
+                Typed::Mouse(mouse) => mouse_heard(mouse)?,
+                Typed::Paste(api::Paste { text }) => Input::Paste(text),
+                Typed::Focus(api::Focus { focused }) => Input::Focus(focused),
+                Typed::Scroll(api::Scroll { back }) => Input::Scroll(back),
+            };
+            ViewerHeard::Typed(TerminalKey::parse("typed.terminal", terminal)?, input)
+        },
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

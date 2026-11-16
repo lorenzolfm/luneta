@@ -33,7 +33,8 @@ fn a_pane_is_named_by_its_own_ids_and_not_by_zellij() {
             tabs(listing).first().is_some_and(|tab| ended(&tab.panes[0]).is_some())
         })
         .await;
-        let dumped = api::DumpRequest { pane: made.pane, dumped: api::Dumped::Text.into() };
+        let dumped =
+            api::DumpRequest { pane: made.pane, dumped: api::Dumped::Text.into(), terminal: None };
         let text = mux.dump(dumped).await.unwrap().into_inner().text;
         assert!(!text.contains("ZELLIJ"), "{text}");
         let named = |name: &str, id: String| {
