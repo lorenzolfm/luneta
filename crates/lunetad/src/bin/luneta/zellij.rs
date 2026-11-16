@@ -180,23 +180,11 @@ fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     }
 }
 
-pub enum After {
-    IntoTab(Due<u32>),
-    Kill { session: SessionName },
-}
+pub const NOT_THERE_YET: &str = "luneta cannot tell when its client is there";
 
-impl After {
-    pub fn untold(self, events: &Sender<Event>) {
-        match self {
-            After::IntoTab(owed) => {
-                owed.pay(Err("luneta cannot tell when its client is there".to_owned()));
-            },
-            After::Kill { session } => {
-                let when = format!("when its client has left \"{session}\", which stays");
-                let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
-            },
-        }
-    }
+pub fn stays(session: &SessionName, events: &Sender<Event>) {
+    let when = format!("when its client has left \"{session}\", which stays");
+    let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
 }
 
 pub fn open(menu: u64, on: &Machine, open: Open, events: &Sender<Event>) {

@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
-use lunetad::api::show_request::focus;
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::attach::{self, Frame, Rows};
@@ -602,7 +601,7 @@ impl Viewed {
             Moused::Nothing => None,
             Moused::Go(workstream) => Some(workstream),
             Moused::Focus(terminal) => {
-                self.ask(Asked::Focus(focus::To::Terminal(terminal.get())));
+                self.ask(Asked::Focus(terminal));
                 None
             },
             Moused::Sent(key, said) => {

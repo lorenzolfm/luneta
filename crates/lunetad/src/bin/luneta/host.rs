@@ -21,7 +21,6 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
-use lunetad::api::show_request::focus;
 use lunetad::api::Host;
 use lunetad::asks::User;
 use lunetad::closes::Whose;
@@ -74,7 +73,7 @@ use crate::projected::Projected;
 use crate::viewed::{self, Heeded, Viewed};
 use crate::workstreams;
 use crate::width::Width;
-use crate::zellij::{self, After, Close, Closes, Open, SessionName, Turned};
+use crate::zellij::{self, Close, Closes, Open, SessionName, Turned};
 
 pub enum Made {
     Workstream { made: Result<WorkstreamId, String>, argv: Vec<String> },
@@ -753,7 +752,9 @@ impl App {
             Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
                 Some(sidebar::Held::Open) => {
                     let place = Place::Pane(turned.place().clone());
-                    if !self.go(&on, &place, Some(After::IntoTab(owed))) {
+                    let gone = self.go(&on, &place);
+                    owed.pay(Err(zellij::NOT_THERE_YET.to_owned()));
+                    if !gone {
                         self.sidebar.drop_menu(menu);
                     }
                 },
@@ -940,7 +941,7 @@ impl App {
             return;
         }
         desktop::raise(self.title.as_deref());
-        self.go(&key.on, &Place::Pane(place), None);
+        self.go(&key.on, &Place::Pane(place));
         self.leave();
     }
 
@@ -1440,7 +1441,7 @@ impl App {
                 }
             },
             Asked::Go { on, place } => {
-                self.go(&on, &place, None);
+                self.go(&on, &place);
                 self.leave();
             },
             Asked::Closes { menu, on: Machine::Local, session, .. }
@@ -1466,7 +1467,8 @@ impl App {
                     self.deleting.push(zellij::kill(&on, session, whose, &self.events));
                 },
                 Act::Leave { session, to, .. } => {
-                    self.go(&on, &to, Some(After::Kill { session }));
+                    self.go(&on, &to);
+                    zellij::stays(&session, &self.events);
                 },
             },
             Asked::Open { menu, on, whose, open } => {
@@ -1625,7 +1627,7 @@ impl App {
             Picked::Nothing => {},
             Picked::Close => self.give(Focus::on(self.focus.side)),
             Picked::Go { on, place } => {
-                self.go(&on, &place, None);
+                self.go(&on, &place);
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Start { on: Machine::Local, session } => {
@@ -1658,7 +1660,8 @@ impl App {
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Delete { on, act: Act::Leave { session, to, .. } } => {
-                self.go(&on, &to, Some(After::Kill { session }));
+                self.go(&on, &to);
+                zellij::stays(&session, &self.events);
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Delete { on, act } => self.follow(Asked::Delete { on, act }),
@@ -1841,17 +1844,14 @@ impl App {
         self.leave();
         if let Some(place) = self.sidebar.next_pane() {
             let machine = self.sidebar.on().clone();
-            self.go(&machine, &place, None);
+            self.go(&machine, &place);
         }
     }
 
-    fn go(&mut self, machine: &Machine, place: &Place, after: Option<After>) -> bool {
+    fn go(&mut self, machine: &Machine, place: &Place) -> bool {
         let gone = self.go_project(machine, place);
         if let Err(why) = &gone {
             self.sidebar.notify(why.clone());
-        }
-        if let Some(after) = after {
-            after.untold(&self.events);
         }
         gone.is_ok()
     }
@@ -1890,7 +1890,7 @@ impl App {
         let (tabs, titles) = self.projected.tabs(workstream);
         self.right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
-            self.right.ask(lunetad::Asked::Focus(focus::To::Terminal(terminal.get())));
+            self.right.ask(lunetad::Asked::Focus(terminal));
         }
         self.seat();
     }

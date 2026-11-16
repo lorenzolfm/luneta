@@ -16,33 +16,25 @@ use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rect {
-    pub column: u16,
-    pub row: u16,
-    pub columns: u16,
-    pub rows: u16,
+pub use crate::projects::layout::Rect;
+
+fn right(rect: Rect) -> u32 {
+    u32::from(rect.column) + u32::from(rect.columns)
 }
 
-impl Rect {
-    fn right(self) -> u32 {
-        u32::from(self.column) + u32::from(self.columns)
-    }
+fn bottom(rect: Rect) -> u32 {
+    u32::from(rect.row) + u32::from(rect.rows)
+}
 
-    fn bottom(self) -> u32 {
-        u32::from(self.row) + u32::from(self.rows)
-    }
+fn overlaps(one: Rect, other: Rect) -> bool {
+    u32::from(one.column) < right(other)
+        && u32::from(other.column) < right(one)
+        && u32::from(one.row) < bottom(other)
+        && u32::from(other.row) < bottom(one)
+}
 
-    fn overlaps(self, other: Rect) -> bool {
-        u32::from(self.column) < other.right()
-            && u32::from(other.column) < self.right()
-            && u32::from(self.row) < other.bottom()
-            && u32::from(other.row) < self.bottom()
-    }
-
-    fn cells(self) -> u64 {
-        u64::from(self.columns) * u64::from(self.rows)
-    }
+fn cells(rect: Rect) -> u64 {
+    u64::from(rect.columns) * u64::from(rect.rows)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,8 +123,7 @@ impl Laid {
     }
 
     fn whole(&self) -> Rect {
-        let (columns, rows) = self.size.get();
-        Rect { column: 0, row: 0, columns, rows }
+        Rect::whole(self.size)
     }
 
     #[must_use]
@@ -190,7 +181,7 @@ fn pane(pane: show_response::Pane) -> Result<Pane, String> {
 fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
     let (columns, rows) = size.get();
     for (at, one) in panes.iter().enumerate() {
-        if one.rect.right() > u32::from(columns) || one.rect.bottom() > u32::from(rows) {
+        if right(one.rect) > u32::from(columns) || bottom(one.rect) > u32::from(rows) {
             return Err(format!("terminal {} is placed off its view", one.terminal));
         }
         for other in &panes[at + 1..] {
@@ -203,12 +194,12 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
                 let (one, other, pane) = (one.terminal, other.terminal, key.id);
                 return Err(format!("terminals {one} and {other} share luneta-mux's pane {pane}"));
             }
-            if one.rect.overlaps(other.rect) {
+            if overlaps(one.rect, other.rect) {
                 return Err(format!("terminal {} is laid over {}", other.terminal, one.terminal));
             }
         }
     }
-    let covered: u64 = panes.iter().map(|pane| pane.rect.cells()).sum();
+    let covered: u64 = panes.iter().map(|pane| cells(pane.rect)).sum();
     let whole = u64::from(columns) * u64::from(rows);
     if !panes.is_empty() && covered != whole {
         return Err(format!("a view's terminals cover {covered} of its {whole} cells"));
@@ -237,7 +228,7 @@ pub enum Asked {
     Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
     Close,
-    Focus(show_request::focus::To),
+    Focus(TerminalId),
     Fullscreen,
 }
 
@@ -257,7 +248,10 @@ impl Asked {
                 Event::Open(show_request::Open { beside: Some(beside), argv })
             },
             Asked::Close => Event::Close(()),
-            Asked::Focus(to) => Event::Focus(show_request::Focus { to: Some(to) }),
+            Asked::Focus(terminal) => {
+                let to = show_request::focus::To::Terminal(terminal.get());
+                Event::Focus(show_request::Focus { to: Some(to) })
+            },
             Asked::Fullscreen => Event::Fullscreen(()),
         };
         api::ShowRequest { event: Some(event) }
