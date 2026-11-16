@@ -83,8 +83,7 @@ impl Projected {
         };
         let projects = kept.projects.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
         let said = kept.projects.iter().zip(&projects);
-        let sessions: Vec<api::Session> =
-            said.map(|(said, project)| session(said, project.key)).collect();
+        let sessions: Vec<api::Session> = said.map(|(said, project)| session(said, project)).collect();
         host.sessions.extend(sessions);
         let projected = Projected { projects };
         projected.seat(host);
@@ -157,10 +156,10 @@ impl Projected {
     }
 }
 
-fn found_key(terminal: &api::Terminal) -> Option<TerminalKey> {
+fn found_key(terminal: &api::Terminal) -> Result<Option<TerminalKey>, String> {
     match &terminal.found {
-        Some(terminal::Found::Key(key)) => TerminalKey::of(key).ok(),
-        Some(terminal::Found::Lost(()) | terminal::Found::Looking(())) | None => None,
+        Some(terminal::Found::Key(key)) => TerminalKey::of(key).map(Some),
+        Some(terminal::Found::Lost(()) | terminal::Found::Looking(())) | None => Ok(None),
     }
 }
 
@@ -169,7 +168,7 @@ fn title_of(terminal: &api::Terminal) -> Option<String> {
     topic.or_else(|| terminal.command.clone())
 }
 
-fn project(project: &api::Project) -> Result<Project, String> {
+pub fn project(project: &api::Project) -> Result<Project, String> {
     let named = &project.name;
     let id = ProjectId::of(project.id).ok_or_else(|| format!("project {named} has id 0"))?;
     let workstream = |(workstream, tab): (&api::Workstream, u32)| {
@@ -181,7 +180,8 @@ fn project(project: &api::Project) -> Result<Project, String> {
         for terminal in &workstream.terminals {
             let held = TerminalId::of(terminal.id);
             let held = held.ok_or_else(|| format!("a terminal of workstream {named} has id 0"))?;
-            terminals.push((held, found_key(terminal)));
+            let key = found_key(terminal).map_err(|why| format!("terminal {held}: {why}"))?;
+            terminals.push((held, key));
             if let Some(title) = title_of(terminal) {
                 titles.insert(held, title);
             }
@@ -199,11 +199,12 @@ fn project(project: &api::Project) -> Result<Project, String> {
     })
 }
 
-fn session(project: &api::Project, key: OwnKey) -> api::Session {
+fn session(said: &api::Project, project: &Project) -> api::Session {
     let mut panes = Vec::new();
-    for (workstream, tab) in project.workstreams.iter().zip(0..) {
-        for terminal in &workstream.terminals {
-            let Some(key) = found_key(terminal) else {
+    for (workstream, parsed) in said.workstreams.iter().zip(&project.workstreams) {
+        let tab = parsed.tab;
+        for (terminal, (_, key)) in workstream.terminals.iter().zip(&parsed.terminals) {
+            let Some(key) = key else {
                 continue;
             };
             panes.push(api::Pane {
@@ -220,12 +221,12 @@ fn session(project: &api::Project, key: OwnKey) -> api::Session {
         }
     }
     api::Session {
-        name: project.name.clone(),
+        name: said.name.clone(),
         started_at: None,
         panes: Some(api::Panes { panes }),
         clients: Some(api::Clients { clients: Vec::new() }),
         socket: 0,
-        mux: Some(Mux::Own(key.into())),
+        mux: Some(Mux::Own(project.key.into())),
     }
 }
 
@@ -369,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_workstream_or_terminal_of_id_0_is_refused_and_own_sessions_still_go() {
+    fn a_project_workstream_or_terminal_of_id_0_or_a_key_unread_is_refused_and_own_sessions_go() {
         let zeroed: [fn(&mut api::Project); 3] = [
             |project| project.id = 0,
             |project| project.workstreams[1].id = 0,
@@ -382,5 +383,10 @@ mod tests {
             assert!(refused.contains("has id 0"), "{refused}");
             assert!(host.sessions.is_empty(), "{:?}", host.sessions);
         }
+        let mut host = host();
+        let unmade = api::TerminalKey { id: 4, made_at: None };
+        kept(&mut host).workstreams[0].terminals[0].found = Some(terminal::Found::Key(unmade));
+        let refused = Projected::adapted(&mut host).unwrap_err();
+        assert!(refused.starts_with("terminal "), "{refused}");
     }
 }

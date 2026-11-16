@@ -5,7 +5,7 @@ use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, R
 use lunetad::api::change_projects_request::WorkstreamAt;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
-use lunetad::api::{ChangeProjectsRequest, Project, WatchRequest};
+use lunetad::api::{ChangeProjectsRequest, WatchRequest};
 use lunetad::projects::{ProjectId, WorkstreamId};
 use tonic::transport::Channel;
 use tonic::Code;
@@ -13,6 +13,7 @@ use tonic::Code;
 use lunetad::names::session_for;
 
 use crate::daemon;
+use crate::projected::{self, Project};
 
 const ASKING: Duration = Duration::from_secs(15);
 
@@ -57,7 +58,7 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
         let request = WatchRequest { after: None, kept: None, shown: false };
         let host = daemon.watch(request).await.map_err(|status| status.message().to_owned())?;
         match host.into_inner().projects.and_then(|projects| projects.held) {
-            Some(Held::Kept(kept)) => Ok(kept.projects),
+            Some(Held::Kept(kept)) => kept.projects.iter().map(projected::project).collect(),
             Some(Held::Unkept(why)) => Err(format!("lunetad keeps no projects: {why}")),
             None => Err("lunetad is older than its projects".to_owned()),
         }
@@ -118,9 +119,9 @@ fn holds(dir: &str, folder: &Path) -> bool {
 }
 
 fn first_of(path: &Path, project: &Project) -> Result<WorkstreamId, String> {
-    match project.workstreams.first().and_then(|it| WorkstreamId::of(it.id)) {
-        Some(first) => Ok(first),
-        None => workstream_at(path, project_id(project)?, &project.dir),
+    match project.workstreams.first() {
+        Some(first) => Ok(first.id),
+        None => workstream_at(path, project.id, &project.dir),
     }
 }
 
@@ -154,7 +155,7 @@ fn chosen(
             "{cwd} is in project {holding}, and no project is made inside another"
         )));
     }
-    Some(project_id(holding).and_then(|id| workstream_at(path, id, folder)))
+    Some(workstream_at(path, holding.id, folder))
 }
 
 pub fn start(
@@ -183,7 +184,7 @@ pub fn start(
     if name.is_some() {
         return Err(unmade);
     }
-    let last = |project: &&Project| ProjectId::of(project.id).and_then(&seen);
+    let last = |project: &&Project| seen(project.id);
     first_of(path, projects.iter().max_by_key(last).ok_or(unmade)?)
 }
 
@@ -192,14 +193,10 @@ pub fn pulled(path: &Path, project: &str, cwd: &Path, name: &str) -> Result<Work
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
     let holding = projects.iter().find(|it| holds(&it.dir, cwd));
     let id = match holding {
-        Some(holding) => project_id(holding)?,
+        Some(holding) => holding.id,
         None => add_project(path, folder, Some(project)).map_err(Unmade::said)?,
     };
     add_workstream(path, id, folder, Some(name))
-}
-
-fn project_id(project: &Project) -> Result<ProjectId, String> {
-    ProjectId::of(project.id).ok_or_else(|| "lunetad keeps a project of id 0".to_owned())
 }
 
 #[must_use]
