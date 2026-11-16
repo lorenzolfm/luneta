@@ -172,11 +172,11 @@ fn a_terminal_named_with_another_time_is_not_found() {
         let dumped =
             api::DumpRequest { pane: 0, dumped: api::Dumped::Text.into(), terminal: other };
         let dumped = mux.dump(dumped).await;
-        for refusal in [closed.unwrap_err(), sized.unwrap_err(), tagged.unwrap_err()] {
+        let refusals =
+            [closed.unwrap_err(), sized.unwrap_err(), tagged.unwrap_err(), dumped.unwrap_err()];
+        for refusal in refusals {
             assert_eq!((refusal.code(), refusal.message()), (Code::NotFound, not_found.as_str()));
         }
-        let refusal = dumped.unwrap_err();
-        assert_eq!((refusal.code(), refusal.message()), (Code::NotFound, not_found.as_str()));
         assert!(terminal(&listed(&mut mux).await, &key).is_some());
     });
 }
@@ -273,7 +273,7 @@ fn a_terminal_keeps_the_server_after_its_last_session_and_the_last_terminal_ends
 }
 
 #[test]
-fn a_tag_is_said_and_bounded_and_a_showing_repeats_no_terminal() {
+fn a_tag_is_said_and_bounded() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
@@ -287,6 +287,14 @@ fn a_tag_is_said_and_bounded_and_a_showing_repeats_no_terminal() {
         let long = mux.new_terminal(made(vec![b'x'; 257])).await.unwrap_err();
         assert_eq!(long.message(), "tag is over 256 bytes");
         mux.new_terminal(made(vec![0xff; 256])).await.unwrap();
+    });
+}
+
+#[test]
+fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key, key]).await;

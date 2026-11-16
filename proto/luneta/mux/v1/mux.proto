@@ -23,7 +23,7 @@ service Mux {
   rpc CloseTerminal(CloseTerminalRequest) returns (CloseTerminalResponse);
   rpc SizeTerminal(SizeTerminalRequest) returns (SizeTerminalResponse);
   rpc TagTerminal(TagTerminalRequest) returns (TagTerminalResponse);
-  rpc Show(stream ToShower) returns (stream ToViewer);
+  rpc Show(stream FromViewer) returns (stream ToViewer);
 }
 
 message TerminalKey {
@@ -547,7 +547,7 @@ message Scroll {
   sint32 back = 1;
 }
 
-message ToShower {
+message FromViewer {
   oneof event {
     Greeting hello = 1;
     Showing showing = 2;

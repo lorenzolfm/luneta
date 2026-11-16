@@ -335,7 +335,7 @@ type Screens = BTreeMap<u32, (Vec<String>, api::Frame)>;
 pub struct Viewer {
     pub refused: Vec<String>,
     screens: Screens,
-    to: mpsc::Sender<api::ToShower>,
+    to: mpsc::Sender<api::FromViewer>,
     from: Streaming<api::ToViewer>,
 }
 
@@ -349,24 +349,24 @@ impl Viewer {
         greeting: api::Greeting,
     ) -> Result<Viewer, tonic::Status> {
         let (to, said) = mpsc::channel(64);
-        to.send(shower(api::to_shower::Event::Hello(greeting))).await.unwrap();
+        to.send(viewer_said(api::from_viewer::Event::Hello(greeting))).await.unwrap();
         let from = mux.show(ReceiverStream::new(said)).await?.into_inner();
         Ok(Viewer { refused: Vec::new(), screens: BTreeMap::new(), to, from })
     }
 
-    pub async fn send(&self, said: api::to_shower::Event) {
-        self.to.send(shower(said)).await.unwrap();
+    pub async fn send(&self, said: api::from_viewer::Event) {
+        self.to.send(viewer_said(said)).await.unwrap();
     }
 
     pub async fn show(&self, terminals: &[api::TerminalKey]) {
         let showing = api::Showing { terminals: terminals.to_vec() };
-        self.send(api::to_shower::Event::Showing(showing)).await;
+        self.send(api::from_viewer::Event::Showing(showing)).await;
     }
 
     pub async fn type_line(&self, terminal: u32, text: &str) {
         for key in line_keys(text) {
             let event = Some(api::typed::Event::Key(key));
-            self.send(api::to_shower::Event::Typed(api::Typed { terminal, event })).await;
+            self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
         }
     }
 
@@ -448,8 +448,8 @@ fn event(said: api::to_server::Event) -> api::ToServer {
     api::ToServer { event: Some(said) }
 }
 
-fn shower(said: api::to_shower::Event) -> api::ToShower {
-    api::ToShower { event: Some(said) }
+fn viewer_said(said: api::from_viewer::Event) -> api::FromViewer {
+    api::FromViewer { event: Some(said) }
 }
 
 fn line_text(line: &api::Line) -> String {

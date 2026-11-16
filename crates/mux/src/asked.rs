@@ -416,7 +416,7 @@ impl RunsIn {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalKey {
     pub id: PaneId,
     pub made: SystemTime,
@@ -470,8 +470,8 @@ pub enum Shows {
     Typed(PaneId, Input),
 }
 
-pub fn greeting(api::ToShower { event }: api::ToShower) -> Result<Greeting, Status> {
-    let Some(api::to_shower::Event::Hello(hello)) = event else {
+pub fn greeting(api::FromViewer { event }: api::FromViewer) -> Result<Greeting, Status> {
+    let Some(api::from_viewer::Event::Hello(hello)) = event else {
         return Err(refused("event", "is not hello, as the first must be"));
     };
     let runs_in = hello.runs_in.map(|key| TerminalKey::parse("hello.runs_in", Some(key)));
@@ -481,8 +481,8 @@ pub fn greeting(api::ToShower { event }: api::ToShower) -> Result<Greeting, Stat
     })
 }
 
-pub fn shows(message: api::ToShower) -> Result<Shows, Status> {
-    use api::to_shower::Event;
+pub fn shows(message: api::FromViewer) -> Result<Shows, Status> {
+    use api::from_viewer::Event;
     Ok(match present("event", message.event)? {
         Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
         Event::Showing(api::Showing { terminals }) => {

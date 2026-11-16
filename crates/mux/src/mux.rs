@@ -460,7 +460,7 @@ impl Mux {
 impl Model {
     fn refuse_if_ended(&self) -> Result<(), Status> {
         if self.ended {
-            return Err(Status::unavailable("luneta-mux is ending, as its last session did"));
+            return Err(Status::unavailable("luneta-mux is ending, as nothing is left in it"));
         }
         Ok(())
     }
@@ -494,6 +494,10 @@ impl Model {
             self.ended = true;
             self.viewing.clear();
         }
+    }
+
+    fn terminal_place(&self, pane: PaneId) -> Option<usize> {
+        self.terminals.iter().position(|found| found.key.id == pane)
     }
 
     fn terminal(&self, key: TerminalKey) -> Result<&Terminal, Status> {
@@ -782,8 +786,8 @@ impl Model {
     }
 
     fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Pane> {
-        if let Some(terminal) = self.terminals.iter_mut().find(|found| found.key.id == pane) {
-            return Some(&mut terminal.pane);
+        if let Some(place) = self.terminal_place(pane) {
+            return Some(&mut self.terminals[place].pane);
         }
         self.sessions
             .iter_mut()
@@ -895,7 +899,7 @@ impl Model {
     }
 
     fn close_pane(&mut self, pane: PaneId) {
-        if let Some(place) = self.terminals.iter().position(|found| found.key.id == pane) {
+        if let Some(place) = self.terminal_place(pane) {
             let closed = self.terminals.remove(place);
             closed.pane.handle.close();
             self.end_if_empty();
@@ -1017,17 +1021,17 @@ impl Model {
         }
         assert!(seated_by_tab.next().is_none(), "settle seats no tab it did not see");
         assert_eq!(laid_out, self.clients.len(), "every client sits on a pane of the model");
+        let mut by_terminal: BTreeMap<TerminalKey, Vec<Viewer>> = BTreeMap::new();
+        for (client, viewing) in &self.viewing {
+            for shown in &viewing.shows {
+                let (out, colours) = (viewing.out.clone(), viewing.colours);
+                let viewer = Viewer { client: *client, out, colours, came: shown.came };
+                by_terminal.entry(shown.key).or_default().push(viewer);
+            }
+        }
         for terminal in &self.terminals {
-            let viewers: Arc<[Viewer]> = self
-                .viewing
-                .iter()
-                .filter_map(|(client, viewing)| {
-                    let shown = viewing.shows.iter().find(|shown| shown.key == terminal.key)?;
-                    let (out, colours) = (viewing.out.clone(), viewing.colours);
-                    Some(Viewer { client: *client, out, colours, came: shown.came })
-                })
-                .collect();
-            terminal.pane.handle.want(Wanted { size: terminal.size, viewers });
+            let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
+            terminal.pane.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
         }
     }
 

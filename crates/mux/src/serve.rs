@@ -198,7 +198,7 @@ impl mux_server::Mux for Service {
 
     type ShowStream = Viewed;
 
-    async fn show(&self, request: Request<Streaming<api::ToShower>>) -> Answer<Self::ShowStream> {
+    async fn show(&self, request: Request<Streaming<api::FromViewer>>) -> Answer<Self::ShowStream> {
         let mut heard = request.into_inner();
         let first = tokio::time::timeout(HELLO_WAIT, heard.message()).await;
         let first = first.map_err(|_| Status::deadline_exceeded("no hello came in time"))??;
@@ -207,7 +207,7 @@ impl mux_server::Mux for Service {
         let (out, going) = mpsc::channel(CLIENT_MESSAGES);
         let (gone, let_go) = oneshot::channel();
         let client = self.mux.view(greeting, out.clone(), gone)?;
-        tokio::spawn(look(Arc::clone(&self.mux), client, heard, out));
+        tokio::spawn(listen_to_viewer(Arc::clone(&self.mux), client, heard, out));
         Ok(Response::new(Viewed { going: ReceiverStream::new(going), let_go, ended: false }))
     }
 
@@ -249,7 +249,12 @@ async fn listen(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToSer
     mux.detach(client);
 }
 
-async fn look(mux: Arc<Mux>, client: ClientId, mut heard: Streaming<api::ToShower>, out: Out) {
+async fn listen_to_viewer(
+    mux: Arc<Mux>,
+    client: ClientId,
+    mut heard: Streaming<api::FromViewer>,
+    out: Out,
+) {
     let refused = loop {
         let message = match heard.message().await {
             Ok(Some(message)) => message,
