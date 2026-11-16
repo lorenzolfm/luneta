@@ -516,10 +516,22 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
-    viewer.typed(key, paste("echo seen-$((40 + 2))\r"));
+    viewer.typed(key, paste("echo seen-$((40 + 2))"));
+    let enter = mux_api::Key {
+        press: mux_api::Press::Down.into(),
+        modifiers: Some(mux_api::Modifiers::default()),
+        key: Some(mux_api::key::Key::Named(mux_api::Named::Enter.into())),
+        text: String::new(),
+    };
+    viewer.typed(key, typed::Event::Key(enter));
     let mut lines = Vec::new();
+    let deadline = std::time::Instant::now() + 3 * HEARD_IN;
     loop {
-        let frame = match seeing.recv_timeout(HEARD_IN).expect("the mux shows the terminal") {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok(seen) = seeing.recv_timeout(left) else {
+            panic!("the terminal never showed seen-42: {:?}", text_of(&lines));
+        };
+        let frame = match seen {
             Seen::Frame(frame) => frame,
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
         };

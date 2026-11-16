@@ -32,7 +32,7 @@ fn luneta_shows_its_workstream_and_what_its_shell_prints() {
 }
 
 #[test]
-fn the_menu_opens_a_pane_beside_the_one_luneta_shows() {
+fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     let owned = Owned::new();
     let dir = directory("work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -48,6 +48,11 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows() {
     eventually("both frames are drawn beside each other", || {
         let tops = window.screen().iter().map(|line| line.matches('╭').count()).max()?;
         (tops == 2).then_some(())
+    });
+    window.send("\x1b[97;3udd");
+    eventually("the pane luneta is on closes", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        (terminals.len() == 1).then_some(())
     });
 }
 

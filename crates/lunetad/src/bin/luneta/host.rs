@@ -1442,6 +1442,12 @@ impl App {
                 self.go(&on, &place, None);
                 self.leave();
             },
+            Asked::Closes { menu, on: Machine::Local, session, .. }
+                if self.projected.projects().iter().any(|it| it.name == session.as_str()) =>
+            {
+                let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
+                self.follow(asked);
+            },
             Asked::Closes { menu, on, session, pane } => {
                 zellij::closes(menu, &on, session, pane, &self.events);
             },
