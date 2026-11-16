@@ -71,16 +71,11 @@ pub fn add_workstream(
     made.ok_or_else(|| "lunetad made no workstream".to_owned())
 }
 
-pub fn renamed(from: &str, to: &str) -> Option<Result<(), String>> {
-    let path = lunetad::folder::find()?;
-    let projects = match kept(&path) {
-        Ok(projects) => projects,
-        Err(unkept) => return Some(Err(format!("lunetad lists no projects to rename: {unkept}"))),
-    };
-    let named = projects.iter().find(|project| project.name == from)?;
-    let project = named.id;
-    let change = Change::RenameProject(RenameProject { project, to: to.to_owned() });
-    Some(changed(&path, change).map(drop))
+pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
+    let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
+    let (project, to) = (project.get(), to.to_owned());
+    let change = Change::RenameProject(RenameProject { project, to });
+    changed(&path, change).map(drop)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {
@@ -101,10 +96,19 @@ fn chosen(
     cwd: &Path,
     folder: &str,
 ) -> Option<Result<WorkstreamId, String>> {
-    if let Some(name) = name
-        && let Some(named) = projects.iter().find(|project| project.name == name)
-    {
-        return Some(first_of(path, named));
+    if let Some(name) = name {
+        let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
+        match named[..] {
+            [] => {},
+            [one] => return Some(first_of(path, one)),
+            [..] => {
+                let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
+                let dirs = dirs.join(", ");
+                return Some(Err(format!(
+                    "projects in {dirs} are all named {name}: start luneta in the one you mean"
+                )));
+            },
+        }
     }
     let holding = projects.iter().find(|project| holds(&project.dir, cwd))?;
     if let Some(name) = name

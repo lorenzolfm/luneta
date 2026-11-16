@@ -271,6 +271,19 @@ fn a_named_luneta_shows_the_project_of_that_name_wherever_it_starts() {
 }
 
 #[test]
+fn a_named_luneta_refuses_a_name_two_projects_share() {
+    let owned = Owned::new();
+    let (one, other) = (directory("one"), directory("other"));
+    project(&owned.host, Path::new(&real(&one.path)), Some("twin"));
+    project(&owned.host, Path::new(&real(&other.path)), Some("twin"));
+    let output = luneta(owned.host.vars(), &one.path).arg("twin").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    let dirs = format!("{}, {}", real(&one.path), real(&other.path));
+    assert!(refusal.contains(&format!("projects in {dirs} are all named twin")), "{refusal}");
+}
+
+#[test]
 fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
     if !makes_shells() {
         return;

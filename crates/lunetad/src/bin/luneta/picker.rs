@@ -36,6 +36,7 @@ use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
+use crate::projected;
 use crate::workstreams;
 use crate::zellij::{self, Closes, SessionName};
 
@@ -189,7 +190,7 @@ pub enum Ask {
     Exited { on: Machine, ask: u64 },
     Peek { on: Machine, session: Listed, asked: Option<u32> },
     Closes { on: Machine, place: PanePlace },
-    Rename { on: Machine, from: SessionName, to: SessionName },
+    Rename { on: Machine, from: Listed, to: SessionName },
     Delete { on: Machine, session: SessionName },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
@@ -226,12 +227,12 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
                 Heard::Closes { on, place, closes }
             },
             Ask::Rename { on, from, to } => {
-                let renamed = match &on {
-                    Machine::Local => match workstreams::renamed(from.as_str(), to.as_str()) {
-                        Some(renamed) => renamed,
-                        None => Mux::Zellij(&from).renamed(&to),
-                    },
-                    Machine::Remote(destination) => {
+                let project = from.own_key().and_then(projected::project_of);
+                let from = from.name().clone();
+                let renamed = match (&on, project) {
+                    (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
+                    (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
+                    (Machine::Remote(destination), _) => {
                         reach(destination).and_then(|mut away| away.rename(&from, &to))
                     },
                 };
@@ -344,7 +345,7 @@ impl Rows {
 #[derive(Debug)]
 enum Stage {
     Search,
-    Rename { on: Machine, session: SessionName, input: String },
+    Rename { on: Machine, session: Listed, input: String },
     Choose { session: SessionName, at: Machine },
     Planning { target: Target, agreed: Option<Plan> },
     Asking { target: Target, plan: Plan, asks: String },
@@ -938,7 +939,7 @@ impl Picker {
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
         if let Stage::Rename { on, session, input } = &self.stage {
-            let spots = self.draw_rename(buffer, &layout, on, session, input);
+            let spots = self.draw_rename(buffer, &layout, on, session.name(), input);
             return Drawn::Picker { number: self.number, area, spots };
         }
         if let Stage::Choose { session, at } = &self.stage {
@@ -1170,7 +1171,7 @@ impl Picker {
         }
         match self.sessions.selected().map(|row| &row.key) {
             Some(Key::Live { on, place }) => {
-                let (on, session) = (on.clone(), place.listed().name().clone());
+                let (on, session) = (on.clone(), place.listed().clone());
                 self.stage = Stage::Rename { on, session, input: String::new() };
             },
             Some(Key::Exited { session, .. }) => {
@@ -1187,13 +1188,13 @@ impl Picker {
         &mut self,
         key: &KeyEvent,
         on: Machine,
-        session: SessionName,
+        session: Listed,
         mut input: String,
     ) -> Picked {
         match key.code {
             KeyCode::Esc => return Picked::Nothing,
             KeyCode::Enter => {
-                let Ok(to) = self.rename_to(&on, &session, &input) else {
+                let Ok(to) = self.rename_to(&on, session.name(), &input) else {
                     self.stage = Stage::Rename { on, session, input };
                     return Picked::Nothing;
                 };
@@ -2641,7 +2642,7 @@ mod tests {
         typed(&mut picker, "d");
         press(&mut picker, KeyCode::Enter);
         let to = SessionName::parse("d").unwrap();
-        let from = SessionName::running("c").unwrap();
+        let from = listed("c", 30);
         assert_eq!(picker.asks(), vec![Ask::Rename { on: Machine::Local, from, to }]);
         assert!(!renaming(&picker));
 
@@ -2682,7 +2683,7 @@ mod tests {
         press(&mut picker, KeyCode::Backspace);
         typed(&mut picker, "a");
         press(&mut picker, KeyCode::Enter);
-        let (from, to) = (SessionName::running("c").unwrap(), SessionName::parse("a").unwrap());
+        let (from, to) = (listed("c", 30), SessionName::parse("a").unwrap());
         assert_eq!(picker.asks(), vec![Ask::Rename { on: Machine::Local, from, to }]);
     }
 
@@ -3249,7 +3250,7 @@ mod tests {
         for taken in ["web", "old"] {
             assert!(rename(&mut picker, taken).is_empty(), "{taken}");
         }
-        let from = SessionName::running("api").unwrap();
+        let from = listed("api", 40);
         let to = SessionName::parse("here").unwrap();
         assert_eq!(rename(&mut picker, "here"), [Ask::Rename { on: nixos(), from, to }]);
 

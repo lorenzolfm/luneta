@@ -1445,13 +1445,13 @@ impl App {
                 self.leave();
             },
             Asked::Closes { menu, on: Machine::Local, session, .. }
-                if self.projected.projects().iter().any(|it| it.name == session.as_str()) =>
+                if session.own_key().and_then(|key| self.projected.project(key)).is_some() =>
             {
                 let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
                 self.follow(asked);
             },
             Asked::Closes { menu, on, session, pane } => {
-                zellij::closes(menu, &on, session, pane, &self.events);
+                zellij::closes(menu, &on, session.name().clone(), pane, &self.events);
             },
             Asked::Delete { on, act } if self.of_project(&act) => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
@@ -1470,8 +1470,8 @@ impl App {
                     self.go(&on, &to, Some(After::Kill { session }));
                 },
             },
-            Asked::Open { menu, on, open } => {
-                if !self.project_open(menu, &on, &open) {
+            Asked::Open { menu, on, whose, open } => {
+                if !self.project_open(menu, &on, whose, &open) {
                     zellij::open(menu, &on, open, &self.events);
                 }
             },
@@ -1584,13 +1584,11 @@ impl App {
         });
     }
 
-    fn project_open(&mut self, menu: u64, on: &Machine, open: &Open) -> bool {
-        if *on != Machine::Local {
+    fn project_open(&mut self, menu: u64, on: &Machine, whose: Whose, open: &Open) -> bool {
+        let (Machine::Local, Whose::Own(key)) = (on, whose) else {
             return false;
-        }
-        let session = open.session();
-        let project = self.projected.projects().iter().find(|it| it.name == session.as_str());
-        let Some(project) = project else {
+        };
+        let Some(project) = self.projected.project(key) else {
             return false;
         };
         self.sidebar.drop_menu(menu);

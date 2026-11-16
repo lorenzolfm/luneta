@@ -44,6 +44,12 @@ pub fn key_of(project: ProjectId) -> OwnKey {
     OwnKey { id: own_id(project), made: OwnMade::from_nanos(0) }
 }
 
+#[must_use]
+pub fn project_of(key: OwnKey) -> Option<ProjectId> {
+    let project = ProjectId::of(key.id.get())?;
+    (key_of(project) == key).then_some(project)
+}
+
 fn tab_id(tab: u32) -> u32 {
     tab.checked_add(1).expect("a project holds fewer than 2^32 workstreams")
 }
@@ -336,6 +342,14 @@ mod tests {
             panic!("the host keeps projects");
         };
         &mut kept.projects[0]
+    }
+
+    #[test]
+    fn a_project_row_s_key_leads_back_to_its_project_and_an_own_session_s_to_none() {
+        let project = ProjectId::of(7).unwrap();
+        assert_eq!(project_of(key_of(project)), Some(project));
+        let own = OwnKey { id: own_id(project), made: OwnMade::from_nanos(1) };
+        assert_eq!(project_of(own), None);
     }
 
     #[test]

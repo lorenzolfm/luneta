@@ -756,9 +756,9 @@ pub enum Asked {
     CopyText(String),
     Browse(Link),
     Leave,
-    Closes { menu: u64, on: Machine, session: SessionName, pane: u32 },
+    Closes { menu: u64, on: Machine, session: Listed, pane: u32 },
     Delete { on: Machine, act: Act },
-    Open { menu: u64, on: Machine, open: Open },
+    Open { menu: u64, on: Machine, whose: Whose, open: Open },
     Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
     Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
     StartOwn { starts: Starts },
@@ -2738,16 +2738,17 @@ impl Sidebar {
                 Asked::Find { menu: number, on, cwd, agent }
             },
             Wants::Open { session, cwd, opens: Opens::Pane { beside, command }, .. } => {
+                let whose = session.whose();
                 let open = Open::Pane { session: session.name, beside, cwd, command };
-                Asked::Open { menu: number, on, open }
+                Asked::Open { menu: number, on, whose, open }
             },
             Wants::Open { session, pane, cwd, opens: Opens::Tab { name, command } } => {
                 let place = Place::Pane(PanePlace { session, pane });
                 let session = place.listed().name().clone();
                 let tab = Tab { cwd, name, command };
                 let opened = Open::Tab { session: session.clone(), tab, alone_since: None };
-                if place.listed().own() {
-                    Asked::Open { menu: number, on, open: opened }
+                if let Some(key) = place.listed().own_key() {
+                    Asked::Open { menu: number, on, whose: Whose::Own(key), open: opened }
                 } else {
                     self.drop_menu(number);
                     let refused = format!("{session} is one of zellij's sessions");
@@ -2784,7 +2785,7 @@ impl Sidebar {
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
-                Asked::Closes { menu: number, on, session: session.name, pane }
+                Asked::Closes { menu: number, on, session, pane }
             },
             Wants::Plan { session, scope: Scope::Session } => {
                 let plan = self.plan(&on, &session, Deletes::Session);
@@ -4650,8 +4651,8 @@ mod tests {
         SessionName::parse(name).unwrap()
     }
 
-    fn closes_here(menu: u64, session: &str, pane: u32) -> Asked {
-        Asked::Closes { menu, on: Machine::Local, session: session_name(session), pane }
+    fn closes_here(menu: u64, session: Listed, pane: u32) -> Asked {
+        Asked::Closes { menu, on: Machine::Local, session, pane }
     }
 
     fn delete_here(act: Act) -> Asked {
@@ -7274,7 +7275,7 @@ mod tests {
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
         let (session, cwd) = (session_name("older"), directory(&cwd));
         let open = Open::Pane { session, beside: 1, cwd, command };
-        let open = Asked::Open { menu: 1, on: Machine::Local, open };
+        let open = Asked::Open { menu: 1, on: Machine::Local, whose: listed("older", 10).whose(), open };
         assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
     }
 
@@ -7290,9 +7291,10 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         let started = |menu, session: &str, beside, cwd: &str, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
+            let whose = listed(session, if session == "older" { 10 } else { 20 }).whose();
             let (session, cwd) = (session_name(session), directory(cwd));
             let open = Open::Pane { session, beside, cwd, command };
-            Asked::Open { menu, on: Machine::Local, open }
+            Asked::Open { menu, on: Machine::Local, whose, open }
         };
         type_in(&mut sidebar, "c");
         let pi = started(1, "older", 1, "/w/luneta/main", "pi", "/skill:tigerstyle");
@@ -7337,7 +7339,7 @@ mod tests {
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         let tab = Tab { cwd, name: None, command: Vec::new() };
         let tab = Open::Tab { session: older, tab, alone_since: None };
-        let tab = Asked::Open { menu: 1, on: Machine::Local, open: tab };
+        let tab = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("older", 1, 10).whose(), open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
         let opened = own_pane_of("older", 1, 10, 7);
         assert_eq!(sidebar.opened(1, Ok(7)), go_here(opened));
@@ -7348,7 +7350,7 @@ mod tests {
         let (session, cwd) = (session_name("newer"), directory("/w/b"));
         let tab = Tab { cwd, name: None, command: Vec::new() };
         let tab = Open::Tab { session, tab, alone_since: None };
-        let asked = Asked::Open { menu: 2, on: Machine::Local, open: tab };
+        let asked = Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("newer", 2, 20).whose(), open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
@@ -7373,7 +7375,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
         let tab = Tab { cwd: directory("/w/luneta/main"), name: None, command: Vec::new() };
         let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
-        let asked = Asked::Open { menu: 1, on: Machine::Local, open: tab };
+        let asked = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("own", 1, 20).whose(), open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
         let own = own_pane_of("own", 1, 20, 8);
         assert_eq!(sidebar.opened(1, Ok(8)), Asked::Go { on: Machine::Local, place: own });
@@ -7381,7 +7383,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), {
             let tab = Tab { cwd: directory("/w/luneta/main"), name: None, command: Vec::new() };
             let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
-            Asked::Open { menu: 2, on: Machine::Local, open: tab }
+            Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("own", 1, 20).whose(), open: tab }
         });
         sidebar.focus(Keys::Zellij);
         assert_eq!(sidebar.opened(2, Ok(9)), Asked::Nothing);
@@ -7665,6 +7667,7 @@ mod tests {
         assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), Asked::Open {
             menu: number,
             on: Machine::Local,
+            whose: own_listed("older", 1, 10).whose(),
             open,
         });
         sidebar.focus(Keys::Zellij);
@@ -7911,7 +7914,7 @@ mod tests {
         assert_eq!(lines[7], "─ New ─────────── luneta/main ─", "{lines:?}");
         let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let pane = Asked::Open { menu: 1, on: Machine::Local, open: pane };
+        let pane = Asked::Open { menu: 1, on: Machine::Local, whose: listed("s", 10).whose(), open: pane };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), pane);
     }
 
@@ -7938,7 +7941,7 @@ mod tests {
         let command = vec!["claude".to_owned(), prompt.to_owned()];
         let cwd = directory("/w/luneta/main");
         let open = Open::Pane { session: session_name("s"), beside: 1, cwd, command };
-        let open = Asked::Open { menu: 1, on: Machine::Local, open };
+        let open = Asked::Open { menu: 1, on: Machine::Local, whose: listed("s", 10).whose(), open };
         assert_eq!(sidebar.printed(1, nothing()), open);
         assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
         assert!(sidebar.menu.is_none());
@@ -8121,7 +8124,7 @@ mod tests {
         let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };
         let tab = Open::Tab { session: older.clone(), tab, alone_since: None };
         type_in(&mut sidebar, "n");
-        let tab = Asked::Open { menu: 1, on: Machine::Local, open: tab };
+        let tab = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("older", 1, 10).whose(), open: tab };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
         let opened = own_pane_of("older", 1, 10, 7);
         assert_eq!(sidebar.opened(1, Ok(7)), go_here(opened));
@@ -8134,7 +8137,7 @@ mod tests {
         let command = ["claude", "/thermo-nuclear-review"];
         let command = command.map(str::to_owned).to_vec();
         let pane = Open::Pane { session: older, beside: 1, cwd, command };
-        let pane = Asked::Open { menu: 2, on: Machine::Local, open: pane };
+        let pane = Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("older", 1, 10).whose(), open: pane };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), pane);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
@@ -8434,7 +8437,7 @@ mod tests {
             untold(&mut sidebar);
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = || closes_here(1, "newer", 1);
+            let closes = || closes_here(1, listed("newer", 20), 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
@@ -8465,7 +8468,7 @@ mod tests {
             sidebar.heard(Host { unread: 1, unread_files, ..host });
             sidebar.step(2);
             type_in(&mut sidebar, "d");
-            let closes = closes_here(1, "newer", 1);
+            let closes = closes_here(1, listed("newer", 20), 1);
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
             let act = Act::Pane {
                 session: session_name("newer"),
@@ -8517,7 +8520,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.step(1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        let closes = closes_here(1, "older", 2);
+        let closes = closes_here(1, listed("older", 10), 2);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         let act = Act::Pane {
             session: session_name("older"),
@@ -8542,7 +8545,7 @@ mod tests {
         sit(&mut sidebar, &own_pane_of("older", 1, 10, 1));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let closes = || closes_here(1, "older", 1);
+        let closes = || closes_here(1, own_listed("older", 1, 10), 1);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes());
         let tab = || Closes::Tab { id: TabId(0), panes: vec![1] };
         assert_eq!(sidebar.closes(1, Ok(tab())), Asked::Nothing);
@@ -9236,7 +9239,7 @@ mod tests {
         let number = menu.number();
         let (session, cwd) = (session_name("main"), directory("/w/b"));
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let asked = Asked::Open { menu: number, on: on.clone(), open };
+        let asked = Asked::Open { menu: number, on: on.clone(), whose: listed("main", 20).whose(), open };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
         sidebar.close_menu();
 
@@ -9362,7 +9365,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         let menu = sidebar.menu.as_ref().map_or(0, Menu::number);
         let on = Machine::Remote(nixos());
-        let closes = Asked::Closes { menu, on: on.clone(), session: session_name("main"), pane: 1 };
+        let closes = Asked::Closes { menu, on: on.clone(), session: listed("main", 20), pane: 1 };
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
         assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 120, 16);
