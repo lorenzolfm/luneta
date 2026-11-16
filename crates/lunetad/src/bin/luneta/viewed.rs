@@ -13,7 +13,7 @@ use lunetad::mux::own::attach::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
-use lunetad::{Asked, Beside, Found, Heard, Laid, Pane, Rect as Placed, Show, Shown};
+use lunetad::{Asked, Beside, Found, Heard, Laid, Pane, Rect as Placed, Show};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -88,7 +88,7 @@ impl View {
     }
 
     fn laid(&self) -> Option<&Laid> {
-        self.laid.as_ref().filter(|laid| laid.workstream() == self.workstream)
+        self.laid.as_ref()
     }
 
     fn focused(&self) -> Option<TerminalId> {
@@ -102,17 +102,19 @@ impl View {
 
     fn go(&mut self, workstream: WorkstreamId) {
         self.workstream = workstream;
+        self.laid = None;
+        self.screens.clear();
         self.pointer = Pointer::Free;
     }
 
     fn laid_out(&mut self, laid: Laid) -> bool {
-        let before = self.focused();
-        let now = laid.focused().map(|pane| pane.terminal);
-        let here = laid.workstream() == self.workstream;
-        if here && before != now {
+        if laid.workstream() != self.workstream {
+            return false;
+        }
+        if self.focused() != laid.focused().map(|pane| pane.terminal) {
             self.pointer = Pointer::Free;
         }
-        let empty = here && laid.panes().is_empty();
+        let empty = laid.is_empty();
         self.laid = Some(laid);
         let wanted = self.wanted();
         self.screens.retain(|key, _| wanted.contains(key));
@@ -165,35 +167,13 @@ impl View {
         Ok(())
     }
 
-    fn placed(&self, pane: &Pane) -> Placed {
-        match self.laid().and_then(Laid::shown) {
-            Some(Shown::Full(full)) if full == pane.terminal => {
-                self.laid().map_or(pane.rect, Laid::whole)
-            },
-            Some(Shown::Full(_) | Shown::Tiled { .. }) | None => pane.rect,
-        }
-    }
-
     fn drawn(&self) -> Vec<(&Pane, Placed)> {
-        let Some(laid) = self.laid() else {
-            return Vec::new();
-        };
-        let full = match laid.shown() {
-            Some(Shown::Full(full)) => Some(full),
-            Some(Shown::Tiled { .. }) | None => None,
-        };
-        let shown = |pane: &&Pane| full.is_none_or(|full| full == pane.terminal);
-        let drawn: Vec<(&Pane, Placed)> =
-            laid.panes().iter().filter(shown).map(|pane| (pane, self.placed(pane))).collect();
-        if full.is_some() {
-            assert_eq!(drawn.len(), 1, "a full view draws only the terminal it is full of");
-        }
-        drawn
+        self.laid().map_or_default(Laid::drawn)
     }
 
     fn focused_screen(&self) -> Option<(Rect, TerminalKey, &Screen)> {
-        let pane = self.laid()?.focused()?;
-        let inner = screen_rect(pane_rect(Rect::default(), self.placed(pane)));
+        let (_, placed) = self.laid()?.focused_at()?;
+        let inner = screen_rect(pane_rect(Rect::default(), placed));
         if inner.is_empty() {
             return None;
         }
@@ -729,13 +709,13 @@ mod tests {
         lunetad::api::TerminalKey::from(key(id))
     }
 
-    fn laid(panes: Vec<show_response::Pane>, focused: u64, full: Option<u64>) -> Laid {
+    fn laid(panes: Vec<show_response::Pane>, focused: u64, full: bool) -> Laid {
+        use show_response::laid::Shown as Said;
         Laid::heard(show_response::Laid {
             workstream: 1,
             size: Some(show_request::Size { columns: 20, rows: 4 }),
             panes,
-            focused: Some(focused),
-            full,
+            shown: Some(if full { Said::Full(focused) } else { Said::Tiled(focused) }),
         })
         .unwrap()
     }
@@ -751,7 +731,7 @@ mod tests {
             Tab { workstream: workstream(2), name: "two".to_owned() },
         ];
         view.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
-        assert!(!view.laid_out(laid(halves(), 11, None)));
+        assert!(!view.laid_out(laid(halves(), 11, false)));
         let cursor =
             Cursor { row: 1, column: 2, shape: attach::CursorShape::Block, blinking: false };
         view.framed(key(1), &whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
@@ -792,16 +772,25 @@ mod tests {
     }
 
     #[test]
+    fn a_view_of_the_workstream_left_is_not_drawn_in_the_one_gone_to() {
+        let mut view = split_view();
+        view.go(workstream(2));
+        assert!(view.drawn().is_empty() && view.wanted().is_empty() && view.screens.is_empty());
+        assert!(!view.laid_out(laid(halves(), 11, false)));
+        assert!(view.drawn().is_empty() && view.focused().is_none());
+    }
+
+    #[test]
     fn a_full_terminal_fills_the_view_and_a_lost_one_or_the_one_luneta_runs_in_says_so() {
         let mut view = split_view();
-        view.laid_out(laid(halves(), 12, Some(12)));
+        view.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
         view.draw(&mut buffer, Rect::new(0, 0, 20, 5));
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = View::new(workstream(1), Some(key(2)));
         let lost = vec![pane(11, (0, 0, 10, 4), None), pane(12, (10, 0, 10, 4), Some(2))];
-        here.laid_out(laid(lost, 11, None));
+        here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "luneta never shows the terminal it runs in");
         here.draw(&mut buffer, Rect::new(0, 0, 20, 5));
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
@@ -852,7 +841,7 @@ mod tests {
         let frame = Frame::new(NonZeroU32::MIN, size, changed, None, false).unwrap();
         let why = view.framed(key(1), &frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
-        view.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, None));
+        view.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(view.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
         view.framed(key(1), &whole(1, &["no"], None)).unwrap();
         assert!(!view.screens.contains_key(&key(1)), "a terminal its view lacks gets no screen");

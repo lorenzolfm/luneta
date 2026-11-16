@@ -862,8 +862,14 @@ fn laid(
         workstream: workstream.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         panes,
-        focused: focus.map(TerminalId::get),
-        full: view.full().map(TerminalId::get),
+        shown: match (view.full(), focus) {
+            (Some(full), _) => {
+                assert_eq!(focus, Some(full), "a client of a full view focuses its terminal");
+                Some(show_response::laid::Shown::Full(full.get()))
+            },
+            (None, Some(focus)) => Some(show_response::laid::Shown::Tiled(focus.get())),
+            (None, None) => None,
+        },
     };
     api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }
 }

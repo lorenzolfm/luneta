@@ -1121,11 +1121,14 @@ message ShowResponse {
   }
 
   message Laid {
+    reserved 4, 5;
     fixed64 workstream = 1;
     ShowRequest.Size size = 2;
     repeated Pane panes = 3;
-    optional fixed64 focused = 4;
-    optional fixed64 full = 5;
+    oneof shown {
+      fixed64 tiled = 6;
+      fixed64 full = 7;
+    }
   }
 
   message Pane {

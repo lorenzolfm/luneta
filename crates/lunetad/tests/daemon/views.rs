@@ -73,7 +73,7 @@ impl<'a> Shown<'a> {
         let laid = self.until("a terminal more", |laid| laid.panes.len() == before.len() + 1);
         let new = laid.panes.iter().find(|pane| !before.contains(&pane.terminal));
         let new = new.expect("the view holds a new terminal").terminal;
-        assert_eq!(laid.focused, Some(new), "a client focuses the terminal it opens");
+        assert_eq!(focused_of(&laid), Some(new), "a client focuses the terminal it opens");
         new
     }
 
@@ -129,6 +129,19 @@ impl<'a> Shown<'a> {
     }
 }
 
+fn focused_of(laid: &Laid) -> Option<u64> {
+    match laid.shown? {
+        show_response::laid::Shown::Tiled(it) | show_response::laid::Shown::Full(it) => Some(it),
+    }
+}
+
+fn full_of(laid: &Laid) -> Option<u64> {
+    match laid.shown? {
+        show_response::laid::Shown::Full(it) => Some(it),
+        show_response::laid::Shown::Tiled(_) => None,
+    }
+}
+
 fn key(pane: &Pane) -> Option<TerminalKey> {
     match &pane.found {
         Some(Found::Key(key)) => Some(*key),
@@ -181,7 +194,8 @@ fn a_view_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     let empty = shown.laid.clone().unwrap();
-    assert_eq!((empty.workstream, empty.panes.len(), empty.focused), (workstream, 0, None));
+    let laid = (empty.workstream, empty.panes.len(), focused_of(&empty));
+    assert_eq!(laid, (workstream, 0, None));
 
     let first = shown.open();
     let laid = shown.laid.clone().unwrap();
@@ -232,14 +246,14 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_view_s() {
     let left = one.open();
     let right = one.open();
     let mut other = Shown::new(&owned, workstream, 80, 24);
-    other.until("the view where the last client was", |laid| laid.focused == Some(right));
+    other.until("the view where the last client was", |laid| focused_of(laid) == Some(right));
     let towards_left = focus::To::Direction(show_request::Direction::Left.into());
     other.ask(Event::Focus(show_request::Focus { to: Some(towards_left) }));
-    other.until("the other client on the left", |laid| laid.focused == Some(left));
-    assert_eq!(one.laid.as_ref().unwrap().focused, Some(right));
+    other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
+    assert_eq!(one.laid.as_ref().and_then(focused_of), Some(right));
 
     one.ask(Event::Fullscreen(()));
-    let full = |laid: &Laid| laid.full == Some(right) && laid.focused == Some(right);
+    let full = |laid: &Laid| full_of(laid) == Some(right) && focused_of(laid) == Some(right);
     one.until("the right terminal fills the view", full);
     other.until("the other client on the full terminal", full);
     eventually("the full terminal takes the whole view", || {
@@ -248,8 +262,9 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_view_s() {
     });
 
     other.ask(Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(left)) }));
-    other.until("the view tiled again", |laid| laid.full.is_none() && laid.focused == Some(left));
-    one.until("the view tiled again", |laid| laid.full.is_none() && laid.focused == Some(right));
+    let tiled = |on| move |laid: &Laid| full_of(laid).is_none() && focused_of(laid) == Some(on);
+    other.until("the view tiled again", tiled(left));
+    one.until("the view tiled again", tiled(right));
     other.ask(Event::Go(workstream + 1));
     assert!(other.until_refused().contains("no workstream"), "a go to nowhere is refused");
 }
@@ -273,17 +288,18 @@ fn a_closed_terminal_leaves_the_mux_and_its_view_to_the_terminal_beside_it() {
     let laid = shown.until("two terminals left", |laid| laid.panes.len() == 2);
     let left: Vec<u64> = laid.panes.iter().map(|pane| pane.terminal).collect();
     assert_eq!(left, [first, second]);
-    assert_eq!(laid.focused, Some(first), "the terminal the closed one split takes the focus");
+    let took = "the terminal the closed one split takes the focus";
+    assert_eq!(focused_of(&laid), Some(first), "{took}");
     eventually("the closed terminal leaves the mux", || {
         tagged(&owned.listing(), third).is_none().then_some(())
     });
 
     closed_outside(&owned, &laid, second);
     let laid = shown.until("the terminal closed outside gone", |laid| laid.panes.len() == 1);
-    assert_eq!((laid.panes[0].terminal, laid.focused), (first, Some(first)));
+    assert_eq!((laid.panes[0].terminal, focused_of(&laid)), (first, Some(first)));
     closed_outside(&owned, &laid, first);
     let laid = shown.until("the view empty", |laid| laid.panes.is_empty());
-    assert_eq!(laid.focused, None);
+    assert_eq!(focused_of(&laid), None);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(!file.contains(r#""view""#), "an empty view is kept as no view: {file}");
 }
@@ -296,9 +312,9 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
     shown.open();
     shown.open();
     shown.ask(Event::Fullscreen(()));
-    let before = shown.until("the view full", |laid| laid.full.is_some());
+    let before = shown.until("the view full", |laid| full_of(laid).is_some());
     drop(shown);
-    let full = format!(r#""full": "{:016x}""#, before.full.unwrap());
+    let full = format!(r#""full": "{:016x}""#, full_of(&before).unwrap());
     eventually("the view full is kept within a sweep", || {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
@@ -348,7 +364,7 @@ fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     shown.open();
     let to = Some(show_request::focus::To::Terminal(first));
     shown.ask(Event::Focus(show_request::Focus { to }));
-    shown.until("the first terminal focused", |laid| laid.focused == Some(first));
+    shown.until("the first terminal focused", |laid| focused_of(laid) == Some(first));
     let new = shown.open_beside(open::Beside::Focused(()), &WAITS);
     let laid = shown.laid.clone().unwrap();
     let rect_of = |terminal| laid.panes.iter().find(|pane| pane.terminal == terminal).unwrap().rect;
@@ -393,9 +409,9 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let to = Some(r#move::To::Direction(towards_left));
     shown.ask(Event::Move(show_request::Move { to }));
     let laid = shown.until("the terminals traded", |laid| laid.panes[0].terminal == right);
-    assert_eq!((laid.panes[1].terminal, laid.focused), (left, Some(right)));
+    assert_eq!((laid.panes[1].terminal, focused_of(&laid)), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
-    shown.until("the view full", |laid| laid.full == Some(right));
+    shown.until("the view full", |laid| full_of(laid) == Some(right));
     shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
     assert!(shown.until_refused().contains("resized by none"));
     let to = Some(r#move::To::Direction(show_request::Direction::Right.into()));
@@ -549,10 +565,10 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
             panic!("the view is not laid out: {why}")
         },
     };
-    assert_eq!(laid().panes().len(), 0);
+    assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
     let opened = laid();
-    let pane = opened.panes()[0];
+    let pane = *opened.panes().next().expect("the view lays out the terminal opened");
     let key = pane.key().expect("lunetad says the key of a terminal it opened");
     assert_eq!(opened.focused(), Some(&pane));
 
@@ -611,7 +627,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
             panic!("the view is not laid out: {why}")
         },
     };
-    assert_eq!(laid().panes().len(), 0);
+    assert!(laid().is_empty());
     let ticking = ["sh", "-c", "while :; do date +%N; sleep 0.005; done"];
     let argv = ticking.iter().map(|word| (*word).to_owned()).collect();
     show.ask(Asked::Open { beside: Beside::Largest, argv });

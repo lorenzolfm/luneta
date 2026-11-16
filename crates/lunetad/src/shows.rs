@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::iter;
 use std::pin::pin;
 
 use tokio::runtime;
@@ -68,18 +69,18 @@ impl Pane {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Shown {
-    Tiled { focused: TerminalId },
-    Full(TerminalId),
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Showing {
+    focused: Pane,
+    others: Vec<Pane>,
+    full: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Laid {
     workstream: WorkstreamId,
     size: Size,
-    panes: Vec<Pane>,
-    shown: Option<Shown>,
+    shown: Option<Showing>,
 }
 
 impl Laid {
@@ -94,67 +95,74 @@ impl Laid {
     }
 
     #[must_use]
-    pub fn panes(&self) -> &[Pane] {
-        &self.panes
+    pub fn is_empty(&self) -> bool {
+        self.shown.is_none()
     }
 
-    #[must_use]
-    pub fn shown(&self) -> Option<Shown> {
-        self.shown
+    pub fn panes(&self) -> impl Iterator<Item = &Pane> {
+        self.shown.iter().flat_map(|shown| iter::once(&shown.focused).chain(&shown.others))
     }
 
     #[must_use]
     pub fn focused(&self) -> Option<&Pane> {
-        let focused = match self.shown? {
-            Shown::Tiled { focused } | Shown::Full(focused) => focused,
-        };
-        let pane = self.panes.iter().find(|pane| pane.terminal == focused);
-        Some(pane.expect("`heard` reads a view only if it lays out the terminal it focuses"))
+        self.shown.as_ref().map(|shown| &shown.focused)
     }
 
     #[must_use]
-    pub fn whole(&self) -> Rect {
+    pub fn full(&self) -> bool {
+        self.shown.as_ref().is_some_and(|shown| shown.full)
+    }
+
+    #[must_use]
+    pub fn focused_at(&self) -> Option<(&Pane, Rect)> {
+        let shown = self.shown.as_ref()?;
+        let rect = if shown.full { self.whole() } else { shown.focused.rect };
+        Some((&shown.focused, rect))
+    }
+
+    #[must_use]
+    pub fn drawn(&self) -> Vec<(&Pane, Rect)> {
+        match &self.shown {
+            Some(Showing { full: true, .. }) => self.focused_at().into_iter().collect(),
+            Some(Showing { full: false, .. }) | None => {
+                self.panes().map(|pane| (pane, pane.rect)).collect()
+            },
+        }
+    }
+
+    fn whole(&self) -> Rect {
         let (columns, rows) = self.size.get();
         Rect { column: 0, row: 0, columns, rows }
     }
 
     #[must_use]
     pub fn keys(&self) -> BTreeSet<TerminalKey> {
-        self.panes.iter().filter_map(Pane::key).collect()
+        self.panes().filter_map(Pane::key).collect()
     }
 
     pub fn heard(laid: show_response::Laid) -> Result<Laid, String> {
+        use show_response::laid::Shown as Said;
         let workstream = WorkstreamId::of(laid.workstream).ok_or("a view of workstream 0")?;
         let size = laid.size.ok_or("a view of no size")?;
         let size = Size::of(size.columns, size.rows).map_err(|why| format!("a view's {why}"))?;
         if laid.panes.len() > PANES_MAX {
             return Err(format!("a view of {} terminals, over {PANES_MAX}", laid.panes.len()));
         }
-        let panes = laid.panes.into_iter().map(pane).collect::<Result<Vec<Pane>, String>>()?;
-        let terminal = |id: Option<u64>, what: &str| -> Result<Option<TerminalId>, String> {
-            let Some(id) = id else {
-                return Ok(None);
-            };
-            let held = panes.iter().find(|pane| pane.terminal.get() == id);
-            let unheld = || format!("a view {what} terminal {id:016x}, which it does not lay out");
-            held.map(|pane| Some(pane.terminal)).ok_or_else(unheld)
-        };
-        let focused = terminal(laid.focused, "focuses")?;
-        let full = terminal(laid.full, "fills with")?;
-        let shown = match (focused, full) {
-            (None, None) if panes.is_empty() => None,
-            (None, _) => return Err("a view of terminals focuses none".to_owned()),
-            (Some(focused), None) => Some(Shown::Tiled { focused }),
-            (Some(focused), Some(full)) if focused == full && panes.len() > 1 => {
-                Some(Shown::Full(full))
-            },
-            (Some(_), Some(_)) if panes.len() == 1 => {
+        let mut others = laid.panes.into_iter().map(pane).collect::<Result<Vec<Pane>, String>>()?;
+        tiles(&others, size)?;
+        let (focused, full) = match laid.shown {
+            None if others.is_empty() => return Ok(Laid { workstream, size, shown: None }),
+            None => return Err("a view of terminals focuses none".to_owned()),
+            Some(Said::Tiled(focused)) => (focused, false),
+            Some(Said::Full(_)) if others.len() == 1 => {
                 return Err("a view of one terminal fills itself with it".to_owned());
             },
-            (Some(_), Some(_)) => return Err("a full view focuses another terminal".to_owned()),
+            Some(Said::Full(full)) => (full, true),
         };
-        tiles(&panes, size)?;
-        Ok(Laid { workstream, size, panes, shown })
+        let at = others.iter().position(|pane| pane.terminal.get() == focused);
+        let unheld = || format!("a view focuses terminal {focused:016x}, which it lays out not");
+        let focused = others.remove(at.ok_or_else(unheld)?);
+        Ok(Laid { workstream, size, shown: Some(Showing { focused, others, full }) })
     }
 }
 
@@ -364,6 +372,8 @@ fn refusal(status: &Status) -> String {
 
 #[cfg(test)]
 mod tests {
+    use show_response::laid::Shown as Said;
+
     use super::*;
 
     fn placed(terminal: u64, rect: (u32, u32, u32, u32), key: Option<u32>) -> show_response::Pane {
@@ -383,18 +393,21 @@ mod tests {
         }
     }
 
-    fn laid(
-        panes: Vec<show_response::Pane>,
-        focused: Option<u64>,
-        full: Option<u64>,
-    ) -> show_response::Laid {
+    fn laid(panes: Vec<show_response::Pane>, shown: Option<Said>) -> show_response::Laid {
         show_response::Laid {
             workstream: 9,
             size: Some(show_request::Size { columns: 80, rows: 24 }),
             panes,
-            focused,
-            full,
+            shown,
         }
+    }
+
+    fn tiled(terminal: u64) -> Option<Said> {
+        Some(Said::Tiled(terminal))
+    }
+
+    fn full(terminal: u64) -> Option<Said> {
+        Some(Said::Full(terminal))
     }
 
     fn halves() -> Vec<show_response::Pane> {
@@ -403,16 +416,21 @@ mod tests {
 
     #[test]
     fn a_view_reads_where_its_terminals_tile_it_and_one_is_focused() {
-        let read = Laid::heard(laid(halves(), Some(2), None)).unwrap();
-        let terminals: Vec<u64> = read.panes().iter().map(|pane| pane.terminal.get()).collect();
-        assert_eq!(terminals, [1, 2]);
-        assert_eq!(read.focused().map(|pane| pane.terminal.get()), Some(2));
+        let read = Laid::heard(laid(halves(), tiled(2))).unwrap();
+        let terminals: Vec<u64> = read.panes().map(|pane| pane.terminal.get()).collect();
+        assert_eq!(terminals, [2, 1], "the focused terminal first");
+        let focused = read.focused().map(|pane| (pane.terminal.get(), pane.found));
+        assert_eq!(focused, Some((2, Found::Lost)));
         assert_eq!(read.keys().len(), 1);
-        assert_eq!(read.panes()[1].found, Found::Lost);
-        let full = Laid::heard(laid(halves(), Some(1), Some(1))).unwrap();
-        assert_eq!(full.shown(), Some(Shown::Full(full.panes()[0].terminal)));
-        let empty = Laid::heard(laid(Vec::new(), None, None)).unwrap();
-        assert_eq!((empty.panes().len(), empty.shown()), (0, None));
+        let drawn: Vec<(u64, u16)> =
+            read.drawn().iter().map(|(pane, rect)| (pane.terminal.get(), rect.columns)).collect();
+        assert_eq!((read.full(), drawn), (false, vec![(2, 40), (1, 40)]));
+        let full = Laid::heard(laid(halves(), full(1))).unwrap();
+        let drawn: Vec<(u64, u16)> =
+            full.drawn().iter().map(|(pane, rect)| (pane.terminal.get(), rect.columns)).collect();
+        assert_eq!((full.full(), drawn), (true, vec![(1, 80)]));
+        let empty = Laid::heard(laid(Vec::new(), None)).unwrap();
+        assert!(empty.is_empty() && empty.focused().is_none() && empty.drawn().is_empty());
     }
 
     #[test]
@@ -439,20 +457,20 @@ mod tests {
         let unframed = vec![placed(1, (0, 0, 2, 24), None), placed(2, (2, 0, 78, 24), None)];
         let one = vec![placed(1, (0, 0, 80, 24), None)];
         for refused in [
-            laid(gap, Some(1), None),
-            laid(over, Some(1), None),
-            laid(off, Some(1), None),
-            laid(twice, Some(1), None),
-            laid(shared, Some(1), None),
-            laid(one_id, Some(1), None),
-            laid(unframed, Some(1), None),
-            laid(halves(), None, None),
-            laid(halves(), Some(3), None),
-            laid(halves(), Some(1), Some(2)),
-            laid(one, Some(1), Some(1)),
-            laid(Vec::new(), Some(1), None),
-            show_response::Laid { workstream: 0, ..laid(halves(), Some(1), None) },
-            show_response::Laid { size: None, ..laid(halves(), Some(1), None) },
+            laid(gap, tiled(1)),
+            laid(over, tiled(1)),
+            laid(off, tiled(1)),
+            laid(twice, tiled(1)),
+            laid(shared, tiled(1)),
+            laid(one_id, tiled(1)),
+            laid(unframed, tiled(1)),
+            laid(halves(), None),
+            laid(halves(), tiled(3)),
+            laid(halves(), full(3)),
+            laid(one, full(1)),
+            laid(Vec::new(), tiled(1)),
+            show_response::Laid { workstream: 0, ..laid(halves(), tiled(1)) },
+            show_response::Laid { size: None, ..laid(halves(), tiled(1)) },
         ] {
             assert!(Laid::heard(refused.clone()).is_err(), "{refused:?}");
         }
