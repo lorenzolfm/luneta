@@ -64,10 +64,7 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
 pub fn opening_of(open: &Open, whose: Whose) -> Result<Opened, String> {
     match whose {
         Whose::Zellij(_) => opened(open),
-        Whose::Own(_) => Err(format!(
-            "\"{}\" is no session luneta-mux holds, as it holds terminals alone",
-            open.session()
-        )),
+        Whose::Own(_) => Err(closes::no_own(open.session())),
     }
 }
 

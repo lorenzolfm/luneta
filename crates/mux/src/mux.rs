@@ -106,7 +106,7 @@ impl Mux {
             model.refuse_if_ended()?;
             refuse_if_full(model.terminals.len(), TERMINALS_MAX, "terminals")?;
             let id = TerminalId::next(&mut model.last.terminal);
-            assert!(model.place(id).is_none(), "terminal {id} is new");
+            assert!(model.index_of(id).is_none(), "terminal {id} is new");
             let key = TerminalKey { id, made: SystemTime::now() };
             let terminal = spawned(self, key, tag, opens, size)?;
             model.terminals.push(terminal);
@@ -193,7 +193,7 @@ impl Mux {
 
     pub fn titled(&self, terminal: TerminalId, title: String, cwd: Option<String>) {
         self.change(|model| {
-            if let Some(found) = model.of_id_mut(terminal) {
+            if let Some(found) = model.terminal_of_id_mut(terminal) {
                 found.title = title;
                 if let Some(cwd) = cwd {
                     found.cwd = cwd;
@@ -209,7 +209,7 @@ impl Mux {
         ran: Option<api::Ran>,
     ) {
         self.change(|model| {
-            let found = model.of_id_mut(terminal).map(|found| &mut found.program);
+            let found = model.terminal_of_id_mut(terminal).map(|found| &mut found.program);
             if let Some(Program::Runs { foreground: was, ran: said, .. }) = found {
                 (*was, *said) = (foreground, ran);
             }
@@ -218,7 +218,7 @@ impl Mux {
 
     pub fn ended(&self, terminal: TerminalId, exit: Exit) -> bool {
         self.change(|model| {
-            let Some(found) = model.of_id_mut(terminal) else {
+            let Some(found) = model.terminal_of_id_mut(terminal) else {
                 return true;
             };
             if let Program::Runs { ends: Ends::Closes, .. } = found.program {
@@ -246,11 +246,11 @@ impl Model {
         }
     }
 
-    fn place(&self, terminal: TerminalId) -> Option<usize> {
+    fn index_of(&self, terminal: TerminalId) -> Option<usize> {
         self.terminals.iter().position(|found| found.key.id == terminal)
     }
 
-    fn of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
+    fn terminal_of_id_mut(&mut self, terminal: TerminalId) -> Option<&mut Terminal> {
         self.terminals.iter_mut().find(|found| found.key.id == terminal)
     }
 
@@ -302,10 +302,10 @@ impl Model {
     }
 
     fn close(&mut self, terminal: TerminalId) {
-        let Some(place) = self.place(terminal) else {
+        let Some(index) = self.index_of(terminal) else {
             return;
         };
-        let closed = self.terminals.remove(place);
+        let closed = self.terminals.remove(index);
         closed.handle.close();
         for viewing in self.viewing.values_mut() {
             viewing.shows.remove(&closed.key);

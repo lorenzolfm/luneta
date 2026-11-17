@@ -197,7 +197,7 @@ pub struct Started {
 
 pub fn start(
     mux: Arc<Mux>,
-    pane: TerminalId,
+    terminal: TerminalId,
     pty: Pty,
     mut child: Child,
     size: Size,
@@ -213,21 +213,21 @@ pub fn start(
     let wanted = Arc::new(wanted);
     let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
     let pid = child.id();
-    thread::Builder::new().name(format!("pane {pane} waits")).spawn(move || {
-        waits(pane, &mut child, &exited, &wake);
+    thread::Builder::new().name(format!("terminal {terminal} waits")).spawn(move || {
+        waits(terminal, &mut child, &exited, &wake);
     })?;
-    thread::Builder::new().name(format!("pane {pane}")).spawn(move || {
+    thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
-                eprintln!("luneta-mux: pane {pane}'s screen could not be made: {error}");
+                eprintln!("luneta-mux: terminal {terminal}'s screen could not be made: {error}");
                 drop(pty);
-                mux.lost(pane);
+                mux.lost(terminal);
                 return;
             },
         };
         let mut thread = Thread {
-            pane,
+            terminal,
             mux,
             inbox,
             wants,
@@ -255,15 +255,15 @@ pub fn start(
             Err(_) => Some("it panicked".to_owned()),
         };
         if let Some(failed) = failed {
-            eprintln!("luneta-mux: pane {pane} failed: {failed}");
+            eprintln!("luneta-mux: terminal {terminal} failed: {failed}");
             thread.program = Program::Gone;
-            thread.mux.lost(pane);
+            thread.mux.lost(terminal);
         }
     })?;
     Ok(Started { handle, pid })
 }
 
-fn waits(pane: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
+fn waits(terminal: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
     match child.wait() {
         Ok(status) => {
             if exited.try_send(Exit::of(status)).is_ok() {
@@ -271,7 +271,7 @@ fn waits(pane: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &
             }
         },
         Err(error) => {
-            eprintln!("luneta-mux: pane {pane}'s program could not be waited for: {error}");
+            eprintln!("luneta-mux: terminal {terminal}'s program could not be waited for: {error}");
         },
     }
 }
@@ -306,7 +306,7 @@ impl Program {
 }
 
 struct Thread {
-    pane: TerminalId,
+    terminal: TerminalId,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
     wants: watch::Receiver<Wanted>,
@@ -436,7 +436,7 @@ impl Thread {
         let told = Told { foreground, ran: self.shell.said() };
         if told != self.told {
             self.told = told.clone();
-            self.mux.looked(self.pane, told.foreground, told.ran);
+            self.mux.looked(self.terminal, told.foreground, told.ran);
         }
     }
 
@@ -557,7 +557,7 @@ impl Thread {
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.pane, exit))
+        Ok(self.mux.ended(self.terminal, exit))
     }
 
     fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
@@ -624,8 +624,8 @@ impl Thread {
             unread.extend_from_slice(bytes);
         } else {
             eprintln!(
-                "luneta-mux: pane {} has {} unread bytes: input dropped",
-                self.pane,
+                "luneta-mux: terminal {} has {} unread bytes: input dropped",
+                self.terminal,
                 unread.len()
             );
         }
@@ -704,7 +704,7 @@ impl Thread {
             let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
             self.title.clone_from(&title);
             self.pwd = pwd;
-            self.mux.titled(self.pane, title, cwd);
+            self.mux.titled(self.terminal, title, cwd);
         }
         Ok(())
     }
@@ -779,7 +779,7 @@ impl Thread {
                 continue;
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
-            let said = frame::said(self.pane, view, before, flags);
+            let said = frame::said(self.terminal, view, before, flags);
             match sent(&watcher.viewer.frames, said) {
                 Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });

@@ -163,7 +163,7 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
     closed_as_listed(Mux::Zellij(session), close)
 }
 
-fn no_own(session: &SessionName) -> String {
+pub(crate) fn no_own(session: &SessionName) -> String {
     format!("\"{session}\" is no session luneta-mux holds, as it holds terminals alone")
 }
 
