@@ -196,7 +196,7 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Followed {
-    Unreached,
+    Unreached { at: Instant },
     Emptied { since: Instant },
     LetGo,
 }
@@ -204,8 +204,9 @@ pub enum Followed {
 pub fn followed(
     mut told: impl FnMut(Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
+    let at = Instant::now();
     let Ok(server) = Server::reached_on(runtime()?, None)? else {
-        return Ok(Followed::Unreached);
+        return Ok(Followed::Unreached { at });
     };
     let since = Instant::now();
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });

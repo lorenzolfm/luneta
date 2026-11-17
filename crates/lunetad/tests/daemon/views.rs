@@ -26,6 +26,8 @@ const HEARD_IN: Duration = Duration::from_secs(10);
 
 const RESTORE_PAUSE: Duration = Duration::from_secs(10);
 
+const RESTORE_ATTEMPTS_MAX: u32 = 3;
+
 struct Shown<'a> {
     owned: &'a Owned,
     asks: mpsc::Sender<ShowRequest>,
@@ -543,6 +545,30 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     for trouble in ["panicked", "not typed", "not restored"] {
         assert!(!log.contains(trouble), "{log}");
     }
+}
+
+#[test]
+fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 607");
+    let mut crashed = Instant::now();
+    restored_after_kill(&owned, &mut shown);
+    for _ in 1..RESTORE_ATTEMPTS_MAX {
+        thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
+        crashed = Instant::now();
+        restored_after_kill(&owned, &mut shown);
+    }
+    owned.kill_mux();
+    shown.until("the terminal left lost", |laid| lost(&laid.panes[0]));
+    eventually("the terminal is given up", || {
+        logged(&owned).contains("given up after 3 attempts").then_some(())
+    });
+    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()) + Duration::from_secs(3));
+    let unrun = std::os::unix::net::UnixStream::connect(owned.socket()).is_err();
+    assert!(unrun, "no luneta-mux is started again for a terminal given up");
+    assert!(lost(&shown.until("the terminal still lost", |_| true).panes[0]));
 }
 
 #[test]
