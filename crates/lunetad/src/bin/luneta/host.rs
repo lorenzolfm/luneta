@@ -1484,7 +1484,9 @@ impl App {
             },
             Asked::StartOwn { starts } => {
                 match lunetad::names::free_at(starts) {
-                    Ok((name, _, dir)) => self.make_workstream(Some(name), dir),
+                    Ok((name, _, dir)) => self.make_workstream(dir, move |lunetad, cwd| {
+                        workstreams::here(lunetad, cwd, Some(name.as_str()))
+                    }),
                     Err(why) => self.sidebar.notify(format!("menu: no workstream made: {why}")),
                 }
                 self.leave();
@@ -1632,7 +1634,9 @@ impl App {
             },
             Picked::Start { on: Machine::Local, session } => {
                 match Directory::parse(self.dir.to_string_lossy().into_owned()) {
-                    Ok(cwd) => self.make_workstream(Some(session), cwd),
+                    Ok(cwd) => self.make_workstream(cwd, move |lunetad, cwd| {
+                        workstreams::start(lunetad, Some(session.as_str()), cwd, |_| None)
+                    }),
                     Err(why) => self.sidebar.notify(format!("no workstream made: {why}")),
                 }
                 self.give(Focus::on(self.focus.side.session()));
@@ -1645,7 +1649,9 @@ impl App {
                 self.sidebar.notify(format!("picker: zellij keeps {session}: {}", menu::OWN_ONLY));
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
-                self.make_workstream(Some(session), cwd);
+                self.make_workstream(cwd, move |lunetad, cwd| {
+                    workstreams::here(lunetad, cwd, Some(session.as_str()))
+                });
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Plan { on, session, deletes } => {
@@ -1935,17 +1941,17 @@ impl App {
         self.seat();
     }
 
-    fn make_workstream(&mut self, name: Option<SessionName>, cwd: Directory) {
+    fn make_workstream(
+        &mut self,
+        cwd: Directory,
+        made: impl FnOnce(&Path, &Path) -> Result<WorkstreamId, String> + Send + 'static,
+    ) {
         if self.refuse_naming(None) {
             return;
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| {
-                let named = name.as_ref().map(SessionName::as_str);
-                let cwd = workstreams::real(Path::new(cwd.as_str()));
-                workstreams::start(&lunetad, named, &cwd, |_| None)
-            });
+            let made = caught(|| made(&lunetad, &workstreams::real(Path::new(cwd.as_str()))));
             let made = made.map_err(|why| format!("no workstream made: {why}"));
             Made::Workstream { made, argv: Vec::new() }
         });

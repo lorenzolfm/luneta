@@ -118,6 +118,10 @@ fn holds(dir: &str, folder: &Path) -> bool {
     folder.starts_with(dir)
 }
 
+fn holding(projects: &[Project], cwd: &Path) -> Option<ProjectId> {
+    projects.iter().find(|project| holds(&project.dir, cwd)).map(|project| project.id)
+}
+
 fn first_of(path: &Path, project: &Project) -> Result<WorkstreamId, String> {
     match project.workstreams.first() {
         Some(first) => Ok(first.id),
@@ -188,12 +192,26 @@ pub fn start(
     first_of(path, projects.iter().max_by_key(last).ok_or(unmade)?)
 }
 
+pub fn here(path: &Path, cwd: &Path, name: Option<&str>) -> Result<WorkstreamId, String> {
+    let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    if let Some(id) = holding(&kept(path)?, cwd) {
+        return workstream_at(path, id, folder);
+    }
+    match add_project(path, folder, name) {
+        Ok(made) => workstream_at(path, made, folder),
+        Err(Unmade::Failed(why)) => Err(why),
+        Err(Unmade::Nests(why)) => match holding(&kept(path)?, cwd) {
+            Some(id) => workstream_at(path, id, folder),
+            None => Err(why),
+        },
+    }
+}
+
 pub fn pulled(path: &Path, project: &str, cwd: &Path, name: &str) -> Result<WorkstreamId, String> {
     let projects = kept(path)?;
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
-    let holding = projects.iter().find(|it| holds(&it.dir, cwd));
-    let id = match holding {
-        Some(holding) => holding.id,
+    let id = match holding(&projects, cwd) {
+        Some(id) => id,
         None => add_project(path, folder, Some(project)).map_err(Unmade::said)?,
     };
     add_workstream(path, id, folder, Some(name))

@@ -257,6 +257,38 @@ fn a_bare_luneta_in_a_project_shows_the_workstream_of_its_folder() {
 }
 
 #[test]
+fn a_new_session_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_project() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let dir = directory("work");
+    let feat = dir.path.join("feat");
+    fs::create_dir(&feat).unwrap();
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send("cd feat\r");
+    let mut asked: Option<Instant> = None;
+    eventually("n s shows the workstream of feat", || {
+        if asked.is_none_or(|asked| asked.elapsed() >= Duration::from_secs(1)) {
+            window.send("\x1b[97;3uns");
+            asked = Some(Instant::now());
+        }
+        shown(&owned, &feat)
+    });
+    let projects = projects_of(&owned);
+    let folders: Vec<(&str, Vec<&str>)> = projects
+        .iter()
+        .map(|project| {
+            let folders = project.workstreams.iter().map(|it| it.folder.as_str()).collect();
+            (project.name.as_str(), folders)
+        })
+        .collect();
+    assert_eq!(folders, [("work", vec![real(&dir.path).as_str(), real(&feat).as_str()])]);
+}
+
+#[test]
 fn a_named_luneta_shows_the_project_of_that_name_wherever_it_starts() {
     if !makes_shells() {
         return;
