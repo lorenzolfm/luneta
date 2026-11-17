@@ -6,7 +6,7 @@ use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
-use lunetad::mux::own::attach::{Line, Rows, Shows};
+use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{view, Greeting, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorkstreamId};
 use lunetad::{Asked, Beside, Heard};
@@ -337,6 +337,9 @@ fn a_closed_terminal_leaves_the_mux_and_its_view_to_the_terminal_beside_it() {
     assert_eq!(focused_of(&laid), None);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(!file.contains(r#""view""#), "an empty view is kept as no view: {file}");
+    let again = shown.open();
+    let made = "the mux that ended with its last terminal gives way to the next";
+    assert!(tagged(&owned.listing(), again).is_some(), "{made}");
 }
 
 #[test]
@@ -554,6 +557,32 @@ fn a_workstream_lists_its_view_s_terminals_on_watch_in_their_order() {
 }
 
 #[test]
+fn a_terminal_s_shell_marks_say_what_it_ran_on_watch() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let mark = "m() { printf '\\033]133;%s\\007' \"$1\"; }";
+    let said = format!("{mark}; m A; m 'C;cmdline_url=make%20test'; m 'D;3'; m A; exec sleep 600");
+    let unsaid = format!("{mark}; m A; m C; m 'D;4'; m A; exec sleep 604");
+    shown.open_running(&["sh", "-c", &said]);
+    shown.open_running(&["sh", "-c", &unsaid]);
+    let ended = |terminal: &Terminal| match terminal.shell.as_ref()?.doing.as_ref()? {
+        lunetad::api::shell::Doing::Ended(ended) => Some(ended.clone()),
+        _ => None,
+    };
+    let told = eventually("the shells say their commands ended", || {
+        let terminals = watched(&owned, workstream);
+        let ended: Option<Vec<_>> = terminals.iter().map(ended).collect();
+        ended.filter(|ended| ended.len() == 2)
+    });
+    let status = lunetad::api::shell::ended::Ending::Status;
+    assert_eq!(told[0].command.as_deref(), Some("make test"));
+    assert_eq!((told[0].ending, told[1].ending), (Some(status(3)), Some(status(4))));
+    assert!(told[0].at.is_some() && told[0].took.is_some(), "{told:?}");
+    assert_eq!(told[1].command, None, "a shell that marks no line names no command");
+}
+
+#[test]
 fn an_agent_in_a_view_s_terminal_is_there_by_the_terminal_s_key() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);
@@ -575,7 +604,7 @@ fn an_agent_in_a_view_s_terminal_is_there_by_the_terminal_s_key() {
 }
 
 fn text_of(lines: &[Line]) -> Vec<String> {
-    let shown = |glyph: &lunetad::mux::own::attach::Glyph| match &glyph.shows {
+    let shown = |glyph: &lunetad::mux::own::frames::Glyph| match &glyph.shows {
         Shows::Blank => " ".to_owned(),
         Shows::Narrow(grapheme) | Shows::Wide(grapheme) => grapheme.as_str().to_owned(),
     };

@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::closes::running_in;
-use crate::mux::own::server;
 use crate::mux::{SessionName, Zellij};
 use crate::Directory;
 
@@ -44,8 +43,6 @@ pub fn named() -> Result<Vec<SessionName>, String> {
     let mut named: Vec<SessionName> = running.into_iter().map(|(name, _)| name).collect();
     let unknown = |why| format!("luneta cannot tell which sessions zellij keeps: {why}");
     named.extend(Zellij::kept().map_err(unknown)?);
-    let own = server::names()?.into_iter().filter_map(|name| SessionName::running(&name).ok());
-    named.extend(own);
     Ok(named)
 }
 
@@ -93,7 +90,6 @@ fn home() -> Result<Directory, String> {
 pub enum Holder {
     Zellij,
     Kept,
-    Own,
 }
 
 #[derive(Debug)]
@@ -109,7 +105,6 @@ impl fmt::Display for Unusable {
             Unusable::Taken(to, Holder::Kept) => {
                 write!(f, "zellij keeps {to}, which ended, to bring back")
             },
-            Unusable::Taken(to, Holder::Own) => write!(f, "{to} runs already, as an own session"),
             Unusable::Unknown(why) => f.write_str(why),
         }
     }
@@ -122,15 +117,6 @@ impl From<Unusable> for String {
 }
 
 pub fn unused(to: &SessionName) -> Result<SystemTime, Unusable> {
-    let since = unused_by_zellij(to)?;
-    let named = server::named(to).map_err(|failure| Unusable::Unknown(failure.to_string()))?;
-    if named.is_some() {
-        return Err(Unusable::Taken(to.clone(), Holder::Own));
-    }
-    Ok(since)
-}
-
-pub fn unused_by_zellij(to: &SessionName) -> Result<SystemTime, Unusable> {
     let since = SystemTime::now();
     let running = running_in(&Zellij::socket_folder()).map_err(Unusable::Unknown)?;
     if running.iter().any(|(name, _)| name == to) {

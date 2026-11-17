@@ -3,8 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::{close_request, closes_response, kill_request, CloseRequest, On};
-use crate::mux::own;
-use crate::mux::{tabs, Asks, Called, Laid, Mux, OwnKey, PaneId, SessionName, SocketFolder, TabId};
+use crate::mux::{tabs, Asks, Laid, Mux, OwnKey, PaneId, SessionName, SocketFolder, TabId};
 use crate::mux::Zellij;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,7 +14,7 @@ pub enum Closes {
 }
 
 pub fn closes_now(session: &SessionName, pane: u32) -> Result<Closes, String> {
-    closing(&Called::named(session)?.mux().laid()?, pane)
+    closing(&Mux::Zellij(session).laid()?, pane)
 }
 
 pub(crate) fn closing(laid: &[Laid], pane: u32) -> Result<Closes, String> {
@@ -34,7 +33,7 @@ pub enum Closing {
 }
 
 pub fn closes_together(session: &SessionName, panes: &BTreeSet<u32>) -> Result<Closing, String> {
-    together(&Called::named(session)?.mux().laid()?, panes)
+    together(&Mux::Zellij(session).laid()?, panes)
 }
 
 fn together(laid: &[Laid], panes: &BTreeSet<u32>) -> Result<Closing, String> {
@@ -106,14 +105,14 @@ impl Whose {
     pub fn closed(self, session: &SessionName, close: &Close) -> Result<(), String> {
         match self {
             Whose::Zellij(started) => closed(session, started, close),
-            Whose::Own(key) => closed_own(session, key, close),
+            Whose::Own(_) => Err(no_own(session)),
         }
     }
 
     pub fn killed(self, session: &SessionName) -> Result<(), String> {
         match self {
             Whose::Zellij(started) => killed(session, started),
-            Whose::Own(key) => killed_own(session, key),
+            Whose::Own(_) => Err(no_own(session)),
         }
     }
 }
@@ -164,16 +163,8 @@ pub fn closed(session: &SessionName, started: SystemTime, close: &Close) -> Resu
     closed_as_listed(Mux::Zellij(session), close)
 }
 
-pub fn closed_own(session: &SessionName, key: OwnKey, close: &Close) -> Result<(), String> {
-    closed_as_listed(Mux::Own(&same_own(session, key)?), close)
-}
-
-pub(crate) fn same_own(session: &SessionName, key: OwnKey) -> Result<own::server::Own, String> {
-    match own::server::named(session)? {
-        Some(named) if named.key() == key => Ok(named),
-        Some(_) => Err(format!("\"{session}\" is a session made since, which stays")),
-        None => Err(format!("\"{session}\" is no own session that runs")),
-    }
+fn no_own(session: &SessionName) -> String {
+    format!("\"{session}\" is no session luneta-mux holds, as it holds terminals alone")
 }
 
 pub(crate) fn same_session(session: &SessionName, started: SystemTime) -> Result<(), String> {
@@ -247,10 +238,6 @@ fn settled(
         return deleted(session);
     }
     Ok(())
-}
-
-pub fn killed_own(session: &SessionName, key: OwnKey) -> Result<(), String> {
-    Ok(Mux::Own(&same_own(session, key)?).session_killed()?)
 }
 
 pub fn running_in(folder: &SocketFolder) -> Result<Vec<(SessionName, SystemTime)>, String> {

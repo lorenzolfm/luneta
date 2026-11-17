@@ -20,32 +20,14 @@ use crate::projects::{Dir, Name, Project, Projects, Seen, Stage, TerminalId, Wor
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
-use crate::log;
 use crate::transcripts::SessionId;
-use crate::mux::{Client, Id, Listed, OwnId, OwnKey, OwnMade, SessionName, Sessions, Socket};
+use crate::mux::{Client, Id, Listed, SessionName, Sessions, Socket};
 use crate::mux::TerminalKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
     pub id: Id,
     pub name: SessionName,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Own {
-    pub id: OwnId,
-    pub made: OwnMade,
-    pub name: SessionName,
-    pub panes: Vec<Pane>,
-    pub clients: Listed,
-    pub doings: BTreeMap<u32, Doing>,
-}
-
-impl Own {
-    #[must_use]
-    pub fn key(&self) -> OwnKey {
-        OwnKey { id: self.id, made: self.made }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +55,6 @@ pub enum Command {
     Sockets { sockets: Vec<Socket>, unread: u32 },
     Panes { asked: Asked, panes: Vec<Pane> },
     Clients { asked: Asked, clients: Listed },
-    Owns(Vec<Own>),
     Terminals(BTreeMap<TerminalId, Located>),
     WorkTree { dir: String, tree: WorkTree },
     PullRequests(BTreeMap<String, Found>),
@@ -132,9 +113,7 @@ struct Known {
     pi: Vec<Agent>,
     sessions: Sessions,
     unread_sockets: u32,
-    owns: Vec<Own>,
     terminals: BTreeMap<TerminalId, Located>,
-    shared: BTreeSet<SessionName>,
     panes: HashMap<Id, Vec<Pane>>,
     clients: HashMap<Id, Listed>,
     trees: BTreeMap<String, WorkTree>,
@@ -159,9 +138,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         pi: Vec::new(),
         sessions: Sessions::default(),
         unread_sockets: 0,
-        owns: Vec::new(),
         terminals: BTreeMap::new(),
-        shared: BTreeSet::new(),
         panes: HashMap::new(),
         clients: HashMap::new(),
         trees: BTreeMap::new(),
@@ -197,7 +174,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 if known.saw(sockets) {
                     wake(&wakes.panes);
                 }
-                known.say_shared();
             },
             Command::Panes { asked, panes } => {
                 if !known.answers(&asked) {
@@ -212,12 +188,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     continue;
                 }
                 known.clients.insert(asked.id, clients);
-            },
-            Command::Owns(now) => {
-                if known.owned(now) {
-                    wake(&wakes.git);
-                }
-                known.say_shared();
             },
             Command::Terminals(now) => {
                 let before = known.dirs();
@@ -267,11 +237,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 *was = reached;
             },
             Command::Say { said, at, answer } => {
-                let owns = &known.owns;
-                let own_named = |key: OwnKey| {
-                    owns.iter().find(|own| own.key() == key).map(|own| own.name.to_string())
-                };
-                let taken = known.sayings.take(said, &known.sessions, at, own_named);
+                let taken = known.sayings.take(said, &known.sessions, at);
                 let _ = answer.send(taken);
             },
             Command::Sessions(answer) => {
@@ -321,28 +287,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Row<'a> {
-    Zellij(Id, &'a SessionName),
-    Own(&'a Own),
-}
-
-impl<'a> Row<'a> {
-    fn name(self) -> &'a SessionName {
-        match self {
-            Row::Zellij(_, name) => name,
-            Row::Own(own) => &own.name,
-        }
-    }
-
-    fn ranked(self) -> (&'a SessionName, Option<OwnId>, Option<SystemTime>) {
-        match self {
-            Row::Zellij(id, name) => (name, None, Some(id.started())),
-            Row::Own(own) => (&own.name, Some(own.id), None),
-        }
-    }
-}
-
 fn wake(thread: &SyncSender<()>) {
     match thread.try_send(()) {
         Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
@@ -373,35 +317,6 @@ impl Known {
             self.say(*session);
         }
         !came.is_empty()
-    }
-
-    fn owned(&mut self, now: Vec<Own>) -> bool {
-        let ids: HashSet<OwnId> = now.iter().map(|own| own.id).collect();
-        assert_eq!(ids.len(), now.len(), "an own session's id comes twice");
-        let names: HashSet<&SessionName> = now.iter().map(|own| &own.name).collect();
-        assert_eq!(names.len(), now.len(), "an own session's name comes twice");
-        for own in &now {
-            let ids: HashSet<u32> = own.panes.iter().map(|pane| pane.id).collect();
-            assert_eq!(ids.len(), own.panes.len(), "a pane's id comes twice");
-        }
-        let before = self.dirs();
-        self.owns = now;
-        !self.dirs().is_subset(&before)
-    }
-
-    fn say_shared(&mut self) {
-        let zellij: BTreeSet<&SessionName> =
-            self.sessions.running().map(|(_, name)| name).collect();
-        let shared: BTreeSet<SessionName> = self
-            .owns
-            .iter()
-            .filter(|own| zellij.contains(&own.name))
-            .map(|own| own.name.clone())
-            .collect();
-        for name in shared.difference(&self.shared) {
-            log::say(&format!("a zellij session and an own one are both named {name}"));
-        }
-        self.shared = shared;
     }
 
     fn heard(&mut self, now: Vec<Shell>) -> bool {
@@ -455,8 +370,7 @@ impl Known {
     }
 
     fn dirs(&self) -> BTreeSet<String> {
-        let owns = self.owns.iter().flat_map(|own| &own.panes);
-        let cwds = self.panes.values().flatten().chain(owns).filter_map(|pane| pane.cwd.as_ref());
+        let cwds = self.panes.values().flatten().filter_map(|pane| pane.cwd.as_ref());
         let cwds = cwds.map(|cwd| cwd.as_str().to_owned());
         let listed = self.terminals.values().filter_map(|found| match found {
             Located::Shown(Shown { listed: Some(listed), .. }) => Dir::parse(&listed.cwd).ok(),
@@ -663,45 +577,28 @@ impl Known {
     }
 
     fn built_sessions(&self) -> Vec<api::Session> {
-        let zellij = self.sessions.running().map(|(id, name)| Row::Zellij(id, name));
-        let mut running: Vec<Row> = zellij.chain(self.owns.iter().map(Row::Own)).collect();
-        running.sort_unstable_by_key(|row| row.ranked());
+        let mut running: Vec<(Id, &SessionName)> = self.sessions.running().collect();
+        running.sort_unstable_by_key(|(id, name)| (*name, id.started()));
         let shells = self.shells();
         let zellij_panes = |id: Id, panes: &[Pane]| {
             let doing = |pane: &Pane| shells.get(&(id, pane.id)).map(|shell| &shell.doing);
             api::Panes { panes: panes.iter().map(|pane| pane.to_api(doing(pane))).collect() }
-        };
-        let own_panes = |own: &Own| api::Panes {
-            panes: own.panes.iter().map(|pane| pane.to_api(own.doings.get(&pane.id))).collect(),
         };
         let clients_of = |clients: &Listed| api::Clients {
             clients: clients.iter().copied().map(Client::to_api).collect(),
         };
         running
             .into_iter()
-            .map(|row| {
-                let name = row.name().to_string();
-                match row {
-                    Row::Zellij(id, _) => {
-                        let started_at = Some(id.started().into());
-                        let zellij = api::ZellijSession { started_at, socket: id.socket() };
-                        api::Session {
-                            name,
-                            started_at: zellij.started_at,
-                            socket: zellij.socket,
-                            panes: self.panes.get(&id).map(|panes| zellij_panes(id, panes)),
-                            clients: self.clients.get(&id).map(clients_of),
-                            mux: Some(api::session::Mux::Zellij(zellij)),
-                        }
-                    },
-                    Row::Own(own) => api::Session {
-                        name,
-                        started_at: None,
-                        socket: 0,
-                        panes: Some(own_panes(own)),
-                        clients: Some(clients_of(&own.clients)),
-                        mux: Some(api::session::Mux::Own(own.key().into())),
-                    },
+            .map(|(id, name)| {
+                let started_at = Some(id.started().into());
+                let zellij = api::ZellijSession { started_at, socket: id.socket() };
+                api::Session {
+                    name: name.to_string(),
+                    started_at: zellij.started_at,
+                    socket: zellij.socket,
+                    panes: self.panes.get(&id).map(|panes| zellij_panes(id, panes)),
+                    clients: self.clients.get(&id).map(clients_of),
+                    mux: Some(api::session::Mux::Zellij(zellij)),
                 }
             })
             .collect()

@@ -41,7 +41,6 @@ service Daemon {
   rpc Prune(PruneRequest) returns (stream PruneResponse);
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
-  rpc NewOwn(NewOwnRequest) returns (NewOwnResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
 }
@@ -217,21 +216,6 @@ message DumpScreenRequest {
 message DumpScreenResponse {
   uint32 pane = 1;
   string screen = 2;
-}
-
-message NewOwnRequest {
-  On on = 1;
-  string name = 2;
-  string cwd = 3;
-  repeated string command = 4;
-  optional string tab = 5;
-}
-
-message NewOwnResponse {
-  uint64 session = 1;
-  uint32 tab = 2;
-  uint32 pane = 3;
-  google.protobuf.Timestamp made_at = 4;
 }
 
 message StartRequest {

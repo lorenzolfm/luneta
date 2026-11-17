@@ -22,7 +22,7 @@ use crate::api;
 use crate::asked::{Colours, Dumped, Input, Size};
 use crate::frame::{self, Flags};
 use crate::front::Front;
-use crate::id::{ClientId, PaneId};
+use crate::id::{ClientId, TerminalId};
 use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::process::{self, Group};
@@ -63,8 +63,6 @@ const FOR_WORDS: usize = 8;
 const _: () = assert!(FOR_WORDS < CLIENT_MESSAGES);
 const _: () = assert!(MESSAGES_PER_TURN <= MESSAGES_MAX);
 
-pub type Out = mpsc::Sender<Result<api::ToClient, Status>>;
-
 pub type ViewerOut = mpsc::Sender<Result<api::ToViewer, Status>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,15 +93,9 @@ impl Exit {
 #[derive(Clone)]
 pub struct Viewer {
     pub client: ClientId,
-    pub frames: Frames,
+    pub frames: ViewerOut,
     pub colours: Colours,
     pub came: u64,
-}
-
-#[derive(Clone)]
-pub enum Frames {
-    Client(Out),
-    Viewer(ViewerOut),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,37 +105,9 @@ enum Sent {
     Closed,
 }
 
-impl Frames {
-    fn capacity(&self) -> usize {
-        match self {
-            Frames::Client(out) => out.capacity(),
-            Frames::Viewer(out) => out.capacity(),
-        }
-    }
-
-    fn is_closed(&self) -> bool {
-        match self {
-            Frames::Client(out) => out.is_closed(),
-            Frames::Viewer(out) => out.is_closed(),
-        }
-    }
-
-    fn send(&self, frame: api::Frame) -> Sent {
-        match self {
-            Frames::Client(out) => {
-                let event = Some(api::to_client::Event::Frame(frame));
-                sent(&out.try_send(Ok(api::ToClient { event })))
-            },
-            Frames::Viewer(out) => {
-                let event = Some(api::to_viewer::Event::Frame(frame));
-                sent(&out.try_send(Ok(api::ToViewer { event })))
-            },
-        }
-    }
-}
-
-fn sent<T>(sent: &Result<(), TrySendError<T>>) -> Sent {
-    match sent {
+fn sent(frames: &ViewerOut, frame: api::Frame) -> Sent {
+    let event = Some(api::to_viewer::Event::Frame(frame));
+    match frames.try_send(Ok(api::ToViewer { event })) {
         Ok(()) => Sent::Taken,
         Err(TrySendError::Full(_)) => Sent::Full,
         Err(TrySendError::Closed(_)) => Sent::Closed,
@@ -233,7 +197,7 @@ pub struct Started {
 
 pub fn start(
     mux: Arc<Mux>,
-    pane: PaneId,
+    pane: TerminalId,
     pty: Pty,
     mut child: Child,
     size: Size,
@@ -299,7 +263,7 @@ pub fn start(
     Ok(Started { handle, pid })
 }
 
-fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
+fn waits(pane: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
     match child.wait() {
         Ok(status) => {
             if exited.try_send(Exit::of(status)).is_ok() {
@@ -342,7 +306,7 @@ impl Program {
 }
 
 struct Thread {
-    pane: PaneId,
+    pane: TerminalId,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
     wants: watch::Receiver<Wanted>,
@@ -816,7 +780,7 @@ impl Thread {
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
             let said = frame::said(self.pane, view, before, flags);
-            match watcher.viewer.frames.send(said) {
+            match sent(&watcher.viewer.frames, said) {
                 Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });
                     watcher.owed = false;

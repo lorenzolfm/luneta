@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use notify::RecursiveMode;
 
-use crate::core::{self, Command};
-use crate::mux::own::server::{self, Followed, Listing, SOCKET};
-use crate::panes;
+use crate::mux::own::server::{self, Followed, SOCKET};
 use crate::views;
 use crate::watch::{self, Troubles};
 
@@ -19,7 +17,6 @@ const UNREACHED_TRIES: u32 = 50;
 const UNREACHED_PAUSE: Duration = Duration::from_millis(20);
 
 pub fn follow(
-    core: SyncSender<Command>,
     views: SyncSender<views::Command>,
     (wake, woken): (SyncSender<()>, Receiver<()>),
     running: Arc<AtomicBool>,
@@ -32,7 +29,7 @@ pub fn follow(
         let socket = match server::socket() {
             Ok(socket) => Some(socket),
             Err(failure) => {
-                troubles.say(format!("the own sessions are not followed: {failure}"));
+                troubles.say(format!("luneta-mux's terminals are not followed: {failure}"));
                 None
             },
         };
@@ -46,18 +43,14 @@ pub fn follow(
                 watcher = watch::watching(folder, mode, is_socket, &wake, &mut watching);
                 watching.done();
             }
-            let followed = server::followed(|listed, unread, terminals| {
-                let held = !listed.is_empty() || !terminals.terminals.is_empty();
+            let followed = server::followed(|unread, terminals| {
+                let held = !terminals.terminals.is_empty();
                 running.store(held || !unread.is_empty(), Ordering::Relaxed);
-                if views.send(views::Command::Listed(terminals)).is_err() {
-                    return false;
-                }
                 for why in unread {
-                    troubles.say(format!("the own sessions: {why}"));
+                    troubles.say(format!("luneta-mux's terminals: {why}"));
                 }
-                let owns = owns(listed, &mut troubles);
                 troubles.done();
-                core.send(Command::Owns(owns)).is_ok()
+                views.send(views::Command::Listed(terminals)).is_ok()
             });
             running.store(false, Ordering::Relaxed);
             let listens_soon = socket.as_deref().is_some_and(Path::exists);
@@ -68,7 +61,7 @@ pub fn follow(
                 Ok(Followed::Emptied { since }) => Some(views::Command::Emptied { since }),
                 Ok(Followed::LetGo) => return,
                 Err(failure) => {
-                    troubles.say(format!("the own sessions: {failure}"));
+                    troubles.say(format!("luneta-mux's terminals: {failure}"));
                     troubles.done();
                     Some(views::Command::Crashed)
                 },
@@ -79,9 +72,6 @@ pub fn follow(
             if let Some(unlisted) = unlisted
                 && views.send(unlisted).is_err()
             {
-                return;
-            }
-            if core.send(Command::Owns(Vec::new())).is_err() {
                 return;
             }
             if unreached_now && listens_soon && unreached < UNREACHED_TRIES {
@@ -104,17 +94,4 @@ pub fn follow(
 
 fn is_socket(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == SOCKET)
-}
-
-fn owns(listed: Vec<Listing>, troubles: &mut Troubles) -> Vec<core::Own> {
-    let own = |Listing { id, made, name, laid, clients, doings }: Listing| {
-        match panes::terminals(laid) {
-            Ok(panes) => Some(core::Own { id, made, name, panes, clients, doings }),
-            Err(why) => {
-                troubles.say(format!("the panes of own session {id}: {why}"));
-                None
-            },
-        }
-    };
-    listed.into_iter().filter_map(own).collect()
 }

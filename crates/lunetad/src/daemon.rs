@@ -46,7 +46,7 @@ use crate::api::{
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    NameSessionRequest, NameSessionResponse, NewOwnRequest, NewOwnResponse, OpenRequest,
+    NameSessionRequest, NameSessionResponse, OpenRequest,
     OpenResponse, OtherTabsRequest,
     OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
@@ -65,12 +65,11 @@ use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
-use crate::names::{Holder, Starts, Unusable};
+use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Destination, Standing};
 use crate::watch::Troubles;
-use crate::mux::own::server;
-use crate::mux::{self, Called, Failure, Runs, SessionName, SocketFolder, Zellij};
+use crate::mux::{self, Mux, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
 use crate::printed::{Kept as KeptFile, Printed};
 use crate::transcripts::Reading;
@@ -174,7 +173,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let owns = Arc::new(AtomicBool::new(false));
     follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
-    owns::follow(core.clone(), views.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
+    owns::follow(views.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -457,7 +456,7 @@ impl Daemon for Host {
             let (at, to) = (at.to_string(), to.to_string());
             return daemon.go(GoRequest { on: None, at, to, pane }).await;
         }
-        let went = task::spawn_blocking(move || Called::named(&at)?.mux().went(&to, pane)).await;
+        let went = task::spawn_blocking(move || Mux::Zellij(&at).went(&to, pane)).await;
         let went = went.map_err(|error| unfinished(&error))?;
         went.map_err(Status::failed_precondition)?;
         Ok(Response::new(()))
@@ -684,7 +683,7 @@ impl Daemon for Host {
             let (at, to, cwd) = (at.to_string(), to.to_string(), cwd.map(String::from));
             return daemon.start(StartRequest { on: None, at, to, cwd }).await;
         }
-        let start = move || Called::named(&at)?.mux().started(&to, cwd.as_ref());
+        let start = move || Mux::Zellij(&at).started(&to, cwd.as_ref());
         let started = task::spawn_blocking(start).await;
         let started = started.map_err(|error| unfinished(&error))?;
         started.map_err(Status::failed_precondition)?;
@@ -866,7 +865,7 @@ impl Daemon for Host {
             let (session, to) = (session.to_string(), to.to_string());
             return daemon.rename_session(RenameSessionRequest { on: None, session, to }).await;
         }
-        let renamed = move || Called::named(&session)?.mux().renamed(&to);
+        let renamed = move || Mux::Zellij(&session).renamed(&to);
         let renamed = task::spawn_blocking(renamed).await;
         let renamed = renamed.map_err(|error| unfinished(&error))?;
         renamed.map_err(Status::failed_precondition)?;
@@ -1092,42 +1091,6 @@ impl Daemon for Host {
         Ok(Response::new(ChangeProjectsResponse { made: made.map(Id::get) }))
     }
 
-    async fn new_own(
-        &self,
-        request: Request<NewOwnRequest>,
-    ) -> Result<Response<NewOwnResponse>, Status> {
-        let NewOwnRequest { on, name, cwd, command, tab } = request.into_inner();
-        let name = SessionName::parse(&name)
-            .map_err(|why| Status::invalid_argument(format!("name: {why}")))?;
-        let cwd = directory("cwd", cwd)?;
-        if let Some(mut daemon) = self.bridged(on)? {
-            let (name, cwd) = (name.to_string(), cwd.into());
-            return daemon.new_own(NewOwnRequest { on: None, name, cwd, command, tab }).await;
-        }
-        let made = task::spawn_blocking(move || -> Result<server::Made, Status> {
-            names::unused(&name).map_err(|unusable| match unusable {
-                Unusable::Taken(_, Holder::Own) => Status::already_exists(unusable.to_string()),
-                unusable => Status::failed_precondition(unusable.to_string()),
-            })?;
-            let shell = opens::your_shell();
-            let runs = Runs::of(&command, Runs::Shell(&shell));
-            let made = server::made(&name, tab.as_deref(), &cwd, runs);
-            made.map_err(|failure| match failure {
-                Failure::Taken(_) => Status::already_exists(failure.to_string()),
-                Failure::Invalid(_) => Status::invalid_argument(failure.to_string()),
-                failure => Status::failed_precondition(failure.to_string()),
-            })
-        });
-        let made = made.await.map_err(|error| unfinished(&error))?;
-        let server::Made { pane, tab } = made?;
-        Ok(Response::new(NewOwnResponse {
-            session: pane.session.id.get(),
-            tab: tab.get(),
-            pane: pane.id.get(),
-            made_at: Some(pane.session.made.into()),
-        }))
-    }
-
     async fn keep_image(
         &self,
         request: Request<Streaming<KeepImageRequest>>,
@@ -1245,7 +1208,7 @@ where
 }
 
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
-    let listed = Called::named(session)?.mux().clients()?;
+    let listed = Mux::Zellij(session).clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
 }
 

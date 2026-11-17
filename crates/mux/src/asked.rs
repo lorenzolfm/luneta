@@ -9,11 +9,8 @@ use libghostty_vt::mouse;
 use tonic::Status;
 
 use crate::api;
-use crate::id::{ClientId, PaneId, SessionId, TabId};
-use crate::layout::{Change, Direction, Order, Towards};
+use crate::id::TerminalId;
 use crate::screen::{Click, RgbColor, Wheel};
-
-pub const NAME_BYTES_MAX: usize = 255;
 
 pub const SIDE_MAX: u16 = 1000;
 
@@ -63,58 +60,6 @@ impl Size {
     pub fn holds(self, column: u16, row: u16) -> bool {
         let (columns, rows) = self.get();
         column < columns && row < rows
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Name(String);
-
-impl Name {
-    pub fn parse(field: &str, name: String) -> Result<Name, Status> {
-        if name.is_empty() {
-            return Err(refused(field, "is empty"));
-        }
-        if name.len() > NAME_BYTES_MAX {
-            return Err(refused(field, format_args!("is over {NAME_BYTES_MAX} bytes")));
-        }
-        if name.chars().any(char::is_control) {
-            return Err(refused(field, "has a control character"));
-        }
-        Ok(Name(name))
-    }
-
-    #[must_use]
-    pub fn numbered(place: usize) -> Name {
-        Name(format!("Tab #{place}"))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionName(Name);
-
-impl SessionName {
-    pub fn parse(field: &str, name: String) -> Result<SessionName, Status> {
-        let name = Name::parse(field, name)?;
-        if name.as_str().trim().is_empty() {
-            return Err(refused(field, "is only whitespace"));
-        }
-        if name.as_str() == "." || name.as_str() == ".." {
-            return Err(refused(field, "is '.' or '..'"));
-        }
-        if name.as_str().contains('/') {
-            return Err(refused(field, "has a '/'"));
-        }
-        Ok(SessionName(name))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
     }
 }
 
@@ -175,171 +120,6 @@ impl Opens {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Place {
-    pub is: Is,
-    pub made: SystemTime,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Is {
-    Session(SessionId),
-    Tab(TabId),
-    Pane(PaneId),
-}
-
-impl Place {
-    pub fn parse(field: &str, place: Option<api::Place>) -> Result<Place, Status> {
-        let place = present(field, place)?;
-        let is = match present(&format!("{field}.is"), place.is)? {
-            api::place::Is::Session(session) => {
-                Is::Session(SessionId::parse(&format!("{field}.session"), session)?)
-            },
-            api::place::Is::Tab(tab) => Is::Tab(TabId::parse(&format!("{field}.tab"), tab)?),
-            api::place::Is::Pane(pane) => {
-                Is::Pane(PaneId::parse(&format!("{field}.pane"), pane)?)
-            },
-        };
-        let made_at = format!("{field}.made_at");
-        let made = SystemTime::try_from(present(&made_at, place.made_at)?)
-            .map_err(|why| refused(&made_at, why))?;
-        Ok(Place { is, made })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum At {
-    Beside { pane: PaneId, towards: Towards },
-    Tab(TabId),
-}
-
-impl At {
-    pub fn parse(field: &str, at: Option<api::new_pane_request::At>) -> Result<At, Status> {
-        Ok(match present(field, at)? {
-            api::new_pane_request::At::Beside(api::Beside { pane, towards }) => At::Beside {
-                pane: PaneId::parse(&format!("{field}.beside.pane"), pane)?,
-                towards: towards_heard(&format!("{field}.beside.towards"), towards)?,
-            },
-            api::new_pane_request::At::Tab(tab) => {
-                At::Tab(TabId::parse(&format!("{field}.tab"), tab)?)
-            },
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TurnTo {
-    NewTab(Option<Name>),
-    Tab(TabId),
-}
-
-impl TurnTo {
-    pub fn parse(field: &str, into: Option<api::Into>) -> Result<TurnTo, Status> {
-        let into = present(field, into)?;
-        Ok(match present(&format!("{field}.is"), into.is)? {
-            api::into::Is::NewTab(api::NewTab { name }) => {
-                let field = format!("{field}.new_tab.name");
-                TurnTo::NewTab(name.map(|name| Name::parse(&field, name)).transpose()?)
-            },
-            api::into::Is::Tab(tab) => TurnTo::Tab(TabId::parse(&format!("{field}.tab"), tab)?),
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Opening {
-    Largest,
-    Beside(Towards),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FocusTo {
-    Towards(Direction),
-    TowardsOrTab(Order),
-    InOrder(Order),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MoveTo {
-    Towards(Direction),
-    InOrder(Order),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Act {
-    Open(Opening),
-    ClosePane,
-    Focus(FocusTo),
-    Resize { change: Change, towards: Option<Direction> },
-    Move(MoveTo),
-    Fullscreen,
-    NamePane(Option<Name>),
-    NameTab(Name),
-    MoveTab(Order),
-    Turn(TurnTo),
-}
-
-fn towards_heard(field: &str, towards: i32) -> Result<Towards, Status> {
-    match api::Towards::try_from(towards) {
-        Ok(api::Towards::Right) => Ok(Towards::Right),
-        Ok(api::Towards::Down) => Ok(Towards::Down),
-        Ok(api::Towards::Unspecified) | Err(_) => {
-            Err(refused(field, "is not one of RIGHT or DOWN"))
-        },
-    }
-}
-
-fn direction_heard(field: &str, direction: i32) -> Result<Direction, Status> {
-    match api::Direction::try_from(direction) {
-        Ok(api::Direction::Left) => Ok(Direction::Left),
-        Ok(api::Direction::Right) => Ok(Direction::Right),
-        Ok(api::Direction::Up) => Ok(Direction::Up),
-        Ok(api::Direction::Down) => Ok(Direction::Down),
-        Ok(api::Direction::Unspecified) | Err(_) => {
-            Err(refused(field, "is not one of LEFT, RIGHT, UP or DOWN"))
-        },
-    }
-}
-
-fn order_heard(field: &str, order: i32) -> Result<Order, Status> {
-    match api::Order::try_from(order) {
-        Ok(api::Order::Next) => Ok(Order::Next),
-        Ok(api::Order::Previous) => Ok(Order::Previous),
-        Ok(api::Order::Unspecified) | Err(_) => {
-            Err(refused(field, "is not one of NEXT or PREVIOUS"))
-        },
-    }
-}
-
-fn change_heard(field: &str, change: i32) -> Result<Change, Status> {
-    match api::Change::try_from(change) {
-        Ok(api::Change::Grow) => Ok(Change::Grow),
-        Ok(api::Change::Shrink) => Ok(Change::Shrink),
-        Ok(api::Change::Unspecified) | Err(_) => {
-            Err(refused(field, "is not one of GROW or SHRINK"))
-        },
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Who {
-    Client(ClientId),
-    LastTypedIn(SessionId),
-}
-
-impl Who {
-    pub fn parse(field: &str, who: Option<api::go_request::Who>) -> Result<Who, Status> {
-        Ok(match present(field, who)? {
-            api::go_request::Who::Client(client) => {
-                Who::Client(ClientId::parse(&format!("{field}.client"), client)?)
-            },
-            api::go_request::Who::LastTypedIn(session) => {
-                Who::LastTypedIn(SessionId::parse(&format!("{field}.last_typed_in"), session)?)
-            },
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dumped {
     Screen,
     Text,
@@ -389,43 +169,16 @@ impl Colours {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Hello {
-    pub to: Place,
-    pub size: Size,
-    pub colours: Colours,
-    pub runs_in: Option<RunsIn>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RunsIn {
-    pub session: SessionId,
-    pub made: SystemTime,
-}
-
-impl RunsIn {
-    pub fn parse(field: &str, runs_in: Option<api::RunsIn>) -> Result<Option<RunsIn>, Status> {
-        let Some(runs_in) = runs_in else {
-            return Ok(None);
-        };
-        let session = SessionId::parse(&format!("{field}.session"), runs_in.session)?;
-        let made_at = format!("{field}.made_at");
-        let made = SystemTime::try_from(present(&made_at, runs_in.made_at)?)
-            .map_err(|why| refused(&made_at, why))?;
-        Ok(Some(RunsIn { session, made }))
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TerminalKey {
-    pub id: PaneId,
+    pub id: TerminalId,
     pub made: SystemTime,
 }
 
 impl TerminalKey {
     pub fn parse(field: &str, key: Option<api::TerminalKey>) -> Result<TerminalKey, Status> {
         let key = present(field, key)?;
-        let id = PaneId::parse(&format!("{field}.id"), key.id)?;
+        let id = TerminalId::parse(&format!("{field}.id"), key.id)?;
         let made_at = format!("{field}.made_at");
         let made = SystemTime::try_from(present(&made_at, key.made_at)?)
             .map_err(|why| refused(&made_at, why))?;
@@ -513,14 +266,6 @@ pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Heard {
-    Input(Input),
-    Resize(Size),
-    Go(Place),
-    Act(Act),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     Key {
         action: keys::Action,
@@ -551,76 +296,6 @@ impl Input {
     pub fn types(&self) -> bool {
         matches!(self, Input::Key { .. } | Input::Paste(_))
     }
-}
-
-pub fn hello(api::ToServer { event }: api::ToServer) -> Result<Hello, Status> {
-    let Some(api::to_server::Event::Hello(hello)) = event else {
-        return Err(refused("event", "is not hello, as the first must be"));
-    };
-    Ok(Hello {
-        to: Place::parse("hello.to", hello.to)?,
-        size: Size::parse("hello.size", hello.size)?,
-        colours: Colours::parse("hello.colours", hello.colours)?,
-        runs_in: RunsIn::parse("hello.runs_in", hello.runs_in)?,
-    })
-}
-
-pub fn heard(message: api::ToServer) -> Result<Heard, Status> {
-    use api::to_server::Event;
-    Ok(match present("event", message.event)? {
-        Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
-        Event::Key(key) => Heard::Input(key_heard(key)?),
-        Event::Mouse(mouse) => Heard::Input(mouse_heard(mouse)?),
-        Event::Paste(api::Paste { text }) => Heard::Input(Input::Paste(text)),
-        Event::Focus(api::Focus { focused }) => Heard::Input(Input::Focus(focused)),
-        Event::Scroll(api::Scroll { back }) => Heard::Input(Input::Scroll(back)),
-        Event::Resize(size) => Heard::Resize(Size::parse("resize", Some(size))?),
-        Event::Go(place) => Heard::Go(Place::parse("go", Some(place))?),
-        Event::Open(open) => Heard::Act(Act::Open(match present("open.at", open.at)? {
-            api::open::At::Largest(api::Largest {}) => Opening::Largest,
-            api::open::At::Beside(towards) => {
-                Opening::Beside(towards_heard("open.beside", towards)?)
-            },
-        })),
-        Event::ClosePane(api::ClosePane {}) => Heard::Act(Act::ClosePane),
-        Event::FocusPane(focus) => Heard::Act(Act::Focus(match present("focus_pane.to", focus.to)? {
-            api::focus_pane::To::Towards(towards) => {
-                FocusTo::Towards(direction_heard("focus_pane.towards", towards)?)
-            },
-            api::focus_pane::To::TowardsOrTab(order) => {
-                FocusTo::TowardsOrTab(order_heard("focus_pane.towards_or_tab", order)?)
-            },
-            api::focus_pane::To::Order(order) => {
-                FocusTo::InOrder(order_heard("focus_pane.order", order)?)
-            },
-        })),
-        Event::ResizePane(resize) => Heard::Act(Act::Resize {
-            change: change_heard("resize_pane.change", resize.change)?,
-            towards: resize
-                .towards
-                .map(|towards| direction_heard("resize_pane.towards", towards))
-                .transpose()?,
-        }),
-        Event::MovePane(moved) => Heard::Act(Act::Move(match present("move_pane.to", moved.to)? {
-            api::move_pane::To::Towards(towards) => {
-                MoveTo::Towards(direction_heard("move_pane.towards", towards)?)
-            },
-            api::move_pane::To::Order(order) => {
-                MoveTo::InOrder(order_heard("move_pane.order", order)?)
-            },
-        })),
-        Event::Fullscreen(api::Fullscreen {}) => Heard::Act(Act::Fullscreen),
-        Event::NamePane(api::NamePane { name }) => Heard::Act(Act::NamePane(
-            name.map(|name| Name::parse("name_pane.name", name)).transpose()?,
-        )),
-        Event::NameTab(api::NameTab { name }) => {
-            Heard::Act(Act::NameTab(Name::parse("name_tab.name", name)?))
-        },
-        Event::MoveTab(api::MoveTab { order }) => {
-            Heard::Act(Act::MoveTab(order_heard("move_tab.order", order)?))
-        },
-        Event::Turn(into) => Heard::Act(Act::Turn(TurnTo::parse("turn", Some(into))?)),
-    })
 }
 
 fn mods(modifiers: Option<api::Modifiers>) -> Mods {
@@ -820,10 +495,6 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
 mod tests {
     use super::*;
 
-    fn at() -> prost_types::Timestamp {
-        prost_types::Timestamp { seconds: 60, nanos: 0 }
-    }
-
     fn size(columns: u32, rows: u32) -> Result<Size, Status> {
         Size::parse("resize", Some(api::Size { columns, rows }))
     }
@@ -837,34 +508,6 @@ mod tests {
         assert_eq!(size(1, 65536).unwrap_err().message(), "resize.rows is over 1000");
         let missing = Size::parse("hello.size", None).unwrap_err();
         assert_eq!(missing.message(), "hello.size is missing");
-    }
-
-    #[test]
-    fn a_name_is_held_to_its_rules() {
-        assert_eq!(Name::parse("name", "work".to_owned()).unwrap().as_str(), "work");
-        let refusal = |name: &str| Name::parse("name", name.to_owned()).unwrap_err();
-        assert_eq!(refusal("").message(), "name is empty");
-        assert_eq!(refusal("a\nb").message(), "name has a control character");
-        assert_eq!(refusal(&"x".repeat(256)).message(), "name is over 255 bytes");
-        assert_eq!(Name::parse("name", "src/main".to_owned()).unwrap().as_str(), "src/main");
-    }
-
-    #[test]
-    fn a_session_s_name_is_one_luneta_reads() {
-        let parsed = |name: &str| SessionName::parse("name", name.to_owned());
-        assert_eq!(parsed("work").unwrap().as_str(), "work");
-        assert_eq!(parsed("café . 2").unwrap().as_str(), "café . 2");
-        let refused = [
-            ("", "name is empty"),
-            ("a\nb", "name has a control character"),
-            (" \u{a0}", "name is only whitespace"),
-            (".", "name is '.' or '..'"),
-            ("..", "name is '.' or '..'"),
-            ("a/b", "name has a '/'"),
-        ];
-        for (name, message) in refused {
-            assert_eq!(parsed(name).unwrap_err().message(), message, "{name:?}");
-        }
     }
 
     #[test]
@@ -930,28 +573,21 @@ mod tests {
 
     #[test]
     fn only_the_first_message_is_a_hello() {
-        let hello_said = api::ToServer {
-            event: Some(api::to_server::Event::Hello(api::Hello {
-                to: Some(api::Place { is: Some(api::place::Is::Session(1)), made_at: Some(at()) }),
-                size: Some(api::Size { columns: 80, rows: 24 }),
-                colours: None,
-                runs_in: None,
-            })),
-        };
-        let focus = api::ToServer {
-            event: Some(api::to_server::Event::Focus(api::Focus { focused: true })),
-        };
-        let first = SessionId::parse("session", 1).unwrap();
-        let made = SystemTime::try_from(at()).unwrap();
-        let first = Place { is: Is::Session(first), made };
-        assert_eq!(hello(hello_said.clone()).unwrap().to, first);
+        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let runs_in = Some(api::TerminalKey { id: 3, made_at });
+        let hello = api::Greeting { colours: None, runs_in };
+        let hello_said = api::FromViewer { event: Some(api::from_viewer::Event::Hello(hello)) };
+        let showing = api::Showing { terminals: Vec::new() };
+        let shows = api::FromViewer { event: Some(api::from_viewer::Event::Showing(showing)) };
+        let runs_in = greeting(hello_said.clone()).unwrap().runs_in.unwrap();
+        assert_eq!(runs_in.id.said(), 3);
         assert_eq!(
-            hello(focus.clone()).unwrap_err().message(),
+            greeting(shows.clone()).unwrap_err().message(),
             "event is not hello, as the first must be"
         );
-        assert_eq!(heard(focus).unwrap(), Heard::Input(Input::Focus(true)));
+        assert_eq!(viewer_heard(shows).unwrap(), ViewerHeard::Showing(BTreeSet::new()));
         assert_eq!(
-            heard(hello_said).unwrap_err().message(),
+            viewer_heard(hello_said).unwrap_err().message(),
             "event is hello, which only the first may be"
         );
     }

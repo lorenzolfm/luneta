@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::api;
 use crate::api::say::Does;
-use crate::mux::{OwnKey, OwnPane, SessionName, Sessions};
+use crate::mux::{OwnPane, SessionName, Sessions};
 use crate::seats::Where;
 
 pub const BYTES_MAX: usize = 16 * 1024;
@@ -81,13 +81,13 @@ impl Asker {
         }
     }
 
-    fn placed(self, sessions: &Sessions, own_named: &impl Fn(OwnKey) -> Option<String>) -> Speaker {
+    fn placed(self, sessions: &Sessions) -> Speaker {
         match self {
             Asker::Zellij { named, pane } => {
                 let session = sessions.lead(named.as_str(), None).map(ToString::to_string);
                 Speaker::Zellij(api::Zellij { named: named.to_string(), session, pane })
             },
-            Asker::Own(pane) => Speaker::Own { pane, session: own_named(pane.session) },
+            Asker::Own(pane) => Speaker::Own { pane, session: None },
         }
     }
 }
@@ -177,9 +177,8 @@ impl Sayings {
         said: ToSay,
         sessions: &Sessions,
         at: SystemTime,
-        own_named: impl Fn(OwnKey) -> Option<String>,
     ) -> Result<(), String> {
-        let placed = |spoken| placed(spoken, sessions, &own_named);
+        let placed = |spoken| placed(spoken, sessions);
         let does = match said {
             ToSay::InTurn(spoken) => Does::InTurn(placed(spoken)?),
             ToSay::Now(spoken) => Does::Now(placed(spoken)?),
@@ -202,15 +201,11 @@ impl Sayings {
     }
 }
 
-fn placed(
-    spoken: Spoken,
-    sessions: &Sessions,
-    own_named: &impl Fn(OwnKey) -> Option<String>,
-) -> Result<api::Utterance, String> {
+fn placed(spoken: Spoken, sessions: &Sessions) -> Result<api::Utterance, String> {
     let Spoken { text, asker } = spoken;
     assert_ne!(text.trim(), "");
     assert!(text.len() <= BYTES_MAX);
-    let speaker = asker.map(|asker| asker.placed(sessions, own_named));
+    let speaker = asker.map(|asker| asker.placed(sessions));
     bounded(&text, speaker.as_ref().and_then(Speaker::called))?;
     Ok(utterance(text, speaker))
 }
@@ -218,14 +213,10 @@ fn placed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mux::{OwnId, OwnMade};
+    use crate::mux::{OwnId, OwnKey, OwnMade};
 
     fn does(text: &str, speaker: Option<api::Zellij>) -> Does {
         Does::InTurn(api::Utterance { text: text.to_owned(), speaker, own_speaker: None })
-    }
-
-    fn nameless(_: OwnKey) -> Option<String> {
-        None
     }
 
     fn own_pane(id: u64, pane: u32) -> OwnPane {
@@ -265,7 +256,7 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH;
         let mut sayings = Sayings::default();
         for count in 0..KEPT + 2 {
-            sayings.take(said(&count.to_string()), &Sessions::default(), at, nameless).unwrap();
+            sayings.take(said(&count.to_string()), &Sessions::default(), at).unwrap();
         }
         let fresh = sayings.fresh(at);
         assert_eq!(fresh.len(), KEPT);
@@ -279,8 +270,8 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_hours(1);
         let mut sayings = Sayings::default();
         let sessions = Sessions::default();
-        sayings.take(said("early"), &sessions, at, nameless).unwrap();
-        sayings.take(said("late"), &sessions, at + Duration::from_mins(1), nameless).unwrap();
+        sayings.take(said("early"), &sessions, at).unwrap();
+        sayings.take(said("late"), &sessions, at + Duration::from_mins(1)).unwrap();
         assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
         assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
@@ -291,25 +282,20 @@ mod tests {
     fn what_a_speaker_was_asked_with_has_no_say_in_its_session() {
         let asked = ToSay::parse(does("hello", Some(from("work", Some("made up"))))).unwrap();
         let mut sayings = Sayings::default();
-        sayings.take(asked, &Sessions::default(), SystemTime::UNIX_EPOCH, nameless).unwrap();
+        sayings.take(asked, &Sessions::default(), SystemTime::UNIX_EPOCH).unwrap();
         let placed = utterance(&sayings).speaker.unwrap();
         assert_eq!(placed.session, None);
         assert_eq!(placed.named, "work");
     }
 
     #[test]
-    fn an_own_speaker_s_session_is_named_as_it_is_now() {
+    fn what_an_own_speaker_was_asked_with_has_no_say_in_its_session() {
         let pane = own_pane(3, 12);
-        let asked = || {
-            let own_speaker = Some(from_own(pane.into(), Some("made up")));
-            let utterance = api::Utterance { text: "hello".to_owned(), speaker: None, own_speaker };
-            ToSay::parse(Does::InTurn(utterance)).unwrap()
-        };
+        let own_speaker = Some(from_own(pane.into(), Some("made up")));
+        let asked = api::Utterance { text: "hello".to_owned(), speaker: None, own_speaker };
+        let asked = ToSay::parse(Does::InTurn(asked)).unwrap();
         let mut sayings = Sayings::default();
-        let named = |key: OwnKey| (key == pane.session).then(|| "work".to_owned());
-        sayings.take(asked(), &Sessions::default(), SystemTime::UNIX_EPOCH, named).unwrap();
-        assert_eq!(utterance(&sayings).own_speaker, Some(from_own(pane.into(), Some("work"))));
-        sayings.take(asked(), &Sessions::default(), SystemTime::UNIX_EPOCH, nameless).unwrap();
+        sayings.take(asked, &Sessions::default(), SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(utterance(&sayings).own_speaker, Some(from_own(pane.into(), None)));
     }
 
@@ -329,25 +315,6 @@ mod tests {
         let no_pane = Some(api::OwnSpeaker { pane: None, session: None });
         assert!(parsed(None, no_pane).is_err());
         assert!(parsed(Some(from("work", None)), Some(from_own(pane, None))).is_err());
-    }
-
-    #[test]
-    fn the_name_an_own_speaker_is_said_by_counts() {
-        let pane = own_pane(3, 12);
-        let asked = || {
-            let own_speaker = Some(from_own(pane.into(), None));
-            let text = "a".repeat(BYTES_MAX - 4);
-            let utterance = api::Utterance { text, speaker: None, own_speaker };
-            ToSay::parse(Does::InTurn(utterance)).unwrap()
-        };
-        let mut sayings = Sayings::default();
-        let at = SystemTime::UNIX_EPOCH;
-        let named = |name: &'static str| move |_: OwnKey| Some(name.to_owned());
-        assert!(sayings.take(asked(), &Sessions::default(), at, named("work")).is_ok());
-        let refused = sayings.take(asked(), &Sessions::default(), at, named("works"));
-        assert!(refused.unwrap_err().contains("the most to say at once"));
-        assert!(sayings.take(asked(), &Sessions::default(), at, nameless).is_ok());
-        assert_eq!(sayings.fresh(at).len(), 2);
     }
 
     #[test]

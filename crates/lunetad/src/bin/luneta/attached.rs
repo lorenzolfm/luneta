@@ -5,7 +5,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use lunetad::mux::own::api;
-use lunetad::mux::own::attach::{self, Cursor, Glyph, Line, Shows, Size};
+use lunetad::mux::own::frames::{self, Cursor, Glyph, Line, Shows, Size};
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -286,10 +286,10 @@ pub(crate) fn text(screen: &Screen, selection: Selection) -> String {
     rows.join("\n")
 }
 
-fn styled(style: &attach::Style) -> Style {
-    let colour = |colour: Option<attach::Colour>| match colour {
-        Some(attach::Colour::Palette(index)) => Color::Indexed(index),
-        Some(attach::Colour::Rgb([red, green, blue])) => Color::Rgb(red, green, blue),
+fn styled(style: &frames::Style) -> Style {
+    let colour = |colour: Option<frames::Colour>| match colour {
+        Some(frames::Colour::Palette(index)) => Color::Indexed(index),
+        Some(frames::Colour::Rgb([red, green, blue])) => Color::Rgb(red, green, blue),
         None => Color::Reset,
     };
     let mut drawn = Style::new().fg(colour(style.foreground)).bg(colour(style.background));
@@ -438,12 +438,12 @@ pub(crate) fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use lunetad::mux::own::attach::Grapheme;
+    use lunetad::mux::own::frames::Grapheme;
 
     use super::*;
 
     fn glyph(shows: Shows) -> Glyph {
-        Glyph { shows, style: attach::Style::default() }
+        Glyph { shows, style: frames::Style::default() }
     }
 
     fn grapheme(grapheme: &str) -> Grapheme {

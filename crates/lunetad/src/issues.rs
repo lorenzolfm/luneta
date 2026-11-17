@@ -577,9 +577,8 @@ mod tests {
             claude.get_envs().any(|(key, value)| key.to_str() == Some(name) && value.is_none())
         };
         let zellij = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
-        let own = ["LUNETA_MUX_SESSION", "LUNETA_MUX_MADE", "LUNETA_MUX_PANE"];
         let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
-        let panes = zellij.into_iter().chain(own).chain(terminal);
+        let panes = zellij.into_iter().chain(terminal);
         for name in panes.chain(git::REPOSITORY_VARS) {
             assert!(removed(name), "{name}");
         }

@@ -9,7 +9,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
 use super::api::{self, from_viewer, to_viewer, typed};
-use super::attach::{colours, Frame};
+use super::frames::{colours, Frame};
 use super::server::{connect, refused, runtime};
 use super::TerminalKey;
 use crate::projects::PANES_MAX;
