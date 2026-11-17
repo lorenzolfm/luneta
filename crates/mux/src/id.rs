@@ -5,45 +5,52 @@ use tonic::Status;
 
 use crate::asked::refused;
 
-macro_rules! id {
-    ($id:ident($nonzero:ty, $raw:ty)) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $id($nonzero);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TerminalId(NonZeroU32);
 
-        impl $id {
-            pub fn parse(field: &str, raw: $raw) -> Result<$id, Status> {
-                <$nonzero>::new(raw).map($id).ok_or_else(|| refused(field, "is missing"))
-            }
+impl TerminalId {
+    pub fn parse(field: &str, raw: u32) -> Result<TerminalId, Status> {
+        NonZeroU32::new(raw).map(TerminalId).ok_or_else(|| refused(field, "is missing"))
+    }
 
-            pub fn next(last: &mut Option<$id>) -> $id {
-                let next = match *last {
-                    None => <$nonzero>::MIN,
-                    Some($id(last)) => {
-                        last.checked_add(1).expect(concat!(stringify!($id), "s last"))
-                    },
-                };
-                *last = Some($id(next));
-                $id(next)
-            }
+    pub fn next(last: &mut Option<TerminalId>) -> TerminalId {
+        let next = last.map_or(NonZeroU32::MIN, |TerminalId(last)| {
+            last.checked_add(1).expect("TerminalIds last")
+        });
+        *last = Some(TerminalId(next));
+        TerminalId(next)
+    }
 
-            #[must_use]
-            pub fn said(self) -> $raw {
-                self.0.get()
-            }
-        }
-
-        impl fmt::Display for $id {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-    };
+    #[must_use]
+    pub fn said(self) -> u32 {
+        self.0.get()
+    }
 }
 
-id!(SessionId(NonZeroU64, u64));
-id!(TabId(NonZeroU32, u32));
-id!(PaneId(NonZeroU32, u32));
-id!(ClientId(NonZeroU64, u64));
+impl fmt::Display for TerminalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClientId(NonZeroU64);
+
+impl ClientId {
+    pub fn next(last: &mut Option<ClientId>) -> ClientId {
+        let next = last.map_or(NonZeroU64::MIN, |ClientId(last)| {
+            last.checked_add(1).expect("ClientIds last")
+        });
+        *last = Some(ClientId(next));
+        ClientId(next)
+    }
+}
+
+impl fmt::Display for ClientId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -51,15 +58,19 @@ mod tests {
 
     #[test]
     fn an_id_is_never_0() {
-        assert_eq!(TabId::parse("tab", 7).unwrap().said(), 7);
-        assert_eq!(SessionId::parse("session", 0).unwrap_err().message(), "session is missing");
+        assert_eq!(TerminalId::parse("terminal", 7).unwrap().said(), 7);
+        let missing = TerminalId::parse("terminal", 0).unwrap_err();
+        assert_eq!(missing.message(), "terminal is missing");
     }
 
     #[test]
     fn ids_count_up_from_1() {
         let mut last = None;
-        assert_eq!(PaneId::next(&mut last).said(), 1);
-        assert_eq!(PaneId::next(&mut last).said(), 2);
-        assert_eq!(last.map(PaneId::said), Some(2));
+        assert_eq!(TerminalId::next(&mut last).said(), 1);
+        assert_eq!(TerminalId::next(&mut last).said(), 2);
+        assert_eq!(last.map(TerminalId::said), Some(2));
+        let mut clients = None;
+        assert_eq!(ClientId::next(&mut clients).to_string(), "1");
+        assert_eq!(ClientId::next(&mut clients).to_string(), "2");
     }
 }

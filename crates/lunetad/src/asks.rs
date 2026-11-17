@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::api::ask_request::{self, UserOwnPane, UserPane};
+use crate::api::ask_request::{self, UserPane};
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
 use crate::transcripts::SessionId;
-use crate::mux::{self, OwnClientId, OwnId, OwnKey, OwnMade, OwnPane, SessionName};
+use crate::mux::{self, SessionName};
 use crate::{git, program, Harness};
 
 pub const MODEL: &str = "sonnet";
@@ -24,10 +24,6 @@ pub const TURN: Duration = Duration::from_mins(10);
 pub const LOOK: Duration = Duration::from_millis(5);
 
 pub const ASKED_VAR: &str = "LUNETA_PANE";
-
-pub const OWN_VAR: &str = "LUNETA_OWN_SEAT";
-
-pub const OWN_VAR_BEFORE: &str = "LUNETA_OWN_PANE";
 
 pub const AWAY_VAR: &str = "LUNETA_AWAY";
 
@@ -140,21 +136,17 @@ impl Turn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum User {
     Pane { session: SessionName, pane: u32 },
-    Own { pane: OwnPane, named: SessionName, client: OwnClientId },
     Away,
     Untold,
 }
 
 impl User {
     fn name_in(&self, command: &mut Command) {
-        for name in [ASKED_VAR, OWN_VAR, OWN_VAR_BEFORE, AWAY_VAR] {
+        for name in [ASKED_VAR, AWAY_VAR] {
             command.env_remove(name);
         }
         match self {
             User::Pane { session, pane } => command.env(ASKED_VAR, format!("{session}:{pane}")),
-            User::Own { pane, named, client } => {
-                command.env(OWN_VAR, own_spelled(*pane, named, *client))
-            },
             User::Away => command.env(AWAY_VAR, AWAY_SET),
             User::Untold => command,
         };
@@ -168,26 +160,17 @@ impl User {
                 let session = session.to_string();
                 Some(ask_request::User::Pane(UserPane { session, pane: *pane }))
             },
-            User::Own { pane, named, client } => Some(ask_request::User::Own(UserOwnPane {
-                session: Some(pane.session.into()),
-                pane: pane.id.get(),
-                named: named.to_string(),
-                client: client.get(),
-            })),
         }
     }
 
     fn read(said: Where<'_>) -> Result<User, String> {
-        if let Some(before) = said.own_before {
-            return Err(older(before));
-        }
         match said {
-            Where { asked: None, own: None, away: None, .. } => Ok(User::Untold),
-            Where { asked: None, own: None, away: Some(AWAY_SET), .. } => Ok(User::Away),
-            Where { asked: None, own: None, away: Some(away), .. } => {
+            Where { asked: None, away: None } => Ok(User::Untold),
+            Where { asked: None, away: Some(AWAY_SET) } => Ok(User::Away),
+            Where { asked: None, away: Some(away) } => {
                 Err(format!("{AWAY_VAR} is {away:?}, and luneta's ask box sets it to {AWAY_SET}"))
             },
-            Where { asked: Some(asked), own: None, away: None, .. } => {
+            Where { asked: Some(asked), away: None } => {
                 let pane = asked.rsplit_once(':').and_then(|(session, pane)| {
                     let session = SessionName::running(session).ok()?;
                     Some(User::Pane { session, pane: pane.parse().ok()? })
@@ -195,54 +178,18 @@ impl User {
                 let no_pane = || format!("{ASKED_VAR}: {asked} is no pane of a session zellij runs");
                 pane.ok_or_else(no_pane)
             },
-            Where { asked: None, own: Some(own), away: None, .. } => {
-                let no_pane = || format!("{OWN_VAR}: {own} is no pane of an own session");
-                own_read(own).ok_or_else(no_pane)
-            },
-            Where { asked, own, away, .. } => {
-                let asked = asked.map(|asked| {
-                    format!("{ASKED_VAR} names {asked}, a pane luneta's ask box asked from")
-                });
-                let own = own.map(|own| {
-                    format!("{OWN_VAR} names {own}, an own pane luneta's ask box asked from")
-                });
-                let away = away.map(|_| format!("{AWAY_VAR} says it asked from another machine"));
-                let said: Vec<String> = [asked, own, away].into_iter().flatten().collect();
-                assert!(said.len() >= 2, "the arms above take each place alone, and none");
-                Err(said.join(", and "))
-            },
+            Where { asked: Some(asked), away: Some(_) } => Err(format!(
+                "{ASKED_VAR} names {asked}, a pane luneta's ask box asked from, and {AWAY_VAR} \
+                 says it asked from another machine"
+            )),
         }
     }
-}
-
-fn older(before: &str) -> String {
-    format!(
-        "{OWN_VAR_BEFORE} is {before:?}, as a lunetad older than this luneta sets it: relaunch \
-         luneta, and ask again"
-    )
-}
-
-fn own_spelled(pane: OwnPane, named: &SessionName, client: OwnClientId) -> String {
-    let made = pane.session.made.nanos();
-    format!("{}:{made}:{}:{client}:{named}", pane.session.id, pane.id)
-}
-
-fn own_read(spelled: &str) -> Option<User> {
-    let mut parts = spelled.splitn(5, ':');
-    let id = OwnId::new(parts.next()?.parse().ok()?)?;
-    let made = OwnMade::from_nanos(parts.next()?.parse().ok()?);
-    let pane = OwnPane { session: OwnKey { id, made }, id: parts.next()?.parse().ok()? };
-    let client = OwnClientId::new(parts.next()?.parse().ok()?)?;
-    let named = SessionName::running(parts.next()?).ok()?;
-    Some(User::Own { pane, named, client })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Where<'a> {
     pub asked: Option<&'a str>,
-    pub own: Option<&'a str>,
     pub away: Option<&'a str>,
-    pub own_before: Option<&'a str>,
 }
 
 pub fn turn_in(
@@ -252,10 +199,8 @@ pub fn turn_in(
 ) -> Result<Option<(Turn, User)>, String> {
     let Some(turn) = Turn::read(key, before)? else {
         let set = match user {
-            Where { asked: None, own: None, away: None, own_before: None } => return Ok(None),
-            Where { own_before: Some(before), .. } => return Err(older(before)),
+            Where { asked: None, away: None } => return Ok(None),
             Where { asked: Some(_), .. } => ASKED_VAR,
-            Where { own: Some(_), .. } => OWN_VAR,
             Where { away: Some(_), .. } => AWAY_VAR,
         };
         return Err(format!("{set} is set, and {TURN_VAR} is not"));
@@ -357,13 +302,6 @@ impl Asked {
                 let session = SessionName::running(&session).map_err(|why| format!("user: {why}"))?;
                 User::Pane { session, pane }
             },
-            Some(ask_request::User::Own(UserOwnPane { session, pane, named, client })) => {
-                let pane = OwnPane::of(&crate::api::Own { session, pane })
-                    .map_err(|why| format!("user: {why}"))?;
-                let named = SessionName::running(&named).map_err(|why| format!("user: {why}"))?;
-                let client = OwnClientId::new(client).ok_or("user: 0 is no client's id")?;
-                User::Own { pane, named, client }
-            },
         };
         let turn = Turn::new(turn, before)?;
         let agents = Harness::said(agents).map_err(|why| format!("agents: {why}"))?;
@@ -438,11 +376,6 @@ fn told(user: &User, agents: Harness, words: &str) -> String {
     };
     let user = match user {
         User::Pane { session, pane } => format!("[luneta: the user is in pane {session}:{pane}.]"),
-        User::Own { pane, named, .. } => format!(
-            "[luneta: the user is in pane {named}:{}, of an own session, whose tabs hold a pane \
-             each: `open pane` and `turn` fail there.]",
-            pane.id
-        ),
         User::Away => "[luneta: the user is on another machine just now, where luneta's zellij \
                        is, and in none of this machine's panes: `luneta here`, `go` and `open \
                        session` fail, and so do `open pane` without --beside and `open tab` \
@@ -608,7 +541,6 @@ fn failed(stderr: &[u8], status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::time::UNIX_EPOCH;
 
     use serde_json::json;
 
@@ -622,17 +554,6 @@ mod tests {
 
     fn pane(session: &str, pane: u32) -> User {
         User::Pane { session: SessionName::running(session).unwrap(), pane }
-    }
-
-    fn own_pane_made(named: &str, pane: u32, made: u64) -> User {
-        let made = OwnMade::from_nanos(made);
-        let pane = OwnPane::new(OwnKey { id: OwnId::new(3).unwrap(), made }, pane).unwrap();
-        let client = OwnClientId::new(7).unwrap();
-        User::Own { pane, named: SessionName::running(named).unwrap(), client }
-    }
-
-    fn own_pane(named: &str, pane: u32) -> User {
-        own_pane_made(named, pane, 1_700_000_000_123_456_789)
     }
 
     fn session(id: &str) -> SessionId {
@@ -674,9 +595,8 @@ mod tests {
         let line = "[luneta: start an agent in pi, unless the user names Claude Code.]";
         assert_eq!(pi, format!("{you}\n{line}\n\ngo"));
         let zellij = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
-        let own = ["LUNETA_MUX_SESSION", "LUNETA_MUX_MADE", "LUNETA_MUX_PANE"];
         let terminal = ["LUNETA_MUX_TERMINAL", "LUNETA_MUX_TERMINAL_MADE"];
-        let panes = zellij.into_iter().chain(own).chain(terminal);
+        let panes = zellij.into_iter().chain(terminal);
         for name in panes.chain(git::REPOSITORY_VARS).chain([AWAY_VAR]) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
@@ -714,20 +634,16 @@ mod tests {
             set.and_then(|(_, value)| value).map(|value| value.to_string_lossy().into_owned())
         };
         let first = Turn::new(10, None).unwrap();
-        for user in [pane("a:b", 4), own_pane("a:b", 4), User::Away, User::Untold] {
+        for user in [pane("a:b", 4), User::Away, User::Untold] {
             for turn in [first, turn()] {
                 let you = user.clone();
                 let asked = Asked::new(None, "yes", None, String::new(), you, turn, CLAUDE);
                 let claude = asked.unwrap().claude();
-                let names = [TURN_VAR, BEFORE_VAR, ASKED_VAR, OWN_VAR, AWAY_VAR];
-                let [key, before, asked, own, away] = names.map(|name| var(&claude, name));
-                let (asked, own, away) = (asked.as_deref(), own.as_deref(), away.as_deref());
-                let said = Where { asked, own, away, own_before: None };
+                let names = [TURN_VAR, BEFORE_VAR, ASKED_VAR, AWAY_VAR];
+                let [key, before, asked, away] = names.map(|name| var(&claude, name));
+                let said = Where { asked: asked.as_deref(), away: away.as_deref() };
                 let read = turn_in(key.as_deref(), before.as_deref(), said);
                 assert_eq!(read, Ok(Some((turn, user.clone()))));
-                let mut envs = claude.get_envs();
-                let removed = envs.any(|(key, value)| key == OWN_VAR_BEFORE && value.is_none());
-                assert!(removed, "{OWN_VAR_BEFORE}");
             }
         }
         assert_eq!(turn_in(None, None, Where::default()), Ok(None));
@@ -751,11 +667,8 @@ mod tests {
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
         let (key, before) = (Some("ff"), Some("0a"));
-        let at = |asked, away| Where { asked, away, ..Where::default() };
-        let own = |own| Where { own: Some(own), ..Where::default() };
+        let at = |asked, away| Where { asked, away };
         assert_eq!(turn_in(key, before, Where::default()), Ok(Some((turn(), User::Untold))));
-        let read = turn_in(key, before, own("3:60000000005:12:7:a:b"));
-        assert_eq!(read, Ok(Some((turn(), own_pane_made("a:b", 12, 60_000_000_005)))));
         for (key, before) in [
             (Some(""), None),
             (Some("forged"), None),
@@ -765,34 +678,8 @@ mod tests {
         ] {
             assert!(turn_in(key, before, Where::default()).is_err(), "{key:?} {before:?}");
         }
-        for said in [at(Some("work:2"), None), at(None, Some("1")), own("3:60:12:7:work")] {
+        for said in [at(Some("work:2"), None), at(None, Some("1"))] {
             assert!(turn_in(None, None, said).is_err(), "{said:?}");
-        }
-        for forged in [
-            "",
-            "3:60:12:7",
-            "3:60:12:work",
-            "0:60:12:7:work",
-            "3:60:0:7:work",
-            "3:60:12:0:work",
-            "3:x:12:7:work",
-            "3:60:12:7:a/b",
-        ] {
-            assert!(turn_in(key, before, own(forged)).is_err(), "{forged:?}");
-        }
-        let twice = Where { asked: Some("work:2"), ..own("3:60:12:7:work") };
-        assert!(turn_in(key, before, twice).is_err());
-        let older = |own_before| Where { own_before: Some(own_before), ..Where::default() };
-        for spelled in ["3:60:12:7:work", "3:60:12:work"] {
-            let said = older(spelled);
-            let refused = format!(
-                "LUNETA_OWN_PANE is {spelled:?}, as a lunetad older than this luneta sets it: \
-                 relaunch luneta, and ask again"
-            );
-            assert_eq!(turn_in(key, before, said), Err(refused.clone()), "{spelled:?}");
-            assert_eq!(turn_in(None, None, said), Err(refused), "{spelled:?}");
-            let both = Where { own: Some("3:60:12:7:work"), ..said };
-            assert!(turn_in(key, before, both).is_err(), "{spelled:?}");
         }
         for (asked, away) in [
             (Some(""), None),
@@ -818,18 +705,10 @@ mod tests {
         assert!(first.key() != second.key() && second.key() != third.key());
     }
 
-    fn own_asked(change: impl FnOnce(&mut UserOwnPane)) -> ask_request::User {
-        let Some(ask_request::User::Own(mut own)) = own_pane("work", 2).asked() else {
-            unreachable!("an own pane is asked as one");
-        };
-        change(&mut own);
-        ask_request::User::Own(own)
-    }
-
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
         let on = || Some(On { destination: "nixos".to_owned() });
-        for user in [pane("luneta", 2), own_pane("luneta", 2), User::Away, User::Untold] {
+        for user in [pane("luneta", 2), User::Away, User::Untold] {
             for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
                 let row = "row".to_owned();
                 let asked = Asked::new(cwd, "close it", resumed, row, user.clone(), turn(), CLAUDE);
@@ -842,8 +721,6 @@ mod tests {
             let asked = Asked::new(None, "close it", None, row, User::Untold, turn(), CLAUDE);
             asked.unwrap().asked(None)
         };
-        let made_at = Some((UNIX_EPOCH - Duration::from_secs(1)).into());
-        let made_before = Some(crate::api::OwnSession { id: 3, made_at });
         let invalid = [
             AskRequest { cwd: Some(String::new()), ..request() },
             AskRequest { cwd: Some("w".to_owned()), ..request() },
@@ -853,11 +730,6 @@ mod tests {
                 user: Some(ask_request::User::Pane(UserPane { session: String::new(), pane: 2 })),
                 ..request()
             },
-            AskRequest { user: Some(own_asked(|own| own.session = None)), ..request() },
-            AskRequest { user: Some(own_asked(|own| own.pane = 0)), ..request() },
-            AskRequest { user: Some(own_asked(|own| own.session = made_before)), ..request() },
-            AskRequest { user: Some(own_asked(|own| own.named = "a/b".to_owned())), ..request() },
-            AskRequest { user: Some(own_asked(|own| own.client = 0)), ..request() },
             AskRequest { turn: 7, before: Some(7), ..request() },
             AskRequest { agents: Some(99), ..request() },
         ];

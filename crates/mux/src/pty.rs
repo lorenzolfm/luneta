@@ -16,17 +16,11 @@ use rustix::termios::{self, InputModes, LocalModes, OptionalActions, Winsize};
 use crate::asked::{Opens, Runs, Size};
 use crate::process::Group;
 
-pub const SESSION_VAR: &str = "LUNETA_MUX_SESSION";
-
-pub const MADE_VAR: &str = "LUNETA_MUX_MADE";
-
-pub const PANE_VAR: &str = "LUNETA_MUX_PANE";
-
 pub const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
 
 pub const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
 
-const OWN_VARS: [&str; 5] = [SESSION_VAR, MADE_VAR, PANE_VAR, TERMINAL_VAR, TERMINAL_MADE_VAR];
+const OWN_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
 
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 

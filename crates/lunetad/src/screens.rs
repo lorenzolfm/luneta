@@ -1,8 +1,7 @@
-use crate::mux::{Called, Laid, Mux, SessionName};
+use crate::mux::{Laid, Mux, SessionName};
 
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
-    let called = Called::named(session)?;
-    let mux = called.mux();
+    let mux = Mux::Zellij(session);
     let pane = pane.map_or_else(|| focused(mux, session), Ok)?;
     Ok((pane, mux.screen_dumped(pane)?))
 }

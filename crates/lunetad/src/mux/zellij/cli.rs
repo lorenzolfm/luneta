@@ -40,9 +40,6 @@ pub enum Failure {
     Refused(String),
     Unread(String),
     Own(String),
-    Taken(String),
-    Invalid(String),
-    Unsupported(&'static str),
 }
 
 impl fmt::Display for Failure {
@@ -54,12 +51,7 @@ impl fmt::Display for Failure {
                 write!(f, "zellij: {said}")
             },
             Failure::Unread(why) => f.write_str(why),
-            Failure::Own(said) | Failure::Taken(said) | Failure::Invalid(said) => {
-                write!(f, "luneta-mux: {said}")
-            },
-            Failure::Unsupported(what) => {
-                write!(f, "luneta's own sessions cannot {what} yet")
-            },
+            Failure::Own(said) => write!(f, "luneta-mux: {said}"),
         }
     }
 }

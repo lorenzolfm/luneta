@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 use luneta_protocol::tab;
 
 use crate::closes::{same_session, terminals};
-use crate::mux::{Asks, Called, Client, Failure, Laid, Listed, Mux, PaneId, SessionName, TabId};
+use crate::mux::{Asks, Client, Laid, Listed, Mux, PaneId, SessionName, TabId};
 
 const STAND_IN: [&str; 2] = ["sleep", "10"];
 
@@ -42,17 +42,7 @@ pub struct OtherTab {
 }
 
 pub fn other_tabs(session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
-    zellij_s(session)?;
     others(&Mux::Zellij(session).laid()?, pane)
-}
-
-fn zellij_s(session: &SessionName) -> Result<(), String> {
-    match Called::named(session)? {
-        Called::Zellij(_) => Ok(()),
-        Called::Own(_) => {
-            Err(Failure::Unsupported("turn a pane into a tab or a tab into panes").into())
-        },
-    }
 }
 
 fn others(laid: &[Laid], pane: u32) -> Result<Vec<OtherTab>, String> {
@@ -103,7 +93,6 @@ pub fn pane_leaving(
     started: SystemTime,
     pane: u32,
 ) -> Result<Option<Leaving>, String> {
-    zellij_s(session)?;
     same_session(session, started)?;
     let laid = Mux::Zellij(session).laid()?;
     let name = leaving(&laid, pane)?;
@@ -147,7 +136,6 @@ pub fn panes_moving(
     pane: u32,
     beside: u32,
 ) -> Result<Moving, String> {
-    zellij_s(session)?;
     same_session(session, started)?;
     moving(&Mux::Zellij(session).laid()?, pane, beside)
 }

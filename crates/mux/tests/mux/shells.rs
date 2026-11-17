@@ -1,22 +1,34 @@
 use luneta_mux::api;
+use luneta_mux::api::mux_client::MuxClient;
 use luneta_mux::api::ran::Is;
+use tonic::transport::Channel;
 
-use crate::host::{Attached, Server, new_session, run, script, session, size, tabs, watched_until};
+use crate::host::{Server, Viewer, new_terminal, run, script, size, watched_until};
 
 const MARK: &str = "m() { printf '\\033]133;%s\\007' \"$1\"; }";
 
-fn pane(listing: &api::Listing) -> Option<&api::Pane> {
-    tabs(listing).first().and_then(|tab| tab.panes.first())
+fn running(listing: &api::Listing) -> Option<&api::Running> {
+    match listing.terminals.first()?.program.as_ref()? {
+        api::terminal::Program::Runs(running) => Some(running),
+        api::terminal::Program::Ended(_) => None,
+    }
 }
 
 fn said(listing: &api::Listing) -> Option<&Is> {
-    pane(listing)?.ran.as_ref()?.is.as_ref()
+    running(listing)?.ran.as_ref()?.is.as_ref()
 }
 
 fn in_front(listing: &api::Listing, program: &str) -> bool {
-    pane(listing)
-        .and_then(|pane| pane.foreground.as_ref())
+    running(listing)
+        .and_then(|running| running.foreground.as_ref())
         .is_some_and(|front| front.argv.first().is_some_and(|first| first == program))
+}
+
+async fn shown(mux: &mut MuxClient<Channel>, opens: api::Opens) -> (Viewer, api::TerminalKey) {
+    let key = new_terminal(mux, opens, b"t", size(40, 10)).await;
+    let viewer = Viewer::new(mux).await;
+    viewer.show(&[key]).await;
+    (viewer, key)
 }
 
 fn bash(script: &str) -> api::Opens {
@@ -29,7 +41,7 @@ fn bash(script: &str) -> api::Opens {
 }
 
 fn signal_front(listing: &api::Listing, signal: rustix::process::Signal) {
-    let front = pane(listing).and_then(|pane| pane.foreground.as_ref()).unwrap().pid;
+    let front = running(listing).and_then(|running| running.foreground.as_ref()).unwrap().pid;
     let front = rustix::process::Pid::from_raw(front.cast_signed()).unwrap();
     rustix::process::kill_process_group(front, signal).unwrap();
 }
@@ -43,20 +55,18 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
         let body = "m A; m 'C;cmdline_url=make%20test'; stty -echo; read x; stty echo; m 'D;3'\n\
             m A; read y";
         let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
-        let made = new_session(&mut mux, "marks", opens).await;
-        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
+        let (viewer, key) = shown(&mut mux, opens).await;
         let listing = watched_until(&mut watch, "make test going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
         assert_eq!(going.command.as_deref(), Some("make test"));
-        let pane = pane(&listing).unwrap();
-        let Some(api::pane::Program::Pid(pid)) = pane.program else { panic!("{pane:?}") };
-        let front = pane.foreground.as_ref().expect("something runs in front");
-        assert_eq!(front.pid, pid);
+        let running = running(&listing).unwrap();
+        let front = running.foreground.as_ref().expect("something runs in front");
+        assert_eq!(front.pid, running.pid);
         assert_eq!(front.argv[..2], ["/bin/sh", "-c"]);
-        attached.type_line("").await;
+        viewer.type_line(key, "").await;
         let listing = watched_until(&mut watch, "make test ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
@@ -81,8 +91,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
             m A; m 'C;cmdline_url=sleep%2030'; sleep 30 & fg >/dev/null; m 'D;0'\n\
             m A; read x; m 'C;cmdline_url=fg'; fg >/dev/null; m 'D;0'\n\
             m A; read x";
-        let made = new_session(&mut mux, "jobs", bash(&format!("{MARK}\n{body}"))).await;
-        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
+        let (viewer, key) = shown(&mut mux, bash(&format!("{MARK}\n{body}"))).await;
         let listing = watched_until(&mut watch, "sleep in front", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
@@ -94,7 +103,7 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         .await;
         let Some(Is::Stopped(stopped)) = said(&listing) else { unreachable!() };
         assert_eq!(stopped.command.as_deref(), Some("sleep 30"));
-        attached.type_line("").await;
+        viewer.type_line(key, "").await;
         let listing = watched_until(&mut watch, "sleep brought back", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
@@ -109,20 +118,17 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
         let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
         assert_eq!(ended.command.as_deref(), Some("sleep 30"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Resumed(api::ran::Resumed {})));
-        attached.type_line("").await;
+        viewer.type_line(key, "").await;
         watched_until(&mut watch, "nothing said once the program ended", |listing| {
-            pane(listing).is_some_and(|pane| {
-                matches!(pane.program, Some(api::pane::Program::Ended(_)))
-                    && pane.ran.is_none()
-                    && pane.foreground.is_none()
-            })
+            let program = listing.terminals.first().and_then(|terminal| terminal.program.as_ref());
+            matches!(program, Some(api::terminal::Program::Ended(_)))
         })
         .await;
     });
 }
 
 #[test]
-fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
+fn the_marks_of_a_shell_the_command_runs_are_none_of_the_terminal_s() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
@@ -133,15 +139,14 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_pane_s() {
              m A; m 'C;cmdline_url=inner'; bash -c \"{inner}\"; m 'D;7'\n\
              m A; read y"
         );
-        let made = new_session(&mut mux, "nested", bash(&format!("{MARK}\n{body}"))).await;
-        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
+        let (viewer, key) = shown(&mut mux, bash(&format!("{MARK}\n{body}"))).await;
         let listing = watched_until(&mut watch, "inner going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
         let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
         assert_eq!(going.command.as_deref(), Some("inner"));
-        attached.type_line("").await;
+        viewer.type_line(key, "").await;
         let listing = watched_until(&mut watch, "inner ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
@@ -162,13 +167,12 @@ fn a_job_in_front_under_one_that_is_not_reads_as_asking() {
         let body = "m A; m 'C;cmdline_url=nested'; bash -c 'set -m; head -n1; true'; m 'D;0'\n\
             m A; read y";
         let opens = script(&format!("{MARK}\n{body}"), api::Ends::Holds);
-        let made = new_session(&mut mux, "under", opens).await;
-        let attached = Attached::new(&mut mux, session(&made), size(40, 10)).await;
+        let (viewer, key) = shown(&mut mux, opens).await;
         watched_until(&mut watch, "nested going, asking", |listing| {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
-        attached.type_line("").await;
+        viewer.type_line(key, "").await;
         watched_until(&mut watch, "nested ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })

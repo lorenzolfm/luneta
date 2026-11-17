@@ -51,9 +51,6 @@ impl Server {
             .env("ZELLIJ", "0")
             .env("ZELLIJ_SESSION_NAME", "theirs")
             .env("ZELLIJ_PANE_ID", "7")
-            .env_remove("LUNETA_MUX_SESSION")
-            .env_remove("LUNETA_MUX_MADE")
-            .env_remove("LUNETA_MUX_PANE")
             .env_remove("LUNETA_MUX_TERMINAL")
             .env_remove("LUNETA_MUX_TERMINAL_MADE")
             .stdin(Stdio::null())
@@ -137,24 +134,6 @@ pub fn script(script: &str, ends: api::Ends) -> api::Opens {
     }
 }
 
-pub async fn new_session(
-    mux: &mut MuxClient<Channel>,
-    name: &str,
-    opens: api::Opens,
-) -> api::NewSessionResponse {
-    let request = api::NewSessionRequest { name: name.to_owned(), opens: Some(opens), tab: None };
-    mux.new_session(request).await.unwrap().into_inner()
-}
-
-pub async fn new_tab(
-    mux: &mut MuxClient<Channel>,
-    session: u64,
-    opens: api::Opens,
-) -> api::NewTabResponse {
-    let request = api::NewTabRequest { session, name: None, opens: Some(opens) };
-    mux.new_tab(request).await.unwrap().into_inner()
-}
-
 pub async fn new_terminal(
     mux: &mut MuxClient<Channel>,
     opens: api::Opens,
@@ -164,14 +143,6 @@ pub async fn new_terminal(
     let request =
         api::NewTerminalRequest { opens: Some(opens), tag: tag.to_vec(), size: Some(size) };
     mux.new_terminal(request).await.unwrap().into_inner().terminal.unwrap()
-}
-
-pub fn session(made: &api::NewSessionResponse) -> api::Place {
-    api::Place { is: Some(api::place::Is::Session(made.session)), made_at: made.made_at }
-}
-
-pub fn tab(id: u32, made: &api::NewSessionResponse) -> api::Place {
-    api::Place { is: Some(api::place::Is::Tab(id)), made_at: made.made_at }
 }
 
 pub fn size(columns: u32, rows: u32) -> api::Size {
@@ -200,134 +171,6 @@ pub async fn watched_until(
 
 pub async fn listed(mux: &mut MuxClient<Channel>) -> api::Listing {
     mux.list(api::ListRequest {}).await.unwrap().into_inner()
-}
-
-pub fn tabs(listing: &api::Listing) -> &[api::Tab] {
-    listing.sessions.first().map_or(&[], |session| &session.tabs)
-}
-
-pub fn ended(pane: &api::Pane) -> Option<api::Exit> {
-    match &pane.program {
-        Some(api::pane::Program::Ended(exit)) => Some(*exit),
-        Some(api::pane::Program::Pid(_)) | None => None,
-    }
-}
-
-pub struct Attached {
-    pub client: u64,
-    pub went: api::Went,
-    pub rows: Vec<String>,
-    pub last: Option<api::Frame>,
-    pub layout: Option<api::Layout>,
-    screens: BTreeMap<u32, (Vec<String>, api::Frame)>,
-    to: mpsc::Sender<api::ToServer>,
-    from: Streaming<api::ToClient>,
-}
-
-impl Attached {
-    pub async fn new(mux: &mut MuxClient<Channel>, to: api::Place, size: api::Size) -> Attached {
-        let hello = api::Hello { to: Some(to), size: Some(size), colours: None, runs_in: None };
-        Attached::hello(mux, hello).await.unwrap()
-    }
-
-    pub async fn hello(
-        mux: &mut MuxClient<Channel>,
-        hello: api::Hello,
-    ) -> Result<Attached, tonic::Status> {
-        let (to, said) = mpsc::channel(64);
-        to.send(event(api::to_server::Event::Hello(hello))).await.unwrap();
-        let mut from = mux.attach(ReceiverStream::new(said)).await?.into_inner();
-        let Some(api::to_client::Event::Attached(api::Attached { client })) =
-            from.message().await?.and_then(|message| message.event)
-        else {
-            panic!("the first word was not attached");
-        };
-        let mut attached = Attached {
-            client,
-            went: api::Went::default(),
-            rows: Vec::new(),
-            last: None,
-            layout: None,
-            screens: BTreeMap::new(),
-            to,
-            from,
-        };
-        attached.went = attached.next_went().await;
-        Ok(attached)
-    }
-
-    pub async fn send(&self, said: api::to_server::Event) {
-        self.to.send(event(said)).await.unwrap();
-    }
-
-    pub async fn type_line(&self, text: &str) {
-        for key in line_keys(text) {
-            self.send(api::to_server::Event::Key(key)).await;
-        }
-    }
-
-    pub async fn next(&mut self) -> Option<api::to_client::Event> {
-        let next = tokio::time::timeout(PATIENCE, self.from.message()).await;
-        let message = next.expect("the server said something in time").ok()??;
-        let event = message.event?;
-        match &event {
-            api::to_client::Event::Frame(frame) => self.apply(frame),
-            api::to_client::Event::Went(went) => {
-                self.went = *went;
-                self.screens.clear();
-            },
-            api::to_client::Event::Layout(layout) => self.layout = Some(layout.clone()),
-            _ => {},
-        }
-        let focused = self.screens.get(&self.went.pane);
-        self.rows = focused.map_or_else(Vec::new, |(rows, _)| rows.clone());
-        self.last = focused.map(|(_, frame)| frame.clone());
-        Some(event)
-    }
-
-    async fn next_went(&mut self) -> api::Went {
-        loop {
-            if let Some(api::to_client::Event::Went(went)) = self.next().await {
-                return went;
-            }
-        }
-    }
-
-    pub async fn until(&mut self, what: &str, test: impl Fn(&Attached) -> bool) {
-        while !test(self) {
-            assert!(self.next().await.is_some(), "the stream ended before {what}: {}", self.text());
-        }
-    }
-
-    pub async fn until_row(&mut self, text: &str) {
-        self.until(&format!("a row reads {text:?}"), |attached| {
-            attached.rows.iter().any(|row| row == text)
-        })
-        .await;
-    }
-
-    pub async fn until_pane_row(&mut self, pane: u32, text: &str) {
-        self.until(&format!("a row of pane {pane} reads {text:?}"), |attached| {
-            attached.rows_of(pane).iter().any(|row| row == text)
-        })
-        .await;
-    }
-
-    pub async fn until_laid(&mut self, what: &str, test: impl Fn(&api::Layout) -> bool) {
-        self.until(what, |attached| attached.layout.as_ref().is_some_and(&test)).await;
-    }
-
-    pub fn rows_of(&self, pane: u32) -> &[String] {
-        self.screens.get(&pane).map_or(&[], |(rows, _)| rows)
-    }
-
-    pub fn text(&self) -> String {
-        self.rows.join("\n")
-    }
-
-    fn apply(&mut self, frame: &api::Frame) {
-        applied(&mut self.screens, frame);
-    }
 }
 
 type Screens = BTreeMap<u32, (Vec<String>, api::Frame)>;
@@ -407,13 +250,14 @@ impl Viewer {
 }
 
 fn applied(screens: &mut Screens, frame: &api::Frame) {
+    let terminal = frame.terminal.unwrap().id;
     match frame.rows.as_ref().unwrap() {
         api::frame::Rows::Whole(whole) => {
             let rows = whole.lines.iter().map(line_text).collect();
-            screens.insert(frame.pane, (rows, frame.clone()));
+            screens.insert(terminal, (rows, frame.clone()));
         },
         api::frame::Rows::Changed(changed) => {
-            let Some((rows, last)) = screens.get_mut(&frame.pane) else {
+            let Some((rows, last)) = screens.get_mut(&terminal) else {
                 return;
             };
             for row in &changed.rows {
@@ -442,10 +286,6 @@ fn line_keys(text: &str) -> Vec<api::Key> {
         text: String::new(),
     });
     keys
-}
-
-fn event(said: api::to_server::Event) -> api::ToServer {
-    api::ToServer { event: Some(said) }
 }
 
 fn viewer_said(said: api::from_viewer::Event) -> api::FromViewer {

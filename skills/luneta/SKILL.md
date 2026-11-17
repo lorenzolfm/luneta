@@ -7,10 +7,9 @@ description: Drive luneta and zellij for the user with the `luneta` CLI - open a
 
 luneta runs zellij beside a sidebar of every session on the host, and what
 the agent in each pane is doing. Its CLI reads what lunetad, its daemon, knows,
-and has zellij open, move and close things. You run in a pane of zellij, or of
-one of luneta's own sessions (`◇` in the sidebar, `luneta-mux`'s), whose names
-are shared with zellij's: `luneta here` says which pane, as
-`<session>:<pane>`. Don't read it from `$ZELLIJ_SESSION_NAME`: that keeps the
+and has zellij open, move and close things. You run in a pane of zellij, or in
+a terminal of one of luneta's projects (`luneta-mux`'s), which the verbs don't
+reach yet. In zellij, `luneta here` says which pane, as `<session>:<pane>`. Don't read it from `$ZELLIJ_SESSION_NAME`: that keeps the
 name the session had when your pane opened, and a rename leaves it behind.
 
 A pane is named `<session>:<pane>`, as `luneta:11`; a session by its name alone.
@@ -24,9 +23,8 @@ luneta agents     # each agent: <session>:<pane>, status (busy/idle/waiting/shel
 zoxide query -l   # the directories the user works in, most used first; `zoxide query <words>` picks one
 ```
 
-`luneta agents` writes `?:<pane> (own <id>)` for an agent of an own session
-whose name it can't tell, and says why. That is no pane address: no verb
-takes it.
+`luneta agents` writes `terminal <id>` for an agent in a project's terminal.
+That is no pane address: no verb takes it.
 
 - "X" is a directory, a repository or a session: match it against the zoxide
   list and the session names. Ask when two fit.
@@ -46,11 +44,9 @@ agents end, and `prune` deletes nothing and says so.
 was renamed and luneta can't tell which it is now (no lunetad, or one that
 can't say), they fail and say so. Tell the user. Don't guess a session.
 
-An own session's tab holds one pane for now. There `open pane` and `turn`
-fail and say so: open a tab with `open tab --session <session>` instead.
-`open session` from an own session makes an own one. `go` takes the user
-between own sessions, or between zellij's, and not from one kind to the
-other: it fails and says so, and the user goes across in luneta's sidebar.
+In a project's terminal, `luneta here` says you run in no pane of zellij, and
+the verbs that need your session fail. Tell the user; they open, close and
+move a project's terminals in luneta itself.
 
 ## Verbs
 

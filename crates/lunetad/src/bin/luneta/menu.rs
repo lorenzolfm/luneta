@@ -2875,7 +2875,7 @@ mod tests {
 
     #[test]
     fn an_own_session_s_pane_opens_its_agents_beside_it_and_turns_none() {
-        let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
+        let own = Listed::new_project("luneta", 3);
         let own_row = || Target::Pane(Machine::Local, PaneRow { session: own.clone(), ..row() });
         let (menu, _) = stays(opened(own_row(), None));
         let lines = text(&menu.lines(31, 10, 0).0);
@@ -3192,7 +3192,7 @@ mod tests {
             "menu: pane 4 runs no shell with luneta's hook; a fish started since the hook was \
              installed has it"
         );
-        let own = Listed::new_own("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1), 3);
+        let own = Listed::new_project("luneta", 3);
         let unmarked = PaneRow { session: own, ran: Ran::Unhooked, ..row() };
         assert_eq!(
             refused(Target::Pane(Machine::Local, unmarked)),

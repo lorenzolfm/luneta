@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::mux::value_in;
 
 pub mod api;
-pub mod attach;
+pub mod frames;
 pub mod server;
 pub mod viewer;
 
@@ -172,14 +172,6 @@ impl From<OwnPane> for crate::api::Own {
     }
 }
 
-const SESSION_VAR: &str = "LUNETA_MUX_SESSION";
-
-const MADE_VAR: &str = "LUNETA_MUX_MADE";
-
-const PANE_VAR: &str = "LUNETA_MUX_PANE";
-
-const PANE_VARS: [&str; 3] = [SESSION_VAR, MADE_VAR, PANE_VAR];
-
 const TERMINAL_VAR: &str = "LUNETA_MUX_TERMINAL";
 
 const TERMINAL_MADE_VAR: &str = "LUNETA_MUX_TERMINAL_MADE";
@@ -191,14 +183,6 @@ pub(crate) fn terminal_in(environ: &[OsString]) -> Option<TerminalKey> {
     let id = NonZeroU32::new(text(TERMINAL_VAR)?.parse().ok()?)?;
     let made = OwnMade::from_nanos(text(TERMINAL_MADE_VAR)?.parse().ok()?);
     Some(TerminalKey { id, made })
-}
-
-pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
-    let text = |name: &str| std::str::from_utf8(value_in(environ, name)?).ok();
-    let id = OwnId::new(text(SESSION_VAR)?.parse().ok()?)?;
-    let made = OwnMade::from_nanos(text(MADE_VAR)?.parse().ok()?);
-    let pane = text(PANE_VAR)?.parse().ok()?;
-    Some(OwnPane { session: OwnKey { id, made }, id: pane })
 }
 
 #[must_use]
@@ -217,21 +201,8 @@ fn environ() -> Vec<OsString> {
         .collect()
 }
 
-pub fn here() -> Result<Option<OwnPane>, String> {
-    here_in(&environ())
-}
-
-fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {
-    if PANE_VARS.iter().all(|name| value_in(environ, name).is_none()) {
-        return Ok(None);
-    }
-    let unread =
-        || format!("{SESSION_VAR}, {MADE_VAR} and {PANE_VAR} name no pane of luneta-mux's");
-    pane_in(environ).map(Some).ok_or_else(unread)
-}
-
 pub(crate) fn in_no_pane(command: &mut Command) {
-    for name in PANE_VARS.into_iter().chain(TERMINAL_VARS) {
+    for name in TERMINAL_VARS {
         command.env_remove(name);
     }
 }
@@ -239,35 +210,6 @@ pub(crate) fn in_no_pane(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_variables_name_an_own_pane_by_its_ids_and_its_session_s_making() {
-        let environ = |entries: &[&str]| -> Vec<OsString> {
-            entries.iter().map(OsString::from).collect()
-        };
-        let all = ["LUNETA_MUX_SESSION=3", "HOME=/h", "LUNETA_MUX_MADE=60000000005"];
-        let all = environ(&[&all[..], &["LUNETA_MUX_PANE=12"]].concat());
-        let made = OwnMade::from_nanos(60_000_000_005);
-        let session = OwnKey { id: OwnId::new(3).unwrap(), made };
-        assert_eq!(pane_in(&all), OwnPane::new(session, 12));
-        let made = "LUNETA_MUX_MADE=60";
-        let unnamed = [
-            environ(&["LUNETA_MUX_SESSION=3", made]),
-            environ(&["LUNETA_MUX_PANE=12", made]),
-            environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_PANE=12"]),
-            environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=", "LUNETA_MUX_PANE=12"]),
-            environ(&["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=-1", "LUNETA_MUX_PANE=12"]),
-            environ(&["LUNETA_MUX_SESSION=work", made, "LUNETA_MUX_PANE=12"]),
-            environ(&["LUNETA_MUX_SESSION=3", made, "LUNETA_MUX_PANE="]),
-            environ(&["LUNETA_MUX_SESSION=3", made, "LUNETA_MUX_PANE=4294967296"]),
-            environ(&["LUNETA_MUX_SESSION=0", made, "LUNETA_MUX_PANE=12"]),
-            environ(&["LUNETA_MUX_SESSION=3", made, "LUNETA_MUX_PANE=0"]),
-            environ(&["LUNETA_MUX_SESSIONS=3", made, "LUNETA_MUX_PANE=12"]),
-        ];
-        for environ in unnamed {
-            assert_eq!(pane_in(&environ), None, "{environ:?}");
-        }
-    }
 
     #[test]
     fn the_variables_name_a_terminal_by_its_id_and_its_making() {
@@ -288,28 +230,6 @@ mod tests {
         ];
         for environ in unnamed {
             assert_eq!(terminal_in(&environ), None, "{environ:?}");
-        }
-    }
-
-    #[test]
-    fn a_pane_s_variables_set_that_do_not_read_are_no_pane_and_not_none() {
-        let environ = |entries: &[&str]| -> Vec<OsString> {
-            entries.iter().map(OsString::from).collect()
-        };
-        assert_eq!(here_in(&environ(&["HOME=/h"])), Ok(None));
-        let all = ["LUNETA_MUX_SESSION=3", "LUNETA_MUX_MADE=60", "LUNETA_MUX_PANE=12"];
-        let session = OwnKey { id: OwnId::new(3).unwrap(), made: OwnMade::from_nanos(60) };
-        assert_eq!(here_in(&environ(&all)), Ok(OwnPane::new(session, 12)));
-        let unread = "LUNETA_MUX_SESSION, LUNETA_MUX_MADE and LUNETA_MUX_PANE name no pane of \
-                      luneta-mux's";
-        for partial in [
-            environ(&all[..2]),
-            environ(&all[1..]),
-            environ(&[all[0], all[2]]),
-            environ(&["LUNETA_MUX_MADE="]),
-            environ(&["LUNETA_MUX_SESSION=work", all[1], all[2]]),
-        ] {
-            assert_eq!(here_in(&partial), Err(unread.to_owned()), "{partial:?}");
         }
     }
 

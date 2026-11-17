@@ -8,7 +8,7 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
-use lunetad::mux::own::attach::{self, Frame, Rows};
+use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
@@ -128,7 +128,8 @@ impl View {
         keys
     }
 
-    fn framed(&mut self, key: TerminalKey, frame: &Frame) -> Result<(), String> {
+    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+        let key = frame.terminal();
         if !self.wanted().contains(&key) {
             return Ok(());
         }
@@ -147,7 +148,7 @@ impl View {
             },
             (Rows::Changed(_), None) => return Ok(()),
             (Rows::Changed(_), Some(screen)) => {
-                let sides = |size: attach::Size| format!("{}x{}", size.columns, size.rows);
+                let sides = |size: frames::Size| format!("{}x{}", size.columns, size.rows);
                 let (had, sides) = (sides(screen.size), sides(frame.size()));
                 self.screens.insert(key, screen);
                 return Err(format!("a frame of {sides} changes the rows of {had}"));
@@ -337,10 +338,10 @@ impl View {
             return (CursorShape::HollowBlock, false);
         };
         let shape = match cursor.shape {
-            attach::CursorShape::Block => CursorShape::Block,
-            attach::CursorShape::Bar => CursorShape::Beam,
-            attach::CursorShape::Underline => CursorShape::Underline,
-            attach::CursorShape::BlockHollow => CursorShape::HollowBlock,
+            frames::CursorShape::Block => CursorShape::Block,
+            frames::CursorShape::Bar => CursorShape::Beam,
+            frames::CursorShape::Underline => CursorShape::Underline,
+            frames::CursorShape::BlockHollow => CursorShape::HollowBlock,
         };
         (shape, cursor.blinking)
     }
@@ -495,12 +496,10 @@ impl Viewed {
             },
         };
         let frame = framed.frame();
-        let mut keys = watching.showing.iter().filter(|key| key.id == frame.pane());
-        let Some(key) = keys.next().copied() else {
+        if !watching.showing.contains(&frame.terminal()) {
             return Heeded::Quiet;
-        };
-        assert_eq!(keys.next(), None, "a view's keys name each pane of luneta-mux's once");
-        match self.view.framed(key, frame) {
+        }
+        match self.view.framed(frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
@@ -650,7 +649,7 @@ mod tests {
 
     use crossterm::event::{KeyModifiers, MouseButton};
     use lunetad::api::{show_request, show_response};
-    use lunetad::mux::own::attach::{Cursor, Glyph, Grapheme, Line, Shows};
+    use lunetad::mux::own::frames::{Cursor, Glyph, Grapheme, Line, Shows};
     use lunetad::mux::own::OwnMade;
 
     use super::*;
@@ -661,7 +660,7 @@ mod tests {
 
     fn narrow(it: &str) -> Glyph {
         let shows = Shows::Narrow(Grapheme::new(it.to_owned()).unwrap());
-        Glyph { shows, style: attach::Style::default() }
+        Glyph { shows, style: frames::Style::default() }
     }
 
     fn lines(rows: &[&str]) -> Vec<Line> {
@@ -679,8 +678,8 @@ mod tests {
     fn whole(id: u32, rows: &[&str], cursor: Option<Cursor>) -> Frame {
         let lines = lines(rows);
         let columns = side(u16::try_from(rows[0].len()).unwrap());
-        let size = attach::Size { columns, rows: side(u16::try_from(lines.len()).unwrap()) };
-        Frame::new(NonZeroU32::new(id).unwrap(), size, Rows::Whole(lines), cursor, false).unwrap()
+        let size = frames::Size { columns, rows: side(u16::try_from(lines.len()).unwrap()) };
+        Frame::new(key(id), size, Rows::Whole(lines), cursor, false).unwrap()
     }
 
     fn workstream(id: u64) -> WorkstreamId {
@@ -733,9 +732,9 @@ mod tests {
         view.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
         assert!(!view.laid_out(laid(halves(), 11, false)));
         let cursor =
-            Cursor { row: 1, column: 2, shape: attach::CursorShape::Block, blinking: false };
-        view.framed(key(1), &whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        view.framed(key(2), &whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+            Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
+        view.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
+        view.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
         view
     }
 
@@ -827,9 +826,9 @@ mod tests {
         view.select_to(spot(3, 30));
         assert_eq!(view.selected().as_deref(), Some("abcdefgh\nijklmnop"));
         assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(key(2), &whole(2, &["ab"], None)).unwrap();
+        view.framed(&whole(2, &["ab"], None)).unwrap();
         assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(key(1), &whole(1, &["ab"], None)).unwrap();
+        view.framed(&whole(1, &["ab"], None)).unwrap();
         assert_eq!(view.pointer, Pointer::Free);
     }
 
@@ -837,13 +836,13 @@ mod tests {
     fn changed_rows_follow_only_a_frame_of_their_size_and_a_terminal_laid_out_no_more_drops() {
         let mut view = split_view();
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
-        let size = attach::Size { columns: side(1), rows: side(1) };
-        let frame = Frame::new(NonZeroU32::MIN, size, changed, None, false).unwrap();
-        let why = view.framed(key(1), &frame).unwrap_err();
+        let size = frames::Size { columns: side(1), rows: side(1) };
+        let frame = Frame::new(key(1), size, changed, None, false).unwrap();
+        let why = view.framed(&frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
         view.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(view.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
-        view.framed(key(1), &whole(1, &["no"], None)).unwrap();
+        view.framed(&whole(1, &["no"], None)).unwrap();
         assert!(!view.screens.contains_key(&key(1)), "a terminal its view lacks gets no screen");
         view.go(workstream(2));
         assert_eq!(view.focused(), None, "a view of another workstream lays out nothing here");

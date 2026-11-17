@@ -19,10 +19,10 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Dumped, Input, Size};
+use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
 use crate::front::Front;
-use crate::id::{ClientId, PaneId};
+use crate::id::{ClientId, TerminalId};
 use crate::marks::Mark;
 use crate::mux::Mux;
 use crate::process::{self, Group};
@@ -63,8 +63,6 @@ const FOR_WORDS: usize = 8;
 const _: () = assert!(FOR_WORDS < CLIENT_MESSAGES);
 const _: () = assert!(MESSAGES_PER_TURN <= MESSAGES_MAX);
 
-pub type Out = mpsc::Sender<Result<api::ToClient, Status>>;
-
 pub type ViewerOut = mpsc::Sender<Result<api::ToViewer, Status>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,15 +93,9 @@ impl Exit {
 #[derive(Clone)]
 pub struct Viewer {
     pub client: ClientId,
-    pub frames: Frames,
+    pub frames: ViewerOut,
     pub colours: Colours,
     pub came: u64,
-}
-
-#[derive(Clone)]
-pub enum Frames {
-    Client(Out),
-    Viewer(ViewerOut),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,37 +105,9 @@ enum Sent {
     Closed,
 }
 
-impl Frames {
-    fn capacity(&self) -> usize {
-        match self {
-            Frames::Client(out) => out.capacity(),
-            Frames::Viewer(out) => out.capacity(),
-        }
-    }
-
-    fn is_closed(&self) -> bool {
-        match self {
-            Frames::Client(out) => out.is_closed(),
-            Frames::Viewer(out) => out.is_closed(),
-        }
-    }
-
-    fn send(&self, frame: api::Frame) -> Sent {
-        match self {
-            Frames::Client(out) => {
-                let event = Some(api::to_client::Event::Frame(frame));
-                sent(&out.try_send(Ok(api::ToClient { event })))
-            },
-            Frames::Viewer(out) => {
-                let event = Some(api::to_viewer::Event::Frame(frame));
-                sent(&out.try_send(Ok(api::ToViewer { event })))
-            },
-        }
-    }
-}
-
-fn sent<T>(sent: &Result<(), TrySendError<T>>) -> Sent {
-    match sent {
+fn sent(frames: &ViewerOut, frame: api::Frame) -> Sent {
+    let event = Some(api::to_viewer::Event::Frame(frame));
+    match frames.try_send(Ok(api::ToViewer { event })) {
         Ok(()) => Sent::Taken,
         Err(TrySendError::Full(_)) => Sent::Full,
         Err(TrySendError::Closed(_)) => Sent::Closed,
@@ -233,11 +197,12 @@ pub struct Started {
 
 pub fn start(
     mux: Arc<Mux>,
-    pane: PaneId,
+    key: TerminalKey,
     pty: Pty,
     mut child: Child,
     size: Size,
 ) -> io::Result<Started> {
+    let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
     let (exited, exits) = std_mpsc::sync_channel(1);
     let (wake, woken) = UnixStream::pair()?;
@@ -249,21 +214,21 @@ pub fn start(
     let wanted = Arc::new(wanted);
     let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
     let pid = child.id();
-    thread::Builder::new().name(format!("pane {pane} waits")).spawn(move || {
-        waits(pane, &mut child, &exited, &wake);
+    thread::Builder::new().name(format!("terminal {terminal} waits")).spawn(move || {
+        waits(terminal, &mut child, &exited, &wake);
     })?;
-    thread::Builder::new().name(format!("pane {pane}")).spawn(move || {
+    thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
         let screen = match Screen::new(size, SCROLLBACK_BYTES) {
             Ok(screen) => screen,
             Err(error) => {
-                eprintln!("luneta-mux: pane {pane}'s screen could not be made: {error}");
+                eprintln!("luneta-mux: terminal {terminal}'s screen could not be made: {error}");
                 drop(pty);
-                mux.lost(pane);
+                mux.lost(terminal);
                 return;
             },
         };
         let mut thread = Thread {
-            pane,
+            key,
             mux,
             inbox,
             wants,
@@ -291,15 +256,15 @@ pub fn start(
             Err(_) => Some("it panicked".to_owned()),
         };
         if let Some(failed) = failed {
-            eprintln!("luneta-mux: pane {pane} failed: {failed}");
+            eprintln!("luneta-mux: terminal {terminal} failed: {failed}");
             thread.program = Program::Gone;
-            thread.mux.lost(pane);
+            thread.mux.lost(terminal);
         }
     })?;
     Ok(Started { handle, pid })
 }
 
-fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
+fn waits(terminal: TerminalId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake) {
     match child.wait() {
         Ok(status) => {
             if exited.try_send(Exit::of(status)).is_ok() {
@@ -307,7 +272,7 @@ fn waits(pane: PaneId, child: &mut Child, exited: &SyncSender<Exit>, wake: &Wake
             }
         },
         Err(error) => {
-            eprintln!("luneta-mux: pane {pane}'s program could not be waited for: {error}");
+            eprintln!("luneta-mux: terminal {terminal}'s program could not be waited for: {error}");
         },
     }
 }
@@ -342,7 +307,7 @@ impl Program {
 }
 
 struct Thread {
-    pane: PaneId,
+    key: TerminalKey,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
     wants: watch::Receiver<Wanted>,
@@ -472,7 +437,7 @@ impl Thread {
         let told = Told { foreground, ran: self.shell.said() };
         if told != self.told {
             self.told = told.clone();
-            self.mux.looked(self.pane, told.foreground, told.ran);
+            self.mux.looked(self.key.id, told.foreground, told.ran);
         }
     }
 
@@ -593,7 +558,7 @@ impl Thread {
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.pane, exit))
+        Ok(self.mux.ended(self.key.id, exit))
     }
 
     fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
@@ -660,8 +625,8 @@ impl Thread {
             unread.extend_from_slice(bytes);
         } else {
             eprintln!(
-                "luneta-mux: pane {} has {} unread bytes: input dropped",
-                self.pane,
+                "luneta-mux: terminal {} has {} unread bytes: input dropped",
+                self.key.id,
                 unread.len()
             );
         }
@@ -740,7 +705,7 @@ impl Thread {
             let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
             self.title.clone_from(&title);
             self.pwd = pwd;
-            self.mux.titled(self.pane, title, cwd);
+            self.mux.titled(self.key.id, title, cwd);
         }
         Ok(())
     }
@@ -815,8 +780,8 @@ impl Thread {
                 continue;
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
-            let said = frame::said(self.pane, view, before, flags);
-            match watcher.viewer.frames.send(said) {
+            let said = frame::said(self.key, view, before, flags);
+            match sent(&watcher.viewer.frames, said) {
                 Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });
                     watcher.owed = false;

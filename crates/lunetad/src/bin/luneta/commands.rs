@@ -21,8 +21,7 @@ use lunetad::api::{
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
-use lunetad::mux::own::server::{self, Listing};
-use lunetad::mux::{Failure, OwnId, OwnPane, SessionName, TerminalKey, ZellijPane};
+use lunetad::mux::{OwnId, OwnPane, SessionName, TerminalKey, ZellijPane};
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::{self, Asker, BYTES_MAX};
@@ -186,10 +185,7 @@ fn version(spelled: &str) -> Result<Version, String> {
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::running(folder), info),
-        Command::Agents => {
-            let own = server::listed();
-            ask(folder, daemon::running(folder), |daemon| agents(daemon, own))
-        },
+        Command::Agents => ask(folder, daemon::running(folder), agents),
         Command::Sessions => ask(folder, daemon::running(folder), sessions),
         Command::Watch { after } => {
             let current = async { daemon::current(folder).await.map(|current| current.daemon) };
@@ -284,12 +280,9 @@ fn asker_of(seat: Seat) -> Result<Option<Asker>, String> {
         Seat::Opened(ZellijPane { session, pane }) => {
             let named = SessionName::running(&session)
                 .map_err(|why| format!("session {session:?}: {why}"))?;
-            Asker::Zellij { named, pane }
+            Asker { named, pane }
         },
-        Seat::Asked { user: User::Pane { session, pane }, .. } => {
-            Asker::Zellij { named: session, pane }
-        },
-        Seat::Own(pane) | Seat::Asked { user: User::Own { pane, .. }, .. } => Asker::Own(pane),
+        Seat::Asked { user: User::Pane { session, pane }, .. } => Asker { named: session, pane },
         Seat::Asked { user: User::Away | User::Untold, .. } => return Ok(None),
     };
     Ok(Some(asker))
@@ -406,22 +399,10 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn agents(
-    mut daemon: DaemonClient<Channel>,
-    own: Result<(Vec<Listing>, Vec<String>), Failure>,
-) -> Result<(), Box<dyn Error>> {
+async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
-    let (own, left_out) = own.unwrap_or_else(|failure| {
-        let why = "own sessions go by their ids, as luneta-mux cannot list them";
-        eprintln!("luneta: {why}: {failure}");
-        (Vec::new(), Vec::new())
-    });
-    for why in left_out {
-        let left = "luneta-mux lists a session that does not read, whose agents go by its id";
-        eprintln!("luneta: {left}: {why}");
-    }
     let seated = |agent: &Agent| {
-        seat_of(agent, &own).unwrap_or_else(|(seat, why)| {
+        seat_of(agent).unwrap_or_else(|(seat, why)| {
             eprintln!("luneta: lunetad lists an agent in {why}");
             seat
         })
@@ -439,10 +420,10 @@ async fn agents(
     Ok(())
 }
 
-pub fn seat_of(agent: &Agent, own: &[Listing]) -> Result<String, (String, String)> {
+pub fn seat_of(agent: &Agent) -> Result<String, (String, String)> {
     match &agent.pane {
         Some(agent::Pane::Own(pane)) => {
-            OwnPane::of(pane).map(|read| own_seat(read, own)).map_err(|why| {
+            OwnPane::of(pane).map(own_seat).map_err(|why| {
                 let session = pane.session.and_then(|session| OwnId::new(session.id));
                 (unnamed_own(session, NonZeroU32::new(pane.pane)), why)
             })
@@ -460,11 +441,8 @@ pub fn terminal_seat(key: TerminalKey) -> String {
     seat
 }
 
-pub fn own_seat(pane: OwnPane, own: &[Listing]) -> String {
-    match own.iter().find(|listed| listed.key() == pane.session) {
-        Some(named) => format!("{}:{}", named.name, pane.id),
-        None => unnamed_own(Some(pane.session.id), Some(pane.id)),
-    }
+pub fn own_seat(pane: OwnPane) -> String {
+    unnamed_own(Some(pane.session.id), Some(pane.id))
 }
 
 fn unnamed_own(session: Option<OwnId>, pane: Option<NonZeroU32>) -> String {

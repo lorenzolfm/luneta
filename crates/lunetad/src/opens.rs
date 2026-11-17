@@ -5,8 +5,8 @@ use std::time::SystemTime;
 
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
-use crate::mux::{tabs, terminal_of, Called, Laid, Mux, Runs, SessionName, TabId, Zellij};
-use crate::closes::{self, Close, Whose};
+use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId, Zellij};
+use crate::closes::{self, Close};
 use crate::Directory;
 
 const SHELL_VAR: &str = "SHELL";
@@ -58,26 +58,18 @@ pub struct Opened {
 }
 
 pub fn opening(open: &Open) -> Result<Opened, String> {
-    opened(Called::named(open.session())?, open)
+    opened(open)
 }
 
-pub fn opening_of(open: &Open, whose: Whose) -> Result<Opened, String> {
-    opened(Called::of(open.session(), whose)?, open)
-}
 
-fn opened(called: Called<'_>, open: &Open) -> Result<Opened, String> {
+fn opened(open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };
     match open {
-        Open::Pane { beside, cwd, command, .. } => {
+        Open::Pane { session, beside, cwd, command } => {
             let runs = Runs::of(command, Runs::ZellijShell);
-            Ok(terminal(called.mux().pane_opened(*beside, cwd, runs)?))
+            Ok(terminal(Mux::Zellij(session).pane_opened(*beside, cwd, runs)?))
         },
         Open::Tab { session, tab, alone_since } => {
-            if let Called::Own(own) = called {
-                let own = Mux::Own(&own);
-                let (opened, laid) = tab_opened(own, tab)?;
-                return terminal_of(&laid, opened).map(terminal).ok_or_else(|| NO_PANE.to_owned());
-            }
             if !Mux::Zellij(session).has_clients()? {
                 return Err(format!(
                     "{}: go there first, or open a pane beside one of its panes",

@@ -2,8 +2,7 @@ use luneta_mux::api;
 use tonic::Code;
 
 use crate::host::{
-    Server, Viewer, gone, listed, new_session, new_terminal, run, script, shell, size,
-    watched_until,
+    Server, Viewer, gone, listed, new_terminal, run, script, shell, size, watched_until,
 };
 
 fn terminal<'a>(listing: &'a api::Listing, key: &api::TerminalKey) -> Option<&'a api::Terminal> {
@@ -28,7 +27,6 @@ fn a_terminal_is_listed_with_its_tag_and_size_and_a_viewer_types_in_it() {
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"work 1", size(40, 10)).await;
         let listing = listed(&mut mux).await;
-        assert_eq!(listing.sessions, Vec::<api::Session>::new());
         let listed = terminal(&listing, &key).expect("the terminal is listed");
         assert_eq!(listing.terminals.len(), 1);
         assert_eq!(listed.tag, b"work 1");
@@ -116,7 +114,7 @@ fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
         loop {
             let event = viewer.next().await.unwrap().expect("the stream goes on");
             if let api::to_viewer::Event::Frame(frame) = event
-                && frame.pane == key.id
+                && frame.terminal == Some(key)
                 && matches!(frame.rows, Some(api::frame::Rows::Whole(_)))
             {
                 break;
@@ -169,8 +167,7 @@ fn a_terminal_named_with_another_time_is_not_found() {
         let sized = mux.size_terminal(sized).await;
         let tagged = api::TagTerminalRequest { terminal: other, tag: b"u".to_vec() };
         let tagged = mux.tag_terminal(tagged).await;
-        let dumped =
-            api::DumpRequest { pane: 0, dumped: api::Dumped::Text.into(), terminal: other };
+        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: other };
         let dumped = mux.dump(dumped).await;
         let refusals =
             [closed.unwrap_err(), sized.unwrap_err(), tagged.unwrap_err(), dumped.unwrap_err()];
@@ -182,11 +179,11 @@ fn a_terminal_named_with_another_time_is_not_found() {
 }
 
 #[test]
-fn a_terminal_s_program_sees_the_terminal_s_ids_and_no_session_s() {
+fn a_terminal_s_program_sees_the_terminal_s_ids_and_not_zellij_s() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
-        let says = "echo \"$LUNETA_MUX_TERMINAL ${LUNETA_MUX_SESSION-none}\"; \
+        let says = "echo \"$LUNETA_MUX_TERMINAL ${ZELLIJ_SESSION_NAME-none}\"; \
             echo \"$LUNETA_MUX_TERMINAL_MADE\"; read x";
         let key = new_terminal(&mut mux, script(says, api::Ends::Holds), b"t", size(40, 4)).await;
         let mut viewer = Viewer::new(&mut mux).await;
@@ -210,17 +207,12 @@ fn a_terminal_dumps_its_text() {
             })
         })
         .await;
-        let dumped =
-            api::DumpRequest { pane: 0, dumped: api::Dumped::Text.into(), terminal: Some(key) };
+        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: Some(key) };
         let text = mux.dump(dumped).await.unwrap().into_inner().text;
         assert!(text.lines().any(|line| line == "said"), "{text}");
-        let both = api::DumpRequest {
-            pane: key.id,
-            dumped: api::Dumped::Text.into(),
-            terminal: Some(key),
-        };
-        let refusal = mux.dump(both).await.unwrap_err();
-        assert_eq!(refusal.message(), "pane and terminal are both set");
+        let untold = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: None };
+        let refusal = mux.dump(untold).await.unwrap_err();
+        assert_eq!(refusal.message(), "terminal is missing");
     });
 }
 
@@ -248,27 +240,6 @@ fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
         })
         .await;
         assert!(terminal(&listing, &held).is_some());
-    });
-}
-
-#[test]
-fn a_terminal_keeps_the_server_after_its_last_session_and_the_last_terminal_ends_it() {
-    run(async {
-        let mut server = Server::start();
-        let mut mux = server.client().await;
-        let made = new_session(&mut mux, "work", shell()).await;
-        let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
-        mux.kill(api::KillRequest { session: made.session }).await.unwrap();
-        let listing = listed(&mut mux).await;
-        assert_eq!(listing.sessions, Vec::<api::Session>::new());
-        assert!(terminal(&listing, &key).is_some());
-        let mut viewer = Viewer::new(&mut mux).await;
-        viewer.show(&[key]).await;
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
-        while viewer.next().await.unwrap().is_some() {}
-        drop((viewer, mux));
-        assert!(server.ended().await.success());
-        assert!(gone(&server.socket()));
     });
 }
 
@@ -348,20 +319,109 @@ fn a_closed_terminal_leaves_what_its_viewers_show() {
 }
 
 #[test]
-fn a_terminal_is_reached_by_its_key_and_not_as_a_pane() {
+fn the_last_terminal_to_close_ends_the_server() {
+    run(async {
+        let mut server = Server::start();
+        let mut mux = server.client().await;
+        let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
+        while viewer.next().await.unwrap().is_some() {}
+        drop((viewer, mux));
+        assert!(server.ended().await.success());
+        assert!(gone(&server.socket()));
+    });
+}
+
+#[test]
+fn a_closed_terminal_s_id_is_never_given_again() {
     run(async {
         let server = Server::start();
         let mut mux = server.client().await;
-        new_session(&mut mux, "work", shell()).await;
-        let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
-        let no_pane = format!("no pane {}", key.id);
-        let closed = mux.close_pane(api::ClosePaneRequest { pane: key.id }).await.unwrap_err();
-        let dumped =
-            api::DumpRequest { pane: key.id, dumped: api::Dumped::Text.into(), terminal: None };
-        let dumped = mux.dump(dumped).await.unwrap_err();
-        for refusal in [closed, dumped] {
-            assert_eq!((refusal.code(), refusal.message()), (Code::NotFound, no_pane.as_str()));
-        }
-        assert!(terminal(&listed(&mut mux).await, &key).is_some());
+        let first = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
+        let second = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
+        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(second) }).await.unwrap();
+        let third = new_terminal(&mut mux, shell(), b"3", size(40, 10)).await;
+        assert_eq!((first.id, second.id, third.id), (1, 2, 3));
+    });
+}
+
+#[test]
+fn a_terminal_works_where_it_says_on_this_machine() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let says = "printf '\\033]7;file://elsewhere/tmp\\007'; echo one; read x; \
+            printf '\\033]7;file:///tmp\\007'; echo two; read x";
+        let key = new_terminal(&mut mux, script(says, api::Ends::Holds), b"t", size(20, 4)).await;
+        let mut viewer = Viewer::new(&mut mux).await;
+        viewer.show(&[key]).await;
+        viewer.until_row(key.id, "one").await;
+        assert_eq!(terminal(&listed(&mut mux).await, &key).unwrap().cwd, "/");
+        viewer.type_line(key, "").await;
+        viewer.until_row(key.id, "two").await;
+        assert_eq!(terminal(&listed(&mut mux).await, &key).unwrap().cwd, "/tmp");
+    });
+}
+
+async fn scroll(viewer: &Viewer, key: api::TerminalKey, back: i32) {
+    let event = Some(api::typed::Event::Scroll(api::Scroll { back }));
+    viewer.send(api::from_viewer::Event::Typed(api::Typed { terminal: Some(key), event })).await;
+}
+
+const THIRTY_LINES: &str = "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done; read x";
+
+#[test]
+fn each_viewer_looks_back_in_the_scrollback_on_its_own() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let lines = script(THIRTY_LINES, api::Ends::Holds);
+        let key = new_terminal(&mut mux, lines, b"t", size(20, 5)).await;
+        let mut reading = Viewer::new(&mut mux).await;
+        let mut watching = Viewer::new(&mut mux).await;
+        reading.show(&[key]).await;
+        watching.show(&[key]).await;
+        reading.until_row(key.id, "line30").await;
+        watching.until_row(key.id, "line30").await;
+        scroll(&reading, key, 10).await;
+        reading.until_row(key.id, "line20").await;
+        let frame = reading.frame_of(key.id).unwrap();
+        assert_eq!(frame.scrolled_back, 10);
+        assert_eq!(frame.cursor, None, "the cursor is below the view");
+        assert!(watching.rows_of(key.id).iter().any(|row| row == "line30"));
+        assert_eq!(watching.frame_of(key.id).unwrap().scrolled_back, 0);
+    });
+}
+
+#[test]
+fn a_viewer_back_in_the_scrollback_stays_on_its_rows() {
+    run(async {
+        let server = Server::start();
+        let mut mux = server.client().await;
+        let lines = format!("{THIRTY_LINES}; echo more1; echo more2; echo more3; read x");
+        let key = new_terminal(&mut mux, script(&lines, api::Ends::Holds), b"t", size(20, 5)).await;
+        let mut reading = Viewer::new(&mut mux).await;
+        let mut typing = Viewer::new(&mut mux).await;
+        reading.show(&[key]).await;
+        typing.show(&[key]).await;
+        reading.until_row(key.id, "line30").await;
+        scroll(&reading, key, 10).await;
+        reading.until_row(key.id, "line20").await;
+        let rows = reading.rows_of(key.id).to_vec();
+        let before = reading.frame_of(key.id).unwrap().clone();
+        assert_eq!(before.scrolled_back, 10);
+        typing.type_line(key, "").await;
+        typing.until_row(key.id, "more3").await;
+        reading
+            .until("the program's three rows more", |viewer| {
+                viewer.frame_of(key.id).unwrap().scrollback >= before.scrollback + 3
+            })
+            .await;
+        let after = reading.frame_of(key.id).unwrap();
+        let pushed = after.scrollback - before.scrollback;
+        assert_eq!(after.scrolled_back, before.scrolled_back + pushed);
+        assert_eq!(reading.rows_of(key.id), rows);
     });
 }

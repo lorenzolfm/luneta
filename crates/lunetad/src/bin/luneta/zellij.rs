@@ -3,20 +3,18 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use lunetad::mux::own;
-use lunetad::mux::{self, Mux, OwnPane, PaneId, PaneVars, Zellij, ZellijPane};
+use lunetad::mux::{self, Mux, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
-use lunetad::closes::{running_in, Whose};
+use lunetad::closes::{self, running_in};
 pub use lunetad::names::{session_for, Starts};
-pub use lunetad::opens::{opening, opening_of, Open, Opened, Tab};
-use lunetad::asks::{
-    self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, OWN_VAR_BEFORE, TURN_VAR,
-};
+pub use lunetad::opens::{opening, Open, Opened, Tab};
+use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::Directory;
 pub use lunetad::{var, SessionName};
 
 use crate::away::{self, Away};
+use crate::close::Whose;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -45,7 +43,6 @@ pub fn pane_address(spelled: &str) -> Result<Pane, String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Seat {
     Opened(ZellijPane),
-    Own(OwnPane),
     Asked { turn: Turn, user: User },
 }
 
@@ -53,41 +50,27 @@ impl Seat {
     pub fn turn(&self) -> Option<Turn> {
         match self {
             Seat::Asked { turn, .. } => Some(*turn),
-            Seat::Opened(_) | Seat::Own(_) => None,
+            Seat::Opened(_) => None,
         }
     }
 }
 
 pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
-    let (asked, own, away) = (var(ASKED_VAR)?, var(OWN_VAR)?, var(AWAY_VAR)?);
-    let own_before = var(OWN_VAR_BEFORE)?;
-    let said = asks::Where {
-        asked: asked.as_deref(),
-        own: own.as_deref(),
-        away: away.as_deref(),
-        own_before: own_before.as_deref(),
-    };
+    let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
+    let said = asks::Where { asked: asked.as_deref(), away: away.as_deref() };
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), said);
-    seat_in(turn?, Zellij::here()?, own::here()?)
+    seat_in(turn?, Zellij::here()?)
 }
 
-fn seat_in(
-    asked: Option<(Turn, User)>,
-    here: PaneVars,
-    own: Option<OwnPane>,
-) -> Result<Option<Seat>, String> {
-    match (asked, here.named(), own) {
-        (Some((_, user)), Some(session), _) => {
+fn seat_in(asked: Option<(Turn, User)>, here: PaneVars) -> Result<Option<Seat>, String> {
+    match (asked, here.named()) {
+        (Some((_, user)), Some(session)) => {
             Err(asked_in_pane(&user, &format!("a pane of {session}")))
         },
-        (Some((_, user)), None, Some(own)) => {
-            let (pane, session) = (own.id, own.session.id);
-            Err(asked_in_pane(&user, &format!("pane {pane} of own session {session}")))
-        },
-        (Some((turn, user)), None, None) => Ok(Some(Seat::Asked { turn, user })),
-        (None, Some(_), _) => Ok(here.pane_named().map(Seat::Opened)),
-        (None, None, own) => Ok(own.map(Seat::Own)),
+        (Some((turn, user)), None) => Ok(Some(Seat::Asked { turn, user })),
+        (None, Some(_)) => Ok(here.pane_named().map(Seat::Opened)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -95,9 +78,6 @@ fn asked_in_pane(user: &User, in_pane: &str) -> String {
     let asked = match user {
         User::Pane { session: from, pane } => {
             format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
-        },
-        User::Own { pane, named, .. } => {
-            format!("{OWN_VAR} names {named}:{}, a pane luneta's ask box asked from", pane.id)
         },
         User::Away => format!("{AWAY_VAR} says luneta's ask box asked from another machine"),
         User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
@@ -383,16 +363,18 @@ impl There {
     }
 
     fn close(&mut self, session: &SessionName, whose: Whose, close: &Close) -> Result<(), String> {
+        let started = whose.started(session)?;
         match self {
-            There::Here => whose.closed(session, close),
-            There::Away(away) => away.close(session, whose, close),
+            There::Here => closes::closed(session, started, close),
+            There::Away(away) => away.close(session, started, close),
         }
     }
 
     fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
+        let started = whose.started(session)?;
         match self {
-            There::Here => whose.killed(session),
-            There::Away(away) => away.kill(session, whose),
+            There::Here => closes::killed(session, started),
+            There::Away(away) => away.kill(session, started),
         }
     }
 }
@@ -405,14 +387,7 @@ mod tests {
     fn a_command_runs_in_the_pane_zellij_names_or_goes_by_the_one_the_ask_box_does() {
         let here = |named: Option<&str>, pane| PaneVars::spelled(named.map(str::to_owned), pane);
         let opened = Seat::Opened(ZellijPane { session: "work".to_owned(), pane: 2 });
-        let made = mux::OwnMade::from_nanos(0);
-        let key = mux::OwnKey { id: mux::OwnId::new(3).unwrap(), made };
-        let own = OwnPane::new(key, 12);
-        assert_eq!(seat_in(None, here(Some("work"), Some("2")), None), Ok(Some(opened.clone())));
-        assert_eq!(seat_in(None, here(Some("work"), Some("2")), own), Ok(Some(opened)));
-        let in_own = Seat::Own(own.unwrap());
-        assert_eq!(seat_in(None, here(None, None), own), Ok(Some(in_own)));
-        assert_eq!(seat_in(None, here(Some("work"), None), own), Ok(None));
+        assert_eq!(seat_in(None, here(Some("work"), Some("2"))), Ok(Some(opened)));
         let unnamed = [
             (Some(""), Some("2")),
             (Some("work"), Some("terminal_2")),
@@ -421,22 +396,16 @@ mod tests {
             (None, None),
         ];
         for (session, pane) in unnamed {
-            assert_eq!(seat_in(None, here(session, pane), None), Ok(None), "{session:?} {pane:?}");
+            assert_eq!(seat_in(None, here(session, pane)), Ok(None), "{session:?} {pane:?}");
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
-        let named = SessionName::running("mine").unwrap();
-        let client = own::OwnClientId::new(8).unwrap();
-        let mine = User::Own { pane: OwnPane::new(key, 5).unwrap(), named, client };
-        for user in [work, mine, User::Away, User::Untold] {
+        for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
-            assert_eq!(seat_in(Some((turn, user.clone())), here(None, None), None), asked);
-            assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2")), None), asked);
-            let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None), None);
+            assert_eq!(seat_in(Some((turn, user.clone())), here(None, None)), asked);
+            assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2"))), asked);
+            let in_a_pane = seat_in(Some((turn, user.clone())), here(Some("play"), None));
             assert!(in_a_pane.is_err_and(|why| why.ends_with("this runs in a pane of play")));
-            let in_own = seat_in(Some((turn, user.clone())), here(None, None), own);
-            let says = "this runs in pane 12 of own session 3";
-            assert!(in_own.is_err_and(|why| why.ends_with(says)));
         }
     }
 }
