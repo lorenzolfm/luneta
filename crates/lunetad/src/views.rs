@@ -297,7 +297,6 @@ struct Remade {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Restored {
     Typing { line: Line, due: Instant, by: Instant },
-    Kept,
     Resumed,
 }
 
@@ -770,17 +769,17 @@ impl Views {
         let args: Vec<String>;
         let (opened, restore) = match &runs {
             Runs::Shell => (Opened::Shell(&self.shell), None),
-            Runs::Command(line) => {
+            Runs::Command(line) | Runs::Unrun(line) => {
                 let restore = if line.as_str().contains('\n') {
                     let lines = format!("terminal {terminal}'s last command spans lines");
                     self.troubles.say(format!("{lines}, and is kept, not typed"));
-                    Restored::Kept
+                    None
                 } else {
                     let now = Instant::now();
                     let (due, by) = (now + TYPING_WAIT, now + TYPING_WAIT_MAX);
-                    Restored::Typing { line: line.clone(), due, by }
+                    Some(Restored::Typing { line: line.clone(), due, by })
                 };
-                (Opened::Shell(&self.shell), Some(restore))
+                (Opened::Shell(&self.shell), restore)
             },
             Runs::Agent { harness, session } => {
                 args = vec![harness.resumes().to_owned(), session.as_str().to_owned()];
@@ -792,6 +791,12 @@ impl Views {
         let remade = Remade { at: Instant::now(), restored: restore };
         self.made(terminal, key, Some(inner), Some(remade));
         assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
+        if let Runs::Command(line) = runs {
+            let unrun = Ran { terminal, folder, runs: Runs::Unrun(line) };
+            if let Err(why) = self.changed(Change::Ran(vec![unrun])) {
+                self.troubles.say(format!("terminal {terminal}'s line is not kept as unrun: {why}"));
+            }
+        }
         Ok(())
     }
 
@@ -815,7 +820,7 @@ impl Views {
                     troubles.say(format!("{untyped}, as it ran or runs another program first"));
                 },
             }
-            remade.restored = Some(Restored::Kept);
+            remade.restored = None;
         }
         assert!(pastes_due.len() <= known.len(), "a paste is due only where one is restored");
         if pastes_due.is_empty() {
@@ -973,13 +978,11 @@ impl Views {
             if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
                 runs = held.runs().clone();
             }
-            let restored = known.remade.as_mut().map(|remade| &mut remade.restored);
-            match restored {
-                Some(restored) if keeps(restored.as_ref(), &listed.is, &runs) => {
-                    runs = held.runs().clone();
-                },
-                Some(restored) => *restored = None,
-                None => {},
+            let restored = known.remade.as_ref().and_then(|remade| remade.restored.as_ref());
+            if keeps(restored, held.runs(), &listed.is, &runs) {
+                runs = held.runs().clone();
+            } else if let Some(remade) = &mut known.remade {
+                remade.restored = None;
             }
             known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() || runs != *held.runs() {
@@ -1151,12 +1154,11 @@ fn placed(view: &View, terminal: TerminalId, size: Size) -> Option<Size> {
     Some(inner)
 }
 
-fn keeps(restored: Option<&Restored>, is: &Is, read: &Runs) -> bool {
+fn keeps(restored: Option<&Restored>, held: &Runs, is: &Is, read: &Runs) -> bool {
     match restored {
-        None => false,
         Some(Restored::Typing { .. }) => true,
-        Some(Restored::Kept) => !ran_since(is),
         Some(Restored::Resumed) => !matches!(read, Runs::Agent { .. }),
+        None => matches!(held, Runs::Unrun(_)) && !ran_since(is),
     }
 }
 
@@ -1478,6 +1480,7 @@ mod tests {
     fn a_restored_terminal_keeps_what_it_ran_until_it_runs_something_else() {
         let shell = Runs::Shell;
         let line = Line::parse("make test").unwrap();
+        let unrun = Runs::Unrun(line.clone());
         let now = Instant::now();
         let typing = Restored::Typing { line, due: now, by: now };
         let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
@@ -1487,19 +1490,21 @@ mod tests {
         let ended = listed(Is::Ended);
         let ran_ls = doing(Word::Prompts, ended_ls());
         for is in [&prompts, &started, &going, &vim, &ended, &ran_ls] {
-            assert!(!keeps(None, &is.is, &shell), "{is:?}");
-            assert!(keeps(Some(&typing), &is.is, &shell), "{is:?}");
+            assert!(!keeps(None, &shell, &is.is, &shell), "{is:?}");
+            assert!(!keeps(None, &command("make test"), &is.is, &shell), "{is:?}");
+            assert!(keeps(Some(&typing), &unrun, &is.is, &shell), "{is:?}");
         }
         for is in [&prompts, &started] {
-            assert!(keeps(Some(&Restored::Kept), &is.is, &shell), "{is:?}");
+            assert!(keeps(None, &unrun, &is.is, &shell), "{is:?}");
         }
         for is in [&going, &vim, &ended, &ran_ls] {
-            assert!(!keeps(Some(&Restored::Kept), &is.is, &shell), "{is:?}");
+            assert!(!keeps(None, &unrun, &is.is, &shell), "{is:?}");
         }
         let session = Session::parse("7c22-ab").unwrap();
         let agent = Runs::Agent { harness: Harness::ClaudeCode, session };
-        assert!(keeps(Some(&Restored::Resumed), &started.is, &command("claude --resume 7c22-ab")));
-        assert!(!keeps(Some(&Restored::Resumed), &started.is, &agent));
+        let resumed = Some(&Restored::Resumed);
+        assert!(keeps(resumed, &agent, &started.is, &command("claude --resume 7c22-ab")));
+        assert!(!keeps(resumed, &agent, &started.is, &agent));
     }
 
     #[test]

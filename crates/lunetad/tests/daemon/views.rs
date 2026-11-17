@@ -28,6 +28,8 @@ const RESTORE_PAUSE: Duration = Duration::from_secs(10);
 
 const RESTORE_ATTEMPTS_MAX: u32 = 3;
 
+const READ_RUNS_SWEEPS: Duration = Duration::from_secs(5);
+
 struct Shown<'a> {
     owned: &'a Owned,
     asks: mpsc::Sender<ShowRequest>,
@@ -362,7 +364,7 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 2,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 3,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -572,6 +574,41 @@ fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
 }
 
 #[test]
+fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
+    let mut owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
+    let laid = restored_after_kill(&owned, &mut shown);
+    let restored = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed at the prompt", || {
+        owned.dumped(restored).contains("sleep 602").then_some(())
+    });
+    let unrun = r#""unrun": "sleep 602""#;
+    eventually("the line is kept, left unrun", || {
+        fs::read_to_string(kept(&owned.host)).ok()?.contains(unrun).then_some(())
+    });
+    drop(shown);
+    owned.stop_daemon();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, workstream, 80, 24);
+    again.until("the terminal found", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    thread::sleep(READ_RUNS_SWEEPS);
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    assert!(file.contains(unrun), "the line is still kept, left unrun: {file}");
+    let laid = restored_after_kill(&owned, &mut again);
+    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
+    let typed = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed again", || {
+        owned.dumped(typed).contains("sleep 602").then_some(())
+    });
+    let log = logged(&owned);
+    for trouble in ["panicked", "not typed", "not restored", "not kept"] {
+        assert!(!log.contains(trouble), "{log}");
+    }
+}
+
+#[test]
 fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     let mut owned = Owned::new();
     let workstream = workstream_in_home(&owned);
@@ -593,7 +630,8 @@ fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
         let file = fs::read_to_string(kept(&owned.host)).ok()?;
         file.contains(&folder).then_some(file)
     });
-    assert!(file.contains(spans), "a command that spans lines is kept: {file}");
+    let unrun = r#""unrun": "sleep 603\necho done""#;
+    assert!(file.contains(unrun), "a command that spans lines is kept, left unrun: {file}");
     let log = logged(&owned);
     assert!(log.contains("spans lines, and is kept, not typed"), "{log}");
 }

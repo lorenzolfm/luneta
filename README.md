@@ -496,8 +496,10 @@ A project's terminals outlive lunetad, as `luneta-mux` holds them. When
 `luneta-mux` goes unasked, as on a reboot or a crash, lunetad starts each
 terminal of every view again in its place: a shell in its folder, an agent as
 `claude --resume` or `pi --session` on its session, and any other command as a
-shell with that command typed at its prompt, not run. A terminal that closed
-while lunetad itself was not running comes back too.
+shell with that command typed at its prompt, not run. lunetad keeps that
+command for the next restore until the shell runs another, even across a
+restart of lunetad. A terminal that closed while lunetad itself was not running
+comes back too.
 
 When zellij detaches, luneta ends. When the session zellij is in ends, as
 zellij quits, its last pane exits, or it is killed, luneta attaches zellij to
