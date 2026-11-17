@@ -14,10 +14,7 @@ use crate::state;
 const FILE: &str = "agent";
 
 pub const fn name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::ClaudeCode => "claude",
-        Harness::Pi => "pi",
-    }
+    harness.program()
 }
 
 pub fn named(program: &str) -> Option<Harness> {

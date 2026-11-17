@@ -83,6 +83,9 @@ impl Session {
         if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(format!("the agent's session {text:?} holds more than letters and marks"));
         }
+        if text.starts_with('-') {
+            return Err(format!("the agent's session {text:?} reads as an option"));
+        }
         Ok(Session(text.to_owned()))
     }
 
@@ -260,4 +263,17 @@ fn fills(tree: &Tree<Terminal>, full: TerminalId) -> Result<(), String> {
         return Err("a view of one terminal shows it whole already".to_owned());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_s_session_is_one_word_that_reads_as_no_option() {
+        assert_eq!(Session::parse("7c22-ab").unwrap().as_str(), "7c22-ab");
+        for refused in ["", "-7c22", "--debug", "7c22 ab", "7c22\n"] {
+            assert!(Session::parse(refused).is_err(), "{refused:?}");
+        }
+    }
 }

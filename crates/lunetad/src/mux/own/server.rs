@@ -19,6 +19,7 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
+use super::frames::colours;
 use super::TerminalKey;
 use crate::mux::{in_no_pane, Failure, Runs};
 use crate::projects::Size;
@@ -332,14 +333,48 @@ impl Terminals {
     }
 
     pub fn tagged(&self, tag: &[u8]) -> Result<Option<TerminalKey>, Failure> {
-        let Some(server) = Server::reached()? else {
-            return Ok(None);
-        };
-        let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
-        let terminals = listed.map_err(|status| refused(&status))?.terminals;
-        let found = terminals.into_iter().find(|terminal| terminal.tag == tag);
+        let found = listed()?.into_iter().find(|terminal| terminal.tag == tag);
         let key = found.map(|terminal| TerminalKey::read(terminal.key));
         key.transpose().map_err(Failure::Unread)
+    }
+
+    pub fn tags(&self) -> Result<Vec<(Vec<u8>, TerminalKey)>, Failure> {
+        let tags = listed()?.into_iter().map(|terminal| {
+            let key = TerminalKey::read(terminal.key).map_err(Failure::Unread)?;
+            Ok((terminal.tag, key))
+        });
+        tags.collect()
+    }
+
+    pub fn typed(&self, key: TerminalKey, text: &str) -> Result<(), Failure> {
+        use api::from_viewer::Event;
+        let said = |event| api::FromViewer { event: Some(event) };
+        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
+        let paste = api::typed::Event::Paste(api::Paste { text: text.to_owned() });
+        let words = vec![
+            said(Event::Hello(hello)),
+            said(Event::Showing(api::Showing { terminals: vec![key.said()] })),
+            said(Event::Typed(api::Typed { terminal: Some(key.said()), event: Some(paste) })),
+        ];
+        let server = reached()?;
+        let shown = server.ask(|mut client| async move {
+            client.show(tokio_stream::iter(words)).await
+        });
+        let mut heard = shown.map_err(|status| refused(&status))?;
+        let drained = server.runtime.block_on(tokio::time::timeout(ANSWER, async move {
+            while let Some(word) = heard.message().await? {
+                if let Some(api::to_viewer::Event::Refused(api::Refused { reason })) = word.event {
+                    return Ok(Some(reason));
+                }
+            }
+            Ok::<_, Status>(None)
+        }));
+        match drained {
+            Ok(Ok(None)) => Ok(()),
+            Ok(Ok(Some(reason))) => Err(Failure::Own(reason)),
+            Ok(Err(status)) => Err(refused(&status)),
+            Err(_) => Err(Failure::Own("luneta-mux kept showing a paste too long".to_owned())),
+        }
     }
 
     pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
@@ -363,6 +398,14 @@ impl Terminals {
             asked => asked.map(drop).map_err(|status| refused(&status)),
         }
     }
+}
+
+fn listed() -> Result<Vec<api::Terminal>, Failure> {
+    let Some(server) = Server::reached()? else {
+        return Ok(Vec::new());
+    };
+    let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
+    Ok(listed.map_err(|status| refused(&status))?.terminals)
 }
 
 fn reached() -> Result<Server, Failure> {

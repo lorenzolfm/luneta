@@ -86,6 +86,15 @@ impl Owned {
         })
     }
 
+    pub fn dumped(&self, terminal: mux_api::TerminalKey) -> String {
+        let socket = self.socket();
+        let dumped = mux_api::Dumped::Text.into();
+        let request = mux_api::DumpRequest { dumped, terminal: Some(terminal) };
+        self.runtime.block_on(async move {
+            mux_client(socket).await.dump(request).await.unwrap().into_inner().text
+        })
+    }
+
     pub fn new_terminal(&self, tag: &[u8]) -> mux_api::TerminalKey {
         let socket = self.socket();
         let runs = Some(mux_api::opens::Runs::Program(mux_api::Program {

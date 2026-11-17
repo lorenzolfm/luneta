@@ -32,6 +32,12 @@ const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
 
 const TAG: &str = "luneta terminal ";
 
+const RESTORE_PAUSE: Duration = Duration::from_secs(10);
+
+const TYPING_WAIT: Duration = Duration::from_secs(3);
+
+const UNSHOWN: (u16, u16) = (80, 24);
+
 const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh"];
 
 const _: () = assert!(ANSWERS_MAX > 1);
@@ -207,6 +213,8 @@ pub fn start(
         listed: BTreeMap::new(),
         looked: false,
         last_focus: BTreeMap::new(),
+        restored: BTreeMap::new(),
+        restoring: None,
         told: None,
         troubles: Troubles::default(),
         shell: opens::your_shell(),
@@ -226,6 +234,8 @@ struct Views {
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
     last_focus: BTreeMap<WorkstreamId, TerminalId>,
+    restored: BTreeMap<TerminalId, Restored>,
+    restoring: Option<Instant>,
     told: Option<BTreeMap<TerminalId, Located>>,
     troubles: Troubles,
     shell: OsString,
@@ -253,6 +263,13 @@ enum Heard {
     Seen,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Restored {
+    Typing { line: Line, by: Instant },
+    Typed,
+    Resumed,
+}
+
 fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
     let mut swept = Instant::now();
     loop {
@@ -269,6 +286,8 @@ fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
             views.flushed();
             swept = Instant::now();
         }
+        views.restore();
+        views.type_due();
         views.settle();
         views.tell_core();
         views.troubles.done();
@@ -503,9 +522,16 @@ impl Views {
                 return Err(failure.to_string());
             },
         };
+        self.made(terminal, key, Some(inner));
+        self.client(client).focus = Some(terminal);
+        self.last_focus.insert(workstream, terminal);
+        Ok(())
+    }
+
+    fn made(&mut self, terminal: TerminalId, key: TerminalKey, sized: Option<Size>) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, sized: Some(inner), agent_front: None };
+        let known = Known { key, heard, sized, agent_front: None };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -515,9 +541,115 @@ impl Views {
                 },
             }
         }
-        self.client(client).focus = Some(terminal);
-        self.last_focus.insert(workstream, terminal);
+    }
+
+    fn restore(&mut self) {
+        if !self.looked {
+            return;
+        }
+        let Some(projects) = self.store.projects() else {
+            return;
+        };
+        let unknown = |terminal: &TerminalId| !self.known.contains_key(terminal);
+        let ids = projects.terminals().map(|(_, terminal)| layout::Leaf::id(terminal));
+        let lost: BTreeSet<TerminalId> = ids.filter(unknown).collect();
+        if lost.is_empty() || self.restoring.is_some_and(|at| at.elapsed() < RESTORE_PAUSE) {
+            return;
+        }
+        self.restoring = Some(Instant::now());
+        let tags = match self.mux.tags() {
+            Ok(tags) => tags,
+            Err(failure) => {
+                self.troubles.say(format!("no lost terminal is restored: {failure}"));
+                return;
+            },
+        };
+        let mut adopted = BTreeSet::new();
+        for (tag, key) in tags {
+            let Some(terminal) = tagged(&tag).filter(|terminal| lost.contains(terminal)) else {
+                continue;
+            };
+            if self.known.values().any(|known| known.key == key) || !adopted.insert(terminal) {
+                continue;
+            }
+            self.made(terminal, key, None);
+        }
+        assert!(adopted.is_subset(&lost), "only a lost terminal is adopted");
+        for terminal in lost.difference(&adopted) {
+            if let Err(why) = self.remade(*terminal) {
+                self.troubles.say(format!("terminal {terminal} is not restored: {why}"));
+            }
+        }
+        let restored = |terminal: &TerminalId| self.known.contains_key(terminal);
+        assert!(self.restored.keys().all(restored), "a terminal restored is known");
+    }
+
+    fn remade(&mut self, terminal: TerminalId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let (held_in, held) = projects.holding(terminal).ok_or("no view holds it")?;
+        let (project, workstream) = projects.find(held_in.id()).expect("a view's workstream is");
+        let there = Path::new(held.folder().as_str()).is_dir();
+        let folder = if there { held.folder().clone() } else { project.folder(workstream) };
+        let runs = held.runs().clone();
+        let view = workstream.view();
+        let shown = self.clients.values().filter(|it| it.workstream == held_in.id());
+        let unshown = || Size::of(UNSHOWN.0.into(), UNSHOWN.1.into()).expect("80 by 24 is a size");
+        let size = fit(shown, view, &self.known).map_or_else(unshown, |fit| fit.size);
+        let inner = placed(view, terminal, size).expect("a view lays out the terminals it holds");
+        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let args: Vec<String>;
+        let (opened, restored) = match &runs {
+            Runs::Shell => (Opened::Shell(&self.shell), None),
+            Runs::Command(line) => {
+                let by = Instant::now() + TYPING_WAIT;
+                let typing = (!line.as_str().contains('\n'))
+                    .then(|| Restored::Typing { line: line.clone(), by });
+                (Opened::Shell(&self.shell), typing)
+            },
+            Runs::Agent { harness, session } => {
+                args = vec![harness.resumes().to_owned(), session.as_str().to_owned()];
+                let program = harness.program();
+                (Opened::Command { program, args: &args }, Some(Restored::Resumed))
+            },
+        };
+        let key = self.mux.made(&cwd, opened, tag(terminal), inner).map_err(|it| it.to_string())?;
+        self.made(terminal, key, Some(inner));
+        assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
+        match restored {
+            Some(restored) => self.restored.insert(terminal, restored),
+            None => self.restored.remove(&terminal),
+        };
         Ok(())
+    }
+
+    fn type_due(&mut self) {
+        let Views { restored, known, listed, mux, troubles, .. } = self;
+        restored.retain(|terminal, restored| {
+            let Some(known) = known.get(terminal) else {
+                return false;
+            };
+            let Restored::Typing { line, by } = restored else {
+                return true;
+            };
+            let prompts = |listed: &server::Terminal| {
+                matches!(listed.is, Is::Running { word: Some(Word::Prompts), .. })
+            };
+            if !listed.get(&known.key).is_some_and(prompts) && Instant::now() < *by {
+                return true;
+            }
+            match mux.typed(known.key, line.as_str()) {
+                Ok(()) => {
+                    *restored = Restored::Typed;
+                    true
+                },
+                Err(failure) => {
+                    let untyped = format!("terminal {terminal}'s last command is not typed");
+                    troubles.say(format!("{untyped}: {failure}"));
+                    false
+                },
+            }
+        });
+        assert!(restored.len() <= known.len(), "each terminal restored is one known");
     }
 
     fn close(&mut self, terminal: TerminalId) -> Result<(), String> {
@@ -638,7 +770,7 @@ impl Views {
             return;
         }
         let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
-        let Views { store, known, listed, shell, .. } = self;
+        let Views { store, known, listed, shell, restored, .. } = self;
         let Some(projects) = store.projects() else {
             return;
         };
@@ -660,6 +792,11 @@ impl Views {
             let same_front = front.is_some() && front == known.agent_front;
             if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
                 runs = held.runs().clone();
+            }
+            if keeps(restored.get(terminal), &listed.is, &runs) {
+                runs = held.runs().clone();
+            } else {
+                restored.remove(terminal);
             }
             known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() || runs != *held.runs() {
@@ -814,6 +951,30 @@ fn fit<'a>(
 fn inside(client: &Client, view: &View, known: &BTreeMap<TerminalId, Known>) -> bool {
     let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && view.holds(*id));
     client.runs_in.is_some_and(holds)
+}
+
+fn placed(view: &View, terminal: TerminalId, size: Size) -> Option<Size> {
+    let tree = view.tree()?;
+    if view.full() == Some(terminal) {
+        return Some(Rect::whole(tree.fitted(size)).inner());
+    }
+    let mut laid = tree.laid(size).into_iter();
+    laid.find(|(it, _)| layout::Leaf::id(*it) == terminal).map(|(_, rect)| rect.inner())
+}
+
+fn keeps(restored: Option<&Restored>, is: &Is, read: &Runs) -> bool {
+    let ran_since = match is {
+        Is::Running { root, front, word, .. } => {
+            matches!(word, Some(Word::Going(_))) || front.as_ref().is_some_and(|it| it.pid != *root)
+        },
+        Is::Ended => true,
+    };
+    match restored {
+        None => false,
+        Some(Restored::Typing { .. }) => true,
+        Some(Restored::Typed) => !ran_since,
+        Some(Restored::Resumed) => !matches!(read, Runs::Agent { .. }),
+    }
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -1066,6 +1227,32 @@ mod tests {
         for argv in [&["-zsh"][..], &["fish", "--login"], &["bash", "-i"]] {
             assert_eq!(of(&running(Some((10, argv)), None), &[]), Runs::Shell, "{argv:?}");
         }
+    }
+
+    #[test]
+    fn a_restored_terminal_keeps_what_it_ran_until_it_runs_something_else() {
+        let shell = Runs::Shell;
+        let line = Line::parse("make test").unwrap();
+        let typing = Restored::Typing { line, by: Instant::now() };
+        let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
+        let started = running(Some((10, &["fish"])), None);
+        let going = running(Some((10, &["fish"])), Some(Word::Going(Some("ls".into()))));
+        let vim = running(Some((20, &["vim"])), None);
+        let ended = listed(Is::Ended);
+        for is in [&prompts, &started, &going, &vim, &ended] {
+            assert!(!keeps(None, &is.is, &shell), "{is:?}");
+            assert!(keeps(Some(&typing), &is.is, &shell), "{is:?}");
+        }
+        for is in [&prompts, &started] {
+            assert!(keeps(Some(&Restored::Typed), &is.is, &shell), "{is:?}");
+        }
+        for is in [&going, &vim, &ended] {
+            assert!(!keeps(Some(&Restored::Typed), &is.is, &shell), "{is:?}");
+        }
+        let session = Session::parse("7c22-ab").unwrap();
+        let agent = Runs::Agent { harness: Harness::ClaudeCode, session };
+        assert!(keeps(Some(&Restored::Resumed), &started.is, &command("claude --resume 7c22-ab")));
+        assert!(!keeps(Some(&Restored::Resumed), &started.is, &agent));
     }
 
     #[test]
