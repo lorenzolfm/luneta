@@ -758,7 +758,7 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: u32 },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    Tabs { menu: u64, on: Machine, session: SessionName, pane: u32 },
+    Tabs { menu: u64, on: Machine, turned: Turned },
     Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
     StartOwn { starts: Starts },
     Make {
@@ -771,7 +771,7 @@ pub enum Asked {
     },
     Pull { menu: u64, on: Machine, work: Work, wanted: Wanted, worked: Vec<Worked>, others: Others },
     Find { menu: u64, on: Machine, cwd: String, agent: agents::Harness },
-    Printed { menu: u64, on: Machine, session: SessionName, pane: u32, ended: menu::Ended },
+    Printed { menu: u64, on: Machine, session: Listed, pane: u32, ended: menu::Ended },
     Checks { menu: u64, on: Machine, page: checks::PullPage },
     Brief(Brief),
     Ask(Target),
@@ -2747,7 +2747,13 @@ impl Sidebar {
                 }
             },
             Wants::Tabs { session, pane } => {
-                Asked::Tabs { menu: number, on, session: session.name, pane }
+                if let Some(turned) = Turned::of(PanePlace { session, pane }) {
+                    Asked::Tabs { menu: number, on, turned }
+                } else {
+                    self.drop_menu(number);
+                    self.notify(format!("menu: {OWN_TURNS}"));
+                    Asked::Nothing
+                }
             },
             Wants::Turn { session, pane, turn } => {
                 if let Some(turned) = Turned::of(PanePlace { session, pane }) {
@@ -2766,7 +2772,7 @@ impl Sidebar {
                 Err(why) => self.pulled(number, Err(why)),
             },
             Wants::Printed { session, pane, ended } => {
-                Asked::Printed { menu: number, on, session: session.name, pane, ended }
+                Asked::Printed { menu: number, on, session, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
             Wants::Make { session, cwd, name, command } => {
@@ -7447,7 +7453,7 @@ mod tests {
         sidebar.step(2);
         type_in(&mut sidebar, "t");
         let newer = || Turned::of(PanePlace { session: listed("newer", 20), pane: 1 }).unwrap();
-        let tabs = Asked::Tabs { menu: 2, on: on.clone(), session: session_name("newer"), pane: 1 };
+        let tabs = Asked::Tabs { menu: 2, on: on.clone(), turned: newer() };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), tabs);
         let other = || OtherTab { pane: 5, name: "Tab #2".to_owned() };
         assert_eq!(sidebar.tabs(1, Ok(vec![other()])), Asked::Nothing);
@@ -7896,7 +7902,7 @@ mod tests {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
         let command = Said::new("cargo test".to_owned()).unwrap();
         let failed = menu::Ended { command, ending: Some(Ending::Exited(101)), at };
-        let (on, s) = (Machine::Local, session_name("s"));
+        let (on, s) = (Machine::Local, listed("s", 10));
         let printed = Asked::Printed { menu: 1, on, session: s, pane: 1, ended: failed };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         let nothing = || Ok(Printed::Nothing);
@@ -7924,7 +7930,7 @@ mod tests {
         sidebar.heard(shells(ended("make", Some(2), 3000)));
         let command = Said::new("make".to_owned()).unwrap();
         let make = menu::Ended { command, ending: Some(Ending::Exited(2)), at };
-        let (on, s) = (Machine::Local, session_name("s"));
+        let (on, s) = (Machine::Local, listed("s", 10));
         let printed = Asked::Printed { menu: 3, on, session: s, pane: 2, ended: make };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         sidebar.heard(shells(going("make", 200, Front::Working)));
@@ -7940,7 +7946,11 @@ mod tests {
         let failed = in_shell(1, ended("cargo test", Some(101), 3000));
         sidebar.heard(host(vec![own_session("s", 1, vec![failed])], Vec::new()));
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "ggcf");
+        type_in(&mut sidebar, "ggc");
+        let asked = sidebar.key(&char('f'), moment(160_000));
+        let project = own_listed("s", 1);
+        let printed = matches!(&asked, Asked::Printed { session, .. } if *session == project);
+        assert!(printed, "{asked:?}");
         let number = sidebar.menu.as_ref().map_or(0, Menu::number);
         sidebar.focus(Keys::Zellij);
         assert_eq!(sidebar.working.len(), 1);

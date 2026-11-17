@@ -8,6 +8,9 @@ use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
 
+use crate::close::Whose;
+use crate::host::NOT_YET;
+use crate::machines::Machine;
 use crate::viewed::Tab;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +30,12 @@ pub struct Project {
     pub name: String,
     pub dir: String,
     pub workstreams: Vec<Workstream>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Zellij,
+    Terminal(TerminalKey),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,6 +69,11 @@ impl Project {
         let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
         let (_, key) = held.find(|(id, _)| *id == terminal)?;
         Some(OwnPane { session: self.key, id: key.as_ref()?.id })
+    }
+
+    fn shown(&self) -> Option<TerminalKey> {
+        let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
+        held.find_map(|(_, key)| *key)
     }
 
     fn holding(&self, pane: NonZeroU32) -> Option<(WorkstreamId, TerminalId, TerminalKey)> {
@@ -144,6 +158,25 @@ impl Projected {
     pub fn key_of(&self, pane: OwnPane) -> Option<TerminalKey> {
         let (_, _, key) = self.project(pane.session)?.holding(pane.id)?;
         Some(key)
+    }
+
+    pub fn route(&self, on: &Machine, whose: Whose, pane: Option<u32>) -> Result<Route, String> {
+        let Whose::Own(key) = whose else {
+            return Ok(Route::Zellij);
+        };
+        if let Machine::Remote(_) = on {
+            return Err(NOT_YET.to_owned());
+        }
+        let project = self.project(key).ok_or("lunetad keeps no such project")?;
+        let terminal = if let Some(pane) = pane {
+            let held = NonZeroU32::new(pane).and_then(|id| project.holding(id));
+            let unlisted = || format!("lunetad lists no terminal {pane}");
+            held.map(|(_, _, key)| key).ok_or_else(unlisted)
+        } else {
+            let unshown = || format!("{} has no terminal to show", project.name);
+            project.shown().ok_or_else(unshown)
+        };
+        terminal.map(Route::Terminal)
     }
 
     #[must_use]
@@ -367,6 +400,38 @@ mod tests {
         assert_eq!(projected.key_of(pane), None);
         let five = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
         assert_eq!(projected.of_pane(five), Some((workstream(12), TerminalId::of(23).unwrap())));
+    }
+
+    #[test]
+    fn a_project_row_routes_to_its_terminal_by_key_and_a_zellij_row_by_name() {
+        let projected = Projected::adapted(&mut host()).unwrap();
+        let (here, project) = (Machine::Local, Whose::Own(key_of(ProjectId::of(7).unwrap())));
+        let made = OwnMade::read(prost_types::Timestamp::default()).unwrap();
+        let terminal = |id| {
+            Ok(Route::Terminal(TerminalKey { id: NonZeroU32::new(id).unwrap(), made }))
+        };
+        assert_eq!(projected.route(&here, project, Some(5)), terminal(5));
+        assert_eq!(projected.route(&here, project, None), terminal(4), "the first one keyed");
+        let unlisted = Err("lunetad lists no terminal 9".to_owned());
+        assert_eq!(projected.route(&here, project, Some(9)), unlisted);
+        let zellij = Whose::Zellij(std::time::SystemTime::UNIX_EPOCH);
+        assert_eq!(projected.route(&here, zellij, Some(9)), Ok(Route::Zellij));
+        let far = Machine::Remote("far".parse().unwrap());
+        assert_eq!(projected.route(&far, zellij, None), Ok(Route::Zellij));
+        assert_eq!(projected.route(&far, project, Some(5)), Err(NOT_YET.to_owned()));
+        let gone = Whose::Own(key_of(ProjectId::of(8).unwrap()));
+        let unkept = Err("lunetad keeps no such project".to_owned());
+        assert_eq!(projected.route(&here, gone, None), unkept);
+
+        let mut host = host();
+        for workstream in &mut kept(&mut host).workstreams {
+            for terminal in &mut workstream.terminals {
+                terminal.found = Some(terminal::Found::Looking(()));
+            }
+        }
+        let looking = Projected::adapted(&mut host).unwrap();
+        let unshown = Err("bitwarden backup has no terminal to show".to_owned());
+        assert_eq!(looking.route(&here, project, None), unshown);
     }
 
     #[test]

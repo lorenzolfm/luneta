@@ -955,7 +955,7 @@ impl App {
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             let number = picker.number();
             for ask in picker.asks() {
-                picker::ask(number, ask, &self.events);
+                picker::ask(number, ask, &self.projected, &self.events);
             }
         }
     }
@@ -1474,8 +1474,8 @@ impl App {
                     zellij::open(menu, &on, open, &self.events);
                 }
             },
-            Asked::Tabs { menu, on, session, pane } => {
-                zellij::other_tabs(menu, &on, session, pane, &self.events);
+            Asked::Tabs { menu, on, turned } => {
+                zellij::other_tabs(menu, &on, &turned, &self.events);
             },
             Asked::Turn { menu, on, turned, turn } => {
                 zellij::turn(menu, &on, turned, turn, &self.events);
@@ -1524,7 +1524,8 @@ impl App {
                 skills::find(&on, &cwd, agent, &self.events, said);
             },
             Asked::Printed { menu, on, session, pane, ended } => {
-                printed::read(menu, &on, &session, pane, ended, &self.events);
+                let route = self.projected.route(&on, session.whose(), Some(pane));
+                printed::read(menu, &on, route, session.name(), pane, ended, &self.events);
             },
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {

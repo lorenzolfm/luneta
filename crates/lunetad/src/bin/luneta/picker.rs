@@ -36,7 +36,7 @@ use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
-use crate::projected;
+use crate::projected::{self, Projected, Route};
 use crate::workstreams;
 use crate::zellij::{self, Closes, SessionName};
 
@@ -196,8 +196,19 @@ pub enum Ask {
     List { on: Machine, path: Directory },
 }
 
-pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
+pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
     let events = events.clone();
+    let route = match &ask {
+        Ask::Peek { on, session, asked } => Some(projected.route(on, session.whose(), *asked)),
+        Ask::Closes { on, place } => {
+            Some(projected.route(on, place.session.whose(), Some(place.pane)))
+        },
+        Ask::Exited { .. }
+        | Ask::Rename { .. }
+        | Ask::Delete { .. }
+        | Ask::Dirs { .. }
+        | Ask::List { .. } => None,
+    };
     thread::spawn(move || {
         let heard = match ask {
             Ask::Exited { on, ask } => {
@@ -210,19 +221,29 @@ pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
             },
             Ask::Peek { on, session, asked } => {
                 let name = session.name();
-                let peek = match &on {
-                    Machine::Local => screens::dumped(name, asked),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.screen(name, asked)),
+                let peek = match (route.expect("a peek is routed"), &on) {
+                    (Err(why), _) => Err(why),
+                    (Ok(Route::Terminal(key)), _) => {
+                        screens::terminal(key).map(|screen| (key.id.get(), screen))
+                    },
+                    (Ok(Route::Zellij), Machine::Local) => screens::dumped(name, asked),
+                    (Ok(Route::Zellij), Machine::Remote(destination)) => {
+                        Away::reach(destination, away::ANSWER)
+                            .and_then(|mut away| away.screen(name, asked))
+                    },
                 };
                 Heard::Peek { on, session, asked, peek }
             },
             Ask::Closes { on, place } => {
                 let (session, pane) = (place.session.name(), place.pane);
-                let closes = match &on {
-                    Machine::Local => zellij::closes_now(session, pane),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.closes(session, pane)),
+                let closes = match (route.expect("a close is routed"), &on) {
+                    (Err(why), _) => Err(why),
+                    (Ok(Route::Terminal(_)), _) => Ok(Closes::Pane),
+                    (Ok(Route::Zellij), Machine::Local) => zellij::closes_now(session, pane),
+                    (Ok(Route::Zellij), Machine::Remote(destination)) => {
+                        Away::reach(destination, away::ANSWER)
+                            .and_then(|mut away| away.closes(session, pane))
+                    },
                 };
                 Heard::Closes { on, place, closes }
             },
@@ -3434,5 +3455,61 @@ mod tests {
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "reading…"]);
         picker.heard(peek(nixos(), main, "there"));
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "there"]);
+    }
+
+    fn projected(terminal: u32) -> Projected {
+        let made_at = Some(prost_types::Timestamp::default());
+        let key = lunetad::api::TerminalKey { id: terminal, made_at };
+        let terminal = lunetad::api::Terminal {
+            id: 21,
+            found: Some(lunetad::api::terminal::Found::Key(key)),
+            ..lunetad::api::Terminal::default()
+        };
+        let workstream = lunetad::api::Workstream {
+            id: 11,
+            name: "main".to_owned(),
+            terminals: vec![terminal],
+            ..lunetad::api::Workstream::default()
+        };
+        let project = lunetad::api::Project {
+            id: 7,
+            name: "work".to_owned(),
+            workstreams: vec![workstream],
+            ..lunetad::api::Project::default()
+        };
+        let kept = lunetad::api::projects::Kept { projects: vec![project] };
+        let held = Some(lunetad::api::projects::Held::Kept(kept));
+        let projects = Some(lunetad::api::Projects { held });
+        let mut host = lunetad::api::Host { projects, ..lunetad::api::Host::default() };
+        Projected::adapted(&mut host).unwrap()
+    }
+
+    fn asked(ask: Ask, projected: &Projected) -> Heard {
+        let (events, heard) = std::sync::mpsc::channel();
+        super::ask(1, ask, projected, &events);
+        match heard.recv_timeout(Duration::from_secs(10)).expect("the picker hears its ask") {
+            Event::Picker { number: 1, heard } => heard,
+            _ => panic!("the picker hears another event"),
+        }
+    }
+
+    #[test]
+    fn a_project_row_s_pane_closes_alone_by_key_with_no_word_to_zellij() {
+        let projected = projected(4);
+        let session = Listed::new_project("work", 7);
+        let place = |pane| PanePlace { session: session.clone(), pane };
+        let close = |pane| Ask::Closes { on: Machine::Local, place: place(pane) };
+        let closes = |pane| match asked(close(pane), &projected) {
+            Heard::Closes { closes, .. } => closes,
+            _ => panic!("a close is answered with its plan"),
+        };
+        assert_eq!(closes(4), Ok(Closes::Pane));
+        assert_eq!(closes(9), Err("lunetad lists no terminal 9".to_owned()));
+        let far = Machine::Remote("far".parse().unwrap());
+        let peeked = asked(Ask::Peek { on: far, session, asked: Some(4) }, &projected);
+        let Heard::Peek { peek, .. } = peeked else {
+            panic!("a peek is answered with a screen");
+        };
+        assert_eq!(peek, Err(crate::host::NOT_YET.to_owned()));
     }
 }

@@ -187,14 +187,9 @@ pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
     Due::new(events, move |opened| Event::Opened { menu, opened })
 }
 
-pub fn other_tabs(
-    menu: u64,
-    on: &Machine,
-    session: SessionName,
-    pane: u32,
-    events: &Sender<Event>,
-) {
+pub fn other_tabs(menu: u64, on: &Machine, turned: &Turned, events: &Sender<Event>) {
     let (on, events) = (on.clone(), events.clone());
+    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane);
     thread::spawn(move || {
         let tabs = There::on(&on).and_then(|mut there| there.other_tabs(&session, pane));
         let _ = events.send(Event::Tabs { menu, tabs });

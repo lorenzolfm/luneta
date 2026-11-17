@@ -350,6 +350,12 @@ impl Terminals {
         asked.map(drop).map_err(|status| refused(&status))
     }
 
+    pub fn dumped(&self, key: TerminalKey, dumped: api::Dumped) -> Result<String, Failure> {
+        let request = api::DumpRequest { dumped: dumped.into(), terminal: Some(key.said()) };
+        let asked = reached()?.ask(|mut client| async move { client.dump(request).await });
+        Ok(asked.map_err(|status| refused(&status))?.text)
+    }
+
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
         match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {

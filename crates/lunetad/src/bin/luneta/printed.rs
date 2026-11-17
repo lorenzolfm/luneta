@@ -11,6 +11,7 @@ use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::Ended;
+use crate::projected::Route;
 
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     let cannot = "with an exit status my shell cannot say";
@@ -59,6 +60,7 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
 pub fn read(
     menu: u64,
     on: &Machine,
+    route: Result<Route, String>,
     session: &SessionName,
     pane: u32,
     ended: Ended,
@@ -68,10 +70,16 @@ pub fn read(
     let due = Due::new(events, move |printed| Event::Printed { menu, printed });
     thread::spawn(move || {
         let typed = typed(&ended);
-        let printed = match &on {
-            Machine::Local => lunetad::printed::kept_after(&session, pane, &typed),
-            Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.printed(&session, pane, &typed)),
+        let printed = match (route, &on) {
+            (Err(why), _) => Err(why),
+            (Ok(Route::Terminal(terminal)), _) => lunetad::printed::kept_in(terminal, &typed),
+            (Ok(Route::Zellij), Machine::Local) => {
+                lunetad::printed::kept_after(&session, pane, &typed)
+            },
+            (Ok(Route::Zellij), Machine::Remote(destination)) => {
+                Away::reach(destination, away::ANSWER)
+                    .and_then(|mut away| away.printed(&session, pane, &typed))
+            },
         };
         due.pay(printed);
     });
