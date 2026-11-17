@@ -7,10 +7,12 @@ use lunetad::api::{self, agent, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
+use lunetad::SessionName;
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
 use crate::machines::Machine;
+use crate::sidebar::Listed;
 use crate::viewed::Tab;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,9 +34,9 @@ pub struct Project {
     pub workstreams: Vec<Workstream>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Route {
-    Zellij,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route<P> {
+    Zellij { on: Machine, session: SessionName, pane: P },
     Terminal(TerminalKey),
 }
 
@@ -71,19 +73,36 @@ impl Project {
         Some(OwnPane { session: self.key, id: key.as_ref()?.id })
     }
 
-    fn shown(&self) -> Option<TerminalKey> {
+    fn first_keyed(&self) -> Option<TerminalKey> {
         let mut held = self.workstreams.iter().flat_map(|it| &it.terminals);
         held.find_map(|(_, key)| *key)
     }
 
-    fn holding(&self, pane: NonZeroU32) -> Option<(WorkstreamId, TerminalId, TerminalKey)> {
+    fn on_pane(
+        &self,
+        pane: NonZeroU32,
+    ) -> impl Iterator<Item = (WorkstreamId, TerminalId, TerminalKey)> + '_ {
         let held = self.workstreams.iter().flat_map(|workstream| {
             let keyed = workstream.terminals.iter().filter_map(|(id, key)| Some((*id, (*key)?)));
             keyed.map(|(id, key)| (workstream.id, id, key))
         });
-        let mut on_pane = held.filter(|(_, _, key)| key.id == pane);
+        held.filter(move |(_, _, key)| key.id == pane)
+    }
+
+    fn holding(&self, pane: NonZeroU32) -> Option<(WorkstreamId, TerminalId, TerminalKey)> {
+        let mut on_pane = self.on_pane(pane);
         let first = on_pane.next()?;
         on_pane.next().is_none().then_some(first)
+    }
+
+    fn keyed(&self, pane: u32) -> Result<TerminalKey, String> {
+        let unlisted = || format!("lunetad lists no terminal {pane}");
+        let mut on_pane = self.on_pane(NonZeroU32::new(pane).ok_or_else(unlisted)?);
+        let (_, _, key) = on_pane.next().ok_or_else(unlisted)?;
+        if on_pane.next().is_some() {
+            return Err(format!("lunetad lists terminal {pane} more than once"));
+        }
+        Ok(key)
     }
 }
 
@@ -160,21 +179,23 @@ impl Projected {
         Some(key)
     }
 
-    pub fn route(&self, on: &Machine, whose: Whose, pane: Option<u32>) -> Result<Route, String> {
-        let Whose::Own(key) = whose else {
-            return Ok(Route::Zellij);
+    pub fn route<P>(&self, on: &Machine, session: &Listed, pane: P) -> Result<Route<P>, String>
+    where
+        P: Copy + Into<Option<u32>>,
+    {
+        let Whose::Own(key) = session.whose() else {
+            let (on, session) = (on.clone(), session.name().clone());
+            return Ok(Route::Zellij { on, session, pane });
         };
         if let Machine::Remote(_) = on {
             return Err(NOT_YET.to_owned());
         }
         let project = self.project(key).ok_or("lunetad keeps no such project")?;
-        let terminal = if let Some(pane) = pane {
-            let held = NonZeroU32::new(pane).and_then(|id| project.holding(id));
-            let unlisted = || format!("lunetad lists no terminal {pane}");
-            held.map(|(_, _, key)| key).ok_or_else(unlisted)
+        let terminal = if let Some(pane) = pane.into() {
+            project.keyed(pane)
         } else {
             let unshown = || format!("{} has no terminal to show", project.name);
-            project.shown().ok_or_else(unshown)
+            project.first_keyed().ok_or_else(unshown)
         };
         terminal.map(Route::Terminal)
     }
@@ -405,33 +426,42 @@ mod tests {
     #[test]
     fn a_project_row_routes_to_its_terminal_by_key_and_a_zellij_row_by_name() {
         let projected = Projected::adapted(&mut host()).unwrap();
-        let (here, project) = (Machine::Local, Whose::Own(key_of(ProjectId::of(7).unwrap())));
+        let (here, project) = (Machine::Local, Listed::new_project("bitwarden backup", 7));
         let made = OwnMade::read(prost_types::Timestamp::default()).unwrap();
-        let terminal = |id| {
-            Ok(Route::Terminal(TerminalKey { id: NonZeroU32::new(id).unwrap(), made }))
-        };
-        assert_eq!(projected.route(&here, project, Some(5)), terminal(5));
-        assert_eq!(projected.route(&here, project, None), terminal(4), "the first one keyed");
-        let unlisted = Err("lunetad lists no terminal 9".to_owned());
-        assert_eq!(projected.route(&here, project, Some(9)), unlisted);
-        let zellij = Whose::Zellij(std::time::SystemTime::UNIX_EPOCH);
-        assert_eq!(projected.route(&here, zellij, Some(9)), Ok(Route::Zellij));
+        let keyed = |id| TerminalKey { id: NonZeroU32::new(id).unwrap(), made };
+        assert_eq!(projected.route(&here, &project, 5), Ok(Route::Terminal(keyed(5))));
+        let first = Ok(Route::Terminal(keyed(4)));
+        assert_eq!(projected.route(&here, &project, None), first, "the first one keyed");
+        let unlisted = |pane| Err(format!("lunetad lists no terminal {pane}"));
+        assert_eq!(projected.route(&here, &project, 9), unlisted(9));
+        assert_eq!(projected.route(&here, &project, 0), unlisted(0));
+        let zellij = Listed::new("s", std::time::SystemTime::UNIX_EPOCH);
+        let session = zellij.name().clone();
+        let by_name = Route::Zellij { on: here.clone(), session: session.clone(), pane: 9 };
+        assert_eq!(projected.route(&here, &zellij, 9), Ok(by_name));
         let far = Machine::Remote("far".parse().unwrap());
-        assert_eq!(projected.route(&far, zellij, None), Ok(Route::Zellij));
-        assert_eq!(projected.route(&far, project, Some(5)), Err(NOT_YET.to_owned()));
-        let gone = Whose::Own(key_of(ProjectId::of(8).unwrap()));
+        let whole = Route::Zellij { on: far.clone(), session, pane: None };
+        assert_eq!(projected.route(&far, &zellij, None), Ok(whole));
+        assert_eq!(projected.route(&far, &project, 5), Err(NOT_YET.to_owned()));
+        let gone = Listed::new_project("gone", 8);
         let unkept = Err("lunetad keeps no such project".to_owned());
-        assert_eq!(projected.route(&here, gone, None), unkept);
+        assert_eq!(projected.route(&here, &gone, None), unkept);
 
-        let mut host = host();
-        for workstream in &mut kept(&mut host).workstreams {
+        let mut looking = host();
+        for workstream in &mut kept(&mut looking).workstreams {
             for terminal in &mut workstream.terminals {
                 terminal.found = Some(terminal::Found::Looking(()));
             }
         }
-        let looking = Projected::adapted(&mut host).unwrap();
+        let looking = Projected::adapted(&mut looking).unwrap();
         let unshown = Err("bitwarden backup has no terminal to show".to_owned());
-        assert_eq!(looking.route(&here, project, None), unshown);
+        assert_eq!(looking.route(&here, &project, None), unshown);
+
+        let mut twice = host();
+        kept(&mut twice).workstreams[1].terminals[0].found = Some(terminal::Found::Key(key(4)));
+        let twice = Projected::adapted(&mut twice).unwrap();
+        let ambiguous = Err("lunetad lists terminal 4 more than once".to_owned());
+        assert_eq!(twice.route(&here, &project, 4), ambiguous);
     }
 
     #[test]

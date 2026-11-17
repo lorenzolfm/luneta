@@ -1524,8 +1524,8 @@ impl App {
                 skills::find(&on, &cwd, agent, &self.events, said);
             },
             Asked::Printed { menu, on, session, pane, ended } => {
-                let route = self.projected.route(&on, session.whose(), Some(pane));
-                printed::read(menu, &on, route, session.name(), pane, ended, &self.events);
+                let route = self.projected.route(&on, &session, pane);
+                printed::read(menu, route, ended, &self.events);
             },
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {

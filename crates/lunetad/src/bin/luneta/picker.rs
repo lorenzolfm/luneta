@@ -198,94 +198,95 @@ pub enum Ask {
 
 pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
     let events = events.clone();
-    let route = match &ask {
-        Ask::Peek { on, session, asked } => Some(projected.route(on, session.whose(), *asked)),
-        Ask::Closes { on, place } => {
-            Some(projected.route(on, place.session.whose(), Some(place.pane)))
-        },
-        Ask::Exited { .. }
-        | Ask::Rename { .. }
-        | Ask::Delete { .. }
-        | Ask::Dirs { .. }
-        | Ask::List { .. } => None,
-    };
-    thread::spawn(move || {
-        let heard = match ask {
-            Ask::Exited { on, ask } => {
-                let exited = match &on {
-                    Machine::Local => Zellij::exited(),
-                    Machine::Remote(destination) => reach(destination)
-                        .and_then(|mut away| away.exited()),
-                };
-                Heard::Exited { on, ask, exited }
-            },
-            Ask::Peek { on, session, asked } => {
-                let name = session.name();
-                let peek = match (route.expect("a peek is routed"), &on) {
-                    (Err(why), _) => Err(why),
-                    (Ok(Route::Terminal(key)), _) => {
+    let hear: Box<dyn FnOnce() -> Heard + Send> = match ask {
+        Ask::Exited { on, ask } => Box::new(move || {
+            let exited = match &on {
+                Machine::Local => Zellij::exited(),
+                Machine::Remote(destination) => reach(destination)
+                    .and_then(|mut away| away.exited()),
+            };
+            Heard::Exited { on, ask, exited }
+        }),
+        Ask::Peek { on, session, asked } => {
+            let route = projected.route(&on, &session, asked);
+            Box::new(move || {
+                let peek = match route {
+                    Err(why) => Err(why),
+                    Ok(Route::Terminal(key)) => {
+                        if let Some(asked) = asked {
+                            assert_eq!(key.id.get(), asked, "a pane routes to its own terminal");
+                        }
                         screens::terminal(key).map(|screen| (key.id.get(), screen))
                     },
-                    (Ok(Route::Zellij), Machine::Local) => screens::dumped(name, asked),
-                    (Ok(Route::Zellij), Machine::Remote(destination)) => {
-                        Away::reach(destination, away::ANSWER)
-                            .and_then(|mut away| away.screen(name, asked))
+                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
+                        screens::dumped(&name, pane)
+                    },
+                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
+                        Away::reach(&destination, away::ANSWER)
+                            .and_then(|mut away| away.screen(&name, pane))
                     },
                 };
                 Heard::Peek { on, session, asked, peek }
-            },
-            Ask::Closes { on, place } => {
-                let (session, pane) = (place.session.name(), place.pane);
-                let closes = match (route.expect("a close is routed"), &on) {
-                    (Err(why), _) => Err(why),
-                    (Ok(Route::Terminal(_)), _) => Ok(Closes::Pane),
-                    (Ok(Route::Zellij), Machine::Local) => zellij::closes_now(session, pane),
-                    (Ok(Route::Zellij), Machine::Remote(destination)) => {
-                        Away::reach(destination, away::ANSWER)
-                            .and_then(|mut away| away.closes(session, pane))
+            })
+        },
+        Ask::Closes { on, place } => {
+            let route = projected.route(&on, &place.session, place.pane);
+            Box::new(move || {
+                let closes = match route {
+                    Err(why) => Err(why),
+                    Ok(Route::Terminal(_)) => Ok(Closes::Pane),
+                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
+                        zellij::closes_now(&name, pane)
+                    },
+                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
+                        Away::reach(&destination, away::ANSWER)
+                            .and_then(|mut away| away.closes(&name, pane))
                     },
                 };
                 Heard::Closes { on, place, closes }
-            },
-            Ask::Rename { on, from, to } => {
-                let project = from.own_key().and_then(projected::project_of);
-                let from = from.name().clone();
-                let renamed = match (&on, project) {
-                    (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
-                    (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
-                    (Machine::Remote(destination), _) => {
-                        reach(destination).and_then(|mut away| away.rename(&from, &to))
-                    },
-                };
-                Heard::Renamed { from, to, renamed }
-            },
-            Ask::Delete { on, session } => {
-                let deleted = match &on {
-                    Machine::Local => zellij::deleted(&session),
-                    Machine::Remote(destination) => {
-                        reach(destination).and_then(|mut away| away.delete(&session))
-                    },
-                };
-                Heard::Deleted { on, session, deleted }
-            },
-            Ask::Dirs { on, ask } => {
-                let visited = match &on {
-                    Machine::Local => zoxide::visited(),
-                    Machine::Remote(destination) => {
-                        reach(destination).and_then(|mut away| away.dirs())
-                    },
-                };
-                Heard::Dirs { on, ask, visited }
-            },
-            Ask::List { on, path } => {
-                let listed = match &on {
-                    Machine::Local => eza::listed(&path),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.contents(&path)),
-                };
-                Heard::Listed { on, path, listed }
-            },
-        };
+            })
+        },
+        Ask::Rename { on, from, to } => Box::new(move || {
+            let project = from.own_key().and_then(projected::project_of);
+            let from = from.name().clone();
+            let renamed = match (&on, project) {
+                (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
+                (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
+                (Machine::Remote(destination), _) => {
+                    reach(destination).and_then(|mut away| away.rename(&from, &to))
+                },
+            };
+            Heard::Renamed { from, to, renamed }
+        }),
+        Ask::Delete { on, session } => Box::new(move || {
+            let deleted = match &on {
+                Machine::Local => zellij::deleted(&session),
+                Machine::Remote(destination) => {
+                    reach(destination).and_then(|mut away| away.delete(&session))
+                },
+            };
+            Heard::Deleted { on, session, deleted }
+        }),
+        Ask::Dirs { on, ask } => Box::new(move || {
+            let visited = match &on {
+                Machine::Local => zoxide::visited(),
+                Machine::Remote(destination) => {
+                    reach(destination).and_then(|mut away| away.dirs())
+                },
+            };
+            Heard::Dirs { on, ask, visited }
+        }),
+        Ask::List { on, path } => Box::new(move || {
+            let listed = match &on {
+                Machine::Local => eza::listed(&path),
+                Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
+                    .and_then(|mut away| away.contents(&path)),
+            };
+            Heard::Listed { on, path, listed }
+        }),
+    };
+    thread::spawn(move || {
+        let heard = hear();
         let _ = events.send(Event::Picker { number, heard });
     });
 }
