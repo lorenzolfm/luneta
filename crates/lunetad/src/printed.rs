@@ -3,7 +3,9 @@ use std::time::SystemTime;
 
 use luneta_protocol::said::Said;
 
-use crate::mux::{Mux, SessionName};
+use crate::mux::own::api::Dumped;
+use crate::mux::own::server::Terminals;
+use crate::mux::{Mux, SessionName, TerminalKey};
 use crate::{folder, keeps};
 
 const TAIL: usize = 2000;
@@ -49,9 +51,16 @@ impl Printed {
 }
 
 pub fn kept_after(session: &SessionName, pane: u32, typed: &Said) -> Result<Printed, String> {
-    let dump = Mux::Zellij(session).text_dumped(pane)?;
+    kept(&Mux::Zellij(session).text_dumped(pane)?, typed)
+}
+
+pub fn kept_in(terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
+    kept(&Terminals.dumped(terminal, Dumped::Text)?, typed)
+}
+
+fn kept(dump: &str, typed: &Said) -> Result<Printed, String> {
     let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
-    keep(&runtime, cut(&dump, typed.as_str()), SystemTime::now())
+    keep(&runtime, cut(dump, typed.as_str()), SystemTime::now())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

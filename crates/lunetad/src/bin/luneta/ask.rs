@@ -293,7 +293,7 @@ mod tests {
 
     use super::*;
     use crate::menu::{PaneRow, Ran};
-    use crate::sidebar::Listed;
+    use crate::sidebar::{Listed, PaneKey};
 
     fn listed() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
@@ -306,7 +306,7 @@ mod tests {
     fn pane_row_on(machine: Machine) -> Target {
         let row = PaneRow {
             session: listed(),
-            pane: 4,
+            pane: PaneKey::Zellij(4),
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
             repository: None,

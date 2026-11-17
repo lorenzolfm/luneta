@@ -1,9 +1,15 @@
-use crate::mux::{Laid, Mux, SessionName};
+use crate::mux::own::api::Dumped;
+use crate::mux::own::server::Terminals;
+use crate::mux::{Laid, Mux, SessionName, TerminalKey};
 
 pub fn dumped(session: &SessionName, pane: Option<u32>) -> Result<(u32, String), String> {
     let mux = Mux::Zellij(session);
     let pane = pane.map_or_else(|| focused(mux, session), Ok)?;
     Ok((pane, mux.screen_dumped(pane)?))
+}
+
+pub fn terminal(key: TerminalKey) -> Result<String, String> {
+    Ok(Terminals.dumped(key, Dumped::Screen)?)
 }
 
 fn focused(mux: Mux<'_>, session: &SessionName) -> Result<u32, String> {

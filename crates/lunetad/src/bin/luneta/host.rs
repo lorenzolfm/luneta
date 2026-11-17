@@ -25,7 +25,7 @@ use lunetad::api::Host;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
-use lunetad::mux::own::{OwnClientId, OwnPane};
+use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
@@ -63,11 +63,11 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, PaneKey, Place, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
-use crate::projected::Projected;
+use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
 use crate::workstreams;
 use crate::width::Width;
@@ -732,7 +732,7 @@ impl App {
                 self.hold_aloud();
             },
             Event::Opened { menu, opened } => {
-                let asked = self.sidebar.opened(menu, opened);
+                let asked = self.sidebar.opened(menu, opened.map(PaneKey::Zellij));
                 self.follow(asked);
             },
             Event::Closes { menu, closes } => {
@@ -955,7 +955,7 @@ impl App {
         if let Some(Over::Picker(picker)) = &mut self.focus.over {
             let number = picker.number();
             for ask in picker.asks() {
-                picker::ask(number, ask, &self.events);
+                picker::ask(number, ask, &self.projected, &self.events);
             }
         }
     }
@@ -1442,19 +1442,25 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Closes { menu, on: Machine::Local, session, .. }
-                if session.own_key().and_then(|key| self.projected.project(key)).is_some() =>
-            {
-                let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
-                self.follow(asked);
-            },
             Asked::Closes { menu, on, session, pane } => {
-                zellij::closes(menu, &on, session.name().clone(), pane, &self.events);
+                match projected::route(&on, &session, pane) {
+                    Ok(Route::Zellij { on, session, pane }) => {
+                        zellij::closes(menu, &on, session, pane, &self.events);
+                    },
+                    Ok(Route::Terminal(_)) => {
+                        let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
+                        self.follow(asked);
+                    },
+                    Err(why) => {
+                        let asked = self.sidebar.closes(menu, Err(why));
+                        self.follow(asked);
+                    },
+                }
             },
-            Asked::Delete { on, act } if self.of_project(&act) => self.project_act(&on, &act),
+            Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
                 Act::Pane { session, whose, pane } => {
-                    zellij::close(&on, session, whose, Close::Pane(pane), &self.events);
+                    zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
                 },
                 Act::Tab { session, whose, tab, panes } => {
                     let close = Close::Tab { id: tab, panes };
@@ -1469,13 +1475,14 @@ impl App {
                     zellij::stays(&session, &self.events);
                 },
             },
-            Asked::Open { menu, on, whose, open } => {
-                if !self.project_open(menu, &on, whose, &open) {
-                    zellij::open(menu, &on, open, &self.events);
-                }
+            Asked::Open { menu, on, whose: Whose::Own(key), open } => {
+                self.project_open(menu, &on, key, &open);
             },
-            Asked::Tabs { menu, on, session, pane } => {
-                zellij::other_tabs(menu, &on, session, pane, &self.events);
+            Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
+                zellij::open(menu, &on, open, &self.events);
+            },
+            Asked::Tabs { menu, on, turned } => {
+                zellij::other_tabs(menu, &on, &turned, &self.events);
             },
             Asked::Turn { menu, on, turned, turn } => {
                 zellij::turn(menu, &on, turned, turn, &self.events);
@@ -1524,7 +1531,8 @@ impl App {
                 skills::find(&on, &cwd, agent, &self.events, said);
             },
             Asked::Printed { menu, on, session, pane, ended } => {
-                printed::read(menu, &on, &session, pane, ended, &self.events);
+                let route = projected::route(&on, &session, pane);
+                printed::read(menu, route, ended, &self.events);
             },
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
@@ -1559,25 +1567,11 @@ impl App {
         }
     }
 
-    fn of_project(&self, act: &Act) -> bool {
-        let whose = match act {
-            Act::Pane { whose, .. }
-            | Act::Tab { whose, .. }
-            | Act::Kill { whose, .. }
-            | Act::Leave { whose, .. } => whose,
-        };
-        matches!(whose, Whose::Own(key) if self.projected.project(*key).is_some())
-    }
-
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        let (Machine::Local, Act::Pane { whose: Whose::Own(key), pane, .. }) = (on, act) else {
+        let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {
             return self.sidebar.notify(format!("menu: {NOT_YET}"));
         };
-        let held = OwnPane::new(*key, *pane).and_then(|pane| self.projected.key_of(pane));
-        let Some(terminal) = held else {
-            return self.sidebar.notify(format!("menu: lunetad lists no terminal {pane}"));
-        };
-        let events = self.events.clone();
+        let (terminal, events) = (*terminal, self.events.clone());
         thread::spawn(move || {
             if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
                 let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
@@ -1585,21 +1579,20 @@ impl App {
         });
     }
 
-    fn project_open(&mut self, menu: u64, on: &Machine, whose: Whose, open: &Open) -> bool {
-        let (Machine::Local, Whose::Own(key)) = (on, whose) else {
-            return false;
+    fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
+        self.sidebar.drop_menu(menu);
+        let Machine::Local = on else {
+            return self.sidebar.notify(format!("menu: {NOT_YET}"));
         };
         let Some(project) = self.projected.project(key) else {
-            return false;
+            return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
-        self.sidebar.drop_menu(menu);
         match open {
             Open::Pane { beside, command, .. } => {
                 let pane = OwnPane::new(project.key, *beside);
                 let Some((workstream, terminal)) = pane.and_then(|it| self.projected.of_pane(it))
                 else {
-                    self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
-                    return true;
+                    return self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
                 };
                 self.go_workstream(workstream, Some(terminal));
                 self.right.open_beside_focused(command.clone());
@@ -1608,7 +1601,7 @@ impl App {
                 let (lunetad, id) = (self.lunetad.clone(), project.id);
                 let (cwd, name, argv) = (tab.cwd.clone(), tab.name.clone(), tab.command.clone());
                 if self.refuse_naming(None) {
-                    return true;
+                    return;
                 }
                 self.naming_on(move || {
                     let made = caught(|| {
@@ -1619,7 +1612,6 @@ impl App {
                 });
             },
         }
-        true
     }
 
     fn picked(&mut self, picked: Picked) {
@@ -1659,7 +1651,7 @@ impl App {
                     self.picked(did);
                 }
             },
-            Picked::Delete { on, act } if self.of_project(&act) => {
+            Picked::Delete { on, act } if act.own() => {
                 self.project_act(&on, &act);
                 self.give(Focus::on(self.focus.side.session()));
             },

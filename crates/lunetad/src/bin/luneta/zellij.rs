@@ -187,14 +187,9 @@ pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
     Due::new(events, move |opened| Event::Opened { menu, opened })
 }
 
-pub fn other_tabs(
-    menu: u64,
-    on: &Machine,
-    session: SessionName,
-    pane: u32,
-    events: &Sender<Event>,
-) {
+pub fn other_tabs(menu: u64, on: &Machine, turned: &Turned, events: &Sender<Event>) {
     let (on, events) = (on.clone(), events.clone());
+    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane.id());
     thread::spawn(move || {
         let tabs = There::on(&on).and_then(|mut there| there.other_tabs(&session, pane));
         let _ = events.send(Event::Tabs { menu, tabs });
@@ -232,7 +227,7 @@ pub fn turn(menu: u64, on: &Machine, turned: Turned, turn: turns::Turn, events: 
 fn pane_into_tab(menu: u64, on: &Machine, turned: Turned, events: &Sender<Event>) {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
-        let (session, pane) = (turned.place.session.name(), turned.place.pane);
+        let (session, pane) = (turned.place.session.name(), turned.place.pane.id());
         let started = turned.started;
         match There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane)) {
             Ok(IntoTab::Done) => owed.pay(Ok(pane)),
@@ -245,7 +240,7 @@ fn pane_into_tab(menu: u64, on: &Machine, turned: Turned, events: &Sender<Event>
 }
 
 fn tab_into_panes(menu: u64, on: &Machine, turned: &Turned, beside: u32, events: &Sender<Event>) {
-    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane);
+    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane.id());
     let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
     let (on, started) = (on.clone(), turned.started);
     thread::spawn(move || {

@@ -33,10 +33,10 @@ use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
-    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
-use crate::projected;
+use crate::projected::{self, Projected, Route};
 use crate::workstreams;
 use crate::zellij::{self, Closes, SessionName};
 
@@ -106,7 +106,7 @@ pub struct Live {
     pub place: Place,
     pub started: Option<SystemTime>,
     pub panes: Vec<Shown>,
-    pub focus: Option<u32>,
+    pub focus: Option<PaneKey>,
     pub waiting: usize,
 }
 
@@ -177,7 +177,12 @@ pub enum Picked {
 
 pub enum Heard {
     Exited { on: Machine, ask: u64, exited: Result<Vec<Exited>, String> },
-    Peek { on: Machine, session: Listed, asked: Option<u32>, peek: Result<(u32, String), String> },
+    Peek {
+        on: Machine,
+        session: Listed,
+        asked: Option<PaneKey>,
+        peek: Result<(u32, String), String>,
+    },
     Closes { on: Machine, place: PanePlace, closes: Result<Closes, String> },
     Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
     Deleted { on: Machine, session: SessionName, deleted: Result<(), String> },
@@ -188,7 +193,7 @@ pub enum Heard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Exited { on: Machine, ask: u64 },
-    Peek { on: Machine, session: Listed, asked: Option<u32> },
+    Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, from: Listed, to: SessionName },
     Delete { on: Machine, session: SessionName },
@@ -196,75 +201,97 @@ pub enum Ask {
     List { on: Machine, path: Directory },
 }
 
-pub fn ask(number: u64, ask: Ask, events: &Sender<Event>) {
+pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
     let events = events.clone();
-    thread::spawn(move || {
-        let heard = match ask {
-            Ask::Exited { on, ask } => {
-                let exited = match &on {
-                    Machine::Local => Zellij::exited(),
-                    Machine::Remote(destination) => reach(destination)
-                        .and_then(|mut away| away.exited()),
-                };
-                Heard::Exited { on, ask, exited }
-            },
-            Ask::Peek { on, session, asked } => {
-                let name = session.name();
-                let peek = match &on {
-                    Machine::Local => screens::dumped(name, asked),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.screen(name, asked)),
+    let hear: Box<dyn FnOnce() -> Heard + Send> = match ask {
+        Ask::Exited { on, ask } => Box::new(move || {
+            let exited = match &on {
+                Machine::Local => Zellij::exited(),
+                Machine::Remote(destination) => reach(destination)
+                    .and_then(|mut away| away.exited()),
+            };
+            Heard::Exited { on, ask, exited }
+        }),
+        Ask::Peek { on, session, asked } => {
+            let route = match asked {
+                Some(pane) => projected::route(&on, &session, pane).map(|route| route.map(Some)),
+                None => projected.whole(&on, &session),
+            };
+            Box::new(move || {
+                let peek = match route {
+                    Err(why) => Err(why),
+                    Ok(Route::Terminal(key)) => {
+                        screens::terminal(key).map(|screen| (key.id.get(), screen))
+                    },
+                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
+                        screens::dumped(&name, pane)
+                    },
+                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
+                        Away::reach(&destination, away::ANSWER)
+                            .and_then(|mut away| away.screen(&name, pane))
+                    },
                 };
                 Heard::Peek { on, session, asked, peek }
-            },
-            Ask::Closes { on, place } => {
-                let (session, pane) = (place.session.name(), place.pane);
-                let closes = match &on {
-                    Machine::Local => zellij::closes_now(session, pane),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.closes(session, pane)),
+            })
+        },
+        Ask::Closes { on, place } => {
+            let route = projected::route(&on, &place.session, place.pane);
+            Box::new(move || {
+                let closes = match route {
+                    Err(why) => Err(why),
+                    Ok(Route::Terminal(_)) => Ok(Closes::Pane),
+                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
+                        zellij::closes_now(&name, pane)
+                    },
+                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
+                        Away::reach(&destination, away::ANSWER)
+                            .and_then(|mut away| away.closes(&name, pane))
+                    },
                 };
                 Heard::Closes { on, place, closes }
-            },
-            Ask::Rename { on, from, to } => {
-                let project = from.own_key().and_then(projected::project_of);
-                let from = from.name().clone();
-                let renamed = match (&on, project) {
-                    (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
-                    (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
-                    (Machine::Remote(destination), _) => {
-                        reach(destination).and_then(|mut away| away.rename(&from, &to))
-                    },
-                };
-                Heard::Renamed { from, to, renamed }
-            },
-            Ask::Delete { on, session } => {
-                let deleted = match &on {
-                    Machine::Local => zellij::deleted(&session),
-                    Machine::Remote(destination) => {
-                        reach(destination).and_then(|mut away| away.delete(&session))
-                    },
-                };
-                Heard::Deleted { on, session, deleted }
-            },
-            Ask::Dirs { on, ask } => {
-                let visited = match &on {
-                    Machine::Local => zoxide::visited(),
-                    Machine::Remote(destination) => {
-                        reach(destination).and_then(|mut away| away.dirs())
-                    },
-                };
-                Heard::Dirs { on, ask, visited }
-            },
-            Ask::List { on, path } => {
-                let listed = match &on {
-                    Machine::Local => eza::listed(&path),
-                    Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                        .and_then(|mut away| away.contents(&path)),
-                };
-                Heard::Listed { on, path, listed }
-            },
-        };
+            })
+        },
+        Ask::Rename { on, from, to } => Box::new(move || {
+            let project = from.own_key().and_then(projected::project_of);
+            let from = from.name().clone();
+            let renamed = match (&on, project) {
+                (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
+                (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
+                (Machine::Remote(destination), _) => {
+                    reach(destination).and_then(|mut away| away.rename(&from, &to))
+                },
+            };
+            Heard::Renamed { from, to, renamed }
+        }),
+        Ask::Delete { on, session } => Box::new(move || {
+            let deleted = match &on {
+                Machine::Local => zellij::deleted(&session),
+                Machine::Remote(destination) => {
+                    reach(destination).and_then(|mut away| away.delete(&session))
+                },
+            };
+            Heard::Deleted { on, session, deleted }
+        }),
+        Ask::Dirs { on, ask } => Box::new(move || {
+            let visited = match &on {
+                Machine::Local => zoxide::visited(),
+                Machine::Remote(destination) => {
+                    reach(destination).and_then(|mut away| away.dirs())
+                },
+            };
+            Heard::Dirs { on, ask, visited }
+        }),
+        Ask::List { on, path } => Box::new(move || {
+            let listed = match &on {
+                Machine::Local => eza::listed(&path),
+                Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
+                    .and_then(|mut away| away.contents(&path)),
+            };
+            Heard::Listed { on, path, listed }
+        }),
+    };
+    thread::spawn(move || {
+        let heard = hear();
         let _ = events.send(Event::Picker { number, heard });
     });
 }
@@ -475,7 +502,7 @@ impl Contents {
     }
 }
 
-type Looked = (Machine, Listed, Option<u32>);
+type Looked = (Machine, Listed, Option<PaneKey>);
 
 type Located = (Machine, Directory);
 
@@ -1684,7 +1711,7 @@ impl Picker {
             let (on, session, asked) = &looked;
             let pane = match peek {
                 Some(Peek::Ready { pane, .. }) => Some(*pane),
-                _ => *asked,
+                _ => asked.map(PaneKey::id),
             };
             let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
             let live = sessions.iter().find(|live| live.place.listed() == session);
@@ -2179,14 +2206,14 @@ mod tests {
             place: Place::Session(listed(name, started)),
             started: Some(UNIX_EPOCH + Duration::from_secs(started)),
             panes: vec![Shown { id: 0, tab: "Tab #1".to_owned(), label: format!("{name}/w") }],
-            focus,
+            focus: focus.map(PaneKey::Zellij),
             waiting: 0,
         }
     }
 
     fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: PanePlace { session: listed(name, started), pane },
+            place: PanePlace { session: listed(name, started), pane: PaneKey::Zellij(pane) },
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -2531,7 +2558,7 @@ mod tests {
 
     #[test]
     fn del_on_an_agent_asks_zellij_what_closing_its_pane_closes_first() {
-        let place = PanePlace { session: listed("c", 30), pane: 4 };
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2542,10 +2569,10 @@ mod tests {
         let ask = Ask::Closes { on: Machine::Local, place: place.clone() };
         assert_eq!(picker.asks(), vec![ask]);
         let heard = |on, place| Heard::Closes { on, place, closes: Ok(Closes::Pane) };
-        let other = PanePlace { session: listed("c", 30), pane: 5 };
+        let other = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(5) };
         assert_eq!(picker.heard(heard(Machine::Local, other)), Picked::Nothing);
         assert_eq!(picker.heard(heard(nixos(), place.clone())), Picked::Nothing);
-        let deletes = Deletes::Pane { pane: 4, closes: Closes::Pane };
+        let deletes = Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
         assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
     }
@@ -2689,7 +2716,7 @@ mod tests {
 
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let place = PanePlace { session: listed("work", 20), pane: 9 };
+        let place = PanePlace { session: listed("work", 20), pane: PaneKey::Zellij(9) };
         let listing = Listing {
             here: Some(Here::Pane { on: Machine::Local, place }),
             local: agents(vec![
@@ -2757,7 +2784,7 @@ mod tests {
         press(&mut picker, KeyCode::Up);
         let due = picker.due().unwrap();
         picker.ticked(due);
-        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(1))]);
+        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(PaneKey::Zellij(1)))]);
         press(&mut picker, KeyCode::Down);
         assert_eq!(picker.due(), None);
     }
@@ -3270,7 +3297,7 @@ mod tests {
 
         control(&mut picker, 'b');
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let place = PanePlace { session: listed("api", 40), pane: 2 };
+        let place = PanePlace { session: listed("api", 40), pane: PaneKey::Zellij(2) };
         assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place }]);
     }
 
@@ -3375,7 +3402,7 @@ mod tests {
             ],
         };
         let listing = Listing {
-            here: Some(Here::Pane { on: nixos(), place: at(9) }),
+            here: Some(Here::Pane { on: nixos(), place: at(PaneKey::Zellij(9)) }),
             local: Runs {
                 sessions: vec![live("api", 30, None)],
                 agents: vec![seated("api", 30, 1, "fix", Mark::Idle)],
@@ -3407,7 +3434,7 @@ mod tests {
         let named: Vec<String> = lines[1..].iter().map(name).collect();
         assert_eq!(named, ["── desk", "fix", "── nixos", "fix"]);
         press(&mut picker, KeyCode::Down);
-        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(2)) };
+        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::Zellij(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
     }
 
@@ -3422,7 +3449,7 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         picker.ticked(picker.due().unwrap());
         let main = listed("main", 40);
-        let asked = Some(0);
+        let asked = Some(PaneKey::Zellij(0));
         assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: main.clone(), asked }]);
         let peek = |on, session, screen: &str| {
             let peek = Ok((0, screen.to_owned()));
@@ -3434,5 +3461,33 @@ mod tests {
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "reading…"]);
         picker.heard(peek(nixos(), main, "there"));
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "there"]);
+    }
+
+    fn asked(ask: Ask, projected: &Projected) -> Heard {
+        let (events, heard) = std::sync::mpsc::channel();
+        super::ask(1, ask, projected, &events);
+        match heard.recv_timeout(Duration::from_secs(10)).expect("the picker hears its ask") {
+            Event::Picker { number: 1, heard } => heard,
+            _ => panic!("the picker hears another event"),
+        }
+    }
+
+    #[test]
+    fn a_project_row_s_pane_closes_alone_by_key_with_no_word_to_zellij() {
+        let projected = Projected::default();
+        let session = Listed::new_project("work", 7);
+        let place = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
+        let close = Ask::Closes { on: Machine::Local, place };
+        let Heard::Closes { closes, .. } = asked(close, &projected) else {
+            panic!("a close is answered with its plan");
+        };
+        assert_eq!(closes, Ok(Closes::Pane));
+        let far = Machine::Remote("far".parse().unwrap());
+        let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
+        let peeked = asked(peek, &projected);
+        let Heard::Peek { peek, .. } = peeked else {
+            panic!("a peek is answered with a screen");
+        };
+        assert_eq!(peek, Err(crate::host::NOT_YET.to_owned()));
     }
 }

@@ -28,7 +28,7 @@ use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
 use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
-use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PanePlace, Place, TAG};
+use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place, TAG};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{SessionName, Starts};
@@ -843,7 +843,7 @@ pub enum Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
     pub session: Listed,
-    pub pane: u32,
+    pub pane: PaneKey,
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub repository: Option<String>,
@@ -947,7 +947,7 @@ impl Target {
                 Briefed::Machine(machine.clone())
             },
             (Target::Pane(machine, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane)
+                Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane.id())
             },
             (
                 Target::Session(machine, session)
@@ -960,7 +960,7 @@ impl Target {
 
 struct Beside {
     session: Listed,
-    pane: u32,
+    pane: PaneKey,
     cwd: Directory,
 }
 
@@ -1062,11 +1062,11 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Open { session: Listed, pane: u32, cwd: Directory, opens: Opens },
-    Tabs { session: Listed, pane: u32 },
-    Turn { session: Listed, pane: u32, turn: Turn },
+    Open { session: Listed, pane: PaneKey, cwd: Directory, opens: Opens },
+    Tabs { session: Listed, pane: PaneKey },
+    Turn { session: Listed, pane: PaneKey, turn: Turn },
     Pull(Work, Wanted),
-    Printed { session: Listed, pane: u32, ended: Ended },
+    Printed { session: Listed, pane: PaneKey, ended: Ended },
     Checks { page: PullPage },
     Make {
         session: SessionName,
@@ -1118,8 +1118,8 @@ enum Stage {
     Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
     Pruning { keys: Keys, dir: Directory, count: usize },
     Opening { keys: Keys, session: Listed },
-    Listing { keys: Keys, session: Listed, pane: u32 },
-    Picking { keys: Keys, session: Listed, pane: u32, tabs: Vec<OtherTab> },
+    Listing { keys: Keys, session: Listed, pane: PaneKey },
+    Picking { keys: Keys, session: Listed, pane: PaneKey, tabs: Vec<OtherTab> },
     Turning { keys: Keys, session: Listed },
     Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
     Fetching { keys: Keys, beside: Beside, page: PullPage },
@@ -1188,7 +1188,7 @@ impl Menu {
         &self.target
     }
 
-    pub fn planning(&self) -> Option<(&Listed, u32)> {
+    pub fn planning(&self) -> Option<(&Listed, PaneKey)> {
         match &self.stage {
             Stage::Planning { delete: Delete { session, scope: Scope::Pane(pane), .. }, .. } => {
                 Some((session, *pane))
@@ -1401,7 +1401,7 @@ impl Menu {
                 (Pressed::Start(skill), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
                         let command = agents::on_skill(keys.agent.harness(), &skill, None);
-                        let opens = Opens::Pane { beside: pane, command };
+                        let opens = Opens::Pane { beside: pane.id(), command };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
@@ -1431,7 +1431,7 @@ impl Menu {
                 },
                 (Pressed::New(New::Pane), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
-                        let opens = Opens::Pane { beside: pane, command: Vec::new() };
+                        let opens = Opens::Pane { beside: pane.id(), command: Vec::new() };
                         let stage = Stage::Opening { keys, session: session.clone() };
                         stays(stage, Wants::Open { session, pane, cwd, opens })
                     },
@@ -1669,7 +1669,7 @@ impl Menu {
             Ok(dir) => dir,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        let opening = |session: Listed, pane: u32, opens: Opens| {
+        let opening = |session: Listed, pane: PaneKey, opens: Opens| {
             let (cwd, branch, ran) = (Some(worktree.clone()), branch.clone(), Ran::Unhooked);
             let row = PaneRow {
                 session: session.clone(),
@@ -1691,7 +1691,7 @@ impl Menu {
                 Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
             },
             (At::There((session, pane)), Pull::Agent) => {
-                let opens = Opens::Pane { beside: pane, command };
+                let opens = Opens::Pane { beside: pane.id(), command };
                 opening(session, pane, opens)
             },
             (At::Session((session, pane)), _) => {
@@ -1747,7 +1747,7 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::Pane { beside: pane, command };
+        let opens = Opens::Pane { beside: pane.id(), command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -1777,7 +1777,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::Pane { beside: pane, command };
+        let opens = Opens::Pane { beside: pane.id(), command };
         let stage = Stage::Opening { keys, session: session.clone() };
         let wants = Wants::Open { session, pane, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)
@@ -2664,7 +2664,7 @@ mod tests {
     fn row() -> PaneRow {
         PaneRow {
             session: listed(),
-            pane: 4,
+            pane: PaneKey::Zellij(4),
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             repository: Some("/w/luneta".to_owned()),
@@ -2686,7 +2686,7 @@ mod tests {
     }
 
     fn beside_row(opens: Opens) -> Wants {
-        Wants::Open { session: listed(), pane: 4, cwd: main_dir(), opens }
+        Wants::Open { session: listed(), pane: PaneKey::Zellij(4), cwd: main_dir(), opens }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -2747,7 +2747,8 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('p')));
         let cwd = main_dir();
         let opens = Opens::Pane { beside: 4, command: Vec::new() };
-        assert_eq!(wants, Wants::Open { session: listed(), pane: 4, cwd: cwd.clone(), opens });
+        let pane = PaneKey::Zellij(4);
+        assert_eq!(wants, Wants::Open { session: listed(), pane, cwd: cwd.clone(), opens });
         assert!(menu.opening().is_some());
         let (menu, wants) = stays(menu.key(&char('p')));
         assert_eq!(wants, Wants::Nothing);
@@ -2769,7 +2770,7 @@ mod tests {
     fn listing() -> Menu {
         let (menu, _) = stays(opened(pane_row(), Some(TURN)));
         let (menu, wants) = stays(menu.key(&char('p')));
-        assert_eq!(wants, Wants::Tabs { session: listed(), pane: 4 });
+        assert_eq!(wants, Wants::Tabs { session: listed(), pane: PaneKey::Zellij(4) });
         assert!(menu.listing());
         menu
     }
@@ -2789,7 +2790,8 @@ mod tests {
             ]
         );
         let (menu, wants) = stays(menu.key(&char('t')));
-        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn: Turn::PaneIntoTab });
+        let (pane, turn) = (PaneKey::Zellij(4), Turn::PaneIntoTab);
+        assert_eq!(wants, Wants::Turn { session: listed(), pane, turn });
         assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Nothing);
@@ -2802,7 +2804,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.tabs(Ok(vec![other_tab(7, "Tab #2")])));
         let turn = Turn::TabIntoPanes { beside: 7 };
-        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
+        assert_eq!(wants, Wants::Turn { session: listed(), pane: PaneKey::Zellij(4), turn });
         assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
 
         let Done::Wrong(none) = closed(listing().tabs(Ok(Vec::new()))) else {
@@ -2837,7 +2839,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('2')));
         let turn = Turn::TabIntoPanes { beside: 2 };
-        assert_eq!(wants, Wants::Turn { session: listed(), pane: 4, turn });
+        assert_eq!(wants, Wants::Turn { session: listed(), pane: PaneKey::Zellij(4), turn });
         assert_eq!(menu.opening(), Some(Opening::Turned(listed())));
 
         let (menu, _) = stays(listing().tabs(Ok(vec![other_tab(7, "a"), other_tab(2, "b")])));
@@ -2876,7 +2878,10 @@ mod tests {
     #[test]
     fn an_own_session_s_pane_opens_its_agents_beside_it_and_turns_none() {
         let own = Listed::new_project("luneta", 3);
-        let own_row = || Target::Pane(Machine::Local, PaneRow { session: own.clone(), ..row() });
+        let own_row = || {
+            let row = PaneRow { session: own.clone(), pane: PaneKey::terminal(4), ..row() };
+            Target::Pane(Machine::Local, row)
+        };
         let (menu, _) = stays(opened(own_row(), None));
         let lines = text(&menu.lines(31, 10, 0).0);
         assert!(lines.iter().all(|line| !line.contains("Turn")), "{lines:?}");
@@ -2889,7 +2894,8 @@ mod tests {
         let (_, wants) = stays(stays(opened(own_row(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
         let opens = Opens::Pane { beside: 4, command };
-        assert_eq!(wants, Wants::Open { session: own.clone(), pane: 4, cwd: main_dir(), opens });
+        let pane = PaneKey::terminal(4);
+        assert_eq!(wants, Wants::Open { session: own.clone(), pane, cwd: main_dir(), opens });
         assert!(Menu::open(1, own_row(), Some('t'), PICKED).is_none());
     }
 
@@ -3018,14 +3024,16 @@ mod tests {
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
-        assert_eq!(wants, Wants::Printed { session: listed(), pane: 4, ended: cargo_test() });
+        let pane = PaneKey::Zellij(4);
+        assert_eq!(wants, Wants::Printed { session: listed(), pane, ended: cargo_test() });
     }
 
     #[test]
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        assert_eq!(wants, Wants::Printed { session: listed(), pane: 4, ended: cargo_test() });
+        let pane = PaneKey::Zellij(4);
+        assert_eq!(wants, Wants::Printed { session: listed(), pane, ended: cargo_test() });
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
@@ -3329,10 +3337,11 @@ mod tests {
 
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
+        let scope = Scope::Pane(PaneKey::Zellij(4));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let done = closed(menu.planned(Ok(plan(Closes::Pane, Vec::new()))));
         let name = || listed().name().clone();
-        let act = Act::Pane { session: name(), whose: listed().whose(), pane: 4 };
+        let act = Act::Pane { session: name(), whose: listed().whose(), pane: PaneKey::Zellij(4) };
         assert_eq!(done, Done::Act(vps(), act));
         for (row, highlighted) in [
             (pane, Briefed::Agent(vps(), name(), 4)),
@@ -3780,7 +3789,7 @@ mod tests {
         let subject = Subject {
             session: &session,
             seat: Seat::Elsewhere,
-            deletes: Deletes::Pane { pane: 4, closes },
+            deletes: Deletes::Pane { pane: PaneKey::Zellij(4), closes },
             agents: Ok(agents),
             refuge: None,
         };
@@ -3791,11 +3800,12 @@ mod tests {
     fn a_delete_with_no_agent_at_work_to_end_goes_ahead_at_once() {
         let (menu, _) = stays(opened(pane_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
-        assert_eq!(menu.planning(), Some((&listed(), 4)));
+        let scope = Scope::Pane(PaneKey::Zellij(4));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope });
+        assert_eq!(menu.planning(), Some((&listed(), PaneKey::Zellij(4))));
         let done = closed(menu.planned(Ok(plan(Closes::Pane, vec![(4, Doing::Idle)]))));
         let (session, whose) = (listed().name().clone(), listed().whose());
-        let act = Act::Pane { session, whose, pane: 4 };
+        let act = Act::Pane { session, whose, pane: PaneKey::Zellij(4) };
         assert_eq!(done, Done::Act(Machine::Local, act));
         let (menu, _) = stays(opened(session_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
@@ -3823,7 +3833,8 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.planned(Ok(plan(Closes::Pane, busy()))));
         let (menu, wants) = stays(menu.key(&char('d')));
-        assert_eq!(wants, Wants::Plan { session: listed(), scope: Scope::Pane(4) });
+        let scope = Scope::Pane(PaneKey::Zellij(4));
+        assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let tab = || Closes::Tab { id: TabId(2), panes: vec![4, 5] };
         let at_work = vec![(4, Doing::Busy), (5, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(Ok(plan(tab(), at_work))));
@@ -4064,27 +4075,29 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let session = || At::Session((other.clone(), 7));
+        let session = || At::Session((other.clone(), PaneKey::Zellij(7)));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             let cwd = directory(&worktree);
-            assert_eq!(wants, Wants::Open { session: other.clone(), pane: 7, cwd, opens });
+            let pane = PaneKey::Zellij(7);
+            assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
             assert_eq!(menu.opening(), Some(Opening::In(other.clone())));
             let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
-            assert_eq!((&row.session, row.pane), (&other, 7));
+            assert_eq!((&row.session, row.pane), (&other, PaneKey::Zellij(7)));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
-        let there = || At::There((other.clone(), 9));
-        let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
+        let there = || At::There((other.clone(), PaneKey::Zellij(9)));
+        let place = Place::Pane(PanePlace { session: other.clone(), pane: PaneKey::Zellij(9) });
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
         let opens = Opens::Pane { beside: 9, command: review };
         let cwd = directory(&worktree);
-        assert_eq!(wants, Wants::Open { session: other.clone(), pane: 9, cwd, opens });
+        let pane = PaneKey::Zellij(9);
+        assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
         let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
-        assert_eq!((&row.session, row.pane), (&other, 9));
+        assert_eq!((&row.session, row.pane), (&other, PaneKey::Zellij(9)));
     }
 
     #[test]
@@ -4101,7 +4114,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
-        let at = At::Session((other.clone(), 7));
+        let at = At::Session((other.clone(), PaneKey::Zellij(7)));
         let branch = Some("feat/x".to_owned());
         let ready = Ready { at, worktree: worktree.clone(), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
@@ -4112,7 +4125,7 @@ mod tests {
         let command = review.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
         let cwd = directory(&worktree);
-        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd, opens });
+        assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::Zellij(7), cwd, opens });
     }
 
     #[test]
@@ -4137,7 +4150,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let worktree = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
-            at: At::Session((other.clone(), 7)),
+            at: At::Session((other.clone(), PaneKey::Zellij(7))),
             worktree: worktree.clone(),
             branch: Some("issue-2736".to_owned()),
             moved_off: false,
@@ -4148,7 +4161,7 @@ mod tests {
         let command = tackle.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
         let cwd = directory(&worktree);
-        assert_eq!(wants, Wants::Open { session: other, pane: 7, cwd, opens });
+        assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::Zellij(7), cwd, opens });
         assert!(menu.opening().is_some());
     }
 
@@ -4217,7 +4230,7 @@ mod tests {
         let other = Listed::new("cdk", SystemTime::UNIX_EPOCH + Duration::from_secs(2));
         let (worktree, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
         let ready = || Ready {
-            at: At::Session((other.clone(), 7)),
+            at: At::Session((other.clone(), PaneKey::Zellij(7))),
             worktree: worktree.to_owned(),
             branch: Some("md-sync-rework".to_owned()),
             moved_off: false,
@@ -4236,7 +4249,7 @@ mod tests {
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command };
         let session = other.clone();
         let cwd = directory(worktree);
-        assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
+        assert_eq!(wants, Wants::Open { session, pane: PaneKey::Zellij(7), cwd, opens });
 
         let pressed = |key: char| {
             stays(Menu::pull(1, pane_row(), file(), CLAUDE).key(&char(key))).0
@@ -4245,7 +4258,7 @@ mod tests {
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
         let cwd = directory(worktree);
-        assert_eq!(wants, Wants::Open { session, pane: 7, cwd, opens });
+        assert_eq!(wants, Wants::Open { session, pane: PaneKey::Zellij(7), cwd, opens });
 
         assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
@@ -4291,12 +4304,13 @@ mod tests {
             Ok(Found { on: vps(), ready })
         };
         let row = || Target::Pane(vps(), row());
-        let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
-        let there = ready(At::There((other.clone(), 9)));
+        let place = Place::Pane(PanePlace { session: other.clone(), pane: PaneKey::Zellij(9) });
+        let there = ready(At::There((other.clone(), PaneKey::Zellij(9))));
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
-        let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(At::Session((other, 7)))));
+        let at = At::Session((other, PaneKey::Zellij(7)));
+        let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(at)));
         let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
-        assert_eq!((machine, row.pane), (&vps(), 7));
+        assert_eq!((machine, row.pane), (&vps(), PaneKey::Zellij(7)));
         let name = SessionName::parse("cdk").unwrap();
         let clone = At::Clone { cwd: directory("/w/cdk"), name };
         let header = Target::Machine(vps());
@@ -4317,14 +4331,15 @@ mod tests {
         };
         let rows = [session_row(), pane_row(), Target::Machine(Machine::Local)];
         for row in rows {
-            let (menu, wants) =
-                stays(pulling_on(row.clone(), 'r').pulled(found(At::There((other.clone(), 9)))));
-            assert!(matches!(wants, Wants::Open { pane: 9, .. }), "{wants:?}");
+            let at = At::There((other.clone(), PaneKey::Zellij(9)));
+            let (menu, wants) = stays(pulling_on(row.clone(), 'r').pulled(found(at)));
+            assert!(matches!(wants, Wants::Open { pane: PaneKey::Zellij(9), .. }), "{wants:?}");
             let Target::Pane(machine, opening) = menu.target() else { panic!("not a pane's row") };
-            assert_eq!((machine, opening.pane), (&vps(), 9));
+            assert_eq!((machine, opening.pane), (&vps(), PaneKey::Zellij(9)));
 
-            let place = Place::Pane(PanePlace { session: other.clone(), pane: 9 });
-            let goes = pulling_on(row.clone(), 'w').pulled(found(At::There((other.clone(), 9))));
+            let place = Place::Pane(PanePlace { session: other.clone(), pane: PaneKey::Zellij(9) });
+            let at = At::There((other.clone(), PaneKey::Zellij(9)));
+            let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
             let name = SessionName::parse("cdk").unwrap();

@@ -10,16 +10,16 @@ use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::sidebar::Listed;
+use crate::sidebar::{Listed, PaneKey};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
     pub session: Listed,
-    pub pane: u32,
+    pub pane: PaneKey,
     pub works: links::Worked,
 }
 
-pub type Ready = links::Ready<(Listed, u32)>;
+pub type Ready = links::Ready<(Listed, PaneKey)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -65,7 +65,7 @@ fn first_found(
 ) -> Result<Found, String> {
     let mut found_on = |on: Machine, worked: Vec<Worked>| {
         let apart = |Worked { session, pane, works }| ((session, pane), works);
-        let (panes, worked): (Vec<(Listed, u32)>, Vec<links::Worked>) =
+        let (panes, worked): (Vec<(Listed, PaneKey)>, Vec<links::Worked>) =
             worked.into_iter().map(apart).unzip();
         let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted))?;
         match ready.placed(&panes) {
@@ -186,7 +186,7 @@ mod tests {
     fn pane(id: u32, dir: &str) -> Worked {
         let works = links::Worked { dir: dir.to_owned(), pull: None, here: false };
         let session = Listed::new("main", SystemTime::UNIX_EPOCH + Duration::from_secs(1));
-        Worked { session, pane: id, works }
+        Worked { session, pane: PaneKey::Zellij(id), works }
     }
 
     fn there(at: usize) -> links::Ready<usize> {
@@ -226,7 +226,7 @@ mod tests {
         let (found, asked) = asking(&link(), others, |_| Ok(there(0)));
         let Found { on, ready } = found.unwrap();
         assert_eq!((on, asked), (Machine::Local, vec![Machine::Local]));
-        assert_eq!(ready.at, At::Session((pane(1, "/m").session, 1)));
+        assert_eq!(ready.at, At::Session((pane(1, "/m").session, PaneKey::Zellij(1))));
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         });
         let Found { on, ready } = found.unwrap();
         assert_eq!(on, Machine::Remote(vps()));
-        assert_eq!(ready.at, At::Session((pane(9, "/w").session, 9)));
+        assert_eq!(ready.at, At::Session((pane(9, "/w").session, PaneKey::Zellij(9))));
         let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
         assert_eq!(asked, order);
     }

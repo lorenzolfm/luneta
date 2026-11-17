@@ -4,13 +4,13 @@ use std::thread;
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
 pub use lunetad::printed::{Kept, Printed};
-use lunetad::SessionName;
 
 use crate::away::{self, Away};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::Ended;
+use crate::projected::Route;
 
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     let cannot = "with an exit status my shell cannot say";
@@ -56,22 +56,20 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     format!("{asks} In my shell, `{}` {how}. {printed}", ended.command.as_str())
 }
 
-pub fn read(
-    menu: u64,
-    on: &Machine,
-    session: &SessionName,
-    pane: u32,
-    ended: Ended,
-    events: &Sender<Event>,
-) {
-    let (on, session) = (on.clone(), session.clone());
+pub fn read(menu: u64, route: Result<Route<u32>, String>, ended: Ended, events: &Sender<Event>) {
     let due = Due::new(events, move |printed| Event::Printed { menu, printed });
     thread::spawn(move || {
         let typed = typed(&ended);
-        let printed = match &on {
-            Machine::Local => lunetad::printed::kept_after(&session, pane, &typed),
-            Machine::Remote(destination) => Away::reach(destination, away::ANSWER)
-                .and_then(|mut away| away.printed(&session, pane, &typed)),
+        let printed = match route {
+            Err(why) => Err(why),
+            Ok(Route::Terminal(terminal)) => lunetad::printed::kept_in(terminal, &typed),
+            Ok(Route::Zellij { on: Machine::Local, session, pane }) => {
+                lunetad::printed::kept_after(&session, pane, &typed)
+            },
+            Ok(Route::Zellij { on: Machine::Remote(destination), session, pane }) => {
+                Away::reach(&destination, away::ANSWER)
+                    .and_then(|mut away| away.printed(&session, pane, &typed))
+            },
         };
         due.pay(printed);
     });
