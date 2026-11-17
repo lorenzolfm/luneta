@@ -46,6 +46,7 @@ impl Leaf for Terminal {
 pub enum Runs {
     Shell,
     Command(Line),
+    Unrun(Line),
     Agent { harness: Harness, session: Session },
 }
 
