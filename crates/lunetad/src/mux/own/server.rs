@@ -22,7 +22,7 @@ use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
 use super::TerminalKey;
 use crate::mux::{in_no_pane, Failure, Runs};
-use crate::projects::Size;
+use crate::projects::{Line, Size, TERMINALS_MAX};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
@@ -346,34 +346,48 @@ impl Terminals {
         tags.collect()
     }
 
-    pub fn typed(&self, key: TerminalKey, text: &str) -> Result<(), Failure> {
+    pub fn typed(&self, pastes: &[(TerminalKey, &Line)]) -> Result<(), Failure> {
         use api::from_viewer::Event;
+        assert!(!pastes.is_empty(), "a paste is asked for");
+        assert!(pastes.len() <= TERMINALS_MAX, "no more pastes than terminals");
         let said = |event| api::FromViewer { event: Some(event) };
         let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
-        let paste = api::typed::Event::Paste(api::Paste { text: text.to_owned() });
-        let words = vec![
+        let terminals = pastes.iter().map(|(key, _)| key.said()).collect();
+        let mut words = vec![
             said(Event::Hello(hello)),
-            said(Event::Showing(api::Showing { terminals: vec![key.said()] })),
-            said(Event::Typed(api::Typed { terminal: Some(key.said()), event: Some(paste) })),
+            said(Event::Showing(api::Showing { terminals })),
         ];
+        for (key, line) in pastes {
+            assert!(!line.as_str().contains('\n'), "a pasted line holds no newline to run it");
+            let paste = api::typed::Event::Paste(api::Paste { text: line.as_str().to_owned() });
+            let typed = api::Typed { terminal: Some(key.said()), event: Some(paste) };
+            words.push(said(Event::Typed(typed)));
+        }
+        assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
+        let refusals_max = 2 * pastes.len();
         let server = reached()?;
-        let shown = server.ask(|mut client| async move {
-            client.show(tokio_stream::iter(words)).await
-        });
-        let mut heard = shown.map_err(|status| refused(&status))?;
-        let drained = server.runtime.block_on(tokio::time::timeout(ANSWER, async move {
-            while let Some(word) = heard.message().await? {
-                if let Some(api::to_viewer::Event::Refused(api::Refused { reason })) = word.event {
-                    return Ok(Some(reason));
+        let mut client = server.client.clone();
+        let drained = server.runtime.block_on(async move {
+            let shown = async move {
+                let mut heard = client.show(tokio_stream::iter(words)).await?.into_inner();
+                let mut reasons = Vec::new();
+                while let Some(word) = heard.message().await? {
+                    if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
+                        reasons.push(refusal.reason);
+                    }
+                    if reasons.len() >= refusals_max {
+                        break;
+                    }
                 }
-            }
-            Ok::<_, Status>(None)
-        }));
+                Ok::<_, Status>(reasons)
+            };
+            tokio::time::timeout(ANSWER, shown).await
+        });
         match drained {
-            Ok(Ok(None)) => Ok(()),
-            Ok(Ok(Some(reason))) => Err(Failure::Own(reason)),
+            Ok(Ok(reasons)) if reasons.is_empty() => Ok(()),
+            Ok(Ok(reasons)) => Err(Failure::Own(reasons.join("; "))),
             Ok(Err(status)) => Err(refused(&status)),
-            Err(_) => Err(Failure::Own("luneta-mux kept showing a paste too long".to_owned())),
+            Err(_) => Err(Failure::Own("luneta-mux kept showing the pastes too long".to_owned())),
         }
     }
 

@@ -469,30 +469,72 @@ fn front_of(owned: &Owned, terminal: u64) -> Option<Vec<String>> {
     runs.foreground.as_ref().map(|front| front.argv.clone())
 }
 
+fn logged(owned: &Owned) -> String {
+    let log = owned.host.home.path().join(".local/state/luneta/luneta.log");
+    fs::read_to_string(log).unwrap_or_default()
+}
+
 #[test]
 fn a_view_restores_its_terminals_when_the_mux_dies() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
-    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
-    let before = key(&shown.laid.clone().unwrap().panes[0]);
+    let terminals = [
+        heard_in_below(&owned, &mut shown, "sleep 602"),
+        heard_in_below(&owned, &mut shown, "sleep 606"),
+    ];
+    let laid = shown.laid.clone().unwrap();
+    let before: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
     owned.kill_mux();
-    let laid = shown.until("the terminal restored", |laid| {
-        let found = key(&laid.panes[0]);
-        found.is_some() && found != before
+    let laid = shown.until("the terminals restored", |laid| {
+        let found: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+        found.iter().zip(&before).all(|(found, was)| found.is_some() && found != was)
     });
-    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
+    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), terminals);
     assert_eq!(shown.refused, Vec::<String>::new());
-    let restored = mux_key(key(&laid.panes[0]).unwrap());
     let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
     let listing = owned.listing();
-    let listed = tagged(&listing, terminal).expect("the new mux holds the terminal restored");
-    assert_eq!(listed.cwd, below.to_str().unwrap(), "a terminal comes back in its folder");
-    eventually("its last command is typed at the prompt", || {
-        owned.dumped(restored).contains("sleep 602").then_some(())
+    for (pane, command) in laid.panes.iter().zip(["sleep 602", "sleep 606"]) {
+        let listed = tagged(&listing, pane.terminal).expect("the new mux holds the terminal");
+        assert_eq!(listed.cwd, below.to_str().unwrap(), "a terminal comes back in its folder");
+        let restored = mux_key(key(pane).unwrap());
+        eventually("its last command is typed at the prompt", || {
+            owned.dumped(restored).contains(command).then_some(())
+        });
+        let front = front_of(&owned, pane.terminal).expect("a shell runs in the terminal");
+        assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
+    }
+    let log = logged(&owned);
+    for trouble in ["panicked", "not typed", "not restored"] {
+        assert!(!log.contains(trouble), "{log}");
+    }
+}
+
+#[test]
+fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
+    let mut owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 603");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    fs::remove_dir_all(home.join("below")).unwrap();
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    let spans = r#""command": "sleep 603\necho done""#;
+    fs::write(kept(&owned.host), file.replace(r#""command": "sleep 603""#, spans)).unwrap();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, workstream, 80, 24);
+    again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    let folder = format!(r#""folder": "{}""#, home.display());
+    let file = eventually("what the terminal restored runs is read", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        file.contains(&folder).then_some(file)
     });
-    let front = front_of(&owned, terminal).expect("a shell runs in the terminal restored");
-    assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
+    assert!(file.contains(spans), "a command that spans lines is kept: {file}");
+    let log = logged(&owned);
+    assert!(log.contains("spans lines, and is kept, not typed"), "{log}");
 }
 
 #[test]
