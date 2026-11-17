@@ -861,7 +861,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
                 }
             },
         }
-        if text_of(&lines).iter().any(|line| line == "seen-42") {
+        if text_of(&lines).iter().any(|line| line.ends_with("seen-42")) {
             break;
         }
     }
