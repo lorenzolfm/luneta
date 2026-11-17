@@ -558,14 +558,14 @@ mod tests {
     use lunetad::Destination;
 
     use super::*;
-    use crate::sidebar::Mark;
+    use crate::sidebar::{Mark, PaneKey};
 
     fn work() -> Listed {
         Listed::new("work", UNIX_EPOCH + Duration::from_secs(10))
     }
 
     fn place(pane: u32) -> PanePlace {
-        PanePlace { session: work(), pane }
+        PanePlace { session: work(), pane: PaneKey::Zellij(pane) }
     }
 
     fn seated(pid: u32, doing: Doing) -> Seated {

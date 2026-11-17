@@ -71,6 +71,7 @@ fn pane(id: u32, tab: (u32, &str), cwd: Option<&str>) -> api::Pane {
         shell: None,
         tab_id: Some(tab.0),
         held: false,
+        key: None,
     }
 }
 

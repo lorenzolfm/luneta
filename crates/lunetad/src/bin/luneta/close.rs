@@ -7,7 +7,7 @@ use lunetad::api::{Agent, Status};
 use lunetad::mux::{OwnKey, TabId};
 use lunetad::seats::Where;
 
-use crate::sidebar::{Listed, Place};
+use crate::sidebar::{Listed, PaneKey, Place};
 use crate::zellij::{Closes, SessionName};
 
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
@@ -29,7 +29,7 @@ impl Whose {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    Pane(u32),
+    Pane(PaneKey),
     Session,
 }
 
@@ -44,7 +44,7 @@ impl Scope {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
-    Pane { pane: u32, closes: Closes },
+    Pane { pane: PaneKey, closes: Closes },
     Session,
 }
 
@@ -112,13 +112,23 @@ pub struct Subject<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
-    Pane { session: SessionName, whose: Whose, pane: u32 },
+    Pane { session: SessionName, whose: Whose, pane: PaneKey },
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
     Kill { session: SessionName, whose: Whose },
     Leave { session: SessionName, whose: Whose, to: Place },
 }
 
 impl Act {
+    pub fn own(&self) -> bool {
+        let whose = match self {
+            Act::Pane { whose, .. }
+            | Act::Tab { whose, .. }
+            | Act::Kill { whose, .. }
+            | Act::Leave { whose, .. } => whose,
+        };
+        matches!(whose, Whose::Own(_))
+    }
+
     fn what(&self) -> String {
         match self {
             Act::Pane { .. } => "Close the pane".to_owned(),
@@ -131,7 +141,7 @@ impl Act {
 
     pub fn takes(&self, pane: u32) -> bool {
         match self {
-            Act::Pane { pane: closed, .. } => pane == *closed,
+            Act::Pane { pane: closed, .. } => pane == closed.id(),
             Act::Tab { panes, .. } => panes.contains(&pane),
             Act::Kill { .. } | Act::Leave { .. } => true,
         }
@@ -259,7 +269,7 @@ mod tests {
     }
 
     fn pane(closes: Closes) -> Deletes {
-        Deletes::Pane { pane: 4, closes }
+        Deletes::Pane { pane: PaneKey::Zellij(4), closes }
     }
 
     #[test]
@@ -272,7 +282,7 @@ mod tests {
         let (session, whose) = (luneta.name().clone(), luneta.whose());
         assert_eq!(
             planned(Seat::In, pane(Closes::Pane)),
-            Act::Pane { session: session.clone(), whose, pane: 4 }
+            Act::Pane { session: session.clone(), whose, pane: PaneKey::Zellij(4) }
         );
         assert_eq!(
             planned(Seat::In, pane(tab)),
@@ -320,7 +330,7 @@ mod tests {
             question(Deletes::Session),
             Some("Delete session luneta? 4 agents, 1 busy, 1 waiting, 1 unknown".to_owned())
         );
-        let unknown = Deletes::Pane { pane: 7, closes: Closes::Pane };
+        let unknown = Deletes::Pane { pane: PaneKey::Zellij(7), closes: Closes::Pane };
         assert_eq!(question(unknown), Some("Close the pane? 1 agent, 1 unknown".to_owned()));
     }
 }

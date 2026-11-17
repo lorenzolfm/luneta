@@ -20,6 +20,7 @@ use lunetad::Directory;
 use crate::agents::{self, Harness};
 use crate::close::{self, Act, Doing, Plan, Untold, Whose};
 use crate::commands;
+use crate::sidebar::PaneKey;
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -716,8 +717,9 @@ fn plans_in(
                 let tabs = tabs
                     .into_iter()
                     .map(|(tab, panes)| Act::Tab { session: owned(), whose, tab, panes });
-                let panes =
-                    panes.into_iter().map(|pane| Act::Pane { session: owned(), whose, pane });
+                let panes = panes.into_iter().map(|pane| {
+                    Act::Pane { session: owned(), whose, pane: PaneKey::Zellij(pane) }
+                });
                 tabs.chain(panes).collect()
             },
         },
@@ -876,7 +878,7 @@ fn ending(
 fn act(act: &Act) -> Result<(), String> {
     match act {
         Act::Pane { session, whose, pane } => {
-            closes::closed(session, whose.started(session)?, &Close::Pane(*pane))
+            closes::closed(session, whose.started(session)?, &Close::Pane(pane.id()))
         },
         Act::Tab { session, whose, tab, panes } => {
             let close = Close::Tab { id: *tab, panes: panes.clone() };

@@ -33,7 +33,7 @@ use crate::screen;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
-    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PanePlace, Place,
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place,
 };
 use crate::spots::{Drawn, Spots};
 use crate::projected::{self, Projected, Route};
@@ -106,7 +106,7 @@ pub struct Live {
     pub place: Place,
     pub started: Option<SystemTime>,
     pub panes: Vec<Shown>,
-    pub focus: Option<u32>,
+    pub focus: Option<PaneKey>,
     pub waiting: usize,
 }
 
@@ -177,7 +177,12 @@ pub enum Picked {
 
 pub enum Heard {
     Exited { on: Machine, ask: u64, exited: Result<Vec<Exited>, String> },
-    Peek { on: Machine, session: Listed, asked: Option<u32>, peek: Result<(u32, String), String> },
+    Peek {
+        on: Machine,
+        session: Listed,
+        asked: Option<PaneKey>,
+        peek: Result<(u32, String), String>,
+    },
     Closes { on: Machine, place: PanePlace, closes: Result<Closes, String> },
     Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
     Deleted { on: Machine, session: SessionName, deleted: Result<(), String> },
@@ -188,7 +193,7 @@ pub enum Heard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Exited { on: Machine, ask: u64 },
-    Peek { on: Machine, session: Listed, asked: Option<u32> },
+    Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, from: Listed, to: SessionName },
     Delete { on: Machine, session: SessionName },
@@ -208,14 +213,14 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             Heard::Exited { on, ask, exited }
         }),
         Ask::Peek { on, session, asked } => {
-            let route = projected.route(&on, &session, asked);
+            let route = match asked {
+                Some(pane) => projected::route(&on, &session, pane).map(|route| route.map(Some)),
+                None => projected.whole(&on, &session),
+            };
             Box::new(move || {
                 let peek = match route {
                     Err(why) => Err(why),
                     Ok(Route::Terminal(key)) => {
-                        if let Some(asked) = asked {
-                            assert_eq!(key.id.get(), asked, "a pane routes to its own terminal");
-                        }
                         screens::terminal(key).map(|screen| (key.id.get(), screen))
                     },
                     Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
@@ -230,7 +235,7 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             })
         },
         Ask::Closes { on, place } => {
-            let route = projected.route(&on, &place.session, place.pane);
+            let route = projected::route(&on, &place.session, place.pane);
             Box::new(move || {
                 let closes = match route {
                     Err(why) => Err(why),
@@ -497,7 +502,7 @@ impl Contents {
     }
 }
 
-type Looked = (Machine, Listed, Option<u32>);
+type Looked = (Machine, Listed, Option<PaneKey>);
 
 type Located = (Machine, Directory);
 
@@ -1706,7 +1711,7 @@ impl Picker {
             let (on, session, asked) = &looked;
             let pane = match peek {
                 Some(Peek::Ready { pane, .. }) => Some(*pane),
-                _ => *asked,
+                _ => asked.map(PaneKey::id),
             };
             let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
             let live = sessions.iter().find(|live| live.place.listed() == session);
@@ -2201,14 +2206,14 @@ mod tests {
             place: Place::Session(listed(name, started)),
             started: Some(UNIX_EPOCH + Duration::from_secs(started)),
             panes: vec![Shown { id: 0, tab: "Tab #1".to_owned(), label: format!("{name}/w") }],
-            focus,
+            focus: focus.map(PaneKey::Zellij),
             waiting: 0,
         }
     }
 
     fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: PanePlace { session: listed(name, started), pane },
+            place: PanePlace { session: listed(name, started), pane: PaneKey::Zellij(pane) },
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -2553,7 +2558,7 @@ mod tests {
 
     #[test]
     fn del_on_an_agent_asks_zellij_what_closing_its_pane_closes_first() {
-        let place = PanePlace { session: listed("c", 30), pane: 4 };
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
         let listing = Listing {
             local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
@@ -2564,10 +2569,10 @@ mod tests {
         let ask = Ask::Closes { on: Machine::Local, place: place.clone() };
         assert_eq!(picker.asks(), vec![ask]);
         let heard = |on, place| Heard::Closes { on, place, closes: Ok(Closes::Pane) };
-        let other = PanePlace { session: listed("c", 30), pane: 5 };
+        let other = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(5) };
         assert_eq!(picker.heard(heard(Machine::Local, other)), Picked::Nothing);
         assert_eq!(picker.heard(heard(nixos(), place.clone())), Picked::Nothing);
-        let deletes = Deletes::Pane { pane: 4, closes: Closes::Pane };
+        let deletes = Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
         assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
     }
@@ -2711,7 +2716,7 @@ mod tests {
 
     #[test]
     fn agents_named_alike_are_told_apart_and_yours_is_pinned_over_them() {
-        let place = PanePlace { session: listed("work", 20), pane: 9 };
+        let place = PanePlace { session: listed("work", 20), pane: PaneKey::Zellij(9) };
         let listing = Listing {
             here: Some(Here::Pane { on: Machine::Local, place }),
             local: agents(vec![
@@ -2779,7 +2784,7 @@ mod tests {
         press(&mut picker, KeyCode::Up);
         let due = picker.due().unwrap();
         picker.ticked(due);
-        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(1))]);
+        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(PaneKey::Zellij(1)))]);
         press(&mut picker, KeyCode::Down);
         assert_eq!(picker.due(), None);
     }
@@ -3292,7 +3297,7 @@ mod tests {
 
         control(&mut picker, 'b');
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let place = PanePlace { session: listed("api", 40), pane: 2 };
+        let place = PanePlace { session: listed("api", 40), pane: PaneKey::Zellij(2) };
         assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place }]);
     }
 
@@ -3397,7 +3402,7 @@ mod tests {
             ],
         };
         let listing = Listing {
-            here: Some(Here::Pane { on: nixos(), place: at(9) }),
+            here: Some(Here::Pane { on: nixos(), place: at(PaneKey::Zellij(9)) }),
             local: Runs {
                 sessions: vec![live("api", 30, None)],
                 agents: vec![seated("api", 30, 1, "fix", Mark::Idle)],
@@ -3429,7 +3434,7 @@ mod tests {
         let named: Vec<String> = lines[1..].iter().map(name).collect();
         assert_eq!(named, ["── desk", "fix", "── nixos", "fix"]);
         press(&mut picker, KeyCode::Down);
-        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(2)) };
+        let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::Zellij(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
     }
 
@@ -3444,7 +3449,7 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         picker.ticked(picker.due().unwrap());
         let main = listed("main", 40);
-        let asked = Some(0);
+        let asked = Some(PaneKey::Zellij(0));
         assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: main.clone(), asked }]);
         let peek = |on, session, screen: &str| {
             let peek = Ok((0, screen.to_owned()));
@@ -3458,33 +3463,6 @@ mod tests {
         assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "there"]);
     }
 
-    fn projected(terminal: u32) -> Projected {
-        let made_at = Some(prost_types::Timestamp::default());
-        let key = lunetad::api::TerminalKey { id: terminal, made_at };
-        let terminal = lunetad::api::Terminal {
-            id: 21,
-            found: Some(lunetad::api::terminal::Found::Key(key)),
-            ..lunetad::api::Terminal::default()
-        };
-        let workstream = lunetad::api::Workstream {
-            id: 11,
-            name: "main".to_owned(),
-            terminals: vec![terminal],
-            ..lunetad::api::Workstream::default()
-        };
-        let project = lunetad::api::Project {
-            id: 7,
-            name: "work".to_owned(),
-            workstreams: vec![workstream],
-            ..lunetad::api::Project::default()
-        };
-        let kept = lunetad::api::projects::Kept { projects: vec![project] };
-        let held = Some(lunetad::api::projects::Held::Kept(kept));
-        let projects = Some(lunetad::api::Projects { held });
-        let mut host = lunetad::api::Host { projects, ..lunetad::api::Host::default() };
-        Projected::adapted(&mut host).unwrap()
-    }
-
     fn asked(ask: Ask, projected: &Projected) -> Heard {
         let (events, heard) = std::sync::mpsc::channel();
         super::ask(1, ask, projected, &events);
@@ -3496,18 +3474,17 @@ mod tests {
 
     #[test]
     fn a_project_row_s_pane_closes_alone_by_key_with_no_word_to_zellij() {
-        let projected = projected(4);
+        let projected = Projected::default();
         let session = Listed::new_project("work", 7);
-        let place = |pane| PanePlace { session: session.clone(), pane };
-        let close = |pane| Ask::Closes { on: Machine::Local, place: place(pane) };
-        let closes = |pane| match asked(close(pane), &projected) {
-            Heard::Closes { closes, .. } => closes,
-            _ => panic!("a close is answered with its plan"),
+        let place = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
+        let close = Ask::Closes { on: Machine::Local, place };
+        let Heard::Closes { closes, .. } = asked(close, &projected) else {
+            panic!("a close is answered with its plan");
         };
-        assert_eq!(closes(4), Ok(Closes::Pane));
-        assert_eq!(closes(9), Err("lunetad lists no terminal 9".to_owned()));
+        assert_eq!(closes, Ok(Closes::Pane));
         let far = Machine::Remote("far".parse().unwrap());
-        let peeked = asked(Ask::Peek { on: far, session, asked: Some(4) }, &projected);
+        let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
+        let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {
             panic!("a peek is answered with a screen");
         };

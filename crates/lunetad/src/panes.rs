@@ -39,6 +39,7 @@ impl Pane {
             shell: doing.map(Doing::to_api),
             tab_id: Some(self.tab_id),
             held: self.held,
+            key: None,
         }
     }
 }

@@ -576,6 +576,7 @@ message Pane {
   Shell shell = 7;
   optional uint32 tab_id = 8;
   bool held = 9;
+  TerminalKey key = 10;
 }
 
 message Titled {
