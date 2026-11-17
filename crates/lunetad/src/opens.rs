@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use crate::api::open_request::{self, Opens};
 use crate::api::{On, OpenRequest};
 use crate::mux::{tabs, terminal_of, Laid, Mux, Runs, SessionName, TabId, Zellij};
-use crate::closes::{self, Close, Whose};
+use crate::closes::{self, Close};
 use crate::Directory;
 
 const SHELL_VAR: &str = "SHELL";
@@ -61,12 +61,6 @@ pub fn opening(open: &Open) -> Result<Opened, String> {
     opened(open)
 }
 
-pub fn opening_of(open: &Open, whose: Whose) -> Result<Opened, String> {
-    match whose {
-        Whose::Zellij(_) => opened(open),
-        Whose::Own(_) => Err(closes::no_own(open.session())),
-    }
-}
 
 fn opened(open: &Open) -> Result<Opened, String> {
     let terminal = |terminal| Opened { terminal, notes: Vec::new() };

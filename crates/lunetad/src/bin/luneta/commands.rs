@@ -280,12 +280,9 @@ fn asker_of(seat: Seat) -> Result<Option<Asker>, String> {
         Seat::Opened(ZellijPane { session, pane }) => {
             let named = SessionName::running(&session)
                 .map_err(|why| format!("session {session:?}: {why}"))?;
-            Asker::Zellij { named, pane }
+            Asker { named, pane }
         },
-        Seat::Asked { user: User::Pane { session, pane }, .. } => {
-            Asker::Zellij { named: session, pane }
-        },
-        Seat::Asked { user: User::Own { pane, .. }, .. } => Asker::Own(pane),
+        Seat::Asked { user: User::Pane { session, pane }, .. } => Asker { named: session, pane },
         Seat::Asked { user: User::Away | User::Untold, .. } => return Ok(None),
     };
     Ok(Some(asker))

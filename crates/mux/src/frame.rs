@@ -1,5 +1,5 @@
 use crate::api;
-use crate::id::TerminalId;
+use crate::asked::TerminalKey;
 use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub struct Flags {
 }
 
 #[must_use]
-pub fn said(terminal: TerminalId, view: &View, before: Option<&View>, flags: Flags) -> api::Frame {
+pub fn said(terminal: TerminalKey, view: &View, before: Option<&View>, flags: Flags) -> api::Frame {
     let size = view.size();
     let rows = match before {
         Some(before) if before.size() == size => {
@@ -35,7 +35,7 @@ pub fn said(terminal: TerminalId, view: &View, before: Option<&View>, flags: Fla
     let count =
         |count: usize| u32::try_from(count).expect("a pane's scrollback is counted in a u32");
     api::Frame {
-        pane: terminal.said(),
+        terminal: Some(terminal.said()),
         size: Some(size.said()),
         rows: Some(rows),
         cursor: view.cursor().map(cursor_said),

@@ -1,16 +1,31 @@
 use std::fmt;
+use std::time::SystemTime;
 
 use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
-use lunetad::closes::Whose;
-use lunetad::mux::TabId;
+use lunetad::mux::{OwnKey, TabId};
 use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, Place};
 use crate::zellij::{Closes, SessionName};
 
 const UNTOLD: &str = "luneta cannot tell which agents it ends";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Whose {
+    Zellij(SystemTime),
+    Own(OwnKey),
+}
+
+impl Whose {
+    pub fn started(self, session: &SessionName) -> Result<SystemTime, String> {
+        match self {
+            Whose::Zellij(started) => Ok(started),
+            Whose::Own(_) => Err(format!("{session} is a project, and no session of zellij's")),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {

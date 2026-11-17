@@ -5,17 +5,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::mux::{self, Mux, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
-use lunetad::closes::{running_in, Whose};
+use lunetad::closes::{self, running_in};
 pub use lunetad::names::{session_for, Starts};
-pub use lunetad::opens::{opening, opening_of, Open, Opened, Tab};
-use lunetad::asks::{
-    self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, OWN_VAR, OWN_VAR_BEFORE, TURN_VAR,
-};
+pub use lunetad::opens::{opening, Open, Opened, Tab};
+use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::Directory;
 pub use lunetad::{var, SessionName};
 
 use crate::away::{self, Away};
+use crate::close::Whose;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -58,14 +57,8 @@ impl Seat {
 
 pub fn here() -> Result<Option<Seat>, String> {
     let (key, before) = (var(TURN_VAR)?, var(BEFORE_VAR)?);
-    let (asked, own, away) = (var(ASKED_VAR)?, var(OWN_VAR)?, var(AWAY_VAR)?);
-    let own_before = var(OWN_VAR_BEFORE)?;
-    let said = asks::Where {
-        asked: asked.as_deref(),
-        own: own.as_deref(),
-        away: away.as_deref(),
-        own_before: own_before.as_deref(),
-    };
+    let (asked, away) = (var(ASKED_VAR)?, var(AWAY_VAR)?);
+    let said = asks::Where { asked: asked.as_deref(), away: away.as_deref() };
     let turn = asks::turn_in(key.as_deref(), before.as_deref(), said);
     seat_in(turn?, Zellij::here()?)
 }
@@ -85,9 +78,6 @@ fn asked_in_pane(user: &User, in_pane: &str) -> String {
     let asked = match user {
         User::Pane { session: from, pane } => {
             format!("{ASKED_VAR} names {from}:{pane}, a pane luneta's ask box asked from")
-        },
-        User::Own { pane, named, .. } => {
-            format!("{OWN_VAR} names {named}:{}, a pane luneta's ask box asked from", pane.id)
         },
         User::Away => format!("{AWAY_VAR} says luneta's ask box asked from another machine"),
         User::Untold => format!("{TURN_VAR} names a turn of luneta's ask box"),
@@ -373,24 +363,24 @@ impl There {
     }
 
     fn close(&mut self, session: &SessionName, whose: Whose, close: &Close) -> Result<(), String> {
+        let started = whose.started(session)?;
         match self {
-            There::Here => whose.closed(session, close),
-            There::Away(away) => away.close(session, whose, close),
+            There::Here => closes::closed(session, started, close),
+            There::Away(away) => away.close(session, started, close),
         }
     }
 
     fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
+        let started = whose.started(session)?;
         match self {
-            There::Here => whose.killed(session),
-            There::Away(away) => away.kill(session, whose),
+            There::Here => closes::killed(session, started),
+            There::Away(away) => away.kill(session, started),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use lunetad::mux::OwnPane;
-
     use super::*;
 
     #[test]
@@ -410,12 +400,7 @@ mod tests {
         }
         let turn = Turn::new(255, Some(10)).unwrap();
         let work = User::Pane { session: SessionName::running("work").unwrap(), pane: 4 };
-        let named = SessionName::running("mine").unwrap();
-        let client = mux::OwnClientId::new(8).unwrap();
-        let made = mux::OwnMade::from_nanos(0);
-        let key = mux::OwnKey { id: mux::OwnId::new(3).unwrap(), made };
-        let mine = User::Own { pane: OwnPane::new(key, 5).unwrap(), named, client };
-        for user in [work, mine, User::Away, User::Untold] {
+        for user in [work, User::Away, User::Untold] {
             let asked = Ok(Some(Seat::Asked { turn, user: user.clone() }));
             assert_eq!(seat_in(Some((turn, user.clone())), here(None, None)), asked);
             assert_eq!(seat_in(Some((turn, user.clone())), here(Some(""), Some("2"))), asked);

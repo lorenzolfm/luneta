@@ -9,8 +9,8 @@ use std::time::SystemTime;
 use clap::Subcommand;
 use lunetad::api::{agent, Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
-use lunetad::closes::Whose;
-use lunetad::mux::{Client, OwnPane, PaneId, TerminalKey, ZellijPane};
+use lunetad::closes;
+use lunetad::mux::{Client, PaneId, TerminalKey, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::seats::{self, UnreadSeat, Where};
@@ -18,7 +18,7 @@ use lunetad::turns::{self, IntoPanes};
 use lunetad::Directory;
 
 use crate::agents::{self, Harness};
-use crate::close::{self, Act, Doing, Plan, Untold};
+use crate::close::{self, Act, Doing, Plan, Untold, Whose};
 use crate::commands;
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
 
@@ -64,8 +64,8 @@ impl Running {
         Ok(Running { zellij: zellij::running()? })
     }
 
-    fn whose(&self, session: &str) -> Result<Whose, String> {
-        started(session, &self.zellij).map(Whose::Zellij)
+    fn started(&self, session: &str) -> Result<SystemTime, String> {
+        started(session, &self.zellij)
     }
 
     fn names(&self) -> Vec<&str> {
@@ -123,13 +123,6 @@ fn seat(agents: Option<&[Agent]>, running: &Running) -> Result<Seated, String> {
             return Err(format!(
                 "luneta's ask box asked from pane {asked}, and no session runs by that name \
                  now: it was renamed since"
-            ));
-        },
-        Some(Seat::Asked { user: User::Own { pane, named, .. }, .. }) => {
-            return Err(format!(
-                "luneta's ask box asked from pane {named}:{}, a terminal of a project, which \
-                 luneta drives no pane of",
-                pane.id
             ));
         },
         Some(Seat::Opened(ZellijPane { session, pane })) => (session, pane),
@@ -309,17 +302,16 @@ fn pane(
     const UNSEATED: &str = "this runs in no pane of zellij: name one to open beside with --beside";
     may_run(command)?;
     let running = Running::now()?;
-    let (Pane { session, pane }, whose) = if let Some(beside) = beside {
-        (beside.clone(), running.whose(&beside.session)?)
+    let Pane { session, pane } = if let Some(beside) = beside {
+        running.started(&beside.session)?;
+        beside.clone()
     } else {
-        let here = seat_here(folder, &running)?.ok_or(UNSEATED)?;
-        let whose = here.whose();
-        (here.pane, whose)
+        seat_here(folder, &running)?.ok_or(UNSEATED)?.pane
     };
     let cwd = directory(cwd)?;
     let named = session_named(&session)?;
     let open = Open::Pane { session: named, beside: pane, cwd, command: command.to_vec() };
-    let opened = zellij::opening_of(&open, whose)?.terminal;
+    let opened = zellij::opening(&open)?.terminal;
     Ok(Pane { session, pane: opened }.to_string())
 }
 
@@ -333,17 +325,16 @@ fn tab(
     const UNNAMED: &str = "this runs in no pane of zellij: name a --session";
     may_run(command)?;
     let running = Running::now()?;
-    let (session, whose) = if let Some(session) = session {
-        (session.to_owned(), running.whose(session)?)
+    let session = if let Some(session) = session {
+        running.started(session)?;
+        session.to_owned()
     } else {
-        let here = seat_here(folder, &running)?.ok_or(UNNAMED)?;
-        let whose = here.whose();
-        (here.pane.session, whose)
+        seat_here(folder, &running)?.ok_or(UNNAMED)?.pane.session
     };
     let (name, command) = (name.map(str::to_owned), command.to_vec());
     let tab = Tab { cwd: directory(cwd)?, name, command };
     let open = Open::Tab { session: session_named(&session)?, tab, alone_since: None };
-    let opened = zellij::opening_of(&open, whose)?.terminal;
+    let opened = zellij::opening(&open)?.terminal;
     Ok(Pane { session, pane: opened }.to_string())
 }
 
@@ -380,7 +371,7 @@ fn seated(agents: Option<&[Agent]>, running: &Running) -> Result<SessionName, St
 pub fn go(to: &Address, folder: &Path) -> ExitCode {
     let went = Running::now().and_then(|running| {
         let at = seated(listed(folder).as_deref(), &running)?;
-        running.whose(to.session())?;
+        running.started(to.session())?;
         let pane = match to {
             Address::Session(_) => None,
             Address::Pane(pane) => Some(pane.pane),
@@ -510,12 +501,12 @@ pub const PLANNED: u8 = 3;
 pub struct Agreed(u64);
 
 impl Agreed {
-    fn of(plans: &[Plan], whose: &[(&str, Whose)], turn: Option<u64>) -> Self {
+    fn of(plans: &[Plan], sessions: &[(&str, SystemTime)], turn: Option<u64>) -> Self {
         let mut hasher = DefaultHasher::new();
         for plan in plans {
             (says(&plan.act), plan.ends()).hash(&mut hasher);
         }
-        whose.hash(&mut hasher);
+        sessions.hash(&mut hasher);
         turn.hash(&mut hasher);
         Agreed(hasher.finish())
     }
@@ -620,12 +611,12 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     };
     let (mut plans, mut sessions) = (Vec::new(), Vec::new());
     for (session, wanted) in wanted(what) {
-        let planned = running.whose(session).and_then(|whose| {
-            Ok((whose, plans_in(session, whose, &wanted, known.as_ref())?))
+        let planned = running.started(session).and_then(|started| {
+            Ok((started, plans_in(session, started, &wanted, known.as_ref())?))
         });
         match planned {
-            Ok((whose, planned)) => {
-                sessions.push((session, whose));
+            Ok((started, planned)) => {
+                sessions.push((session, started));
                 plans.extend(planned);
             },
             Err(why) => {
@@ -710,10 +701,11 @@ struct Told<'a> {
 
 fn plans_in(
     session: &str,
-    whose: Whose,
+    started: SystemTime,
     wanted: &Wanted,
     told: Result<&Told, &Untold>,
 ) -> Result<Vec<Plan>, String> {
+    let whose = Whose::Zellij(started);
     let named = session_named(session)?;
     let owned = || named.clone();
     let acts = match wanted {
@@ -731,12 +723,9 @@ fn plans_in(
         },
     };
     let in_session = |placed: &Placed| {
-        placed.spot.pane_in(session, whose).map(|pane| (pane, Doing::from(placed.agent)))
+        placed.spot.pane_in(session).map(|pane| (pane, Doing::from(placed.agent)))
     };
-    let at = match whose {
-        Whose::Zellij(_) => Where::Zellij(session),
-        Whose::Own(key) => Where::Own(key),
-    };
+    let at = Where::Zellij(session);
     let agents: Result<Vec<_>, Untold> = match told {
         Ok(Told { agents, unread_seats }) => {
             let agents = agents.iter().filter_map(in_session);
@@ -782,7 +771,6 @@ fn whose_of(act: &Act) -> Whose {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spot<'a> {
     Zellij { session: &'a str, pane: u32 },
-    Own(OwnPane),
     Terminal(TerminalKey),
     Unplaced,
 }
@@ -798,19 +786,15 @@ impl<'a> Spot<'a> {
     fn unread(file: &'a UnreadFile) -> Self {
         match UnreadSeat::of(file) {
             UnreadSeat::Zellij { session, pane } => Spot::Zellij { session, pane },
-            UnreadSeat::Own(pane) => Spot::Own(pane),
             UnreadSeat::Terminal(key) => Spot::Terminal(key),
-            UnreadSeat::NoPane | UnreadSeat::Unplaced => Spot::Unplaced,
+            UnreadSeat::Own(_) | UnreadSeat::NoPane | UnreadSeat::Unplaced => Spot::Unplaced,
         }
     }
 
-    fn pane_in(self, session: &str, whose: Whose) -> Option<u32> {
-        match (self, whose) {
-            (Spot::Zellij { session: at, pane }, Whose::Zellij(_)) => {
-                (at == session).then_some(pane)
-            },
-            (Spot::Own(pane), Whose::Own(key)) => (pane.session == key).then_some(pane.id.get()),
-            _ => None,
+    fn pane_in(self, session: &str) -> Option<u32> {
+        match self {
+            Spot::Zellij { session: at, pane } => (at == session).then_some(pane),
+            Spot::Terminal(_) | Spot::Unplaced => None,
         }
     }
 }
@@ -824,13 +808,12 @@ struct Placed<'a> {
 fn placed<'a>(agents: &'a [Agent]) -> Result<Vec<Placed<'a>>, String> {
     let place = |agent: &'a Agent| {
         let spot = match &agent.pane {
-            Some(agent::Pane::Own(own)) => Spot::Own(
-                OwnPane::of(own).map_err(|why| format!("lunetad lists an agent in {why}"))?,
-            ),
             Some(agent::Pane::Terminal(key)) => Spot::Terminal(
                 TerminalKey::of(key).map_err(|why| format!("lunetad lists an agent in {why}"))?,
             ),
-            Some(agent::Pane::Zellij(_)) | None => Spot::zellij(agent.zellij()),
+            Some(agent::Pane::Zellij(_) | agent::Pane::Own(_)) | None => {
+                Spot::zellij(agent.zellij())
+            },
         };
         Ok(Placed { agent, spot })
     };
@@ -845,10 +828,9 @@ fn ending(
     unread: &[UnreadFile],
     here: Option<&Here>,
 ) -> Vec<String> {
-    let (session, whose) = (session_of(act), whose_of(act));
-    let ends = |spot: Spot| spot.pane_in(session, whose).is_some_and(|pane| act.takes(pane));
+    let session = session_of(act);
+    let ends = |spot: Spot| spot.pane_in(session).is_some_and(|pane| act.takes(pane));
     let seat = |placed: &Placed| match placed.spot {
-        Spot::Own(pane) => commands::own_seat(pane),
         Spot::Terminal(key) => commands::terminal_seat(key),
         Spot::Zellij { .. } | Spot::Unplaced => commands::seat(placed.agent.zellij()),
     };
@@ -863,7 +845,6 @@ fn ending(
         .filter(|(_, spot)| ends(*spot))
         .map(|(file, spot)| {
             let seat = match spot {
-                Spot::Own(pane) => commands::own_seat(pane),
                 Spot::Terminal(key) => commands::terminal_seat(key),
                 Spot::Zellij { .. } | Spot::Unplaced => commands::seat(file.zellij.as_ref()),
             };
@@ -874,7 +855,7 @@ fn ending(
     let width = seats.map(String::len).max().unwrap_or(0);
     let is_here = |spot: Spot| {
         let Some(here) = here else { return false };
-        spot.pane_in(&here.pane.session, here.whose()) == Some(here.pane.pane)
+        spot.pane_in(&here.pane.session) == Some(here.pane.pane)
     };
     let mark = |line: String, spot: Spot| {
         if is_here(spot) { format!("{line}  (this runs here)") } else { line }
@@ -894,12 +875,15 @@ fn ending(
 
 fn act(act: &Act) -> Result<(), String> {
     match act {
-        Act::Pane { session, whose, pane } => whose.closed(session, &Close::Pane(*pane)),
+        Act::Pane { session, whose, pane } => {
+            closes::closed(session, whose.started(session)?, &Close::Pane(*pane))
+        },
         Act::Tab { session, whose, tab, panes } => {
-            whose.closed(session, &Close::Tab { id: *tab, panes: panes.clone() })
+            let close = Close::Tab { id: *tab, panes: panes.clone() };
+            closes::closed(session, whose.started(session)?, &close)
         },
         Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
-            whose.killed(session)
+            closes::killed(session, whose.started(session)?)
         },
     }
 }
@@ -957,7 +941,7 @@ fn said(done: Result<String, String>) -> ExitCode {
 mod tests {
     use std::fs;
 
-    use lunetad::mux::{self, OwnKey};
+    use lunetad::mux::{self, OwnKey, OwnPane};
 
     use super::*;
 
@@ -998,29 +982,6 @@ mod tests {
             assert_eq!(seat, spelled);
             assert!(why.contains(said), "{why}");
             assert!(pane_address(&seat).is_err(), "{seat}");
-        }
-    }
-
-    #[test]
-    fn a_close_places_each_agent_in_an_own_pane_or_closes_nothing() {
-        let in_own = |session| {
-            let pane = Some(agent::Pane::Own(lunetad::api::Own { session, pane: 2 }));
-            Agent { pane, ..Agent::default() }
-        };
-        let session = |id, made_at| Some(lunetad::api::OwnSession { id, made_at });
-        let made = || Some(SystemTime::UNIX_EPOCH.into());
-        let agents = [Agent::default(), in_own(session(3, made()))];
-        let spots: Vec<Spot> = placed(&agents).unwrap().iter().map(|it| it.spot).collect();
-        let key = OwnKey { id: mux::OwnId::new(3).unwrap(), made: mux::OwnMade::from_nanos(0) };
-        assert_eq!(spots, [Spot::Unplaced, Spot::Own(OwnPane::new(key, 2).unwrap())]);
-        assert_eq!(spots[1].pane_in("any", Whose::Own(key)), Some(2));
-        let other = OwnKey { id: mux::OwnId::new(4).unwrap(), ..key };
-        assert_eq!(spots[1].pane_in("any", Whose::Own(other)), None);
-        assert_eq!(spots[1].pane_in("any", Whose::Zellij(SystemTime::UNIX_EPOCH)), None);
-        for unread in [None, session(0, made()), session(3, None)] {
-            let agents = [Agent::default(), in_own(unread)];
-            let refused = placed(&agents).map(drop);
-            assert!(refused.is_err_and(|why| why.contains("own pane 2")), "{unread:?}");
         }
     }
 

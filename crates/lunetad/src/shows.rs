@@ -188,11 +188,11 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
             if one.terminal == other.terminal {
                 return Err(format!("a view lays out terminal {} twice", one.terminal));
             }
-            if let (Some(key), Some(other_key)) = (one.key(), other.key())
-                && key.id == other_key.id
+            if let Some(key) = one.key()
+                && other.key() == Some(key)
             {
-                let (one, other, pane) = (one.terminal, other.terminal, key.id);
-                return Err(format!("terminals {one} and {other} share luneta-mux's pane {pane}"));
+                let (one, other, id) = (one.terminal, other.terminal, key.id);
+                return Err(format!("terminals {one} and {other} share luneta-mux's terminal {id}"));
             }
             if overlaps(one.rect, other.rect) {
                 return Err(format!("terminal {} is laid over {}", other.terminal, one.terminal));
@@ -448,11 +448,6 @@ mod tests {
         let off = vec![placed(1, (0, 0, 40, 24), None), placed(2, (40, 0, 41, 24), None)];
         let twice = vec![placed(1, (0, 0, 40, 24), None), placed(1, (40, 0, 40, 24), None)];
         let shared = vec![placed(1, (0, 0, 40, 24), Some(3)), placed(2, (40, 0, 40, 24), Some(3))];
-        let mut remade = placed(2, (40, 0, 40, 24), Some(3));
-        if let Some(show_response::pane::Found::Key(key)) = &mut remade.found {
-            key.made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
-        }
-        let one_id = vec![placed(1, (0, 0, 40, 24), Some(3)), remade];
         let unframed = vec![placed(1, (0, 0, 2, 24), None), placed(2, (2, 0, 78, 24), None)];
         let one = vec![placed(1, (0, 0, 80, 24), None)];
         for refused in [
@@ -461,7 +456,6 @@ mod tests {
             laid(off, Some(tiled(1))),
             laid(twice, Some(tiled(1))),
             laid(shared, Some(tiled(1))),
-            laid(one_id, Some(tiled(1))),
             laid(unframed, Some(tiled(1))),
             laid(halves(), None),
             laid(halves(), Some(tiled(3))),
@@ -473,5 +467,11 @@ mod tests {
         ] {
             assert!(Laid::heard(refused.clone()).is_err(), "{refused:?}");
         }
+        let mut remade = placed(2, (40, 0, 40, 24), Some(3));
+        if let Some(show_response::pane::Found::Key(key)) = &mut remade.found {
+            key.made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+        }
+        let one_id = vec![placed(1, (0, 0, 40, 24), Some(3)), remade];
+        assert!(Laid::heard(laid(one_id, Some(tiled(1)))).is_ok(), "frames name the whole key");
     }
 }

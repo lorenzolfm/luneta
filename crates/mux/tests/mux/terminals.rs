@@ -114,7 +114,7 @@ fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
         loop {
             let event = viewer.next().await.unwrap().expect("the stream goes on");
             if let api::to_viewer::Event::Frame(frame) = event
-                && frame.pane == key.id
+                && frame.terminal == Some(key)
                 && matches!(frame.rows, Some(api::frame::Rows::Whole(_)))
             {
                 break;

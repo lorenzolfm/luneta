@@ -128,7 +128,8 @@ impl View {
         keys
     }
 
-    fn framed(&mut self, key: TerminalKey, frame: &Frame) -> Result<(), String> {
+    fn framed(&mut self, frame: &Frame) -> Result<(), String> {
+        let key = frame.terminal();
         if !self.wanted().contains(&key) {
             return Ok(());
         }
@@ -495,12 +496,10 @@ impl Viewed {
             },
         };
         let frame = framed.frame();
-        let mut keys = watching.showing.iter().filter(|key| key.id == frame.pane());
-        let Some(key) = keys.next().copied() else {
+        if !watching.showing.contains(&frame.terminal()) {
             return Heeded::Quiet;
-        };
-        assert_eq!(keys.next(), None, "a view's keys name each pane of luneta-mux's once");
-        match self.view.framed(key, frame) {
+        }
+        match self.view.framed(frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
@@ -680,7 +679,7 @@ mod tests {
         let lines = lines(rows);
         let columns = side(u16::try_from(rows[0].len()).unwrap());
         let size = frames::Size { columns, rows: side(u16::try_from(lines.len()).unwrap()) };
-        Frame::new(NonZeroU32::new(id).unwrap(), size, Rows::Whole(lines), cursor, false).unwrap()
+        Frame::new(key(id), size, Rows::Whole(lines), cursor, false).unwrap()
     }
 
     fn workstream(id: u64) -> WorkstreamId {
@@ -734,8 +733,8 @@ mod tests {
         assert!(!view.laid_out(laid(halves(), 11, false)));
         let cursor =
             Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
-        view.framed(key(1), &whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        view.framed(key(2), &whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+        view.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
+        view.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
         view
     }
 
@@ -827,9 +826,9 @@ mod tests {
         view.select_to(spot(3, 30));
         assert_eq!(view.selected().as_deref(), Some("abcdefgh\nijklmnop"));
         assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(key(2), &whole(2, &["ab"], None)).unwrap();
+        view.framed(&whole(2, &["ab"], None)).unwrap();
         assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(key(1), &whole(1, &["ab"], None)).unwrap();
+        view.framed(&whole(1, &["ab"], None)).unwrap();
         assert_eq!(view.pointer, Pointer::Free);
     }
 
@@ -838,12 +837,12 @@ mod tests {
         let mut view = split_view();
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
         let size = frames::Size { columns: side(1), rows: side(1) };
-        let frame = Frame::new(NonZeroU32::MIN, size, changed, None, false).unwrap();
-        let why = view.framed(key(1), &frame).unwrap_err();
+        let frame = Frame::new(key(1), size, changed, None, false).unwrap();
+        let why = view.framed(&frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
         view.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
         assert_eq!(view.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
-        view.framed(key(1), &whole(1, &["no"], None)).unwrap();
+        view.framed(&whole(1, &["no"], None)).unwrap();
         assert!(!view.screens.contains_key(&key(1)), "a terminal its view lacks gets no screen");
         view.go(workstream(2));
         assert_eq!(view.focused(), None, "a view of another workstream lays out nothing here");

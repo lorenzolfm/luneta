@@ -22,8 +22,6 @@ use crossterm::event::{
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
 use lunetad::api::Host;
-use lunetad::asks::User;
-use lunetad::closes::Whose;
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
@@ -46,7 +44,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
-use crate::close::Act;
+use crate::close::{Act, Whose};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::due::Due;
@@ -1678,12 +1676,7 @@ impl App {
         let Some(Over::Ask(ask)) = &self.focus.over else {
             return;
         };
-        let user = match self.sidebar.user(&ask.machine()) {
-            User::Own { pane, .. } if self.projected.project(pane.session).is_some() => {
-                User::Untold
-            },
-            user => user,
-        };
+        let user = self.sidebar.user(&ask.machine());
         if let Some(Over::Ask(ask)) = &mut self.focus.over {
             ask.send(user, self.sidebar.agent(), &self.events);
         }

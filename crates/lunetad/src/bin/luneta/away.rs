@@ -17,7 +17,7 @@ use lunetad::api::{
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
-use lunetad::closes::{Close, Closes, Whose};
+use lunetad::closes::{Close, Closes};
 use lunetad::mux::{Exited, TabId};
 use lunetad::images::{self, Png};
 use lunetad::issues::{self, Filed, Filing, Remote, Unfiled};
@@ -191,10 +191,10 @@ impl Away {
     pub fn close(
         &mut self,
         session: &SessionName,
-        whose: Whose,
+        started: SystemTime,
         close: &Close,
     ) -> Result<(), String> {
-        let request = close.asked(Some(self.on()), session, whose);
+        let request = close.asked(Some(self.on()), session, started);
         self.ask(|mut daemon| async move { daemon.close(request).await })
     }
 
@@ -254,9 +254,9 @@ impl Away {
         )
     }
 
-    pub fn kill(&mut self, session: &SessionName, whose: Whose) -> Result<(), String> {
-        let (session, whose) = (session.to_string(), Some(whose.into()));
-        let request = KillRequest { on: Some(self.on()), session, whose };
+    pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {
+        let (session, started_at) = (session.to_string(), Some(started.into()));
+        let request = KillRequest { on: Some(self.on()), session, started_at };
         self.ask(|mut daemon| async move { daemon.kill(request).await })
     }
 

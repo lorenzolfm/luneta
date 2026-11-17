@@ -123,7 +123,7 @@ impl Shown {
                 let who = match whose {
                     Whose::Selection => "selection".to_owned(),
                     Whose::Said { on, speaker } => {
-                        match (speaker.as_ref().and_then(Speaker::called), on) {
+                        match (speaker.as_ref().map(Speaker::called), on) {
                             (Some(called), _) => called.to_owned(),
                             (None, Machine::Local) => machines::local_name(),
                             (None, Machine::Remote(on)) => on.to_string(),
@@ -216,8 +216,8 @@ impl Queue {
     fn take(&mut self, on: &Machine, saying: Saying, at: SystemTime) {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
-            let Utterance { text, speaker, own_speaker } = utterance;
-            let speaker = Speaker::of(speaker, own_speaker).ok().flatten();
+            let Utterance { text, speaker } = utterance;
+            let speaker = speaker.map(Speaker);
             Waiting { whose: Whose::Said { on: on.clone(), speaker }, text, came: Some(at) }
         };
         match does {
@@ -283,7 +283,7 @@ impl Queue {
             let Waiting { whose, text, .. } = next;
             let speaker = match &whose {
                 Whose::Said { on, speaker: Some(speaker) } => {
-                    speaker.called().map(|called| (on.clone(), called.to_owned()))
+                    Some((on.clone(), speaker.called().to_owned()))
                 },
                 Whose::Said { speaker: None, .. } | Whose::Selection => None,
             };
@@ -474,8 +474,7 @@ impl Aloud {
 mod tests {
     use std::time::Duration;
 
-    use lunetad::api::{OwnSpeaker, Say, Zellij};
-    use lunetad::mux::OwnPane;
+    use lunetad::api::{Say, Zellij};
     use lunetad::Destination;
     use ratatui::layout::Position;
 
@@ -504,19 +503,7 @@ mod tests {
 
     fn utterance(text: &str, session: Option<&str>) -> Utterance {
         let speaker = session.map(|session| pane(session, Some(session)));
-        Utterance { text: text.to_owned(), speaker, own_speaker: None }
-    }
-
-    fn own_pane() -> OwnPane {
-        let id = lunetad::mux::OwnId::new(3).unwrap();
-        let session = lunetad::mux::OwnKey { id, made: lunetad::mux::OwnMade::from_nanos(60) };
-        OwnPane::new(session, 12).unwrap()
-    }
-
-    fn from_own(text: &str, session: Option<&str>) -> Utterance {
-        let session = session.map(str::to_owned);
-        let own_speaker = Some(OwnSpeaker { pane: Some(own_pane().into()), session });
-        Utterance { text: text.to_owned(), speaker: None, own_speaker }
+        Utterance { text: text.to_owned(), speaker }
     }
 
     fn in_turn(number: u64, text: &str, session: Option<&str>) -> Saying {
@@ -1002,17 +989,11 @@ mod tests {
         };
         let from = |speaker| Whose::Said { on: far(), speaker };
         assert_eq!(line(Whose::Selection), format!("{MARK} selection · the tests pass"));
-        let said = from(Some(Speaker::Zellij(pane("old", Some("luneta")))));
+        let said = from(Some(Speaker(pane("old", Some("luneta")))));
         assert_eq!(line(said), format!("{MARK} luneta · the tests pass"));
         assert_eq!(line(from(None)), format!("{MARK} far · the tests pass"));
-        let untold = from(Some(Speaker::Zellij(pane("old", None))));
+        let untold = from(Some(Speaker(pane("old", None))));
         assert_eq!(line(untold), format!("{MARK} old · the tests pass"));
-        let own = |session: Option<&str>| {
-            let session = session.map(str::to_owned);
-            from(Some(Speaker::Own { pane: own_pane(), session }))
-        };
-        assert_eq!(line(own(Some("work"))), format!("{MARK} work · the tests pass"));
-        assert_eq!(line(own(None)), format!("{MARK} far · the tests pass"));
     }
 
     #[test]
@@ -1021,28 +1002,16 @@ mod tests {
             let whose = Whose::Said { on: far(), speaker: Some(speaker) };
             Shown::Reading { whose, text: String::new(), paused: false }
         };
-        let told = shown(Speaker::Zellij(pane("old", Some("new"))));
+        let told = shown(Speaker(pane("old", Some("new"))));
         assert_eq!(told.from(), Some((&far(), Where::Zellij("new"), 3)));
-        assert_eq!(shown(Speaker::Zellij(pane("old", None))).from(), None);
-    }
-
-    #[test]
-    fn what_comes_from_an_own_pane_marks_its_row_by_its_key() {
-        let own = |session: Option<&str>| {
-            let speaker = Speaker::Own { pane: own_pane(), session: session.map(str::to_owned) };
-            let whose = Whose::Said { on: far(), speaker: Some(speaker) };
-            Shown::Reading { whose, text: String::new(), paused: false }
-        };
-        let seat = Some((&far(), Where::Own(own_pane().session), 12));
-        assert_eq!(own(Some("work")).from(), seat);
-        assert_eq!(own(None).from(), seat);
+        assert_eq!(shown(Speaker(pane("old", None))).from(), None);
     }
 
     #[test]
     fn a_session_not_told_goes_by_the_name_the_pane_knows_it_by() {
         let mut queue = hearing();
         let from = |text: &str, speaker| {
-            Utterance { text: text.to_owned(), speaker: Some(speaker), own_speaker: None }
+            Utterance { text: text.to_owned(), speaker: Some(speaker) }
         };
         let said = vec![
             saying(1, Does::InTurn(from("told", pane("old", Some("new"))))),
@@ -1051,21 +1020,5 @@ mod tests {
         ];
         queue.hear(here(said), true, at(1));
         assert_eq!(spoken(&mut queue), ["new. told", "same", "old. untold"]);
-    }
-
-    #[test]
-    fn an_own_pane_s_session_is_named_as_its_daemon_says() {
-        let mut queue = hearing();
-        let speaker = Some(pane("work", Some("work")));
-        let both = Utterance { speaker, ..from_own("both", None) };
-        let said = vec![
-            saying(1, Does::InTurn(from_own("one", Some("work")))),
-            saying(2, Does::InTurn(from_own("two", Some("work")))),
-            saying(3, Does::InTurn(from_own("unnamed", None))),
-            saying(4, Does::InTurn(from_own("four", Some("work")))),
-            saying(5, Does::InTurn(both)),
-        ];
-        queue.hear(here(said), true, at(1));
-        assert_eq!(spoken(&mut queue), ["work. one", "two", "unnamed", "work. four", "both"]);
     }
 }

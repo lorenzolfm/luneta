@@ -251,11 +251,8 @@ message CloseRequest {
     uint32 pane = 3;
     ClosesResponse.Tab tab = 4;
   }
-  oneof whose {
-    google.protobuf.Timestamp started_at = 5;
-    OwnSession own = 7;
-  }
-  reserved 6;
+  google.protobuf.Timestamp started_at = 5;
+  reserved 6, 7;
 }
 
 message OtherTabsRequest {
@@ -311,11 +308,8 @@ message TurnIntoPanesResponse {
 message KillRequest {
   On on = 1;
   string session = 2;
-  oneof whose {
-    google.protobuf.Timestamp started_at = 3;
-    OwnSession own = 5;
-  }
-  reserved 4;
+  google.protobuf.Timestamp started_at = 3;
+  reserved 4, 5;
 }
 
 message ListExitedRequest {
@@ -361,8 +355,8 @@ message AskRequest {
   oneof user {
     UserPane pane = 6;
     google.protobuf.Empty away = 7;
-    UserOwnPane own = 11;
   }
+  reserved 11;
   fixed64 turn = 8;
   optional fixed64 before = 9;
   optional Harness agents = 10;
@@ -370,13 +364,6 @@ message AskRequest {
   message UserPane {
     string session = 1;
     uint32 pane = 2;
-  }
-
-  message UserOwnPane {
-    OwnSession session = 1;
-    uint32 pane = 2;
-    string named = 3;
-    uint64 client = 4;
   }
 }
 
@@ -492,12 +479,7 @@ message Say {
 message Utterance {
   string text = 1;
   optional Zellij speaker = 2;
-  optional OwnSpeaker own_speaker = 3;
-}
-
-message OwnSpeaker {
-  Own pane = 1;
-  optional string session = 2;
+  reserved 3;
 }
 
 message SayRequest {

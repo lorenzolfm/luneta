@@ -5,7 +5,6 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lunetad::mux::own::{OwnId, OwnMade};
 use lunetad::projects::ProjectId;
 use lunetad::SocketId;
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,6 @@ use crate::state;
 #[serde(into = "String", try_from = "String")]
 pub enum Session {
     Zellij { started_ns: u64, socket: NonZeroU64 },
-    Own { made_ns: u64, id: OwnId },
     Project(ProjectId),
 }
 
@@ -29,10 +27,6 @@ impl Session {
         Some(Session::Zellij { started_ns: nanos(started)?, socket })
     }
 
-    pub fn own(made: OwnMade, id: OwnId) -> Self {
-        Session::Own { made_ns: made.nanos(), id }
-    }
-
     pub fn of(id: SocketId) -> Option<Self> {
         Session::new(id.started(), NonZeroU64::new(id.socket())?)
     }
@@ -40,7 +34,6 @@ impl Session {
     pub fn started(self) -> Option<SystemTime> {
         match self {
             Session::Zellij { started_ns, .. } => Some(moment(started_ns)),
-            Session::Own { made_ns, .. } => Some(moment(made_ns)),
             Session::Project(_) => None,
         }
     }
@@ -48,7 +41,6 @@ impl Session {
     fn name(self) -> String {
         match self {
             Session::Zellij { started_ns, socket } => format!("{started_ns}-{socket}"),
-            Session::Own { made_ns, id } => format!("{OWN_PREFIX}{made_ns}-{id}"),
             Session::Project(project) => format!("{PROJECT_PREFIX}{project}"),
         }
     }
@@ -56,9 +48,6 @@ impl Session {
     fn read(name: &str) -> Option<Self> {
         let session = if let Some(project) = name.strip_prefix(PROJECT_PREFIX) {
             Session::Project(project.parse().ok()?)
-        } else if let Some(own) = name.strip_prefix(OWN_PREFIX) {
-            let (made_ns, id) = own.split_once('-')?;
-            Session::Own { made_ns: made_ns.parse().ok()?, id: OwnId::new(id.parse().ok()?)? }
         } else {
             let (started_ns, socket) = name.split_once('-')?;
             let (started_ns, socket) = (started_ns.parse().ok()?, socket.parse().ok()?);
@@ -119,6 +108,17 @@ impl TryFrom<String> for Key {
     }
 }
 
+fn swept_of_own_sessions(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().is_some_and(|name| name.starts_with(OWN_PREFIX)) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn nanos(at: SystemTime) -> Option<u64> {
     u64::try_from(at.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
@@ -154,7 +154,10 @@ impl Default for Ledger {
 impl Ledger {
     pub fn within(dir: PathBuf) -> Self {
         let shared = match fs::create_dir_all(&dir) {
-            Ok(()) => Shared::Through(dir),
+            Ok(()) => {
+                swept_of_own_sessions(&dir);
+                Shared::Through(dir)
+            },
             Err(error) => Shared::Lost(format!("{}: {error}", dir.display())),
         };
         let mut ledger = Ledger { shared, ..Ledger::default() };
@@ -336,31 +339,35 @@ mod tests {
         other(format!("+{}", name(5)));
         other(format!("0{}", name(6)));
         other(format!("{}-7", nanos(at(10)).unwrap()));
-        other(format!("{OWN_PREFIX}{}-0-8", nanos(at(10)).unwrap()));
         ledger.reload();
         assert_eq!(keys(&ledger), [key(10, 1)]);
     }
 
     #[test]
-    fn an_own_session_s_panes_are_kept_apart_from_others() {
+    fn an_own_session_s_files_are_swept_when_a_ledger_opens() {
+        let scratch = tempfile::tempdir().unwrap();
+        let own = scratch.path().join(format!("{OWN_PREFIX}{}-1-3", nanos(at(10)).unwrap()));
+        let half = scratch.path().join(format!("{OWN_PREFIX}10-1-3.{}", state::unfinished()));
+        for file in [&own, &half] {
+            fs::write(file, "5").unwrap();
+        }
+        let mut ledger = Ledger::within(scratch.path().to_owned());
+        ledger.set(key(10, 1), Some(at(5)));
+        assert_eq!((own.exists(), half.exists()), (false, false));
+        assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 1)), Some(at(5)));
+        assert_eq!(Session::read(&format!("{OWN_PREFIX}10-1")), None);
+    }
+
+    #[test]
+    fn a_project_s_panes_are_kept_apart_from_a_session_s() {
         let scratch = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::within(scratch.path().to_owned());
-        let id = OwnId::new(1).unwrap();
-        let made = |seconds| OwnMade::of(at(seconds)).unwrap();
-        let (own, next) = (Session::own(made(10), id), Session::own(made(20), id));
         let zellij = session(10, 1);
-        ledger.set(Key { session: own, pane: 3 }, Some(at(5)));
-        ledger.set(Key { session: next, pane: 3 }, Some(at(6)));
         ledger.set(Key { session: zellij, pane: 3 }, Some(at(7)));
-        let again = Ledger::within(scratch.path().to_owned());
-        assert_eq!(again.latest(own), Some(at(5)));
-        assert_eq!(again.latest(next), Some(at(6)));
-        assert_eq!(again.latest(zellij), Some(at(7)));
-        assert_eq!(own.started(), Some(at(10)));
         let project = Session::Project(ProjectId::of(0x2a).unwrap());
         ledger.set(Key { session: project, pane: 3 }, Some(at(8)));
         let again = Ledger::within(scratch.path().to_owned());
-        assert_eq!(again.latest(project), Some(at(8)));
+        assert_eq!((again.latest(zellij), again.latest(project)), (Some(at(7)), Some(at(8))));
         assert_eq!(project.name(), "project-000000000000002a");
         assert_eq!((Session::read("project-2a"), project.started()), (None, None));
     }

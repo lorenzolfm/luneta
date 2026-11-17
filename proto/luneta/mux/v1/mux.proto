@@ -335,7 +335,8 @@ message Refused {
 }
 
 message Frame {
-  uint32 pane = 1;
+  reserved 1;
+  TerminalKey terminal = 10;
   Size size = 2;
   oneof rows {
     Whole whole = 3;

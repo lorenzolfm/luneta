@@ -250,13 +250,14 @@ impl Viewer {
 }
 
 fn applied(screens: &mut Screens, frame: &api::Frame) {
+    let terminal = frame.terminal.unwrap().id;
     match frame.rows.as_ref().unwrap() {
         api::frame::Rows::Whole(whole) => {
             let rows = whole.lines.iter().map(line_text).collect();
-            screens.insert(frame.pane, (rows, frame.clone()));
+            screens.insert(terminal, (rows, frame.clone()));
         },
         api::frame::Rows::Changed(changed) => {
-            let Some((rows, last)) = screens.get_mut(&frame.pane) else {
+            let Some((rows, last)) = screens.get_mut(&terminal) else {
                 return;
             };
             for row in &changed.rows {

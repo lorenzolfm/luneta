@@ -19,7 +19,7 @@ use tokio::sync::{oneshot, watch};
 use tonic::Status;
 
 use crate::api;
-use crate::asked::{Colours, Dumped, Input, Size};
+use crate::asked::{Colours, Dumped, Input, Size, TerminalKey};
 use crate::frame::{self, Flags};
 use crate::front::Front;
 use crate::id::{ClientId, TerminalId};
@@ -197,11 +197,12 @@ pub struct Started {
 
 pub fn start(
     mux: Arc<Mux>,
-    terminal: TerminalId,
+    key: TerminalKey,
     pty: Pty,
     mut child: Child,
     size: Size,
 ) -> io::Result<Started> {
+    let terminal = key.id;
     let (to, inbox) = mpsc::channel(MESSAGES_MAX);
     let (exited, exits) = std_mpsc::sync_channel(1);
     let (wake, woken) = UnixStream::pair()?;
@@ -227,7 +228,7 @@ pub fn start(
             },
         };
         let mut thread = Thread {
-            terminal,
+            key,
             mux,
             inbox,
             wants,
@@ -306,7 +307,7 @@ impl Program {
 }
 
 struct Thread {
-    terminal: TerminalId,
+    key: TerminalKey,
     mux: Arc<Mux>,
     inbox: mpsc::Receiver<ToPane>,
     wants: watch::Receiver<Wanted>,
@@ -436,7 +437,7 @@ impl Thread {
         let told = Told { foreground, ran: self.shell.said() };
         if told != self.told {
             self.told = told.clone();
-            self.mux.looked(self.terminal, told.foreground, told.ran);
+            self.mux.looked(self.key.id, told.foreground, told.ran);
         }
     }
 
@@ -557,7 +558,7 @@ impl Thread {
         self.told = Told::default();
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.terminal, exit))
+        Ok(self.mux.ended(self.key.id, exit))
     }
 
     fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
@@ -625,7 +626,7 @@ impl Thread {
         } else {
             eprintln!(
                 "luneta-mux: terminal {} has {} unread bytes: input dropped",
-                self.terminal,
+                self.key.id,
                 unread.len()
             );
         }
@@ -704,7 +705,7 @@ impl Thread {
             let cwd = (pwd != self.pwd).then(|| local_cwd(&pwd, &self.host)).flatten();
             self.title.clone_from(&title);
             self.pwd = pwd;
-            self.mux.titled(self.terminal, title, cwd);
+            self.mux.titled(self.key.id, title, cwd);
         }
         Ok(())
     }
@@ -779,7 +780,7 @@ impl Thread {
                 continue;
             }
             let before = watcher.shown.as_ref().map(|shown| &shown.view);
-            let said = frame::said(self.terminal, view, before, flags);
+            let said = frame::said(self.key, view, before, flags);
             match sent(&watcher.viewer.frames, said) {
                 Sent::Taken => {
                     watcher.shown = Some(Shown { view: view.clone(), flags });

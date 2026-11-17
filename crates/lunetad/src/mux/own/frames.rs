@@ -1,6 +1,6 @@
-use std::num::{NonZeroU16, NonZeroU32};
+use std::num::NonZeroU16;
 
-use super::api;
+use super::{api, TerminalKey};
 
 pub const SIDE_MAX: u16 = 1000;
 
@@ -222,7 +222,7 @@ pub struct Cursor {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    pane: NonZeroU32,
+    terminal: TerminalKey,
     size: Size,
     rows: Rows,
     cursor: Option<Cursor>,
@@ -231,7 +231,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(
-        pane: NonZeroU32,
+        terminal: TerminalKey,
         size: Size,
         rows: Rows,
         cursor: Option<Cursor>,
@@ -268,12 +268,12 @@ impl Frame {
             let at = format!("{}:{}", cursor.row, cursor.column);
             return Err(format!("the cursor is off the frame, at {at}"));
         }
-        Ok(Frame { pane, size, rows, cursor, tracks_mouse })
+        Ok(Frame { terminal, size, rows, cursor, tracks_mouse })
     }
 
     #[must_use]
-    pub fn pane(&self) -> NonZeroU32 {
-        self.pane
+    pub fn terminal(&self) -> TerminalKey {
+        self.terminal
     }
 
     #[must_use]
@@ -297,7 +297,7 @@ impl Frame {
     }
 
     pub(super) fn heard(frame: api::Frame) -> Result<Frame, String> {
-        let pane = NonZeroU32::new(frame.pane).ok_or("a frame is of pane 0")?;
+        let terminal = TerminalKey::read(frame.terminal)?;
         let size = Size::heard("a frame", frame.size)?;
         let rows = match frame.rows.ok_or("a frame has no rows")? {
             api::frame::Rows::Whole(api::Whole { lines }) => {
@@ -317,7 +317,7 @@ impl Frame {
             },
         };
         let cursor = frame.cursor.map(|cursor| cursor_heard(&cursor)).transpose()?;
-        Frame::new(pane, size, rows, cursor, frame.mouse_tracking)
+        Frame::new(terminal, size, rows, cursor, frame.mouse_tracking)
     }
 }
 
@@ -336,7 +336,14 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
+    use crate::mux::own::OwnMade;
+
+    fn key() -> TerminalKey {
+        TerminalKey { id: NonZeroU32::new(2).unwrap(), made: OwnMade::from_nanos(60) }
+    }
 
     fn narrow(grapheme: &str) -> api::Glyph {
         let shows = api::glyph::Shows::Narrow(api::Narrow { grapheme: grapheme.to_owned() });
@@ -351,7 +358,7 @@ mod tests {
     fn frame(columns: u32, lines: Vec<api::Line>) -> api::Frame {
         let rows = u32::try_from(lines.len()).unwrap();
         api::Frame {
-            pane: 2,
+            terminal: Some(key().said()),
             size: Some(api::Size { columns, rows }),
             rows: Some(api::frame::Rows::Whole(api::Whole { lines })),
             cursor: None,
@@ -386,8 +393,8 @@ mod tests {
         let mut two = frame(1, vec![row.clone(), row.clone()]);
         two.size = Some(api::Size { columns: 1, rows: 1 });
         assert_eq!(Frame::heard(two).unwrap_err(), "a frame of 1 rows has 2");
-        let nobody = api::Frame { pane: 0, ..frame(1, vec![row.clone()]) };
-        assert_eq!(Frame::heard(nobody).unwrap_err(), "a frame is of pane 0");
+        let nobody = api::Frame { terminal: None, ..frame(1, vec![row.clone()]) };
+        assert_eq!(Frame::heard(nobody).unwrap_err(), "a terminal with no key");
         let changed = api::Changed { rows: vec![api::Row { index: 1, line: Some(row.clone()) }] };
         let past = api::Frame {
             rows: Some(api::frame::Rows::Changed(changed)),
@@ -443,7 +450,7 @@ mod tests {
         let cursor = |column| {
             Some(Cursor { row: 0, column, shape: CursorShape::Bar, blinking: false })
         };
-        let made = |rows, cursor| Frame::new(NonZeroU32::MIN, size, rows, cursor, false);
+        let made = |rows, cursor| Frame::new(key(), size, rows, cursor, false);
         assert!(made(Rows::Whole(vec![two.clone()]), cursor(1)).is_ok());
         let none = made(Rows::Whole(Vec::new()), None);
         assert_eq!(none.unwrap_err(), "a frame of 1 rows has 0");

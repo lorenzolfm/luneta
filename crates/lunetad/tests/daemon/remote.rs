@@ -13,7 +13,7 @@ use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_checks_response::{failed, Failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{
-    close_request, closes_response, kill_request, list_exited_response, other_tabs_response,
+    close_request, closes_response, list_exited_response, other_tabs_response,
     turn_into_panes_response, turn_into_tab_response,
 };
 use lunetad::api::list_skills_response::Skill;
@@ -829,9 +829,9 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         let whole = closes_response::Closes::Session(());
         assert_eq!(idle, Some(whole));
         let close = |session: &str, closes| {
-            let started_at = close_request::Whose::StartedAt(SystemTime::UNIX_EPOCH.into());
+            let started_at = Some(SystemTime::UNIX_EPOCH.into());
             let session = session.to_owned();
-            CloseRequest { on: on("far"), session, closes: Some(closes), whose: Some(started_at) }
+            CloseRequest { on: on("far"), session, closes: Some(closes), started_at }
         };
         let pane = close_request::Closes::Pane;
         let tab = |id, panes| close_request::Closes::Tab(closes_response::Tab { id, panes });
@@ -883,15 +883,14 @@ fn a_daemon_hands_on_what_is_asked_of_another_machine() {
         assert_eq!(came, Some(turn_into_tab_response::Came::NoClient(())));
 
         let kill = |started_at: Option<_>| {
-            let started_at = started_at.map(kill_request::Whose::StartedAt);
-            KillRequest { on: on("far"), session: "work".to_owned(), whose: started_at }
+            KillRequest { on: on("far"), session: "work".to_owned(), started_at }
         };
         invalid(daemon.kill(kill(None)).await.unwrap_err());
         let held = |started_at: Option<_>| CloseRequest {
             on: on("far"),
             session: "work".to_owned(),
             closes: Some(pane(4)),
-            whose: started_at.map(close_request::Whose::StartedAt),
+            started_at,
         };
         invalid(daemon.close(held(None)).await.unwrap_err());
         let since = Some(SystemTime::UNIX_EPOCH.into());

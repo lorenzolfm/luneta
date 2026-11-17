@@ -386,7 +386,7 @@ fn spawned(
     let child = pty.spawned(opens, &vars).map_err(|error| {
         Status::failed_precondition(format!("opens did not start: {error}"))
     })?;
-    let started = pane::start(Arc::clone(mux), key.id, pty, child, size)
+    let started = pane::start(Arc::clone(mux), key, pty, child, size)
         .map_err(|error| failed("the terminal did not start", error))?;
     Ok(Terminal {
         key,

@@ -55,7 +55,7 @@ use crate::api::{
     TurnIntoTabRequest, TurnIntoTabResponse,
 };
 use crate::asks::{Asked, Step};
-use crate::closes::{Close, Closes, Whose};
+use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Change, Failed, Id, Store, WorkstreamId};
@@ -713,9 +713,9 @@ impl Daemon for Host {
     }
 
     async fn close(&self, request: Request<CloseRequest>) -> Result<Response<()>, Status> {
-        let CloseRequest { on, session, closes, whose } = request.into_inner();
+        let CloseRequest { on, session, closes, started_at } = request.into_inner();
         let session = named("session", &session)?;
-        let whose = whose_of(whose)?;
+        let started = started_of(started_at)?;
         let close = match closes {
             Some(close_request::Closes::Pane(pane)) => Close::Pane(pane),
             Some(close_request::Closes::Tab(ClosedTab { panes, .. })) if panes.is_empty() => {
@@ -727,9 +727,9 @@ impl Daemon for Host {
             None => return Err(Status::invalid_argument("closes: neither a pane nor a tab")),
         };
         if let Some(mut daemon) = self.bridged(on)? {
-            return daemon.close(close.asked(None, &session, whose)).await;
+            return daemon.close(close.asked(None, &session, started)).await;
         }
-        let closed = task::spawn_blocking(move || whose.closed(&session, &close));
+        let closed = task::spawn_blocking(move || closes::closed(&session, started, &close));
         let closed = closed.await;
         let closed = closed.map_err(|error| unfinished(&error))?;
         closed.map_err(Status::failed_precondition)?;
@@ -800,14 +800,14 @@ impl Daemon for Host {
     }
 
     async fn kill(&self, request: Request<KillRequest>) -> Result<Response<()>, Status> {
-        let KillRequest { on, session, whose } = request.into_inner();
+        let KillRequest { on, session, started_at } = request.into_inner();
         let session = named("session", &session)?;
-        let whose = whose_of(whose)?;
+        let started = started_of(started_at)?;
         if let Some(mut daemon) = self.bridged(on)? {
-            let (session, whose) = (session.to_string(), Some(whose.into()));
-            return daemon.kill(KillRequest { on: None, session, whose }).await;
+            let (session, started_at) = (session.to_string(), Some(started.into()));
+            return daemon.kill(KillRequest { on: None, session, started_at }).await;
         }
-        let killed = task::spawn_blocking(move || whose.killed(&session));
+        let killed = task::spawn_blocking(move || closes::killed(&session, started));
         let killed = killed.await;
         let killed = killed.map_err(|error| unfinished(&error))?;
         killed.map_err(Status::failed_precondition)?;
@@ -1210,11 +1210,6 @@ where
 fn clients_of(session: &SessionName) -> Result<Vec<api::Client>, String> {
     let listed = Mux::Zellij(session).clients()?;
     Ok(listed.iter().copied().map(mux::Client::to_api).collect())
-}
-
-fn whose_of<W: TryInto<Whose, Error = String>>(whose: Option<W>) -> Result<Whose, Status> {
-    let neither = || Status::invalid_argument("whose: neither started_at nor own");
-    whose.ok_or_else(neither)?.try_into().map_err(Status::invalid_argument)
 }
 
 fn started_of<At: TryInto<SystemTime>>(started_at: Option<At>) -> Result<SystemTime, Status> {

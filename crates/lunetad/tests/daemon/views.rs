@@ -601,6 +601,14 @@ fn an_agent_in_a_view_s_terminal_is_there_by_the_terminal_s_key() {
     });
     assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
     assert_eq!(agent.zellij(), None);
+    let host = owned.host.host();
+    let own_session = |session: &lunetad::api::Session| {
+        matches!(session.mux, Some(lunetad::api::session::Mux::Own(_)))
+    };
+    assert!(!host.sessions.iter().any(own_session), "{:?}", host.sessions);
+    let own_agent = |agent: &lunetad::api::Agent| matches!(agent.pane, Some(agent::Pane::Own(_)));
+    assert!(!host.agents.iter().any(own_agent), "{:?}", host.agents);
+    assert!(host.unread_files.iter().all(|file| file.own.is_none()), "{:?}", host.unread_files);
 }
 
 fn text_of(lines: &[Line]) -> Vec<String> {
@@ -661,7 +669,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
             Seen::Refused(why) | Seen::Lost(why) => panic!("the terminal is not seen: {why}"),
         };
         let frame = framed.frame();
-        assert_eq!(frame.pane(), key.id, "the mux shows only the terminal asked for");
+        assert_eq!(frame.terminal(), key, "the mux shows only the terminal asked for");
         assert_eq!((frame.size().columns.get(), frame.size().rows.get()), (78, 22));
         match frame.rows() {
             Rows::Whole(whole) => lines.clone_from(whole),
