@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
+use std::num::NonZeroU16;
 use std::path::Path;
+use std::process;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,10 +17,12 @@ use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
 use crate::mux::own::TerminalKey;
 use crate::mux::Runs as Opened;
-use crate::projects::layout::{self, Direction, Order, Rect, Towards};
+use crate::program::{self, Ran as Looked};
+use crate::projects::layout::{self, Direction, Order, Rect, Towards, SIDE_MAX};
 use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
 use crate::projects::{Size, Store, Terminal, TerminalId, View, Workstream, WorkstreamId};
-use crate::projects::LINE_BYTES_MAX;
+use crate::projects::{FRAME_CELLS, LINE_BYTES_MAX, TERMINALS_MAX};
+use crate::shells::Doing;
 use crate::watch::Troubles;
 use crate::{opens, Directory};
 
@@ -32,9 +36,33 @@ const ARGV_MAX: usize = LINE_BYTES_MAX / 2;
 
 const TAG: &str = "luneta terminal ";
 
+const RESTORE_PAUSE: Duration = Duration::from_secs(10);
+
+const RESTORE_ATTEMPTS_MAX: u32 = 3;
+
+const RESTORES_PER_PASS: usize = 8;
+
+const RESTORE_SETTLE: Duration = Duration::from_secs(30);
+
+const TYPING_WAIT: Duration = Duration::from_secs(3);
+
+const TYPING_WAIT_MAX: Duration = Duration::from_secs(30);
+
+const FOLDER_LOOK: Duration = Duration::from_secs(1);
+
+const UNSHOWN_SIZE: Size =
+    Size { columns: NonZeroU16::new(80).unwrap(), rows: NonZeroU16::new(24).unwrap() };
+
 const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh"];
 
 const _: () = assert!(ANSWERS_MAX > 1);
+const _: () = assert!(RESTORE_ATTEMPTS_MAX > 0);
+const _: () = assert!(RESTORES_PER_PASS > 0);
+const _: () = assert!(RESTORES_PER_PASS <= TERMINALS_MAX);
+const _: () = assert!(RESTORE_SETTLE.as_nanos() > RESTORE_PAUSE.as_nanos());
+const _: () = assert!(TYPING_WAIT.as_nanos() < TYPING_WAIT_MAX.as_nanos());
+const _: () = assert!(UNSHOWN_SIZE.columns.get() <= SIDE_MAX);
+const _: () = assert!(UNSHOWN_SIZE.rows.get() <= SIDE_MAX);
 
 pub type Out = answers::Sender<Result<api::ShowResponse, Status>>;
 
@@ -55,7 +83,7 @@ pub enum Command {
     Listed(TerminalsListed),
     Emptied { since: Instant },
     Crashed,
-    Unreached,
+    Unreached { since: Instant },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +235,9 @@ pub fn start(
         listed: BTreeMap::new(),
         looked: false,
         last_focus: BTreeMap::new(),
+        restore_round: BTreeSet::new(),
+        restore_last_at: None,
+        restore_attempts: Attempts::default(),
         told: None,
         troubles: Troubles::default(),
         shell: opens::your_shell(),
@@ -226,6 +257,9 @@ struct Views {
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
     last_focus: BTreeMap<WorkstreamId, TerminalId>,
+    restore_round: BTreeSet<TerminalId>,
+    restore_last_at: Option<Instant>,
+    restore_attempts: Attempts,
     told: Option<BTreeMap<TerminalId, Located>>,
     troubles: Troubles,
     shell: OsString,
@@ -245,6 +279,7 @@ struct Known {
     heard: Heard,
     sized: Option<Size>,
     agent_front: Option<u32>,
+    remade: Option<Remade>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,10 +288,82 @@ enum Heard {
     Seen,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Remade {
+    at: Instant,
+    restored: Option<Restored>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Restored {
+    Typing { line: Line, due: Instant, by: Instant },
+    Kept,
+    Resumed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Paste {
+    Now,
+    Later,
+    Never,
+}
+
+#[derive(Default)]
+struct Attempts {
+    failures: BTreeMap<TerminalId, u32>,
+}
+
+impl Attempts {
+    fn wanted(&self, terminal: TerminalId) -> bool {
+        self.failures.get(&terminal).is_none_or(|count| *count < RESTORE_ATTEMPTS_MAX)
+    }
+
+    fn failed(&mut self, terminal: TerminalId, why: &str) -> String {
+        let count = self.charged(terminal);
+        if count < RESTORE_ATTEMPTS_MAX {
+            let attempt = format!("attempt {count} of {RESTORE_ATTEMPTS_MAX}");
+            format!("terminal {terminal} is not restored, on {attempt}: {why}")
+        } else {
+            let given_up = format!("given up after {RESTORE_ATTEMPTS_MAX} attempts");
+            format!("terminal {terminal} is not restored, and is {given_up}: {why}")
+        }
+    }
+
+    fn crashed(&mut self, terminal: TerminalId, after: Duration) -> String {
+        let count = self.charged(terminal);
+        let secs = after.as_secs();
+        let ended = format!("luneta-mux ended {secs}s after terminal {terminal} was restored");
+        if count < RESTORE_ATTEMPTS_MAX {
+            format!("{ended}, which counts as attempt {count} of {RESTORE_ATTEMPTS_MAX}")
+        } else {
+            format!("{ended}, and it is given up after {RESTORE_ATTEMPTS_MAX} attempts")
+        }
+    }
+
+    fn settled(&mut self, terminal: TerminalId) {
+        self.failures.remove(&terminal);
+    }
+
+    fn charged(&mut self, terminal: TerminalId) -> u32 {
+        assert!(self.wanted(terminal), "terminal {terminal}, given up, is not restored again");
+        let count = self.failures.entry(terminal).or_insert(0);
+        *count += 1;
+        assert!(*count <= RESTORE_ATTEMPTS_MAX, "no terminal is tried past the attempts");
+        *count
+    }
+
+    fn retain(&mut self, unsettled: impl Fn(TerminalId) -> bool) {
+        self.failures.retain(|terminal, _| unsettled(*terminal));
+        assert!(self.failures.len() <= TERMINALS_MAX, "no more failures than terminals");
+    }
+}
+
 fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
     let mut swept = Instant::now();
     loop {
-        match commands.recv_timeout(sweep.saturating_sub(swept.elapsed())) {
+        let restoring = !views.restore_round.is_empty();
+        let wait = if restoring { Duration::ZERO } else { sweep.saturating_sub(swept.elapsed()) };
+        match commands.recv_timeout(wait) {
             Ok(command) => views.heard(command),
             Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => {
@@ -269,6 +376,8 @@ fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
             views.flushed();
             swept = Instant::now();
         }
+        views.restore();
+        views.type_due();
         views.settle();
         views.tell_core();
         views.troubles.done();
@@ -308,11 +417,21 @@ impl Views {
                 self.listed.clear();
             },
             Command::Crashed => {
+                self.crashed(|_| true);
                 self.looked = true;
                 self.known.clear();
                 self.listed.clear();
             },
-            Command::Unreached => self.looked = true,
+            Command::Unreached { since } => {
+                let gone = |known: &Known| match known.heard {
+                    Heard::Made(made) => made < since,
+                    Heard::Seen => true,
+                };
+                self.crashed(gone);
+                self.looked = true;
+                self.known.retain(|_, known| !gone(known));
+                self.listed.clear();
+            },
         }
     }
 
@@ -503,9 +622,22 @@ impl Views {
                 return Err(failure.to_string());
             },
         };
+        self.made(terminal, key, Some(inner), None);
+        self.client(client).focus = Some(terminal);
+        self.last_focus.insert(workstream, terminal);
+        Ok(())
+    }
+
+    fn made(
+        &mut self,
+        terminal: TerminalId,
+        key: TerminalKey,
+        sized: Option<Size>,
+        remade: Option<Remade>,
+    ) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, sized: Some(inner), agent_front: None };
+        let known = Known { key, heard, sized, agent_front: None, remade };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -515,9 +647,188 @@ impl Views {
                 },
             }
         }
-        self.client(client).focus = Some(terminal);
-        self.last_focus.insert(workstream, terminal);
+    }
+
+    fn crashed(&mut self, gone: impl Fn(&Known) -> bool) {
+        let now = Instant::now();
+        let Views { known, restore_attempts, troubles, .. } = self;
+        for (terminal, known) in known.iter().filter(|(_, known)| gone(known)) {
+            let after = known.remade.as_ref().map(|it| now.saturating_duration_since(it.at));
+            match after {
+                Some(after) if after < RESTORE_SETTLE => {
+                    troubles.say(restore_attempts.crashed(*terminal, after));
+                },
+                Some(_) | None => restore_attempts.settled(*terminal),
+            }
+        }
+    }
+
+    fn restore(&mut self) {
+        if !self.looked {
+            return;
+        }
+        if self.restore_round.is_empty() {
+            self.restore_begin();
+        }
+        self.restore_some();
+    }
+
+    fn restore_begin(&mut self) {
+        assert!(self.restore_round.is_empty(), "a round begins once the last one is done");
+        if self.restore_last_at.is_some_and(|at| at.elapsed() < RESTORE_PAUSE) {
+            return;
+        }
+        let Some(projects) = self.store.projects() else {
+            return;
+        };
+        let known = &self.known;
+        let held = |terminal| projects.holding(terminal).is_some();
+        let settled = |terminal: TerminalId| {
+            known.get(&terminal).is_some_and(|known| {
+                known.remade.as_ref().is_none_or(|it| it.at.elapsed() >= RESTORE_SETTLE)
+            })
+        };
+        self.restore_attempts.retain(|terminal| held(terminal) && !settled(terminal));
+        let attempts = &self.restore_attempts;
+        let wanted = |terminal: &TerminalId| {
+            !known.contains_key(terminal) && attempts.wanted(*terminal)
+        };
+        let ids = || projects.terminals().map(|(_, terminal)| layout::Leaf::id(terminal));
+        if !ids().any(|terminal| wanted(&terminal)) {
+            return;
+        }
+        let lost: BTreeSet<TerminalId> = ids().filter(wanted).collect();
+        assert!(!lost.is_empty(), "a round begins with a terminal lost");
+        self.restore_last_at = Some(Instant::now());
+        let tags = match self.mux.tags() {
+            Ok(tags) => tags,
+            Err(failure) => {
+                for terminal in &lost {
+                    let said = self.restore_attempts.failed(*terminal, &failure.to_string());
+                    self.troubles.say(said);
+                }
+                return;
+            },
+        };
+        let mut adopted = BTreeSet::new();
+        for (tag, key) in tags {
+            let Some(terminal) = tagged(&tag).filter(|terminal| lost.contains(terminal)) else {
+                continue;
+            };
+            if self.known.values().any(|known| known.key == key) || !adopted.insert(terminal) {
+                continue;
+            }
+            self.made(terminal, key, None, None);
+        }
+        assert!(adopted.is_subset(&lost), "only a lost terminal is adopted");
+        let keys: BTreeSet<TerminalKey> = self.known.values().map(|known| known.key).collect();
+        assert_eq!(keys.len(), self.known.len(), "no terminal adopted shares a key");
+        self.restore_round = lost.difference(&adopted).copied().collect();
+    }
+
+    fn restore_some(&mut self) {
+        let mut remade = 0;
+        while remade < RESTORES_PER_PASS {
+            let Some(terminal) = self.restore_round.pop_first() else {
+                break;
+            };
+            if self.known.contains_key(&terminal) {
+                continue;
+            }
+            let held = self.store.projects().is_some_and(|it| it.holding(terminal).is_some());
+            if !held {
+                continue;
+            }
+            remade += 1;
+            if let Err(why) = self.remade(terminal) {
+                let said = self.restore_attempts.failed(terminal, &why);
+                self.troubles.say(said);
+            }
+        }
+        assert!(remade <= RESTORES_PER_PASS, "a pass restores no more than its share");
+    }
+
+    fn remade(&mut self, terminal: TerminalId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let (held_in, held) = projects.holding(terminal).ok_or("no view holds it")?;
+        let (project, workstream) = projects.find(held_in.id()).expect("a view's workstream is");
+        let (kept_folder, workstream_folder) = (held.folder().clone(), project.folder(workstream));
+        let runs = held.runs().clone();
+        let view = workstream.view();
+        let shown = self.clients.values().filter(|it| it.workstream == held_in.id());
+        let size = fit(shown, view, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let inner = placed(view, terminal, size).expect("a view lays out the terminals it holds");
+        let folder = if is_folder(&kept_folder)? {
+            kept_folder
+        } else if is_folder(&workstream_folder)? {
+            workstream_folder
+        } else {
+            let (kept, theirs) = (kept_folder.as_str(), workstream_folder.as_str());
+            return Err(format!("neither {kept} nor its workstream's {theirs} is a folder"));
+        };
+        let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
+        let args: Vec<String>;
+        let (opened, restore) = match &runs {
+            Runs::Shell => (Opened::Shell(&self.shell), None),
+            Runs::Command(line) => {
+                let restore = if line.as_str().contains('\n') {
+                    let lines = format!("terminal {terminal}'s last command spans lines");
+                    self.troubles.say(format!("{lines}, and is kept, not typed"));
+                    Restored::Kept
+                } else {
+                    let now = Instant::now();
+                    let (due, by) = (now + TYPING_WAIT, now + TYPING_WAIT_MAX);
+                    Restored::Typing { line: line.clone(), due, by }
+                };
+                (Opened::Shell(&self.shell), Some(restore))
+            },
+            Runs::Agent { harness, session } => {
+                args = vec![harness.resumes().to_owned(), session.as_str().to_owned()];
+                let program = harness.program();
+                (Opened::Command { program, args: &args }, Some(Restored::Resumed))
+            },
+        };
+        let key = self.mux.made(&cwd, opened, tag(terminal), inner).map_err(|it| it.to_string())?;
+        let remade = Remade { at: Instant::now(), restored: restore };
+        self.made(terminal, key, Some(inner), Some(remade));
+        assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
         Ok(())
+    }
+
+    fn type_due(&mut self) {
+        let Views { known, listed, mux, troubles, .. } = self;
+        let now = Instant::now();
+        let mut pastes_due: Vec<(TerminalId, TerminalKey, Line)> = Vec::new();
+        for (terminal, known) in known.iter_mut() {
+            let Some(remade) = &mut known.remade else {
+                continue;
+            };
+            let Some(Restored::Typing { line, due, by }) = &remade.restored else {
+                continue;
+            };
+            let is = listed.get(&known.key).map(|listed| &listed.is);
+            match pasted(is, *due, *by, now) {
+                Paste::Later => continue,
+                Paste::Now => pastes_due.push((*terminal, known.key, line.clone())),
+                Paste::Never => {
+                    let untyped = format!("terminal {terminal}'s last command is not typed");
+                    troubles.say(format!("{untyped}, as it ran or runs another program first"));
+                },
+            }
+            remade.restored = Some(Restored::Kept);
+        }
+        assert!(pastes_due.len() <= known.len(), "a paste is due only where one is restored");
+        if pastes_due.is_empty() {
+            return;
+        }
+        let pastes: Vec<(TerminalKey, &Line)> =
+            pastes_due.iter().map(|(_, key, line)| (*key, line)).collect();
+        if let Err(failure) = mux.typed(&pastes) {
+            let terminals: Vec<String> =
+                pastes_due.iter().map(|(terminal, ..)| terminal.to_string()).collect();
+            let kept = format!("the last commands of terminals {} are kept", terminals.join(", "));
+            troubles.say(format!("{kept}, maybe not typed: {failure}"));
+        }
     }
 
     fn close(&mut self, terminal: TerminalId) -> Result<(), String> {
@@ -616,7 +927,8 @@ impl Views {
                     }
                 },
                 Some(_) | None => {
-                    let known = Known { key, heard: Heard::Seen, sized: size, agent_front: None };
+                    let heard = Heard::Seen;
+                    let known = Known { key, heard, sized: size, agent_front: None, remade: None };
                     self.known.insert(terminal, known);
                 },
             }
@@ -660,6 +972,14 @@ impl Views {
             let same_front = front.is_some() && front == known.agent_front;
             if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
                 runs = held.runs().clone();
+            }
+            let restored = known.remade.as_mut().map(|remade| &mut remade.restored);
+            match restored {
+                Some(restored) if keeps(restored.as_ref(), &listed.is, &runs) => {
+                    runs = held.runs().clone();
+                },
+                Some(restored) => *restored = None,
+                None => {},
             }
             known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() || runs != *held.runs() {
@@ -814,6 +1134,80 @@ fn fit<'a>(
 fn inside(client: &Client, view: &View, known: &BTreeMap<TerminalId, Known>) -> bool {
     let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && view.holds(*id));
     client.runs_in.is_some_and(holds)
+}
+
+fn placed(view: &View, terminal: TerminalId, size: Size) -> Option<Size> {
+    let tree = view.tree()?;
+    let fitted = tree.fitted(size);
+    let inner = if view.full() == Some(terminal) {
+        Rect::whole(fitted).inner()
+    } else {
+        let mut laid = tree.laid(size).into_iter();
+        laid.find(|(it, _)| layout::Leaf::id(*it) == terminal).map(|(_, rect)| rect.inner())?
+    };
+    let ((columns, rows), (columns_fitted, rows_fitted)) = (inner.get(), fitted.get());
+    assert!(columns + 2 * FRAME_CELLS <= columns_fitted, "a terminal fits its view's width");
+    assert!(rows + 2 * FRAME_CELLS <= rows_fitted, "a terminal fits its view's height");
+    Some(inner)
+}
+
+fn keeps(restored: Option<&Restored>, is: &Is, read: &Runs) -> bool {
+    match restored {
+        None => false,
+        Some(Restored::Typing { .. }) => true,
+        Some(Restored::Kept) => !ran_since(is),
+        Some(Restored::Resumed) => !matches!(read, Runs::Agent { .. }),
+    }
+}
+
+fn pasted(is: Option<&Is>, due: Instant, by: Instant, now: Instant) -> Paste {
+    assert!(due <= by, "a paste is due before it is given up");
+    let Some(is) = is else {
+        return if now >= due { Paste::Now } else { Paste::Later };
+    };
+    if ran(is) {
+        return Paste::Never;
+    }
+    if runs_in_front(is) {
+        return if now >= by { Paste::Never } else { Paste::Later };
+    }
+    let prompts = matches!(is, Is::Running { word: Some(Word::Prompts), .. });
+    if prompts || now >= due { Paste::Now } else { Paste::Later }
+}
+
+fn ran_since(is: &Is) -> bool {
+    ran(is) || runs_in_front(is)
+}
+
+fn ran(is: &Is) -> bool {
+    match is {
+        Is::Running { doing, .. } => {
+            matches!(doing, Some(Doing::Ended { .. } | Doing::Stopped { .. }))
+        },
+        Is::Ended => true,
+    }
+}
+
+fn runs_in_front(is: &Is) -> bool {
+    match is {
+        Is::Running { root, front, word, doing } => {
+            matches!(word, Some(Word::Going(_)))
+                || matches!(doing, Some(Doing::Going { .. }))
+                || front.as_ref().is_some_and(|it| it.pid != *root)
+        },
+        Is::Ended => false,
+    }
+}
+
+fn is_folder(folder: &Dir) -> Result<bool, String> {
+    let mut test = process::Command::new("/bin/sh");
+    test.args(["-c", r#"test -d "$1""#, "sh", folder.as_str()]);
+    let secs = FOLDER_LOOK.as_secs();
+    match program::run(&mut test, FOLDER_LOOK) {
+        Ok(Looked::Ended { status, .. }) => Ok(status.success()),
+        Ok(Looked::Stuck) => Err(format!("{} did not answer in {secs}s", folder.as_str())),
+        Err(error) => Err(format!("{} is not looked at: {error}", folder.as_str())),
+    }
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -986,12 +1380,13 @@ fn is_shell_option(word: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::SystemTime;
 
     use luneta_protocol::said::Said;
 
     use super::*;
-    use crate::agent::{Harness, Status as Doing};
+    use crate::agent::{Harness, Status};
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
 
@@ -1015,7 +1410,7 @@ mod tests {
             harness: Harness::ClaudeCode,
             session_id: Said::new("7c22-ab".to_owned()).unwrap(),
             cwd: Said::new("/w".to_owned()).unwrap(),
-            status: Doing::Idle,
+            status: Status::Idle,
             status_since: None,
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
@@ -1026,6 +1421,17 @@ mod tests {
 
     fn command(line: &str) -> Runs {
         Runs::Command(Line::parse(line).unwrap())
+    }
+
+    fn doing(word: Word, doing: Doing) -> server::Terminal {
+        let front = Some(Foreground { pid: 10, argv: vec!["fish".to_owned()] });
+        listed(Is::Running { root: 10, front, word: Some(word), doing: Some(doing) })
+    }
+
+    fn ended_ls() -> Doing {
+        let command = Said::new("ls".to_owned());
+        let at = SystemTime::UNIX_EPOCH;
+        Doing::Ended { command, at, ending: None, took: Duration::from_millis(5) }
     }
 
     fn own(argv: &[&str]) -> Vec<String> {
@@ -1066,6 +1472,116 @@ mod tests {
         for argv in [&["-zsh"][..], &["fish", "--login"], &["bash", "-i"]] {
             assert_eq!(of(&running(Some((10, argv)), None), &[]), Runs::Shell, "{argv:?}");
         }
+    }
+
+    #[test]
+    fn a_restored_terminal_keeps_what_it_ran_until_it_runs_something_else() {
+        let shell = Runs::Shell;
+        let line = Line::parse("make test").unwrap();
+        let now = Instant::now();
+        let typing = Restored::Typing { line, due: now, by: now };
+        let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
+        let started = running(Some((10, &["fish"])), None);
+        let going = running(Some((10, &["fish"])), Some(Word::Going(Some("ls".into()))));
+        let vim = running(Some((20, &["vim"])), None);
+        let ended = listed(Is::Ended);
+        let ran_ls = doing(Word::Prompts, ended_ls());
+        for is in [&prompts, &started, &going, &vim, &ended, &ran_ls] {
+            assert!(!keeps(None, &is.is, &shell), "{is:?}");
+            assert!(keeps(Some(&typing), &is.is, &shell), "{is:?}");
+        }
+        for is in [&prompts, &started] {
+            assert!(keeps(Some(&Restored::Kept), &is.is, &shell), "{is:?}");
+        }
+        for is in [&going, &vim, &ended, &ran_ls] {
+            assert!(!keeps(Some(&Restored::Kept), &is.is, &shell), "{is:?}");
+        }
+        let session = Session::parse("7c22-ab").unwrap();
+        let agent = Runs::Agent { harness: Harness::ClaudeCode, session };
+        assert!(keeps(Some(&Restored::Resumed), &started.is, &command("claude --resume 7c22-ab")));
+        assert!(!keeps(Some(&Restored::Resumed), &started.is, &agent));
+    }
+
+    #[test]
+    fn a_terminal_that_fails_to_restore_is_given_up_after_its_attempts() {
+        let (failing, other) = (TerminalId::of(7).unwrap(), TerminalId::of(8).unwrap());
+        let mut attempts = Attempts::default();
+        for attempt in 1..RESTORE_ATTEMPTS_MAX {
+            assert!(attempts.wanted(failing));
+            let said = attempts.failed(failing, "no folder");
+            assert!(said.contains(&format!("attempt {attempt} of")), "{said}");
+        }
+        let said = attempts.failed(failing, "no folder");
+        assert!(said.contains("given up"), "{said}");
+        assert!(!attempts.wanted(failing));
+        assert!(attempts.wanted(other));
+        attempts.retain(|terminal| terminal != failing);
+        assert!(attempts.wanted(failing), "a terminal found again is tried afresh");
+    }
+
+    #[test]
+    fn a_crash_soon_after_a_restore_counts_as_a_failed_attempt() {
+        let (crashing, other) = (TerminalId::of(7).unwrap(), TerminalId::of(8).unwrap());
+        let mut attempts = Attempts::default();
+        let said = attempts.failed(crashing, "no folder");
+        assert!(said.contains("attempt 1 of"), "{said}");
+        let said = attempts.crashed(crashing, Duration::from_secs(4));
+        assert!(said.contains(&format!("ended 4s after terminal {crashing} was")), "{said}");
+        assert!(said.contains("attempt 2 of"), "{said}");
+        for _ in 2..RESTORE_ATTEMPTS_MAX {
+            assert!(attempts.wanted(crashing));
+            attempts.crashed(crashing, Duration::from_secs(4));
+        }
+        assert!(!attempts.wanted(crashing), "a terminal luneta-mux keeps ending after is given up");
+        attempts.failed(other, "no folder");
+        attempts.settled(other);
+        attempts.settled(crashing);
+        assert!(attempts.wanted(other) && attempts.wanted(crashing), "a settled one starts afresh");
+        for terminal in [other, crashing] {
+            let said = attempts.failed(terminal, "no folder");
+            assert!(said.contains("attempt 1 of"), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_restored_line_is_pasted_only_where_its_shell_waits_for_one() {
+        let start = Instant::now();
+        let (due, by) = (start + TYPING_WAIT, start + TYPING_WAIT_MAX);
+        let (early, late, too_late) = (start, due, by);
+        let prompts = running(Some((10, &["fish"])), Some(Word::Prompts));
+        let quiet = running(Some((10, &["bash"])), None);
+        let vim = running(Some((20, &["vim"])), None);
+        let going = running(Some((10, &["fish"])), Some(Word::Going(Some("vim".into()))));
+        let ran_ls = doing(Word::Prompts, ended_ls());
+        let ended = listed(Is::Ended);
+        let at = |is: Option<&server::Terminal>, now| pasted(is.map(|it| &it.is), due, by, now);
+        assert_eq!(at(Some(&prompts), early), Paste::Now, "a prompt is waited for");
+        assert_eq!(at(Some(&quiet), early), Paste::Later);
+        assert_eq!(at(Some(&quiet), late), Paste::Now, "a shell with no marks is pasted in time");
+        assert_eq!(at(None, early), Paste::Later);
+        assert_eq!(at(None, late), Paste::Now);
+        for busy in [&vim, &going] {
+            assert_eq!(at(Some(busy), late), Paste::Later, "{busy:?}");
+            assert_eq!(at(Some(busy), too_late), Paste::Never, "{busy:?}");
+        }
+        for done in [&ran_ls, &ended] {
+            assert_eq!(at(Some(done), early), Paste::Never, "{done:?}");
+        }
+    }
+
+    #[test]
+    fn a_folder_is_looked_at_apart_from_the_views_thread() {
+        let folder = tempfile::tempdir().unwrap();
+        let dir = Dir::parse(folder.path().to_str().unwrap()).unwrap();
+        assert_eq!(is_folder(&dir), Ok(true));
+        let file = folder.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert_eq!(is_folder(&Dir::parse(file.to_str().unwrap()).unwrap()), Ok(false));
+        let gone = folder.path().join("gone");
+        assert_eq!(is_folder(&Dir::parse(gone.to_str().unwrap()).unwrap()), Ok(false));
+        let spaced = folder.path().join("a b'c");
+        fs::create_dir(&spaced).unwrap();
+        assert_eq!(is_folder(&Dir::parse(spaced.to_str().unwrap()).unwrap()), Ok(true));
     }
 
     #[test]

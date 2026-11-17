@@ -51,6 +51,22 @@ impl Harness {
             Harness::Pi => api::Harness::Pi,
         }
     }
+
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        match self {
+            Harness::ClaudeCode => "claude",
+            Harness::Pi => "pi",
+        }
+    }
+
+    #[must_use]
+    pub const fn resumes(self) -> &'static str {
+        match self {
+            Harness::ClaudeCode => "--resume",
+            Harness::Pi => "--session",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

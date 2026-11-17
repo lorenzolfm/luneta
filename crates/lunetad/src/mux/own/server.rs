@@ -19,9 +19,10 @@ use tonic::{Code, Response, Status, Streaming};
 use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
+use super::frames::colours;
 use super::TerminalKey;
 use crate::mux::{in_no_pane, Failure, Runs};
-use crate::projects::Size;
+use crate::projects::{Line, Size, TERMINALS_MAX};
 use crate::shells::{Doing, Front};
 use crate::{folder, log, Directory};
 
@@ -195,7 +196,7 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Followed {
-    Unreached,
+    Unreached { at: Instant },
     Emptied { since: Instant },
     LetGo,
 }
@@ -203,8 +204,9 @@ pub enum Followed {
 pub fn followed(
     mut told: impl FnMut(Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
+    let at = Instant::now();
     let Ok(server) = Server::reached_on(runtime()?, None)? else {
-        return Ok(Followed::Unreached);
+        return Ok(Followed::Unreached { at });
     };
     let since = Instant::now();
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
@@ -332,14 +334,62 @@ impl Terminals {
     }
 
     pub fn tagged(&self, tag: &[u8]) -> Result<Option<TerminalKey>, Failure> {
-        let Some(server) = Server::reached()? else {
-            return Ok(None);
-        };
-        let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
-        let terminals = listed.map_err(|status| refused(&status))?.terminals;
-        let found = terminals.into_iter().find(|terminal| terminal.tag == tag);
+        let found = listed()?.into_iter().find(|terminal| terminal.tag == tag);
         let key = found.map(|terminal| TerminalKey::read(terminal.key));
         key.transpose().map_err(Failure::Unread)
+    }
+
+    pub fn tags(&self) -> Result<Vec<(Vec<u8>, TerminalKey)>, Failure> {
+        let tags = listed()?.into_iter().map(|terminal| {
+            let key = TerminalKey::read(terminal.key).map_err(Failure::Unread)?;
+            Ok((terminal.tag, key))
+        });
+        tags.collect()
+    }
+
+    pub fn typed(&self, pastes: &[(TerminalKey, &Line)]) -> Result<(), Failure> {
+        use api::from_viewer::Event;
+        assert!(!pastes.is_empty(), "a paste is asked for");
+        assert!(pastes.len() <= TERMINALS_MAX, "no more pastes than terminals");
+        let said = |event| api::FromViewer { event: Some(event) };
+        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
+        let terminals = pastes.iter().map(|(key, _)| key.said()).collect();
+        let mut words = vec![
+            said(Event::Hello(hello)),
+            said(Event::Showing(api::Showing { terminals })),
+        ];
+        for (key, line) in pastes {
+            assert!(!line.as_str().contains('\n'), "a pasted line holds no newline to run it");
+            let paste = api::typed::Event::Paste(api::Paste { text: line.as_str().to_owned() });
+            let typed = api::Typed { terminal: Some(key.said()), event: Some(paste) };
+            words.push(said(Event::Typed(typed)));
+        }
+        assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
+        let refusals_max = 2 * pastes.len();
+        let server = reached()?;
+        let mut client = server.client.clone();
+        let drained = server.runtime.block_on(async move {
+            let shown = async move {
+                let mut heard = client.show(tokio_stream::iter(words)).await?.into_inner();
+                let mut reasons = Vec::new();
+                while let Some(word) = heard.message().await? {
+                    if let Some(api::to_viewer::Event::Refused(refusal)) = word.event {
+                        reasons.push(refusal.reason);
+                    }
+                    if reasons.len() >= refusals_max {
+                        break;
+                    }
+                }
+                Ok::<_, Status>(reasons)
+            };
+            tokio::time::timeout(ANSWER, shown).await
+        });
+        match drained {
+            Ok(Ok(reasons)) if reasons.is_empty() => Ok(()),
+            Ok(Ok(reasons)) => Err(Failure::Own(reasons.join("; "))),
+            Ok(Err(status)) => Err(refused(&status)),
+            Err(_) => Err(Failure::Own("luneta-mux kept showing the pastes too long".to_owned())),
+        }
     }
 
     pub fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
@@ -363,6 +413,14 @@ impl Terminals {
             asked => asked.map(drop).map_err(|status| refused(&status)),
         }
     }
+}
+
+fn listed() -> Result<Vec<api::Terminal>, Failure> {
+    let Some(server) = Server::reached()? else {
+        return Ok(Vec::new());
+    };
+    let listed = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
+    Ok(listed.map_err(|status| refused(&status))?.terminals)
 }
 
 fn reached() -> Result<Server, Failure> {

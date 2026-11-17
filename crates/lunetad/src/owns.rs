@@ -54,10 +54,11 @@ pub fn follow(
             });
             running.store(false, Ordering::Relaxed);
             let listens_soon = socket.as_deref().is_some_and(Path::exists);
-            let unreached_now = matches!(followed, Ok(Followed::Unreached));
+            let unreached_now = matches!(followed, Ok(Followed::Unreached { .. }));
+            let retried = listens_soon && unreached < UNREACHED_TRIES;
             let unlisted = match followed {
-                Ok(Followed::Unreached) if listens_soon && unreached < UNREACHED_TRIES => None,
-                Ok(Followed::Unreached) => Some(views::Command::Unreached),
+                Ok(Followed::Unreached { .. }) if retried => None,
+                Ok(Followed::Unreached { at }) => Some(views::Command::Unreached { since: at }),
                 Ok(Followed::Emptied { since }) => Some(views::Command::Emptied { since }),
                 Ok(Followed::LetGo) => return,
                 Err(failure) => {

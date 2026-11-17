@@ -1,5 +1,6 @@
 use std::fs;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
@@ -15,13 +16,17 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
 
 use crate::agents::file_of_pid;
-use crate::host::{eventually, folder_in};
+use crate::host::{eventually, folder_in, script};
 use crate::own::Owned;
 use crate::projects::{kept, project, workstream};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
 const HEARD_IN: Duration = Duration::from_secs(10);
+
+const RESTORE_PAUSE: Duration = Duration::from_secs(10);
+
+const RESTORE_ATTEMPTS_MAX: u32 = 3;
 
 struct Shown<'a> {
     owned: &'a Owned,
@@ -457,43 +462,169 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     assert!(shown.until_refused().contains("moves none"));
 }
 
-#[test]
-fn a_view_keeps_its_terminals_as_lost_when_the_mux_dies() {
-    let owned = Owned::new();
-    let workstream = workstream_in_home(&owned);
-    let mut shown = Shown::new(&owned, workstream, 80, 24);
-    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
-    owned.kill_mux();
-    let laid = shown.until("the terminal lost", |laid| lost(&laid.panes[0]));
-    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
-    let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.contains(&format!("{terminal:016x}")), "a lost terminal is kept: {file}");
+fn mux_key(key: TerminalKey) -> mux_api::TerminalKey {
+    mux_api::TerminalKey { id: key.id, made_at: key.made_at }
+}
 
-    let opened = shown.open();
-    assert_eq!(shown.refused, Vec::<String>::new(), "the first open after the mux died is made");
-    let laid = shown.laid.clone().unwrap();
-    let found = |id| laid.panes.iter().find(|pane| pane.terminal == id).unwrap();
-    assert!(key(found(opened)).is_some(), "the terminal opened runs in a new mux");
-    assert!(lost(found(terminal)), "the terminal lost stays lost");
-    shown.ask(Event::Close(()));
-    shown.until("the terminal opened closed", |laid| laid.panes.len() == 1);
-    shown.ask(Event::Close(()));
-    shown.until("the lost terminal closed", |laid| laid.panes.is_empty());
+fn front_of(owned: &Owned, terminal: u64) -> Option<Vec<String>> {
+    let listing = owned.listing();
+    let Some(mux_api::terminal::Program::Runs(runs)) = &tagged(&listing, terminal)?.program else {
+        return None;
+    };
+    runs.foreground.as_ref().map(|front| front.argv.clone())
+}
+
+fn logged(owned: &Owned) -> String {
+    let log = owned.host.home.path().join(".local/state/luneta/luneta.log");
+    fs::read_to_string(log).unwrap_or_default()
 }
 
 #[test]
-fn a_view_comes_back_lost_when_lunetad_starts_with_no_mux() {
+fn a_view_restores_its_terminals_when_the_mux_dies() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminals = [
+        heard_in_below(&owned, &mut shown, "sleep 602"),
+        heard_in_below(&owned, &mut shown, "sleep 606"),
+    ];
+    let laid = restored_after_kill(&owned, &mut shown);
+    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), terminals);
+    assert_eq!(shown.refused, Vec::<String>::new());
+    let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
+    let listing = owned.listing();
+    for (pane, command) in laid.panes.iter().zip(["sleep 602", "sleep 606"]) {
+        let listed = tagged(&listing, pane.terminal).expect("the new mux holds the terminal");
+        assert_eq!(listed.cwd, below.to_str().unwrap(), "a terminal comes back in its folder");
+        let restored = mux_key(key(pane).unwrap());
+        eventually("its last command is typed at the prompt", || {
+            owned.dumped(restored).contains(command).then_some(())
+        });
+        let front = front_of(&owned, pane.terminal).expect("a shell runs in the terminal");
+        assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
+    }
+    let log = logged(&owned);
+    for trouble in ["panicked", "not typed", "not restored"] {
+        assert!(!log.contains(trouble), "{log}");
+    }
+}
+
+#[test]
+fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let stays = heard_in_below(&owned, &mut shown, "sleep 602");
+    let closes = heard_in_below(&owned, &mut shown, "sleep 606");
+    let crashed = Instant::now();
+    let laid = restored_after_kill(&owned, &mut shown);
+    for pane in &laid.panes {
+        let restored = mux_key(key(pane).unwrap());
+        eventually("its last command is typed at the prompt", || {
+            owned.dumped(restored).contains("sleep 60").then_some(())
+        });
+    }
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(closes)) }));
+    shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
+    shown.ask(Event::Close(()));
+    let terminals = |laid: &Laid| laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>();
+    shown.until("the restored terminal closed", |laid| terminals(laid) == [stays]);
+    eventually("the closed terminal leaves the mux", || {
+        tagged(&owned.listing(), closes).is_none().then_some(())
+    });
+    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
+    let laid = restored_after_kill(&owned, &mut shown);
+    assert_eq!(terminals(&laid), [stays], "a closed terminal stays closed");
+    let again = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed again", || {
+        owned.dumped(again).contains("sleep 602").then_some(())
+    });
+    let front = front_of(&owned, stays).expect("a shell runs in the terminal");
+    assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
+    let log = logged(&owned);
+    for trouble in ["panicked", "not typed", "not restored"] {
+        assert!(!log.contains(trouble), "{log}");
+    }
+}
+
+#[test]
+fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 607");
+    let mut crashed = Instant::now();
+    restored_after_kill(&owned, &mut shown);
+    for _ in 1..RESTORE_ATTEMPTS_MAX {
+        thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
+        crashed = Instant::now();
+        restored_after_kill(&owned, &mut shown);
+    }
+    owned.kill_mux();
+    shown.until("the terminal left lost", |laid| lost(&laid.panes[0]));
+    eventually("the terminal is given up", || {
+        logged(&owned).contains("given up after 3 attempts").then_some(())
+    });
+    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()) + Duration::from_secs(3));
+    let unrun = std::os::unix::net::UnixStream::connect(owned.socket()).is_err();
+    assert!(unrun, "no luneta-mux is started again for a terminal given up");
+    assert!(lost(&shown.until("the terminal still lost", |_| true).panes[0]));
+}
+
+#[test]
+fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     let mut owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
-    let terminal = heard_in_below(&owned, &mut shown, "sleep 603");
+    heard_in_below(&owned, &mut shown, "sleep 603");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    fs::remove_dir_all(home.join("below")).unwrap();
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    let spans = r#""command": "sleep 603\necho done""#;
+    fs::write(kept(&owned.host), file.replace(r#""command": "sleep 603""#, spans)).unwrap();
+    owned.start_daemon();
+    let mut again = Shown::new(&owned, workstream, 80, 24);
+    again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    let folder = format!(r#""folder": "{}""#, home.display());
+    let file = eventually("what the terminal restored runs is read", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        file.contains(&folder).then_some(file)
+    });
+    assert!(file.contains(spans), "a command that spans lines is kept: {file}");
+    let log = logged(&owned);
+    assert!(log.contains("spans lines, and is kept, not typed"), "{log}");
+}
+
+#[test]
+fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
+    let mut owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = shown.open();
+    let pid = root_of(&owned, terminal);
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = file_of_pid("resumed-7c22", pid, "idle");
+    fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
+    let agent = r#""agent": {"harness": "claude-code", "session": "resumed-7c22"}"#;
+    eventually("the agent is kept as what the terminal runs", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        file.replace(['\n', ' '], "").contains(&agent.replace(' ', "")).then_some(())
+    });
+    let asked = owned.host.home.path().join("claude-asked");
+    let claude = owned.host.zellij.bin().join("claude");
+    script(&claude, &format!("echo \"$*\" > '{}'\nexec sleep 600\n", asked.display()));
     drop(shown);
     owned.stop_daemon();
     owned.kill_mux();
     owned.start_daemon();
     let mut again = Shown::new(&owned, workstream, 80, 24);
-    let laid = again.until("the terminal lost", |laid| laid.panes.iter().all(lost));
-    assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), [terminal]);
+    again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
+    assert_eq!(said, "--resume resumed-7c22\n");
 }
 
 #[test]
@@ -502,6 +633,17 @@ fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     heard_in_below(&owned, &mut shown, "sleep 601");
+}
+
+fn restored_after_kill(owned: &Owned, shown: &mut Shown) -> Laid {
+    let laid = shown.laid.clone().expect("a view was heard");
+    let before: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+    owned.kill_mux();
+    shown.until("the terminals restored", |laid| {
+        let found: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+        found.len() == before.len()
+            && found.iter().zip(&before).all(|(found, was)| found.is_some() && found != was)
+    })
 }
 
 fn heard_in_below(owned: &Owned, shown: &mut Shown, runs: &str) -> u64 {
@@ -549,10 +691,12 @@ fn a_workstream_lists_its_view_s_terminals_on_watch_in_their_order() {
     }
 
     owned.kill_mux();
-    eventually("the terminals are watched lost", || {
+    eventually("the terminals are watched restored, by new keys", || {
         let terminals = watched(&owned, workstream);
-        let lost = terminals.iter().all(|it| it.found == Some(terminal::Found::Lost(())));
-        (lost && terminals.len() == 2).then_some(())
+        let new = |(it, was): (&Terminal, &Option<terminal::Found>)| {
+            matches!(it.found, Some(terminal::Found::Key(_))) && it.found != *was
+        };
+        (terminals.len() == 2 && terminals.iter().zip(&found).all(new)).then_some(())
     });
 }
 
