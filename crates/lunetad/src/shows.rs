@@ -285,13 +285,18 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     folder: Folder,
     workstream: WorkstreamId,
     size: Size,
+    runs_in: Option<TerminalKey>,
     told: Told,
 ) -> Show {
     let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
     let showing = move |mut told: Told| {
         let built = runtime::Builder::new_current_thread().enable_all().build();
         let size = Some(size_said(size));
-        let hello = show_request::Hello { workstream: workstream.get(), size };
+        let runs_in = runs_in.map(|key| api::TerminalKey {
+            id: key.id.get(),
+            made_at: Some(key.made.into()),
+        });
+        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
             Err(error) => Heard::Lost(format!("no runtime: {error}")),

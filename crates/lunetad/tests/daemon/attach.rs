@@ -2,13 +2,15 @@ use std::time::Duration;
 
 use lunetad::api::terminal::Found;
 
-use crate::host::eventually;
+use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
 use crate::starts::{directory, mouse, projects_of, shown, Window};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
 const PRINTED: &str = "own-42";
+
+const HERE: &str = "luneta runs here";
 
 #[test]
 fn luneta_shows_its_workstream_and_what_its_shell_prints() {
@@ -92,4 +94,18 @@ fn named_lunetas_started_at_once_show_the_project_one_of_them_made() {
     let dir = directory("anywhere");
     let opening = || Window::opening(&owned.host, &dir, &["work"]);
     both_show(&owned, "work", [opening(), opening()]);
+}
+
+#[test]
+fn a_luneta_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
+    let owned = Owned::new();
+    let dir = directory("work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    let size = || owned.listing().terminals.first()?.size.map(|it| (it.columns, it.rows));
+    let first = eventually("the shell is sized", size);
+    window.send(&format!("{LUNETA}\r"));
+    eventually("the inner luneta says it runs there", || window.shows(HERE).then_some(()));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(size(), Some(first), "{:?}", window.screen());
 }

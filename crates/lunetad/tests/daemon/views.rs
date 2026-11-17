@@ -41,9 +41,18 @@ fn rect(column: u32, row: u32, columns: u32, rows: u32) -> show_response::Rect {
 
 impl<'a> Shown<'a> {
     fn new(owned: &'a Owned, workstream: u64, columns: u32, rows: u32) -> Shown<'a> {
+        Shown::running_in(owned, workstream, (columns, rows), None)
+    }
+
+    fn running_in(
+        owned: &'a Owned,
+        workstream: u64,
+        (columns, rows): (u32, u32),
+        runs_in: Option<TerminalKey>,
+    ) -> Shown<'a> {
         let folder = folder_in(owned.host.runtime.path()).unwrap();
         let (asks, asked) = mpsc::channel(16);
-        let hello = Hello { workstream, size: Some(size(columns, rows)) };
+        let hello = Hello { workstream, size: Some(size(columns, rows)), runs_in };
         asks.try_send(ShowRequest { event: Some(Event::Hello(hello)) }).unwrap();
         let heard = owned.block_on(async move {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
@@ -236,6 +245,32 @@ fn the_smallest_client_sizes_the_terminals_it_shares_with_others() {
     eventually("the terminal fills the wide client again", || {
         (sized(&owned, terminal) == Some((78, 22))).then_some(())
     });
+}
+
+#[test]
+fn a_client_that_runs_in_a_terminal_of_the_view_it_shows_sizes_none_of_it() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut outer = Shown::new(&owned, workstream, 80, 24);
+    let terminal = outer.open();
+    let runs_in = key(&outer.laid.clone().unwrap().panes[0]);
+    let mut inner = Shown::running_in(&owned, workstream, (50, 16), runs_in);
+    inner.until("the outer client's size", |laid| laid.size == Some(size(80, 24)));
+    let other = inner.open();
+    outer.until("the outer size with both", |laid| laid.panes.len() == 2);
+    assert_eq!(outer.laid.clone().unwrap().size, Some(size(80, 24)));
+    eventually("both terminals fit the outer client", || {
+        (sized(&owned, terminal) == Some((38, 22)) && sized(&owned, other) == Some((38, 22)))
+            .then_some(())
+    });
+    drop(outer);
+    let laid = inner.until("the inner size, alone", |laid| laid.size == Some(size(50, 16)));
+    let pane = laid.panes.iter().find(|pane| pane.terminal == other).unwrap();
+    let rect = pane.rect.unwrap();
+    eventually("the other terminal fits the inner client", || {
+        (sized(&owned, other) == Some((rect.columns - 2, rect.rows - 2))).then_some(())
+    });
+    assert_eq!(sized(&owned, terminal), Some((38, 22)), "the inner client's own keeps its size");
 }
 
 #[test]
@@ -558,7 +593,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, move |it| drop(heard.send(it)));
+    let show = lunetad::show(folder, workstream, size, None, move |it| drop(heard.send(it)));
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -620,7 +655,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, move |it| drop(heard.send(it)));
+    let show = lunetad::show(folder, workstream, size, None, move |it| drop(heard.send(it)));
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {

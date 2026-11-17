@@ -412,7 +412,8 @@ impl Viewed {
         let events = self.events.clone();
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
         let workstream = self.view.workstream;
-        self.show = Some(lunetad::show(opened, workstream, self.size, told));
+        let runs_in = self.view.runs_in;
+        self.show = Some(lunetad::show(opened, workstream, self.size, runs_in, told));
     }
 
     #[must_use]

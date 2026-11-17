@@ -46,6 +46,7 @@ pub enum Command {
     Came {
         workstream: WorkstreamId,
         size: Size,
+        runs_in: Option<TerminalKey>,
         out: Out,
         answer: oneshot::Sender<Result<ClientId, Status>>,
     },
@@ -233,6 +234,7 @@ struct Views {
 struct Client {
     workstream: WorkstreamId,
     size: Size,
+    runs_in: Option<TerminalKey>,
     focus: Option<TerminalId>,
     out: Out,
     said: Option<api::ShowResponse>,
@@ -279,8 +281,8 @@ impl Views {
             Command::Change { change, answer } => {
                 let _ = answer.send(self.store.change(change));
             },
-            Command::Came { workstream, size, out, answer } => {
-                let _ = answer.send(self.came(workstream, size, out));
+            Command::Came { workstream, size, runs_in, out, answer } => {
+                let _ = answer.send(self.came(workstream, size, runs_in, out));
             },
             Command::Asked { client, asked } => {
                 if !self.clients.contains_key(&client) {
@@ -314,7 +316,13 @@ impl Views {
         }
     }
 
-    fn came(&mut self, workstream: WorkstreamId, size: Size, out: Out) -> Result<ClientId, Status> {
+    fn came(
+        &mut self,
+        workstream: WorkstreamId,
+        size: Size,
+        runs_in: Option<TerminalKey>,
+        out: Out,
+    ) -> Result<ClientId, Status> {
         if self.clients.len() >= CLIENTS_MAX {
             let many = format!("{CLIENTS_MAX} clients show views, as many as may");
             return Err(Status::resource_exhausted(many));
@@ -326,7 +334,7 @@ impl Views {
         let focus = arrival(shown, self.last_focus.get(&workstream).copied());
         self.arrivals += 1;
         let id = ClientId(self.arrivals);
-        let client = Client { workstream, size, focus, out, said: None };
+        let client = Client { workstream, size, runs_in, focus, out, said: None };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
         Ok(id)
     }
@@ -435,8 +443,11 @@ impl Views {
 
     fn size_of(&self, client: ClientId) -> Size {
         let Client { workstream, size, .. } = self.clients[&client];
+        let Some((_, found)) = self.store.projects().and_then(|it| it.find(workstream)) else {
+            return size;
+        };
         let shown = self.clients.values().filter(|it| it.workstream == workstream);
-        shown.map(|it| it.size).fold(size, Size::least)
+        fit(shown, found.view(), &self.known).map_or(size, |fit| fit.size)
     }
 
     fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
@@ -720,12 +731,15 @@ impl Views {
         last_focus.retain(|workstream, terminal| {
             projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
         });
-        let mut sizes: BTreeMap<WorkstreamId, Size> = BTreeMap::new();
-        for client in clients.values() {
-            let size = sizes.entry(client.workstream).or_insert(client.size);
-            *size = size.least(client.size);
+        let workstreams: BTreeSet<_> = clients.values().map(|it| it.workstream).collect();
+        let mut fits: BTreeMap<WorkstreamId, Fit> = BTreeMap::new();
+        for workstream in workstreams {
+            let (_, found) = projects.find(workstream).expect("a client's workstream is held");
+            let shown = clients.values().filter(|it| it.workstream == workstream);
+            let fitted = fit(shown, found.view(), known).expect("a workstream shown has a client");
+            fits.insert(workstream, fitted);
         }
-        for (&workstream, &size) in &sizes {
+        for (&workstream, &Fit { size, outside }) in &fits {
             let (_, found) = projects.find(workstream).expect("a client's workstream is held");
             let Some(tree) = found.view().tree() else {
                 continue;
@@ -738,7 +752,11 @@ impl Views {
                 let Some(known) = known.get_mut(&terminal) else {
                     continue;
                 };
-                if known.sized == Some(wanted) {
+                let runs_in = |it: &Client| {
+                    it.workstream == workstream && it.runs_in == Some(known.key)
+                };
+                let pinned = !outside && clients.values().any(runs_in);
+                if known.sized == Some(wanted) || pinned {
                     continue;
                 }
                 match mux.sized(known.key, wanted) {
@@ -753,7 +771,7 @@ impl Views {
         for (id, client) in clients.iter_mut() {
             let found = projects.find(client.workstream);
             let (_, found) = found.expect("a client's workstream is held");
-            let size = sizes[&client.workstream];
+            let size = fits[&client.workstream].size;
             let laid = laid(found, size, client.focus, known, *looked);
             if client.said.as_ref() == Some(&laid) {
                 continue;
@@ -769,6 +787,33 @@ impl Views {
         }
         assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show views");
     }
+}
+
+#[derive(Clone, Copy)]
+struct Fit {
+    size: Size,
+    outside: bool,
+}
+
+fn fit<'a>(
+    shown: impl Iterator<Item = &'a Client>,
+    view: &View,
+    known: &BTreeMap<TerminalId, Known>,
+) -> Option<Fit> {
+    shown.fold(None, |fitted, client| {
+        let outside = !inside(client, view, known);
+        let size = match fitted {
+            Some(Fit { outside: true, .. }) if !outside => return fitted,
+            Some(fitted) if fitted.outside == outside => fitted.size.least(client.size),
+            Some(_) | None => client.size,
+        };
+        Some(Fit { size, outside })
+    })
+}
+
+fn inside(client: &Client, view: &View, known: &BTreeMap<TerminalId, Known>) -> bool {
+    let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && view.holds(*id));
+    client.runs_in.is_some_and(holds)
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -1072,7 +1117,7 @@ mod tests {
                 beside: largest(),
                 argv: vec!["x".to_owned(); ARGV_MAX + 1],
             }),
-            Event::Hello(show_request::Hello { workstream: 1, size: None }),
+            Event::Hello(show_request::Hello { workstream: 1, size: None, runs_in: None }),
         ];
         for event in refused {
             assert!(Asked::of_api(event.clone()).is_err(), "{event:?}");
