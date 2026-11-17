@@ -1,5 +1,6 @@
 use std::fs;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
@@ -22,6 +23,8 @@ use crate::projects::{kept, project, workstream};
 const WAITS: [&str; 2] = ["sleep", "600"];
 
 const HEARD_IN: Duration = Duration::from_secs(10);
+
+const RESTORE_PAUSE: Duration = Duration::from_secs(10);
 
 struct Shown<'a> {
     owned: &'a Owned,
@@ -483,13 +486,7 @@ fn a_view_restores_its_terminals_when_the_mux_dies() {
         heard_in_below(&owned, &mut shown, "sleep 602"),
         heard_in_below(&owned, &mut shown, "sleep 606"),
     ];
-    let laid = shown.laid.clone().unwrap();
-    let before: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
-    owned.kill_mux();
-    let laid = shown.until("the terminals restored", |laid| {
-        let found: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
-        found.iter().zip(&before).all(|(found, was)| found.is_some() && found != was)
-    });
+    let laid = restored_after_kill(&owned, &mut shown);
     assert_eq!(laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>(), terminals);
     assert_eq!(shown.refused, Vec::<String>::new());
     let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
@@ -504,6 +501,44 @@ fn a_view_restores_its_terminals_when_the_mux_dies() {
         let front = front_of(&owned, pane.terminal).expect("a shell runs in the terminal");
         assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
     }
+    let log = logged(&owned);
+    for trouble in ["panicked", "not typed", "not restored"] {
+        assert!(!log.contains(trouble), "{log}");
+    }
+}
+
+#[test]
+fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let stays = heard_in_below(&owned, &mut shown, "sleep 602");
+    let closes = heard_in_below(&owned, &mut shown, "sleep 606");
+    let crashed = Instant::now();
+    let laid = restored_after_kill(&owned, &mut shown);
+    for pane in &laid.panes {
+        let restored = mux_key(key(pane).unwrap());
+        eventually("its last command is typed at the prompt", || {
+            owned.dumped(restored).contains("sleep 60").then_some(())
+        });
+    }
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(closes)) }));
+    shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
+    shown.ask(Event::Close(()));
+    let terminals = |laid: &Laid| laid.panes.iter().map(|pane| pane.terminal).collect::<Vec<_>>();
+    shown.until("the restored terminal closed", |laid| terminals(laid) == [stays]);
+    eventually("the closed terminal leaves the mux", || {
+        tagged(&owned.listing(), closes).is_none().then_some(())
+    });
+    thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
+    let laid = restored_after_kill(&owned, &mut shown);
+    assert_eq!(terminals(&laid), [stays], "a closed terminal stays closed");
+    let again = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed again", || {
+        owned.dumped(again).contains("sleep 602").then_some(())
+    });
+    let front = front_of(&owned, stays).expect("a shell runs in the terminal");
+    assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
     let log = logged(&owned);
     for trouble in ["panicked", "not typed", "not restored"] {
         assert!(!log.contains(trouble), "{log}");
@@ -572,6 +607,17 @@ fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     heard_in_below(&owned, &mut shown, "sleep 601");
+}
+
+fn restored_after_kill(owned: &Owned, shown: &mut Shown) -> Laid {
+    let laid = shown.laid.clone().expect("a view was heard");
+    let before: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+    owned.kill_mux();
+    shown.until("the terminals restored", |laid| {
+        let found: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+        found.len() == before.len()
+            && found.iter().zip(&before).all(|(found, was)| found.is_some() && found != was)
+    })
 }
 
 fn heard_in_below(owned: &Owned, shown: &mut Shown, runs: &str) -> u64 {

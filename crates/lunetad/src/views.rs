@@ -224,7 +224,6 @@ pub fn start(
         listed: BTreeMap::new(),
         looked: false,
         last_focus: BTreeMap::new(),
-        restores: BTreeMap::new(),
         restore_round: BTreeSet::new(),
         restore_last_at: None,
         restore_attempts: Attempts::default(),
@@ -247,7 +246,6 @@ struct Views {
     listed: BTreeMap<TerminalKey, server::Terminal>,
     looked: bool,
     last_focus: BTreeMap<WorkstreamId, TerminalId>,
-    restores: BTreeMap<TerminalId, Restored>,
     restore_round: BTreeSet<TerminalId>,
     restore_last_at: Option<Instant>,
     restore_attempts: Attempts,
@@ -270,6 +268,7 @@ struct Known {
     heard: Heard,
     sized: Option<Size>,
     agent_front: Option<u32>,
+    restored: Option<Restored>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,16 +569,22 @@ impl Views {
                 return Err(failure.to_string());
             },
         };
-        self.made(terminal, key, Some(inner));
+        self.made(terminal, key, Some(inner), None);
         self.client(client).focus = Some(terminal);
         self.last_focus.insert(workstream, terminal);
         Ok(())
     }
 
-    fn made(&mut self, terminal: TerminalId, key: TerminalKey, sized: Option<Size>) {
+    fn made(
+        &mut self,
+        terminal: TerminalId,
+        key: TerminalKey,
+        sized: Option<Size>,
+        restored: Option<Restored>,
+    ) {
         let heard_none = !self.known.values().any(|known| known.heard == Heard::Seen);
         let heard = Heard::Made(Instant::now());
-        let known = Known { key, heard, sized, agent_front: None };
+        let known = Known { key, heard, sized, agent_front: None, restored };
         assert!(self.known.insert(terminal, known).is_none(), "terminal {terminal} is made once");
         if heard_none {
             match self.follower.try_send(()) {
@@ -641,7 +646,7 @@ impl Views {
             if self.known.values().any(|known| known.key == key) || !adopted.insert(terminal) {
                 continue;
             }
-            self.made(terminal, key, None);
+            self.made(terminal, key, None, None);
         }
         assert!(adopted.is_subset(&lost), "only a lost terminal is adopted");
         let keys: BTreeSet<TerminalKey> = self.known.values().map(|known| known.key).collect();
@@ -669,8 +674,6 @@ impl Views {
             }
         }
         assert!(remade <= RESTORES_PER_PASS, "a pass restores no more than its share");
-        let known = |terminal: &TerminalId| self.known.contains_key(terminal);
-        assert!(self.restores.keys().all(known), "a terminal restored is known");
     }
 
     fn remade(&mut self, terminal: TerminalId) -> Result<(), String> {
@@ -705,36 +708,29 @@ impl Views {
             },
         };
         let key = self.mux.made(&cwd, opened, tag(terminal), inner).map_err(|it| it.to_string())?;
-        self.made(terminal, key, Some(inner));
+        self.made(terminal, key, Some(inner), restore);
         assert_eq!(self.known.get(&terminal).map(|it| it.key), Some(key), "a remade one is known");
-        match restore {
-            Some(restore) => self.restores.insert(terminal, restore),
-            None => self.restores.remove(&terminal),
-        };
         Ok(())
     }
 
     fn type_due(&mut self) {
-        let Views { restores, known, listed, mux, troubles, .. } = self;
-        restores.retain(|terminal, _| known.contains_key(terminal));
+        let Views { known, listed, mux, troubles, .. } = self;
         let now = Instant::now();
         let mut pastes_due: Vec<(TerminalId, TerminalKey, Line)> = Vec::new();
-        for (terminal, restore) in restores.iter_mut() {
-            let Restored::Typing { line, due } = restore else {
+        for (terminal, known) in known.iter_mut() {
+            let Some(Restored::Typing { line, due }) = &known.restored else {
                 continue;
             };
-            let key = known[terminal].key;
             let prompts = |listed: &server::Terminal| {
                 matches!(listed.is, Is::Running { word: Some(Word::Prompts), .. })
             };
-            let ready = listed.get(&key).is_some_and(prompts) || now >= *due;
+            let ready = listed.get(&known.key).is_some_and(prompts) || now >= *due;
             if ready {
-                pastes_due.push((*terminal, key, line.clone()));
-                *restore = Restored::Kept;
+                pastes_due.push((*terminal, known.key, line.clone()));
+                known.restored = Some(Restored::Kept);
             }
         }
-        assert!(restores.len() <= known.len(), "each terminal restored is one known");
-        assert!(pastes_due.len() <= restores.len(), "a paste is due only where one is restored");
+        assert!(pastes_due.len() <= known.len(), "a paste is due only where one is restored");
         if pastes_due.is_empty() {
             return;
         }
@@ -844,7 +840,8 @@ impl Views {
                     }
                 },
                 Some(_) | None => {
-                    let known = Known { key, heard: Heard::Seen, sized: size, agent_front: None };
+                    let heard = Heard::Seen;
+                    let known = Known { key, heard, sized: size, agent_front: None, restored: None };
                     self.known.insert(terminal, known);
                 },
             }
@@ -866,7 +863,7 @@ impl Views {
             return;
         }
         let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
-        let Views { store, known, listed, shell, restores, .. } = self;
+        let Views { store, known, listed, shell, .. } = self;
         let Some(projects) = store.projects() else {
             return;
         };
@@ -889,10 +886,10 @@ impl Views {
             if was_agent && !matches!(runs, Runs::Agent { .. }) && same_front {
                 runs = held.runs().clone();
             }
-            if keeps(restores.get(terminal), &listed.is, &runs) {
+            if keeps(known.restored.as_ref(), &listed.is, &runs) {
                 runs = held.runs().clone();
             } else {
-                restores.remove(terminal);
+                known.restored = None;
             }
             known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
             if folder != *held.folder() || runs != *held.runs() {
