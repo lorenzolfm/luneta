@@ -5,12 +5,20 @@ use luneta_protocol::unread::Unplaced;
 
 use crate::api::session::Mux;
 use crate::api::{agent, Agent, Harness, Pane, Session, UnreadFile, Zellij};
-use crate::mux::{OwnKey, OwnPane};
+use crate::mux::{OwnKey, OwnMade, OwnPane, TerminalKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Where<'a> {
     Zellij(&'a str),
     Own(OwnKey),
+    Terminal(OwnMade),
+}
+
+impl Where<'_> {
+    #[must_use]
+    pub fn of_terminal(key: TerminalKey) -> (Where<'static>, u32) {
+        (Where::Terminal(key.made), key.id.get())
+    }
 }
 
 #[must_use]
@@ -29,6 +37,7 @@ pub fn seated<'a>(
             Some(agent::Pane::Own(own)) => {
                 OwnPane::of(own).ok().map(|own| (Where::Own(own.session), own.id.get()))
             },
+            Some(agent::Pane::Terminal(key)) => TerminalKey::of(key).ok().map(Where::of_terminal),
             None => None,
         };
         let Some(seat) = seat else {
@@ -88,20 +97,28 @@ pub enum UnreadSeat<'a> {
     NoPane,
     Zellij { session: &'a str, pane: u32 },
     Own(OwnPane),
+    Terminal(TerminalKey),
     Unplaced,
 }
 
 impl<'a> UnreadSeat<'a> {
     #[must_use]
     pub fn of(file: &'a UnreadFile) -> Self {
-        match (&file.zellij, &file.own) {
-            (None, None) => UnreadSeat::NoPane,
-            (Some(zellij), None) => match zellij.session.as_deref() {
+        match (&file.zellij, &file.own, &file.terminal) {
+            (None, None, None) => UnreadSeat::NoPane,
+            (Some(zellij), None, None) => match zellij.session.as_deref() {
                 Some(session) => UnreadSeat::Zellij { session, pane: zellij.pane },
                 None => UnreadSeat::Unplaced,
             },
-            (None, Some(own)) => OwnPane::of(own).map_or(UnreadSeat::Unplaced, UnreadSeat::Own),
-            (Some(_), Some(_)) => UnreadSeat::Unplaced,
+            (None, Some(own), None) => {
+                OwnPane::of(own).map_or(UnreadSeat::Unplaced, UnreadSeat::Own)
+            },
+            (None, None, Some(key)) => {
+                TerminalKey::of(key).map_or(UnreadSeat::Unplaced, UnreadSeat::Terminal)
+            },
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                UnreadSeat::Unplaced
+            },
         }
     }
 }
@@ -116,6 +133,7 @@ pub fn unread(told: u32, files: &[UnreadFile]) -> Result<Vec<(Where<'_>, u32)>, 
             UnreadSeat::NoPane => {},
             UnreadSeat::Zellij { session, pane } => seats.push((Where::Zellij(session), pane)),
             UnreadSeat::Own(own) => seats.push((Where::Own(own.session), own.id.get())),
+            UnreadSeat::Terminal(key) => seats.push(Where::of_terminal(key)),
             UnreadSeat::Unplaced => unplaced += 1,
         }
     }
@@ -139,7 +157,7 @@ mod tests {
             session: session.map(str::to_owned),
             pane,
         });
-        UnreadFile { pid, zellij, own: None }
+        UnreadFile { pid, zellij, own: None, terminal: None }
     }
 
     fn unplaced(unread: u32, unplaced: u32) -> Unplaced {
@@ -174,6 +192,27 @@ mod tests {
         let unkeyed = in_own(api::Own { session: None, ..pane });
         let both = UnreadFile { own: Some(pane), ..file(10, Some(("work", Some("work"), 3))) };
         for unplaceable in [zero, unkeyed, both] {
+            let files = std::slice::from_ref(&unplaceable);
+            assert_eq!(unread(1, files), Err(unplaced(1, 1)), "{unplaceable:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_in_a_terminal_is_in_the_terminal_of_its_key() {
+        let in_terminal =
+            |key: api::TerminalKey| UnreadFile { terminal: Some(key), ..file(10, None) };
+        let id = NonZeroU32::new(7).unwrap();
+        let key = TerminalKey { id, made: OwnMade::from_nanos(60) };
+        let said = api::TerminalKey::from(key);
+        let placed = [in_terminal(said)];
+        let seats = unread(1, &placed);
+        assert_eq!(seats, Ok(vec![(Where::Terminal(OwnMade::from_nanos(60)), 7)]));
+
+        let zero = in_terminal(api::TerminalKey { id: 0, ..said });
+        let unmade = in_terminal(api::TerminalKey { made_at: None, ..said });
+        let own = api::Own::from(OwnPane::new(self::key(3), 12).unwrap());
+        let both = UnreadFile { own: Some(own), ..in_terminal(said) };
+        for unplaceable in [zero, unmade, both] {
             let files = std::slice::from_ref(&unplaceable);
             assert_eq!(unread(1, files), Err(unplaced(1, 1)), "{unplaceable:?}");
         }

@@ -743,6 +743,7 @@ message UnreadFile {
   uint32 pid = 1;
   Zellij zellij = 2;
   Own own = 3;
+  TerminalKey terminal = 4;
 }
 
 message Agent {
@@ -760,6 +761,7 @@ message Agent {
   oneof pane {
     Zellij zellij = 9;
     Own own = 16;
+    TerminalKey terminal = 17;
   }
   oneof waiting_for {
     WaitingFor known_waiting_for = 11;
@@ -949,6 +951,21 @@ message Workstream {
     Stage stage = 6;
     google.protobuf.Empty unread = 7;
   }
+  repeated Terminal terminals = 8;
+}
+
+message Terminal {
+  fixed64 id = 1;
+  oneof found {
+    TerminalKey key = 2;
+    google.protobuf.Empty lost = 3;
+    google.protobuf.Empty looking = 4;
+  }
+  string folder = 5;
+  optional string command = 6;
+  Titled titled = 7;
+  Shell shell = 8;
+  bool held = 9;
 }
 
 enum Stage {

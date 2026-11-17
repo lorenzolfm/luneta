@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
-use lunetad::api::{ShowRequest, ShowResponse, TerminalKey};
+use lunetad::api::projects::Held;
+use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey};
 use lunetad::mux::own::api::{self as mux_api, Listing};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
 
+use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in};
 use crate::own::Owned;
 use crate::projects::{kept, project, workstream};
@@ -139,6 +141,25 @@ fn tagged(listing: &Listing, terminal: u64) -> Option<&mux_api::Terminal> {
 fn sized(owned: &Owned, terminal: u64) -> Option<(u32, u32)> {
     let size = tagged(&owned.listing(), terminal)?.size?;
     Some((size.columns, size.rows))
+}
+
+fn watched(owned: &Owned, workstream: u64) -> Vec<Terminal> {
+    let host = owned.host.host();
+    let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
+        panic!("lunetad keeps no projects");
+    };
+    let workstreams = kept.projects.into_iter().flat_map(|project| project.workstreams);
+    let mut workstreams = workstreams.filter(|it| it.id == workstream);
+    workstreams.next().expect("lunetad watches the workstream").terminals
+}
+
+fn root_of(owned: &Owned, terminal: u64) -> u32 {
+    let listing = owned.listing();
+    let listed = tagged(&listing, terminal).expect("the mux holds the terminal");
+    let Some(mux_api::terminal::Program::Runs(runs)) = &listed.program else {
+        panic!("terminal {terminal} runs nothing: {listed:?}");
+    };
+    runs.pid
 }
 
 fn workstream_in_home(owned: &Owned) -> u64 {
@@ -395,4 +416,62 @@ fn heard_in_below(owned: &Owned, shown: &mut Shown, runs: &str) -> u64 {
         (file.contains(&folder) && file.contains(&command)).then_some(())
     });
     terminal
+}
+
+#[test]
+fn a_workstream_lists_its_view_s_terminals_on_watch_in_their_order() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let plain = shown.open();
+    let titled = r"printf '\033]0;\342\234\263 Fixing the tests\007'; exec sleep 604";
+    let topical = shown.open_running(&["sh", "-c", titled]);
+    let laid = shown.laid.clone().unwrap();
+    let keys: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+    let (plain_key, topical_key) = (keys[0], keys[1]);
+    let told = eventually("the terminals and what they run are watched", || {
+        let terminals = watched(&owned, workstream);
+        let ran = terminals.iter().map(|it| it.command.as_deref()).collect::<Vec<_>>();
+        let titled = terminals.get(1).and_then(|it| it.titled.as_ref());
+        (ran == [Some("sleep 600"), Some("sleep 604")] && titled.is_some()).then_some(terminals)
+    });
+    let ids: Vec<u64> = told.iter().map(|it| it.id).collect();
+    assert_eq!(ids, [plain, topical]);
+    let found: Vec<Option<terminal::Found>> = told.iter().map(|it| it.found).collect();
+    let said = |key: Option<TerminalKey>| Some(terminal::Found::Key(key.unwrap()));
+    assert_eq!(found, [said(plain_key), said(topical_key)]);
+    let topic = told[1].titled.as_ref().and_then(|titled| titled.topic.as_deref());
+    assert_eq!(topic, Some("Fixing the tests"));
+    for terminal in &told {
+        assert_eq!((terminal.folder.as_str(), terminal.held), (home.to_str().unwrap(), false));
+    }
+
+    owned.kill_mux();
+    eventually("the terminals are watched lost", || {
+        let terminals = watched(&owned, workstream);
+        let lost = terminals.iter().all(|it| it.found == Some(terminal::Found::Lost(())));
+        (lost && terminals.len() == 2).then_some(())
+    });
+}
+
+#[test]
+fn an_agent_in_a_view_s_terminal_is_there_by_the_terminal_s_key() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let terminal = shown.open();
+    let laid = shown.laid.clone().unwrap();
+    let key = key(&laid.panes[0]).unwrap();
+    let pid = root_of(&owned, terminal);
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = file_of_pid("in-a-view", pid, "busy");
+    fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
+
+    let agent = eventually("the agent is on the host", || {
+        owned.host.host().agents.into_iter().find(|agent| agent.pid == pid)
+    });
+    assert_eq!(agent.pane, Some(agent::Pane::Terminal(key)));
+    assert_eq!(agent.zellij(), None);
 }

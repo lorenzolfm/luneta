@@ -365,9 +365,10 @@ pub fn followed(
             return Ok(Followed::Emptied { since });
         };
         let (listed, mut unread) = read(listing.sessions);
-        let (terminals, unread_terminals) = terminals(listing.terminals);
+        let (terminals, unread_terminals, unsaid) = terminals(listing.terminals);
         let whole = unread_terminals.is_empty();
         unread.extend(unread_terminals);
+        unread.extend(unsaid);
         if !told(listed, unread, TerminalsListed { terminals, whole, since }) {
             return Ok(Followed::LetGo);
         }
@@ -387,13 +388,14 @@ pub struct Terminal {
     pub tag: Vec<u8>,
     pub size: Option<Size>,
     pub cwd: String,
+    pub title: String,
     pub is: Is,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Is {
     Ended,
-    Running { root: u32, front: Option<Foreground>, word: Option<Word> },
+    Running { root: u32, front: Option<Foreground>, word: Option<Word>, doing: Option<Doing> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -408,43 +410,56 @@ pub enum Word {
     Going(Option<String>),
 }
 
-fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>) {
+fn terminals(listed: Vec<api::Terminal>) -> (Vec<Terminal>, Vec<String>, Vec<String>) {
     let count = listed.len();
     let mut terminals: Vec<Terminal> = Vec::with_capacity(listed.len());
     let mut ids = HashSet::with_capacity(listed.len());
-    let mut unread = Vec::new();
+    let (mut unread, mut unsaid) = (Vec::new(), Vec::new());
     for terminal in listed {
         match terminal_of(terminal) {
-            Ok(read) if !ids.insert(read.key.id) => {
+            Ok((read, _)) if !ids.insert(read.key.id) => {
                 unread.push(format!("terminal {} is listed twice", read.key.id));
             },
-            Ok(read) => terminals.push(read),
+            Ok((read, shell)) => {
+                unsaid.extend(shell.map(|why| format!("terminal {}'s shell: {why}", read.key.id)));
+                terminals.push(read);
+            },
             Err(why) => unread.push(why),
         }
     }
     assert_eq!(terminals.len() + unread.len(), count, "each terminal listed is read or unread");
-    (terminals, unread)
+    (terminals, unread, unsaid)
 }
 
-fn terminal_of(terminal: api::Terminal) -> Result<Terminal, String> {
+fn terminal_of(terminal: api::Terminal) -> Result<(Terminal, Option<String>), String> {
     use api::ran::Is as Said;
     let key = TerminalKey::read(terminal.key)?;
     let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
     let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
+    let mut unsaid = None;
     let is = match terminal.program {
         None => return Err(format!("terminal {} runs nothing it says", key.id)),
         Some(api::terminal::Program::Ended(_)) => Is::Ended,
         Some(api::terminal::Program::Runs(runs)) => {
             let front = runs.foreground;
             let front = front.map(|front| Foreground { pid: front.pid, argv: front.argv });
-            let word = runs.ran.and_then(|ran| ran.is).map(|is| match is {
+            let said = runs.ran.and_then(|ran| ran.is);
+            let doing = match said.as_ref().map(doing).transpose() {
+                Ok(doing) => doing,
+                Err(why) => {
+                    unsaid = Some(why);
+                    None
+                },
+            };
+            let word = said.map(|is| match is {
                 Said::Ready(_) | Said::Ended(_) | Said::Stopped(_) => Word::Prompts,
                 Said::Going(going) => Word::Going(going.command),
             });
-            Is::Running { root: runs.pid, front, word }
+            Is::Running { root: runs.pid, front, word, doing }
         },
     };
-    Ok(Terminal { key, tag: terminal.tag, size, cwd: terminal.cwd, is })
+    let (tag, cwd, title) = (terminal.tag, terminal.cwd, terminal.title);
+    Ok((Terminal { key, tag, size, cwd, title, is }, unsaid))
 }
 
 pub struct Terminals;

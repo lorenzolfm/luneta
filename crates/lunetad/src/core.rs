@@ -13,14 +13,17 @@ use crate::agent::Agent;
 use crate::api;
 use crate::claude::Scan;
 use crate::github::Found;
-use crate::panes::{self, Pane};
-use crate::projects::{Dir, Name, Project, Projects, Seen, Stage};
+use crate::mux::own::server::{self, Is};
+use crate::panes::{self, Pane, Titled};
+use crate::projects::layout::Leaf as _;
+use crate::projects::{Dir, Name, Project, Projects, Seen, Stage, TerminalId, Workstream};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
 use crate::log;
 use crate::transcripts::SessionId;
 use crate::mux::{Client, Id, Listed, OwnId, OwnKey, OwnMade, SessionName, Sessions, Socket};
+use crate::mux::TerminalKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
@@ -45,6 +48,19 @@ impl Own {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub key: TerminalKey,
+    pub listed: Option<Box<server::Terminal>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Located {
+    Shown(Shown),
+    Lost,
+    Looking,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Branch {
     pub repository: Said,
@@ -58,6 +74,7 @@ pub enum Command {
     Panes { asked: Asked, panes: Vec<Pane> },
     Clients { asked: Asked, clients: Listed },
     Owns(Vec<Own>),
+    Terminals(BTreeMap<TerminalId, Located>),
     WorkTree { dir: String, tree: WorkTree },
     PullRequests(BTreeMap<String, Found>),
     Shells(Vec<Shell>),
@@ -116,6 +133,7 @@ struct Known {
     sessions: Sessions,
     unread_sockets: u32,
     owns: Vec<Own>,
+    terminals: BTreeMap<TerminalId, Located>,
     shared: BTreeSet<SessionName>,
     panes: HashMap<Id, Vec<Pane>>,
     clients: HashMap<Id, Listed>,
@@ -142,6 +160,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         sessions: Sessions::default(),
         unread_sockets: 0,
         owns: Vec::new(),
+        terminals: BTreeMap::new(),
         shared: BTreeSet::new(),
         panes: HashMap::new(),
         clients: HashMap::new(),
@@ -199,6 +218,13 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
                 known.say_shared();
+            },
+            Command::Terminals(now) => {
+                let before = known.dirs();
+                known.terminals = now;
+                if !known.dirs().is_subset(&before) {
+                    wake(&wakes.git);
+                }
             },
             Command::WorkTree { dir, tree } => {
                 if !known.dirs().contains(&dir) {
@@ -432,6 +458,11 @@ impl Known {
         let owns = self.owns.iter().flat_map(|own| &own.panes);
         let cwds = self.panes.values().flatten().chain(owns).filter_map(|pane| pane.cwd.as_ref());
         let cwds = cwds.map(|cwd| cwd.as_str().to_owned());
+        let listed = self.terminals.values().filter_map(|found| match found {
+            Located::Shown(Shown { listed: Some(listed), .. }) => Dir::parse(&listed.cwd).ok(),
+            Located::Shown(Shown { listed: None, .. }) | Located::Lost | Located::Looking => None,
+        });
+        let cwds = cwds.chain(listed.map(|cwd| cwd.as_str().to_owned()));
         let present = |folder: &Dir| !self.missing.contains(folder);
         let folders = self.projects.iter().flat_map(Projects::workstream_folders).filter(present);
         cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
@@ -566,6 +597,7 @@ impl Known {
                     renamed: renamed.is_some(),
                     seen: Some(self.seen(&folder).to_api()),
                     folder: folder.as_str().to_owned(),
+                    terminals: self.built_terminals(workstream),
                 }
             });
             built.collect()
@@ -579,6 +611,42 @@ impl Known {
         };
         let kept = api::projects::Kept { projects: projects.all().iter().map(project).collect() };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
+    }
+
+    fn built_terminals(&self, workstream: &Workstream) -> Vec<api::Terminal> {
+        use api::terminal::Found as Told;
+        let built = workstream.view().terminals().map(|terminal| {
+            let id = terminal.id();
+            let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
+            let (told, listed) = match found {
+                Located::Shown(Shown { key, listed }) => {
+                    (Told::Key((*key).into()), listed.as_deref())
+                },
+                Located::Lost => (Told::Lost(()), None),
+                Located::Looking => (Told::Looking(()), None),
+            };
+            let cwd = listed.and_then(|listed| Dir::parse(&listed.cwd).ok());
+            let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
+            let (command, doing, held) = match listed.map(|listed| &listed.is) {
+                Some(Is::Running { front, doing, .. }) => {
+                    let command = front.as_ref().and_then(|front| Said::new(front.argv.join(" ")));
+                    (command, doing.as_ref(), false)
+                },
+                Some(Is::Ended) => (None, None, true),
+                None => (None, None, false),
+            };
+            let titled = listed.and_then(|listed| panes::titled(&listed.title));
+            api::Terminal {
+                id: id.get(),
+                found: Some(told),
+                folder: folder.as_str().to_owned(),
+                command: command.map(String::from),
+                titled: titled.as_ref().map(Titled::to_api),
+                shell: doing.map(Doing::to_api),
+                held,
+            }
+        });
+        built.collect()
     }
 
     fn seen(&self, folder: &Dir) -> Seen {

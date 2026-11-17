@@ -11,7 +11,7 @@ use lunetad::api::{agent, Agent, UnreadFile, Zellij};
 use lunetad::asks::{self, Turn, User, AGENTS_VAR};
 use lunetad::closes::Whose;
 use lunetad::mux::own::server::{self, Listing, Mover, Place};
-use lunetad::mux::{self, Client, OwnKey, OwnPane, PaneId, ZellijPane};
+use lunetad::mux::{self, Client, OwnKey, OwnPane, PaneId, TerminalKey, ZellijPane};
 use lunetad::opens;
 use lunetad::prunes;
 use lunetad::seats::{self, UnreadSeat, Where};
@@ -878,6 +878,7 @@ fn whose_of(act: &Act) -> Whose {
 enum Spot<'a> {
     Zellij { session: &'a str, pane: u32 },
     Own(OwnPane),
+    Terminal(TerminalKey),
     Unplaced,
 }
 
@@ -893,6 +894,7 @@ impl<'a> Spot<'a> {
         match UnreadSeat::of(file) {
             UnreadSeat::Zellij { session, pane } => Spot::Zellij { session, pane },
             UnreadSeat::Own(pane) => Spot::Own(pane),
+            UnreadSeat::Terminal(key) => Spot::Terminal(key),
             UnreadSeat::NoPane | UnreadSeat::Unplaced => Spot::Unplaced,
         }
     }
@@ -920,6 +922,9 @@ fn placed<'a>(agents: &'a [Agent]) -> Result<Vec<Placed<'a>>, String> {
             Some(agent::Pane::Own(own)) => Spot::Own(
                 OwnPane::of(own).map_err(|why| format!("lunetad lists an agent in {why}"))?,
             ),
+            Some(agent::Pane::Terminal(key)) => Spot::Terminal(
+                TerminalKey::of(key).map_err(|why| format!("lunetad lists an agent in {why}"))?,
+            ),
             Some(agent::Pane::Zellij(_)) | None => Spot::zellij(agent.zellij()),
         };
         Ok(Placed { agent, spot })
@@ -940,6 +945,7 @@ fn ending(
     let ends = |spot: Spot| spot.pane_in(session, whose).is_some_and(|pane| act.takes(pane));
     let seat = |placed: &Placed| match placed.spot {
         Spot::Own(pane) => commands::own_seat(pane, &running.own),
+        Spot::Terminal(key) => commands::terminal_seat(key),
         Spot::Zellij { .. } | Spot::Unplaced => commands::seat(placed.agent.zellij()),
     };
     let agents: Vec<Ends<Agent>> = agents
@@ -954,6 +960,7 @@ fn ending(
         .map(|(file, spot)| {
             let seat = match spot {
                 Spot::Own(pane) => commands::own_seat(pane, &running.own),
+                Spot::Terminal(key) => commands::terminal_seat(key),
                 Spot::Zellij { .. } | Spot::Unplaced => commands::seat(file.zellij.as_ref()),
             };
             (seat, file, spot)

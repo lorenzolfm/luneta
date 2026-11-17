@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use luneta_protocol::github::State;
 
+use crate::api::projects::Held;
 use crate::api::session::Mux;
+use crate::api::terminal::Found;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Asker, Based, Pulled};
-use crate::mux::OwnKey;
+use crate::mux::{OwnKey, TerminalKey};
 use crate::program;
 use crate::seats::{self, UnreadSeat};
 
@@ -175,6 +177,7 @@ impl Occupied {
                 .to_owned());
         }
         seats::unread(host.unread, &host.unread_files).map_err(|unplaced| unplaced.to_string())?;
+        let terminals = terminals(host)?;
         let listed = |key: OwnKey| {
             host.sessions.iter().any(|session| match &session.mux {
                 Some(Mux::Own(own)) => OwnKey::of(own).is_ok_and(|listed| listed == key),
@@ -196,10 +199,19 @@ impl Occupied {
                          own session it does not list"
                     ));
                 },
-                UnreadSeat::Own(_) | UnreadSeat::Zellij { .. } | UnreadSeat::Unplaced => {},
+                UnreadSeat::Terminal(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
+                    return Err(format!(
+                        "lunetad cannot read the session file of agent {pid}, which runs in a \
+                         terminal no view holds"
+                    ));
+                },
+                UnreadSeat::Own(_)
+                | UnreadSeat::Terminal(_)
+                | UnreadSeat::Zellij { .. }
+                | UnreadSeat::Unplaced => {},
             }
         }
-        let mut panes = Vec::new();
+        let mut panes: Vec<PathBuf> = terminals.into_iter().map(|(_, folder)| folder).collect();
         for session in &host.sessions {
             let name = &session.name;
             let listed = session
@@ -234,6 +246,25 @@ impl Occupied {
         }
         self.agents.iter().any(holds).then_some(AN_AGENT)
     }
+}
+
+fn terminals(host: &api::Host) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
+    let kept = match host.projects.as_ref().and_then(|projects| projects.held.as_ref()) {
+        None => return Ok(Vec::new()),
+        Some(Held::Unkept(why)) => {
+            return Err(format!("lunetad keeps no views, and may leave out a terminal: {why}"));
+        },
+        Some(Held::Kept(kept)) => kept,
+    };
+    let workstreams = kept.projects.iter().flat_map(|project| &project.workstreams);
+    let terminal = |terminal: &api::Terminal| {
+        let key = match &terminal.found {
+            Some(Found::Key(key)) => TerminalKey::of(key).ok(),
+            Some(Found::Lost(()) | Found::Looking(())) | None => None,
+        };
+        (key, PathBuf::from(&terminal.folder))
+    };
+    Ok(workstreams.flat_map(|workstream| &workstream.terminals).map(terminal).collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1027,6 +1058,61 @@ mod tests {
         assert_eq!(occupied.why_in(Path::new("/w/d")), Some(A_PANE));
     }
 
+    fn viewed(held: api::projects::Held) -> api::Host {
+        let projects = Some(api::Projects { held: Some(held) });
+        api::Host { projects, unread_sockets: Some(0), ..api::Host::default() }
+    }
+
+    fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
+        let workstream = api::Workstream { terminals, ..api::Workstream::default() };
+        let project = api::Project { workstreams: vec![workstream], ..api::Project::default() };
+        api::projects::Held::Kept(api::projects::Kept { projects: vec![project] })
+    }
+
+    fn in_view(folder: &str, found: api::terminal::Found) -> api::Terminal {
+        api::Terminal { folder: folder.to_owned(), found: Some(found), ..api::Terminal::default() }
+    }
+
+    fn terminal_key(id: u32) -> api::TerminalKey {
+        api::TerminalKey { id, made_at: Some(prost_types::Timestamp::default()) }
+    }
+
+    #[test]
+    fn a_terminal_of_a_view_keeps_its_folder_found_or_lost() {
+        use api::terminal::Found;
+        let host = viewed(kept(vec![
+            in_view("/w/a/src", Found::Key(terminal_key(4))),
+            in_view("/w/b", Found::Lost(())),
+            in_view("/w/c", Found::Looking(())),
+        ]));
+        let occupied = Occupied::of(&host).unwrap();
+        for held in ["/w/a", "/w/b", "/w/c"] {
+            assert_eq!(occupied.why_in(Path::new(held)), Some(A_PANE), "{held}");
+        }
+        assert_eq!(occupied.why_in(Path::new("/w/d")), None);
+        let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
+        let why = "lunetad keeps no views, and may leave out a terminal: a newer file";
+        assert_eq!(Occupied::of(&unkept), Err(why.to_owned()));
+    }
+
+    #[test]
+    fn a_file_unread_in_a_terminal_no_view_holds_could_be_anywhere() {
+        use api::terminal::Found;
+        let terminal = Some(terminal_key(4));
+        let file = api::UnreadFile { pid: 9, terminal, ..api::UnreadFile::default() };
+        let host = |terminals| api::Host {
+            unread: 1,
+            unread_files: vec![file.clone()],
+            ..viewed(kept(terminals))
+        };
+        assert!(Occupied::of(&host(vec![in_view("/w/a", Found::Key(terminal_key(4)))])).is_ok());
+        let unheld = "lunetad cannot read the session file of agent 9, which runs in a terminal no \
+                      view holds";
+        for terminals in [vec![], vec![in_view("/w/a", Found::Key(terminal_key(5)))]] {
+            assert_eq!(Occupied::of(&host(terminals)), Err(unheld.to_owned()));
+        }
+    }
+
     #[test]
     fn a_pane_the_daemon_has_yet_to_place_tells_nothing() {
         let host = |session| api::Host {
@@ -1057,7 +1143,7 @@ mod tests {
             unread_files,
             ..sockets(Some(0))
         };
-        let file = |zellij| api::UnreadFile { pid: 9, zellij, own: None };
+        let file = |zellij| api::UnreadFile { pid: 9, zellij, own: None, terminal: None };
         let in_pane = |session: Option<&str>| {
             let session = session.map(str::to_owned);
             Some(api::Zellij { named: "work".to_owned(), session, pane: 4 })

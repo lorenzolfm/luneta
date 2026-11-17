@@ -156,7 +156,7 @@ fn a_close_in_an_own_session_ends_the_agent_of_a_file_that_does_not_read() {
     let agent = Running::spawn(agent.envs(in_pane(work, second)));
     fs::write(session_file(&owned, agent.pid()), "{\"pid\":").unwrap();
     let in_own = api::Own { session: Some(work), pane: second };
-    let file = UnreadFile { pid: agent.pid(), zellij: None, own: Some(in_own) };
+    let file = UnreadFile { pid: agent.pid(), zellij: None, own: Some(in_own), terminal: None };
     eventually("the file does not read, in its own pane", || {
         (owned.host.host().unread_files == [file.clone()]).then_some(())
     });
