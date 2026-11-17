@@ -180,44 +180,11 @@ fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     }
 }
 
-pub enum After {
-    IntoTab(Due<u32>, Turned),
-    Kill { session: SessionName, whose: Whose },
-}
+pub const NOT_THERE_YET: &str = "luneta cannot tell when its client is there";
 
-impl After {
-    pub fn untold(self, events: &Sender<Event>) {
-        match self {
-            After::IntoTab(owed, ..) => {
-                owed.pay(Err("luneta cannot tell when its client is there".to_owned()));
-            },
-            After::Kill { session, .. } => {
-                let when = format!("when its client has left \"{session}\", which stays");
-                let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
-            },
-        }
-    }
-
-    fn came(self, there: &mut There, events: &Sender<Event>) {
-        match (self, there) {
-            (After::IntoTab(owed, turned), there) => {
-                let (session, pane) = (turned.place.session.name(), turned.place.pane);
-                let came = there.turn_into_tab(session, turned.started, pane);
-                owed.pay(came.and_then(|came| match came {
-                    IntoTab::Done => Ok(pane),
-                    IntoTab::NoClient => Err(lunetad::opens::no_client(session)),
-                }));
-            },
-            (After::Kill { session, whose }, There::Here) => {
-                kill(&Machine::Local, session, whose, events);
-            },
-            (After::Kill { session, whose }, There::Away(away)) => {
-                if let Err(why) = away.kill(&session, whose) {
-                    let _ = events.send(Event::Notice(why));
-                }
-            },
-        }
-    }
+pub fn stays(session: &SessionName, events: &Sender<Event>) {
+    let when = format!("when its client has left \"{session}\", which stays");
+    let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
 }
 
 pub fn open(menu: u64, on: &Machine, open: Open, events: &Sender<Event>) {
@@ -348,11 +315,6 @@ pub fn kill(
 
 pub fn running() -> Result<Vec<(SessionName, SystemTime)>, String> {
     running_in(&Zellij::socket_folder())
-}
-
-pub fn came_here(after: After, events: &Sender<Event>) {
-    let events = events.clone();
-    thread::spawn(move || after.came(&mut There::Here, &events));
 }
 
 pub fn clients_on_panes(session: &SessionName) -> Result<mux::Listed, String> {

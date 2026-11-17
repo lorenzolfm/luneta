@@ -988,6 +988,7 @@ message ChangeProjectsRequest {
     MoveWorkstream move_workstream = 7;
     ForgetProject forget_project = 8;
     ForgetWorkstream forget_workstream = 9;
+    WorkstreamAt workstream_at = 10;
   }
 
   message AddProject {
@@ -1028,6 +1029,11 @@ message ChangeProjectsRequest {
   message ForgetWorkstream {
     fixed64 workstream = 1;
   }
+
+  message WorkstreamAt {
+    fixed64 project = 1;
+    string folder = 2;
+  }
 }
 
 message ChangeProjectsResponse {
@@ -1050,6 +1056,7 @@ message ShowRequest {
   message Hello {
     fixed64 workstream = 1;
     Size size = 2;
+    TerminalKey runs_in = 3;
   }
 
   message Size {
@@ -1061,6 +1068,8 @@ message ShowRequest {
     oneof beside {
       google.protobuf.Empty largest = 1;
       Towards towards = 2;
+      google.protobuf.Empty focused = 4;
+      google.protobuf.Empty alone = 5;
     }
     repeated string argv = 3;
   }
@@ -1113,11 +1122,14 @@ message ShowResponse {
   }
 
   message Laid {
+    reserved 4, 5;
     fixed64 workstream = 1;
     ShowRequest.Size size = 2;
     repeated Pane panes = 3;
-    optional fixed64 focused = 4;
-    optional fixed64 full = 5;
+    oneof shown {
+      fixed64 tiled = 6;
+      fixed64 full = 7;
+    }
   }
 
   message Pane {

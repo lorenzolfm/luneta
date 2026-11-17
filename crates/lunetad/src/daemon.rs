@@ -1024,8 +1024,9 @@ impl Daemon for Host {
         request: Request<Streaming<ShowRequest>>,
     ) -> Result<Response<Self::ShowStream>, Status> {
         use crate::api::show_request::{Event, Hello};
+        use crate::mux::own::TerminalKey;
         let mut heard = request.into_inner();
-        let Some(ShowRequest { event: Some(Event::Hello(Hello { workstream, size })) }) =
+        let Some(ShowRequest { event: Some(Event::Hello(Hello { workstream, size, runs_in })) }) =
             heard.message().await?
         else {
             return Err(Status::invalid_argument("the first word is no hello"));
@@ -1033,10 +1034,13 @@ impl Daemon for Host {
         let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
+        let runs_in = runs_in.as_ref().map(TerminalKey::of).transpose();
+        let runs_in = runs_in.map_err(|why| Status::invalid_argument(format!("runs_in: {why}")))?;
         let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
         let views = self.views.clone();
         let came = task::spawn_blocking(move || {
-            views::ask(&views, |answer| views::Command::Came { workstream, size, out, answer })
+            let came = |answer| views::Command::Came { workstream, size, runs_in, out, answer };
+            views::ask(&views, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;
         let client = came.ok_or_else(|| Status::unavailable("the views have stopped"))??;
@@ -1078,6 +1082,7 @@ impl Daemon for Host {
             let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;
             changed.map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
+                Failed::Nests(why) => Status::already_exists(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
                 Failed::KeptUntold => Status::unavailable(stopped),

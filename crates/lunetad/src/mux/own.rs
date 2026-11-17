@@ -9,6 +9,7 @@ use crate::mux::value_in;
 pub mod api;
 pub mod attach;
 pub mod server;
+pub mod viewer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnId(NonZeroU64);
@@ -200,16 +201,24 @@ pub(crate) fn pane_in(environ: &[OsString]) -> Option<OwnPane> {
     Some(OwnPane { session: OwnKey { id, made }, id: pane })
 }
 
-pub fn here() -> Result<Option<OwnPane>, String> {
-    let environ: Vec<OsString> = std::env::vars_os()
+#[must_use]
+pub fn terminal_here() -> Option<TerminalKey> {
+    terminal_in(&environ())
+}
+
+fn environ() -> Vec<OsString> {
+    std::env::vars_os()
         .map(|(name, value)| {
             let mut entry = name;
             entry.push("=");
             entry.push(value);
             entry
         })
-        .collect();
-    here_in(&environ)
+        .collect()
+}
+
+pub fn here() -> Result<Option<OwnPane>, String> {
+    here_in(&environ())
 }
 
 fn here_in(environ: &[OsString]) -> Result<Option<OwnPane>, String> {

@@ -38,6 +38,7 @@ mod own_sessions;
 mod peers;
 mod picker;
 mod printed;
+mod projected;
 mod prune;
 mod pull;
 mod screen;
@@ -46,12 +47,13 @@ mod skills;
 mod speaker;
 mod speech;
 mod spots;
-mod starts;
 mod state;
 mod sweep;
+mod viewed;
 mod voice;
 mod watch;
 mod width;
+mod workstreams;
 mod zellij;
 
 use std::path::PathBuf;
@@ -153,7 +155,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             },
         };
-        return host::run(session, folder);
+        return host::run(session.as_ref(), folder);
     };
     let command = match command {
         Command::Worktree { repo, of } => return pull::make(&repo, &of),

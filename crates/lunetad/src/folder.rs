@@ -46,6 +46,7 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+#[derive(Clone, Debug)]
 pub struct Folder(PathBuf);
 
 impl Folder {

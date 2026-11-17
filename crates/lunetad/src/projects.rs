@@ -20,7 +20,7 @@ pub(crate) mod layout;
 mod view;
 
 pub use file::{Failed, Store};
-pub use layout::Size;
+pub use layout::{Size, FRAME_CELLS, PANES_MAX};
 pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};
 
 pub const PROJECTS_MAX: usize = 64;
@@ -326,6 +326,7 @@ pub struct Projects {
 pub enum Change {
     AddProject { dir: Dir, name: Option<Name> },
     AddWorkstream { project: ProjectId, folder: Dir, name: Option<Name> },
+    WorkstreamAt { project: ProjectId, folder: Dir },
     RenameProject { project: ProjectId, to: Name },
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     MoveProject { project: ProjectId, to: usize },
@@ -373,6 +374,10 @@ impl Change {
                     name: name(named).map_err(field("name"))?,
                 }
             },
+            Asked::WorkstreamAt(asked::WorkstreamAt { project, folder }) => Change::WorkstreamAt {
+                project: id("project", project).map(ProjectId)?,
+                folder: Dir::found(&folder).map_err(field("folder"))?,
+            },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
                 to: Name::parse(&to).map_err(field("to"))?,
@@ -406,6 +411,7 @@ impl Change {
         match self {
             Change::AddProject { .. }
             | Change::AddWorkstream { .. }
+            | Change::WorkstreamAt { .. }
             | Change::RenameProject { .. }
             | Change::RenameWorkstream { .. }
             | Change::MoveProject { .. }
@@ -531,6 +537,19 @@ impl Projects {
     pub fn changed(
         &self,
         change: Change,
+        draw: impl FnMut() -> io::Result<Id>,
+    ) -> Result<(Projects, Option<Id>), Refused> {
+        if let Change::AddProject { dir, .. } = &change
+            && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
+        {
+            return Err(Refused::Nests(nested(dir, other)));
+        }
+        self.changed_by(change, draw).map_err(Refused::Said)
+    }
+
+    fn changed_by(
+        &self,
+        change: Change,
         mut draw: impl FnMut() -> io::Result<Id>,
     ) -> Result<(Projects, Option<Id>), String> {
         let mut changed = self.clone();
@@ -540,9 +559,6 @@ impl Projects {
                     Some(name) => name,
                     None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
                 };
-                if let Some(other) = self.projects.iter().find(|other| other.dir.nests(&dir)) {
-                    return Err(nested(&dir, other));
-                }
                 if self.projects.len() >= PROJECTS_MAX {
                     return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
                 }
@@ -565,6 +581,15 @@ impl Projects {
                 let workstream = Workstream { id: WorkstreamId(id), renamed: name, below, view };
                 project.workstreams.push(workstream);
                 Some(id)
+            },
+            Change::WorkstreamAt { project, folder } => {
+                let held = changed.project(project)?;
+                let at = held.workstreams.iter().find(|it| held.folder(it) == folder);
+                let Some(found) = at else {
+                    let add = Change::AddWorkstream { project, folder, name: None };
+                    return self.changed_by(add, draw);
+                };
+                Some(found.id.0)
             },
             Change::RenameProject { project, to } => {
                 changed.project(project)?.name = to;
@@ -726,6 +751,20 @@ impl Projects {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    Nests(String),
+    Said(String),
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refused::Nests(why) | Refused::Said(why) => formatter.write_str(why),
+        }
+    }
+}
+
 fn nested(dir: &Dir, other: &Project) -> String {
     let (other_dir, name) = (&other.dir.0, &other.name.0);
     if *dir == other.dir {
@@ -814,7 +853,7 @@ mod tests {
         }
     }
 
-    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), String> {
+    fn refused(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), Refused> {
         let mut drawn = counting();
         let taken = |id: &Id| projects.holds(*id);
         projects.changed(change, || loop {
@@ -823,6 +862,10 @@ mod tests {
                 return Ok(id);
             }
         })
+    }
+
+    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), String> {
+        refused(projects, change).map_err(|refused| refused.to_string())
     }
 
     fn add(projects: &mut Projects, change_of: Change) -> Id {
@@ -914,8 +957,11 @@ mod tests {
             ("/w/luneta/main", "is inside /w/luneta"),
             ("/w", "holds /w/luneta"),
         ] {
-            let refused = change(&projects, Change::AddProject { dir: dir(at), name: None });
-            assert!(refused.unwrap_err().contains(why), "{at}");
+            let refused = refused(&projects, Change::AddProject { dir: dir(at), name: None });
+            let Err(Refused::Nests(said)) = refused else {
+                panic!("{at} is refused as nested: {refused:?}");
+            };
+            assert!(said.contains(why), "{at}: {said}");
         }
         project(&mut projects, "/w/luneta-old");
         assert_eq!(projects.all().len(), 2);
@@ -935,6 +981,22 @@ mod tests {
         assert_eq!(folders, want);
         let outside = Change::AddWorkstream { project: luneta, folder: dir("/w/elo"), name: None };
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
+    }
+
+    #[test]
+    fn a_workstream_at_a_folder_is_the_first_there_or_else_one_made_there() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        workstream(&mut projects, luneta, "/w/luneta/main");
+        let at = |folder: &str| Change::WorkstreamAt { project: luneta, folder: dir(folder) };
+        let (same, found) = change(&projects, at("/w/luneta/main")).unwrap();
+        assert_eq!((same == projects, found), (true, Some(main.0)));
+        let made = WorkstreamId(add(&mut projects, at("/w/luneta/feat")));
+        assert_eq!(projects.all()[0].workstreams().len(), 3);
+        let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
+        assert_eq!(again, Some(made.0));
+        assert!(change(&projects, at("/w/elo")).unwrap_err().contains("is not in /w/luneta"));
     }
 
     #[test]
@@ -996,7 +1058,7 @@ mod tests {
         assert_eq!(made, Id::of(7));
         let always = Change::AddProject { dir: dir("/b"), name: None };
         let refused = projects.changed(always, || Ok(first.0));
-        assert!(refused.unwrap_err().contains("were all taken"));
+        assert!(refused.unwrap_err().to_string().contains("were all taken"));
     }
 
     #[test]
@@ -1005,8 +1067,11 @@ mod tests {
         for at in 0..PROJECTS_MAX {
             project(&mut projects, &format!("/p{at}"));
         }
-        let over = change(&projects, Change::AddProject { dir: dir("/over"), name: None });
-        assert!(over.unwrap_err().contains("as many as are kept"));
+        let over = refused(&projects, Change::AddProject { dir: dir("/over"), name: None });
+        let Err(Refused::Said(said)) = over else {
+            panic!("a project over the bound is no nested one: {over:?}");
+        };
+        assert!(said.contains("as many as are kept"));
         let first = projects.all()[0].id();
         for _ in 0..WORKSTREAMS_MAX {
             workstream(&mut projects, first, "/p0");

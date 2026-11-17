@@ -14,7 +14,9 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use base64::Engine as _;
-use lunetad::api::NewOwnResponse;
+use lunetad::api::projects::Held;
+use lunetad::api::terminal::Found;
+use lunetad::api;
 use lunetad::opens;
 use lunetad::program::alone;
 use rustix::fs::{Mode, OFlags};
@@ -26,13 +28,15 @@ use tempfile::TempDir;
 
 use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
 use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
-use crate::own::{own, Owned};
+use crate::own::Owned;
+use crate::projects::{project, workstream};
 use crate::remote::{hosts, FakeSsh};
-use crate::sessions::session;
 
 const ENDS: Duration = Duration::from_secs(30);
 
 const RUNS: Duration = Duration::from_secs(5);
+
+const CD_FEAT: &str = "cd feat && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
 pub struct Ended {
     pub status: ExitStatus,
@@ -55,10 +59,6 @@ pub fn terminal() -> (OwnedFd, OwnedFd) {
 pub fn spawn_on(tty: &OwnedFd, command: &mut Command) -> Running {
     let stdio = || Stdio::from(tty.try_clone().unwrap());
     Running::spawn(alone(command).stdin(stdio()).stdout(stdio()).stderr(stdio()))
-}
-
-pub fn on_terminal(command: Command) -> Ended {
-    on_terminal_with(command, |_| {})
 }
 
 fn on_terminal_with(mut command: Command, meanwhile: impl FnOnce(&Running)) -> Ended {
@@ -192,10 +192,6 @@ impl Window {
     }
 }
 
-pub fn clients(owned: &Owned, name: &str) -> Option<usize> {
-    Some(session(&owned.host.host(), name)?.clients.clone()?.clients.len())
-}
-
 pub fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
     format!("\x1b[<{code};{};{}{last}", column + 1, row + 1)
 }
@@ -204,121 +200,170 @@ fn log_of(host: &Host) -> String {
     fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap()
 }
 
-fn in_pane_of(command: &mut Command, made: &NewOwnResponse) {
-    let at = made.made_at.unwrap();
-    let nanos = u64::try_from(at.seconds).unwrap() * 1_000_000_000;
-    let nanos = nanos + u64::try_from(at.nanos).unwrap();
-    command
-        .env("LUNETA_MUX_SESSION", made.session.to_string())
-        .env("LUNETA_MUX_MADE", nanos.to_string())
-        .env("LUNETA_MUX_PANE", made.pane.to_string());
-}
-
 fn makes_shells() -> bool {
     Path::new(&opens::your_shell()).is_file()
 }
 
-#[test]
-fn a_bare_luneta_joins_the_session_of_its_directory_or_else_the_newest() {
-    let owned = Owned::new();
-    owned.make("project").unwrap();
-    owned.make("newest").unwrap();
+pub fn projects_of(owned: &Owned) -> Vec<api::Project> {
+    match owned.host.host().projects.and_then(|projects| projects.held) {
+        Some(Held::Kept(kept)) => kept.projects,
+        Some(Held::Unkept(_)) | None => Vec::new(),
+    }
+}
 
-    let window = Window::open(&owned.host, &directory("project"), &[]);
-    eventually("luneta is in project", || (clients(&owned, "project")? == 1).then_some(()));
-    drop(window);
-    let _window = Window::open(&owned.host, &directory("elsewhere"), &[]);
-    eventually("luneta is in newest", || (clients(&owned, "newest")? == 1).then_some(()));
+fn real(path: &Path) -> String {
+    fs::canonicalize(path).unwrap().to_str().unwrap().to_owned()
+}
+
+pub fn shown(owned: &Owned, folder: &Path) -> Option<api::Workstream> {
+    let folder = real(folder);
+    let workstreams = projects_of(owned).into_iter().flat_map(|project| project.workstreams);
+    let mut held = workstreams.filter(|workstream| workstream.folder == folder);
+    let found = |terminal: &api::Terminal| matches!(terminal.found, Some(Found::Key(_)));
+    held.find(|workstream| workstream.terminals.iter().any(found))
 }
 
 #[test]
-fn a_bare_luneta_makes_the_session_of_its_directory_only_where_none_runs() {
+fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_a_shell_there() {
     if !makes_shells() {
         return;
     }
     let owned = Owned::new();
-    let _window = Window::open(&owned.host, &directory("project"), &[]);
-    eventually("luneta is in project", || (clients(&owned, "project")? == 1).then_some(()));
-    assert!(own(&owned.listed("project")).is_some());
-}
-
-#[test]
-fn a_session_named_is_made_though_another_runs() {
-    if !makes_shells() {
-        return;
-    }
-    let owned = Owned::new();
-    owned.make("other").unwrap();
-    let _window = Window::open(&owned.host, &directory("project"), &["named"]);
-    eventually("luneta is in named", || (clients(&owned, "named")? == 1).then_some(()));
-    assert_eq!(clients(&owned, "other"), Some(0));
-}
-
-#[test]
-fn a_bare_luneta_never_joins_the_session_its_terminal_is_a_pane_of() {
-    let owned = Owned::new();
-    let project = owned.make("project").unwrap();
     let dir = directory("project");
-    let mut alone = luneta(owned.host.vars(), &dir.path);
-    in_pane_of(&mut alone, &project);
-    let output = alone.output().unwrap();
+    let _window = Window::open(&owned.host, &dir, &[]);
+    let workstream = eventually("luneta shows its directory", || shown(&owned, &dir.path));
+    assert_eq!(workstream.terminals.len(), 1, "one shell opens in the empty view");
+    let projects = projects_of(&owned);
+    let made: Vec<(&str, &str)> =
+        projects.iter().map(|project| (project.name.as_str(), project.dir.as_str())).collect();
+    assert_eq!(made, [("project", real(&dir.path).as_str())]);
+}
+
+#[test]
+fn a_bare_luneta_in_a_project_shows_the_workstream_of_its_folder() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let dir = directory("project");
+    let below = dir.path.join("below");
+    fs::create_dir(&below).unwrap();
+    let made = project(&owned.host, Path::new(&real(&dir.path)), None);
+    workstream(&owned.host, made, Path::new(&real(&dir.path)));
+    let in_below = workstream(&owned.host, made, Path::new(&real(&below)));
+    let _window = Window::running(luneta(owned.host.vars(), &below));
+    let shown = eventually("luneta shows the folder's workstream", || shown(&owned, &below));
+    assert_eq!(shown.id, in_below);
+    assert!(self::shown(&owned, &dir.path).is_none(), "the project's other stays empty");
+    assert_eq!(projects_of(&owned).len(), 1);
+}
+
+#[test]
+fn a_new_session_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_project() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let dir = directory("work");
+    let feat = dir.path.join("feat");
+    fs::create_dir(&feat).unwrap();
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send(CD_FEAT);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while shown(&owned, &feat).is_none() {
+        assert!(Instant::now() < deadline, "n s showed no feat: {:#?}", window.screen());
+        window.send("\x1b[97;3uns");
+        thread::sleep(Duration::from_secs(1));
+    }
+    let projects = projects_of(&owned);
+    let folders: Vec<(&str, Vec<&str>)> = projects
+        .iter()
+        .map(|project| {
+            let folders = project.workstreams.iter().map(|it| it.folder.as_str()).collect();
+            (project.name.as_str(), folders)
+        })
+        .collect();
+    assert_eq!(folders, [("work", vec![real(&dir.path).as_str(), real(&feat).as_str()])]);
+}
+
+#[test]
+fn a_named_luneta_shows_the_project_of_that_name_wherever_it_starts() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let named = directory("named");
+    let made = project(&owned.host, Path::new(&real(&named.path)), None);
+    workstream(&owned.host, made, Path::new(&real(&named.path)));
+    let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
+    eventually("luneta shows named", || shown(&owned, &named.path));
+    assert_eq!(projects_of(&owned).len(), 1);
+}
+
+#[test]
+fn a_named_luneta_refuses_a_name_two_projects_share() {
+    let owned = Owned::new();
+    let (one, other) = (directory("one"), directory("other"));
+    project(&owned.host, Path::new(&real(&one.path)), Some("twin"));
+    project(&owned.host, Path::new(&real(&other.path)), Some("twin"));
+    let output = luneta(owned.host.vars(), &one.path).arg("twin").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let refusal = String::from_utf8(output.stderr).unwrap();
-    let held = "luneta runs in project, and goes nowhere it shows itself";
-    assert!(refusal.starts_with(&format!("luneta: {held}")), "{refusal}");
-    let log = log_of(&owned.host);
-    assert!(log.contains(&format!("ends: {held}")), "{log}");
-    assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
-
-    owned.make("other").unwrap();
-    let mut other = luneta(owned.host.vars(), &dir.path);
-    in_pane_of(&mut other, &project);
-    let _window = Window::running(other);
-    eventually("luneta is in other", || (clients(&owned, "other")? == 1).then_some(()));
+    let dirs = format!("{}, {}", real(&one.path), real(&other.path));
+    assert!(refusal.contains(&format!("projects in {dirs} are all named twin")), "{refusal}");
 }
 
 #[test]
-fn a_luneta_whose_pane_variables_do_not_read_joins_no_session() {
+fn a_bare_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_another() {
     let owned = Owned::new();
-    let project = owned.make("project").unwrap();
-    owned.make("other").unwrap();
-    let dir = directory("project");
-    let unread = "LUNETA_MUX_SESSION, LUNETA_MUX_MADE and LUNETA_MUX_PANE name no pane of \
-                  luneta-mux's, so luneta may run in";
-    for (named, refused) in [
-        (None, format!("{unread} any own session, and joins none: unset them")),
-        (Some("other"), format!("{unread} other, and goes nowhere it shows itself")),
-    ] {
-        let mut garbled = luneta(owned.host.vars(), &dir.path);
-        garbled.args(named);
-        in_pane_of(&mut garbled, &project);
-        garbled.env_remove("LUNETA_MUX_MADE");
-        let output = garbled.output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        let refusal = String::from_utf8(output.stderr).unwrap();
-        assert!(refusal.starts_with(&format!("luneta: {refused}")), "{refusal}");
+    let kept = directory("kept");
+    for at in 0..lunetad::projects::PROJECTS_MAX {
+        let dir = kept.path.join(format!("p{at}"));
+        fs::create_dir(&dir).unwrap();
+        project(&owned.host, Path::new(&real(&dir)), None);
     }
-    assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
-    assert_eq!(clients(&owned, "other").unwrap_or(0), 0);
+    let dir = directory("new");
+    let output = luneta(owned.host.vars(), &dir.path).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    assert!(refusal.contains("projects, as many as are kept"), "{refusal}");
 }
 
 #[test]
-fn a_bare_luneta_where_the_directory_names_no_session_asks_for_a_name() {
+fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
+    if !makes_shells() {
+        return;
+    }
+    let owned = Owned::new();
+    let outer = directory("outer");
+    let inner = outer.path.join("inner");
+    fs::create_dir(&inner).unwrap();
+    let made = project(&owned.host, Path::new(&real(&inner)), None);
+    workstream(&owned.host, made, Path::new(&real(&inner)));
+    let _window = Window::open(&owned.host, &outer, &[]);
+    eventually("luneta shows inner", || shown(&owned, &inner));
+    assert_eq!(projects_of(&owned).len(), 1, "no project is made around another");
+}
+
+#[test]
+fn a_bare_luneta_where_the_directory_names_no_project_asks_for_a_name() {
     let owned = Owned::new();
     let output = luneta(owned.host.vars(), Path::new("/")).output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let refusal = String::from_utf8(output.stderr).unwrap();
-    assert!(refusal.starts_with("luneta: / names no own session: name one"), "{refusal}");
+    let said = "luneta: no workstream to show: / names no project: name one";
+    assert!(refusal.starts_with(said), "{refusal}");
 }
 
 #[test]
 fn the_log_says_luneta_ended_by_a_signal() {
     let owned = Owned::new();
-    owned.make("work").unwrap();
     let dir = directory("work");
     let command = luneta(owned.host.vars(), &dir.path);
     let ended = on_terminal_with(command, |luneta| {
-        eventually("luneta is in work", || (clients(&owned, "work")? == 1).then_some(()));
+        eventually("luneta shows work", || shown(&owned, &dir.path));
         stop(luneta.pid());
     });
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
@@ -329,9 +374,9 @@ fn the_log_says_luneta_ended_by_a_signal() {
 #[test]
 fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let mut owned = Owned::new();
-    owned.make("work").unwrap();
-    let _window = Window::open(&owned.host, &directory("work"), &[]);
-    eventually("luneta is in work", || (clients(&owned, "work")? == 1).then_some(()));
+    let dir = directory("work");
+    let _window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
     thread::sleep(Duration::from_secs(3));
     let was = answering(&owned.host).unwrap();
     let went = Instant::now();
@@ -348,18 +393,19 @@ fn a_daemon_that_goes_away_is_started_again_in_moments() {
 fn an_answer_of_another_daemon_than_the_one_reached_is_dropped() {
     const OTHER: u32 = 1;
     let mut owned = Owned::new();
-    owned.make("work").unwrap();
-    owned.stop_daemon();
-    let notes = owned.host.home.path().join("notes");
-    let stand_in = stand_in_watched_as(&owned.host, OTHER, &notes);
-
     let dir = directory("work");
     let command = luneta(owned.host.vars(), &dir.path);
+    let notes = owned.host.home.path().join("notes");
+    let mut stand_in = None;
     let ended = on_terminal_with(command, |luneta| {
+        eventually("luneta shows work", || shown(&owned, &dir.path));
+        owned.stop_daemon();
+        stand_in = Some(stand_in_watched_as(&owned.host, OTHER, &notes));
         thread::sleep(RUNS);
         stop(luneta.pid());
     });
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
+    let stand_in = stand_in.unwrap();
 
     let log = log_of(&owned.host);
     let note = format!(
@@ -378,22 +424,23 @@ fn an_answer_of_another_daemon_than_the_one_reached_is_dropped() {
 #[test]
 fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     let mut owned = Owned::new();
-    owned.make("work").unwrap();
-    owned.stop_daemon();
     let elsewhere = moved();
     let started = elsewhere.path().join("started");
     let note = format!("echo started >> '{}'\nexit 1\n", started.display());
     script(&elsewhere.path().join("lunetad"), &note);
     let program = elsewhere.path().join("luneta").display().to_string();
 
-    let began = Instant::now();
     let dir = directory("work");
     let command = luneta_at(&program, owned.host.vars(), &dir.path);
+    let mut began = None;
     let ended = on_terminal_with(command, |luneta| {
+        eventually("luneta shows work", || shown(&owned, &dir.path));
+        owned.stop_daemon();
+        began = Some(Instant::now());
         thread::sleep(RUNS);
         stop(luneta.pid());
     });
-    let took = began.elapsed();
+    let took = began.unwrap().elapsed();
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     let starts = fs::read_to_string(&started).unwrap().lines().count();
     assert!(starts >= 2, "it was started {starts} times in {took:?}");
@@ -420,16 +467,14 @@ fn machine(ssh: &FakeSsh, destination: &str, name: &str) -> Machine {
 fn luneta_goes_to_no_session_of_zellij_s_and_stays_where_it_is() {
     let owned = Owned::new();
     let _project = runs(&owned.host, "project");
-    owned.make("mine").unwrap();
-    let dir = directory("anywhere");
-    let mut window = Window::open(&owned.host, &dir, &["mine"]);
-    eventually("luneta is mine's client", || (clients(&owned, "mine")? == 1).then_some(()));
+    let dir = directory("mine");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows mine", || shown(&owned, &dir.path));
     eventually("the sidebar lists project", || window.shows("project").then_some(()));
     window.send("\x1b[106;5uproject\r");
     let said = "project is one of zellij's sessions: luneta goes to its own sessions only, now";
     eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
     assert_eq!(owned.host.zellij.attached(), [] as [String; 0]);
-    assert_eq!(clients(&owned, "mine"), Some(1));
     assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
 }
 
@@ -439,14 +484,12 @@ fn luneta_goes_to_no_session_of_another_machine_s() {
     let ssh = FakeSsh::new(owned.host.zellij.bin());
     let _far = machine(&ssh, "far", "work");
     hosts(&owned.host, "far\n");
-    owned.make("mine").unwrap();
-    let dir = directory("anywhere");
-    let mut window = Window::open(&owned.host, &dir, &["mine"]);
-    eventually("luneta is mine's client", || (clients(&owned, "mine")? == 1).then_some(()));
+    let dir = directory("mine");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows mine", || shown(&owned, &dir.path));
     eventually("the sidebar lists work", || window.shows("work").then_some(()));
     window.send("\x1b[106;5uwork\r");
     let said = "work is one of zellij's sessions: luneta goes to its own sessions only, now";
     eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
-    assert_eq!(clients(&owned, "mine"), Some(1));
     assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
 }

@@ -1,31 +1,23 @@
 use std::time::Duration;
 
-use lunetad::api::{kill_request, KillRequest, NewOwnRequest};
+use lunetad::api::terminal::Found;
 
-use crate::host::eventually;
-use crate::own::{own, Owned};
-use crate::sessions::session;
-use crate::starts::{clients, directory, luneta, mouse, on_terminal, runs, Window};
+use crate::host::{eventually, LUNETA};
+use crate::own::Owned;
+use crate::starts::{directory, mouse, projects_of, shown, Window};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
 const PRINTED: &str = "own-42";
 
+const HERE: &str = "luneta runs here";
+
 #[test]
-fn luneta_attaches_to_its_session_and_shows_what_its_shell_prints() {
+fn luneta_shows_its_workstream_and_what_its_shell_prints() {
     let owned = Owned::new();
-    let request = NewOwnRequest {
-        on: None,
-        name: "work".to_owned(),
-        cwd: owned.home(),
-        command: vec!["sh".to_owned()],
-        tab: None,
-    };
-    owned.ask(|mut daemon| async move { daemon.new_own(request).await }).unwrap();
     let dir = directory("work");
     let mut window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta is the session's client", || (clients(&owned, "work")? == 1).then_some(()));
-    assert!(own(&owned.listed("work")).is_some());
+    eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || {
         let screen = window.screen();
         screen.iter().any(|line| line.contains(" work ") && line.contains('◇')).then_some(())
@@ -42,82 +34,78 @@ fn luneta_attaches_to_its_session_and_shows_what_its_shell_prints() {
 }
 
 #[test]
-fn luneta_refuses_a_name_a_session_of_zellij_s_has() {
+fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     let owned = Owned::new();
-    let _project = runs(&owned.host, "project");
-    let dir = directory("anywhere");
-    let mut command = luneta(owned.host.vars(), &dir.path);
-    command.arg("project");
-    let ended = on_terminal(command);
-    assert!(!ended.status.success(), "{}", ended.said);
-    assert!(ended.said.contains("project is a session of zellij's"), "{}", ended.said);
-    let host = owned.host.host();
-    let named = host.sessions.iter().filter(|session| session.name == "project");
-    assert!(named.clone().all(|session| own(session).is_none()), "{:?}", host.sessions);
-    assert_eq!(clients(&owned, "project").unwrap_or(0), 0);
+    let dir = directory("work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send("\x1b[97;3unp");
+    let split = eventually("a second terminal opens in the view", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 2).then_some(terminals)
+    });
+    assert_eq!(split.len(), 2);
+    eventually("both frames are drawn beside each other", || {
+        let tops = window.screen().iter().map(|line| line.matches('╭').count()).max()?;
+        (tops == 2).then_some(())
+    });
+    window.send("\x1b[97;3udd");
+    eventually("the pane luneta is on closes", || {
+        let terminals = shown(&owned, &dir.path)?.terminals;
+        (terminals.len() == 1).then_some(())
+    });
 }
 
-fn both_join(owned: &Owned, name: &str, mut windows: [Window; 2]) {
-    eventually(&format!("both lunetas are {name}'s clients"), || {
+fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
+    eventually(&format!("both lunetas show {name}"), || {
         for window in &mut windows {
             let ended = window.luneta.ended_within(Duration::ZERO);
             assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
         }
-        (clients(owned, name)? == 2).then_some(())
+        windows.iter().all(|window| window.shows(name)).then_some(())
     });
-    let host = owned.host.host();
-    let made = host.sessions.iter().filter(|session| session.name == name);
-    assert_eq!(made.count(), 1, "{:?}", host.sessions);
+    let projects = projects_of(owned);
+    let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
+    assert_eq!(made.len(), 1, "{projects:?}");
+    assert_eq!(made[0].workstreams.len(), 1, "{projects:?}");
+    let terminals = || {
+        let projects = projects_of(owned);
+        let made = projects.into_iter().find(|project| project.name == name)?;
+        Some(made.workstreams.iter().map(|it| it.terminals.len()).sum::<usize>())
+    };
+    eventually("a shell opens in the empty view", || terminals().filter(|count| *count > 0));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(terminals(), Some(1), "{:?}", projects_of(owned));
 }
 
 #[test]
-fn bare_lunetas_started_at_once_join_the_session_one_of_them_made() {
+fn bare_lunetas_started_at_once_show_the_project_one_of_them_made() {
     let owned = Owned::new();
     let dir = directory("project");
     let opening = || Window::opening(&owned.host, &dir, &[]);
-    both_join(&owned, "project", [opening(), opening()]);
+    both_show(&owned, "project", [opening(), opening()]);
 }
 
 #[test]
-fn named_lunetas_started_at_once_join_the_session_one_of_them_made() {
+fn named_lunetas_started_at_once_show_the_project_one_of_them_made() {
     let owned = Owned::new();
     let dir = directory("anywhere");
     let opening = || Window::opening(&owned.host, &dir, &["work"]);
-    both_join(&owned, "work", [opening(), opening()]);
+    both_show(&owned, "work", [opening(), opening()]);
 }
 
 #[test]
-fn the_newest_session_takes_the_place_of_an_own_one_that_ended() {
+fn a_luneta_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     let owned = Owned::new();
-    let _zellij = runs(&owned.host, "older");
-    owned.make("first").unwrap();
-    let dir = directory("anywhere");
-    let mut window = Window::open(&owned.host, &dir, &["first"]);
-    eventually("luneta is in first", || (clients(&owned, "first")? == 1).then_some(()));
-    owned.make("newer").unwrap();
-    let first = own(&owned.listed("first")).unwrap();
-    let request = KillRequest {
-        on: None,
-        session: "first".to_owned(),
-        whose: Some(kill_request::Whose::Own(first)),
-    };
-    owned.ask(|mut daemon| async move { daemon.kill(request).await }).unwrap();
-    eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
-    assert!(owned.host.zellij.attached().is_empty(), "{:?}", owned.host.zellij.attached());
-    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
-}
-
-#[test]
-fn a_delete_of_the_own_session_luneta_is_in_goes_on_in_the_newest_and_kills_it() {
-    let owned = Owned::new();
-    owned.make("first").unwrap();
-    let dir = directory("anywhere");
-    let mut window = Window::open(&owned.host, &dir, &["first"]);
-    eventually("luneta is in first", || (clients(&owned, "first")? == 1).then_some(()));
-    owned.make("newer").unwrap();
-    eventually("the sidebar lists newer", || window.shows("newer").then_some(()));
-    window.send("\x1b[97;5uds");
-    eventually("luneta goes on in newer", || (clients(&owned, "newer")? == 1).then_some(()));
-    eventually("first is gone", || session(&owned.host.host(), "first").is_none().then_some(()));
-    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
+    let dir = directory("work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    let size = || owned.listing().terminals.first()?.size.map(|it| (it.columns, it.rows));
+    let first = eventually("the shell is sized", size);
+    window.send(&format!("{LUNETA}\r"));
+    eventually("the inner luneta says it runs there", || window.shows(HERE).then_some(()));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(size(), Some(first), "{:?}", window.screen());
 }

@@ -130,6 +130,15 @@ pub struct Rect {
 
 impl Rect {
     #[must_use]
+    pub fn longer(self) -> Towards {
+        if self.columns > self.rows.saturating_mul(2) {
+            Towards::Right
+        } else {
+            Towards::Down
+        }
+    }
+
+    #[must_use]
     pub fn whole(size: Size) -> Rect {
         let (columns, rows) = size.get();
         Rect { column: 0, row: 0, columns, rows }
@@ -433,15 +442,28 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
+    pub fn room_beside(
+        &self,
+        at: TerminalId,
+        new: TerminalId,
+        size: Size,
+    ) -> Option<(Towards, Size)> {
+        let (_, rect) = self.rects(size).into_iter().find(|(pane, _)| *pane == at)?;
+        let towards = rect.longer();
+        [towards, towards.across()]
+            .into_iter()
+            .find_map(|towards| Some((towards, self.room(at, towards, new, size)?)))
+    }
+
+    #[must_use]
     pub fn room_beside_largest(
         &self,
         new: TerminalId,
         size: Size,
     ) -> Option<(TerminalId, Towards, Size)> {
-        let (largest, towards) = self.largest(size);
-        [towards, towards.across()]
-            .into_iter()
-            .find_map(|towards| Some((largest, towards, self.room(largest, towards, new, size)?)))
+        let (largest, _) = self.largest(size);
+        let (towards, inner) = self.room_beside(largest, new, size)?;
+        Some((largest, towards, inner))
     }
 
     pub fn split(&mut self, at: TerminalId, towards: Towards, new: L, size: Size) {
@@ -460,12 +482,7 @@ impl<L: Leaf> Tree<L> {
             .max_by_key(|(place, (_, rect))| (rect.area(), Reverse(*place)))
             .map(|(_, found)| *found)
             .expect("a tree holds a pane");
-        let towards = if rect.columns > rect.rows.saturating_mul(2) {
-            Towards::Right
-        } else {
-            Towards::Down
-        };
-        (pane, towards)
+        (pane, rect.longer())
     }
 
     #[must_use]
@@ -916,6 +933,21 @@ mod tests {
         let taller = size(COLUMNS_MIN, 2 * ROWS_MIN);
         let beside = full.room_beside_largest(pane(2), taller);
         assert_eq!(beside, Some((pane(1), Towards::Down, size(3, 1))));
+    }
+
+    #[test]
+    fn a_pane_opens_beside_one_on_its_longer_side_or_else_across() {
+        let at = size(80, 24);
+        let tree = three(at);
+        assert_eq!(tree.room_beside(pane(1), pane(4), at), Some((Towards::Down, size(38, 10))));
+        assert_eq!(tree.room_beside(pane(2), pane(4), at), Some((Towards::Right, size(18, 10))));
+        let wide = Tree::one(pane(1));
+        let beside = wide.room_beside(pane(1), pane(2), at);
+        assert_eq!(beside, Some((Towards::Right, size(38, 22))));
+        let low = size(2 * COLUMNS_MIN, ROWS_MIN);
+        assert_eq!(wide.room_beside(pane(1), pane(2), low), Some((Towards::Right, size(3, 1))));
+        assert_eq!(wide.room_beside(pane(9), pane(2), at), None);
+        assert_eq!(wide.room_beside(pane(1), pane(2), size(COLUMNS_MIN, ROWS_MIN)), None);
     }
 
     #[test]
