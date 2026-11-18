@@ -85,7 +85,7 @@ pub struct Pulled {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Deleting {
+enum Doomed {
     Workstream(WorkstreamId),
     Project(ProjectId),
 }
@@ -1723,46 +1723,42 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        let deletes = match act {
-            Act::Workstream { workstream, .. } => Some(Deleting::Workstream(*workstream)),
-            Act::Kill { session, whose: Whose::Own(key) }
-            | Act::Leave { session, whose: Whose::Own(key), .. } => {
-                let Some(project) = self.projected.project(on, *key) else {
-                    let why = format!("lunetad keeps no project {session}");
+        match (on, act) {
+            (_, Act::Workstream { workstream, .. }) => {
+                self.project_act_delete(on, Doomed::Workstream(*workstream));
+            },
+            (_, Act::Kill { session, whose: Whose::Own(key) }) => {
+                let Some(project) = projected::project_of(*key) else {
+                    let why = format!("{session} is no project's");
                     return self.sidebar.notify(format!("menu: not deleted: {why}"));
                 };
-                Some(Deleting::Project(project.id))
+                self.project_act_delete(on, Doomed::Project(project));
             },
-            _ => None,
-        };
-        if let Some(deletes) = deletes {
-            let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
-            let deleting = thread::spawn(move || {
-                let closed = caught(|| match deletes {
-                    Deleting::Workstream(workstream) => {
-                        workstreams::closed(&lunetad, &on, workstream)
-                    },
-                    Deleting::Project(project) => {
-                        workstreams::closed_project(&lunetad, &on, project)
-                    },
+            (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
+                let (terminal, events) = (*terminal, self.events.clone());
+                thread::spawn(move || {
+                    if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
+                        let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
+                    }
                 });
-                if let Err(why) = closed {
-                    let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
-                }
-            });
-            self.deleting.retain(|deleting| !deleting.is_finished());
-            self.deleting.push(deleting);
-            return;
+            },
+            _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
         }
-        let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {
-            return self.sidebar.notify(format!("menu: {NOT_YET}"));
-        };
-        let (terminal, events) = (*terminal, self.events.clone());
-        thread::spawn(move || {
-            if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
-                let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
+    }
+
+    fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
+        let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
+        let deleting = thread::spawn(move || {
+            let closed = caught(|| match doomed {
+                Doomed::Workstream(workstream) => workstreams::closed(&lunetad, &on, workstream),
+                Doomed::Project(project) => workstreams::closed_project(&lunetad, &on, project),
+            });
+            if let Err(why) = closed {
+                let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
             }
         });
+        self.deleting.retain(|deleting| !deleting.is_finished());
+        self.deleting.push(deleting);
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {

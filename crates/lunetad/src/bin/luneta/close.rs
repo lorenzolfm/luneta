@@ -120,19 +120,22 @@ pub enum Act {
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
     Workstream { session: SessionName, whose: Whose, workstream: WorkstreamId, panes: Vec<u32> },
     Kill { session: SessionName, whose: Whose },
-    Leave { session: SessionName, whose: Whose, to: Place },
+    Leave { session: SessionName, started: SystemTime, to: Place },
 }
 
 impl Act {
-    pub fn own(&self) -> bool {
-        let whose = match self {
+    pub fn whose(&self) -> Whose {
+        match self {
             Act::Pane { whose, .. }
             | Act::Tab { whose, .. }
             | Act::Workstream { whose, .. }
-            | Act::Kill { whose, .. }
-            | Act::Leave { whose, .. } => whose,
-        };
-        matches!(whose, Whose::Own(_))
+            | Act::Kill { whose, .. } => *whose,
+            Act::Leave { started, .. } => Whose::Zellij(*started),
+        }
+    }
+
+    pub fn own(&self) -> bool {
+        matches!(self.whose(), Whose::Own(_))
     }
 
     fn what(&self) -> String {
@@ -140,10 +143,7 @@ impl Act {
             Act::Pane { .. } => "Close the pane".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
             Act::Workstream { .. } => "Delete the workstream".to_owned(),
-            Act::Kill { session, whose: Whose::Own(_) }
-            | Act::Leave { session, whose: Whose::Own(_), .. } => {
-                format!("Delete project {session}")
-            },
+            Act::Kill { session, whose: Whose::Own(_) } => format!("Delete project {session}"),
             Act::Kill { session, .. } | Act::Leave { session, .. } => {
                 format!("Delete session {session}")
             },
@@ -177,12 +177,13 @@ pub fn plan(subject: &Subject) -> Plan {
         Deletes::Workstream { workstream, panes } => {
             Act::Workstream { session, whose, workstream: *workstream, panes: panes.clone() }
         },
-        Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
-            Seat::Elsewhere => Act::Kill { session, whose },
-            Seat::In => match subject.refuge.clone() {
-                Some(to) => Act::Leave { session, whose, to },
-                None => Act::Kill { session, whose },
-            },
+        Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => {
+            match (subject.seat, whose, subject.refuge.clone()) {
+                (Seat::In, Whose::Zellij(started), Some(to)) => {
+                    Act::Leave { session, started, to }
+                },
+                (Seat::In | Seat::Elsewhere, _, _) => Act::Kill { session, whose },
+            }
         },
     };
     Plan::of(act, subject.agents.as_deref().map_err(|untold| *untold))
@@ -304,7 +305,8 @@ mod tests {
         );
         let kill = Act::Kill { session: session.clone(), whose };
         assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), kill.clone());
-        let leave = Act::Leave { session, whose, to: elsewhere() };
+        let started = whose.started(&session).unwrap();
+        let leave = Act::Leave { session, started, to: elsewhere() };
         assert_eq!(planned(Seat::In, pane(Closes::Session)), leave.clone());
         assert_eq!(planned(Seat::In, Deletes::Session), leave);
         assert_eq!(planned(Seat::Elsewhere, Deletes::Session), kill);
@@ -325,13 +327,16 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_delete_asks_first_by_the_project_s_name() {
+    fn a_project_s_delete_kills_it_and_asks_first_by_the_project_s_name() {
         let project = Listed::new_project("luneta", 6);
         let busy = vec![(4, Doing::Busy)];
-        let planned = plan(&subject(&project, Seat::Elsewhere, Deletes::Session, busy));
-        assert!(matches!(planned.act, Act::Kill { whose: Whose::Own(_), .. }), "{planned:?}");
-        let asks = Some("Delete project luneta? 1 agent, 1 busy".to_owned());
-        assert_eq!(planned.question(), asks);
+        for seat in [Seat::In, Seat::Elsewhere] {
+            let planned = plan(&subject(&project, seat, Deletes::Session, busy.clone()));
+            let killed = matches!(planned.act, Act::Kill { whose: Whose::Own(_), .. });
+            assert!(killed, "an own project is killed, never left: {planned:?}");
+            let asks = Some("Delete project luneta? 1 agent, 1 busy".to_owned());
+            assert_eq!(planned.question(), asks);
+        }
     }
 
     #[test]

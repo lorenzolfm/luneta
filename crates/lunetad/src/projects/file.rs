@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
-use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Refused, Runs, Session};
-use super::{Terminal, TerminalId, Used, WorkstreamId};
+use super::{Below, Change, Closing, Dir, Id, Line, Name, Project, Projects, Refused, Runs};
+use super::{Session, Terminal, TerminalId, Used, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -86,7 +86,6 @@ struct KeptWorkstream {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default)]
     below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
@@ -255,6 +254,15 @@ impl Store {
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
         let (changed, made) = self.applied(change)?;
         assert!(made.is_none(), "a change that follows the mux makes no id");
+        self.follows(changed)
+    }
+
+    pub fn closed(&mut self, closing: Closing) -> Result<Option<String>, Failed> {
+        let changed = self.kept()?.closed(closing).map_err(Failed::Refused)?;
+        self.follows(changed)
+    }
+
+    fn follows(&mut self, changed: Projects) -> Result<Option<String>, Failed> {
         if self.projects() == Some(&changed) {
             return Ok(None);
         }
@@ -267,12 +275,15 @@ impl Store {
         Ok(unwritten)
     }
 
+    fn kept(&self) -> Result<&Projects, Failed> {
+        match &self.keeping {
+            Keeping::Kept { projects, .. } => Ok(projects),
+            Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
+        }
+    }
+
     fn applied(&self, change: Change) -> Result<(Projects, Option<Id>), Failed> {
-        let projects = match &self.keeping {
-            Keeping::Kept { projects, .. } => projects,
-            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
-        };
-        projects.changed(change, Id::random).map_err(|refused| match refused {
+        self.kept()?.changed(change, Id::random).map_err(|refused| match refused {
             Refused::Nests(why) => Failed::Nests(why),
             Refused::Stale(why) => Failed::Stale(why),
             Refused::Said(why) => Failed::Refused(why),
@@ -429,8 +440,7 @@ fn parse(text: &str) -> Result<Projects, String> {
 
 impl KeptProject {
     fn read(self) -> Result<Project, String> {
-        let workstreams = self.workstreams.into_iter();
-        let workstreams = workstreams.filter(|it| !it.below.is_empty()).map(KeptWorkstream::read);
+        let workstreams = self.workstreams.into_iter().map(KeptWorkstream::read);
         Ok(Project {
             id: self.id.parse()?,
             name: Name::parse(&self.name)?,
@@ -810,14 +820,18 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_kept_in_its_project_s_own_folder_is_dropped_when_read() {
-        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
-            "dir": "/a", "workstreams": [{"id": "0000000000000002"},
-            {"id": "0000000000000003", "below": "b"}]}]}"#;
-        let kept = parse(text).unwrap();
-        let ids: Vec<u64> = kept.all()[0].workstreams().iter().map(|it| it.id().get()).collect();
-        assert_eq!(ids, [3]);
-        assert!(!written(&kept).contains("0000000000000002"));
+    fn a_workstream_kept_in_its_project_s_own_folder_is_refused_when_read() {
+        let text = |kept: &str| {
+            format!(
+                r#"{{"version": 4, "projects": [{{"id": "0000000000000001", "name": "a",
+                "dir": "/a", "workstreams": [{kept},
+                {{"id": "0000000000000003", "below": "b"}}]}}]}}"#
+            )
+        };
+        let unsaid = parse(&text(r#"{"id": "0000000000000002"}"#)).unwrap_err();
+        assert!(unsaid.contains("missing field `below`"), "{unsaid}");
+        let own = parse(&text(r#"{"id": "0000000000000002", "below": ""}"#));
+        assert_eq!(own, Err("no workstream is in its project's own folder".to_owned()));
     }
 
     #[test]
@@ -1032,7 +1046,7 @@ mod tests {
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
-        let unwritten = store.followed(Change::CloseWorkstream { workstream });
+        let unwritten = store.closed(Closing::Workstream(workstream));
         let flushed = store.flush();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
         let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
@@ -1045,7 +1059,7 @@ mod tests {
 
         store.flush().unwrap();
         assert!(read(&file).unwrap().find(workstream).is_none(), "a flush writes the close");
-        let again = store.followed(Change::CloseWorkstream { workstream });
+        let again = store.closed(Closing::Workstream(workstream));
         assert!(matches!(again, Err(Failed::Refused(_))), "{again:?}");
     }
 

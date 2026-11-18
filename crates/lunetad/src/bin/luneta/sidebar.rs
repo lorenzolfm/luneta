@@ -7908,7 +7908,7 @@ mod tests {
     }
 
     #[test]
-    fn an_own_client_is_where_its_server_says_and_leaves_its_project_to_delete_it() {
+    fn an_own_client_is_where_its_server_says_and_kills_its_project_to_delete_it() {
         let mut sidebar = fresh();
         let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
@@ -7928,10 +7928,8 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let newest = Place::Session(Listed::new_project("newest", 2));
-        let whose = Whose::Own(key);
-        let leave = Act::Leave { session: session_name("twin"), whose, to: newest };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
+        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
     }
 
     #[test]
@@ -8968,10 +8966,9 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
-        let to = Place::Session(own_listed("young", 2));
         let whose = own_listed("older", 1).whose();
-        let leave = Act::Leave { session: session_name("older"), whose, to };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
+        let kill = Act::Kill { session: session_name("older"), whose };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
         assert!(sidebar.menu.is_none());
     }
 

@@ -637,7 +637,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let holds_here = |plan: &Plan| {
         let holds = |here: &Here| {
             let act = &plan.act;
-            whose_of(act) == here.whose()
+            act.whose() == here.whose()
                 && session_of(act) == here.pane.session
                 && act.takes(here.pane.pane)
         };
@@ -765,16 +765,6 @@ fn says(act: &Act) -> String {
     }
 }
 
-fn whose_of(act: &Act) -> Whose {
-    match act {
-        Act::Pane { whose, .. }
-        | Act::Tab { whose, .. }
-        | Act::Workstream { whose, .. }
-        | Act::Kill { whose, .. }
-        | Act::Leave { whose, .. } => *whose,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Spot<'a> {
     Zellij { session: &'a str, pane: u32 },
@@ -892,9 +882,8 @@ fn act(act: &Act) -> Result<(), String> {
         Act::Workstream { .. } => {
             unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
         },
-        Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
-            closes::killed(session, whose.started(session)?)
-        },
+        Act::Kill { session, whose } => closes::killed(session, whose.started(session)?),
+        Act::Leave { session, started, .. } => closes::killed(session, *started),
     }
 }
 

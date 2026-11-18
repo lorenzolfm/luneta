@@ -3893,8 +3893,8 @@ mod tests {
             agents: Ok(Vec::new()),
             refuge: Some(elo.clone()),
         };
-        let whose = session.whose();
-        let leave = Act::Leave { session: listed().name().clone(), whose, to: elo };
+        let started = session.whose().started(session.name()).unwrap();
+        let leave = Act::Leave { session: listed().name().clone(), started, to: elo };
         let done = closed(menu.planned(Ok(close::plan(&subject))));
         assert_eq!(done, Done::Act(Machine::Local, leave));
     }
