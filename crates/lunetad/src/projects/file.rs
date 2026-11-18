@@ -27,13 +27,15 @@ const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
 
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 const WITHOUT_VIEWS: u32 = 1;
 
 const WITHOUT_UNRUN: u32 = 2;
 
 const WITHOUT_NAMES_OR_USE: u32 = 3;
+
+const UNFOLLOWED: u32 = 4;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -485,7 +487,11 @@ fn parse(text: &str) -> Result<Projects, String> {
         }
     }
     let projects = kept.projects.into_iter().map(KeptProject::read);
-    Projects::checked(projects.collect::<Result<_, _>>()?)
+    let mut projects = Projects { projects: projects.collect::<Result<_, _>>()? };
+    if version <= UNFOLLOWED {
+        projects.followed();
+    }
+    Projects::checked(projects.projects)
 }
 
 impl KeptProject {
@@ -766,7 +772,7 @@ mod tests {
         let main = Change::AddWorkstream { project, folder, name: named };
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let want = r#"{
-  "version": 4,
+  "version": 5,
   "projects": [
     {
       "id": "0000000000000001",
@@ -789,8 +795,8 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [1, 2, 3] {
-            let before = want.replace(r#""version": 4"#, &format!(r#""version": {before}"#));
+        for before in [1, 2, 3, 4] {
+            let before = want.replace(r#""version": 5"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
     }
@@ -825,14 +831,14 @@ mod tests {
             ),
         ];
         for (id, runs, placed) in runs {
-            let terminal = Terminal::new(id, dir("/w/luneta/main"), runs);
+            let terminal = Terminal::new(id, dir("/w/luneta/top"), runs);
             let open = Change::Open { workstream, terminal, placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 4,
+  "version": 5,
   "projects": [
     {
       "id": "0000000000000001",
@@ -854,7 +860,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000004",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": "shell"
                 }
               },
@@ -867,7 +873,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000005",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": {
                     "command": "vim notes"
                   }
@@ -876,7 +882,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000006",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": {
                     "agent": {
                       "harness": "claude-code",
@@ -895,7 +901,7 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects));
-        let before = want.replace(r#""version": 4"#, r#""version": 1"#);
+        let before = want.replace(r#""version": 5"#, r#""version": 1"#);
         assert_eq!(parse(&before), Err("it is of version 1, which holds no views".to_owned()));
     }
 
@@ -909,6 +915,17 @@ mod tests {
         let folders: Vec<Dir> = project.workstreams().iter().map(|it| project.folder(it)).collect();
         assert_eq!(folders, [dir("/a"), dir("/a/b")]);
         assert_eq!(parse(&written(&kept)), Ok(kept));
+    }
+
+    #[test]
+    fn a_workstream_read_from_version_4_is_where_its_terminals_all_went() {
+        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
+            "dir": "/a", "workstreams": [{"id": "0000000000000002", "below": "b",
+            "view": {"tree": [{"terminal": {"id": "0000000000000003", "folder": "/a/c/d",
+            "runs": "shell"}}]}}]}]}"#;
+        let projects = parse(text).unwrap();
+        let project = &projects.all()[0];
+        assert_eq!(project.folder(&project.workstreams()[0]).as_str(), "/a/c/d");
     }
 
     #[test]
@@ -968,7 +985,7 @@ mod tests {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 5, "projects": []}"#, "version 5, and this lunetad reads only 1 to 4"),
+            (r#"{"version": 6, "projects": []}"#, "version 6, and this lunetad reads only 1 to 5"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
@@ -977,6 +994,13 @@ mod tests {
                 "/a/b is inside /a",
             ),
             (&format!(r#"{{"version": 1, "projects": [{project}, {project}]}}"#), "comes twice"),
+            (
+                r#"{"version": 5, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
+                "workstreams": [{"id": "0000000000000002", "below": "b",
+                "view": {"tree": [{"terminal": {"id": "0000000000000003", "folder": "/a/c/d",
+                "runs": "shell"}}]}}]}]}"#,
+                "/a/b: its terminals all went to /a/c/d",
+            ),
             (
                 r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "below": "../b"}]}]}"#,
