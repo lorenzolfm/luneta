@@ -267,7 +267,13 @@ impl View {
         let (Some((inner, _, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
             return;
         };
-        self.pointer = Pointer::Pressed(within(spot_in(inner, at), screen.size));
+        let at = spot_in(inner, at);
+        let held = within(at, screen.size);
+        self.pointer = if held == at {
+            Pointer::Pressed(at)
+        } else {
+            Pointer::Selecting(Selection { from: held, to: held })
+        };
     }
 
     fn select_to(&mut self, at: Spot) {
@@ -304,7 +310,11 @@ impl View {
         if screen.tracks_mouse {
             return None;
         }
-        link(screen, within(spot_in(inner, at), screen.size)).map(|(span, _)| span)
+        let at = spot_in(inner, at);
+        if within(at, screen.size) != at {
+            return None;
+        }
+        link(screen, at).map(|(span, _)| span)
     }
 
     fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
@@ -945,6 +955,14 @@ mod tests {
         let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
         view.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
         assert_eq!(view.pointed(spot(2, 2)), None, "where the program takes the mouse, none shows");
+        view.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
+        assert_eq!(view.pointed(spot(3, 8)), None, "past a screen shorter than its pane, none shows");
+        view.select_from(spot(3, 8));
+        assert_eq!(view.selected(), None, "nor does a click there copy");
+        assert_eq!(view.pointer, Pointer::Free);
+        view.select_from(spot(3, 8));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a drag from there still selects");
     }
 
     #[test]
