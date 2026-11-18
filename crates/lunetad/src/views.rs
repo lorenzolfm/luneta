@@ -613,7 +613,17 @@ impl Views {
                 self.focus(client, to)?;
             },
             Asked::Resize { sides, growth } => {
-                let terminal = focused()?;
+                let Some(terminal) = focus else {
+                    return Ok(Done::Quiet);
+                };
+                let view = self.view(workstream)?;
+                let moves = view.full().is_none()
+                    && view.tree().is_some_and(|tree| {
+                        tree.clone().resize(terminal, sides, growth, size)
+                    });
+                if !moves {
+                    return Ok(Done::Quiet);
+                }
                 self.changed(Change::Resize { terminal, sides, growth, size })?;
             },
             Asked::Move(step) => {

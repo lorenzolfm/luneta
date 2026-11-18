@@ -536,10 +536,10 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     shown.ask(Event::Fullscreen(()));
     shown.until("the view full", |laid| full_of(laid) == Some(right));
     shown.ask(Event::Resize(resize(grow)));
-    assert!(shown.until_refused().contains("resized by none"));
     let to = Some(r#move::To::Direction(show_request::Direction::Right.into()));
     shown.ask(Event::Move(show_request::Move { to }));
-    assert!(shown.until_refused().contains("moves none"));
+    let refused = shown.until_refused();
+    assert!(refused.contains("moves none"), "a full view's resize is quiet, not {refused}");
 }
 
 #[test]
@@ -547,13 +547,16 @@ fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
-    shown.open();
-    shown.open();
     let every = Some(resize::Sides::Every(()));
     let (grow, shrink) = (show_request::Growth::Grow, show_request::Growth::Shrink);
     let around = |growth: show_request::Growth| {
         Event::Resize(show_request::Resize { sides: every, growth: growth.into() })
     };
+    shown.ask(around(grow));
+    shown.open();
+    shown.ask(around(grow));
+    shown.open();
+    assert!(shown.refused.is_empty(), "a resize that moves nothing is quiet: {:?}", shown.refused);
     shown.ask(around(grow));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[1].rect == Some(rect(36, 0, 44, 24))

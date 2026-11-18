@@ -528,7 +528,8 @@ them, whichever side has the keys:
   bar, and where none is right of it, `Ctrl l` goes to the one after it; past
   the project's first or last workstream, they stay.
 - `Alt =` or `Alt +` grows the pane you are on, moving each of its borders a
-  step, and `Alt -` shrinks it.
+  step, and `Alt -` shrinks it. Where no border can move, as with one pane,
+  they do nothing.
 - `Ctrl q` collapses the sidebar to a strip four columns wide, zellij taking
   the rest of its columns, and opens it again, as a click on the strip does.
   `Ctrl a` opens it too, and goes into it.
@@ -551,7 +552,9 @@ task to the background, `Ctrl j` to a new line, `Ctrl d` to exit, and `Ctrl x`
 `Ctrl l`. luneta takes all of these first: if you use those, bind them to
 other keys, in Claude Code's `~/.claude/keybindings.json` or your editor's
 config. `Super j` reaches luneta only where your terminal speaks the kitty
-keyboard protocol, as Ghostty does.
+keyboard protocol, as Ghostty does. Where it does not, `Ctrl h` comes as the
+byte many terminals send for `Ctrl Backspace` too, and some for `Backspace`,
+so those keys move to the pane on the left as well.
 
 The picker floats over zellij's side. It lists the sessions, the agents and
 the directories of every machine, each machine's under a rule of its own, this

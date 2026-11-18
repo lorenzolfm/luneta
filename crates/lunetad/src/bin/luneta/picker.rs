@@ -1015,6 +1015,7 @@ impl Picker {
 
     fn search_key(&mut self, key: &KeyEvent) -> Picked {
         let control = key.modifiers == KeyModifiers::CONTROL;
+        let held_super = key.modifiers == KeyModifiers::SUPER;
         match key.code {
             KeyCode::Esc => Picked::Close,
             KeyCode::Tab => {
@@ -1025,7 +1026,7 @@ impl Picker {
                 self.list = self.list.back();
                 Picked::Nothing
             },
-            KeyCode::Char('j') if control => {
+            KeyCode::Char('j') if held_super => {
                 self.list = List::Sessions;
                 Picked::Nothing
             },
@@ -2557,6 +2558,20 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_that_open_each_list_go_to_it_and_ctrl_j_goes_to_none() {
+        let mut picker = Picker::open(1, List::Agents, Listing::default(), Machine::Local);
+        control(&mut picker, 'j');
+        assert_eq!(picker.list, List::Agents, "Ctrl j is the panes' Down");
+        picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
+        assert_eq!(picker.list, List::Sessions);
+        control(&mut picker, 'd');
+        assert_eq!(picker.list, List::Dirs);
+        control(&mut picker, 'b');
+        assert_eq!(picker.list, List::Agents);
+        assert_eq!(picker.term, "", "no key typed into the search");
+    }
+
+    #[test]
     fn del_on_an_agent_asks_zellij_what_closing_its_pane_closes_first() {
         let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
         let listing = Listing {
@@ -3376,7 +3391,7 @@ mod tests {
         let failed = Err("Permission denied".to_owned());
         picker.heard(Heard::Listed { on: Machine::Local, path: path(), listed: failed });
         assert_eq!(picker.due(), None);
-        control(&mut picker, 'j');
+        picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
         control(&mut picker, 'd');
         picker.ticked(picker.due().unwrap());
         assert_eq!(picker.asks(), [list()]);
