@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseProject};
-use lunetad::api::change_projects_request::CloseWorkstream;
+use lunetad::api::change_projects_request::{CloseWorkstream, Pull, Start};
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::change_projects_request::RenameTerminal;
+use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
@@ -14,6 +15,7 @@ use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use lunetad::names::session_for;
+use lunetad::Directory;
 
 use crate::daemon;
 use crate::machines::Machine;
@@ -113,11 +115,7 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
     })
 }
 
-fn changed(path: &Path, change: Change) -> Result<Option<u64>, Unmade> {
-    changed_on(path, None, change)
-}
-
-fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<u64>, Unmade> {
+fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<Made>, Unmade> {
     asked(path, async |daemon| {
         let request = ChangeProjectsRequest { on, change: Some(change) };
         match daemon.change_projects(request).await {
@@ -136,27 +134,39 @@ fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<u64>
 fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unmade> {
     let (dir, name) = (dir.to_owned(), name.map(str::to_owned));
     let change = Change::AddProject(AddProject { dir, name });
-    let made = changed(path, change)?.and_then(ProjectId::of);
-    made.ok_or_else(|| Unmade::Failed("lunetad made no project".to_owned()))
+    match changed_on(path, None, change)? {
+        Some(Made::Project(made)) => ProjectId::of(made).ok_or_else(|| zero("project").into()),
+        made => Err(Unmade::Failed(format!("lunetad made no project but {made:?}"))),
+    }
+}
+
+fn zero(made: &str) -> String {
+    format!("lunetad said it made {made} 0, and no id is 0")
+}
+
+fn workstream_made(made: Option<Made>) -> Result<WorkstreamId, String> {
+    match made {
+        Some(Made::Workstream(made)) => WorkstreamId::of(made).ok_or_else(|| zero("workstream")),
+        made => Err(format!("lunetad made no workstream but {made:?}")),
+    }
 }
 
 pub fn add_workstream(
     path: &Path,
+    machine: &Machine,
     project: ProjectId,
     folder: &str,
     name: Option<&str>,
 ) -> Result<WorkstreamId, String> {
     let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
     let change = Change::AddWorkstream(AddWorkstream { project, folder, name });
-    let made = changed(path, change).map_err(Unmade::said)?.and_then(WorkstreamId::of);
-    made.ok_or_else(|| "lunetad made no workstream".to_owned())
+    workstream_made(changed_on(path, on(machine), change).map_err(Unmade::said)?)
 }
 
 fn workstream_at(path: &Path, project: ProjectId, folder: &str) -> Result<WorkstreamId, String> {
     let (project, folder) = (project.get(), folder.to_owned());
     let change = Change::WorkstreamAt(WorkstreamAt { project, folder });
-    let found = changed(path, change).map_err(Unmade::said)?.and_then(WorkstreamId::of);
-    found.ok_or_else(|| "lunetad found and made no workstream".to_owned())
+    workstream_made(changed_on(path, None, change).map_err(Unmade::said)?)
 }
 
 pub fn closed(
@@ -236,10 +246,6 @@ pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<Opti
 
 fn holds(dir: &str, folder: &Path) -> bool {
     folder.starts_with(dir)
-}
-
-fn holding(projects: &[Project], cwd: &Path) -> Option<Project> {
-    projects.iter().find(|project| holds(&project.dir, cwd)).cloned()
 }
 
 fn last_used(project: &Project) -> Option<WorkstreamId> {
@@ -334,49 +340,38 @@ fn started(
     Ok(last_used(projects.iter().max_by_key(last).ok_or(unmade)?))
 }
 
-pub fn here(path: &Path, cwd: &Path, name: Option<&str>) -> Result<Option<WorkstreamId>, String> {
-    let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
-    twice(|| {
-        if let Some(project) = holding(&kept(path)?, cwd) {
-            return at_folder(path, &project, folder);
-        }
-        match add_project(path, folder, name) {
-            Ok(_) => Ok(None),
-            Err(Unmade::Failed(why)) => Err(Tried::Failed(why)),
-            Err(Unmade::Nests(why)) => match holding(&kept(path)?, cwd) {
-                Some(project) => at_folder(path, &project, folder),
-                None => Err(Tried::Failed(why)),
-            },
-        }
-    })
-}
-
-fn utf8(dir: &Path) -> Result<&str, String> {
-    dir.to_str().ok_or_else(|| format!("{} is not UTF-8", dir.display()))
+pub fn made_at(
+    path: &Path,
+    machine: &Machine,
+    cwd: &Directory,
+    name: Option<&str>,
+) -> Result<Option<WorkstreamId>, String> {
+    let (folder, name) = (cwd.to_string(), name.map(str::to_owned));
+    match changed_on(path, on(machine), Change::Start(Start { folder, name })) {
+        Ok(Some(Made::Project(_))) => Ok(None),
+        Ok(made) => workstream_made(made).map(Some),
+        Err(unmade) => Err(unmade.said()),
+    }
 }
 
 pub fn pulled(
     path: &Path,
+    machine: &Machine,
     project: &str,
-    (holder, cwd): (&Path, &Path),
+    (holder, cwd): (&Directory, &Directory),
     name: &str,
 ) -> Result<WorkstreamId, String> {
-    let (dir, folder) = (utf8(holder)?, utf8(cwd)?);
-    twice(|| {
-        let id = match holding(&kept(path)?, cwd) {
-            Some(project) => project.id,
-            None => add_project(path, dir, Some(project)).map_err(Unmade::said)?,
-        };
-        in_kept(path, id, add_workstream(path, id, folder, Some(name)))
-    })
+    let (holder, folder) = (holder.to_string(), cwd.to_string());
+    let (project, name) = (project.to_owned(), name.to_owned());
+    let change = Change::Pull(Pull { holder, folder, project, name });
+    workstream_made(changed_on(path, on(machine), change).map_err(Unmade::said)?)
 }
 
-#[must_use]
-pub fn real(cwd: &Path) -> PathBuf {
-    std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned())
+pub fn real(cwd: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(cwd).map_err(|error| format!("{}: {error}", cwd.display()))
 }
 
-fn made_there(machine: &Machine, change: Change) -> Result<Option<u64>, String> {
+fn made_there(machine: &Machine, change: Change) -> Result<Option<Made>, String> {
     let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
     changed_on(&path, on(machine), change).map_err(Unmade::said)
 }
@@ -425,12 +420,13 @@ pub fn project_made(
     let (dir, name) = (folder.to_owned(), name.map(spelled));
     let unmade = |why: String| format!("no project made: {why}");
     let made = made_there(machine, Change::AddProject(AddProject { dir, name })).map_err(unmade)?;
-    let project = made.ok_or_else(|| unmade("lunetad said no project's id".to_owned()))?;
+    let project = match made {
+        Some(Made::Project(project)) => project,
+        made => return Err(unmade(format!("lunetad made no project but {made:?}"))),
+    };
     let empty = |why: String| format!("{folder} is a project now, with no workstream: {why}");
     let at = WorkstreamAt { project, folder: folder.to_owned() };
-    let found = made_there(machine, Change::WorkstreamAt(at)).map_err(empty)?;
-    let found = found.and_then(WorkstreamId::of);
-    found.ok_or_else(|| empty("lunetad said no workstream's id".to_owned()))
+    workstream_made(made_there(machine, Change::WorkstreamAt(at)).map_err(empty)?).map_err(empty)
 }
 
 fn spelled(name: &Name) -> String {

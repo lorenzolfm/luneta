@@ -390,6 +390,17 @@ impl Project {
     pub fn folder(&self, workstream: &Workstream) -> Dir {
         self.dir.join(&workstream.below)
     }
+
+    fn last_used(&self) -> Option<WorkstreamId> {
+        let mut last: Option<&Workstream> = None;
+        for workstream in &self.workstreams {
+            if last.is_none_or(|last| workstream.used > last.used) {
+                last = Some(workstream);
+            }
+        }
+        assert_eq!(last.is_some(), !self.workstreams.is_empty(), "a project's workstream is last");
+        last.map(Workstream::id)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -438,6 +449,8 @@ pub enum Change {
     AddProject { dir: Dir, name: Option<Name> },
     AddWorkstream { project: ProjectId, folder: Dir, name: Option<Name> },
     WorkstreamAt { project: ProjectId, folder: Dir },
+    Start { folder: Dir, name: Option<Name> },
+    Pull { holder: Dir, folder: Dir, project: Name, name: Name },
     RenameProject { project: ProjectId, to: Name },
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     ReorderProjects { seen: Vec<ProjectId>, projects: Vec<ProjectId> },
@@ -462,6 +475,12 @@ pub enum Change {
     Swap { one: TerminalId, other: TerminalId },
     Fill { workstream: WorkstreamId, full: Option<TerminalId> },
     Ran(Vec<Ran>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Made {
+    Project(ProjectId),
+    Workstream(WorkstreamId),
 }
 
 #[derive(Debug)]
@@ -511,6 +530,16 @@ impl Ask {
             Asked::WorkstreamAt(asked::WorkstreamAt { project, folder }) => Change::WorkstreamAt {
                 project: id("project", project).map(ProjectId)?,
                 folder: Dir::found(&folder).map_err(field("folder"))?,
+            },
+            Asked::Start(asked::Start { folder, name: named }) => Change::Start {
+                folder: Dir::found(&folder).map_err(field("folder"))?,
+                name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
+            },
+            Asked::Pull(asked::Pull { holder, folder, project, name }) => Change::Pull {
+                holder: Dir::found(&holder).map_err(field("holder"))?,
+                folder: Dir::found(&folder).map_err(field("folder"))?,
+                project: Name::of_project(&project).map_err(field("project"))?,
+                name: Name::parse(&name).map_err(field("name"))?,
             },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
@@ -576,6 +605,8 @@ impl Change {
             Change::AddProject { .. }
             | Change::AddWorkstream { .. }
             | Change::WorkstreamAt { .. }
+            | Change::Start { .. }
+            | Change::Pull { .. }
             | Change::RenameProject { .. }
             | Change::RenameWorkstream { .. }
             | Change::ReorderProjects { .. }
@@ -737,8 +768,8 @@ impl Projects {
         &self,
         change: Change,
         draw: impl FnMut() -> io::Result<Id>,
-    ) -> Result<(Projects, Option<Id>), Refused> {
-        if let Change::AddProject { dir, .. } = &change
+    ) -> Result<(Projects, Option<Made>), Refused> {
+        if let Some(dir) = self.added_at(&change)
             && let Some(other) = self.projects.iter().find(|other| other.dir.nests(dir))
         {
             return Err(Refused::Nests(nested(dir, other)));
@@ -747,6 +778,19 @@ impl Projects {
             return Err(Refused::Stale(why));
         }
         self.changed_by(change, draw).map_err(Refused::Said)
+    }
+
+    fn added_at<'a>(&self, change: &'a Change) -> Option<&'a Dir> {
+        match change {
+            Change::AddProject { dir, .. } => Some(dir),
+            Change::Start { folder, .. } => self.held_at(folder).is_none().then_some(folder),
+            Change::Pull { holder, folder, .. } => self.held_at(folder).is_none().then_some(holder),
+            _ => None,
+        }
+    }
+
+    fn held_at(&self, folder: &Dir) -> Option<(&Project, Below)> {
+        self.projects.iter().find_map(|project| Some((project, project.dir.below(folder)?)))
     }
 
     fn stale(&self, change: &Change) -> Option<String> {
@@ -766,21 +810,13 @@ impl Projects {
         &self,
         change: Change,
         mut draw: impl FnMut() -> io::Result<Id>,
-    ) -> Result<(Projects, Option<Id>), String> {
+    ) -> Result<(Projects, Option<Made>), String> {
         let mut changed = self.clone();
         let made = match change {
             Change::AddProject { dir, name } => {
-                let name = match name {
-                    Some(name) => name,
-                    None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
-                };
-                if self.projects.len() >= PROJECTS_MAX {
-                    return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
-                }
-                let id = self.fresh(&mut draw)?;
-                let project = Project { id: ProjectId(id), name, dir, workstreams: Vec::new() };
-                changed.projects.push(project);
-                Some(id)
+                let (with, made) = self.with_project(dir, name, &mut draw)?;
+                changed = with;
+                Some(Made::Project(made))
             },
             Change::AddWorkstream { project, folder, name } => {
                 if self.workstream_count() >= WORKSTREAMS_MAX {
@@ -796,7 +832,7 @@ impl Projects {
                 let made = WorkstreamId(id);
                 let workstream = Workstream { id: made, renamed: name, below, view, used };
                 project.workstreams.push(workstream);
-                Some(id)
+                Some(Made::Workstream(made))
             },
             Change::WorkstreamAt { project, folder } => {
                 let held = changed.project(project)?;
@@ -806,7 +842,26 @@ impl Projects {
                     let add = Change::AddWorkstream { project, folder, name: None };
                     return self.changed_by(add, draw);
                 };
-                Some(found.id.0)
+                Some(Made::Workstream(found.id))
+            },
+            Change::Start { folder, name } => match self.held_at(&folder) {
+                Some((held, below)) if below.is_own() => Some(match held.last_used() {
+                    Some(last) => Made::Workstream(last),
+                    None => Made::Project(held.id),
+                }),
+                Some((held, _)) => {
+                    let at = Change::WorkstreamAt { project: held.id, folder };
+                    return self.changed_by(at, draw);
+                },
+                None => return self.changed_by(Change::AddProject { dir: folder, name }, draw),
+            },
+            Change::Pull { holder, folder, project, name } => {
+                let (with, held) = match self.held_at(&folder) {
+                    Some((held, _)) => (self.clone(), held.id),
+                    None => self.with_project(holder, Some(project), &mut draw)?,
+                };
+                let add = Change::AddWorkstream { project: held, folder, name: Some(name) };
+                return with.changed_by(add, draw);
             },
             Change::RenameProject { project, to } => {
                 changed.project(project)?.name = to;
@@ -958,6 +1013,25 @@ impl Projects {
         }
         self.kept_as(&changed);
         Ok(changed)
+    }
+
+    fn with_project(
+        &self,
+        dir: Dir,
+        name: Option<Name>,
+        draw: &mut impl FnMut() -> io::Result<Id>,
+    ) -> Result<(Projects, ProjectId), String> {
+        let name = match name {
+            Some(name) => name,
+            None => Name::parse(dir.last()).map_err(|why| format!("name it: {why}"))?,
+        };
+        if self.projects.len() >= PROJECTS_MAX {
+            return Err(format!("there are {PROJECTS_MAX} projects, as many as are kept"));
+        }
+        let id = ProjectId(self.fresh(draw)?);
+        let mut changed = self.clone();
+        changed.projects.push(Project { id, name, dir, workstreams: Vec::new() });
+        Ok((changed, id))
     }
 
     fn kept_as(&self, changed: &Projects) {
@@ -1206,6 +1280,10 @@ mod tests {
         Dir::parse(text).unwrap()
     }
 
+    fn name(text: &str) -> Name {
+        Name::parse(text).unwrap()
+    }
+
     fn counting() -> impl FnMut() -> io::Result<Id> {
         let mut next = 0;
         move || {
@@ -1214,7 +1292,7 @@ mod tests {
         }
     }
 
-    fn refused(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), Refused> {
+    fn refused(projects: &Projects, change: Change) -> Result<(Projects, Option<Made>), Refused> {
         let mut drawn = counting();
         let taken = |id: &Id| projects.holds(*id);
         projects.changed(change, || loop {
@@ -1225,22 +1303,30 @@ mod tests {
         })
     }
 
-    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Id>), String> {
+    fn change(projects: &Projects, change: Change) -> Result<(Projects, Option<Made>), String> {
         refused(projects, change).map_err(|refused| refused.to_string())
     }
 
-    fn add(projects: &mut Projects, change_of: Change) -> Id {
+    fn add(projects: &mut Projects, change_of: Change) -> Made {
         let (changed, made) = change(projects, change_of).unwrap();
         *projects = changed;
         made.unwrap()
     }
 
     fn project(projects: &mut Projects, at: &str) -> ProjectId {
-        ProjectId(add(projects, Change::AddProject { dir: dir(at), name: None }))
+        let Made::Project(made) = add(projects, Change::AddProject { dir: dir(at), name: None })
+        else {
+            panic!("an added project is made");
+        };
+        made
     }
 
     fn workstream(projects: &mut Projects, project: ProjectId, at: &str) -> WorkstreamId {
-        WorkstreamId(add(projects, Change::AddWorkstream { project, folder: dir(at), name: None }))
+        let added = Change::AddWorkstream { project, folder: dir(at), name: None };
+        let Made::Workstream(made) = add(projects, added) else {
+            panic!("an added workstream is made");
+        };
+        made
     }
 
     #[test]
@@ -1385,18 +1471,19 @@ mod tests {
         let again = workstream(&mut projects, luneta, "/w/luneta/main");
         let at = |folder: &str| Change::WorkstreamAt { project: luneta, folder: dir(folder) };
         let (same, found) = change(&projects, at("/w/luneta/main")).unwrap();
-        assert_eq!((same == projects, found), (true, Some(main.0)), "none used: the first");
+        let none_used = (true, Some(Made::Workstream(main)));
+        assert_eq!((same == projects, found), none_used, "none used: the first");
         let went = |workstream| Change::Went { workstream, at: Used::of_millis(5_000) };
         (projects, _) = change(&projects, went(again)).unwrap();
         let (_, found) = change(&projects, at("/w/luneta/main")).unwrap();
-        assert_eq!(found, Some(again.0), "the one used last");
+        assert_eq!(found, Some(Made::Workstream(again)), "the one used last");
         (projects, _) = change(&projects, went(main)).unwrap();
         let (_, found) = change(&projects, at("/w/luneta/main")).unwrap();
-        assert_eq!(found, Some(main.0), "the one used last");
-        let made = WorkstreamId(add(&mut projects, at("/w/luneta/feat")));
+        assert_eq!(found, Some(Made::Workstream(main)), "the one used last");
+        let made = add(&mut projects, at("/w/luneta/feat"));
         assert_eq!(projects.all()[0].workstreams().len(), 3);
         let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
-        assert_eq!(again, Some(made.0));
+        assert_eq!(again, Some(made));
         assert!(change(&projects, at("/w/elo")).unwrap_err().contains("is not in /w/luneta"));
     }
 
@@ -1411,7 +1498,77 @@ mod tests {
         assert_eq!(held.folder(&held.workstreams()[0]), dir("/w/luneta"));
         let at = Change::WorkstreamAt { project: luneta, folder: dir("/w/luneta") };
         let (same, found) = change(&projects, at).unwrap();
-        assert_eq!((same == projects, found), (true, Some(own.0)));
+        assert_eq!((same == projects, found), (true, Some(Made::Workstream(own))));
+    }
+
+    #[test]
+    fn a_start_in_a_project_s_own_folder_opens_its_last_used_and_makes_none() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let start = || Change::Start { folder: dir("/w/luneta"), name: None };
+        let (same, found) = change(&projects, start()).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Project(luneta))));
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let feat = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let (same, found) = change(&projects, start()).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Workstream(main))));
+        let went = Change::Went { workstream: feat, at: Used::of_millis(5) };
+        projects = change(&projects, went).unwrap().0;
+        let (same, found) = change(&projects, start()).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Workstream(feat))));
+    }
+
+    #[test]
+    fn a_start_below_a_project_goes_to_the_workstream_there_and_in_none_makes_a_project() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let start = |at: &str| Change::Start { folder: dir(at), name: None };
+        let (same, found) = change(&projects, start("/w/luneta/main")).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Workstream(main))));
+        let feat = add(&mut projects, start("/w/luneta/feat"));
+        assert_eq!(projects.all()[0].workstreams().len(), 2);
+        assert_ne!(feat, Made::Workstream(main));
+        let named = Change::Start { folder: dir("/w/elo"), name: Some(name("elo-app")) };
+        let Made::Project(elo) = add(&mut projects, named) else {
+            panic!("a start in no project makes one");
+        };
+        let held = projects.project_of(elo).unwrap();
+        let held = (held.name(), held.dir(), held.workstreams());
+        assert_eq!(held, (&name("elo-app"), &dir("/w/elo"), &[][..]));
+        let refused = refused(&projects, start("/w"));
+        let Err(Refused::Nests(said)) = refused else {
+            panic!("a start in a folder that holds a project is refused: {refused:?}");
+        };
+        assert!(said.contains("holds /w/elo") || said.contains("holds /w/luneta"), "{said}");
+    }
+
+    #[test]
+    fn a_pull_makes_its_workstream_in_the_project_holding_it_or_in_one_made_at_its_holder() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let pull = |holder: &str, folder: &str| Change::Pull {
+            holder: dir(holder),
+            folder: dir(folder),
+            project: name("cloned"),
+            name: name("pr-7"),
+        };
+        let Made::Workstream(held) = add(&mut projects, pull("/w/other", "/w/luneta/pr-7")) else {
+            panic!("a pull makes a workstream");
+        };
+        let (project, workstream) = projects.find(held).unwrap();
+        assert_eq!((project.id(), workstream.renamed()), (luneta, Some(&name("pr-7"))));
+        assert_eq!(projects.all().len(), 1, "a pull into a held folder makes no project");
+        let Made::Workstream(made) = add(&mut projects, pull("/w/elo", "/w/elo/pr-7")) else {
+            panic!("a pull makes a workstream");
+        };
+        let (project, workstream) = projects.find(made).unwrap();
+        assert_eq!((project.name(), project.dir()), (&name("cloned"), &dir("/w/elo")));
+        assert_eq!(project.folder(workstream), dir("/w/elo/pr-7"));
+        let refused = refused(&projects, pull("/w", "/w/new/pr-7"));
+        assert!(matches!(refused, Err(Refused::Nests(_))), "{refused:?}");
+        let outside = change(&projects, pull("/w/new", "/w/far/pr-7")).unwrap_err();
+        assert!(outside.contains("is not in /w/new"), "{outside}");
     }
 
     #[test]
@@ -1545,7 +1702,7 @@ mod tests {
         let mut draws = [first.0, first.0, Id::of(7).unwrap()].into_iter();
         let change = Change::AddProject { dir: dir("/b"), name: None };
         let (_, made) = projects.changed(change, || Ok(draws.next().unwrap())).unwrap();
-        assert_eq!(made, Id::of(7));
+        assert_eq!(made, Some(Made::Project(ProjectId(Id::of(7).unwrap()))));
         let always = Change::AddProject { dir: dir("/b"), name: None };
         let refused = projects.changed(always, || Ok(first.0));
         assert!(refused.unwrap_err().to_string().contains("were all taken"));

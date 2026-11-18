@@ -1055,7 +1055,7 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    NewWorkstream { project: ProjectId, folder: Directory },
+    NewWorkstream { on: Machine, project: ProjectId, folder: Directory },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
     Make {
@@ -3147,7 +3147,9 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Workstream(project, folder) => Asked::NewWorkstream { project, folder },
+                    Done::Workstream(on, project, folder) => {
+                        Asked::NewWorkstream { on, project, folder }
+                    },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
                     Done::Rename(on, rename) => Asked::Rename { on, rename },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
@@ -7916,14 +7918,16 @@ mod tests {
             " <BS> - Back, <ESC> - Close",
         ]);
         let project = ProjectId::of(1).unwrap();
-        let made = Asked::NewWorkstream { project, folder: directory("/w/luneta/main") };
+        let (on, folder) = (Machine::Local, directory("/w/luneta/main"));
+        let made = Asked::NewWorkstream { on, project, folder };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         assert!(sidebar.menu.is_none());
 
         sidebar.cursor = Some(Spot::Local(own_pane_of("young", 2, 1)));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(2).unwrap();
-        let made = Asked::NewWorkstream { project, folder: directory("/w/b") };
+        let (on, folder) = (Machine::Local, directory("/w/b"));
+        let made = Asked::NewWorkstream { on, project, folder };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
@@ -8573,7 +8577,7 @@ mod tests {
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(1).unwrap();
-        let made = Asked::NewWorkstream { project, folder: cwd.clone() };
+        let made = Asked::NewWorkstream { on: Machine::Local, project, folder: cwd.clone() };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         assert!(sidebar.floating().is_none());
         sidebar.focus(Keys::Zellij);
@@ -9895,7 +9899,7 @@ mod tests {
     }
 
     #[test]
-    fn n_w_on_a_workstream_makes_one_in_its_folder_and_elsewhere_is_none() {
+    fn n_w_on_a_workstream_makes_one_in_its_folder_on_its_machine() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
@@ -9905,12 +9909,14 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Workstream(tab(10))));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(10).unwrap();
-        let made = Asked::NewWorkstream { project, folder: directory("/w/a") };
+        let made = Asked::NewWorkstream { on: Machine::Local, project, folder: directory("/w/a") };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(tab(20))));
         type_in(&mut sidebar, "n");
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
-        assert!(sidebar.menu.as_ref().is_some_and(|menu| menu.target().cwd() == Some("/w/b")));
+        let project = ProjectId::of(20).unwrap();
+        let on = Machine::Remote(nixos());
+        let far = Asked::NewWorkstream { on, project, folder: directory("/w/b") };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), far);
     }
 
     #[test]

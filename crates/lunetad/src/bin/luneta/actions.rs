@@ -213,7 +213,7 @@ impl Action {
                 spec("new pane", &["split", "terminal", "shell"], menu(&['n', 'p']), PANE, Any)
             },
             Action::NewWorkstream => {
-                spec("new workstream", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Here)
+                spec("new workstream", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)
             },
             Action::NewProject => {
                 spec("new project", &["folder", "directory", "add"], menu(&['n', 'P']), EVERY, Any)

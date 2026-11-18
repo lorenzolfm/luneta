@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lunetad::api::change_projects_request::{
-    AddProject, AddWorkstream, Change, ReorderProjects, ReorderWorkstreams,
+    AddProject, AddWorkstream, Change, Pull, ReorderProjects, ReorderWorkstreams, Start,
 };
+use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::{Held, Kept};
 use lunetad::api::workstream::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
@@ -20,7 +21,10 @@ pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
 }
 
 fn asked_on(host: &Host, on: Option<&str>, change: Change) -> Result<Option<u64>, Status> {
-    answered_on(host, on, change).map(|answered| answered.made)
+    let made = |made| match made {
+        Made::Project(id) | Made::Workstream(id) => id,
+    };
+    answered_on(host, on, change).map(|answered| answered.made.map(made))
 }
 
 fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
@@ -274,4 +278,62 @@ fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
         let stale = swap(vec![one, two]).unwrap_err();
         assert!(stale.message().contains("they changed since"), "{on:?}: {stale:?}");
     }
+}
+
+#[test]
+fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let scratch = tempfile::tempdir().unwrap();
+    let real = fs::canonicalize(scratch.path()).unwrap().join("real");
+    for folder in ["luneta/feat", "luneta/pr-7", "elo", "elsewhere"] {
+        fs::create_dir_all(real.join(folder)).unwrap();
+    }
+    let link = scratch.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let luneta = project(&far, &real.join("luneta"), None);
+    let asked = |change| answered_on(&here, Some("far"), change).unwrap().made;
+    let start = |at: &str| {
+        let start = Start { folder: text(&link.join(at)), name: None };
+        asked(Change::Start(start))
+    };
+    let folders = || {
+        let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
+        let projects = kept.projects.into_iter();
+        let folders = |it: api::Project| it.workstreams.into_iter().map(|it| (it.id, it.folder));
+        projects.flat_map(folders).collect::<Vec<_>>()
+    };
+
+    assert_eq!(start("luneta"), Some(Made::Project(luneta)), "its own folder makes none");
+    assert_eq!(folders(), []);
+    let Some(Made::Workstream(feat)) = start("luneta/feat") else {
+        panic!("a start below a project far keeps goes to a workstream there");
+    };
+    assert_eq!(folders(), [(feat, text(&real.join("luneta/feat")))]);
+    assert_eq!(start("luneta/feat"), Some(Made::Workstream(feat)), "the same one again");
+    assert_eq!(start("luneta"), Some(Made::Workstream(feat)), "its own folder opens it");
+
+    let pull = Pull {
+        holder: text(&link.join("elsewhere")),
+        folder: text(&link.join("luneta/pr-7")),
+        project: "cloned".to_owned(),
+        name: "pr-7".to_owned(),
+    };
+    let Some(Made::Workstream(pr)) = asked(Change::Pull(pull)) else {
+        panic!("a pull makes a workstream");
+    };
+    assert_eq!(folders()[1], (pr, text(&real.join("luneta/pr-7"))), "in project luneta");
+
+    let Some(Made::Project(elo)) = start("elo") else { panic!("a start in no project makes one") };
+    let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
+    let made = kept.projects.iter().find(|it| it.id == elo).expect("far keeps elo");
+    assert_eq!(made.dir, text(&real.join("elo")));
+    let holds = Start { folder: text(&link), name: None };
+    let refused = answered_on(&here, Some("far"), Change::Start(holds)).unwrap_err();
+    assert_eq!(refused.code(), Code::AlreadyExists, "{refused:?}");
 }

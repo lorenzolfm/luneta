@@ -20,7 +20,7 @@ use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Id, Line, Placed, ProjectId};
-use crate::projects::{Projects, Ran, Runs};
+use crate::projects::{Made, Projects, Ran, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::projects::WORKSTREAMS_MAX;
@@ -513,7 +513,7 @@ impl Views {
         project: ProjectId,
         seen_workstreams: &BTreeSet<WorkstreamId>,
         seen: &BTreeSet<TerminalId>,
-    ) -> Result<Option<Id>, Failed> {
+    ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
@@ -542,7 +542,7 @@ impl Views {
         &mut self,
         workstream: WorkstreamId,
         seen: &BTreeSet<TerminalId>,
-    ) -> Result<Option<Id>, Failed> {
+    ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
         let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;

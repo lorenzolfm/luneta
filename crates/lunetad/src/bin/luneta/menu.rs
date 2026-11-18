@@ -1009,7 +1009,7 @@ pub enum Done {
     Issue(Repository),
     Ssh(Destination),
     Forget(Destination),
-    Workstream(ProjectId, Directory),
+    Workstream(Machine, ProjectId, Directory),
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
 }
@@ -1300,7 +1300,9 @@ impl Menu {
                 Err(reason) => wrong(reason),
             },
             Offer::NewWorkstream(project) => match target.folder() {
-                Ok(folder) => Did::Closed(Done::Workstream(project, folder)),
+                Ok(folder) => {
+                    Did::Closed(Done::Workstream(target.machine().clone(), project, folder))
+                },
                 Err(reason) => wrong(reason),
             },
             Offer::NewProject => {
@@ -1856,8 +1858,6 @@ impl Menu {
 }
 
 pub const OWN_ONLY: &str = "luneta goes to its own sessions only, now";
-
-pub const HERE_ONLY: &str = "luneta makes and goes to sessions of this machine only, for now";
 
 struct Shown {
     title: String,
@@ -2656,19 +2656,20 @@ mod tests {
     }
 
     #[test]
-    fn n_w_makes_a_workstream_of_the_row_s_project_in_the_row_s_folder() {
+    fn n_w_makes_a_workstream_of_the_row_s_project_in_the_row_s_folder_on_its_machine() {
         let made = |target: Target| closed(stays(opened(target, Some('n'))).0.key(&char('w')));
-        let id = project().id();
-        assert_eq!(made(own_pane()), Done::Workstream(id, main_dir()));
-        assert_eq!(made(workstream_on(Machine::Local)), Done::Workstream(id, main_dir()));
-        assert_eq!(made(session_row()), Done::Workstream(id, directory("/w/luneta")));
+        let (id, here) = (project().id(), || Machine::Local);
+        assert_eq!(made(own_pane()), Done::Workstream(here(), id, main_dir()));
+        assert_eq!(made(workstream_on(here())), Done::Workstream(here(), id, main_dir()));
+        assert_eq!(made(session_row()), Done::Workstream(here(), id, directory("/w/luneta")));
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let far = Target::Pane(vps(), own_row());
-        for target in [pane_row(), far, workstream_on(vps()), project_on(vps())] {
-            let (menu, _) = stays(opened(target.clone(), Some('n')));
-            let lines = text(&menu.lines(31, 9, 0).0);
-            assert!(!lines.contains(&" w  new workstream".to_owned()), "{target:?}: {lines:?}");
-        }
+        assert_eq!(made(Target::Pane(vps(), own_row())), Done::Workstream(vps(), id, main_dir()));
+        assert_eq!(made(workstream_on(vps())), Done::Workstream(vps(), id, main_dir()));
+        let far = directory("/w/luneta");
+        assert_eq!(made(project_on(vps())), Done::Workstream(vps(), id, far));
+        let (menu, _) = stays(opened(pane_row(), Some('n')));
+        let lines = text(&menu.lines(31, 9, 0).0);
+        assert!(!lines.contains(&" w  new workstream".to_owned()), "a zellij pane's: {lines:?}");
     }
 
     #[test]
@@ -3284,8 +3285,9 @@ mod tests {
         let (session, at) = (project().listed().clone(), PaneKey::terminal(4));
         assert_eq!(wants, Wants::Open { session, pane: at, cwd: main_dir(), opens });
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..5], [
             " p  new pane",
+            " w  new workstream",
             " P  new project",
             " m  new machine",
         ]);

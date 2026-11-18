@@ -24,6 +24,7 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::api::change_projects_response;
 use crate::api::close_request;
 use crate::api::closes_response::{self, Tab as ClosedTab};
 use crate::api::daemon_client::DaemonClient;
@@ -59,7 +60,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Failed, Id, Store, WorkstreamId};
+use crate::projects::{Ask, Changed, Failed, Made, Store, WorkstreamId};
 use crate::views;
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -1154,8 +1155,13 @@ impl Daemon for Host {
             })
         });
         let Changed { made, kept } = changed.await.map_err(|error| unfinished(&error))??;
-        let (made, kept) = (made.map(Id::get), Some(kept.to_api()));
-        Ok(Response::new(ChangeProjectsResponse { made, kept }))
+        let made = made.map(|made| match made {
+            Made::Project(project) => change_projects_response::Made::Project(project.get()),
+            Made::Workstream(workstream) => {
+                change_projects_response::Made::Workstream(workstream.get())
+            },
+        });
+        Ok(Response::new(ChangeProjectsResponse { made, kept: Some(kept.to_api()) }))
     }
 
     async fn keep_image(

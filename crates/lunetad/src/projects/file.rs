@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Id, Line, Name, Project, Projects, Refused, Runs};
 use super::{Session, Terminal, TerminalId, Used, WorkstreamId};
-use super::{View, Workstream};
+use super::{Made, View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
@@ -180,7 +180,7 @@ impl Revision {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Changed {
-    pub made: Option<Id>,
+    pub made: Option<Made>,
     pub kept: Revision,
 }
 
@@ -241,7 +241,7 @@ impl Store {
         }
     }
 
-    pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
+    pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
         let at_once = change.kept_at_once();
         let (changed, made) = self.applied(change)?;
         if self.projects() == Some(&changed) {
@@ -285,7 +285,7 @@ impl Store {
         }
     }
 
-    fn applied(&self, change: Change) -> Result<(Projects, Option<Id>), Failed> {
+    fn applied(&self, change: Change) -> Result<(Projects, Option<Made>), Failed> {
         self.kept()?.changed(change, Id::random).map_err(|refused| match refused {
             Refused::Nests(why) => Failed::Nests(why),
             Refused::Stale(why) => Failed::Stale(why),
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(store.unkept(), None);
         let vault = Some(Name::parse("bitwarden backup").unwrap());
         let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
-        let vault = ProjectId::new(made.unwrap().unwrap());
+        let Some(Made::Project(vault)) = made.unwrap() else { panic!("Vault is made") };
         store.change(Change::AddProject { dir: dir("/w/luneta"), name: None }).unwrap();
         let top = dir("/home/me/Vault/notes");
         store.change(Change::AddWorkstream { project: vault, folder: top, name: None }).unwrap();
@@ -736,7 +736,7 @@ mod tests {
         let (core, _commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
         let made = store.change(Change::AddProject { dir: dir("/w/luneta"), name: None });
-        let luneta = ProjectId::new(made.unwrap().unwrap());
+        let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
         let folder = dir("/w/luneta/main");
         store.change(Change::AddWorkstream { project: luneta, folder, name: None }).unwrap();
         let held = store.projects().unwrap().clone();
@@ -1136,9 +1136,11 @@ mod tests {
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         let made = store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
-        let project = ProjectId::new(made.unwrap());
+        let Some(Made::Project(project)) = made else { panic!("/a is made") };
         let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
-        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
+        let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
+            panic!("/a/b is made");
+        };
         let terminal = Terminal::new(TerminalId::of(7).unwrap(), dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
         store.change(Change::Open { workstream, terminal, placed, size }).unwrap();
@@ -1214,9 +1216,11 @@ mod tests {
         let (core, commands) = channel();
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
-        let project = ProjectId::new(project.unwrap().unwrap());
+        let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
         let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
-        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
+        let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
+            panic!("/a/b is made");
+        };
         let size = super::super::Size::of(80, 24).unwrap();
         let [one, two] = [store.fresh().unwrap(), TerminalId::of(u64::MAX).unwrap()];
         let opened = |id, placed| {
