@@ -58,7 +58,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Change, Failed, Id, Store, WorkstreamId};
+use crate::projects::{Ask, Failed, Id, Store, WorkstreamId};
 use crate::views;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
@@ -1025,11 +1025,10 @@ impl Daemon for Host {
         use crate::api::show_request::{Event, Hello};
         use crate::mux::own::TerminalKey;
         let mut heard = request.into_inner();
-        let Some(ShowRequest { event: Some(Event::Hello(Hello { workstream, size, runs_in })) }) =
-            heard.message().await?
-        else {
+        let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
+        let Hello { workstream, size, runs_in, again } = hello;
         let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
@@ -1038,7 +1037,8 @@ impl Daemon for Host {
         let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
         let views = self.views.clone();
         let came = task::spawn_blocking(move || {
-            let came = |answer| views::Command::Came { workstream, size, runs_in, out, answer };
+            let came =
+                |answer| views::Command::Came { workstream, size, runs_in, again, out, answer };
             views::ask(&views, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;
@@ -1075,7 +1075,7 @@ impl Daemon for Host {
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let views = self.views.clone();
         let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
-            let change = Change::of_api(change).map_err(Status::invalid_argument)?;
+            let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
             let stopped = "it is kept, but the daemon's core has stopped";
             let asked = views::ask(&views, |answer| views::Command::Change { change, answer });
             let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;
@@ -1084,6 +1084,7 @@ impl Daemon for Host {
                 Failed::Nests(why) => Status::already_exists(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
+                Failed::Unclosed(why) => Status::unavailable(why),
                 Failed::KeptUntold => Status::unavailable(stopped),
             })
         });

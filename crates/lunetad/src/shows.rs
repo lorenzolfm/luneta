@@ -286,6 +286,7 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     workstream: WorkstreamId,
     size: Size,
     runs_in: Option<TerminalKey>,
+    again: bool,
     told: Told,
 ) -> Show {
     let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
@@ -296,7 +297,7 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             id: key.id.get(),
             made_at: Some(key.made.into()),
         });
-        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in };
+        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in, again };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
             Err(error) => Heard::Lost(format!("no runtime: {error}")),

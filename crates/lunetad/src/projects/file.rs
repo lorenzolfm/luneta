@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Refused, Runs, Session};
-use super::{Terminal, TerminalId, WorkstreamId};
+use super::{Terminal, TerminalId, Used, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -26,11 +26,13 @@ const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 const WITHOUT_VIEWS: u32 = 1;
 
 const WITHOUT_UNRUN: u32 = 2;
+
+const WITHOUT_NAMES_OR_USE: u32 = 3;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -40,8 +42,9 @@ const NAME_BYTES_MAX: usize = CHAR_BYTES_MAX * NAME_CHARS_MAX;
 
 const ENTRY_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + NAME_BYTES_MAX) + 256;
 
-const TERMINAL_BYTES_MAX: usize =
-    ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + LINE_BYTES_MAX + SESSION_BYTES_MAX) + 256;
+const TERMINAL_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE
+    * (PATH_BYTES_MAX + LINE_BYTES_MAX + SESSION_BYTES_MAX + NAME_BYTES_MAX)
+    + 256;
 
 const SPLIT_BYTES_MAX: usize = 128;
 
@@ -86,6 +89,8 @@ struct KeptWorkstream {
     below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_millis: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +126,8 @@ enum KeptTowards {
 #[serde(deny_unknown_fields)]
 struct KeptTerminal {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     folder: String,
     runs: KeptRuns,
 }
@@ -164,6 +171,7 @@ pub enum Failed {
     Nests(String),
     Refused(String),
     Unwritten(String),
+    Unclosed(String),
     KeptUntold,
 }
 
@@ -210,26 +218,49 @@ impl Store {
 
     pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
         let at_once = change.kept_at_once();
-        let projects = match &mut self.keeping {
-            Keeping::Kept { projects, .. } => projects,
-            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
-        };
-        let (changed, made) = projects.changed(change, Id::random).map_err(|refused| match refused {
-            Refused::Nests(why) => Failed::Nests(why),
-            Refused::Said(why) => Failed::Refused(why),
-        })?;
-        if changed == *projects {
+        let (changed, made) = self.applied(change)?;
+        if self.projects() == Some(&changed) {
             return Ok(made);
         }
         if at_once {
             self.written_as(&changed)?;
         }
+        self.took(changed)?;
+        Ok(made)
+    }
+
+    pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
+        let (changed, made) = self.applied(change)?;
+        assert!(made.is_none(), "a change that follows the mux makes no id");
+        if self.projects() == Some(&changed) {
+            return Ok(None);
+        }
+        let unwritten = match self.written_as(&changed) {
+            Ok(()) => None,
+            Err(Failed::Unwritten(why)) => Some(why),
+            Err(failed) => return Err(failed),
+        };
+        self.took(changed)?;
+        Ok(unwritten)
+    }
+
+    fn applied(&self, change: Change) -> Result<(Projects, Option<Id>), Failed> {
+        let projects = match &self.keeping {
+            Keeping::Kept { projects, .. } => projects,
+            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
+        };
+        projects.changed(change, Id::random).map_err(|refused| match refused {
+            Refused::Nests(why) => Failed::Nests(why),
+            Refused::Said(why) => Failed::Refused(why),
+        })
+    }
+
+    fn took(&mut self, changed: Projects) -> Result<(), Failed> {
         let Keeping::Kept { projects, .. } = &mut self.keeping else {
-            unreachable!("projects written are kept");
+            unreachable!("projects changed are kept");
         };
         *projects = changed;
-        self.tell()?;
-        Ok(made)
+        self.tell()
     }
 
     pub fn flush(&mut self) -> Result<(), Failed> {
@@ -343,12 +374,23 @@ fn parse(text: &str) -> Result<Projects, String> {
     if version == WITHOUT_VIEWS && workstreams().any(|it| it.view.is_some()) {
         return Err(format!("it is of version {WITHOUT_VIEWS}, which holds no views"));
     }
-    let nodes = workstreams().filter_map(|it| it.view.as_ref()).flat_map(|view| &view.tree);
+    let mut nodes = workstreams().filter_map(|it| it.view.as_ref()).flat_map(|view| &view.tree);
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
-    if version <= WITHOUT_UNRUN && nodes.into_iter().any(unrun) {
+    if version <= WITHOUT_UNRUN && nodes.clone().any(unrun) {
         return Err(format!("it is of version {version}, which holds no line left unrun"));
+    }
+    let named = |node: &KeptNode| {
+        matches!(node, KeptNode::Terminal(KeptTerminal { name: Some(_), .. }))
+    };
+    if version <= WITHOUT_NAMES_OR_USE {
+        if nodes.any(named) {
+            return Err(format!("it is of version {version}, which holds no terminal's name"));
+        }
+        if workstreams().any(|it| it.used_millis.is_some()) {
+            return Err(format!("it is of version {version}, which holds no workstream's use"));
+        }
     }
     let projects = kept.projects.into_iter().map(KeptProject::read);
     Projects::checked(projects.collect::<Result<_, _>>()?)
@@ -387,6 +429,9 @@ impl KeptWorkstream {
             renamed: self.name.as_deref().map(Name::parse).transpose()?,
             below: Below::parse(&self.below)?,
             view,
+            used: self.used_millis.map(Used::read).transpose().map_err(|why| {
+                format!("workstream {id}: {why}")
+            })?,
         })
     }
 
@@ -396,6 +441,7 @@ impl KeptWorkstream {
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
             below: workstream.below.0.clone(),
             view: KeptView::of(&workstream.view),
+            used_millis: workstream.used.map(Used::millis),
         }
     }
 }
@@ -444,6 +490,7 @@ impl KeptTerminal {
         let id: TerminalId = self.id.parse()?;
         let why = |why: String| format!("terminal {id}: {why}");
         let folder = Dir::parse(&self.folder).map_err(why)?;
+        let name = self.name.as_deref().map(Name::parse).transpose().map_err(why)?;
         let runs = match self.runs {
             KeptRuns::Shell => Runs::Shell,
             KeptRuns::Command(line) => Runs::Command(Line::parse(&line).map_err(why)?),
@@ -453,7 +500,7 @@ impl KeptTerminal {
                 session: Session::parse(&session).map_err(why)?,
             },
         };
-        Ok(Terminal::new(id, folder, runs))
+        Ok(Terminal::new(id, folder, runs).named(name))
     }
 
     fn of(terminal: &Terminal) -> KeptTerminal {
@@ -468,6 +515,7 @@ impl KeptTerminal {
         };
         KeptTerminal {
             id: terminal.id().to_string(),
+            name: terminal.name().map(|name| name.as_str().to_owned()),
             folder: terminal.folder().as_str().to_owned(),
             runs,
         }
@@ -596,7 +644,7 @@ mod tests {
         let main = Change::AddWorkstream { project, folder, name: named };
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let want = r#"{
-  "version": 3,
+  "version": 4,
   "projects": [
     {
       "id": "0000000000000001",
@@ -618,8 +666,8 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [1, 2] {
-            let before = want.replace(r#""version": 3"#, &format!(r#""version": {before}"#));
+        for before in [1, 2, 3] {
+            let before = want.replace(r#""version": 4"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
     }
@@ -661,7 +709,7 @@ mod tests {
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 3,
+  "version": 4,
   "projects": [
     {
       "id": "0000000000000001",
@@ -723,7 +771,7 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects));
-        let before = want.replace(r#""version": 3"#, r#""version": 1"#);
+        let before = want.replace(r#""version": 4"#, r#""version": 1"#);
         assert_eq!(parse(&before), Err("it is of version 1, which holds no views".to_owned()));
     }
 
@@ -748,11 +796,41 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_s_name_and_a_workstream_s_use_are_kept_only_from_version_4() {
+        let text = |version: u32, name: &str, used: &str| {
+            format!(
+                r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
+                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "view": {{"tree": [
+                {{"terminal": {{"id": "0000000000000003", {name} "folder": "/a", "runs": "shell"}}}}
+                ]}} {used}}}]}}]}}"#
+            )
+        };
+        let (name, used) = (r#""name": "tests","#, r#", "used_millis": 1763460000123"#);
+        let kept = parse(&text(4, name, used)).unwrap();
+        let (workstream, held) = kept.holding(TerminalId::of(3).unwrap()).unwrap();
+        assert_eq!(held.name().map(Name::as_str), Some("tests"));
+        assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
+        let again = written(&kept);
+        assert!(again.contains(r#""name": "tests""#));
+        assert!(again.contains(r#""used_millis": 1763460000123"#));
+        assert_eq!(parse(&again), Ok(kept));
+        let refusals = [(name, "", "terminal's name"), ("", used, "workstream's use")];
+        for (name, used, without) in refusals {
+            let refused = parse(&text(3, name, used));
+            assert_eq!(refused, Err(format!("it is of version 3, which holds no {without}")));
+        }
+        assert!(parse(&text(4, r#""name": "","#, "")).unwrap_err().contains("a name is empty"));
+        let past = format!(r#", "used_millis": {}"#, u64::MAX);
+        let refused = parse(&text(4, "", &past)).unwrap_err();
+        assert!(refused.contains("workstream 0000000000000002: a use at"), "{refused}");
+    }
+
+    #[test]
     fn a_file_it_cannot_read_is_never_written_over() {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 4, "projects": []}"#, "version 4, and this lunetad reads only 1 to 3"),
+            (r#"{"version": 5, "projects": []}"#, "version 5, and this lunetad reads only 1 to 4"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
@@ -883,6 +961,41 @@ mod tests {
         store.change(Change::AddProject { dir: dir("/c"), name: None }).unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
         assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
+    }
+
+    #[test]
+    fn a_change_that_follows_the_mux_is_kept_unwritten_until_a_flush_writes_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let made = store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        let project = ProjectId::new(made.unwrap());
+        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
+        let terminal = Terminal::new(TerminalId::of(7).unwrap(), dir("/a"), Runs::Shell);
+        let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
+        store.change(Change::Open { workstream, terminal, placed, size }).unwrap();
+        let written = fs::read_to_string(&file).unwrap();
+        heard(&commands);
+
+        let folder = file.parent().unwrap();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
+        let unwritten = store.followed(Change::CloseWorkstream { workstream });
+        let flushed = store.flush();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
+        assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
+        assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+        let [told] = heard(&commands).try_into().unwrap();
+        assert!(told.unwrap().find(workstream).is_none(), "the core hears of the close");
+        assert!(store.projects().unwrap().find(workstream).is_none());
+
+        store.flush().unwrap();
+        assert!(read(&file).unwrap().find(workstream).is_none(), "a flush writes the close");
+        let again = store.followed(Change::CloseWorkstream { workstream });
+        assert!(matches!(again, Err(Failed::Refused(_))), "{again:?}");
     }
 
     #[test]

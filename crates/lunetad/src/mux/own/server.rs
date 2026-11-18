@@ -32,9 +32,16 @@ const PROGRAM: &str = "luneta-mux";
 
 pub const ANOTHER_RUNS: u8 = 3;
 
-const CONNECT: Duration = Duration::from_secs(1);
+const CONNECT: Duration = Duration::from_millis(500);
 
-const ANSWER: Duration = Duration::from_secs(5);
+const ANSWER: Duration = Duration::from_millis(1500);
+
+const WAITS_PER_ANSWER_MAX: u128 = 2;
+
+const _: () = assert!(
+    WAITS_PER_ANSWER_MAX * (CONNECT.as_millis() + ANSWER.as_millis())
+        < crate::client::ANSWER.as_millis()
+);
 
 const MAKING: Duration = Duration::from_secs(10);
 
@@ -410,6 +417,11 @@ impl Terminals {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
         match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
             Err(status) if status.code() == Code::NotFound => Ok(()),
+            Err(status) if matches!(status.code(), Code::Cancelled | Code::DeadlineExceeded) => {
+                let unanswered = format!("luneta-mux did not answer in time ({})", status.message());
+                let id = key.id;
+                Err(Failure::Own(format!("{unanswered}, and terminal {id} may close still")))
+            },
             asked => asked.map(drop).map_err(|status| refused(&status)),
         }
     }

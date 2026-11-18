@@ -512,6 +512,7 @@ impl Known {
                     seen: Some(self.seen(&folder).to_api()),
                     folder: folder.as_str().to_owned(),
                     terminals: self.built_terminals(workstream),
+                    used_at: workstream.used().map(|used| used.time().into()),
                 }
             });
             built.collect()
@@ -558,6 +559,7 @@ impl Known {
                 titled: titled.as_ref().map(Titled::to_api),
                 shell: doing.map(Doing::to_api),
                 held,
+                name: terminal.name().map(|name| name.as_str().to_owned()),
             }
         });
         built.collect()
