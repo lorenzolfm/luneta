@@ -8911,7 +8911,7 @@ mod tests {
             type_in(&mut sidebar, "d");
             let went = sidebar.key(&char('s'), moment(160_000));
             let lines = screen(&mut sidebar, true, 60, 16);
-            let question = " Delete session twin? 1 agent, 1 unknown";
+            let question = " Delete project twin? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
             assert_eq!((went == delete_here(kill.clone()), asked), (!asks, asks), "{lines:#?}");
         }
@@ -8967,7 +8967,7 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
+        assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
         let to = Place::Session(own_listed("young", 2));
         let whose = own_listed("older", 1).whose();
         let leave = Act::Leave { session: session_name("older"), whose, to };

@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseWorkstream};
+use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseProject};
+use lunetad::api::change_projects_request::CloseWorkstream;
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::daemon_client::DaemonClient;
@@ -131,6 +132,11 @@ pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
 
 pub fn closed(path: &Path, machine: &Machine, workstream: WorkstreamId) -> Result<(), String> {
     let change = Change::CloseWorkstream(CloseWorkstream { workstream: workstream.get() });
+    changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
+}
+
+pub fn closed_project(path: &Path, machine: &Machine, project: ProjectId) -> Result<(), String> {
+    let change = Change::CloseProject(CloseProject { project: project.get() });
     changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
 }
 

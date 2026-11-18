@@ -140,6 +140,10 @@ impl Act {
             Act::Pane { .. } => "Close the pane".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
             Act::Workstream { .. } => "Delete the workstream".to_owned(),
+            Act::Kill { session, whose: Whose::Own(_) }
+            | Act::Leave { session, whose: Whose::Own(_), .. } => {
+                format!("Delete project {session}")
+            },
             Act::Kill { session, .. } | Act::Leave { session, .. } => {
                 format!("Delete session {session}")
             },
@@ -318,6 +322,16 @@ mod tests {
             let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
             assert_eq!(planned.question(), asks);
         }
+    }
+
+    #[test]
+    fn a_project_s_delete_asks_first_by_the_project_s_name() {
+        let project = Listed::new_project("luneta", 6);
+        let busy = vec![(4, Doing::Busy)];
+        let planned = plan(&subject(&project, Seat::Elsewhere, Deletes::Session, busy));
+        assert!(matches!(planned.act, Act::Kill { whose: Whose::Own(_), .. }), "{planned:?}");
+        let asks = Some("Delete project luneta? 1 agent, 1 busy".to_owned());
+        assert_eq!(planned.question(), asks);
     }
 
     #[test]

@@ -417,6 +417,7 @@ pub struct Ran {
 pub enum Ask {
     Change(Change),
     CloseWorkstream(WorkstreamId),
+    CloseProject(ProjectId),
 }
 
 impl Ask {
@@ -478,6 +479,9 @@ impl Ask {
             Asked::CloseWorkstream(asked::CloseWorkstream { workstream }) => {
                 let workstream = id("workstream", workstream).map(WorkstreamId)?;
                 return Ok(Ask::CloseWorkstream(workstream));
+            },
+            Asked::CloseProject(asked::CloseProject { project }) => {
+                return Ok(Ask::CloseProject(id("project", project).map(ProjectId)?));
             },
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {
@@ -734,12 +738,11 @@ impl Projects {
                 if held > 0 {
                     return Err(format!("workstream {workstream} holds {held} terminals still"));
                 }
-                project.workstreams.remove(at);
+                changed.without(workstream)?;
                 None
             },
             Change::CloseWorkstream { workstream } => {
-                let (project, at) = changed.workstream(workstream)?;
-                let closed = project.workstreams.remove(at);
+                let closed = changed.without(workstream)?;
                 for terminal in closed.view.terminals() {
                     let id = layout::Leaf::id(terminal);
                     assert!(!changed.holds(id.0), "terminal {id} goes with its workstream");
@@ -790,8 +793,7 @@ impl Projects {
                 let workstream = held_in.ok_or_else(|| unknown("terminal", terminal))?;
                 let (project, at) = changed.workstream(workstream)?;
                 if project.workstreams[at].view.closed(terminal).is_none() {
-                    project.workstreams.remove(at);
-                    assert!(changed.find(workstream).is_none(), "{workstream} goes with its last");
+                    changed.without(workstream)?;
                 }
                 assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
                 None
@@ -858,6 +860,11 @@ impl Projects {
     }
 
     #[must_use]
+    pub fn project_of(&self, project: ProjectId) -> Option<&Project> {
+        self.projects.iter().find(|it| it.id == project)
+    }
+
+    #[must_use]
     pub fn find(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
         self.workstreams().find(|(_, it)| it.id == workstream)
     }
@@ -897,6 +904,19 @@ impl Projects {
     fn project(&mut self, id: ProjectId) -> Result<&mut Project, String> {
         let project = self.projects.iter_mut().find(|project| project.id == id);
         project.ok_or_else(|| unknown("project", id))
+    }
+
+    fn without(&mut self, workstream: WorkstreamId) -> Result<Workstream, String> {
+        let (project, at) = self.workstream(workstream)?;
+        let (held_in, gone) = (project.id, project.workstreams.remove(at));
+        let emptied = project.workstreams.is_empty();
+        if emptied {
+            self.projects.retain(|it| it.id != held_in);
+        }
+        assert!(self.find(workstream).is_none(), "{workstream} is gone");
+        let kept = self.projects.iter().any(|it| it.id == held_in);
+        assert_eq!(kept, !emptied, "project {held_in} goes with its last workstream");
+        Ok(gone)
     }
 
     fn workstream(&mut self, id: WorkstreamId) -> Result<(&mut Project, usize), String> {
@@ -1244,17 +1264,43 @@ mod tests {
     }
 
     #[test]
-    fn a_project_is_forgotten_only_once_it_holds_no_workstream() {
+    fn a_project_is_forgotten_by_hand_only_while_it_holds_no_workstream() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let refused = change(&projects, Change::ForgetProject { project: luneta });
         assert!(refused.unwrap_err().contains("holds 1 workstreams still"));
+        let vault = project(&mut projects, "/w/vault");
+        (projects, _) = change(&projects, Change::ForgetProject { project: vault }).unwrap();
+        assert_eq!(projects.project_of(vault), None, "a project made empty is forgotten");
+        assert!(projects.project_of(luneta).is_some());
+        let gone = change(&projects, Change::ForgetProject { project: vault });
+        assert!(gone.unwrap_err().contains("no project has the id"));
+        assert!(projects.find(main).is_some());
+    }
+
+    #[test]
+    fn a_project_goes_with_its_last_workstream_forgotten_or_closed() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let fix = workstream(&mut projects, luneta, "/w/luneta/fix");
         (projects, _) = change(&projects, Change::ForgetWorkstream { workstream: main }).unwrap();
-        (projects, _) = change(&projects, Change::ForgetProject { project: luneta }).unwrap();
-        assert_eq!(projects, Projects::default());
+        assert!(projects.project_of(luneta).is_some(), "a project keeps with a workstream left");
+        (projects, _) = change(&projects, Change::ForgetWorkstream { workstream: fix }).unwrap();
+        assert_eq!(projects, Projects::default(), "a project goes with its last forgotten");
         let gone = change(&projects, Change::ForgetWorkstream { workstream: main });
         assert!(gone.unwrap_err().contains("no workstream has the id"));
+
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let fix = workstream(&mut projects, luneta, "/w/luneta/fix");
+        opened(&mut projects, main, 100, Placed::Alone);
+        (projects, _) = change(&projects, Change::CloseWorkstream { workstream: fix }).unwrap();
+        assert!(projects.project_of(luneta).is_some(), "a project keeps with a workstream left");
+        let close = Change::CloseWorkstream { workstream: main };
+        (projects, _) = change(&projects, close).unwrap();
+        assert_eq!(projects, Projects::default(), "a project goes with its last closed");
     }
 
     #[test]
@@ -1358,7 +1404,8 @@ mod tests {
         let refused = change(&projects, Change::ForgetWorkstream { workstream: main });
         assert!(refused.unwrap_err().contains("holds 1 terminals still"));
         (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
-        assert_eq!(projects.all()[0].workstreams(), [], "a workstream goes with its last terminal");
+        assert_eq!(projects.find(main), None, "a workstream goes with its last terminal");
+        assert_eq!(projects.all(), [], "a project goes with its last workstream");
     }
 
     #[test]

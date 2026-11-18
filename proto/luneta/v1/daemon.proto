@@ -964,6 +964,7 @@ message ChangeProjectsRequest {
     CloseWorkstream close_workstream = 12;
     ReorderProjects reorder_projects = 15;
     ReorderWorkstreams reorder_workstreams = 16;
+    CloseProject close_project = 17;
   }
 
   reserved 6, 7, 13, 14;
@@ -1010,6 +1011,10 @@ message ChangeProjectsRequest {
 
   message CloseWorkstream {
     fixed64 workstream = 1;
+  }
+
+  message CloseProject {
+    fixed64 project = 1;
   }
 
   message ReorderProjects {

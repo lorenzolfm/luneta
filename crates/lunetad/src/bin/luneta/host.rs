@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{TerminalId, WorkstreamId};
+use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
@@ -82,6 +82,12 @@ pub enum Made {
 pub struct Pulled {
     workstream: WorkstreamId,
     argv: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Deleting {
+    Workstream(WorkstreamId),
+    Project(ProjectId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1717,11 +1723,30 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        if let Act::Workstream { workstream, .. } = act {
-            let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
-            let (on, workstream) = (on.clone(), *workstream);
+        let deletes = match act {
+            Act::Workstream { workstream, .. } => Some(Deleting::Workstream(*workstream)),
+            Act::Kill { session, whose: Whose::Own(key) }
+            | Act::Leave { session, whose: Whose::Own(key), .. } => {
+                let Some(project) = self.projected.project(on, *key) else {
+                    let why = format!("lunetad keeps no project {session}");
+                    return self.sidebar.notify(format!("menu: not deleted: {why}"));
+                };
+                Some(Deleting::Project(project.id))
+            },
+            _ => None,
+        };
+        if let Some(deletes) = deletes {
+            let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
             let deleting = thread::spawn(move || {
-                if let Err(why) = caught(|| workstreams::closed(&lunetad, &on, workstream)) {
+                let closed = caught(|| match deletes {
+                    Deleting::Workstream(workstream) => {
+                        workstreams::closed(&lunetad, &on, workstream)
+                    },
+                    Deleting::Project(project) => {
+                        workstreams::closed_project(&lunetad, &on, project)
+                    },
+                });
+                if let Err(why) = closed {
                     let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
                 }
             });

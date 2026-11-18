@@ -19,7 +19,8 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs};
+use crate::projects::{Ask, Change, Changed, Dir, Failed, Id, Line, Placed, ProjectId, Projects};
+use crate::projects::{Ran, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::shells::Doing;
@@ -412,6 +413,7 @@ impl Views {
                 let changed = match change {
                     Ask::Change(change) => self.store.change(change),
                     Ask::CloseWorkstream(workstream) => self.close_workstream(workstream),
+                    Ask::CloseProject(project) => self.close_project(project),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -499,6 +501,22 @@ impl Views {
         if let Err(why) = self.changed(went) {
             self.troubles.say(format!("workstream {workstream}'s use is not kept: {why}"));
         }
+    }
+
+    fn close_project(&mut self, project: ProjectId) -> Result<Option<Id>, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let unknown = || Failed::Refused(format!("no project has the id {project}"));
+        let held = projects.project_of(project).ok_or_else(unknown)?;
+        let workstreams: Vec<WorkstreamId> = held.workstreams().iter().map(Workstream::id).collect();
+        if workstreams.is_empty() {
+            return self.store.change(Change::ForgetProject { project });
+        }
+        for workstream in workstreams {
+            self.close_workstream(workstream)?;
+        }
+        let projects = self.store.projects().expect("projects just changed are kept");
+        assert!(projects.project_of(project).is_none(), "project {project} went with its last");
+        Ok(None)
     }
 
     fn close_workstream(&mut self, workstream: WorkstreamId) -> Result<Option<Id>, Failed> {
