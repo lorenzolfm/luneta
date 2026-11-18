@@ -54,14 +54,14 @@ use crate::api::{
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
     ShowResponse, StartRequest,
     TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
-    TurnIntoTabRequest, TurnIntoTabResponse, ViewRequest,
+    TurnIntoTabRequest, TurnIntoTabResponse, FramesRequest,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Changed, Failed, Lock, Made, Store, WorkstreamId};
-use crate::views;
+use crate::layouts;
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
 use crate::prunes::{self, Occupied};
@@ -182,8 +182,8 @@ pub async fn serve(
         log::say(why);
     }
     let (wake_owns, owns_woken) = mpsc::sync_channel(1);
-    let views = views::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
-    projects::follow(core.clone(), views.clone(), SWEEP)?;
+    let layouts = layouts::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
+    projects::follow(core.clone(), layouts.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
     let sockets = Zellij::socket_folder();
     let claude_folder = claude::folder();
@@ -192,7 +192,7 @@ pub async fn serve(
     let owns = Arc::new(AtomicBool::new(false));
     follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
-    owns::follow(views.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
+    owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
     git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
@@ -210,7 +210,7 @@ pub async fn serve(
     if let Some(why) = unkept {
         log::say(&format!("what goes wrong is kept in no log: {why}"));
     }
-    let host = Host { started, sockets, claude_folder, core, watchers, bridges, views };
+    let host = Host { started, sockets, claude_folder, core, watchers, bridges, layouts };
     let socket = claim.socket.clone();
     let (begun, beginning) = oneshot::channel();
     let ended = async move {
@@ -434,7 +434,7 @@ struct Host {
     core: SyncSender<Command>,
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
-    views: SyncSender<views::Command>,
+    layouts: SyncSender<layouts::Command>,
 }
 
 #[tonic::async_trait]
@@ -1059,51 +1059,52 @@ impl Daemon for Host {
             let held = Held { stream: answer.into_inner(), _permit: permit };
             return Ok(Response::new(Box::pin(held)));
         }
-        let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
+        let workstream = layouts::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
-        let size = views::size_of(size).map_err(Status::invalid_argument)?;
+        let size = layouts::size_of(size).map_err(Status::invalid_argument)?;
         let runs_in = runs_in.as_ref().map(TerminalKey::of).transpose();
         let runs_in = runs_in.map_err(|why| Status::invalid_argument(format!("runs_in: {why}")))?;
-        let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
-        let views = self.views.clone();
+        let (out, answers) = tokio::sync::mpsc::channel(layouts::ANSWERS_MAX);
+        let layouts = self.layouts.clone();
         let came = task::spawn_blocking(move || {
             let came =
-                |answer| views::Command::Came { workstream, size, runs_in, again, out, answer };
-            views::ask(&views, came)
+                |answer| layouts::Command::Came { workstream, size, runs_in, again, out, answer };
+            layouts::ask(&layouts, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;
-        let client = came.ok_or_else(|| Status::unavailable("the views have stopped"))??;
-        let views = self.views.clone();
+        let client = came.ok_or_else(|| Status::unavailable("the layouts have stopped"))??;
+        let layouts = self.layouts.clone();
         tokio::spawn(async move {
             loop {
                 let asked = match heard.message().await {
-                    Ok(Some(ShowRequest { event: Some(event) })) => views::Asked::of_api(event),
+                    Ok(Some(ShowRequest { event: Some(event) })) => layouts::Asked::of_api(event),
                     Ok(Some(ShowRequest { event: None })) => Err("a word says nothing".to_owned()),
                     Ok(None) | Err(_) => break,
                 };
-                let views = views.clone();
+                let layouts = layouts.clone();
                 let told = task::spawn_blocking(move || {
-                    views.send(views::Command::Asked { client, asked }).is_ok()
+                    layouts.send(layouts::Command::Asked { client, asked }).is_ok()
                 });
                 if !matches!(told.await, Ok(true)) {
                     return;
                 }
             }
-            let _ = task::spawn_blocking(move || views.send(views::Command::Left(client))).await;
+            let left = move || layouts.send(layouts::Command::Left(client));
+            let _ = task::spawn_blocking(left).await;
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(answers))))
     }
 
-    type ViewStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
+    type FramesStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
 
-    async fn view(
+    async fn frames(
         &self,
-        request: Request<Streaming<ViewRequest>>,
-    ) -> Result<Response<Self::ViewStream>, Status> {
-        use crate::api::view_request::{Event, Hello};
+        request: Request<Streaming<FramesRequest>>,
+    ) -> Result<Response<Self::FramesStream>, Status> {
+        use crate::api::frames_request::{Event, Hello};
         use crate::mux::own::api::from_viewer;
         let mut heard = request.into_inner();
-        let Some(ViewRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
             heard.message().await?
         else {
             return Err(Status::invalid_argument("the first word is no hello"));
@@ -1116,20 +1117,20 @@ impl Daemon for Host {
         let mut refuse = Some(refuse);
         let said = heard.map_while(move |word| {
             let refusal = match word {
-                Ok(ViewRequest { event: Some(Event::Said(said)) }) => return Some(said),
-                Ok(ViewRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
-                Ok(ViewRequest { event: None }) => "a word of the view says nothing",
+                Ok(FramesRequest { event: Some(Event::Said(said)) }) => return Some(said),
+                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
+                Ok(FramesRequest { event: None }) => "a word of the frames says nothing",
                 Err(_) => return None,
             };
-            let refuse = refuse.take().expect("a view's words end at the first refused");
+            let refuse = refuse.take().expect("the words for frames end at the first refused");
             drop(refuse.send(Status::invalid_argument(refusal)));
             None
         });
         if let Some((mut daemon, permit)) = self.bridged_held(on)? {
             let hello = Hello { on: None, greeting: Some(greeting) };
-            let first = ViewRequest { event: Some(Event::Hello(hello)) };
-            let rest = said.map(|said| ViewRequest { event: Some(Event::Said(said)) });
-            let answer = daemon.view(tokio_stream::once(first).chain(rest)).await?;
+            let first = FramesRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
             let stream = ended_by(answer.into_inner(), refused);
             return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
         }
@@ -1147,12 +1148,13 @@ impl Daemon for Host {
             return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
-        let views = self.views.clone();
+        let layouts = self.layouts.clone();
         let changed = task::spawn_blocking(move || -> Result<Changed, Status> {
             let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
             let stopped = "it is kept, but the daemon's core has stopped";
-            let asked = views::ask(&views, |answer| views::Command::Change { change, answer });
-            let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;
+            let asked =
+                layouts::ask(&layouts, |answer| layouts::Command::Change { change, answer });
+            let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
             changed.map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
                 Failed::Nests(why) => Status::already_exists(why),
@@ -1368,7 +1370,7 @@ impl Host {
             return Ok(None);
         };
         let full = |_| {
-            let held = format!("{} shows and views open to {destination}", remote::HELD_MAX);
+            let held = format!("{} shows and frames open to {destination}", remote::HELD_MAX);
             Status::resource_exhausted(format!("lunetad's bridge holds {held}, its most"))
         };
         Ok(Some((daemon, held.try_acquire_owned().map_err(full)?)))

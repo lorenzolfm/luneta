@@ -734,15 +734,15 @@ impl Daemon for StandIn {
         &self,
         _: Request<Streaming<api::ShowRequest>>,
     ) -> Result<Response<Self::ShowStream>, Status> {
-        Err(Status::unimplemented("a stand-in shows no view"))
+        Err(Status::unimplemented("a stand-in shows no layout"))
     }
 
-    type ViewStream = tokio_stream::Empty<Result<lunetad::mux::own::api::ToViewer, Status>>;
+    type FramesStream = tokio_stream::Empty<Result<lunetad::mux::own::api::ToViewer, Status>>;
 
-    async fn view(
+    async fn frames(
         &self,
-        _: Request<Streaming<api::ViewRequest>>,
-    ) -> Result<Response<Self::ViewStream>, Status> {
+        _: Request<Streaming<api::FramesRequest>>,
+    ) -> Result<Response<Self::FramesStream>, Status> {
         Err(Status::unimplemented("a stand-in shows no terminal"))
     }
 }

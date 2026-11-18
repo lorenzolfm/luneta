@@ -545,7 +545,7 @@ impl Known {
 
     fn built_terminals(&self, workstream: &Workstream) -> Vec<api::Terminal> {
         use api::terminal::Found as Told;
-        let built = workstream.view().terminals().map(|terminal| {
+        let built = workstream.layout().terminals().map(|terminal| {
             let id = terminal.id();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
             let (told, listed) = match found {

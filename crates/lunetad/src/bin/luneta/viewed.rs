@@ -39,7 +39,7 @@ const LOOKING: &str = "looking for it in luneta-mux";
 const HERE: &str = "luneta runs here";
 
 #[must_use]
-pub fn view_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
+pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
     let rows = rows.get().saturating_sub(TAB_BAR_ROWS).max(1);
     let side = |cells: u16| u32::from(cells.min(SIDE_MAX));
     Size::of(side(columns.get()), side(rows)).expect("a side of 1 to 1000 cells is a size")
@@ -70,7 +70,7 @@ pub enum Heeded {
     Lost(String),
 }
 
-struct View {
+struct Layout {
     workstream: WorkstreamId,
     runs_in: Option<TerminalKey>,
     laid: Option<Laid>,
@@ -80,9 +80,9 @@ struct View {
     titles: BTreeMap<TerminalId, String>,
 }
 
-impl View {
-    fn new(workstream: WorkstreamId, runs_in: Option<TerminalKey>) -> View {
-        View {
+impl Layout {
+    fn new(workstream: WorkstreamId, runs_in: Option<TerminalKey>) -> Layout {
+        Layout {
             workstream,
             runs_in,
             laid: None,
@@ -420,7 +420,7 @@ pub struct Viewed {
     size: Size,
     greeting: Greeting,
     runs_in_here: Option<TerminalKey>,
-    view: View,
+    layout: Layout,
     watcher: Option<Watcher>,
     watchers: u64,
     watched_at: Option<Instant>,
@@ -450,7 +450,7 @@ impl Viewed {
             size,
             greeting,
             runs_in_here,
-            view: View::new(workstream, runs_in),
+            layout: Layout::new(workstream, runs_in),
             watcher: None,
             watchers: 0,
             watched_at: None,
@@ -476,7 +476,7 @@ impl Viewed {
         };
         let events = self.events.clone();
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
-        let workstream = self.view.workstream;
+        let workstream = self.layout.workstream;
         let again = self.laid_in == Some(workstream);
         self.show = Some(lunetad::show(opened, self.at(), workstream, self.size, again, told));
     }
@@ -493,25 +493,25 @@ impl Viewed {
 
     #[must_use]
     pub fn workstream(&self) -> WorkstreamId {
-        self.view.workstream
+        self.layout.workstream
     }
 
     #[must_use]
     pub fn focused(&self) -> Option<TerminalId> {
-        self.view.focused()
+        self.layout.focused()
     }
 
     pub fn heard(&mut self, heard: Heard) -> Heeded {
         match heard {
             Heard::Laid(laid) => {
                 self.laid_in = Some(laid.workstream());
-                let followed = self.view.followed(&laid);
+                let followed = self.layout.followed(&laid);
                 if followed {
-                    self.opened.insert(self.view.workstream);
+                    self.opened.insert(self.layout.workstream);
                 }
                 let mut emptied = false;
-                if self.view.laid_out(laid) {
-                    if self.opened.insert(self.view.workstream) {
+                if self.layout.laid_out(laid) {
+                    if self.opened.insert(self.layout.workstream) {
                         self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
                     } else {
                         emptied = true;
@@ -525,7 +525,7 @@ impl Viewed {
                 }
             },
             Heard::Edged { workstream, direction } => {
-                self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
+                self.layout.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
             },
             Heard::Sent(workstream) => Heeded::Sent(workstream),
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
@@ -541,7 +541,7 @@ impl Viewed {
     }
 
     fn watch(&mut self) {
-        let wanted = self.view.wanted();
+        let wanted = self.layout.wanted();
         match &mut self.watcher {
             Some(watcher) if watcher.showing == wanted => {},
             Some(watcher) => {
@@ -563,7 +563,7 @@ impl Viewed {
                 };
                 let greeting = self.greeting;
                 let told = move |seen| drop(events.send(Event::Seen { number, watcher, seen }));
-                let viewer = viewer::view(reach, greeting, told);
+                let viewer = viewer::start(reach, greeting, told);
                 viewer.show(wanted.clone());
                 self.watcher = Some(Watcher { number: watcher, viewer, showing: wanted });
             },
@@ -595,14 +595,14 @@ impl Viewed {
             Seen::Refused(why) => return Heeded::Note(format!("luneta-mux refused: {why}")),
             Seen::Lost(why) => {
                 self.unwatch();
-                return Heeded::Note(format!("luneta's view of luneta-mux: {why}"));
+                return Heeded::Note(format!("luneta's viewer of luneta-mux: {why}"));
             },
         };
         let frame = framed.frame();
         if !watching.showing.contains(&frame.terminal()) {
             return Heeded::Quiet;
         }
-        match self.view.framed(frame) {
+        match self.layout.framed(frame) {
             Ok(()) => Heeded::Quiet,
             Err(why) => {
                 self.unwatch();
@@ -613,9 +613,9 @@ impl Viewed {
 
     fn unwatch(&mut self) {
         if let Some(watcher) = self.watcher.take() {
-            watcher.viewer.give_up("luneta lets go of its view".to_owned());
+            watcher.viewer.give_up("luneta lets go of its viewer".to_owned());
         }
-        self.view.screens.clear();
+        self.layout.screens.clear();
     }
 
     pub fn ticked(&mut self) {
@@ -641,17 +641,17 @@ impl Viewed {
             *self = Viewed::start(number, folder, on, workstream, size, greeting, here, &events);
             return;
         }
-        if workstream == self.view.workstream {
+        if workstream == self.layout.workstream {
             return;
         }
         self.opened.remove(&workstream);
-        self.view.go(workstream);
+        self.layout.go(workstream);
         self.ask(Asked::Go(workstream));
         self.watch();
     }
 
     pub fn open_in(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
-        if workstream != self.view.workstream {
+        if workstream != self.layout.workstream {
             return;
         }
         self.opened.insert(workstream);
@@ -659,17 +659,17 @@ impl Viewed {
     }
 
     pub fn open_beside_focused(&mut self, argv: Vec<String>) {
-        self.opened.insert(self.view.workstream);
+        self.opened.insert(self.layout.workstream);
         self.ask(Asked::Open { beside: Beside::Focused, argv });
     }
 
     pub fn tabs(&mut self, tabs: Vec<Tab>, titles: BTreeMap<TerminalId, String>) {
-        self.view.tabs = tabs;
-        self.view.titles = titles;
+        self.layout.tabs = tabs;
+        self.layout.titles = titles;
     }
 
     pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {
-        let size = view_size(columns, rows);
+        let size = layout_size(columns, rows);
         if size == self.size {
             return;
         }
@@ -686,7 +686,7 @@ impl Viewed {
     }
 
     fn type_focused(&self, event: typed::Event) {
-        if let Some(key) = self.view.focused_key() {
+        if let Some(key) = self.layout.focused_key() {
             self.type_in(key, event);
         }
     }
@@ -708,7 +708,7 @@ impl Viewed {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, at: Spot, width: u16) -> Option<WorkstreamId> {
-        match self.view.moused(mouse, at, width) {
+        match self.layout.moused(mouse, at, width) {
             Moused::Nothing => None,
             Moused::Go(workstream) => Some(workstream),
             Moused::Focus(terminal) => {
@@ -724,33 +724,33 @@ impl Viewed {
 
     #[must_use]
     pub fn selects(&self, mouse: MouseEvent, at: Spot) -> bool {
-        self.view.selects(mouse, at)
+        self.layout.selects(mouse, at)
     }
 
     pub fn select_from(&mut self, at: Spot) {
-        self.view.select_from(at);
+        self.layout.select_from(at);
     }
 
     pub fn select_to(&mut self, at: Spot) {
-        self.view.select_to(at);
+        self.layout.select_to(at);
     }
 
     pub fn selected(&mut self) -> Option<String> {
-        self.view.selected()
+        self.layout.selected()
     }
 
     pub fn unselect(&mut self) {
-        self.view.pointer = self.view.pointer.unselected();
+        self.layout.pointer = self.layout.pointer.unselected();
     }
 
     #[must_use]
     pub fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
-        self.view.draw(buffer, area, hover)
+        self.layout.draw(buffer, area, hover)
     }
 
     #[must_use]
     pub fn cursor_style(&self) -> (CursorShape, bool) {
-        self.view.cursor_style()
+        self.layout.cursor_style()
     }
 }
 
@@ -836,19 +836,19 @@ mod tests {
         vec![pane(11, (0, 0, 10, 4), Some(1)), pane(12, (10, 0, 10, 4), Some(2))]
     }
 
-    fn split_view() -> View {
-        let mut view = View::new(workstream(1), None);
-        view.tabs = vec![
+    fn split_layout() -> Layout {
+        let mut layout = Layout::new(workstream(1), None);
+        layout.tabs = vec![
             Tab { workstream: workstream(1), name: "one".to_owned() },
             Tab { workstream: workstream(2), name: "two".to_owned() },
         ];
-        view.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
-        assert!(!view.laid_out(laid(halves(), 11, false)));
+        layout.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
+        assert!(!layout.laid_out(laid(halves(), 11, false)));
         let cursor =
             Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
-        view.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        view.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
-        view
+        layout.framed(&whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
+        layout.framed(&whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+        layout
     }
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
@@ -865,9 +865,9 @@ mod tests {
 
     #[test]
     fn each_terminal_draws_in_its_frame_under_the_workstreams_and_a_larger_area_keeps_a_margin() {
-        let view = split_view();
+        let layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let cursor = view.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
+        let cursor = layout.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
         assert_eq!(row(&buffer, 0, 2, 14), " one   two  ");
         assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::GREEN));
         assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
@@ -878,38 +878,39 @@ mod tests {
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
-        assert_eq!(view.draw(&mut small, Rect::new(0, 0, 14, 3), None), None);
+        assert_eq!(layout.draw(&mut small, Rect::new(0, 0, 14, 3), None), None);
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
         assert_eq!(row(&small, 2, 0, 14), "│abcdefgh││qrs");
     }
 
     #[test]
     fn a_view_of_the_workstream_left_is_not_drawn_in_the_one_gone_to() {
-        let mut view = split_view();
-        view.go(workstream(2));
-        assert!(view.drawn().is_empty() && view.wanted().is_empty() && view.screens.is_empty());
-        assert!(!view.laid_out(laid(halves(), 11, false)));
-        assert!(view.drawn().is_empty() && view.focused().is_none());
+        let mut layout = split_layout();
+        layout.go(workstream(2));
+        let drawn = layout.drawn().is_empty() && layout.wanted().is_empty();
+        assert!(drawn && layout.screens.is_empty());
+        assert!(!layout.laid_out(laid(halves(), 11, false)));
+        assert!(layout.drawn().is_empty() && layout.focused().is_none());
     }
 
     #[test]
     fn an_edge_is_heeded_only_from_the_workstream_the_view_is_on() {
-        let mut view = split_view();
-        assert_eq!(view.edged(workstream(1), Direction::Right), Some(Direction::Right));
-        view.go(workstream(2));
-        assert_eq!(view.edged(workstream(1), Direction::Right), None, "an edge of the one left");
-        assert_eq!(view.edged(workstream(2), Direction::Left), Some(Direction::Left));
+        let mut layout = split_layout();
+        assert_eq!(layout.edged(workstream(1), Direction::Right), Some(Direction::Right));
+        layout.go(workstream(2));
+        assert_eq!(layout.edged(workstream(1), Direction::Right), None, "an edge of the one left");
+        assert_eq!(layout.edged(workstream(2), Direction::Left), Some(Direction::Left));
     }
 
     #[test]
     fn a_full_terminal_fills_the_view_and_a_lost_one_or_the_one_luneta_runs_in_says_so() {
-        let mut view = split_view();
-        view.laid_out(laid(halves(), 12, true));
+        let mut layout = split_layout();
+        layout.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        view.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
-        let mut here = View::new(workstream(1), Some(key(2)));
+        let mut here = Layout::new(workstream(1), Some(key(2)));
         let lost = vec![pane(11, (0, 0, 10, 4), None), pane(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "luneta never shows the terminal it runs in");
@@ -920,7 +921,7 @@ mod tests {
 
     #[test]
     fn a_press_focuses_the_terminal_under_it_or_goes_to_its_workstream_or_reaches_the_program() {
-        let mut view = split_view();
+        let mut layout = split_layout();
         let down = mouse(MouseEventKind::Down(MouseButton::Left));
         let drag = mouse(MouseEventKind::Drag(MouseButton::Left));
         let up = mouse(MouseEventKind::Up(MouseButton::Left));
@@ -928,85 +929,88 @@ mod tests {
             Moused::Sent(key, said) => Some((key.id.get(), said.row, said.column)),
             Moused::Nothing | Moused::Go(_) | Moused::Focus(_) => None,
         };
-        assert_eq!(view.moused(down, spot(2, 14), 22), Moused::Focus(terminal(12)));
-        assert_eq!(view.moused(down, spot(0, 7), 22), Moused::Go(workstream(2)));
-        assert_eq!(view.moused(down, spot(0, 1), 22), Moused::Nothing);
-        assert_eq!(view.moused(down, spot(1, 0), 22), Moused::Nothing);
-        assert_eq!(at(view.moused(down, spot(2, 3), 22)), Some((1, 0, 2)));
-        assert_eq!(at(view.moused(drag, spot(0, 15), 22)), Some((1, 0, 7)));
-        assert_eq!(at(view.moused(up, spot(4, 15), 22)), Some((1, 1, 7)));
-        assert_eq!(view.moused(up, spot(2, 3), 22), Moused::Nothing);
+        assert_eq!(layout.moused(down, spot(2, 14), 22), Moused::Focus(terminal(12)));
+        assert_eq!(layout.moused(down, spot(0, 7), 22), Moused::Go(workstream(2)));
+        assert_eq!(layout.moused(down, spot(0, 1), 22), Moused::Nothing);
+        assert_eq!(layout.moused(down, spot(1, 0), 22), Moused::Nothing);
+        assert_eq!(at(layout.moused(down, spot(2, 3), 22)), Some((1, 0, 2)));
+        assert_eq!(at(layout.moused(drag, spot(0, 15), 22)), Some((1, 0, 7)));
+        assert_eq!(at(layout.moused(up, spot(4, 15), 22)), Some((1, 1, 7)));
+        assert_eq!(layout.moused(up, spot(2, 3), 22), Moused::Nothing);
     }
 
     #[test]
     fn a_drag_selects_in_the_focused_terminal_and_a_new_size_lets_it_go() {
-        let mut view = split_view();
+        let mut layout = split_layout();
         let press = mouse(MouseEventKind::Down(MouseButton::Left));
-        assert!(view.selects(press, spot(2, 1)));
-        assert!(!view.selects(press, spot(2, 11)));
-        view.select_from(spot(2, 1));
-        view.select_to(spot(3, 30));
-        assert_eq!(view.selected().as_deref(), Some("abcdefgh\nijklmnop"));
-        assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(&whole(2, &["ab"], None)).unwrap();
-        assert!(matches!(view.pointer, Pointer::Shown(_)));
-        view.framed(&whole(1, &["ab"], None)).unwrap();
-        assert_eq!(view.pointer, Pointer::Free);
+        assert!(layout.selects(press, spot(2, 1)));
+        assert!(!layout.selects(press, spot(2, 11)));
+        layout.select_from(spot(2, 1));
+        layout.select_to(spot(3, 30));
+        assert_eq!(layout.selected().as_deref(), Some("abcdefgh\nijklmnop"));
+        assert!(matches!(layout.pointer, Pointer::Shown(_)));
+        layout.framed(&whole(2, &["ab"], None)).unwrap();
+        assert!(matches!(layout.pointer, Pointer::Shown(_)));
+        layout.framed(&whole(1, &["ab"], None)).unwrap();
+        assert_eq!(layout.pointer, Pointer::Free);
     }
 
     #[test]
     fn a_click_on_a_link_copies_it_and_the_pointer_over_one_underlines_it() {
-        let mut view = split_view();
-        view.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
-        view.select_from(spot(2, 3));
-        assert_eq!(view.selected().as_deref(), Some("a/b.rs"));
+        let mut layout = split_layout();
+        layout.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
+        layout.select_from(spot(2, 3));
+        assert_eq!(layout.selected().as_deref(), Some("a/b.rs"));
         let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
-        assert_eq!(view.pointer, Pointer::Shown(lit));
-        view.select_from(spot(2, 3));
-        view.select_to(spot(2, 3));
-        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a press that stays is a click");
-        view.select_from(spot(2, 3));
-        view.select_to(spot(2, 6));
-        view.select_to(spot(2, 3));
-        assert_eq!(view.selected(), None, "a drag that comes back is no click");
-        assert_eq!(view.pointer, Pointer::Free);
-        view.select_from(spot(2, 8));
-        assert_eq!(view.selected(), None, "a click on a word copies nothing");
-        assert_eq!(view.pointer, Pointer::Free);
+        assert_eq!(layout.pointer, Pointer::Shown(lit));
+        layout.select_from(spot(2, 3));
+        layout.select_to(spot(2, 3));
+        assert_eq!(layout.selected().as_deref(), Some("a/b.rs"), "a press that stays is a click");
+        layout.select_from(spot(2, 3));
+        layout.select_to(spot(2, 6));
+        layout.select_to(spot(2, 3));
+        assert_eq!(layout.selected(), None, "a drag that comes back is no click");
+        assert_eq!(layout.pointer, Pointer::Free);
+        layout.select_from(spot(2, 8));
+        assert_eq!(layout.selected(), None, "a click on a word copies nothing");
+        assert_eq!(layout.pointer, Pointer::Free);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        view.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)));
+        layout.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)));
         let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
         let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
         assert_eq!(line, "______  ");
-        assert_eq!(view.pointed(spot(2, 13)), None, "only in the focused terminal");
+        assert_eq!(layout.pointed(spot(2, 13)), None, "only in the focused terminal");
         let size = frames::Size { columns: side(8), rows: side(2) };
         let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
-        view.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
-        assert_eq!(view.pointed(spot(2, 2)), None, "where the program takes the mouse, none shows");
-        view.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
-        assert_eq!(view.pointed(spot(3, 8)), None, "past a screen shorter than its pane, none shows");
-        view.select_from(spot(3, 8));
-        assert_eq!(view.selected(), None, "nor does a click there copy");
-        assert_eq!(view.pointer, Pointer::Free);
-        view.select_from(spot(3, 8));
-        view.select_to(spot(2, 3));
-        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a drag from there still selects");
+        layout.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
+        let taken = "where the program takes the mouse, none shows";
+        assert_eq!(layout.pointed(spot(2, 2)), None, "{taken}");
+        layout.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
+        let past = "past a screen shorter than its pane, none shows";
+        assert_eq!(layout.pointed(spot(3, 8)), None, "{past}");
+        layout.select_from(spot(3, 8));
+        assert_eq!(layout.selected(), None, "nor does a click there copy");
+        assert_eq!(layout.pointer, Pointer::Free);
+        layout.select_from(spot(3, 8));
+        layout.select_to(spot(2, 3));
+        assert_eq!(layout.selected().as_deref(), Some("a/b.rs"), "a drag from there still selects");
     }
 
     #[test]
     fn changed_rows_follow_only_a_frame_of_their_size_and_a_terminal_laid_out_no_more_drops() {
-        let mut view = split_view();
+        let mut layout = split_layout();
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
         let size = frames::Size { columns: side(1), rows: side(1) };
         let frame = Frame::new(key(1), size, changed, None, false).unwrap();
-        let why = view.framed(&frame).unwrap_err();
+        let why = layout.framed(&frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
-        view.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
-        assert_eq!(view.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
-        view.framed(&whole(1, &["no"], None)).unwrap();
-        assert!(!view.screens.contains_key(&key(1)), "a terminal its view lacks gets no screen");
-        view.go(workstream(2));
-        assert_eq!(view.focused(), None, "a view of another workstream lays out nothing here");
+        layout.laid_out(laid(vec![pane(12, (0, 0, 20, 4), Some(2))], 12, false));
+        assert_eq!(layout.screens.keys().copied().collect::<Vec<_>>(), [key(2)]);
+        layout.framed(&whole(1, &["no"], None)).unwrap();
+        let lacked = "a terminal its layout lacks gets no screen";
+        assert!(!layout.screens.contains_key(&key(1)), "{lacked}");
+        layout.go(workstream(2));
+        assert_eq!(layout.focused(), None, "a layout of another workstream lays out nothing here");
     }
 
     fn laid_in(id: u64, panes: Vec<show_response::Pane>) -> Heard {
@@ -1021,7 +1025,7 @@ mod tests {
     fn a_workstream_emptied_is_left_and_one_gone_back_to_opens_again() {
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
-        let size = view_size(side(20), side(6));
+        let size = layout_size(side(20), side(6));
         let greeting = Greeting { foreground: None, background: None };
         let folder = unserved.path().to_owned();
         let mut viewed =

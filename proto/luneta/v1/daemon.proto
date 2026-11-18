@@ -44,7 +44,7 @@ service Daemon {
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
-  rpc View(stream ViewRequest) returns (stream luneta.mux.v1.ToViewer);
+  rpc Frames(stream FramesRequest) returns (stream luneta.mux.v1.ToViewer);
 }
 
 message On {
@@ -1160,7 +1160,7 @@ message ShowRequest {
   }
 }
 
-message ViewRequest {
+message FramesRequest {
   oneof event {
     Hello hello = 1;
     luneta.mux.v1.FromViewer said = 2;

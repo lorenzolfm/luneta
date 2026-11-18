@@ -38,7 +38,7 @@ mod topics;
 #[cfg(test)]
 mod turns;
 #[cfg(test)]
-mod views;
+mod layouts;
 #[cfg(test)]
 mod workstreams;
 #[cfg(test)]

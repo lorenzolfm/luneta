@@ -20,8 +20,8 @@ use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
-use crate::projects::{Made, Project, ProjectId, Projects, Ran, Runs, Spot};
-use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
+use crate::projects::{Layout, Made, Project, ProjectId, Projects, Ran, Runs, Spot};
+use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::projects::{Worktree, WORKSTREAMS_MAX};
 use crate::shells::Doing;
@@ -239,11 +239,11 @@ fn order_of(said: i32) -> Result<Order, String> {
 }
 
 pub fn ask<T>(
-    views: &SyncSender<Command>,
+    layouts: &SyncSender<Command>,
     question: impl FnOnce(oneshot::Sender<T>) -> Command,
 ) -> Option<T> {
     let (answer, answered) = oneshot::channel();
-    views.send(question(answer)).ok()?;
+    layouts.send(question(answer)).ok()?;
     answered.blocking_recv().ok()
 }
 
@@ -254,7 +254,7 @@ pub fn start(
     sweep: Duration,
 ) -> io::Result<SyncSender<Command>> {
     let (send, commands) = mpsc::sync_channel(COMMANDS_MAX);
-    let views = Views {
+    let layouts = Layouts {
         store,
         core,
         follower,
@@ -273,11 +273,12 @@ pub fn start(
         troubles: Troubles::default(),
         shell: opens::your_shell(),
     };
-    thread::Builder::new().name("views".to_owned()).spawn(move || run(views, &commands, sweep))?;
+    let thread = thread::Builder::new().name("layouts".to_owned());
+    thread.spawn(move || run(layouts, &commands, sweep))?;
     Ok(send)
 }
 
-struct Views {
+struct Layouts {
     store: Store,
     core: SyncSender<Core>,
     follower: SyncSender<()>,
@@ -389,34 +390,34 @@ impl Attempts {
     }
 }
 
-fn run(mut views: Views, commands: &Receiver<Command>, sweep: Duration) {
+fn run(mut layouts: Layouts, commands: &Receiver<Command>, sweep: Duration) {
     let mut swept = Instant::now();
     loop {
-        let restoring = !views.restore_round.is_empty();
+        let restoring = !layouts.restore_round.is_empty();
         let wait = if restoring { Duration::ZERO } else { sweep.saturating_sub(swept.elapsed()) };
         match commands.recv_timeout(wait) {
-            Ok(command) => views.heard(command),
+            Ok(command) => layouts.heard(command),
             Err(RecvTimeoutError::Timeout) => {},
             Err(RecvTimeoutError::Disconnected) => {
-                views.flushed();
+                layouts.flushed();
                 return;
             },
         }
         if swept.elapsed() >= sweep {
-            views.read_runs();
-            views.rehome_due();
-            views.flushed();
+            layouts.read_runs();
+            layouts.rehome_due();
+            layouts.flushed();
             swept = Instant::now();
         }
-        views.restore();
-        views.type_due();
-        views.settle();
-        views.tell_core();
-        views.troubles.done();
+        layouts.restore();
+        layouts.type_due();
+        layouts.settle();
+        layouts.tell_core();
+        layouts.troubles.done();
     }
 }
 
-impl Views {
+impl Layouts {
     fn heard(&mut self, command: Command) {
         match command {
             Command::Change { change, answer } => {
@@ -489,8 +490,9 @@ impl Views {
                     return;
                 };
                 let held = projects.all().iter().find(|it| *it.dir() == root);
-                let views = held.into_iter().flat_map(Project::workstreams).map(Workstream::view);
-                let terminals = views.flat_map(View::terminals).map(layout::Leaf::id);
+                let layouts = held.into_iter().flat_map(Project::workstreams);
+                let layouts = layouts.map(Workstream::layout);
+                let terminals = layouts.flat_map(Layout::terminals).map(layout::Leaf::id);
                 self.unhomed.extend(terminals);
                 assert!(self.unhomed.len() <= TERMINALS_MAX, "only held terminals wait for a home");
             },
@@ -516,7 +518,7 @@ impl Views {
         out: Out,
     ) -> Result<ClientId, Status> {
         if self.clients.len() >= CLIENTS_MAX {
-            let many = format!("{CLIENTS_MAX} clients show views, as many as may");
+            let many = format!("{CLIENTS_MAX} clients show layouts, as many as may");
             return Err(Status::resource_exhausted(many));
         }
         let projects = self.kept().map_err(Status::failed_precondition)?;
@@ -551,8 +553,9 @@ impl Views {
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
         let workstreams: Vec<WorkstreamId> = held.workstreams().map(Workstream::id).collect();
-        let views = held.workstreams().map(Workstream::view);
-        let terminals: Vec<TerminalId> = views.flat_map(View::terminals).map(layout::Leaf::id).collect();
+        let layouts = held.workstreams().map(Workstream::layout);
+        let terminals = layouts.flat_map(Layout::terminals).map(layout::Leaf::id);
+        let terminals: Vec<TerminalId> = terminals.collect();
         assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
         assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
         let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
@@ -582,18 +585,18 @@ impl Views {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
         let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;
-        let terminals: Vec<TerminalId> = shown.view().terminals().map(layout::Leaf::id).collect();
+        let terminals: Vec<TerminalId> = shown.layout().terminals().map(layout::Leaf::id).collect();
         if terminals.iter().copied().collect::<BTreeSet<_>>() != *seen {
             let changed = format!("workstream {workstream}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
-        assert!(terminals.len() <= PANES_MAX, "a view holds at most {PANES_MAX} terminals");
+        assert!(terminals.len() <= PANES_MAX, "a layout holds at most {PANES_MAX} terminals");
         self.close_terminals(&terminals)?;
         if let Some(why) = self.store.closed(Closing::Workstream(workstream))? {
             self.unwritten(&why);
         }
         let projects = self.store.projects().expect("projects just changed are kept");
-        let emptied = projects.find(workstream).is_some_and(|(_, it)| it.view().is_empty());
+        let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
         assert!(emptied, "workstream {workstream} is closed, and stays empty");
         self.forget_closed(&[workstream], &terminals);
         Ok(None)
@@ -640,7 +643,7 @@ impl Views {
             assert!(!focused, "closed workstream {workstream} has no focus");
         }
         for terminal in terminals {
-            assert!(projects.holding(*terminal).is_none(), "terminal {terminal} left its view");
+            assert!(projects.holding(*terminal).is_none(), "terminal {terminal} left its layout");
             assert!(!self.known.contains_key(terminal), "terminal {terminal} is known no more");
         }
     }
@@ -692,12 +695,12 @@ impl Views {
     }
 
     fn unwritten(&mut self, why: &str) {
-        self.troubles.say(format!("the views are kept, and written on the next sweep: {why}"));
+        self.troubles.say(format!("the layouts are kept, and written on the next sweep: {why}"));
     }
 
     fn flushed(&mut self) {
         if let Err(failed) = self.store.flush() {
-            self.troubles.say(format!("the views are not written: {}", said(failed)));
+            self.troubles.say(format!("the layouts are not written: {}", said(failed)));
         }
     }
 
@@ -705,7 +708,7 @@ impl Views {
         let workstream = self.clients[&client].workstream;
         let size = self.size_of(client);
         let focus = self.clients[&client].focus;
-        let focused = || focus.ok_or_else(|| "the view holds no terminal".to_owned());
+        let focused = || focus.ok_or_else(|| "the layout holds no terminal".to_owned());
         match asked {
             Asked::Size(size) => self.client(client).size = size,
             Asked::Go(to) => {
@@ -720,13 +723,13 @@ impl Views {
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
             Asked::Close => self.close(focused()?)?,
             Asked::Focus(Focus::Terminal(terminal)) => {
-                if !self.view(workstream)?.holds(terminal) {
-                    return Err(format!("the view holds no terminal {terminal}"));
+                if !self.layout(workstream)?.holds(terminal) {
+                    return Err(format!("the layout holds no terminal {terminal}"));
                 }
                 self.focus(client, terminal)?;
             },
             Asked::Focus(Focus::Step(Step::Direction(direction))) => {
-                let tree = self.view(workstream)?.tree();
+                let tree = self.layout(workstream)?.tree();
                 let beside = tree.zip(focus).and_then(|(tree, from)| {
                     tree.neighbour(from, direction, size)
                 });
@@ -744,9 +747,9 @@ impl Views {
                 let Some(terminal) = focus else {
                     return Ok(Done::Quiet);
                 };
-                let view = self.view(workstream)?;
-                let moves = view.full().is_none()
-                    && view.tree().is_some_and(|tree| {
+                let layout = self.layout(workstream)?;
+                let moves = layout.full().is_none()
+                    && layout.tree().is_some_and(|tree| {
                         tree.clone().resize(terminal, sides, growth, size)
                     });
                 if !moves {
@@ -760,7 +763,7 @@ impl Views {
                 self.changed(Change::Swap { one, other })?;
             },
             Asked::Fullscreen => {
-                let full = match self.view(workstream)?.full() {
+                let full = match self.layout(workstream)?.full() {
                     Some(_) => None,
                     None => Some(focused()?),
                 };
@@ -774,11 +777,11 @@ impl Views {
         self.clients.get_mut(&client).expect("a client asked is held")
     }
 
-    fn view(&self, workstream: WorkstreamId) -> Result<&View, String> {
+    fn layout(&self, workstream: WorkstreamId) -> Result<&Layout, String> {
         let projects = self.kept()?;
         let found = projects.find(workstream).ok_or_else(|| format!("no workstream {workstream}"));
         let (_, found) = found?;
-        Ok(found.view())
+        Ok(found.layout())
     }
 
     fn stepped(
@@ -788,7 +791,7 @@ impl Views {
         step: Step,
         size: Size,
     ) -> Result<TerminalId, String> {
-        let tree = self.view(workstream)?.tree().ok_or("the view holds no terminal")?;
+        let tree = self.layout(workstream)?.tree().ok_or("the layout holds no terminal")?;
         let to = match step {
             Step::Direction(direction) => tree.neighbour(from, direction, size),
             Step::Order(order) => tree.in_order(from, order),
@@ -798,7 +801,7 @@ impl Views {
 
     fn focus(&mut self, client: ClientId, terminal: TerminalId) -> Result<(), String> {
         let workstream = self.clients[&client].workstream;
-        let full = self.view(workstream)?.full();
+        let full = self.layout(workstream)?.full();
         if full.is_some_and(|full| full != terminal) {
             self.changed(Change::Fill { workstream, full: None })?;
         }
@@ -813,7 +816,7 @@ impl Views {
             return size;
         };
         let shown = self.clients.values().filter(|it| it.workstream == workstream);
-        fit(shown, found.view(), &self.known).map_or(size, |fit| fit.size)
+        fit(shown, found.layout(), &self.known).map_or(size, |fit| fit.size)
     }
 
     fn open(&mut self, client: ClientId, beside: Beside, argv: &[String]) -> Result<(), String> {
@@ -826,17 +829,17 @@ impl Views {
         let terminal = self.store.fresh().map_err(said)?;
         let projects = self.kept()?;
         let (project, shown) = projects.find(workstream).ok_or("the workstream is gone")?;
-        let (placed, inner) = match (shown.view().tree(), beside) {
+        let (placed, inner) = match (shown.layout().tree(), beside) {
             (None, _) => (Placed::Alone, layout::lone(size)),
             (Some(_), Beside::Alone) => return Ok(()),
             (Some(tree), Beside::Towards(towards)) => {
-                let at = focus.ok_or("the view holds no terminal to open beside")?;
+                let at = focus.ok_or("the layout holds no terminal to open beside")?;
                 let room = tree.room(at, towards, terminal, size);
                 let inner = room.ok_or_else(|| format!("terminal {at} has no room beside it"))?;
                 (Placed::Beside { at, towards }, inner)
             },
             (Some(tree), Beside::Focused) => {
-                let at = focus.ok_or("the view holds no terminal to open beside")?;
+                let at = focus.ok_or("the layout holds no terminal to open beside")?;
                 let room = tree.room_beside(at, terminal, size);
                 let roomless = || format!("terminal {at} has no room beside it");
                 let (towards, inner) = room.ok_or_else(roomless)?;
@@ -900,7 +903,7 @@ impl Views {
 
     fn crashed(&mut self, gone: impl Fn(&Known) -> bool) {
         let now = Instant::now();
-        let Views { known, restore_attempts, troubles, .. } = self;
+        let Layouts { known, restore_attempts, troubles, .. } = self;
         for (terminal, known) in known.iter().filter(|(_, known)| gone(known)) {
             let after = known.remade.as_ref().map(|it| now.saturating_duration_since(it.at));
             match after {
@@ -999,15 +1002,16 @@ impl Views {
 
     fn remade(&mut self, terminal: TerminalId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, held) = projects.holding(terminal).ok_or("no view holds it")?;
-        let (project, workstream) = projects.find(held_in.id()).expect("a view's workstream is");
+        let (held_in, held) = projects.holding(terminal).ok_or("no layout holds it")?;
+        let (project, workstream) = projects.find(held_in.id()).expect("a layout's workstream is");
         let workstream_folder = project.folder(workstream.id()).ok_or("its project holds it not")?;
         let kept_folder = held.folder().clone();
         let runs = held.runs().clone();
-        let view = workstream.view();
+        let layout = workstream.layout();
         let shown = self.clients.values().filter(|it| it.workstream == held_in.id());
-        let size = fit(shown, view, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
-        let inner = placed(view, terminal, size).expect("a view lays out the terminals it holds");
+        let size = fit(shown, layout, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let inner = placed(layout, terminal, size);
+        let inner = inner.expect("a layout lays out the terminals it holds");
         let folder = if is_folder(&kept_folder)? {
             kept_folder
         } else if is_folder(&workstream_folder)? {
@@ -1052,7 +1056,7 @@ impl Views {
     }
 
     fn type_due(&mut self) {
-        let Views { known, listed, mux, troubles, .. } = self;
+        let Layouts { known, listed, mux, troubles, .. } = self;
         let now = Instant::now();
         let mut pastes_due: Vec<(TerminalId, TerminalKey, Line)> = Vec::new();
         for (terminal, known) in known.iter_mut() {
@@ -1102,9 +1106,9 @@ impl Views {
 
     fn closed(&mut self, terminal: TerminalId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, _) = projects.holding(terminal).ok_or("no view holds the terminal")?;
+        let (held_in, _) = projects.holding(terminal).ok_or("no layout holds the terminal")?;
         let workstream = held_in.id();
-        let tree = held_in.view().tree().expect("a view that holds a terminal is laid");
+        let tree = held_in.layout().tree().expect("a layout that holds a terminal is laid");
         let heir = tree.heir(terminal);
         self.followed(Change::Close { terminal })?;
         self.known.remove(&terminal);
@@ -1118,11 +1122,11 @@ impl Views {
             };
         }
         let projects = self.kept()?;
-        assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its view");
+        assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its layout");
         if let Some(heir) = heir {
             assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
         } else {
-            let emptied = projects.find(workstream).is_some_and(|(_, it)| it.view().is_empty());
+            let emptied = projects.find(workstream).is_some_and(|(_, it)| it.layout().is_empty());
             assert!(emptied, "workstream {workstream} stays, empty, after its last terminal");
         }
         let focused = self.clients.values().any(|client| client.focus == Some(terminal));
@@ -1151,7 +1155,7 @@ impl Views {
             };
             if projects.holding(terminal).is_none() {
                 let id = listed.key.id;
-                let unheld = format!("terminal {id} is tagged {terminal}, which no view holds");
+                let unheld = format!("terminal {id} is tagged {terminal}, which no layout holds");
                 self.troubles.say(unheld);
                 continue;
             }
@@ -1197,7 +1201,7 @@ impl Views {
         self.listed = by_key(terminals);
         for terminal in ended {
             if let Err(why) = self.closed(terminal) {
-                let stays = format!("terminal {terminal} ended, and stays in its view");
+                let stays = format!("terminal {terminal} ended, and stays in its layout");
                 self.troubles.say(format!("{stays}: {why}"));
             }
         }
@@ -1209,7 +1213,7 @@ impl Views {
             return;
         }
         let agents = core::ask(&self.core, Core::AllAgents).unwrap_or_default();
-        let Views { store, known, listed, shell, .. } = self;
+        let Layouts { store, known, listed, shell, .. } = self;
         let Some(projects) = store.projects() else {
             return;
         };
@@ -1306,13 +1310,13 @@ impl Views {
 
     fn moved(&mut self, terminal: TerminalId, to: WorkstreamId) -> Result<(), String> {
         let projects = self.kept()?;
-        let (held_in, _) = projects.holding(terminal).ok_or("no view holds it")?;
+        let (held_in, _) = projects.holding(terminal).ok_or("no layout holds it")?;
         let from = held_in.id();
-        let heir = held_in.view().tree().and_then(|tree| tree.heir(terminal));
+        let heir = held_in.layout().tree().and_then(|tree| tree.heir(terminal));
         let (_, target) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
         let follows = |client: &Client| client.workstream == from && client.focus == Some(terminal);
         let shown = self.clients.values().filter(|it| it.workstream == to || follows(it));
-        let size = fit(shown, target.view(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let size = fit(shown, target.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         self.changed(Change::Move { terminal, to, size })?;
         let mut followed = false;
         for client in self.clients.values_mut() {
@@ -1359,14 +1363,14 @@ impl Views {
             return;
         }
         if self.core.send(Core::Terminals(now.clone())).is_err() {
-            self.troubles.say("the core hears the views' terminals no more".to_owned());
+            self.troubles.say("the core hears the layouts' terminals no more".to_owned());
             return;
         }
         self.told = Some(now);
     }
 
     fn settle(&mut self) {
-        let Views { store, clients, known, looked, last_focus, mux, troubles, .. } = self;
+        let Layouts { store, clients, known, looked, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
             for (_, client) in std::mem::take(clients) {
@@ -1382,10 +1386,10 @@ impl Views {
                 gone.push(*id);
                 continue;
             };
-            let view = shown.view();
-            if let Some(full) = view.full() {
+            let layout = shown.layout();
+            if let Some(full) = layout.full() {
                 client.focus = Some(full);
-            } else if !client.focus.is_some_and(|focus| view.holds(focus)) {
+            } else if !client.focus.is_some_and(|focus| layout.holds(focus)) {
                 client.focus = arrival(shown, last_focus.get(&client.workstream).copied());
             }
         }
@@ -1393,25 +1397,26 @@ impl Views {
             clients.remove(&id);
         }
         last_focus.retain(|workstream, terminal| {
-            projects.find(*workstream).is_some_and(|(_, it)| it.view().holds(*terminal))
+            projects.find(*workstream).is_some_and(|(_, it)| it.layout().holds(*terminal))
         });
         let workstreams: BTreeSet<_> = clients.values().map(|it| it.workstream).collect();
         let mut fits: BTreeMap<WorkstreamId, Fit> = BTreeMap::new();
         for workstream in workstreams {
             let (_, found) = projects.find(workstream).expect("a client's workstream is held");
             let shown = clients.values().filter(|it| it.workstream == workstream);
-            let fitted = fit(shown, found.view(), known).expect("a workstream shown has a client");
+            let fitted = fit(shown, found.layout(), known);
+            let fitted = fitted.expect("a workstream shown has a client");
             fits.insert(workstream, fitted);
         }
         for (&workstream, &Fit { size, outside }) in &fits {
             let (_, found) = projects.find(workstream).expect("a client's workstream is held");
-            let Some(tree) = found.view().tree() else {
+            let Some(tree) = found.layout().tree() else {
                 continue;
             };
             let whole = Rect::whole(tree.fitted(size)).inner();
             for (terminal, rect) in tree.laid(size) {
                 let terminal = layout::Leaf::id(terminal);
-                let full = found.view().full() == Some(terminal);
+                let full = found.layout().full() == Some(terminal);
                 let wanted = if full { whole } else { rect.inner() };
                 let Some(known) = known.get_mut(&terminal) else {
                     continue;
@@ -1449,7 +1454,7 @@ impl Views {
         for id in slow {
             clients.remove(&id);
         }
-        assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show views");
+        assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
     }
 }
 
@@ -1461,11 +1466,11 @@ struct Fit {
 
 fn fit<'a>(
     shown: impl Iterator<Item = &'a Client>,
-    view: &View,
+    layout: &Layout,
     known: &BTreeMap<TerminalId, Known>,
 ) -> Option<Fit> {
     shown.fold(None, |fitted, client| {
-        let outside = !inside(client, view, known);
+        let outside = !inside(client, layout, known);
         let size = match fitted {
             Some(Fit { outside: true, .. }) if !outside => return fitted,
             Some(fitted) if fitted.outside == outside => fitted.size.least(client.size),
@@ -1475,23 +1480,23 @@ fn fit<'a>(
     })
 }
 
-fn inside(client: &Client, view: &View, known: &BTreeMap<TerminalId, Known>) -> bool {
-    let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && view.holds(*id));
+fn inside(client: &Client, layout: &Layout, known: &BTreeMap<TerminalId, Known>) -> bool {
+    let holds = |runs_in| known.iter().any(|(id, it)| it.key == runs_in && layout.holds(*id));
     client.runs_in.is_some_and(holds)
 }
 
-fn placed(view: &View, terminal: TerminalId, size: Size) -> Option<Size> {
-    let tree = view.tree()?;
+fn placed(layout: &Layout, terminal: TerminalId, size: Size) -> Option<Size> {
+    let tree = layout.tree()?;
     let fitted = tree.fitted(size);
-    let inner = if view.full() == Some(terminal) {
+    let inner = if layout.full() == Some(terminal) {
         Rect::whole(fitted).inner()
     } else {
         let mut laid = tree.laid(size).into_iter();
         laid.find(|(it, _)| layout::Leaf::id(*it) == terminal).map(|(_, rect)| rect.inner())?
     };
     let ((columns, rows), (columns_fitted, rows_fitted)) = (inner.get(), fitted.get());
-    assert!(columns + 2 * FRAME_CELLS <= columns_fitted, "a terminal fits its view's width");
-    assert!(rows + 2 * FRAME_CELLS <= rows_fitted, "a terminal fits its view's height");
+    assert!(columns + 2 * FRAME_CELLS <= columns_fitted, "a terminal fits its layout's width");
+    assert!(rows + 2 * FRAME_CELLS <= rows_fitted, "a terminal fits its layout's height");
     Some(inner)
 }
 
@@ -1583,14 +1588,14 @@ fn by_key(terminals: Vec<server::Terminal>) -> BTreeMap<TerminalKey, server::Ter
 }
 
 fn arrival(workstream: &Workstream, last: Option<TerminalId>) -> Option<TerminalId> {
-    let view = workstream.view();
-    if let Some(full) = view.full() {
+    let layout = workstream.layout();
+    if let Some(full) = layout.full() {
         return Some(full);
     }
-    if let Some(last) = last.filter(|last| view.holds(*last)) {
+    if let Some(last) = last.filter(|last| layout.holds(*last)) {
         return Some(last);
     }
-    view.terminals().next().map(layout::Leaf::id)
+    layout.terminals().next().map(layout::Leaf::id)
 }
 
 fn tag(terminal: TerminalId) -> Vec<u8> {
@@ -1608,11 +1613,11 @@ fn laid(
     known: &BTreeMap<TerminalId, Known>,
     looked: bool,
 ) -> api::ShowResponse {
-    let view = workstream.view();
+    let layout = workstream.layout();
     if let Some(focus) = focus {
-        assert!(view.holds(focus), "a client focuses terminal {focus} of the view it shows");
+        assert!(layout.holds(focus), "a client focuses terminal {focus} of the layout it shows");
     }
-    let (fitted, panes) = match view.tree() {
+    let (fitted, panes) = match layout.tree() {
         None => (size, Vec::new()),
         Some(tree) => {
             let panes = tree.laid(size).into_iter().map(|(terminal, rect)| {
@@ -1640,15 +1645,15 @@ fn laid(
             (tree.fitted(size), panes.collect::<Vec<_>>())
         },
     };
-    assert_eq!(panes.len(), view.len(), "a view lays out each of its terminals");
+    assert_eq!(panes.len(), layout.len(), "a layout lays out each of its terminals");
     let (columns, rows) = fitted.get();
     let laid = show_response::Laid {
         workstream: workstream.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         panes,
-        shown: match (view.full(), focus) {
+        shown: match (layout.full(), focus) {
             (Some(full), _) => {
-                assert_eq!(focus, Some(full), "a client of a full view focuses its terminal");
+                assert_eq!(focus, Some(full), "a client of a full layout focuses its terminal");
                 Some(show_response::laid::Shown::Full(full.get()))
             },
             (None, Some(focus)) => Some(show_response::laid::Shown::Tiled(focus.get())),
@@ -1918,7 +1923,7 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_is_looked_at_apart_from_the_views_thread() {
+    fn a_folder_is_looked_at_apart_from_the_layouts_thread() {
         let folder = tempfile::tempdir().unwrap();
         let dir = Dir::parse(folder.path().to_str().unwrap()).unwrap();
         assert_eq!(is_folder(&dir), Ok(true));
@@ -1941,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tag_names_the_terminal_of_a_view() {
+    fn a_tag_names_the_terminal_of_a_layout() {
         let id = TerminalId::of(0x1f).unwrap();
         assert_eq!(tagged(format!("{TAG}{id}").as_bytes()), Some(id));
         for refused in [&b"luneta terminal 1f"[..], b"terminal 000000000000001f", b"\xff", b""] {

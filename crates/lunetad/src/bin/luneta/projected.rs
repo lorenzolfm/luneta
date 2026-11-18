@@ -369,7 +369,7 @@ mod tests {
         let project_key = key_of(ProjectId::of(7).unwrap());
         let own = api::Own::from(OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() });
         assert_eq!(adapted.agents[0].pane, Some(agent::Pane::Own(own)));
-        assert_eq!(adapted.agents[1].pane, host.agents[1].pane, "a terminal of no view stays");
+        assert_eq!(adapted.agents[1].pane, host.agents[1].pane, "a terminal of no layout stays");
         let Some(remote::Reached::Host(far)) = &adapted.remotes[0].reached else {
             panic!("the remote is reached");
         };
