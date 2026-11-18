@@ -705,11 +705,6 @@ fn luneta_sessions_lists_the_sessions_as_the_sidebar_does() {
         said.lines().map(first).collect::<Vec<String>>()
     };
     assert_eq!(listed(), ["zeta", "alpha"]);
-
-    let kept = host.home.path().join(".local/state/luneta");
-    fs::create_dir_all(&kept).unwrap();
-    fs::write(kept.join("order"), r#"{"sessions":["alpha"]}"#).unwrap();
-    assert_eq!(listed(), ["alpha", "zeta"]);
 }
 
 #[test]

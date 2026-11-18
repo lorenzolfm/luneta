@@ -961,6 +961,8 @@ message ChangeProjectsRequest {
     WorkstreamAt workstream_at = 10;
     RenameTerminal rename_terminal = 11;
     CloseWorkstream close_workstream = 12;
+    ReorderProjects reorder_projects = 13;
+    ReorderWorkstreams reorder_workstreams = 14;
   }
 
   message AddProject {
@@ -1014,6 +1016,15 @@ message ChangeProjectsRequest {
 
   message CloseWorkstream {
     fixed64 workstream = 1;
+  }
+
+  message ReorderProjects {
+    repeated fixed64 projects = 1;
+  }
+
+  message ReorderWorkstreams {
+    fixed64 project = 1;
+    repeated fixed64 workstreams = 2;
   }
 }
 

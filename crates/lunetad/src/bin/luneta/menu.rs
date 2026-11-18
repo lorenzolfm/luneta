@@ -28,7 +28,9 @@ use crate::machines::Machine;
 use crate::printed::{self, Printed};
 use crate::prune;
 use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
-use crate::sidebar::{self, ACCENT, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place, TAG};
+use crate::sidebar::{
+    self, ACCENT, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place, TAG, WorkstreamPlace,
+};
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
 use crate::zellij::{SessionName, Starts};
@@ -187,20 +189,17 @@ pub enum Command {
     Search,
     Unread,
     Reorder,
-    MovePane,
     Open,
 }
 
 impl Command {
-    const ALL: [Command; 5] =
-        [Command::Search, Command::Unread, Command::Reorder, Command::MovePane, Command::Open];
+    const ALL: [Command; 4] = [Command::Search, Command::Unread, Command::Reorder, Command::Open];
 
     const fn key(self) -> char {
         match self {
             Command::Search => '/',
             Command::Unread => 'u',
             Command::Reorder => 'v',
-            Command::MovePane => 'V',
             Command::Open => 'o',
         }
     }
@@ -210,7 +209,6 @@ impl Command {
             Command::Search => "Search",
             Command::Unread => "Unread",
             Command::Reorder => "Reorder",
-            Command::MovePane => "Move pane",
             Command::Open => "Open PR",
         }
     }
@@ -837,8 +835,18 @@ enum Removes {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Session(Machine, Listed),
+    Workstream(Machine, WorkstreamRow),
     Pane(Machine, PaneRow),
     Machine(Machine),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkstreamRow {
+    pub place: WorkstreamPlace,
+    pub name: String,
+    pub folder: String,
+    pub branch: Option<String>,
+    pub repository: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,15 +881,17 @@ pub struct Ended {
 impl Target {
     pub fn machine(&self) -> &Machine {
         match self {
-            Target::Session(machine, _) | Target::Pane(machine, _) | Target::Machine(machine) => {
-                machine
-            },
+            Target::Session(machine, _)
+            | Target::Workstream(machine, _)
+            | Target::Pane(machine, _)
+            | Target::Machine(machine) => machine,
         }
     }
 
     fn own(&self) -> bool {
         match self {
             Target::Session(_, session) => session.own(),
+            Target::Workstream(_, row) => row.place.project.listed().own(),
             Target::Pane(_, row) => row.session.own(),
             Target::Machine(_) => false,
         }
@@ -890,31 +900,34 @@ impl Target {
     pub fn cwd(&self) -> Option<&str> {
         match self {
             Target::Session(..) | Target::Machine(_) => None,
+            Target::Workstream(_, row) => Some(&row.folder),
             Target::Pane(_, row) => row.cwd.as_deref(),
         }
     }
 
-    fn repository_name(&self) -> &str {
+    fn held_repository(&self) -> Option<&str> {
         match self {
-            Target::Pane(_, PaneRow { repository: Some(repository), .. }) => {
-                prunes::name_of(repository)
-            },
-            Target::Pane(..) | Target::Session(..) | Target::Machine(_) => "",
+            Target::Pane(_, row) => row.repository.as_deref(),
+            Target::Workstream(_, row) => row.repository.as_deref(),
+            Target::Session(..) | Target::Machine(_) => None,
         }
     }
 
+    fn repository_name(&self) -> &str {
+        self.held_repository().map_or("", prunes::name_of)
+    }
+
     fn repository(&self) -> Option<Repository> {
-        let Target::Pane(on, PaneRow { cwd: Some(cwd), repository: Some(home), .. }) = self else {
-            return None;
-        };
-        let dir = Directory::parse(cwd.clone()).ok()?;
-        let (home, name) = (home.clone(), self.repository_name().to_owned());
+        let (on, cwd, home) = (self.machine(), self.cwd()?, self.held_repository()?);
+        let dir = Directory::parse(cwd.to_owned()).ok()?;
+        let (home, name) = (home.to_owned(), self.repository_name().to_owned());
         Some(Repository { on: on.clone(), dir, home, name })
     }
 
     pub fn branch(&self) -> Option<&str> {
         match self {
             Target::Session(..) | Target::Machine(_) => None,
+            Target::Workstream(_, row) => row.branch.as_deref(),
             Target::Pane(_, row) => row.branch.as_deref(),
         }
     }
@@ -937,7 +950,7 @@ impl Target {
             Target::Machine(Machine::Remote(destination)) => {
                 Some(Removes::Machine(destination.clone()))
             },
-            Target::Machine(Machine::Local) => None,
+            Target::Machine(Machine::Local) | Target::Workstream(..) => None,
         }
     }
 
@@ -951,8 +964,11 @@ impl Target {
                 Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane.id())
             },
             (
-                Target::Session(machine, session)
-                | Target::Pane(machine, PaneRow { session, .. }),
+                Target::Workstream(machine, row),
+                brief::Scope::Session | brief::Scope::Highlighted,
+            ) => Briefed::Session(machine.clone(), row.place.project.listed().name().clone()),
+            (
+                Target::Session(machine, session) | Target::Pane(machine, PaneRow { session, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(machine.clone(), session.name().clone()),
         }
@@ -1386,7 +1402,7 @@ impl Menu {
                     | Pressed::Checks
                     | Pressed::New(New::Pane | New::Tab)
                     | Pressed::Turn(_),
-                    Target::Session(..) | Target::Machine(_),
+                    Target::Session(..) | Target::Workstream(..) | Target::Machine(_),
                 )
                 | (Pressed::New(New::Session), Target::Session(..)) => {
                     stays(Stage::Choosing(keys), Wants::Nothing)
@@ -1429,6 +1445,12 @@ impl Menu {
                 },
                 (Pressed::New(New::Session), Target::Machine(machine)) => {
                     Did::Closed(new_session(machine, Starts::Home))
+                },
+                (Pressed::New(New::Session), Target::Workstream(machine, row)) => {
+                    match Directory::parse(row.folder.clone()) {
+                        Ok(cwd) => Did::Closed(new_session(machine, Starts::In(cwd))),
+                        Err(why) => Did::Closed(Done::Wrong(format!("menu: {why}"))),
+                    }
                 },
                 (Pressed::New(New::Pane), Target::Pane(_, row)) => match row.beside() {
                     Ok(Beside { session, pane, cwd }) => {
@@ -2909,7 +2931,6 @@ mod tests {
                 " /  Search",
                 " u  Unread",
                 " v  Reorder",
-                " V  Move pane",
                 " o  Open PR",
                 " y  Yank ▸",
                 " a  Ask",
@@ -2925,7 +2946,7 @@ mod tests {
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
         assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('o'), Some(Top::Command(Command::Open)));
-        assert_eq!(Top::of('V'), Some(Top::Command(Command::MovePane)));
+        assert_eq!(Top::of('V'), None);
         assert_eq!(Top::of('y'), Some(Top::Yank));
         assert_eq!(Top::of('a'), None);
         assert_eq!(Top::of('c'), None);

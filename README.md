@@ -455,19 +455,21 @@ pane. luneta runs `claude` itself, so it needs `claude` on its own `PATH`.
 
 ### luneta in your terminal
 
-Type `luneta` in a terminal, and a session of luneta's own multiplexer,
-`luneta-mux`, runs in it beside luneta's sidebar: every live session, the panes
-in it, and what the agent in each pane is doing.
+Type `luneta` in a terminal, and luneta shows a workstream's terminals beside
+its sidebar: every project lunetad keeps, the workstreams in each, the
+terminals of each, and what the agent in each terminal is doing.
 
 ```text
-─ 2 sessions ───────────── ●1 ─ ~/P/m/luneta/main ➜
- ▾ mac ════════════════════ ●1
- ▾ luneta-main ──────────── ●1
+─ 2 projects ───────────── ●1 ─ ~/P/m/luneta/main ➜
+ ▾ luneta ───────────────── ●1
+  ▾ fold                    ●1
+       feat/sidebar #441✓    !
    ● fold                   3m
-     feat/sidebar            !
+▌ ▾ main
+▌      main
 ▌    luneta/main
-▌    main
  ▾ elo ───────────────────────
+  ▾ main
      elo/main
 ```
 
@@ -583,24 +585,24 @@ off the box, closes it. A
 click on a row does what `Enter` does on it, the wheel moves the highlight,
 and a click on a key the line under the search names presses it, as `<TAB>`.
 
-The sidebar lists every session, under a header for the machine it runs on,
-as [other machines](#other-machines) says, oldest first until you move them,
-the panes in each, in the order of their tabs until you move those too, and
-what the agent in each pane
-is doing, with the branch under it, all as [`lunetad`](#building-from-source)
-says:
-luneta starts the daemon when none runs, and the sidebar says so at its bottom
-while it does not answer. A bracket, `╭`, `│` and `╰`, down the column after
-`▌` joins the panes of a tab that sit next to each other. Each session has a
-colour of its own, as a browser's group of tabs has, which its name sits on and
-its brackets are drawn in: a session takes the first that no other has as it
-starts, and keeps it until it ends, renamed too, the same in every luneta. `j`
-and `k` move, `gg` and `Home` go to the first row, `G` and `End` to the last,
-`h`, `l` and `Space` fold, `Enter` or a click goes to the pane, across sessions
-too, `u` marks a pane read or unread, `y p` copies the link of a row's pull
-request and `o` opens it, and `Esc` goes back to zellij. The session
-zellij is in has its rule in
-the accent, and `▌` marks the pane it is on. The highlight rests there while
+The sidebar lists every project, in the order lunetad keeps them, this
+machine's first and then each [other machine's](#other-machines); under each
+project its workstreams, and under each workstream its terminals, in the order
+of its view, and what the agent in each is doing, all as
+[`lunetad`](#building-from-source) says: luneta starts the daemon when none
+runs, and the sidebar says so at its bottom while it does not answer. A
+workstream's row has its branch under it, with the lines changed on it, its pull
+request's number and what its checks come to; a workstream whose folder is gone
+says `missing`. A project with no workstream is one row, and a workstream with
+no terminal is one row you can go to. A bracket, `╭`, `│` and `╰`, down the
+column after `▌` joins the terminals of a workstream. Each project has a colour
+of its own, from its id, which its name sits on and its brackets are drawn in,
+the same in every luneta. `j` and `k` move, `gg` and `Home` go to the first row,
+`G` and `End` to the last, `h`, `l` and `Space` fold, `Enter` or a click goes to
+the terminal or the workstream, `u` marks a terminal read or unread, `y p`
+copies the link of a workstream's pull request and `o` opens it, and `Esc` goes
+back to the terminals. The project luneta is in has its rule in the accent, and
+`▌` marks the workstream it shows and the terminal it is on. The highlight rests there while
 the sidebar does not have the focus; once it has, the highlight goes with the
 keys, and comes back as the sidebar gives the focus back. A move you make in
 zellij, as with its keys, shows within two seconds, as the daemon asks zellij
@@ -692,7 +694,6 @@ lists what you can press there, until the next key:
  /  Search
  u  Unread
  v  Reorder
- V  Move pane
  o  Open PR
  y  Yank ▸
  a  Ask
@@ -722,13 +723,13 @@ shows what can come next, as which-key does in neovim: `d d`, `g g` or `y p`
 typed fast draws nothing in between, and a slow `d` shows the Delete group. A
 click on `d  Delete ▸` shows it at once. A lone `g` waits the same way, then shows
 `g  First row`, as `y` shows what it yanks. While `v` selects, the bottom
-lists the keys of the selection instead, and while `V` has picked a pane,
-those of the move:
+lists the keys of the selection instead:
 
 ```text
-─ Move pane ───────────────────
+─ Reorder ─────────────────────
+ j k  Grow
  J K  Move
- V    Tab, then done
+ v    Project, then done
  Esc  Done
 ```
 
@@ -1098,14 +1099,12 @@ gave. A `│` down the sidebar's last column, open or collapsed, parts it from
 zellij: in the accent while the sidebar has the keys, and dim while it does
 not.
 
-A fold is the same in every luneta on the host, and lasts until you unfold the
-session or a luneta goes to it: by the sidebar, the menu or zellij, as luneta
-starts in it, or as luneta attaches zellij to it once the session zellij was in
-ends. You go to a session for its panes. `h` on the session you are in folds
-it until you next go to it. Each folded session is an empty file named for it
-in `$XDG_STATE_HOME/luneta/folded`, or `~/.local/state/luneta/folded`, which
-every luneta watches. A fold keeps to the session's name, so a session started
-again under it comes back folded, but for one luneta starts, as it goes there.
+`h` on a terminal folds its workstream, and on a folded workstream, or one with
+no terminal, folds its project; `l` unfolds. A fold is the same in every luneta
+on the host, and lasts until you unfold it or a luneta goes there. Each folded
+project or workstream is an empty file named for its id in
+`$XDG_STATE_HOME/luneta/folded`, or `~/.local/state/luneta/folded`, which every
+luneta watches, and goes once lunetad no longer keeps what it folds.
 
 The sidebar is 32 columns wide until you drag its edge, that `│`, with the
 mouse: from 16 columns to half the terminal, zellij taking the rest. A
@@ -1115,57 +1114,27 @@ every luneta opens that wide from its next start: one already running keeps
 its own. Collapsed, the strip stays four columns wide, and opens to the width
 you dragged.
 
-You can move the sessions, of any machine, the machines, and the panes. `v`
-selects the session of the highlighted row, `j` and `k` grow the selection
-from session to session of its machine, folded or not, and `J` and `K` move
-the sessions it holds, each with its panes, one down or one up, as a visual
-selection and `:m` do in vim. A session moves among its machine's alone: never
-under another machine's header. On a machine's
-header, which the highlight stops on while the machine is folded or lists no
-session, `v` selects the machine, this one too, `j` and `k` grow the
-selection from header to header, and `J` and `K` move the machines it holds,
-each with every row under its header. They stay selected, so `JJJ` goes on.
-`v` or `Esc` ends the selection, `Esc` doing nothing else; any other key ends
-it and does what it does.
+You can move the projects and the workstreams. `v` selects the workstream of
+the highlighted terminal, or the highlighted project or workstream, and `v`
+again its project. `j` and `k` grow the selection over the next ones, and `J`
+and `K` move what it holds, one down or one up, as a visual selection and `:m`
+do in vim: a workstream among its project's, a project among its machine's.
+lunetad keeps the order, so every luneta, on any machine, shows it the same,
+and a move shows once lunetad says so. A move asks lunetad for the whole order
+as you saw it, and lunetad turns it down where its order changed since. They
+stay selected, so `JJJ` goes on. `Esc` ends the selection, doing nothing else;
+any other key ends it and does what it does.
 
-`V` picks the highlighted pane, and `J` and `K`, or `j` and `k`, move it one
-row down or one up, among the panes of its session, and past the last of
-them, or the first, under the next session of its machine, or the one before,
-passing over a folded one. `V` again takes up the rest of its tab, the panes
-of it next to each other, which move together, and once more ends, as `Esc`
-does; any other key ends it and does what it does. A pane moves among its
-machine's alone, and it moves only where its row shows: zellij moves no pane
-between sessions, so it goes on in its own, and what runs in it runs on,
-untouched. `Enter` on it goes to it there, the menu acts on it there, and its
-session's rule is the one in the accent while zellij is on it. Its bracket,
-or under another session a `┆` where it is alone of its tab, is drawn in its
-own session's colour, so you can tell where it lives. It folds with the
-session it shows under, and `h` on it folds that one. Where you moved each
-pane is kept for every luneta, and the next, in the same file as the order of
-the sessions, for as long as its session runs: zellij numbers a session's
-panes from 0 each time it starts, so no pane keeps a place past it. A pane
-you have not moved, as one that opens later, shows under its own session with
-the panes of its tab there, or else before those of the tabs after it; and so
-does one whose place has gone, as the session it shows under has ended. A
-session whose own panes are back in the order of their tabs, with none of
-another's, keeps no order of them, and follows its tabs again.
-
-With the mouse, a press on a session's row, or on a machine's header, lifts
-it once the mouse moves a line, and the sidebar takes the keys. It shows where
-it lands, lit, with the rows under it, the others around it making room, a
-session among its machine's alone. Held on the first or last line of the
-rows, it scrolls them. Let go, it stays there. Let go off the sidebar, or
-press `Esc`, and it goes back. A press on a pane's row lifts the pane, as `V`
-picks it, and one on the bracket that joins it to the panes of its tab lifts
-the tab: it shows where it lands, lit, among the panes of its machine's
-sessions, and lands there as it lets go. What the mouse holds stays with the
-sidebar until it lets go, over zellij too, and while the button is down no key
-reaches zellij, and the sidebar does nothing with one but `Esc`, which lets go, as the window losing
-the focus does. The button does nothing more then until it comes up: zellij
-hears nothing of it. So
-a click is a press let go on the line it went down on, and acts as it lets go,
-though the hand moved a cell along it. While the search has something typed,
-nothing lifts.
+With the mouse, a press on a project's or a workstream's row lifts it once the
+mouse moves a line, and the sidebar takes the keys. It shows where it lands,
+lit, with the rows under it, the others around it making room. Held on the first
+or last line of the rows, it scrolls them. Let go, it moves there. Let go off
+the sidebar, or press `Esc`, and it goes back. What the mouse holds stays with
+the sidebar until it lets go, and while the button is down the sidebar does
+nothing with a key but `Esc`, which lets go, as the window losing the focus
+does. So a click is a press let go on the line it went down on, and acts as it
+lets go, though the hand moved a cell along it. While the search has something
+typed, nothing lifts.
 
 A drag anywhere else on the sidebar selects text, as it does in a pane: a
 branch, a session's name, an agent's topic, what a note says. On a pane's or a
@@ -1180,21 +1149,6 @@ shows comes out as the rest of the name it cut short, with no control character
 in it, as a row shows none. It stays reversed until the next click, or until
 other rows or notes come under it. Over nothing but blanks nothing is copied, and
 nothing stays reversed. `Esc` drops it before you let go, with nothing copied.
-
-The order is the same in every luneta on the host, and lasts: it is kept in
-`$XDG_STATE_HOME/luneta/order`, or `~/.local/state/luneta/order`, which every
-luneta watches. A session keeps its place by its name, as a fold does, so one
-started again under it comes back there, and two that share one, as zellij
-versions with sockets of their own can each run, move together. Each machine's
-sessions have an order of their own, another machine's by what you typed ssh
-to it, kept on this host as its folds are: the luneta on that machine keeps
-its own. A move is made to the order as it is kept then, so it undoes none
-that another luneta made, heard or not. A session the order does not have
-goes after those it has, as a new session always went last, and so does a
-machine. The order is the
-sidebar's only: zellij's tabs keep theirs. The sessions' colours are kept in
-the same file, by the session rather than its name, so a renamed one keeps its
-own, and given up once the daemon has not listed a session for 10 seconds.
 
 luneta's terminal tells zellij what it is told: the kitty keyboard protocol,
 where the terminal you run luneta in speaks it, so that `Shift Enter` is not
@@ -1211,9 +1165,9 @@ the session it is in.
 
 ### Other machines
 
-The sidebar lists your other machines' sessions too, a header over each
-machine's: this one first, by its host's name, and then each machine you
-added, as you typed it, until you move them, as
+The sidebar lists your other machines' projects too, each with its machine's
+name beside its own: this one's first, and then each machine's you added, as
+you typed it, as
 [luneta in your terminal](#luneta-in-your-terminal) says. lunetad reaches
 each one through `ssh <machine> luneta bridge`, so ssh does the auth and
 nothing listens on the network, and the machine needs `luneta` on its `PATH`.
@@ -1230,21 +1184,24 @@ lunetad's ssh asks you nothing, so run `ssh` to a machine yourself once, for
 its host key, before you add it.
 
 ```text
- ▾ mac ═══════════════════════
- ▾ luneta-main ───────────────
+ ▾ luneta  mac ───────────────
+▌ ▾ main
 ▌    luneta/main
- ▾ nixos ══════════════════ ●1
- ▾ cipher ───────────────── ●1
+ ▾ cipher  nixos ────────── ●1
+  ▾ ci                      ●1
    ● ci                     2m
- ▸ vps · unreachable        3m
+ ▾ elo  pi · unreachable ─────
+  ▾ main
+     elo/main
+ ▸ vps · reaching…
 ```
 
-A machine folds as a session does: `h` on a folded session folds its machine,
-and a folded machine shows on its header what its sessions want of you, as a
-folded session does its panes'. One lunetad does not reach is a dimmed header
-that says why in a word, and in full at the bottom while it is highlighted;
+A machine lunetad does not reach keeps the projects lunetad last heard of it,
+each saying why in a word beside the machine's name, and in full at the bottom
+while it is highlighted. One lunetad has heard nothing of, or that keeps no
+project, is a dimmed row of its own;
 lunetad runs ssh to it again, every 30 seconds at the longest, and
-`luneta.log` has what ssh said. `d d` on its header forgets it. The machines
+`luneta.log` has what ssh said. `d d` on its row forgets it. The machines
 are kept one to a line in `$XDG_STATE_HOME/luneta/hosts`, or
 `~/.local/state/luneta/hosts`, which lunetad reads again as it changes.
 

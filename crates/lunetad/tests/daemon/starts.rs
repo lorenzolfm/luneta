@@ -23,14 +23,12 @@ use rustix::fs::{Mode, OFlags};
 use rustix::io::{fcntl_setfd, FdFlags};
 use rustix::pty::{self, OpenptFlags};
 use rustix::termios::{self, Winsize};
-use serde_json::json;
 use tempfile::TempDir;
 
 use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
-use crate::host::{eventually, script, start, Host, Running, Vars, LUNETA};
+use crate::host::{eventually, script, Host, Running, Vars, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, workstream};
-use crate::remote::{hosts, FakeSsh};
 
 const ENDS: Duration = Duration::from_secs(30);
 
@@ -97,11 +95,6 @@ fn luneta_at(program: &str, vars: Vars, dir: &Path) -> Command {
     let mut command = vars.command(program);
     command.current_dir(dir).env_remove("SSH_CONNECTION").env_remove("SSH_TTY");
     command
-}
-
-pub fn runs(host: &Host, name: &str) -> std::os::unix::net::UnixListener {
-    host.zellij.list(name, &json!([]));
-    host.serve(name)
 }
 
 pub struct Window {
@@ -458,48 +451,4 @@ fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     assert!(starts <= most, "it was started {starts} times in {took:?}");
 }
 
-struct Machine {
-    _host: Host,
-    _session: std::os::unix::net::UnixListener,
-    _daemon: crate::host::Daemon,
-}
 
-fn machine(ssh: &FakeSsh, destination: &str, name: &str) -> Machine {
-    let host = Host::new();
-    host.zellij.list(name, &json!([]));
-    let session = host.serve(name);
-    let daemon = start(host.vars()).unwrap();
-    ssh.reaches(destination, host.vars());
-    Machine { _host: host, _session: session, _daemon: daemon }
-}
-
-#[test]
-fn luneta_goes_to_no_session_of_zellij_s_and_stays_where_it_is() {
-    let owned = Owned::new();
-    let _project = runs(&owned.host, "project");
-    let dir = directory("mine");
-    let mut window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta shows mine", || shown(&owned, &dir.path));
-    eventually("the sidebar lists project", || window.shows("project").then_some(()));
-    window.send("\x1b[106;9uproject\r");
-    let said = "project is one of zellij's sessions: luneta goes to its own sessions only, now";
-    eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
-    assert_eq!(owned.host.zellij.attached(), [] as [String; 0]);
-    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
-}
-
-#[test]
-fn luneta_goes_to_no_session_of_another_machine_s() {
-    let owned = Owned::new();
-    let ssh = FakeSsh::new(owned.host.zellij.bin());
-    let _far = machine(&ssh, "far", "work");
-    hosts(&owned.host, "far\n");
-    let dir = directory("mine");
-    let mut window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta shows mine", || shown(&owned, &dir.path));
-    eventually("the sidebar lists work", || window.shows("work").then_some(()));
-    window.send("\x1b[106;9uwork\r");
-    let said = "work is one of zellij's sessions: luneta goes to its own sessions only, now";
-    eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
-    assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");
-}

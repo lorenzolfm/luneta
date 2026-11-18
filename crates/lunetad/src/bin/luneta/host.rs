@@ -57,7 +57,6 @@ use crate::menu::{self, Choice};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
-use crate::order::{self, Order};
 use crate::prune;
 use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
@@ -142,7 +141,6 @@ pub enum Event {
     StopAloud,
     Folds,
     News,
-    Order,
     Agent,
     Alerted(alerts::Read),
     Clicked(alerts::Key),
@@ -514,15 +512,13 @@ fn run_in(
 ) -> io::Result<Option<String>> {
     let (width, width_unread) = Width::kept();
     let folds = Folds::shared();
-    let order = Order::shared();
     let folds_dirs = folds.dirs();
     let folds_watched =
         (!folds_dirs.is_empty()).then(|| folds::watch(&folds_dirs, events.clone())).transpose();
     let news_watched = news::watch(&news, events.clone());
-    let order_watched = order.file().map(|file| order::watch(file, events.clone())).transpose();
     let (agent, agent_unread) = Kept::shared();
     let agent_watched = agent.file().map(|file| agents::watch(file, events.clone())).transpose();
-    let mut sidebar = Sidebar::new(folds, news, order, agent, machines::local_name());
+    let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
     if let Some(why) = unkept {
         sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
     }
@@ -537,12 +533,6 @@ fn run_in(
         Ok(watcher) => watching.push(watcher),
         Err(error) => {
             sidebar.notify(format!("dots of other lunetas show from luneta's next start: {error}"));
-        },
-    }
-    match order_watched {
-        Ok(watcher) => watching.extend(watcher),
-        Err(error) => {
-            sidebar.notify(format!("rows moved elsewhere show from luneta's next start: {error}"));
         },
     }
     match agent_watched {
@@ -900,7 +890,6 @@ impl App {
             },
             Event::StopAloud => self.aloud.press(aloud::Button::Stop),
             Event::News => self.sidebar.reread(),
-            Event::Order => self.sidebar.reorder(),
             Event::Agent => self.sidebar.reagent(),
         }
         if relists {
@@ -1608,6 +1597,14 @@ impl App {
                     self.sidebar.notify(format!("forget {destination}: {why}"));
                 }
             },
+            Asked::Move { on, order } => {
+                let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
+                thread::spawn(move || {
+                    if let Err(why) = caught(|| workstreams::reordered(&lunetad, &on, &order)) {
+                        let _ = events.send(Event::Notice(format!("not moved: {why}")));
+                    }
+                });
+            },
         }
     }
 
@@ -1911,6 +1908,16 @@ impl App {
         }
         let project = self.projected.project(key);
         let project = project.ok_or_else(|| format!("{session} is no project lunetad keeps"))?;
+        if let Place::Workstream(place) = place {
+            let held = project.workstreams.iter().any(|it| it.id == place.workstream);
+            if !held {
+                return Err(format!("{session} holds no such workstream"));
+            }
+            if self.right.workstream() != place.workstream {
+                self.go_workstream(place.workstream, None);
+            }
+            return Ok(());
+        }
         let Some(pane) = place.pane() else {
             let shown = self.right.workstream();
             if project.workstreams.iter().any(|it| it.id == shown) {
@@ -1944,6 +1951,7 @@ impl App {
         let Some((project, _)) = self.projected.holding(workstream) else {
             return;
         };
+        self.sidebar.showing(workstream);
         let key = project.key;
         let pane = self.right.focused().and_then(|focused| project.pane_of(focused));
         let seated = self.sidebar.own_seat().map(sidebar::OwnSeat::session);

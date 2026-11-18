@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, RenameProject};
-use lunetad::api::change_projects_request::WorkstreamAt;
+use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
-use lunetad::api::{ChangeProjectsRequest, WatchRequest};
+use lunetad::api::{ChangeProjectsRequest, On, WatchRequest};
 use lunetad::projects::{ProjectId, WorkstreamId};
 use tonic::transport::Channel;
 use tonic::Code;
@@ -13,7 +13,9 @@ use tonic::Code;
 use lunetad::names::session_for;
 
 use crate::daemon;
+use crate::machines::Machine;
 use crate::projected::{self, Project};
+use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
 
@@ -66,8 +68,12 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
 }
 
 fn changed(path: &Path, change: Change) -> Result<Option<u64>, Unmade> {
+    changed_on(path, None, change)
+}
+
+fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<u64>, Unmade> {
     asked(path, async |daemon| {
-        let request = ChangeProjectsRequest { on: None, change: Some(change) };
+        let request = ChangeProjectsRequest { on, change: Some(change) };
         match daemon.change_projects(request).await {
             Ok(made) => Ok(made.into_inner().made),
             Err(status) => {
@@ -112,6 +118,24 @@ pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
     let (project, to) = (project.get(), to.to_owned());
     let change = Change::RenameProject(RenameProject { project, to });
     changed(&path, change).map(drop).map_err(Unmade::said)
+}
+
+pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<(), String> {
+    let on = match machine {
+        Machine::Local => None,
+        Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
+    };
+    let change = match order {
+        Reorder::Projects(projects) => {
+            let projects = projects.iter().map(|it| it.get()).collect();
+            Change::ReorderProjects(ReorderProjects { projects })
+        },
+        Reorder::Workstreams { project, workstreams } => {
+            let workstreams = workstreams.iter().map(|it| it.get()).collect();
+            Change::ReorderWorkstreams(ReorderWorkstreams { project: project.get(), workstreams })
+        },
+    };
+    changed_on(path, on, change).map(drop).map_err(Unmade::said)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {

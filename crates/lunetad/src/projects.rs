@@ -385,6 +385,8 @@ pub enum Change {
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     MoveProject { project: ProjectId, to: usize },
     MoveWorkstream { workstream: WorkstreamId, to: usize },
+    ReorderProjects { projects: Vec<ProjectId> },
+    ReorderWorkstreams { project: ProjectId, workstreams: Vec<WorkstreamId> },
     ForgetProject { project: ProjectId },
     ForgetWorkstream { workstream: WorkstreamId },
     CloseWorkstream { workstream: WorkstreamId },
@@ -459,6 +461,16 @@ impl Ask {
                 let workstream = id("workstream", workstream).map(WorkstreamId)?;
                 Change::MoveWorkstream { workstream, to: place(to) }
             },
+            Asked::ReorderProjects(asked::ReorderProjects { projects }) => {
+                let projects = projects.into_iter().map(|it| id("projects", it).map(ProjectId));
+                Change::ReorderProjects { projects: projects.collect::<Result<_, _>>()? }
+            },
+            Asked::ReorderWorkstreams(asked::ReorderWorkstreams { project, workstreams }) => {
+                let project = id("project", project).map(ProjectId)?;
+                let held = workstreams.into_iter();
+                let held = held.map(|it| id("workstreams", it).map(WorkstreamId));
+                Change::ReorderWorkstreams { project, workstreams: held.collect::<Result<_, _>>()? }
+            },
             Asked::ForgetProject(asked::ForgetProject { project }) => {
                 Change::ForgetProject { project: id("project", project).map(ProjectId)? }
             },
@@ -492,6 +504,8 @@ impl Change {
             | Change::RenameWorkstream { .. }
             | Change::MoveProject { .. }
             | Change::MoveWorkstream { .. }
+            | Change::ReorderProjects { .. }
+            | Change::ReorderWorkstreams { .. }
             | Change::ForgetProject { .. }
             | Change::ForgetWorkstream { .. }
             | Change::CloseWorkstream { .. }
@@ -690,6 +704,15 @@ impl Projects {
             Change::MoveWorkstream { workstream, to } => {
                 let (project, at) = changed.workstream(workstream)?;
                 moved(&mut project.workstreams, at, to)?;
+                None
+            },
+            Change::ReorderProjects { projects } => {
+                reordered(&mut changed.projects, |it| it.id, &projects, "projects")?;
+                None
+            },
+            Change::ReorderWorkstreams { project, workstreams } => {
+                let held = &mut changed.project(project)?.workstreams;
+                reordered(held, |it| it.id, &workstreams, "workstreams")?;
                 None
             },
             Change::ForgetProject { project } => {
@@ -894,6 +917,23 @@ fn nested(dir: &Dir, other: &Project) -> String {
 
 fn unknown(what: &str, id: impl fmt::Display) -> String {
     format!("no {what} has the id {id}")
+}
+
+fn reordered<T, I: Ord + Copy>(
+    items: &mut [T],
+    id: impl Fn(&T) -> I,
+    wanted: &[I],
+    kind: &str,
+) -> Result<(), String> {
+    let mut kept: Vec<I> = items.iter().map(&id).collect();
+    let mut asked = wanted.to_vec();
+    kept.sort_unstable();
+    asked.sort_unstable();
+    if kept != asked {
+        return Err(format!("the {kind} asked for are not the {kind} kept: they changed since"));
+    }
+    items.sort_by_key(|it| wanted.iter().position(|wanted| *wanted == id(it)));
+    Ok(())
 }
 
 fn moved<T>(items: &mut Vec<T>, at: usize, to: usize) -> Result<(), String> {
@@ -1148,6 +1188,34 @@ mod tests {
         (projects, _) = change(&projects, first).unwrap();
         let ids: Vec<_> = projects.all()[2].workstreams().iter().map(Workstream::id).collect();
         assert_eq!(ids, [two, one]);
+    }
+
+    #[test]
+    fn a_reorder_takes_the_whole_order_and_only_the_one_kept() {
+        let mut projects = Projects::default();
+        let a = project(&mut projects, "/a");
+        let b = project(&mut projects, "/b");
+        let c = project(&mut projects, "/c");
+        let order = |projects: &Projects| {
+            projects.all().iter().map(Project::id).collect::<Vec<_>>()
+        };
+        let reorder = Change::ReorderProjects { projects: vec![b, c, a] };
+        (projects, _) = change(&projects, reorder).unwrap();
+        assert_eq!(order(&projects), [b, c, a]);
+        for stale in [vec![a, b], vec![a, b, b], vec![c, b, a, a]] {
+            let refused = change(&projects, Change::ReorderProjects { projects: stale });
+            assert!(refused.unwrap_err().contains("they changed since"));
+        }
+        assert_eq!(order(&projects), [b, c, a]);
+
+        let one = workstream(&mut projects, a, "/a/one");
+        let two = workstream(&mut projects, a, "/a/two");
+        let swapped = Change::ReorderWorkstreams { project: a, workstreams: vec![two, one] };
+        (projects, _) = change(&projects, swapped).unwrap();
+        let ids: Vec<_> = projects.all()[2].workstreams().iter().map(Workstream::id).collect();
+        assert_eq!(ids, [two, one]);
+        let elsewhere = Change::ReorderWorkstreams { project: b, workstreams: vec![two, one] };
+        assert!(change(&projects, elsewhere).unwrap_err().contains("they changed since"));
     }
 
     #[test]

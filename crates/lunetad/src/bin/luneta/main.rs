@@ -33,7 +33,6 @@ mod mic;
 mod models;
 mod named;
 mod news;
-mod order;
 mod peers;
 mod picker;
 mod printed;

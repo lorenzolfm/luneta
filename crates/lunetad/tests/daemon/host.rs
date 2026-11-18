@@ -351,10 +351,6 @@ echo "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"
         self.lines("went")
     }
 
-    pub fn attached(&self) -> Vec<String> {
-        self.lines("attached")
-    }
-
     pub fn asked_clients(&self, session: &str) -> usize {
         self.lines("asked-clients").iter().filter(|asked| *asked == session).count()
     }
