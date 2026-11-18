@@ -309,6 +309,27 @@ impl Below {
     pub fn is_own(&self) -> bool {
         self.0.is_empty()
     }
+
+    fn holds(&self, other: &Below) -> bool {
+        if self.is_own() {
+            return true;
+        }
+        let rest = other.0.strip_prefix(&self.0);
+        rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+
+    fn shared(&self, other: &Below) -> Below {
+        let mut end = 0;
+        for (part, other_part) in self.0.split('/').zip(other.0.split('/')) {
+            if part != other_part {
+                break;
+            }
+            end += usize::from(end > 0) + part.len();
+        }
+        let shared = Below(self.0[..end].to_owned());
+        assert!(shared.holds(self) && shared.holds(other), "{} holds both", shared.0);
+        shared
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1057,37 +1078,17 @@ fn left_for<'a>(
     below: &Below,
     folders: impl Iterator<Item = &'a Dir>,
 ) -> Option<Below> {
-    let mut shared: Option<&'a str> = None;
+    let mut shared: Option<Below> = None;
     for folder in folders {
-        let folder_below = folder.as_str().strip_prefix(project.as_str())?.strip_prefix('/')?;
-        if within(below.as_str(), folder_below) {
+        let folder = project.below(folder)?;
+        if below.holds(&folder) {
             return None;
         }
-        shared = Some(shared.map_or(folder_below, |shared| shared_part(shared, folder_below)));
+        shared = Some(shared.map_or_else(|| folder.clone(), |shared| shared.shared(&folder)));
     }
-    let shared = shared.filter(|shared| !shared.is_empty())?;
-    assert!(!within(below.as_str(), shared), "{shared} is no part of {}", below.as_str());
-    Some(Below::parse(shared).expect("the parts a below shares with another make a below"))
-}
-
-fn within(outer: &str, inner: &str) -> bool {
-    if outer.is_empty() {
-        return true;
-    }
-    inner.strip_prefix(outer).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
-fn shared_part<'a>(one: &'a str, other: &str) -> &'a str {
-    let mut end = 0;
-    for (part, other_part) in one.split('/').zip(other.split('/')) {
-        if part != other_part {
-            break;
-        }
-        end += usize::from(end > 0) + part.len();
-    }
-    let shared = &one[..end];
-    assert!(within(shared, one), "{shared} is a part of {one}");
-    shared
+    let shared = shared.filter(|shared| !shared.is_own())?;
+    assert!(!below.holds(&shared), "{} is no part of {}", shared.0, below.0);
+    Some(shared)
 }
 
 fn unknown(what: &str, id: impl fmt::Display) -> String {
@@ -1253,6 +1254,18 @@ mod tests {
         assert_eq!(luneta.below(&dir("/w/luneta-old")), None);
         assert_eq!(luneta.below(&dir("/w")), None);
         assert_eq!(luneta.join(&luneta.below(&dir("/w/luneta/a")).unwrap()), dir("/w/luneta/a"));
+    }
+
+    #[test]
+    fn belows_hold_and_share_only_whole_names() {
+        let below = |text: &str| Below::parse(text).unwrap();
+        assert!(Below::OWN.holds(&below("a")));
+        assert!(below("a").holds(&below("a/b")));
+        assert!(!below("a").holds(&below("ab")));
+        assert!(!below("a/b").holds(&below("a")));
+        assert_eq!(below("a/b/c").shared(&below("a/b/d")), below("a/b"));
+        assert_eq!(below("fix").shared(&below("fix-bug")), Below::OWN);
+        assert_eq!(below("a").shared(&Below::OWN), Below::OWN);
     }
 
     #[test]
