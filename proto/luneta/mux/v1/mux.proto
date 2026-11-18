@@ -363,9 +363,16 @@ message Row {
 }
 
 message Line {
+  reserved 2;
   repeated Glyph glyphs = 1;
-  bool wraps_wide = 2;
-  bool wraps = 3;
+  Ending ending = 3;
+}
+
+enum Ending {
+  ENDING_UNSPECIFIED = 0;
+  ENDING_HERE = 1;
+  ENDING_WRAPS = 2;
+  ENDING_WRAPS_WIDE = 3;
 }
 
 message Glyph {

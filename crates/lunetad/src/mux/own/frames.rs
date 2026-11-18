@@ -155,12 +155,15 @@ impl Line {
 
     fn heard(line: Option<api::Line>, columns: NonZeroU16) -> Result<Line, String> {
         let line = line.ok_or("a row of a frame has no line")?;
-        let glyphs = line.glyphs.into_iter().map(glyph).collect::<Result<Vec<_>, _>>()?;
-        let ending = match (line.wraps_wide, line.wraps) {
-            (true, _) => Ending::WrapsWide,
-            (false, true) => Ending::Wraps,
-            (false, false) => Ending::Here,
+        let ending = match line.ending() {
+            api::Ending::Here => Ending::Here,
+            api::Ending::Wraps => Ending::Wraps,
+            api::Ending::WrapsWide => Ending::WrapsWide,
+            api::Ending::Unspecified => {
+                return Err("a row of a frame does not say how it ends".into());
+            },
         };
+        let glyphs = line.glyphs.into_iter().map(glyph).collect::<Result<Vec<_>, _>>()?;
         Line::new(glyphs, ending, columns)
     }
 }
@@ -385,17 +388,16 @@ mod tests {
 
     #[test]
     fn a_frame_reads_where_its_rows_add_up_to_its_size() {
-        let line = |glyphs: Vec<api::Glyph>, wraps_wide| {
-            api::Line { glyphs, wraps_wide, wraps: false }
+        let line = |glyphs: Vec<api::Glyph>, ending: api::Ending| api::Line {
+            glyphs,
+            ending: ending.into(),
         };
-        let wrapped = |line: api::Line| api::Line { wraps: true, ..line };
         let read = Frame::heard(frame(
             3,
             vec![
-                line(vec![narrow("a"), wide("日")], false),
-                line(vec![narrow("a"), narrow("b")], true),
-                wrapped(line(vec![narrow("a"), narrow("b")], true)),
-                wrapped(line(vec![narrow("a"), narrow("b"), narrow("c")], false)),
+                line(vec![narrow("a"), wide("日")], api::Ending::Here),
+                line(vec![narrow("a"), narrow("b")], api::Ending::WrapsWide),
+                line(vec![narrow("a"), narrow("b"), narrow("c")], api::Ending::Wraps),
             ],
         ))
         .unwrap();
@@ -404,19 +406,24 @@ mod tests {
         assert_eq!(lines[0].glyphs()[1].shows, two);
         assert!(!lines[0].wraps());
         assert!(lines[1].wraps_wide());
-        assert!(lines[1].wraps(), "a mux that says only that a wide glyph wraps, still wraps");
-        assert!(lines[2].wraps_wide());
-        assert!(lines[3].wraps());
-        assert!(!lines[3].wraps_wide());
-        let short = Frame::heard(frame(3, vec![line(vec![narrow("a")], false)]));
+        assert!(lines[1].wraps(), "a wide glyph that wraps early wraps its row");
+        assert!(lines[2].wraps());
+        assert!(!lines[2].wraps_wide());
+        let unsaid =
+            Frame::heard(frame(3, vec![line(vec![narrow("a")], api::Ending::Unspecified)]));
+        assert_eq!(unsaid.unwrap_err(), "a row of a frame does not say how it ends");
+        let unknown = api::Line { glyphs: vec![narrow("a")], ending: 9 };
+        assert!(Frame::heard(frame(1, vec![unknown])).is_err(), "nor in a word of a newer mux's");
+        let short = Frame::heard(frame(3, vec![line(vec![narrow("a")], api::Ending::Here)]));
         assert_eq!(short.unwrap_err(), "a row of 3 columns has glyphs of 1");
-        let long = Frame::heard(frame(2, vec![line(vec![narrow("a"), wide("日")], false)]));
+        let long = vec![line(vec![narrow("a"), wide("日")], api::Ending::Here)];
+        let long = Frame::heard(frame(2, long));
         assert_eq!(long.unwrap_err(), "a row of 2 columns has glyphs of 3");
     }
 
     #[test]
     fn a_frame_that_does_not_fit_its_size_does_not_read() {
-        let row = api::Line { glyphs: vec![narrow("a")], wraps_wide: false, wraps: false };
+        let row = api::Line { glyphs: vec![narrow("a")], ending: api::Ending::Here.into() };
         let mut two = frame(1, vec![row.clone(), row.clone()]);
         two.size = Some(api::Size { columns: 1, rows: 1 });
         assert_eq!(Frame::heard(two).unwrap_err(), "a frame of 1 rows has 2");
@@ -441,7 +448,7 @@ mod tests {
         let none =
             api::Frame { size: Some(api::Size { columns: 0, rows: 1 }), ..frame(1, vec![row]) };
         assert_eq!(Frame::heard(none).unwrap_err(), "a frame's columns are 0");
-        let escape = api::Line { glyphs: vec![narrow("\u{1b}")], wraps_wide: false, wraps: false };
+        let escape = api::Line { glyphs: vec![narrow("\u{1b}")], ending: api::Ending::Here.into() };
         assert!(Frame::heard(frame(1, vec![escape])).unwrap_err().contains("control character"));
     }
 

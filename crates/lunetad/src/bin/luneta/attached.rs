@@ -21,20 +21,26 @@ pub(crate) struct Screen {
     pub(crate) tracks_mouse: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spot {
     pub row: u16,
     pub column: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct At {
+    pub(crate) row: u16,
+    pub(crate) column: u16,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Selection {
-    pub(crate) from: Spot,
-    pub(crate) to: Spot,
+    pub(crate) from: At,
+    pub(crate) to: At,
 }
 
 impl Selection {
-    pub(crate) fn ends(self) -> (Spot, Spot) {
+    pub(crate) fn ends(self) -> (At, At) {
         if self.to < self.from {
             (self.to, self.from)
         } else {
@@ -42,9 +48,9 @@ impl Selection {
         }
     }
 
-    pub(crate) fn holds(self, spot: Spot) -> bool {
+    pub(crate) fn holds(self, at: At) -> bool {
         let (first, last) = self.ends();
-        first <= spot && spot <= last
+        first <= at && at <= last
     }
 }
 
@@ -52,6 +58,7 @@ impl Selection {
 pub(crate) enum Pointer {
     Free,
     Sending,
+    Pressed(At),
     Selecting(Selection),
     Shown(Selection),
 }
@@ -59,13 +66,14 @@ pub(crate) enum Pointer {
 impl Pointer {
     pub(crate) fn unselected(self) -> Pointer {
         match self {
-            Pointer::Selecting(_) | Pointer::Shown(_) => Pointer::Free,
+            Pointer::Pressed(_) | Pointer::Selecting(_) | Pointer::Shown(_) => Pointer::Free,
             Pointer::Free | Pointer::Sending => self,
         }
     }
 
     pub(crate) fn selection(self) -> Option<Selection> {
         match self {
+            Pointer::Pressed(at) => Some(Selection { from: at, to: at }),
             Pointer::Selecting(selection) | Pointer::Shown(selection) => Some(selection),
             Pointer::Free | Pointer::Sending => None,
         }
@@ -94,11 +102,11 @@ pub(crate) fn screen_rect(outer: Rect) -> Rect {
     outer.inner(Margin::new(1, 1))
 }
 
-pub(crate) fn spot_in(inner: Rect, at: Position) -> Spot {
+pub(crate) fn spot_in(inner: Rect, at: Position) -> At {
     assert!(!inner.is_empty(), "a spot is on a screen of at least one cell");
     let row = at.y.saturating_sub(inner.y).min(inner.height - 1);
     let column = at.x.saturating_sub(inner.x).min(inner.width - 1);
-    Spot { row, column }
+    At { row, column }
 }
 
 pub(crate) fn span_under<T: Copy>(spans: &[TabSpan<T>], column: u16) -> Option<T> {
@@ -206,7 +214,7 @@ pub(crate) fn draw_screen(
             if column >= area.width {
                 break;
             }
-            let at = Spot { row, column };
+            let at = At { row, column };
             let holds = |span: Option<Selection>| span.is_some_and(|span| span.holds(at));
             let mut lit = Modifier::empty();
             if holds(selection) {
@@ -229,11 +237,11 @@ pub(crate) fn selects(tracks: bool, mouse: MouseEvent) -> bool {
         && (!tracks || mouse.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-pub(crate) fn within(at: Spot, size: Size) -> Spot {
-    Spot { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
+pub(crate) fn within(at: At, size: Size) -> At {
+    At { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
 }
 
-fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: Modifier) {
+fn paint(buffer: &mut Buffer, area: Rect, at: At, glyph: &Glyph, lit: Modifier) {
     let columns = glyph.shows.columns();
     let fits = at.column + columns <= area.width;
     let (x, y) = (area.x + at.column, area.y + at.row);
@@ -305,12 +313,12 @@ const PATH_LEADS: &str = ":!?";
 
 const PAIRS: [(&str, &str); 3] = [("(", ")"), ("[", "]"), ("{", "}")];
 
-pub(crate) fn link(screen: &Screen, at: Spot) -> Option<(Selection, String)> {
+pub(crate) fn link(screen: &Screen, at: At) -> Option<(Selection, String)> {
     let (word, clicked) = word(screen, at)?;
     let (first, end) = url(&word, clicked).or_else(|| path(&word, clicked))?;
     assert!(first <= clicked, "a link starts at or before the cell clicked");
     assert!(clicked < end, "a link ends after the cell clicked");
-    let selection = Selection { from: word[first].spot, to: word[end - 1].spot };
+    let selection = Selection { from: word[first].at, to: word[end - 1].at };
     let text: String = word[first..end].iter().map(|letter| letter.text).collect();
     assert!(!text.is_empty(), "a link shows something");
     Some((selection, text))
@@ -318,7 +326,7 @@ pub(crate) fn link(screen: &Screen, at: Spot) -> Option<(Selection, String)> {
 
 #[derive(Clone, Copy)]
 struct Letter<'a> {
-    spot: Spot,
+    at: At,
     text: &'a str,
 }
 
@@ -329,7 +337,7 @@ struct Place {
     column: u16,
 }
 
-fn word(screen: &Screen, at: Spot) -> Option<(Vec<Letter<'_>>, usize)> {
+fn word(screen: &Screen, at: At) -> Option<(Vec<Letter<'_>>, usize)> {
     let line = screen.lines.get(usize::from(at.row))?;
     let place = under(line, at)?;
     let own = letter(screen, place)?;
@@ -340,11 +348,11 @@ fn word(screen: &Screen, at: Spot) -> Option<(Vec<Letter<'_>>, usize)> {
     word.push(own);
     word.extend(after);
     assert!(word.len() <= LINK_CELLS_MAX, "a word is cut at {LINK_CELLS_MAX} cells");
-    assert!(word.windows(2).all(|pair| pair[0].spot < pair[1].spot), "a word reads forward");
+    assert!(word.windows(2).all(|pair| pair[0].at < pair[1].at), "a word reads forward");
     Some((word, clicked))
 }
 
-fn under(line: &Line, at: Spot) -> Option<Place> {
+fn under(line: &Line, at: At) -> Option<Place> {
     let mut column = 0;
     for (index, glyph) in line.glyphs().iter().enumerate() {
         let columns = glyph.shows.columns();
@@ -366,7 +374,7 @@ fn letter(screen: &Screen, place: Place) -> Option<Letter<'_>> {
     if text.chars().all(char::is_whitespace) {
         return None;
     }
-    Some(Letter { spot: Spot { row: place.row, column: place.column }, text })
+    Some(Letter { at: At { row: place.row, column: place.column }, text })
 }
 
 fn letters(
@@ -660,7 +668,7 @@ fn modifier_named(modifier: ModifierKeyCode) -> Option<api::Named> {
     })
 }
 
-pub(crate) fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
+pub(crate) fn mouse_said(mouse: MouseEvent, at: At) -> Option<api::Mouse> {
     use api::mouse::Does;
     let button = |button: MouseButton| -> i32 {
         match button {
@@ -721,8 +729,8 @@ mod tests {
         ended(glyphs, Ending::Here)
     }
 
-    fn spot(row: u16, column: u16) -> Spot {
-        Spot { row, column }
+    fn spot(row: u16, column: u16) -> At {
+        At { row, column }
     }
 
     #[test]
@@ -759,7 +767,7 @@ mod tests {
         typed_ending(rows, |index| if index < last { Ending::Wraps } else { Ending::Here })
     }
 
-    fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(Spot, Spot, String)> {
+    fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(At, At, String)> {
         let (span, text) = link(&typed(rows), spot(row, column))?;
         Some((span.from, span.to, text))
     }

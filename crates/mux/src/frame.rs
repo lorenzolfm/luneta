@@ -1,6 +1,8 @@
 use crate::api;
 use crate::asked::TerminalKey;
-use crate::screen::{Cell, Cursor, CursorShape, Glyph, Line, Style, StyleColor, Underline, View};
+use crate::screen::{
+    Cell, Cursor, CursorShape, Ending, Glyph, Line, Style, StyleColor, Underline, View,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
@@ -49,8 +51,12 @@ pub fn said(terminal: TerminalKey, view: &View, before: Option<&View>, flags: Fl
 fn line_said(line: &Line) -> api::Line {
     api::Line {
         glyphs: line.cells().iter().map(glyph_said).collect(),
-        wraps_wide: line.wraps_wide(),
-        wraps: line.wraps(),
+        ending: match line.ending() {
+            Ending::Here => api::Ending::Here,
+            Ending::Wraps => api::Ending::Wraps,
+            Ending::WrapsWide => api::Ending::WrapsWide,
+        }
+        .into(),
     }
 }
 

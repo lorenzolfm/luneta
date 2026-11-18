@@ -267,8 +267,7 @@ impl View {
         let (Some((inner, _, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
             return;
         };
-        let at = within(spot_in(inner, at), screen.size);
-        self.pointer = Pointer::Selecting(Selection { from: at, to: at });
+        self.pointer = Pointer::Pressed(within(spot_in(inner, at), screen.size));
     }
 
     fn select_to(&mut self, at: Spot) {
@@ -276,23 +275,25 @@ impl View {
             return;
         };
         let at = within(spot_in(inner, below_bar(at)), screen.size);
-        if let Pointer::Selecting(selection) = &mut self.pointer {
-            selection.to = at;
-        }
+        self.pointer = match self.pointer {
+            Pointer::Pressed(from) if from != at => Pointer::Selecting(Selection { from, to: at }),
+            Pointer::Selecting(selection) => Pointer::Selecting(Selection { to: at, ..selection }),
+            Pointer::Free | Pointer::Sending | Pointer::Pressed(_) | Pointer::Shown(_) => {
+                return;
+            },
+        };
     }
 
     fn selected(&mut self) -> Option<String> {
-        let Pointer::Selecting(selection) = self.pointer else {
-            return None;
-        };
         let screen = self.focused_screen().map(|(_, _, screen)| screen);
-        let chosen = screen.and_then(|screen| {
-            if selection.from == selection.to {
-                link(screen, selection.from)
-            } else {
-                Some((selection, text(screen, selection))).filter(|(_, text)| !text.is_empty())
-            }
-        });
+        let chosen = match self.pointer {
+            Pointer::Pressed(at) => screen.and_then(|screen| link(screen, at)),
+            Pointer::Selecting(selection) if selection.from != selection.to => screen
+                .map(|screen| (selection, text(screen, selection)))
+                .filter(|(_, text)| !text.is_empty()),
+            Pointer::Selecting(_) => None,
+            Pointer::Free | Pointer::Sending | Pointer::Shown(_) => return None,
+        };
         self.pointer = chosen.as_ref().map_or(Pointer::Free, |(lit, _)| Pointer::Shown(*lit));
         chosen.map(|(_, text)| text)
     }
@@ -726,6 +727,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
+    use crate::attached::At;
 
     fn side(count: u16) -> NonZeroU16 {
         NonZeroU16::new(count).unwrap()
@@ -920,8 +922,16 @@ mod tests {
         view.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
         view.select_from(spot(2, 3));
         assert_eq!(view.selected().as_deref(), Some("a/b.rs"));
-        let lit = Selection { from: spot(0, 0), to: spot(0, 5) };
+        let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
         assert_eq!(view.pointer, Pointer::Shown(lit));
+        view.select_from(spot(2, 3));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a press that stays is a click");
+        view.select_from(spot(2, 3));
+        view.select_to(spot(2, 6));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected(), None, "a drag that comes back is no click");
+        assert_eq!(view.pointer, Pointer::Free);
         view.select_from(spot(2, 8));
         assert_eq!(view.selected(), None, "a click on a word copies nothing");
         assert_eq!(view.pointer, Pointer::Free);
