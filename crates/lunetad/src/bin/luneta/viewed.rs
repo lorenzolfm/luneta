@@ -364,6 +364,7 @@ pub struct Viewed {
     folder: PathBuf,
     show: Option<Show>,
     shown_at: Instant,
+    laid_in: Option<WorkstreamId>,
     size: Size,
     greeting: Greeting,
     view: View,
@@ -388,6 +389,7 @@ impl Viewed {
             folder,
             show: None,
             shown_at: Instant::now(),
+            laid_in: None,
             size,
             greeting,
             view: View::new(workstream, greeting.runs_in),
@@ -413,8 +415,8 @@ impl Viewed {
         let events = self.events.clone();
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
         let workstream = self.view.workstream;
-        let runs_in = self.view.runs_in;
-        self.show = Some(lunetad::show(opened, workstream, self.size, runs_in, told));
+        let (runs_in, again) = (self.view.runs_in, self.laid_in == Some(workstream));
+        self.show = Some(lunetad::show(opened, workstream, self.size, runs_in, again, told));
     }
 
     #[must_use]
@@ -435,6 +437,7 @@ impl Viewed {
     pub fn heard(&mut self, heard: Heard) -> Heeded {
         match heard {
             Heard::Laid(laid) => {
+                self.laid_in = Some(laid.workstream());
                 if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
                     self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
                 }

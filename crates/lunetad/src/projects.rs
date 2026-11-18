@@ -721,16 +721,16 @@ impl Projects {
             Change::Went { workstream, at } => {
                 let others = self.workstreams().filter(|(_, it)| it.id != workstream);
                 let newest = others.filter_map(|(_, it)| it.used).max();
-                let at = match newest {
-                    None => at,
-                    Some(newest) => {
-                        let past = || format!("no workstream is used past {USED_MILLIS_MAX} ms");
-                        at.max(newest.next_millisecond().ok_or_else(past)?)
-                    },
-                };
                 let (project, place) = changed.workstream(workstream)?;
                 let went = &mut project.workstreams[place];
-                if went.used.is_none_or(|used| used < at) {
+                let last = went.used.is_some_and(|used| newest.is_none_or(|newest| used > newest));
+                if !last {
+                    let past = || format!("no workstream is used past {USED_MILLIS_MAX} ms");
+                    let at = match newest {
+                        None => at,
+                        Some(newest) => at.max(newest.next_millisecond().ok_or_else(past)?),
+                    };
+                    assert!(went.used.is_none_or(|used| used < at), "a stamp is never set back");
                     went.used = Some(at);
                 }
                 let used = went.used.expect("a workstream gone to is used");
@@ -1306,6 +1306,8 @@ mod tests {
         assert_eq!(used(&projects, one), Some(Used::of_millis(9_000)));
         let (same, _) = change(&projects, went(one, 8_000)).unwrap();
         assert_eq!(same, projects, "a go to the workstream used last changes nothing");
+        let (same, _) = change(&projects, went(one, 10_000)).unwrap();
+        assert_eq!(same, projects, "however late the clock says it is");
         let unknown = went(WorkstreamId::of(7).unwrap(), 1);
         assert!(change(&projects, unknown).unwrap_err().contains("no workstream has the id"));
         let at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_234);
@@ -1315,6 +1317,7 @@ mod tests {
         assert_eq!(Used::read(READ_MILLIS_MAX), Ok(Used::of_millis(READ_MILLIS_MAX)));
         let past = Used::read(READ_MILLIS_MAX + 1).unwrap_err();
         assert!(past.contains("is past"), "{past}");
+        (projects, _) = change(&projects, went(two, 1)).unwrap();
         (projects, _) = change(&projects, went(one, USED_MILLIS_MAX)).unwrap();
         let refused = change(&projects, went(two, 1)).unwrap_err();
         assert!(refused.contains("no workstream is used past"), "{refused}");

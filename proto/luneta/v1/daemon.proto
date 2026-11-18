@@ -1037,6 +1037,7 @@ message ShowRequest {
     fixed64 workstream = 1;
     Size size = 2;
     TerminalKey runs_in = 3;
+    bool again = 4;
   }
 
   message Size {

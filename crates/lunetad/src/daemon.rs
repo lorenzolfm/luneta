@@ -1025,11 +1025,10 @@ impl Daemon for Host {
         use crate::api::show_request::{Event, Hello};
         use crate::mux::own::TerminalKey;
         let mut heard = request.into_inner();
-        let Some(ShowRequest { event: Some(Event::Hello(Hello { workstream, size, runs_in })) }) =
-            heard.message().await?
-        else {
+        let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
+        let Hello { workstream, size, runs_in, again } = hello;
         let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
@@ -1038,7 +1037,8 @@ impl Daemon for Host {
         let (out, answers) = tokio::sync::mpsc::channel(views::ANSWERS_MAX);
         let views = self.views.clone();
         let came = task::spawn_blocking(move || {
-            let came = |answer| views::Command::Came { workstream, size, runs_in, out, answer };
+            let came =
+                |answer| views::Command::Came { workstream, size, runs_in, again, out, answer };
             views::ask(&views, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;

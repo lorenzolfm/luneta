@@ -75,6 +75,7 @@ pub enum Command {
         workstream: WorkstreamId,
         size: Size,
         runs_in: Option<TerminalKey>,
+        again: bool,
         out: Out,
         answer: oneshot::Sender<Result<ClientId, Status>>,
     },
@@ -398,8 +399,8 @@ impl Views {
                 };
                 let _ = answer.send(changed);
             },
-            Command::Came { workstream, size, runs_in, out, answer } => {
-                let _ = answer.send(self.came(workstream, size, runs_in, out));
+            Command::Came { workstream, size, runs_in, again, out, answer } => {
+                let _ = answer.send(self.came(workstream, size, runs_in, again, out));
             },
             Command::Asked { client, asked } => {
                 if !self.clients.contains_key(&client) {
@@ -448,6 +449,7 @@ impl Views {
         workstream: WorkstreamId,
         size: Size,
         runs_in: Option<TerminalKey>,
+        again: bool,
         out: Out,
     ) -> Result<ClientId, Status> {
         if self.clients.len() >= CLIENTS_MAX {
@@ -463,7 +465,9 @@ impl Views {
         let id = ClientId(self.arrivals);
         let client = Client { workstream, size, runs_in, focus, out, said: None };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
-        self.went(workstream);
+        if !again {
+            self.went(workstream);
+        }
         Ok(id)
     }
 
@@ -1722,7 +1726,7 @@ mod tests {
                 beside: largest(),
                 argv: vec!["x".to_owned(); ARGV_MAX + 1],
             }),
-            Event::Hello(show_request::Hello { workstream: 1, size: None, runs_in: None }),
+            Event::Hello(show_request::Hello { workstream: 1, ..Default::default() }),
         ];
         for event in refused {
             assert!(Asked::of_api(event.clone()).is_err(), "{event:?}");

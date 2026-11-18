@@ -60,9 +60,18 @@ impl<'a> Shown<'a> {
         (columns, rows): (u32, u32),
         runs_in: Option<TerminalKey>,
     ) -> Shown<'a> {
+        let hello = Hello { workstream, size: Some(size(columns, rows)), runs_in, again: false };
+        Shown::greeted(owned, hello)
+    }
+
+    fn again(owned: &'a Owned, workstream: u64) -> Shown<'a> {
+        let hello = Hello { workstream, size: Some(size(80, 24)), runs_in: None, again: true };
+        Shown::greeted(owned, hello)
+    }
+
+    fn greeted(owned: &'a Owned, hello: Hello) -> Shown<'a> {
         let folder = folder_in(owned.host.runtime.path()).unwrap();
         let (asks, asked) = mpsc::channel(16);
-        let hello = Hello { workstream, size: Some(size(columns, rows)), runs_in };
         asks.try_send(ShowRequest { event: Some(Event::Hello(hello)) }).unwrap();
         let heard = owned.block_on(async move {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
@@ -527,7 +536,8 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     let stalled = owned.stall_mux();
     let unclosed = asked(&owned.host, close()).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
-    assert_eq!(watched(&owned, closing).len(), 2, "no terminal closed, so none is forgotten");
+    assert!(unclosed.message().contains("may close still"), "{}", unclosed.message());
+    assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);
     assert_eq!(asked(&owned.host, close()).unwrap(), None);
     eventually("the workstream's terminals leave the mux", || {
@@ -576,6 +586,13 @@ fn a_terminal_s_name_and_the_last_use_of_a_workstream_reach_watch_and_the_file()
         let named = file.contains(r#""name": "tests""#);
         (named && file.matches(r#""used_millis": "#).count() == 2).then_some(())
     });
+    let _back = Shown::again(&owned, first);
+    let to = Some("again".to_owned());
+    asked(&owned.host, Change::RenameTerminal(RenameTerminal { terminal, to })).unwrap();
+    let name = || watched(&owned, first).into_iter().find(|it| it.id == terminal)?.name;
+    eventually("the view that came back is watched", || name().filter(|it| it == "again"));
+    let both = (used(first), used(second));
+    assert_eq!(both, (Some(first_used), Some(second_used)), "a view that comes back is no use");
 }
 
 fn mux_key(key: TerminalKey) -> mux_api::TerminalKey {
@@ -926,7 +943,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, move |it| drop(heard.send(it)));
+    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -988,7 +1005,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, move |it| drop(heard.send(it)));
+    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {

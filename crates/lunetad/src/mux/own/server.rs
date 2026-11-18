@@ -417,6 +417,11 @@ impl Terminals {
         let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
         match reached()?.ask(|mut client| async move { client.close_terminal(request).await }) {
             Err(status) if status.code() == Code::NotFound => Ok(()),
+            Err(status) if matches!(status.code(), Code::Cancelled | Code::DeadlineExceeded) => {
+                let unanswered = format!("luneta-mux did not answer in time ({})", status.message());
+                let id = key.id;
+                Err(Failure::Own(format!("{unanswered}, and terminal {id} may close still")))
+            },
             asked => asked.map(drop).map_err(|status| refused(&status)),
         }
     }
