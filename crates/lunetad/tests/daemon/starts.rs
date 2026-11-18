@@ -203,7 +203,7 @@ fn log_of(host: &Host) -> String {
     fs::read_to_string(host.home.path().join(".local/state/luneta/luneta.log")).unwrap()
 }
 
-fn makes_shells() -> bool {
+pub fn makes_shells() -> bool {
     Path::new(&opens::your_shell()).is_file()
 }
 

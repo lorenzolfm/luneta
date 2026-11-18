@@ -6,11 +6,11 @@ use lunetad::api::{self, agent, remote, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
-use lunetad::SessionName;
+use lunetad::{Destination, SessionName};
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
-use crate::machines::Machine;
+use crate::machines::{self, Machine};
 use crate::sidebar::{Listed, PaneKey};
 use crate::viewed::Tab;
 
@@ -63,7 +63,8 @@ pub fn route(on: &Machine, session: &Listed, pane: PaneKey) -> Result<Route<u32>
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Projected {
-    projects: Vec<Project>,
+    here: Vec<Project>,
+    far: BTreeMap<Destination, Vec<Project>>,
 }
 
 #[must_use]
@@ -109,34 +110,55 @@ impl Project {
 impl Projected {
     pub fn adapted(host: &mut Host) -> Result<Projected, String> {
         host.sessions.clear();
-        for remote in &mut host.remotes {
+        let mut far_projects = BTreeMap::new();
+        let named = machines::named_once(&host.remotes);
+        for (remote, destination) in host.remotes.iter_mut().zip(named) {
             if let Some(remote::Reached::Host(far)) = &mut remote.reached {
                 far.sessions.clear();
                 let projects = kept(far.projects.as_ref());
                 let projects: Vec<Project> =
                     projects.iter().filter_map(|it| project(it).ok()).collect();
                 seat(&projects, &mut far.agents, &mut far.unread_files);
+                if let Some(destination) = destination {
+                    let held = far_projects.insert(destination, projects);
+                    assert!(held.is_none(), "named_once names each machine once");
+                }
             }
         }
-        let projects = kept(host.projects.as_ref());
-        let projects = projects.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
-        seat(&projects, &mut host.agents, &mut host.unread_files);
-        Ok(Projected { projects })
+        let here = kept(host.projects.as_ref());
+        let here = here.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
+        seat(&here, &mut host.agents, &mut host.unread_files);
+        Ok(Projected { here, far: far_projects })
     }
 
     #[must_use]
-    pub fn projects(&self) -> &[Project] {
-        &self.projects
+    pub fn reaches(&self, on: &Machine) -> bool {
+        match on {
+            Machine::Local => true,
+            Machine::Remote(destination) => self.far.contains_key(destination),
+        }
     }
 
     #[must_use]
-    pub fn project(&self, key: OwnKey) -> Option<&Project> {
-        self.projects.iter().find(|project| project.key == key)
+    pub fn projects(&self, on: &Machine) -> &[Project] {
+        match on {
+            Machine::Local => &self.here,
+            Machine::Remote(destination) => self.far.get(destination).map_or(&[], Vec::as_slice),
+        }
     }
 
     #[must_use]
-    pub fn holding(&self, workstream: WorkstreamId) -> Option<(&Project, &Workstream)> {
-        self.projects.iter().find_map(|project| {
+    pub fn project(&self, on: &Machine, key: OwnKey) -> Option<&Project> {
+        self.projects(on).iter().find(|project| project.key == key)
+    }
+
+    #[must_use]
+    pub fn holding(
+        &self,
+        on: &Machine,
+        workstream: WorkstreamId,
+    ) -> Option<(&Project, &Workstream)> {
+        self.projects(on).iter().find_map(|project| {
             let found = project.workstreams.iter().find(|it| it.id == workstream)?;
             Some((project, found))
         })
@@ -145,9 +167,10 @@ impl Projected {
     #[must_use]
     pub fn tabs_beside(
         &self,
+        on: &Machine,
         workstream: WorkstreamId,
     ) -> (Option<WorkstreamId>, Option<WorkstreamId>) {
-        let held = self.projects.iter().find_map(|project| {
+        let held = self.projects(on).iter().find_map(|project| {
             Some((project, project.workstreams.iter().position(|it| it.id == workstream)?))
         });
         let Some((project, at)) = held else {
@@ -159,8 +182,8 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn of_pane(&self, pane: OwnPane) -> Option<(WorkstreamId, TerminalId)> {
-        let (workstream, terminal, _) = self.project(pane.session)?.holding(pane.id)?;
+    pub fn of_pane(&self, on: &Machine, pane: OwnPane) -> Option<(WorkstreamId, TerminalId)> {
+        let (workstream, terminal, _) = self.project(on, pane.session)?.holding(pane.id)?;
         Some((workstream, terminal))
     }
 
@@ -172,14 +195,18 @@ impl Projected {
         if let Machine::Remote(_) = on {
             return Err(NOT_YET.to_owned());
         }
-        let project = self.project(key).ok_or("lunetad keeps no such project")?;
+        let project = self.project(on, key).ok_or("lunetad keeps no such project")?;
         let unshown = || format!("{} has no terminal to show", project.name);
         project.first_keyed().map(Route::Terminal).ok_or_else(unshown)
     }
 
     #[must_use]
-    pub fn tabs(&self, workstream: WorkstreamId) -> (Vec<Tab>, BTreeMap<TerminalId, String>) {
-        let Some((project, shown)) = self.holding(workstream) else {
+    pub fn tabs(
+        &self,
+        on: &Machine,
+        workstream: WorkstreamId,
+    ) -> (Vec<Tab>, BTreeMap<TerminalId, String>) {
+        let Some((project, shown)) = self.holding(on, workstream) else {
             return (Vec::new(), BTreeMap::new());
         };
         let tab = |it: &Workstream| Tab { workstream: it.id, name: it.name.clone() };
@@ -338,9 +365,8 @@ mod tests {
         };
         let reached = Some(remote::Reached::Host(far));
         host.remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
-        let adapted = host.clone();
-        let mut adapted = adapted;
-        Projected::adapted(&mut adapted).unwrap();
+        let mut adapted = host.clone();
+        let projected = Projected::adapted(&mut adapted).unwrap();
         assert!(adapted.sessions.is_empty(), "{:?}", adapted.sessions);
         let project_key = key_of(ProjectId::of(7).unwrap());
         let own = api::Own::from(OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() });
@@ -352,6 +378,20 @@ mod tests {
         assert!(far.sessions.is_empty(), "{:?}", far.sessions);
         assert_eq!(far.agents[0].pane, Some(agent::Pane::Own(own)));
         assert_eq!(far.agents[1].pane, host.agents[1].pane);
+        let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));
+        let pane = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
+        let held = Some((workstream(12), TerminalId::of(23).unwrap()));
+        assert_eq!((projected.of_pane(&here, pane), projected.of_pane(&nixos, pane)), (held, held));
+        let names = |on| -> Vec<&str> {
+            projected.projects(on).iter().map(|it| it.name.as_str()).collect()
+        };
+        let both = (vec!["bitwarden backup"], vec!["bitwarden backup"]);
+        assert_eq!((names(&here), names(&nixos)), both);
+        let gone = Machine::Remote("gone".parse().unwrap());
+        assert!(projected.projects(&gone).is_empty(), "a machine not reached holds no project");
+        assert!(projected.reaches(&here), "this machine is reached");
+        assert!(projected.reaches(&nixos), "nixos is reached");
+        assert!(!projected.reaches(&gone), "gone is not reached");
     }
 
     #[test]
@@ -360,11 +400,11 @@ mod tests {
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
         let terminal = TerminalId::of(21).unwrap();
-        assert_eq!(projected.of_pane(pane), Some((workstream(11), terminal)));
-        let project = &projected.projects()[0];
+        assert_eq!(projected.of_pane(&Machine::Local, pane), Some((workstream(11), terminal)));
+        let project = &projected.projects(&Machine::Local)[0];
         assert_eq!(project.pane_of(terminal), Some(pane));
         assert_eq!(project.pane_of(TerminalId::of(22).unwrap()), None, "a lost one is no pane");
-        let (tabs, titles) = projected.tabs(workstream(11));
+        let (tabs, titles) = projected.tabs(&Machine::Local, workstream(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
@@ -376,9 +416,12 @@ mod tests {
     fn the_tabs_beside_a_workstream_are_the_ones_before_and_after_it_and_none_past_the_ends() {
         let projected = Projected::adapted(&mut host()).unwrap();
         let (main, docs) = (workstream(11), workstream(12));
-        assert_eq!(projected.tabs_beside(main), (None, Some(docs)));
-        assert_eq!(projected.tabs_beside(docs), (Some(main), None));
-        assert_eq!(projected.tabs_beside(workstream(99)), (None, None));
+        let here = Machine::Local;
+        assert_eq!(projected.tabs_beside(&here, main), (None, Some(docs)));
+        assert_eq!(projected.tabs_beside(&here, docs), (Some(main), None));
+        assert_eq!(projected.tabs_beside(&here, workstream(99)), (None, None));
+        let far = Machine::Remote("far".parse().unwrap());
+        assert_eq!(projected.tabs_beside(&far, main), (None, None), "far keeps no project");
     }
 
     fn kept(host: &mut Host) -> &mut api::Project {
@@ -407,9 +450,10 @@ mod tests {
         let projected = Projected::adapted(&mut host).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let pane = OwnPane { session: project_key, id: NonZeroU32::new(4).unwrap() };
-        assert_eq!(projected.of_pane(pane), None);
+        assert_eq!(projected.of_pane(&Machine::Local, pane), None);
         let five = OwnPane { session: project_key, id: NonZeroU32::new(5).unwrap() };
-        assert_eq!(projected.of_pane(five), Some((workstream(12), TerminalId::of(23).unwrap())));
+        let held = Some((workstream(12), TerminalId::of(23).unwrap()));
+        assert_eq!(projected.of_pane(&Machine::Local, five), held);
     }
 
     #[test]

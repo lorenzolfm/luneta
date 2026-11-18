@@ -9,13 +9,14 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use luneta_protocol::said::Said;
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, OwnedSemaphorePermit};
 use tokio::task;
 use tokio::time::timeout;
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
@@ -52,7 +53,7 @@ use crate::api::{
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
     ShowResponse, StartRequest,
     TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
-    TurnIntoTabRequest, TurnIntoTabResponse,
+    TurnIntoTabRequest, TurnIntoTabResponse, ViewRequest,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -60,6 +61,8 @@ use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Failed, Id, Store, WorkstreamId};
 use crate::views;
+use crate::mux::own::api::{FromViewer, ToViewer};
+use crate::mux::own::viewer;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -67,7 +70,7 @@ use crate::issues::{self, Filing, Remote, Unfiled};
 use crate::links::{Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
-use crate::remote::{Bridges, Destination, Standing};
+use crate::remote::{Bridges, Bridging, Destination, Standing};
 use crate::watch::Troubles;
 use crate::mux::{self, Mux, SessionName, SocketFolder, Zellij};
 use crate::opens::{Open, Tab};
@@ -102,6 +105,12 @@ const WATCH: Duration = Duration::from_secs(4);
 const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
 const QUESTIONS_MAX: u32 = 16;
+
+const BRIDGED_ASKS_MIN: usize = 4;
+
+const _: () = assert!(remote::HELD_MAX + BRIDGED_ASKS_MIN == QUESTIONS_MAX as usize);
+
+const RUNS_IN_ON: &str = "runs_in names a terminal of this machine, and on names another";
 
 const STEPS_WAITING: usize = 64;
 
@@ -1028,7 +1037,18 @@ impl Daemon for Host {
         let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let Hello { workstream, size, runs_in, again } = hello;
+        let Hello { workstream, size, runs_in, again, on } = hello;
+        if on.is_some() && runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
+        if let Some((mut daemon, permit)) = self.bridged_held(on)? {
+            let hello = Hello { workstream, size, runs_in: None, again, on: None };
+            let first = ShowRequest { event: Some(Event::Hello(hello)) };
+            let rest = heard.map_while(Result::ok);
+            let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
+            let held = Held { stream: answer.into_inner(), _permit: permit };
+            return Ok(Response::new(Box::pin(held)));
+        }
         let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
@@ -1062,6 +1082,50 @@ impl Daemon for Host {
             let _ = task::spawn_blocking(move || views.send(views::Command::Left(client))).await;
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(answers))))
+    }
+
+    type ViewStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
+
+    async fn view(
+        &self,
+        request: Request<Streaming<ViewRequest>>,
+    ) -> Result<Response<Self::ViewStream>, Status> {
+        use crate::api::view_request::{Event, Hello};
+        use crate::mux::own::api::from_viewer;
+        let mut heard = request.into_inner();
+        let Some(ViewRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        if on.is_some() && greeting.runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
+        let (refuse, refused) = oneshot::channel();
+        let mut refuse = Some(refuse);
+        let said = heard.map_while(move |word| {
+            let refusal = match word {
+                Ok(ViewRequest { event: Some(Event::Said(said)) }) => return Some(said),
+                Ok(ViewRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
+                Ok(ViewRequest { event: None }) => "a word of the view says nothing",
+                Err(_) => return None,
+            };
+            let refuse = refuse.take().expect("a view's words end at the first refused");
+            drop(refuse.send(Status::invalid_argument(refusal)));
+            None
+        });
+        if let Some((mut daemon, permit)) = self.bridged_held(on)? {
+            let hello = Hello { on: None, greeting: Some(greeting) };
+            let first = ViewRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| ViewRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.view(tokio_stream::once(first).chain(rest)).await?;
+            let stream = ended_by(answer.into_inner(), refused);
+            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
+        }
+        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
+        Ok(Response::new(ended_by(answer, refused)))
     }
 
     async fn change_projects(
@@ -1161,6 +1225,27 @@ fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecks
     KeepChecksResponse { head, failed: failed.collect(), pending, passed }
 }
 
+struct Held<S> {
+    stream: S,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<S: Stream + Unpin> Stream for Held<S> {
+    type Item = S::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        Pin::new(&mut self.stream).poll_next(context)
+    }
+}
+
+fn ended_by(
+    answer: impl Stream<Item = Result<ToViewer, Status>> + Send + 'static,
+    mut refused: oneshot::Receiver<Status>,
+) -> Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>> {
+    let refusal = tokio_stream::once(()).filter_map(move |()| refused.try_recv().ok().map(Err));
+    Box::pin(answer.chain(refusal))
+}
+
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
 where
     T: Send + 'static,
@@ -1253,14 +1338,33 @@ fn unfinished(error: &task::JoinError) -> Status {
 
 impl Host {
     fn bridged(&self, on: Option<api::On>) -> Result<Option<DaemonClient<Channel>>, Status> {
+        Ok(self.bridge(on)?.map(|(_, bridging)| bridging.daemon))
+    }
+
+    fn bridged_held(
+        &self,
+        on: Option<api::On>,
+    ) -> Result<Option<(DaemonClient<Channel>, OwnedSemaphorePermit)>, Status> {
+        let Some((destination, Bridging { daemon, held })) = self.bridge(on)? else {
+            return Ok(None);
+        };
+        let full = |_| {
+            let held = format!("{} shows and views open to {destination}", remote::HELD_MAX);
+            Status::resource_exhausted(format!("lunetad's bridge holds {held}, its most"))
+        };
+        Ok(Some((daemon, held.try_acquire_owned().map_err(full)?)))
+    }
+
+    fn bridge(&self, on: Option<api::On>) -> Result<Option<(Destination, Bridging)>, Status> {
         let Some(api::On { destination }) = on else {
             return Ok(None);
         };
         let destination: Destination =
             destination.parse().map_err(|why: String| Status::invalid_argument(why))?;
-        let daemon = self.bridges.to(&destination);
-        let unreached = || Status::unavailable(format!("lunetad does not reach {destination} now"));
-        daemon.map(Some).ok_or_else(unreached)
+        let Some(bridging) = self.bridges.to(&destination) else {
+            return Err(Status::unavailable(format!("lunetad does not reach {destination} now")));
+        };
+        Ok(Some((destination, bridging)))
     }
 
     async fn ask<T>(

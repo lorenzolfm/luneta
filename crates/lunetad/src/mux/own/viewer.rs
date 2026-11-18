@@ -1,18 +1,23 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt as _;
+use tokio_stream::{Stream, StreamExt as _};
+use tonic::{Status, Streaming};
 
 use super::api::{self, from_viewer, to_viewer, typed};
 use super::frames::{colours, Frame};
-use super::server::{connect, refused, runtime};
+use super::server::{connect, refused, runtime, socket};
 use super::TerminalKey;
+use crate::api::{view_request, On, ViewRequest};
+use crate::folder::Folder;
 use crate::projects::PANES_MAX;
+use crate::remote::Destination;
 use crate::streams::{self, Inbox, Next, Outbox};
 
 pub const SHOWN_MAX: usize = 1024;
@@ -25,18 +30,16 @@ const _: () = assert!(PANES_MAX <= SHOWN_MAX);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Greeting {
-    pub runs_in: Option<TerminalKey>,
     pub foreground: Option<[u8; 3]>,
     pub background: Option<[u8; 3]>,
 }
 
 impl Greeting {
-    fn said(self) -> api::FromViewer {
-        let hello = api::Greeting {
+    fn greeted(self, runs_in: Option<TerminalKey>) -> api::Greeting {
+        api::Greeting {
             colours: Some(colours(self.foreground, self.background)),
-            runs_in: self.runs_in.map(TerminalKey::said),
-        };
-        api::FromViewer { event: Some(from_viewer::Event::Hello(hello)) }
+            runs_in: runs_in.map(TerminalKey::said),
+        }
     }
 }
 
@@ -107,8 +110,14 @@ impl Drop for Viewer {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Reach {
+    Mux { socket: PathBuf, runs_in: Option<TerminalKey> },
+    On { lunetad: Folder, destination: Destination },
+}
+
 pub fn view<Told: FnMut(Seen) + Send + 'static>(
-    socket: PathBuf,
+    reach: Reach,
     greeting: Greeting,
     told: Told,
 ) -> Viewer {
@@ -117,7 +126,7 @@ pub fn view<Told: FnMut(Seen) + Send + 'static>(
     let budget = Arc::clone(&frames);
     let viewing = move |mut told: Told| {
         let last = match runtime() {
-            Ok(runtime) => runtime.block_on(stream(&socket, greeting, inbox, &budget, &mut told)),
+            Ok(runtime) => runtime.block_on(stream(&reach, greeting, inbox, &budget, &mut told)),
             Err(failure) => failure.to_string(),
         };
         told(Seen::Lost(last));
@@ -128,27 +137,71 @@ pub fn view<Told: FnMut(Seen) + Send + 'static>(
     Viewer { outbox, frames }
 }
 
+pub async fn relayed(
+    said: impl Stream<Item = api::FromViewer> + Send + 'static,
+) -> Result<Streaming<api::ToViewer>, Status> {
+    let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
+    let unreached =
+        |error: io::Error| Status::unavailable(format!("{}: {error}", socket.display()));
+    let client = connect(&socket, None).await.map_err(unreached)?;
+    let mut client = client.ok_or_else(|| Status::unavailable("luneta-mux does not run"))?;
+    Ok(client.show(said).await?.into_inner())
+}
+
+fn said_by_lunetad(status: &Status) -> String {
+    match status.message() {
+        "" => format!("lunetad: {}", status.code().description()),
+        said => said.to_owned(),
+    }
+}
+
 fn untaken() -> String {
     format!("luneta-mux has yet to take the last {SAID_MAX} events sent its viewer")
 }
 
+async fn hearing(
+    reach: &Reach,
+    greeting: Greeting,
+    sent: mpsc::Receiver<api::FromViewer>,
+) -> Result<Streaming<api::ToViewer>, String> {
+    let sent = ReceiverStream::new(sent);
+    let heard = match reach {
+        Reach::Mux { socket, runs_in } => {
+            let mut client = match connect(socket, None).await {
+                Ok(Some(client)) => client,
+                Ok(None) => return Err("luneta-mux does not run".to_owned()),
+                Err(error) => return Err(format!("{}: {error}", socket.display())),
+            };
+            let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));
+            let first = api::FromViewer { event: Some(hello) };
+            let heard = client.show(tokio_stream::once(first).chain(sent)).await;
+            heard.map_err(|status| refused(&status).to_string())
+        },
+        Reach::On { lunetad, destination } => {
+            let reached = crate::connect(lunetad).await;
+            let mut daemon = reached.map_err(|error| format!("lunetad is not reached: {error}"))?;
+            let on = Some(On { destination: destination.to_string() });
+            let hello = view_request::Hello { on, greeting: Some(greeting.greeted(None)) };
+            let first = ViewRequest { event: Some(view_request::Event::Hello(hello)) };
+            let said = |said| ViewRequest { event: Some(view_request::Event::Said(said)) };
+            let heard = daemon.view(tokio_stream::once(first).chain(sent.map(said))).await;
+            heard.map_err(|status| said_by_lunetad(&status))
+        },
+    };
+    heard.map(tonic::Response::into_inner)
+}
+
 async fn stream(
-    socket: &Path,
+    reach: &Reach,
     greeting: Greeting,
     inbox: Inbox<Saying>,
     frames: &Arc<Semaphore>,
     told: &mut impl FnMut(Seen),
 ) -> String {
-    let mut client = match connect(socket, None).await {
-        Ok(Some(client)) => client,
-        Ok(None) => return "luneta-mux does not run".to_owned(),
-        Err(error) => return format!("{}: {error}", socket.display()),
-    };
     let (sending, sent) = mpsc::channel(SAID_MAX);
-    let said = tokio_stream::once(greeting.said()).chain(ReceiverStream::new(sent));
-    let hearing = match client.show(said).await {
-        Ok(hearing) => hearing.into_inner(),
-        Err(status) => return refused(&status).to_string(),
+    let hearing = match hearing(reach, greeting, sent).await {
+        Ok(hearing) => hearing,
+        Err(why) => return why,
     };
     let mut next = pin!(inbox.merged(hearing));
     loop {

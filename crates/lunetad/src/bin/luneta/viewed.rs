@@ -9,10 +9,12 @@ use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use lunetad::folder;
 use lunetad::mux::own::api::{self, typed};
 use lunetad::mux::own::frames::{self, Frame, Rows};
-use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
+use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
-use lunetad::{Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show};
+use lunetad::{
+    Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show, Where,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -24,6 +26,7 @@ use crate::attached::{
 };
 use crate::gruvbox;
 use crate::host::Event;
+use crate::machines::Machine;
 
 const AGAIN: Duration = Duration::from_secs(1);
 
@@ -364,14 +367,23 @@ struct Watcher {
     showing: BTreeSet<TerminalKey>,
 }
 
+fn where_on(machine: &Machine, runs_in_here: Option<TerminalKey>) -> Where {
+    match machine {
+        Machine::Local => Where::Here { runs_in: runs_in_here },
+        Machine::Remote(destination) => Where::On(destination.clone()),
+    }
+}
+
 pub struct Viewed {
     number: u64,
     folder: PathBuf,
+    machine: Machine,
     show: Option<Show>,
     shown_at: Instant,
     laid_in: Option<WorkstreamId>,
     size: Size,
     greeting: Greeting,
+    runs_in_here: Option<TerminalKey>,
     view: View,
     watcher: Option<Watcher>,
     watchers: u64,
@@ -384,20 +396,25 @@ impl Viewed {
     pub fn start(
         number: u64,
         folder: PathBuf,
+        machine: Machine,
         workstream: WorkstreamId,
         size: Size,
         greeting: Greeting,
+        runs_in_here: Option<TerminalKey>,
         events: &Sender<Event>,
     ) -> Viewed {
+        let runs_in = where_on(&machine, runs_in_here).runs_in();
         let mut viewed = Viewed {
             number,
             folder,
+            machine,
             show: None,
             shown_at: Instant::now(),
             laid_in: None,
             size,
             greeting,
-            view: View::new(workstream, greeting.runs_in),
+            runs_in_here,
+            view: View::new(workstream, runs_in),
             watcher: None,
             watchers: 0,
             watched_at: None,
@@ -406,6 +423,10 @@ impl Viewed {
         };
         viewed.shown();
         viewed
+    }
+
+    fn at(&self) -> Where {
+        where_on(&self.machine, self.runs_in_here)
     }
 
     fn shown(&mut self) {
@@ -420,13 +441,18 @@ impl Viewed {
         let events = self.events.clone();
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
         let workstream = self.view.workstream;
-        let (runs_in, again) = (self.view.runs_in, self.laid_in == Some(workstream));
-        self.show = Some(lunetad::show(opened, workstream, self.size, runs_in, again, told));
+        let again = self.laid_in == Some(workstream);
+        self.show = Some(lunetad::show(opened, self.at(), workstream, self.size, again, told));
     }
 
     #[must_use]
     pub fn number(&self) -> u64 {
         self.number
+    }
+
+    #[must_use]
+    pub fn machine(&self) -> &Machine {
+        &self.machine
     }
 
     #[must_use]
@@ -478,19 +504,35 @@ impl Viewed {
                 self.watchers += 1;
                 self.watched_at = Some(Instant::now());
                 let (number, watcher, events) = (self.number, self.watchers, self.events.clone());
-                let socket = match lunetad::mux::own::server::socket() {
-                    Ok(socket) => socket,
-                    Err(failure) => {
-                        let seen = Seen::Lost(failure.to_string());
-                        let _ = events.send(Event::Seen { number, watcher, seen });
+                let reach = match self.reach() {
+                    Ok(reach) => reach,
+                    Err(why) => {
+                        let _ = events.send(Event::Seen { number, watcher, seen: Seen::Lost(why) });
                         return;
                     },
                 };
+                let greeting = self.greeting;
                 let told = move |seen| drop(events.send(Event::Seen { number, watcher, seen }));
-                let viewer = viewer::view(socket, self.greeting, told);
+                let viewer = viewer::view(reach, greeting, told);
                 viewer.show(wanted.clone());
                 self.watcher = Some(Watcher { number: watcher, viewer, showing: wanted });
             },
+        }
+    }
+
+    fn reach(&self) -> Result<Reach, String> {
+        let destination = match self.at() {
+            Where::Here { runs_in } => {
+                let socket = lunetad::mux::own::server::socket();
+                let socket = socket.map_err(|failure| failure.to_string())?;
+                return Ok(Reach::Mux { socket, runs_in });
+            },
+            Where::On(destination) => destination,
+        };
+        match folder::open(&self.folder) {
+            Ok(Some(lunetad)) => Ok(Reach::On { lunetad, destination }),
+            Ok(None) => Err("lunetad has made no folder yet".to_owned()),
+            Err(refusal) => Err(refusal.to_string()),
         }
     }
 
@@ -541,7 +583,14 @@ impl Viewed {
         }
     }
 
-    pub fn go(&mut self, workstream: WorkstreamId) {
+    pub fn go(&mut self, on: &Machine, workstream: WorkstreamId) {
+        if *on != self.machine {
+            let (number, folder, on) = (self.number + 1, self.folder.clone(), on.clone());
+            let (size, greeting, here) = (self.size, self.greeting, self.runs_in_here);
+            let events = self.events.clone();
+            *self = Viewed::start(number, folder, on, workstream, size, greeting, here, &events);
+            return;
+        }
         if workstream == self.view.workstream {
             return;
         }

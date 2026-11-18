@@ -5,6 +5,7 @@ package luneta.v1;
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
+import "luneta/mux/v1/mux.proto";
 
 service Daemon {
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
@@ -43,6 +44,7 @@ service Daemon {
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
+  rpc View(stream ViewRequest) returns (stream luneta.mux.v1.ToViewer);
 }
 
 message On {
@@ -1050,6 +1052,7 @@ message ShowRequest {
     Size size = 2;
     TerminalKey runs_in = 3;
     bool again = 4;
+    On on = 5;
   }
 
   message Size {
@@ -1116,6 +1119,18 @@ message ShowRequest {
     GROWTH_UNSPECIFIED = 0;
     GROWTH_GROW = 1;
     GROWTH_SHRINK = 2;
+  }
+}
+
+message ViewRequest {
+  oneof event {
+    Hello hello = 1;
+    luneta.mux.v1.FromViewer said = 2;
+  }
+
+  message Hello {
+    On on = 1;
+    luneta.mux.v1.Greeting greeting = 2;
   }
 }
 

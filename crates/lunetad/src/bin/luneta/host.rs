@@ -557,8 +557,8 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let lunetad = daemon.clone().unwrap_or_default();
-    let (size, greeting) = (view_size(areas.1), greeting(runs_in, colours));
-    let right = Viewed::start(1, lunetad.clone(), start, size, greeting, &events);
+    let (size, greeting, here) = (view_size(areas.1), greeting(colours), Machine::Local);
+    let right = Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events);
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
@@ -616,9 +616,9 @@ fn run_in(
     Ok(app.failure())
 }
 
-fn greeting(runs_in: Option<TerminalKey>, colours: Colours) -> Greeting {
+fn greeting(colours: Colours) -> Greeting {
     let (foreground, background) = colours.both();
-    Greeting { runs_in, foreground, background }
+    Greeting { foreground, background }
 }
 
 fn view_size(area: Rect) -> lunetad::projects::Size {
@@ -713,7 +713,8 @@ impl App {
                     self.sidebar.notify(format!("lunetad's projects: {why}"));
                     Projected::default()
                 });
-                let (tabs, titles) = self.projected.tabs(self.right.workstream());
+                let (on, workstream) = (self.right.machine(), self.right.workstream());
+                let (tabs, titles) = self.projected.tabs(on, workstream);
                 self.right.tabs(tabs, titles);
                 self.sidebar.heard(host);
                 self.seat();
@@ -1389,7 +1390,8 @@ impl App {
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
         if let Some(workstream) = self.right.mouse(mouse, at, self.areas.1.width) {
-            self.go_workstream(workstream, None);
+            let on = self.right.machine().clone();
+            self.go_workstream(&on, workstream, None);
         }
     }
 
@@ -1622,21 +1624,21 @@ impl App {
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {
         self.sidebar.drop_menu(menu);
-        let Machine::Local = on else {
-            return self.sidebar.notify(format!("menu: {NOT_YET}"));
-        };
-        let Some(project) = self.projected.project(key) else {
+        let Some(project) = self.projected.project(on, key) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
         match open {
             Open::Pane { beside, command, .. } => {
                 let pane = OwnPane::new(project.key, *beside);
-                let Some((workstream, terminal)) = pane.and_then(|it| self.projected.of_pane(it))
-                else {
+                let held = pane.and_then(|it| self.projected.of_pane(on, it));
+                let Some((workstream, terminal)) = held else {
                     return self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
                 };
-                self.go_workstream(workstream, Some(terminal));
+                self.go_workstream(on, workstream, Some(terminal));
                 self.right.open_beside_focused(command.clone());
+            },
+            Open::Tab { .. } if *on != Machine::Local => {
+                self.sidebar.notify(format!("menu: {NOT_YET}"));
             },
             Open::Tab { tab, .. } => {
                 let (lunetad, id) = (self.lunetad.clone(), project.id);
@@ -1878,14 +1880,15 @@ impl App {
     }
 
     fn cross(&mut self, direction: Direction) {
-        let (before, after) = self.projected.tabs_beside(self.right.workstream());
+        let on = self.right.machine().clone();
+        let (before, after) = self.projected.tabs_beside(&on, self.right.workstream());
         let beside = match direction {
             Direction::Left => before,
             Direction::Right => after,
             Direction::Up | Direction::Down => None,
         };
         if let Some(beside) = beside {
-            self.go_workstream(beside, None);
+            self.go_workstream(&on, beside, None);
         }
     }
 
@@ -1903,42 +1906,54 @@ impl App {
         let Some(key) = listed.own_key() else {
             return Err(format!("{session} is one of zellij's sessions: {}", menu::OWN_ONLY));
         };
-        if let Machine::Remote(destination) = machine {
-            return Err(format!("luneta cannot go to {session}, a project of {destination}'s, yet"));
-        }
-        let project = self.projected.project(key);
-        let project = project.ok_or_else(|| format!("{session} is no project lunetad keeps"))?;
+        let Some(project) = self.projected.project(machine, key) else {
+            if let Machine::Remote(destination) = machine
+                && !self.projected.reaches(machine)
+            {
+                return Err(format!("lunetad does not reach {destination} now"));
+            }
+            return Err(format!("{session} is no project lunetad keeps"));
+        };
+        let shows = |workstream| {
+            self.right.machine() == machine && self.right.workstream() == workstream
+        };
         if let Place::Workstream(place) = place {
             let held = project.workstreams.iter().any(|it| it.id == place.workstream);
             if !held {
                 return Err(format!("{session} holds no such workstream"));
             }
-            if self.right.workstream() != place.workstream {
-                self.go_workstream(place.workstream, None);
+            if !shows(place.workstream) {
+                self.go_workstream(machine, place.workstream, None);
             }
             return Ok(());
         }
         let Some(pane) = place.pane() else {
-            let shown = self.right.workstream();
-            if project.workstreams.iter().any(|it| it.id == shown) {
+            if project.workstreams.iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
             let first = project.workstreams.first();
             let first = first.ok_or_else(|| format!("{session} holds no workstream"))?;
-            self.go_workstream(first.id, None);
+            self.go_workstream(machine, first.id, None);
             return Ok(());
         };
         let pane = OwnPane::new(key, pane).ok_or("a pane of id 0")?;
-        let (workstream, terminal) = self.projected.of_pane(pane).ok_or_else(|| {
+        let (workstream, terminal) = self.projected.of_pane(machine, pane).ok_or_else(|| {
             format!("lunetad lists no terminal {} in {session}", pane.id)
         })?;
-        self.go_workstream(workstream, Some(terminal));
+        self.go_workstream(machine, workstream, Some(terminal));
         Ok(())
     }
 
-    fn go_workstream(&mut self, workstream: WorkstreamId, terminal: Option<TerminalId>) {
-        self.right.go(workstream);
-        let (tabs, titles) = self.projected.tabs(workstream);
+    fn go_workstream(
+        &mut self,
+        on: &Machine,
+        workstream: WorkstreamId,
+        terminal: Option<TerminalId>,
+    ) {
+        self.right.go(on, workstream);
+        assert_eq!(self.right.machine(), on, "luneta shows the machine it went to");
+        assert_eq!(self.right.workstream(), workstream, "luneta shows the workstream it went to");
+        let (tabs, titles) = self.projected.tabs(on, workstream);
         self.right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
             self.right.ask(lunetad::Asked::Focus(terminal));
@@ -1947,18 +1962,19 @@ impl App {
     }
 
     fn seat(&mut self) {
-        let workstream = self.right.workstream();
-        let Some((project, _)) = self.projected.holding(workstream) else {
+        let (on, workstream) = (self.right.machine().clone(), self.right.workstream());
+        let Some((project, _)) = self.projected.holding(&on, workstream) else {
             return;
         };
-        self.sidebar.showing(workstream);
         let key = project.key;
         let pane = self.right.focused().and_then(|focused| project.pane_of(focused));
-        let seated = self.sidebar.own_seat().map(sidebar::OwnSeat::session);
-        if seated != Some(key) {
-            self.sidebar.attaching(key);
+        let seated = |sidebar: &Sidebar| sidebar.own_seat_on(&on).map(sidebar::OwnSeat::session);
+        if seated(&self.sidebar) != Some(key) {
+            self.sidebar.attaching(on.clone(), key);
             self.seated = None;
         }
+        assert_eq!(seated(&self.sidebar), Some(key), "the sidebar sits where luneta shows");
+        self.sidebar.showing(workstream);
         if let Some(pane) = pane
             && self.seated != Some(pane)
         {
@@ -1974,11 +1990,19 @@ impl App {
             Heeded::Edged(direction) => self.cross(direction),
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Forgotten(why) => {
-                let forgotten = self.right.workstream();
-                let workstreams = self.projected.projects().iter().flat_map(|it| &it.workstreams);
-                let other = workstreams.map(|it| it.id).find(|id| *id != forgotten);
+                let (on, forgotten) = (self.right.machine().clone(), self.right.workstream());
+                let held = |machine: &Machine| {
+                    let projects = self.projected.projects(machine).iter();
+                    let mut workstreams = projects.flat_map(|it| &it.workstreams).map(|it| it.id);
+                    workstreams.find(|id| {
+                        let is_forgotten = *machine == on && *id == forgotten;
+                        !is_forgotten
+                    })
+                };
+                let other = held(&on).map(|id| (on.clone(), id));
+                let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
                 match other {
-                    Some(other) => self.go_workstream(other, None),
+                    Some((machine, other)) => self.go_workstream(&machine, other, None),
                     None => self.end("no workstream is left to show"),
                 }
                 self.sidebar.notify(format!("lunetad's view: {why}"));
@@ -2032,7 +2056,7 @@ impl App {
     }
 
     fn go_opening(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
-        self.go_workstream(workstream, None);
+        self.go_workstream(&Machine::Local, workstream, None);
         if !argv.is_empty() {
             self.right.open_in(workstream, argv);
         }

@@ -18,6 +18,7 @@ use notify::RecursiveMode;
 use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
 use tokio::sync::watch::Receiver;
+use tokio::sync::Semaphore;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
@@ -33,6 +34,8 @@ use crate::watch::{self, Troubles};
 pub const FILE: &str = "hosts";
 
 pub const HOSTS_MAX: usize = 16;
+
+pub const HELD_MAX: usize = 12;
 
 const AGAIN_MAX: Duration = Duration::from_secs(30);
 
@@ -120,16 +123,22 @@ struct Bridge {
     watch: u64,
     daemon: Option<DaemonClient<Channel>>,
     wake: wakes::Sender<()>,
+    held: Arc<Semaphore>,
+}
+
+pub struct Bridging {
+    pub daemon: DaemonClient<Channel>,
+    pub held: Arc<Semaphore>,
 }
 
 impl Bridges {
-    pub fn to(&self, destination: &Destination) -> Option<DaemonClient<Channel>> {
+    pub fn to(&self, destination: &Destination) -> Option<Bridging> {
         let bridges = locked(&self.0);
         let bridge = bridges.get(destination)?;
         if bridge.daemon.is_none() {
             let _ = bridge.wake.try_send(());
         }
-        bridge.daemon.clone()
+        Some(Bridging { daemon: bridge.daemon.clone()?, held: Arc::clone(&bridge.held) })
     }
 }
 
@@ -143,7 +152,7 @@ struct Bridged {
 impl Bridged {
     fn new(bridges: Arc<Bridges>, destination: Destination, watch: u64) -> Self {
         let (wake, woken) = wakes::channel(1);
-        let bridge = Bridge { watch, daemon: None, wake };
+        let bridge = Bridge { watch, daemon: None, wake, held: Arc::new(Semaphore::new(HELD_MAX)) };
         locked(&bridges.0).insert(destination.clone(), bridge);
         Bridged { bridges, destination, watch, woken }
     }

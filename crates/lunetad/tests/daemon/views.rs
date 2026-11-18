@@ -9,19 +9,25 @@ use lunetad::api::change_projects_request::{
 };
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
+use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::{view_request, CheckNameRequest, On, ViewRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
-use lunetad::mux::own::viewer::{view, Greeting, Seen, FRAMES_MAX};
+use lunetad::mux::own::viewer::{view, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorkstreamId};
-use lunetad::{Asked, Beside, Heard};
+use lunetad::folder::Folder;
+use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::Channel;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
-use crate::host::{eventually, folder_in, script};
+use crate::host::{eventually, folder_in, script, start, Host};
 use crate::own::Owned;
 use crate::projects::{asked, kept, project, workstream};
+use crate::remote::{hosts, reached, FakeSsh};
+use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -61,12 +67,14 @@ impl<'a> Shown<'a> {
         (columns, rows): (u32, u32),
         runs_in: Option<TerminalKey>,
     ) -> Shown<'a> {
-        let hello = Hello { workstream, size: Some(size(columns, rows)), runs_in, again: false };
+        let size = Some(size(columns, rows));
+        let hello = Hello { workstream, size, runs_in, again: false, on: None };
         Shown::greeted(owned, hello)
     }
 
     fn again(owned: &'a Owned, workstream: u64) -> Shown<'a> {
-        let hello = Hello { workstream, size: Some(size(80, 24)), runs_in: None, again: true };
+        let size = Some(size(80, 24));
+        let hello = Hello { workstream, size, runs_in: None, again: true, on: None };
         Shown::greeted(owned, hello)
     }
 
@@ -999,9 +1007,234 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let owned = Owned::new();
     let workstream = WorkstreamId::of(workstream_in_home(&owned)).unwrap();
     let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+    seen_and_typed_into(folder, Where::Here { runs_in: None }, reach, workstream);
+}
+
+#[test]
+fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
+    let far = Owned::new();
+    let workstream = WorkstreamId::of(workstream_in_home(&far)).unwrap();
+    let here = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let lunetad = folder_in(here.runtime.path()).unwrap();
+    let destination: Destination = "far".parse().unwrap();
+    let reach = Reach::On { lunetad: lunetad.clone(), destination: destination.clone() };
+    seen_and_typed_into(lunetad.clone(), Where::On(destination), reach, workstream);
+
+    let nowhere: Destination = "nowhere".parse().unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
+    let told = move |it| drop(heard.send(it));
+    let at = Where::On(nowhere.clone());
+    let _show = lunetad::show(lunetad.clone(), at, workstream, size, false, told);
+    match hearing.recv_timeout(HEARD_IN).expect("lunetad answers a view of nowhere") {
+        Heard::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
+        other => panic!("a view of a machine not reached is lost, not {other:?}"),
+    }
+    let (seen, seeing) = std::sync::mpsc::channel();
+    let greeting = Greeting { foreground: None, background: None };
+    let reach = Reach::On { lunetad, destination: nowhere };
+    let _viewer = view(reach, greeting, move |it| drop(seen.send(it)));
+    match seeing.recv_timeout(HEARD_IN).expect("lunetad answers a viewer of nowhere") {
+        Seen::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
+        other => panic!("a viewer of a machine not reached is lost, not {other:?}"),
+    }
+}
+
+async fn shown_through(
+    daemon: &mut DaemonClient<Channel>,
+    workstream: u64,
+) -> Result<(mpsc::Sender<ShowRequest>, Streaming<ShowResponse>), Status> {
+    let on = Some(On { destination: "far".to_owned() });
+    let hello = Hello { workstream, size: Some(size(80, 24)), runs_in: None, again: false, on };
+    let (asks, asked) = mpsc::channel(1);
+    asks.send(ShowRequest { event: Some(Event::Hello(hello)) }).await.unwrap();
+    let mut heard = daemon.show(ReceiverStream::new(asked)).await?.into_inner();
+    match heard.message().await? {
+        Some(ShowResponse { event: Some(show_response::Event::Laid(_)) }) => Ok((asks, heard)),
+        other => panic!("a show through the bridge is laid out first, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_bridge_holds_its_most_shows_and_views_open_and_keeps_room_for_questions() {
+    let far = Owned::new();
+    let workstream = workstream_in_home(&far);
+    let here = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let on = || Some(On { destination: "far".to_owned() });
+    far.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut held = Vec::new();
+        for _ in 0..BRIDGE_HELD_MAX {
+            let shown = shown_through(&mut daemon, workstream).await;
+            held.push(shown.expect("a show within the most is laid out"));
+        }
+        let refused = shown_through(&mut daemon, workstream).await.err();
+        let refused = refused.expect("a show past the most is refused");
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+        let greeting = Some(mux_api::Greeting { colours: None, runs_in: None });
+        let hello = view_request::Hello { on: on(), greeting };
+        let words = vec![ViewRequest { event: Some(view_request::Event::Hello(hello)) }];
+        let refused = daemon.view(tokio_stream::iter(words)).await.err();
+        let refused = refused.expect("a view past the most is refused");
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+        let check = CheckNameRequest { on: on(), name: "fresh".to_owned() };
+        let checked = tokio::time::timeout(HEARD_IN, daemon.check_name(check)).await;
+        assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
+
+        drop(held.pop());
+        let deadline = tokio::time::Instant::now() + HEARD_IN;
+        loop {
+            match shown_through(&mut daemon, workstream).await {
+                Ok(again) => break held.push(again),
+                Err(full)
+                    if full.code() == Code::ResourceExhausted
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                },
+                Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
+            }
+        }
+    });
+}
+
+#[test]
+fn a_view_is_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_named_there() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    shown.open();
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let greeted = Some(mux_api::Greeting { colours: None, runs_in: None });
+    let hello = |on: Option<&str>, greeting: Option<mux_api::Greeting>| {
+        let on = on.map(|destination| On { destination: destination.to_owned() });
+        let hello = view_request::Hello { on, greeting };
+        ViewRequest { event: Some(view_request::Event::Hello(hello)) }
+    };
+    let showing = mux_api::from_viewer::Event::Showing(mux_api::Showing { terminals: Vec::new() });
+    let said = mux_api::FromViewer { event: Some(showing) };
+    let showing = ViewRequest { event: Some(view_request::Event::Said(said)) };
+    let refused = |words: Vec<ViewRequest>| -> Option<(Code, String)> {
+        let folder = folder.clone();
+        owned.block_on(async move {
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let mut heard = match daemon.view(tokio_stream::iter(words)).await {
+                Ok(answer) => answer.into_inner(),
+                Err(refused) => return Some((refused.code(), refused.message().to_owned())),
+            };
+            let ended = async move {
+                loop {
+                    match heard.message().await {
+                        Ok(Some(_)) => {},
+                        Ok(None) => return None,
+                        Err(refused) => return Some((refused.code(), refused.message().to_owned())),
+                    }
+                }
+            };
+            tokio::time::timeout(HEARD_IN, ended).await.expect("the view ends when its words do")
+        })
+    };
+    let invalid = |why: &str| Some((Code::InvalidArgument, why.to_owned()));
+    assert_eq!(refused(vec![hello(None, greeted), showing.clone()]), None, "said well, it ends");
+    let again = vec![hello(None, greeted), showing.clone(), hello(None, greeted)];
+    assert_eq!(refused(again), invalid("a hello comes only first"));
+    let nothing = vec![hello(None, greeted), ViewRequest { event: None }];
+    assert_eq!(refused(nothing), invalid("a word of the view says nothing"));
+    assert_eq!(refused(vec![hello(None, None)]), invalid("the hello greets nobody"));
+    let misnamed = refused(vec![hello(Some("-oops"), greeted)]).expect("a misnamed machine");
+    assert_eq!(misnamed.0, Code::InvalidArgument, "{misnamed:?}");
+    let runs_in = Some(mux_api::TerminalKey { id: 1, made_at: None });
+    let greeted_here = Some(mux_api::Greeting { colours: None, runs_in });
+    let runs_in_on = invalid("runs_in names a terminal of this machine, and on names another");
+    assert_eq!(refused(vec![hello(Some("far"), greeted_here)]), runs_in_on);
+    let runs_in = Some(TerminalKey { id: 1, made_at: None });
+    let on = Some(On { destination: "far".to_owned() });
+    let size = Some(size(80, 24));
+    let hello = Hello { workstream, size, runs_in, again: false, on };
+    let words = vec![ShowRequest { event: Some(Event::Hello(hello)) }];
+    let show_refused = owned.block_on(async move {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        daemon.show(tokio_stream::iter(words)).await.err()
+    });
+    let show_refused = show_refused.map(|it| (it.code(), it.message().to_owned()));
+    assert_eq!(show_refused, runs_in_on, "a show names no terminal of here to another machine");
+}
+
+#[test]
+fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_beside() {
+    if !makes_shells() {
+        return;
+    }
+    let far = Owned::new();
+    let home = fs::canonicalize(far.host.home.path()).unwrap();
+    let made = project(&far.host, &home, Some("faraway"));
+    let workstream = workstream(&far.host, made, &home);
+    let mut shown = Shown::new(&far, workstream, 400, 200);
+    let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);
+    drop(shown);
+    let here = Owned::new();
+    FakeSsh::new(here.host.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here.host, "far\n");
+    let mut window = Window::open(&here.host, &directory("project"), &[]);
+    window.spot_of("faraway");
+    assert!(!window.shows("far-is-42"));
+    let mut clicked: Option<Instant> = None;
+    eventually("luneta shows far's terminal", || {
+        if window.shows("far-is-42") {
+            return Some(());
+        }
+        if clicked.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
+            let (row, column) = window.spot_of(home.file_name().unwrap().to_str().unwrap());
+            let row = (row + 1, column + 4);
+            window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
+            clicked = Some(Instant::now());
+        }
+        None
+    });
+    window.send("echo typed-$((40 + 2))\r");
+    eventually("far's terminal shows what was typed here", || {
+        window.shows("typed-42").then_some(())
+    });
+    let far_terminal = |owned: &Owned| {
+        let projects = projects_of(owned);
+        let workstreams = projects.into_iter().flat_map(|project| project.workstreams);
+        let terminals = workstreams.flat_map(|workstream| workstream.terminals);
+        terminals.into_iter().any(|it| it.id == terminal)
+    };
+    assert!(far_terminal(&far), "the terminal typed into is far's");
+
+    let far_terminals = || {
+        let projects = projects_of(&far);
+        let workstreams = projects.into_iter().flat_map(|project| project.workstreams);
+        let held = workstreams.into_iter().find(|it| it.id == workstream);
+        held.map_or(0, |it| it.terminals.len())
+    };
+    window.send("\x1ba");
+    window.spot_of("New");
+    window.send("np");
+    eventually("n p opens a terminal beside it, there", || (far_terminals() == 2).then_some(()));
+}
+
+fn seen_and_typed_into(
+    folder: Folder,
+    at: Where,
+    reach: Reach,
+    workstream: WorkstreamId,
+) {
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(80, 24).unwrap();
+    let told = move |it| drop(heard.send(it));
+    let show = lunetad::show(folder, at, workstream, size, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1017,8 +1250,8 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     assert_eq!(opened.focused(), Some(&pane));
 
     let (seen, seeing) = std::sync::mpsc::channel();
-    let greeting = Greeting { runs_in: None, foreground: None, background: None };
-    let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
+    let greeting = Greeting { foreground: None, background: None };
+    let viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
     viewer.typed(key, paste("echo seen-$((40 + 2))"));
@@ -1064,7 +1297,8 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
+    let told = move |it| drop(heard.send(it));
+    let show = lunetad::show(folder, Where::Here { runs_in: None }, workstream, size, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1079,8 +1313,9 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let opened = laid();
 
     let (seen, seeing) = std::sync::mpsc::channel();
-    let greeting = Greeting { runs_in: None, foreground: None, background: None };
-    let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
+    let greeting = Greeting { foreground: None, background: None };
+    let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+    let viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |within: Duration| match seeing.recv_timeout(within) {
         Ok(Seen::Frame(framed)) => Some(framed),
