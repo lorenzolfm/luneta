@@ -19,11 +19,12 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Id, Line, Placed, ProjectId};
-use crate::projects::{Made, Projects, Ran, Runs};
+use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line, Placed};
+use crate::projects::{Made, ProjectId, Projects, Ran, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::projects::WORKSTREAMS_MAX;
+use crate::git;
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -808,11 +809,13 @@ impl Views {
                 (Placed::Beside { at, towards }, inner)
             },
         };
+        let home = project.folder(shown);
         let listed_cwd = focus
             .and_then(|focus| self.known.get(&focus))
             .and_then(|known| self.listed.get(&known.key))
-            .and_then(|listed| Dir::parse(&listed.cwd).ok());
-        let folder = listed_cwd.unwrap_or_else(|| project.folder(shown));
+            .and_then(|listed| Dir::parse(&listed.cwd).ok())
+            .filter(|cwd| home.below(cwd).is_some());
+        let folder = listed_cwd.unwrap_or(home);
         let cwd = Directory::parse(folder.as_str().to_owned()).expect("a dir is absolute");
         let made = Terminal::new(terminal, folder, runs);
         self.changed(Change::Open { workstream, terminal: made, placed, size })?;
@@ -1171,6 +1174,7 @@ impl Views {
             return;
         };
         let mut ran = Vec::new();
+        let mut went = Vec::new();
         for (terminal, known) in known.iter_mut() {
             let Some(listed) = listed.get(&known.key) else {
                 continue;
@@ -1196,16 +1200,91 @@ impl Views {
                 remade.restored = None;
             }
             known.agent_front = front.filter(|_| matches!(runs, Runs::Agent { .. }));
+            if folder != *held.folder() {
+                went.push((*terminal, folder.clone()));
+            }
             if folder != *held.folder() || runs != *held.runs() {
                 ran.push(Ran { terminal: *terminal, folder, runs });
             }
         }
+        assert!(went.len() <= ran.len(), "a terminal that went elsewhere ran there");
         if ran.is_empty() {
             return;
         }
         if let Err(why) = self.changed(Change::Ran(ran)) {
             self.troubles.say(format!("what the terminals run is not kept: {why}"));
+            return;
         }
+        for (terminal, folder) in went {
+            self.rehome(terminal, &folder);
+        }
+    }
+
+    fn rehome(&mut self, terminal: TerminalId, folder: &Dir) {
+        let top = worktree(folder);
+        let Some(projects) = self.store.projects() else {
+            return;
+        };
+        let stays = format!("terminal {terminal}, gone to {}, stays", folder.as_str());
+        let (to, made) = match projects.home(terminal, folder, top.as_ref()) {
+            Home::Stays => return,
+            Home::In(to) => (to, false),
+            Home::Made { project, folder: at } => {
+                let add = Change::AddWorkstream { project, folder: at.clone(), name: None };
+                match self.store.change(add) {
+                    Ok(Some(made)) => (WorkstreamId::new(made), true),
+                    Ok(None) => unreachable!("a workstream added is made"),
+                    Err(failed) => {
+                        let unmade = format!("no workstream is made at {}", at.as_str());
+                        return self.troubles.say(format!("{stays}: {unmade}: {}", said(failed)));
+                    },
+                }
+            },
+        };
+        let Err(why) = self.moved(terminal, to) else {
+            return;
+        };
+        self.troubles.say(format!("{stays}: {why}"));
+        if made && let Err(why) = self.changed(Change::ForgetWorkstream { workstream: to }) {
+            self.troubles.say(format!("workstream {to}, made for it, stays empty: {why}"));
+        }
+    }
+
+    fn moved(&mut self, terminal: TerminalId, to: WorkstreamId) -> Result<(), String> {
+        let projects = self.kept()?;
+        let (held_in, _) = projects.holding(terminal).ok_or("no view holds it")?;
+        let from = held_in.id();
+        let heir = held_in.view().tree().and_then(|tree| tree.heir(terminal));
+        let (_, target) = projects.find(to).ok_or_else(|| format!("no workstream {to}"))?;
+        let follows = |client: &Client| client.workstream == from && client.focus == Some(terminal);
+        let shown = self.clients.values().filter(|it| it.workstream == to || follows(it));
+        let size = fit(shown, target.view(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        self.changed(Change::Move { terminal, to, size })?;
+        let mut followed = false;
+        for client in self.clients.values_mut() {
+            if follows(client) {
+                client.workstream = to;
+                followed = true;
+            } else if client.focus == Some(terminal) {
+                client.focus = heir;
+            }
+        }
+        if self.last_focus.get(&from) == Some(&terminal) {
+            match heir {
+                Some(heir) => self.last_focus.insert(from, heir),
+                None => self.last_focus.remove(&from),
+            };
+        }
+        if followed {
+            self.last_focus.insert(to, terminal);
+            self.went(to);
+        }
+        let projects = self.kept()?;
+        let held_in = projects.holding(terminal).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(to), "terminal {terminal} moved to workstream {to}");
+        let stray = |client: &Client| client.workstream == from && client.focus == Some(terminal);
+        assert!(!self.clients.values().any(stray), "no client of {from} focuses {terminal}");
+        Ok(())
     }
 
     fn tell_core(&mut self) {
@@ -1421,6 +1500,21 @@ fn is_folder(folder: &Dir) -> Result<bool, String> {
         Ok(Looked::Stuck) => Err(format!("{} did not answer in {secs}s", folder.as_str())),
         Err(error) => Err(format!("{} is not looked at: {error}", folder.as_str())),
     }
+}
+
+fn worktree(folder: &Dir) -> Option<Dir> {
+    let mut looked = process::Command::new("git");
+    git::local(looked.args(["-c", "safe.bareRepository=explicit", "-C", folder.as_str()]))
+        .args(["rev-parse", "--show-toplevel", "--show-superproject-working-tree"])
+        .env("LC_ALL", "C");
+    let said = program::run(&mut looked, FOLDER_LOOK).ok()?.answer().ok()?;
+    let said = String::from_utf8(said).ok()?;
+    let mut lines = said.lines();
+    let top = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    Dir::parse(top).ok()
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {

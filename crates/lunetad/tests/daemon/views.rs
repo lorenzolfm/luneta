@@ -29,6 +29,7 @@ use crate::own::Owned;
 use crate::projects::{asked, kept, project, workstream};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
+use crate::worktree::{cloned_as_wt, git};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -1035,6 +1036,32 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
     again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
     let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
     assert_eq!(said, "--resume resumed-7c22\n");
+}
+
+#[test]
+fn a_terminal_gone_to_another_worktree_moves_to_its_workstream_and_its_client_follows() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let (up, clone) = (home.join("up"), home.join("clone"));
+    cloned_as_wt(&home, &up, &clone);
+    git(&clone.join(".bare"), &["worktree", "add", "-q", "../feat", "feat"]);
+    let made = project(&owned.host, &clone, None);
+    let main = workstream(&owned.host, made, &clone.join("main"));
+    let mut shown = Shown::new(&owned, main, 80, 24);
+    let stays = shown.open();
+    let feat = clone.join("feat").join("src");
+    fs::create_dir_all(&feat).unwrap();
+    let said = r#"(sleep 0.3; printf '\033]7;file://localhost%s\007' "$PWD") &"#;
+    let line = format!("cd '{}' && {said} exec sleep 601", feat.display());
+    let goes = shown.open_running(&["sh", "-c", &line]);
+
+    let laid = shown.until("the view of the worktree it went to", |laid| laid.workstream != main);
+    let terminals: Vec<u64> = laid.panes.iter().map(|pane| pane.terminal).collect();
+    assert_eq!((terminals, focused_of(&laid)), (vec![goes], Some(goes)));
+    let went = watched_workstream(&owned, laid.workstream).expect("its workstream is watched");
+    assert_eq!(went.folder, clone.join("feat").to_str().unwrap(), "made at the worktree's top");
+    let left: Vec<u64> = watched(&owned, main).iter().map(|it| it.id).collect();
+    assert_eq!(left, [stays], "the terminal beside it stays");
 }
 
 #[test]

@@ -61,6 +61,7 @@ enum Moused {
 
 pub enum Heeded {
     Quiet,
+    Followed,
     Edged(Direction),
     Sent(WorkstreamId),
     Note(String),
@@ -70,6 +71,7 @@ pub enum Heeded {
 
 struct View {
     workstream: WorkstreamId,
+    arrived: bool,
     runs_in: Option<TerminalKey>,
     laid: Option<Laid>,
     screens: BTreeMap<TerminalKey, Screen>,
@@ -82,6 +84,7 @@ impl View {
     fn new(workstream: WorkstreamId, runs_in: Option<TerminalKey>) -> View {
         View {
             workstream,
+            arrived: false,
             runs_in,
             laid: None,
             screens: BTreeMap::new(),
@@ -106,15 +109,26 @@ impl View {
 
     fn go(&mut self, workstream: WorkstreamId) {
         self.workstream = workstream;
+        self.arrived = false;
         self.laid = None;
         self.screens.clear();
         self.pointer = Pointer::Free;
+    }
+
+    fn followed(&mut self, laid: &Laid) -> bool {
+        let follows = self.arrived && laid.workstream() != self.workstream;
+        if follows {
+            self.workstream = laid.workstream();
+            self.pointer = Pointer::Free;
+        }
+        follows
     }
 
     fn laid_out(&mut self, laid: Laid) -> bool {
         if laid.workstream() != self.workstream {
             return false;
         }
+        self.arrived = true;
         if self.focused() != laid.focused().map(|pane| pane.terminal) {
             self.pointer = Pointer::Free;
         }
@@ -493,11 +507,15 @@ impl Viewed {
         match heard {
             Heard::Laid(laid) => {
                 self.laid_in = Some(laid.workstream());
+                let followed = self.view.followed(&laid);
+                if followed {
+                    self.opened.insert(self.view.workstream);
+                }
                 if self.view.laid_out(laid) && self.opened.insert(self.view.workstream) {
                     self.ask(Asked::Open { beside: Beside::Alone, argv: Vec::new() });
                 }
                 self.watch();
-                Heeded::Quiet
+                if followed { Heeded::Followed } else { Heeded::Quiet }
             },
             Heard::Edged { workstream, direction } => {
                 self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
