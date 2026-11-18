@@ -7,7 +7,7 @@ use lunetad::api::terminal::Found;
 use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
 use crate::projects::workstream;
-use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, UNSHOWN};
+use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, SPLIT, UNSHOWN};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -23,7 +23,6 @@ const GROW: &str = "\x1b[61;3u";
 
 const SHRINK: &str = "\x1b[45;3u";
 
-const SPLIT: &str = "\x1b[97;3unp";
 
 const CLOSE: &str = "\x1b[97;3udd";
 

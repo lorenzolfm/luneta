@@ -424,7 +424,9 @@ fn parse(text: &str) -> Result<Projects, String> {
         }
     }
     let projects = kept.projects.into_iter().map(KeptProject::read);
-    Projects::checked(projects.collect::<Result<_, _>>()?)
+    let mut projects = Projects::checked(projects.collect::<Result<_, _>>()?)?;
+    projects.followed();
+    Ok(projects)
 }
 
 impl KeptProject {
@@ -734,7 +736,7 @@ mod tests {
             ),
         ];
         for (id, runs, placed) in runs {
-            let terminal = Terminal::new(id, dir("/w/luneta/main"), runs);
+            let terminal = Terminal::new(id, dir("/w/luneta/top"), runs);
             let open = Change::Open { workstream, terminal, placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
@@ -763,7 +765,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000004",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": "shell"
                 }
               },
@@ -776,7 +778,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000005",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": {
                     "command": "vim notes"
                   }
@@ -785,7 +787,7 @@ mod tests {
               {
                 "terminal": {
                   "id": "0000000000000006",
-                  "folder": "/w/luneta/main",
+                  "folder": "/w/luneta/top",
                   "runs": {
                     "agent": {
                       "harness": "claude-code",
@@ -818,6 +820,17 @@ mod tests {
         let folders: Vec<Dir> = project.workstreams().iter().map(|it| project.folder(it)).collect();
         assert_eq!(folders, [dir("/a"), dir("/a/b")]);
         assert_eq!(parse(&written(&kept)), Ok(kept));
+    }
+
+    #[test]
+    fn a_workstream_read_is_where_its_terminals_all_went() {
+        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
+            "dir": "/a", "workstreams": [{"id": "0000000000000002", "below": "b",
+            "view": {"tree": [{"terminal": {"id": "0000000000000003", "folder": "/a/c/d",
+            "runs": "shell"}}]}}]}]}"#;
+        let projects = parse(text).unwrap();
+        let project = &projects.all()[0];
+        assert_eq!(project.folder(&project.workstreams()[0]).as_str(), "/a/c/d");
     }
 
     #[test]

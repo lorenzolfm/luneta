@@ -843,10 +843,23 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
 }
 
 #[test]
+fn a_workstream_whose_only_terminal_went_to_another_folder_goes_there_too() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    heard_in_below(&owned, &mut shown, "sleep 604");
+    eventually("the workstream is kept in below", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        file.contains(r#""below": "below""#).then_some(())
+    });
+}
+
+#[test]
 fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     let mut owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
+    shown.open();
     heard_in_below(&owned, &mut shown, "sleep 603");
     drop(shown);
     owned.stop_daemon();
@@ -862,7 +875,7 @@ fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     let folder = format!(r#""folder": "{}""#, work_folder(&owned).display());
     let file = eventually("what the terminal restored runs is read", || {
         let file = fs::read_to_string(kept(&owned.host)).ok()?;
-        file.contains(&folder).then_some(file)
+        (file.matches(&folder).count() == 2).then_some(file)
     });
     let unrun = r#""unrun": "sleep 603\necho done""#;
     assert!(file.contains(unrun), "a command that spans lines is kept, left unrun: {file}");

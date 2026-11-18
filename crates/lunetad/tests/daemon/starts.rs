@@ -36,6 +36,8 @@ const RUNS: Duration = Duration::from_secs(5);
 
 pub const UNSHOWN: &str = "No workstream to show yet.";
 
+pub const SPLIT: &str = "\x1b[97;3unp";
+
 const CD_FEAT: &str = "cd ../feat && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
 pub struct Ended {
@@ -308,6 +310,10 @@ fn a_new_session_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_pro
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    window.send(SPLIT);
+    eventually("a second pane opens in work", || {
+        (shown(&owned, &dir.path)?.terminals.len() == 2).then_some(())
+    });
     window.send(CD_FEAT);
     let deadline = Instant::now() + Duration::from_secs(10);
     while shown(&owned, &feat).is_none() {
