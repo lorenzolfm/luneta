@@ -346,7 +346,7 @@ struct App {
     _watching: Vec<notify::RecommendedWatcher>,
     dir: PathBuf,
     gave_up: Option<String>,
-    deleting: Vec<JoinHandle<()>>,
+    changes: Vec<JoinHandle<()>>,
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
@@ -574,15 +574,15 @@ fn run_in(
         _watching: watching,
         dir: dir.to_owned(),
         gave_up: None,
-        deleting: Vec::new(),
+        changes: Vec::new(),
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
     };
     app.watch();
     let ran = run_loop(terminal, &mut app, inbox);
-    for deleting in app.deleting.drain(..) {
-        let _ = deleting.join();
+    for change in app.changes.drain(..) {
+        let _ = change.join();
     }
     ran?;
     Ok(app.failure())
@@ -1532,8 +1532,7 @@ impl App {
                     zellij::close(&on, session, whose, close, &self.events);
                 },
                 Act::Kill { session, whose } => {
-                    self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(zellij::kill(&on, session, whose, &self.events));
+                    self.keep_change(zellij::kill(&on, session, whose, &self.events));
                 },
                 Act::Leave { session, to, .. } => {
                     self.go(&on, &to);
@@ -1561,31 +1560,36 @@ impl App {
                 self.naming_on(move || {
                     let named = name.as_deref();
                     let made = || workstreams::project_made(&Machine::Local, &folder, named);
-                    let made = caught(made).map(Some);
-                    let made = made.map_err(|why| format!("menu: no project made: {why}"));
+                    let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
                     Made::Workstream { made, argv: Vec::new() }
                 });
                 self.leave();
             },
             Asked::AddProject { on, folder, name } => {
-                self.change(on, "no project made", move |on| {
+                self.change(on, move |on| {
                     workstreams::project_made(on, &folder, name.as_deref()).map(drop)
                 });
             },
             Asked::Rename { on, rename } => {
-                self.change(on, "not renamed", move |on| match &rename {
-                    Rename::Terminal(terminal, to) => {
-                        workstreams::renamed_terminal(on, *terminal, to.as_deref())
-                    },
-                    Rename::Workstream(workstream, to) => {
-                        workstreams::renamed_workstream(on, *workstream, to.as_deref())
-                    },
-                    Rename::Project(project, to) => workstreams::renamed_project(on, *project, to),
+                self.change(on, move |on| {
+                    let renamed = match &rename {
+                        Rename::Terminal(terminal, to) => {
+                            workstreams::renamed_terminal(on, *terminal, to.as_deref())
+                        },
+                        Rename::Workstream(workstream, to) => {
+                            workstreams::renamed_workstream(on, *workstream, to.as_deref())
+                        },
+                        Rename::Project(project, to) => {
+                            workstreams::renamed_project(on, *project, to)
+                        },
+                    };
+                    renamed.map_err(|why| format!("not renamed: {why}"))
                 });
             },
             Asked::RemoveProject { on, project } => {
-                self.change(on, "not removed", move |on| {
-                    workstreams::forgotten_project(on, project)
+                self.change(on, move |on| {
+                    let removed = workstreams::forgotten_project(on, project);
+                    removed.map_err(|why| format!("not removed: {why}"))
                 });
             },
             Asked::Make { menu, on, session, holder, cwd, name, command } => {
@@ -1615,8 +1619,7 @@ impl App {
                 let here = on == Machine::Local;
                 let deleting = prune::delete(menu, on, dir, agreed, &self.events);
                 if here {
-                    self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(deleting);
+                    self.keep_change(deleting);
                 }
             },
             Asked::Find { menu, on, cwd, agent } => {
@@ -1678,17 +1681,21 @@ impl App {
     }
 
     fn change(
-        &self,
+        &mut self,
         on: Machine,
-        unchanged: &'static str,
         change: impl FnOnce(&Machine) -> Result<(), String> + Send + 'static,
     ) {
         let events = self.events.clone();
-        thread::spawn(move || {
+        self.keep_change(thread::spawn(move || {
             if let Err(why) = caught(|| change(&on)) {
-                let _ = events.send(Event::Notice(format!("menu: {unchanged}: {why}")));
+                let _ = events.send(Event::Notice(format!("menu: {why}")));
             }
-        });
+        }));
+    }
+
+    fn keep_change(&mut self, change: JoinHandle<()>) {
+        self.changes.retain(|change| !change.is_finished());
+        self.changes.push(change);
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
@@ -1701,8 +1708,7 @@ impl App {
                     let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
                 }
             });
-            self.deleting.retain(|deleting| !deleting.is_finished());
-            self.deleting.push(deleting);
+            self.keep_change(deleting);
             return;
         }
         let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {

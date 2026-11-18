@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::aloud;
 use crate::dictation;
+use crate::machines::Machine;
 
 pub type Chord = (KeyCode, KeyModifiers);
 
@@ -35,8 +36,10 @@ pub const YANK: char = 'y';
 
 pub const YANK_PULL: char = 'p';
 
+pub const SKILLS: char = 'c';
+
 pub const MENU_GROUPS: [(char, &str); 4] =
-    [('c', "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
+    [(SKILLS, "Skills"), ('n', "New"), ('d', "Delete"), ('b', "Brief")];
 
 pub const ROW_GROUPS: [(char, &str); 1] = [(YANK, "Yank")];
 
@@ -85,8 +88,20 @@ pub struct Spec {
     pub reach: Reach,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Action {
+macro_rules! actions {
+    ($($action:ident,)+) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Action {
+            $($action,)+
+        }
+
+        impl Action {
+            pub const ALL: [Action; [$(stringify!($action),)+].len()] = [$(Action::$action,)+];
+        }
+    };
+}
+
+actions! {
     SearchSkills,
     Ask,
     FileIssue,
@@ -151,56 +166,6 @@ const fn anywhere(name: &'static str, keywords: &'static [&'static str], chord: 
 }
 
 impl Action {
-    pub const ALL: [Action; 47] = [
-        Action::SearchSkills,
-        Action::Ask,
-        Action::FileIssue,
-        Action::Review,
-        Action::IllegalStates,
-        Action::TigerStyle,
-        Action::FixLast,
-        Action::ExplainLast,
-        Action::FixChecks,
-        Action::NewPane,
-        Action::NewWorkstream,
-        Action::NewProject,
-        Action::NewMachine,
-        Action::RenameTerminal,
-        Action::RenameWorkstream,
-        Action::RenameProject,
-        Action::ClosePane,
-        Action::CloseWorkstream,
-        Action::RemoveProject,
-        Action::ForgetMachine,
-        Action::DeleteMerged,
-        Action::BriefEvery,
-        Action::BriefThis,
-        Action::BriefHighlighted,
-        Action::Search,
-        Action::Unread,
-        Action::Reorder,
-        Action::OpenPull,
-        Action::YankPull,
-        Action::PastedWorktree,
-        Action::PastedReview,
-        Action::PastedTackle,
-        Action::Swap,
-        Action::PaneLeft,
-        Action::PaneDown,
-        Action::PaneUp,
-        Action::PaneRight,
-        Action::Grow,
-        Action::Shrink,
-        Action::Collapse,
-        Action::Menu,
-        Action::Workstreams,
-        Action::Agents,
-        Action::Dirs,
-        Action::Dictate,
-        Action::ReadAloud,
-        Action::StopAloud,
-    ];
-
     #[must_use]
     pub const fn spec(self) -> Spec {
         use Reach::{Any, Here};
@@ -354,9 +319,20 @@ impl Action {
     }
 
     #[must_use]
-    pub fn fits(self, noun: Noun, here: bool) -> bool {
+    pub fn fits(self, noun: Noun, on: &Machine) -> bool {
         let Spec { nouns, reach, .. } = self.spec();
-        nouns.contains(&noun) && (here || reach == Reach::Any)
+        if !nouns.contains(&noun) {
+            return false;
+        }
+        match (on, reach) {
+            (Machine::Local, Reach::Any | Reach::Here) | (Machine::Remote(_), Reach::Any) => true,
+            (Machine::Remote(_), Reach::Here) => false,
+        }
+    }
+
+    #[must_use]
+    pub const fn starts_agent(self) -> bool {
+        matches!(self.key(), Key::Menu([SKILLS, _]))
     }
 
     #[must_use]
@@ -403,21 +379,50 @@ pub fn group_name(groups: &[(char, &'static str)], key: char) -> Option<&'static
     groups.iter().find(|(group, _)| *group == key).map(|(_, name)| *name)
 }
 
+const fn is_group(groups: &[(char, &str)], key: char) -> bool {
+    let mut at = 0;
+    while at < groups.len() {
+        if groups[at].0 == key {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
+
+const fn grouped(path: &[char], groups: &[(char, &str)]) -> bool {
+    match path {
+        [only] => !is_group(groups, *only),
+        [group, _] => is_group(groups, *group),
+        _ => false,
+    }
+}
+
+const _: () = {
+    let mut at = 0;
+    while at < Action::ALL.len() {
+        match Action::ALL[at].key() {
+            Key::Menu(path) => {
+                let menu = "a menu path is a key, or a named group's key then one of its own";
+                assert!(grouped(path, &MENU_GROUPS), "{}", menu);
+            },
+            Key::Row(path) => {
+                let row = "a sidebar path is a key, or a named group's key then one of its own";
+                assert!(grouped(path, &ROW_GROUPS), "{}", row);
+            },
+            Key::Pasted(_) | Key::Chord(_) => {},
+        }
+        at += 1;
+    }
+};
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
 
     fn overlap(one: Action, other: Action) -> bool {
         let (one, other) = (one.spec(), other.spec());
         one.nouns.iter().any(|noun| other.nouns.contains(noun))
-    }
-
-    #[test]
-    fn every_action_is_listed_once() {
-        let listed: HashSet<Action> = Action::ALL.into_iter().collect();
-        assert_eq!(listed.len(), Action::ALL.len());
     }
 
     #[test]
@@ -432,18 +437,17 @@ mod tests {
     }
 
     #[test]
-    fn a_key_two_deep_is_in_a_group_and_a_group_holds_no_action_of_its_own() {
-        let deep = |path: &[char], groups: &[(char, &'static str)]| match path {
-            [first, _] => group_name(groups, *first).is_some(),
-            [only] => group_name(groups, *only).is_none(),
-            _ => false,
-        };
-        for (action, path) in Action::menu() {
-            assert!(deep(path, &MENU_GROUPS), "{action:?} on {path:?}");
-        }
-        for (action, path) in Action::row() {
-            assert!(deep(path, &ROW_GROUPS), "{action:?} on {path:?}");
-        }
+    fn the_skills_group_s_actions_alone_start_an_agent() {
+        let starting = Action::ALL.into_iter().filter(|action| action.starts_agent());
+        let starting: Vec<Action> = starting.collect();
+        assert_eq!(starting, [
+            Action::Review,
+            Action::IllegalStates,
+            Action::TigerStyle,
+            Action::FixLast,
+            Action::ExplainLast,
+            Action::FixChecks,
+        ]);
     }
 
     #[test]
@@ -469,9 +473,10 @@ mod tests {
 
     #[test]
     fn an_action_here_alone_is_kept_from_another_machine_s_rows() {
-        assert!(Action::ClosePane.fits(Noun::Pane, true));
-        assert!(!Action::ClosePane.fits(Noun::Pane, false));
-        assert!(!Action::ClosePane.fits(Noun::Workstream, true));
-        assert!(Action::CloseWorkstream.fits(Noun::Workstream, false));
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        assert!(Action::ClosePane.fits(Noun::Pane, &Machine::Local));
+        assert!(!Action::ClosePane.fits(Noun::Pane, &vps));
+        assert!(!Action::ClosePane.fits(Noun::Workstream, &Machine::Local));
+        assert!(Action::CloseWorkstream.fits(Noun::Workstream, &vps));
     }
 }

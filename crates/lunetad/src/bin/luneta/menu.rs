@@ -176,14 +176,6 @@ enum Last {
 }
 
 impl Last {
-    const fn of(action: Action) -> Option<Last> {
-        match action {
-            Action::FixLast => Some(Last::Fix),
-            Action::ExplainLast => Some(Last::Explain),
-            _ => None,
-        }
-    }
-
     const fn asks(self) -> &'static str {
         match self {
             Last::Fix => "Fix this.",
@@ -235,8 +227,18 @@ impl Pull {
         let KeyCode::Char(c) = key.code else {
             return None;
         };
-        let keyed = |pull: &Pull| pull.action(asks).key() == Key::Pasted(c);
-        Pull::ALL.into_iter().find(|pull| bare(key) && keyed(pull))
+        if !bare(key) {
+            return None;
+        }
+        Pull::ALL.into_iter().find(|pull| pull.key(asks) == c)
+    }
+
+    fn key(self, asks: Asks) -> char {
+        let action = self.action(asks);
+        let Key::Pasted(key) = action.key() else {
+            unreachable!("{action:?} answers a pasted link, and so is keyed as one");
+        };
+        key
     }
 }
 
@@ -269,7 +271,7 @@ fn tree(
         let (group, key) = match path {
             [key] => (None, *key),
             [group, key] => (Some(*group), *key),
-            _ => continue,
+            _ => unreachable!("{action:?} on {path:?}: actions.rs keeps a path to one or two keys"),
         };
         let Some(group) = group else {
             root.push(Entry::Act { key, action });
@@ -277,27 +279,17 @@ fn tree(
         };
         let held = |entry: &Entry| matches!(entry, Entry::Group { key, .. } if *key == group);
         let at = root.iter().position(held).unwrap_or_else(|| {
-            let name = actions::group_name(groups, group).unwrap_or_default();
+            let name = actions::group_name(groups, group);
+            let name = name.expect("actions.rs names the group of every path two keys long");
             root.push(Entry::Group { key: group, name, entries: Vec::new() });
             root.len() - 1
         });
-        if let Some(Entry::Group { entries, .. }) = root.get_mut(at) {
-            entries.push(Entry::Act { key, action });
-        }
+        let Some(Entry::Group { entries, .. }) = root.get_mut(at) else {
+            unreachable!("entry {at} of the root is the group {group:?}");
+        };
+        entries.push(Entry::Act { key, action });
     }
     root
-}
-
-const fn starts_agent(action: Action) -> bool {
-    matches!(
-        action,
-        Action::Review
-            | Action::IllegalStates
-            | Action::TigerStyle
-            | Action::FixLast
-            | Action::ExplainLast
-            | Action::FixChecks
-    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -340,9 +332,15 @@ impl Keys {
     }
 
     fn starts(&self) -> bool {
+        if self.search.is_some() {
+            return true;
+        }
+        if self.open.is_empty() {
+            return false;
+        }
         let starting =
-            |entry: &Entry| matches!(entry, Entry::Act { action, .. } if starts_agent(*action));
-        self.search.is_some() || (!self.open.is_empty() && self.entries().iter().any(starting))
+            |entry: &Entry| matches!(entry, Entry::Act { action, .. } if action.starts_agent());
+        self.entries().iter().any(starting)
     }
 
     fn key(&mut self, key: &KeyEvent) -> Pressed {
@@ -462,6 +460,13 @@ pub enum Rename {
     Project(ProjectId, String),
 }
 
+#[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
+enum Entered {
+    Done(Done),
+    Next(Typing),
+    Wrong(String),
+}
+
 impl Typing {
     fn title(&self) -> &'static str {
         match self {
@@ -490,26 +495,31 @@ impl Typing {
         }
     }
 
-    fn typed(self, typed: &str, on: &Machine) -> Result<Result<Done, Typing>, String> {
+    fn typed(self, typed: &str, on: &Machine) -> Entered {
         let named = Some(typed.trim().to_owned()).filter(|name| !name.is_empty());
         match (self, named) {
             (Typing::Machine, _) => match typed.parse::<Destination>() {
-                Ok(destination) => Ok(Ok(Done::Ssh(destination))),
-                Err(why) => Err(format!("not a destination: {why}")),
+                Ok(destination) => Entered::Done(Done::Ssh(destination)),
+                Err(why) => Entered::Wrong(format!("not a destination: {why}")),
             },
-            (Typing::Folder, _) => folder_typed(typed).map(|folder| Err(Typing::Name(folder))),
-            (Typing::Name(folder), name) => Ok(Ok(Done::Project { on: on.clone(), folder, name })),
+            (Typing::Folder, _) => match folder_typed(typed) {
+                Ok(folder) => Entered::Next(Typing::Name(folder)),
+                Err(why) => Entered::Wrong(why),
+            },
+            (Typing::Name(folder), name) => {
+                Entered::Done(Done::Project { on: on.clone(), folder, name })
+            },
             (Typing::Rename(Renames::Terminal(terminal)), name) => {
-                Ok(Ok(Done::Rename(on.clone(), Rename::Terminal(terminal, name))))
+                Entered::Done(Done::Rename(on.clone(), Rename::Terminal(terminal, name)))
             },
             (Typing::Rename(Renames::Workstream(workstream)), name) => {
-                Ok(Ok(Done::Rename(on.clone(), Rename::Workstream(workstream, name))))
+                Entered::Done(Done::Rename(on.clone(), Rename::Workstream(workstream, name)))
             },
             (Typing::Rename(Renames::Project(project)), Some(name)) => {
-                Ok(Ok(Done::Rename(on.clone(), Rename::Project(project, name))))
+                Entered::Done(Done::Rename(on.clone(), Rename::Project(project, name)))
             },
             (Typing::Rename(Renames::Project(_)), None) => {
-                Err("a project keeps a name: type one".to_owned())
+                Entered::Wrong("a project keeps a name: type one".to_owned())
             },
         }
     }
@@ -662,7 +672,7 @@ impl Target {
     }
 
     fn fits(&self, action: Action) -> bool {
-        if !action.fits(self.noun(), *self.machine() == Machine::Local) {
+        if !action.fits(self.noun(), self.machine()) {
             return false;
         }
         match action {
@@ -786,12 +796,23 @@ fn started(keys: &Keys, row: &PaneRow, skill: &str) -> Result<(Listed, Wants), S
     Ok((session.clone(), Wants::Open { session, pane, cwd, opens }))
 }
 
-fn last_key(action: Action) -> char {
-    match action.key() {
-        Key::Menu(path) | Key::Row(path) => path.last().copied().unwrap_or('y'),
-        Key::Pasted(key) => key,
-        Key::Chord(_) => 'y',
+const ASKS_FIRST: [Action; 3] = [Action::ClosePane, Action::CloseWorkstream, Action::DeleteMerged];
+
+const _: () = {
+    let mut at = 0;
+    while at < ASKS_FIRST.len() {
+        let in_menu = matches!(ASKS_FIRST[at].key(), Key::Menu([_, ..]));
+        assert!(in_menu, "an action that asks first is said yes to with its menu key");
+        at += 1;
     }
+};
+
+fn yes_key(action: Action) -> char {
+    assert!(ASKS_FIRST.contains(&action), "{action:?} asks no question");
+    let Key::Menu([.., last]) = action.key() else {
+        unreachable!("{action:?} asks first, and so is in the menu");
+    };
+    *last
 }
 
 struct Beside {
@@ -1162,11 +1183,8 @@ impl Menu {
         true
     }
 
-    fn act(self, action: Action) -> Did {
-        let Menu { number, target, stage } = self;
-        let Stage::Choosing(mut keys) = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
-        };
+    fn act(number: u64, target: &Target, mut keys: Keys, action: Action) -> Did {
+        assert!(target.fits(action), "the menu offers {action:?} only on a row it fits");
         let stays = |stage: Stage, wants: Wants| {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
@@ -1175,17 +1193,40 @@ impl Menu {
             stays(stage, Wants::Nothing)
         };
         let deleting = |keys: Keys, session: &Listed, scope: Scope| {
-            let (key, session) = (last_key(action), session.clone());
+            let (key, session) = (yes_key(action), session.clone());
             let wants = Wants::Plan { session: session.clone(), scope };
             let delete = Delete { key, session, scope };
             stays(Stage::Planning { keys, delete, agreed: None }, wants)
         };
+        let reading = |keys: Keys, row: &PaneRow, last: Last| match row.ended() {
+            Ok((beside, ended)) => {
+                let (session, pane) = (beside.session.clone(), beside.pane);
+                let wants = Wants::Printed { session, pane, ended: ended.clone() };
+                stays(Stage::Reading { keys, last, beside, ended }, wants)
+            },
+            Err(reason) => Did::Closed(Done::Wrong(reason)),
+        };
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
-        if !target.fits(action) {
-            return stays(Stage::Choosing(keys), Wants::Nothing);
-        }
-        match (action, &target) {
-            (Action::SearchSkills, Target::Pane(_, row)) => match row.beside() {
+        let on_pane = move || {
+            let Target::Pane(_, row) = target else {
+                unreachable!("fits() keeps {action:?} to a pane's row");
+            };
+            row
+        };
+        let on_workstream = move || {
+            let Target::Workstream(_, row) = target else {
+                unreachable!("fits() keeps {action:?} to a workstream's row");
+            };
+            row
+        };
+        let on_project = move || {
+            let Target::Project(_, project) = target else {
+                unreachable!("fits() keeps {action:?} to a project's row");
+            };
+            project
+        };
+        match action {
+            Action::SearchSkills => match on_pane().beside() {
                 Ok(Beside { cwd, .. }) => {
                     keys.search = Some(Search::new());
                     let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent.harness() };
@@ -1193,32 +1234,23 @@ impl Menu {
                 },
                 Err(reason) => wrong(reason),
             },
-            (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::Pane(_, row)) => {
-                let skill = action.skill().unwrap_or_default();
-                match started(&keys, row, skill) {
+            Action::Review | Action::IllegalStates | Action::TigerStyle => {
+                let skill = action.skill().expect("a skill's action names its skill");
+                match started(&keys, on_pane(), skill) {
                     Ok((session, wants)) => stays(Stage::Opening { keys, session }, wants),
                     Err(reason) => wrong(reason),
                 }
             },
-            (Action::FixLast | Action::ExplainLast, Target::Pane(_, row)) => {
-                match (Last::of(action), row.ended()) {
-                    (Some(last), Ok((beside, ended))) => {
-                        let (session, pane) = (beside.session.clone(), beside.pane);
-                        let wants = Wants::Printed { session, pane, ended: ended.clone() };
-                        stays(Stage::Reading { keys, last, beside, ended }, wants)
-                    },
-                    (_, Err(reason)) => wrong(reason),
-                    (None, Ok(_)) => Did::Closed(Done::Nothing),
-                }
-            },
-            (Action::FixChecks, Target::Pane(_, row)) => match row.pulled() {
+            Action::FixLast => reading(keys, on_pane(), Last::Fix),
+            Action::ExplainLast => reading(keys, on_pane(), Last::Explain),
+            Action::FixChecks => match on_pane().pulled() {
                 Ok((beside, page)) => {
                     let wants = Wants::Checks { page: page.clone() };
                     stays(Stage::Fetching { keys, beside, page }, wants)
                 },
                 Err(reason) => wrong(reason),
             },
-            (Action::NewPane, Target::Pane(_, row)) => match row.beside() {
+            Action::NewPane => match on_pane().beside() {
                 Ok(Beside { session, pane, cwd }) => {
                     let opens = Opens::Pane { beside: pane.id(), command: Vec::new() };
                     let stage = Stage::Opening { keys, session: session.clone() };
@@ -1226,57 +1258,86 @@ impl Menu {
                 },
                 Err(reason) => wrong(reason),
             },
-            (Action::NewWorkstream, _) => match (target.project(), target.folder()) {
-                (Some(project), Ok(folder)) => Did::Closed(Done::Workstream(project.id(), folder)),
-                (_, Err(reason)) => wrong(reason),
-                (None, Ok(_)) => Did::Closed(Done::Nothing),
+            Action::NewWorkstream => {
+                let project = target.project().expect("fits() offers n w only in a project");
+                match target.folder() {
+                    Ok(folder) => Did::Closed(Done::Workstream(project.id(), folder)),
+                    Err(reason) => wrong(reason),
+                }
             },
-            (Action::NewProject, _) => {
+            Action::NewProject => {
                 let typed = target.folder_hint();
                 let stage = Stage::Typing { keys, typing: Typing::Folder, typed, wrong: None };
                 stays(stage, Wants::Nothing)
             },
-            (Action::NewMachine, _) => typing(keys, Typing::Machine),
-            (Action::RenameTerminal, Target::Pane(_, PaneRow { terminal: Some(terminal), .. })) => {
-                typing(keys, Typing::Rename(Renames::Terminal(*terminal)))
+            Action::NewMachine => typing(keys, Typing::Machine),
+            Action::RenameTerminal => {
+                let terminal = on_pane().terminal;
+                let terminal = terminal.expect("fits() offers r only on a known terminal");
+                typing(keys, Typing::Rename(Renames::Terminal(terminal)))
             },
-            (Action::RenameWorkstream, Target::Workstream(_, row)) => {
-                typing(keys, Typing::Rename(Renames::Workstream(row.place.workstream)))
+            Action::RenameWorkstream => {
+                typing(keys, Typing::Rename(Renames::Workstream(on_workstream().place.workstream)))
             },
-            (Action::RenameProject, Target::Project(_, project)) => {
-                typing(keys, Typing::Rename(Renames::Project(project.project.id())))
+            Action::RenameProject => {
+                typing(keys, Typing::Rename(Renames::Project(on_project().project.id())))
             },
-            (Action::ClosePane, Target::Pane(_, row)) => {
+            Action::ClosePane => {
+                let row = on_pane();
                 deleting(keys, &row.session, Scope::Pane(row.pane))
             },
-            (Action::CloseWorkstream, Target::Workstream(_, row)) => {
+            Action::CloseWorkstream => {
+                let row = on_workstream();
                 let scope = Scope::Workstream(row.place.workstream);
                 deleting(keys, row.place.project.listed(), scope)
             },
-            (Action::RemoveProject, Target::Project(on, project)) => {
-                Did::Closed(Done::Remove(on.clone(), project.project.id()))
+            Action::RemoveProject => {
+                Did::Closed(Done::Remove(target.machine().clone(), on_project().project.id()))
             },
-            (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
+            Action::ForgetMachine => {
+                let Target::Machine(Machine::Remote(destination)) = target else {
+                    unreachable!("fits() offers d d on a machine's row only for another machine");
+                };
                 Did::Closed(Done::Forget(destination.clone()))
             },
-            (Action::DeleteMerged, _) => match target.merged_in() {
-                Some(dir) => {
-                    let wants = Wants::Prunes { dir: dir.clone() };
-                    stays(Stage::Sweeping { keys, dir }, wants)
-                },
-                None => stays(Stage::Choosing(keys), Wants::Nothing),
+            Action::DeleteMerged => {
+                let dir = target.merged_in().expect("fits() offers d m only in a repository");
+                let wants = Wants::Prunes { dir: dir.clone() };
+                stays(Stage::Sweeping { keys, dir }, wants)
             },
-            (Action::BriefEvery, _) => Did::Closed(Done::Brief(target.brief(brief::Scope::Every))),
-            (Action::BriefThis, _) => Did::Closed(Done::Brief(target.brief(brief::Scope::Session))),
-            (Action::BriefHighlighted, _) => {
+            Action::BriefEvery => Did::Closed(Done::Brief(target.brief(brief::Scope::Every))),
+            Action::BriefThis => Did::Closed(Done::Brief(target.brief(brief::Scope::Session))),
+            Action::BriefHighlighted => {
                 Did::Closed(Done::Brief(target.brief(brief::Scope::Highlighted)))
             },
-            (Action::Ask, _) => Did::Closed(Done::Ask(target.clone())),
-            (Action::FileIssue, _) => match target.repository() {
-                Some(repository) => Did::Closed(Done::Issue(repository)),
-                None => Did::Closed(Done::Nothing),
+            Action::Ask => Did::Closed(Done::Ask(target.clone())),
+            Action::FileIssue => {
+                let repository = target.repository().expect("fits() offers i only in a repository");
+                Did::Closed(Done::Issue(repository))
             },
-            _ => stays(Stage::Choosing(keys), Wants::Nothing),
+            Action::Search
+            | Action::Unread
+            | Action::Reorder
+            | Action::OpenPull
+            | Action::YankPull
+            | Action::PastedWorktree
+            | Action::PastedReview
+            | Action::PastedTackle
+            | Action::Swap
+            | Action::PaneLeft
+            | Action::PaneDown
+            | Action::PaneUp
+            | Action::PaneRight
+            | Action::Grow
+            | Action::Shrink
+            | Action::Collapse
+            | Action::Menu
+            | Action::Workstreams
+            | Action::Agents
+            | Action::Dirs
+            | Action::Dictate
+            | Action::ReadAloud
+            | Action::StopAloud => unreachable!("{action:?} is no action of the menu's"),
         }
     }
 
@@ -1309,9 +1370,7 @@ impl Menu {
                     }
                 },
                 (Pressed::Start(_), _) => stays(Stage::Choosing(keys), Wants::Nothing),
-                (Pressed::Act(action), _) => {
-                    Menu { number, target, stage: Stage::Choosing(keys) }.act(action)
-                },
+                (Pressed::Act(action), _) => Menu::act(number, &target, keys, action),
             },
             Stage::Typing { keys, typing, mut typed, .. } => match type_key(key, &mut typed) {
                 Typed::Close => Did::Closed(Done::Nothing),
@@ -1320,12 +1379,12 @@ impl Menu {
                     stays(Stage::Typing { keys, typing, typed, wrong: None }, Wants::Nothing)
                 },
                 Typed::Enter => match typing.clone().typed(&typed, target.machine()) {
-                    Ok(Ok(done)) => Did::Closed(done),
-                    Ok(Err(typing)) => {
+                    Entered::Done(done) => Did::Closed(done),
+                    Entered::Next(typing) => {
                         let typed = String::new();
                         stays(Stage::Typing { keys, typing, typed, wrong: None }, Wants::Nothing)
                     },
-                    Err(why) => {
+                    Entered::Wrong(why) => {
                         let wrong = Some(why);
                         stays(Stage::Typing { keys, typing, typed, wrong }, Wants::Nothing)
                     },
@@ -1371,7 +1430,7 @@ impl Menu {
             | Stage::Reading { .. }
             | Stage::Fetching { .. }
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
-            Stage::Swept { keys, dir, plan } => match answer(key, last_key(Action::DeleteMerged)) {
+            Stage::Swept { keys, dir, plan } => match answer(key, yes_key(Action::DeleteMerged)) {
                 Answer::Yes if !plan.goes.is_empty() => {
                     let wants = Wants::Prune { dir: dir.clone(), agreed: plan.deletes() };
                     stays(Stage::Pruning { keys, dir, count: plan.goes.len() }, wants)
@@ -1682,12 +1741,7 @@ impl Menu {
                     Step::Choosing { wrong } => {
                         let asks = Asks::of(work);
                         let entry = |pull: Pull| {
-                            let action = pull.action(asks);
-                            let key = match action.key() {
-                                Key::Pasted(key) => key,
-                                Key::Menu(_) | Key::Row(_) | Key::Chord(_) => ' ',
-                            };
-                            Entry::Act { key, action }
+                            Entry::Act { key: pull.key(asks), action: pull.action(asks) }
                         };
                         let entries = Pull::ALL.map(entry);
                         spots = entry_spots(&entries, width).map(Choice::Key);
@@ -2072,7 +2126,7 @@ pub fn yanks(width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>)
         Entry::Group { key: YANK, name, entries } => Some((name, entries)),
         Entry::Group { .. } | Entry::Act { .. } => None,
     });
-    let (name, entries) = yanks.unwrap_or_default();
+    let (name, entries) = yanks.expect("the catalogue keys its yanks under y");
     listed(name, &entries, width, room)
 }
 

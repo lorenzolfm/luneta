@@ -368,9 +368,12 @@ pub fn project_made(
     name: Option<&str>,
 ) -> Result<WorkstreamId, String> {
     let (dir, name) = (folder.to_owned(), name.map(str::to_owned));
-    let made = made_there(machine, Change::AddProject(AddProject { dir, name }))?;
-    let project = made.ok_or("lunetad made no project")?;
+    let unmade = |why: String| format!("no project made: {why}");
+    let made = made_there(machine, Change::AddProject(AddProject { dir, name })).map_err(unmade)?;
+    let project = made.ok_or_else(|| unmade("lunetad said no project's id".to_owned()))?;
+    let empty = |why: String| format!("{folder} is a project now, with no workstream: {why}");
     let at = WorkstreamAt { project, folder: folder.to_owned() };
-    let found = made_there(machine, Change::WorkstreamAt(at))?.and_then(WorkstreamId::of);
-    found.ok_or_else(|| "lunetad found and made no workstream".to_owned())
+    let found = made_there(machine, Change::WorkstreamAt(at)).map_err(empty)?;
+    let found = found.and_then(WorkstreamId::of);
+    found.ok_or_else(|| empty("lunetad said no workstream's id".to_owned()))
 }
