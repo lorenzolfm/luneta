@@ -30,7 +30,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
-use lunetad::{Change, Destination, Direction, Directory};
+use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::{DefaultTerminal, Terminal};
@@ -173,6 +173,13 @@ const RIGHT: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::CONTRO
 
 const GROW: (KeyCode, KeyModifiers) = (KeyCode::Char('='), KeyModifiers::ALT);
 
+const GROWS: [(KeyCode, KeyModifiers); 4] = [
+    GROW,
+    (KeyCode::Char('+'), KeyModifiers::ALT),
+    (KeyCode::Char('='), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
+    (KeyCode::Char('+'), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
+];
+
 const SHRINK: (KeyCode, KeyModifiers) = (KeyCode::Char('-'), KeyModifiers::ALT);
 
 const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
@@ -207,15 +214,11 @@ fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
     }
 }
 
-fn resized((code, modifiers): (KeyCode, KeyModifiers)) -> Option<Change> {
-    let shifted = KeyModifiers::ALT | KeyModifiers::SHIFT;
-    match code {
-        KeyCode::Char('=' | '+') if modifiers == GROW.1 || modifiers == shifted => {
-            Some(Change::Grow)
-        },
-        KeyCode::Char('-') if modifiers == SHRINK.1 => Some(Change::Shrink),
-        _ => None,
+fn resized(chord: (KeyCode, KeyModifiers)) -> Option<Growth> {
+    if GROWS.contains(&chord) {
+        return Some(Growth::Grow);
     }
+    (chord == SHRINK).then_some(Growth::Shrink)
 }
 
 #[derive(Debug)]
@@ -1874,11 +1877,17 @@ impl App {
 
     fn step(&mut self, direction: Direction) {
         self.leave();
-        if !self.right.at_edge(direction) {
-            self.right.ask(lunetad::Asked::Step(direction));
-            return;
-        }
-        if let Some(beside) = self.projected.tab_beside(self.right.workstream(), direction) {
+        self.right.ask(lunetad::Asked::Step(direction));
+    }
+
+    fn cross(&mut self, direction: Direction) {
+        let (before, after) = self.projected.tabs_beside(self.right.workstream());
+        let beside = match direction {
+            Direction::Left => before,
+            Direction::Right => after,
+            Direction::Up | Direction::Down => None,
+        };
+        if let Some(beside) = beside {
             self.go_workstream(beside, None);
         }
     }
@@ -1954,6 +1963,7 @@ impl App {
     fn heeded(&mut self, heeded: Heeded) {
         match heeded {
             Heeded::Quiet => {},
+            Heeded::Edged(direction) => self.cross(direction),
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Forgotten(why) => {
                 let forgotten = self.right.workstream();
@@ -2276,9 +2286,9 @@ mod tests {
         let (alt, shifted) = (KeyModifiers::ALT, KeyModifiers::ALT | KeyModifiers::SHIFT);
         let grows = [('=', alt), ('+', alt), ('=', shifted), ('+', shifted)];
         for (key, modifiers) in grows {
-            assert_eq!(resized((KeyCode::Char(key), modifiers)), Some(Change::Grow), "{key}");
+            assert_eq!(resized((KeyCode::Char(key), modifiers)), Some(Growth::Grow), "{key}");
         }
-        assert_eq!(resized((KeyCode::Char('-'), alt)), Some(Change::Shrink));
+        assert_eq!(resized((KeyCode::Char('-'), alt)), Some(Growth::Shrink));
         let none = [('=', KeyModifiers::NONE), ('-', shifted), ('=', KeyModifiers::CONTROL)];
         for (key, modifiers) in none {
             assert_eq!(resized((KeyCode::Char(key), modifiers)), None, "{key} {modifiers:?}");

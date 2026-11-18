@@ -115,7 +115,7 @@ impl Order {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Change {
+pub enum Growth {
     Grow,
     Shrink,
 }
@@ -557,13 +557,13 @@ impl<L: Leaf> Tree<L> {
     }
 
     #[must_use]
-    pub fn resize(&mut self, pane: TerminalId, sides: Sides, change: Change, size: Size) -> bool {
+    pub fn resize(&mut self, pane: TerminalId, sides: Sides, growth: Growth, size: Size) -> bool {
         let before = self.rects(size);
         let moved = match sides {
-            Sides::One(direction) => self.border_moved(pane, direction, change, size),
+            Sides::One(direction) => self.border_moved(pane, direction, growth, size),
             Sides::Every => {
                 let moved = Direction::ALL
-                    .map(|direction| self.border_moved(pane, direction, change, size));
+                    .map(|direction| self.border_moved(pane, direction, growth, size));
                 moved.contains(&true)
             },
         };
@@ -577,12 +577,12 @@ impl<L: Leaf> Tree<L> {
             found.map(|(_, rect)| *rect).expect("a resized pane is in the tree")
         };
         let (was, now) = (rect_of(&before), rect_of(&after));
-        match change {
-            Change::Grow => {
+        match growth {
+            Growth::Grow => {
                 assert!(now.columns >= was.columns, "{was:?} grows, not to {now:?}");
                 assert!(now.rows >= was.rows, "{was:?} grows, not to {now:?}");
             },
-            Change::Shrink => {
+            Growth::Shrink => {
                 assert!(now.columns <= was.columns, "{was:?} shrinks, not to {now:?}");
                 assert!(now.rows <= was.rows, "{was:?} shrinks, not to {now:?}");
             },
@@ -594,7 +594,7 @@ impl<L: Leaf> Tree<L> {
         &mut self,
         pane: TerminalId,
         direction: Direction,
-        change: Change,
+        growth: Growth,
         size: Size,
     ) -> bool {
         let (towards, half) = direction.border();
@@ -613,7 +613,7 @@ impl<L: Leaf> Tree<L> {
             if (split.towards, held) == (towards, half) {
                 let extent = rects[parent].extent(towards);
                 let bounds = split.bounds(extent, leasts[split.first()], leasts[split.second()]);
-                return split.moved(extent, bounds, half, change);
+                return split.moved(extent, bounds, half, growth);
             }
             node = parent;
         }
@@ -794,7 +794,7 @@ impl Split {
         rect.cut(self.towards, self.first_extent(extent, bounds))
     }
 
-    fn moved(&mut self, extent: u16, bounds: (u16, u16), side: Side, change: Change) -> bool {
+    fn moved(&mut self, extent: u16, bounds: (u16, u16), side: Side, growth: Growth) -> bool {
         assert!(extent > 0, "a border moves on a side of some cells");
         let (low, high) = bounds;
         let now = self.first_extent(extent, bounds);
@@ -802,8 +802,8 @@ impl Split {
             .expect("a step is less than the side")
             .max(1);
         let grows_first = matches!(
-            (side, change),
-            (Side::First, Change::Grow) | (Side::Second, Change::Shrink)
+            (side, growth),
+            (Side::First, Growth::Grow) | (Side::Second, Growth::Shrink)
         );
         let wanted = if grows_first { now.saturating_add(step) } else { now.saturating_sub(step) };
         let wanted = wanted.clamp(low, high);
@@ -1062,14 +1062,14 @@ mod tests {
     fn a_resize_moves_the_nearest_border_on_that_side() {
         let at = size(80, 24);
         let mut tree = three(at);
-        assert!(tree.resize(pane(3), Sides::One(Direction::Left), Change::Grow, at));
+        assert!(tree.resize(pane(3), Sides::One(Direction::Left), Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 36, 24));
-        assert!(tree.resize(pane(3), Sides::One(Direction::Up), Change::Grow, at));
+        assert!(tree.resize(pane(3), Sides::One(Direction::Up), Growth::Grow, at));
         assert_eq!(tree.rects(at)[2].1, rect(36, 11, 44, 13));
-        assert!(tree.resize(pane(1), Sides::One(Direction::Right), Change::Shrink, at));
+        assert!(tree.resize(pane(1), Sides::One(Direction::Right), Growth::Shrink, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 32, 24));
-        assert!(!tree.resize(pane(1), Sides::One(Direction::Left), Change::Grow, at));
-        assert!(!tree.resize(pane(2), Sides::One(Direction::Up), Change::Grow, at));
+        assert!(!tree.resize(pane(1), Sides::One(Direction::Left), Growth::Grow, at));
+        assert!(!tree.resize(pane(2), Sides::One(Direction::Up), Growth::Grow, at));
         tiles(&tree, at);
     }
 
@@ -1077,16 +1077,16 @@ mod tests {
     fn a_resize_on_every_side_moves_each_border_the_pane_has() {
         let at = size(80, 24);
         let mut tree = three(at);
-        assert!(tree.resize(pane(3), Sides::Every, Change::Grow, at));
+        assert!(tree.resize(pane(3), Sides::Every, Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 36, 24));
         assert_eq!(tree.rects(at)[2].1, rect(36, 11, 44, 13));
         tiles(&tree, at);
-        assert!(tree.resize(pane(3), Sides::Every, Change::Shrink, at));
+        assert!(tree.resize(pane(3), Sides::Every, Growth::Shrink, at));
         assert_eq!(tree, three(at), "a shrink takes back the grow on every side");
-        assert!(tree.resize(pane(1), Sides::Every, Change::Grow, at));
+        assert!(tree.resize(pane(1), Sides::Every, Growth::Grow, at));
         assert_eq!(tree.rects(at)[0].1, rect(0, 0, 44, 24));
         let mut lone = Tree::one(pane(1));
-        assert!(!lone.resize(pane(1), Sides::Every, Change::Grow, at));
+        assert!(!lone.resize(pane(1), Sides::Every, Growth::Grow, at));
     }
 
     #[test]
@@ -1094,11 +1094,11 @@ mod tests {
         let at = size(20, 5);
         let mut tree = Tree::one(pane(1));
         tree.split(pane(1), Towards::Right, pane(2), at);
-        while tree.resize(pane(1), Sides::One(Direction::Right), Change::Grow, at) {}
+        while tree.resize(pane(1), Sides::One(Direction::Right), Growth::Grow, at) {}
         assert_eq!(tree.rects(at)[1].1, rect(15, 0, COLUMNS_MIN, 5));
-        assert!(!tree.resize(pane(1), Sides::One(Direction::Right), Change::Grow, at));
+        assert!(!tree.resize(pane(1), Sides::One(Direction::Right), Growth::Grow, at));
         let narrow = size(2 * COLUMNS_MIN, 5);
-        assert!(!tree.resize(pane(2), Sides::One(Direction::Left), Change::Grow, narrow));
+        assert!(!tree.resize(pane(2), Sides::One(Direction::Left), Growth::Grow, narrow));
     }
 
     #[test]
@@ -1127,7 +1127,7 @@ mod tests {
         let at = size(80, 24);
         let mut tree = three(at);
         tree.split(pane(1), Towards::Down, pane(4), at);
-        assert!(tree.resize(pane(4), Sides::One(Direction::Up), Change::Grow, at));
+        assert!(tree.resize(pane(4), Sides::One(Direction::Up), Growth::Grow, at));
         assert!(matches!(tree.remove(pane(2)), Removed::Out { .. }));
         let preorder: Vec<Preordered<TerminalId>> = tree
             .preorder()

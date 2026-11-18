@@ -395,7 +395,7 @@ pub enum Change {
     Resize {
         terminal: TerminalId,
         sides: layout::Sides,
-        change: layout::Change,
+        growth: layout::Growth,
         size: Size,
     },
     Swap { one: TerminalId, other: TerminalId },
@@ -761,8 +761,8 @@ impl Projects {
                 changed.view_of(terminal)?.closed(terminal);
                 None
             },
-            Change::Resize { terminal, sides, change, size } => {
-                changed.view_of(terminal)?.resized(terminal, sides, change, size)?;
+            Change::Resize { terminal, sides, growth, size } => {
+                changed.view_of(terminal)?.resized(terminal, sides, growth, size)?;
                 None
             },
             Change::Swap { one, other } => {
@@ -1252,9 +1252,9 @@ mod tests {
         assert_eq!(view(&projects, main).full(), Some(two));
         let swap = change(&projects, Change::Swap { one, other: two });
         assert!(swap.unwrap_err().contains("moves none"), "a full view moves no terminal");
-        let (sides, grow) = (layout::Sides::One(layout::Direction::Left), layout::Change::Grow);
+        let (sides, grow) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
         let size = Size::of(80, 24).unwrap();
-        let resize = Change::Resize { terminal: one, sides, change: grow, size };
+        let resize = Change::Resize { terminal: one, sides, growth: grow, size };
         assert!(change(&projects, resize).unwrap_err().contains("resized by none"));
         let gone = TerminalId::of(7).unwrap();
         assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no terminal"));

@@ -58,6 +58,7 @@ enum Moused {
 
 pub enum Heeded {
     Quiet,
+    Edged(Direction),
     Note(String),
     Forgotten(String),
     Lost(String),
@@ -181,22 +182,8 @@ impl View {
         Some((inner, key, self.screens.get(&key)?))
     }
 
-    fn at_edge(&self, direction: Direction) -> bool {
-        let Some(laid) = self.laid() else {
-            return true;
-        };
-        let Some(focused) = laid.focused() else {
-            return true;
-        };
-        let (columns, rows) = laid.size().get();
-        let rect = focused.rect;
-        let end = |from: u16, cells: u16| u32::from(from) + u32::from(cells);
-        match direction {
-            Direction::Left => rect.column == 0,
-            Direction::Up => rect.row == 0,
-            Direction::Right => end(rect.column, rect.columns) == u32::from(columns),
-            Direction::Down => end(rect.row, rect.rows) == u32::from(rows),
-        }
+    fn edged(&self, workstream: WorkstreamId, direction: Direction) -> Option<Direction> {
+        (workstream == self.workstream).then_some(direction)
     }
 
     fn named_tabs(&self) -> impl Iterator<Item = (WorkstreamId, &str)> {
@@ -462,6 +449,9 @@ impl Viewed {
                 self.watch();
                 Heeded::Quiet
             },
+            Heard::Edged { workstream, direction } => {
+                self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
+            },
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) => {
                 self.show = None;
@@ -558,11 +548,6 @@ impl Viewed {
         self.view.go(workstream);
         self.ask(Asked::Go(workstream));
         self.watch();
-    }
-
-    #[must_use]
-    pub fn at_edge(&self, direction: Direction) -> bool {
-        self.view.at_edge(direction)
     }
 
     pub fn open_in(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
@@ -806,16 +791,12 @@ mod tests {
     }
 
     #[test]
-    fn the_focused_terminal_is_at_each_edge_of_the_view_it_touches_and_one_unlaid_at_all() {
-        let edges = |view: &View| Direction::ALL.map(|direction| view.at_edge(direction));
+    fn an_edge_is_heeded_only_from_the_workstream_the_view_is_on() {
         let mut view = split_view();
-        assert_eq!(edges(&view), [true, false, true, true], "left, right, up, down");
-        assert!(!view.laid_out(laid(halves(), 12, false)));
-        assert_eq!(edges(&view), [false, true, true, true]);
-        assert!(!view.laid_out(laid(halves(), 11, true)));
-        assert_eq!(edges(&view), [true, false, true, true], "a full one keeps its place");
+        assert_eq!(view.edged(workstream(1), Direction::Right), Some(Direction::Right));
         view.go(workstream(2));
-        assert_eq!(edges(&view), [true; 4]);
+        assert_eq!(view.edged(workstream(1), Direction::Right), None, "an edge of the one left");
+        assert_eq!(view.edged(workstream(2), Direction::Left), Some(Direction::Left));
     }
 
     #[test]

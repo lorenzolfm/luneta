@@ -23,6 +23,7 @@ use crate::projects::{Ask, Change, Dir, Failed, Id, Line, Placed, Projects, Ran,
 use crate::projects::{Size, Store, Terminal, TerminalId, Used, View, Workstream, WorkstreamId};
 use crate::projects::{FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::shells::Doing;
+use crate::shows::direction_said;
 use crate::watch::Troubles;
 use crate::{opens, Directory};
 
@@ -94,7 +95,7 @@ pub enum Asked {
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(Focus),
-    Resize { sides: Sides, change: layout::Change },
+    Resize { sides: Sides, growth: layout::Growth },
     Move(Step),
     Fullscreen,
 }
@@ -105,6 +106,12 @@ pub enum Beside {
     Largest,
     Focused,
     Towards(Towards),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Done {
+    Quiet,
+    Edged(Direction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,14 +162,14 @@ impl Asked {
                     },
                 })
             },
-            Event::Resize(show_request::Resize { sides, grow }) => {
+            Event::Resize(show_request::Resize { sides, growth }) => {
                 use show_request::resize;
-                let change = if grow { layout::Change::Grow } else { layout::Change::Shrink };
+                let growth = growth_of(growth)?;
                 let sides = match sides.ok_or("resize: it says no side to move")? {
                     resize::Sides::Direction(direction) => Sides::One(direction_of(direction)?),
                     resize::Sides::Every(()) => Sides::Every,
                 };
-                Asked::Resize { sides, change }
+                Asked::Resize { sides, growth }
             },
             Event::Move(show_request::Move { to }) => {
                 use show_request::r#move::To;
@@ -194,7 +201,7 @@ fn towards_of(said: i32) -> Result<Towards, String> {
     }
 }
 
-fn direction_of(said: i32) -> Result<Direction, String> {
+pub(crate) fn direction_of(said: i32) -> Result<Direction, String> {
     use show_request::Direction as Said;
     match Said::try_from(said) {
         Ok(Said::Left) => Ok(Direction::Left),
@@ -202,6 +209,15 @@ fn direction_of(said: i32) -> Result<Direction, String> {
         Ok(Said::Up) => Ok(Direction::Up),
         Ok(Said::Down) => Ok(Direction::Down),
         Ok(Said::Unspecified) | Err(_) => Err("no direction it knows".to_owned()),
+    }
+}
+
+fn growth_of(said: i32) -> Result<layout::Growth, String> {
+    use show_request::Growth as Said;
+    match Said::try_from(said) {
+        Ok(Said::Grow) => Ok(layout::Growth::Grow),
+        Ok(Said::Shrink) => Ok(layout::Growth::Shrink),
+        Ok(Said::Unspecified) | Err(_) => Err("resize: it says neither grow nor shrink".to_owned()),
     }
 }
 
@@ -406,13 +422,19 @@ impl Views {
                 if !self.clients.contains_key(&client) {
                     return;
                 }
-                if let Err(why) = asked.and_then(|asked| self.asked(client, asked)) {
-                    let refused = Some(show_response::Event::Refused(why));
-                    let word = api::ShowResponse { event: refused };
-                    let held = self.clients.get(&client).expect("a client that asked is held");
-                    if !told(&held.out, word) {
-                        self.clients.remove(&client);
-                    }
+                let event = match asked.and_then(|asked| self.asked(client, asked)) {
+                    Ok(Done::Quiet) => return,
+                    Ok(Done::Edged(direction)) => {
+                        let workstream = self.clients[&client].workstream.get();
+                        let direction = direction_said(direction).into();
+                        show_response::Event::Edged(show_response::Edged { workstream, direction })
+                    },
+                    Err(why) => show_response::Event::Refused(why),
+                };
+                let word = api::ShowResponse { event: Some(event) };
+                let held = self.clients.get(&client).expect("a client that asked is held");
+                if !told(&held.out, word) {
+                    self.clients.remove(&client);
                 }
             },
             Command::Left(client) => {
@@ -551,7 +573,7 @@ impl Views {
         }
     }
 
-    fn asked(&mut self, client: ClientId, asked: Asked) -> Result<(), String> {
+    fn asked(&mut self, client: ClientId, asked: Asked) -> Result<Done, String> {
         let workstream = self.clients[&client].workstream;
         let size = self.size_of(client);
         let focus = self.clients[&client].focus;
@@ -575,14 +597,24 @@ impl Views {
                 }
                 self.focus(client, terminal)?;
             },
-            Asked::Focus(Focus::Step(step)) => {
+            Asked::Focus(Focus::Step(Step::Direction(direction))) => {
+                let tree = self.view(workstream)?.tree();
+                let beside = tree.zip(focus).and_then(|(tree, from)| {
+                    tree.neighbour(from, direction, size)
+                });
+                let Some(to) = beside else {
+                    return Ok(Done::Edged(direction));
+                };
+                self.focus(client, to)?;
+            },
+            Asked::Focus(Focus::Step(step @ Step::Order(_))) => {
                 let from = focused()?;
                 let to = self.stepped(workstream, from, step, size)?;
                 self.focus(client, to)?;
             },
-            Asked::Resize { sides, change } => {
+            Asked::Resize { sides, growth } => {
                 let terminal = focused()?;
-                self.changed(Change::Resize { terminal, sides, change, size })?;
+                self.changed(Change::Resize { terminal, sides, growth, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -597,7 +629,7 @@ impl Views {
                 self.changed(Change::Fill { workstream, full })?;
             },
         }
-        Ok(())
+        Ok(Done::Quiet)
     }
 
     fn client(&mut self, client: ClientId) -> &mut Client {
@@ -1707,18 +1739,22 @@ mod tests {
         let asked = Asked::Open { beside: Beside::Alone, argv: vec![] };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
         let (one_side, every) = (resize::Sides::Direction, Some(resize::Sides::Every(())));
-        let around = Event::Resize(show_request::Resize { sides: every, grow: false });
-        let asked = Asked::Resize { sides: Sides::Every, change: layout::Change::Shrink };
+        let (grow, shrink) = (show_request::Growth::Grow, show_request::Growth::Shrink);
+        let (grow, shrink) = (grow.into(), shrink.into());
+        let around = Event::Resize(show_request::Resize { sides: every, growth: shrink });
+        let asked = Asked::Resize { sides: Sides::Every, growth: layout::Growth::Shrink };
         assert_eq!(Asked::of_api(around), Ok(asked));
         let left = Some(one_side(show_request::Direction::Left.into()));
-        let towards = Event::Resize(show_request::Resize { sides: left, grow: true });
-        let (sides, change) = (Sides::One(Direction::Left), layout::Change::Grow);
-        assert_eq!(Asked::of_api(towards), Ok(Asked::Resize { sides, change }));
+        let towards = Event::Resize(show_request::Resize { sides: left, growth: grow });
+        let (sides, growth) = (Sides::One(Direction::Left), layout::Growth::Grow);
+        assert_eq!(Asked::of_api(towards), Ok(Asked::Resize { sides, growth }));
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None }),
-            Event::Resize(show_request::Resize { sides: None, grow: true }),
-            Event::Resize(show_request::Resize { sides: Some(one_side(0)), grow: true }),
+            Event::Resize(show_request::Resize { sides: None, growth: grow }),
+            Event::Resize(show_request::Resize { sides: Some(one_side(0)), growth: grow }),
+            Event::Resize(show_request::Resize { sides: every, growth: 0 }),
+            Event::Resize(show_request::Resize { sides: every, growth: 3 }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
             Event::Open(show_request::Open { beside: None, argv: vec![] }),
             Event::Open(show_request::Open { beside: largest(), argv: vec![String::new()] }),

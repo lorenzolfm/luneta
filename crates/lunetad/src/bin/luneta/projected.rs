@@ -7,7 +7,7 @@ use lunetad::api::{self, agent, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
-use lunetad::{Direction, SessionName};
+use lunetad::SessionName;
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
@@ -173,19 +173,19 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn tab_beside(
+    pub fn tabs_beside(
         &self,
         workstream: WorkstreamId,
-        direction: Direction,
-    ) -> Option<WorkstreamId> {
-        let (project, _) = self.holding(workstream)?;
-        let at = project.workstreams.iter().position(|it| it.id == workstream)?;
-        let beside = match direction {
-            Direction::Left => at.checked_sub(1)?,
-            Direction::Right => at + 1,
-            Direction::Up | Direction::Down => return None,
+    ) -> (Option<WorkstreamId>, Option<WorkstreamId>) {
+        let held = self.projects.iter().find_map(|project| {
+            Some((project, project.workstreams.iter().position(|it| it.id == workstream)?))
+        });
+        let Some((project, at)) = held else {
+            return (None, None);
         };
-        project.workstreams.get(beside).map(|it| it.id)
+        let before = at.checked_sub(1).and_then(|it| project.workstreams.get(it));
+        let after = project.workstreams.get(at + 1);
+        (before.map(|it| it.id), after.map(|it| it.id))
     }
 
     #[must_use]
@@ -402,15 +402,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tab_beside_a_workstream_is_its_project_s_next_or_last_and_none_past_the_ends() {
+    fn the_tabs_beside_a_workstream_are_the_ones_before_and_after_it_and_none_past_the_ends() {
         let projected = Projected::adapted(&mut host()).unwrap();
         let (main, docs) = (workstream(11), workstream(12));
-        assert_eq!(projected.tab_beside(main, Direction::Right), Some(docs));
-        assert_eq!(projected.tab_beside(docs, Direction::Left), Some(main));
-        assert_eq!(projected.tab_beside(main, Direction::Left), None);
-        assert_eq!(projected.tab_beside(docs, Direction::Right), None);
-        assert_eq!(projected.tab_beside(main, Direction::Down), None);
-        assert_eq!(projected.tab_beside(workstream(99), Direction::Right), None);
+        assert_eq!(projected.tabs_beside(main), (None, Some(docs)));
+        assert_eq!(projected.tabs_beside(docs), (Some(main), None));
+        assert_eq!(projected.tabs_beside(workstream(99)), (None, None));
     }
 
     fn kept(host: &mut Host) -> &mut api::Project {
