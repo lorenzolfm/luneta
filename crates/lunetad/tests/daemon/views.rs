@@ -520,6 +520,11 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     assert!(refused.message().contains("holds 2 terminals still"), "{}", refused.message());
 
     let close = || Change::CloseWorkstream(CloseWorkstream { workstream: closing });
+    let stalled = owned.stall_mux();
+    let unclosed = asked(&owned.host, close()).unwrap_err();
+    assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
+    assert_eq!(watched(&owned, closing).len(), 2, "no terminal closed, so none is forgotten");
+    drop(stalled);
     assert_eq!(asked(&owned.host, close()).unwrap(), None);
     eventually("the workstream's terminals leave the mux", || {
         let listing = owned.listing();
@@ -565,7 +570,7 @@ fn a_terminal_s_name_and_the_last_use_of_a_workstream_reach_watch_and_the_file()
     eventually("the uses reach the file within a sweep", || {
         let file = fs::read_to_string(kept(&owned.host)).ok()?;
         let named = file.contains(r#""name": "tests""#);
-        (named && file.matches(r#""used": "#).count() == 2).then_some(())
+        (named && file.matches(r#""used_millis": "#).count() == 2).then_some(())
     });
 }
 

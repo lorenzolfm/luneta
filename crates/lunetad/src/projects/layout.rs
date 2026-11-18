@@ -558,14 +558,36 @@ impl<L: Leaf> Tree<L> {
 
     #[must_use]
     pub fn resize(&mut self, pane: TerminalId, sides: Sides, change: Change, size: Size) -> bool {
-        match sides {
+        let before = self.rects(size);
+        let moved = match sides {
             Sides::One(direction) => self.border_moved(pane, direction, change, size),
             Sides::Every => {
                 let moved = Direction::ALL
                     .map(|direction| self.border_moved(pane, direction, change, size));
                 moved.contains(&true)
             },
+        };
+        let after = self.rects(size);
+        if !moved {
+            assert_eq!(after, before, "a resize that moves no border moves no pane");
+            return false;
         }
+        let rect_of = |rects: &[(TerminalId, Rect)]| {
+            let found = rects.iter().find(|(id, _)| *id == pane);
+            found.map(|(_, rect)| *rect).expect("a resized pane is in the tree")
+        };
+        let (was, now) = (rect_of(&before), rect_of(&after));
+        match change {
+            Change::Grow => {
+                assert!(now.columns >= was.columns, "{was:?} grows, not to {now:?}");
+                assert!(now.rows >= was.rows, "{was:?} grows, not to {now:?}");
+            },
+            Change::Shrink => {
+                assert!(now.columns <= was.columns, "{was:?} shrinks, not to {now:?}");
+                assert!(now.rows <= was.rows, "{was:?} shrinks, not to {now:?}");
+            },
+        }
+        true
     }
 
     fn border_moved(

@@ -118,14 +118,32 @@ impl Owned {
     }
 
     pub fn kill_mux(&self) {
+        if let Some(pid) = self.mux_pid() {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+
+    pub fn stall_mux(&self) -> StalledMux {
+        let pid = self.mux_pid().expect("luneta-mux listens");
+        rustix::process::kill_process(pid, rustix::process::Signal::STOP).unwrap();
+        StalledMux(pid)
+    }
+
+    fn mux_pid(&self) -> Option<rustix::process::Pid> {
         let socket = self.socket();
         let listening = self.runtime.block_on(async move {
             let stream = tokio::net::UnixStream::connect(socket).await.ok()?;
             stream.peer_cred().ok()?.pid()
         });
-        if let Some(pid) = listening.and_then(rustix::process::Pid::from_raw) {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-        }
+        listening.and_then(rustix::process::Pid::from_raw)
+    }
+}
+
+pub struct StalledMux(rustix::process::Pid);
+
+impl Drop for StalledMux {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::CONT);
     }
 }
 

@@ -33,6 +33,12 @@ pub const NAME_CHARS_MAX: usize = 64;
 
 pub const PATH_BYTES_MAX: usize = 4096;
 
+pub const USED_MILLIS_MAX: u64 = u64::MAX / 2;
+
+const CLOCK_MILLIS_MAX: u64 = 253_402_300_799_999;
+
+const _: () = assert!(CLOCK_MILLIS_MAX < USED_MILLIS_MAX / 2);
+
 const FRESH_TRIES: u32 = 8;
 
 const UNNAMED: &str = "a path holds a part that is no name: empty, `.` or `..`";
@@ -162,11 +168,21 @@ impl Used {
     #[must_use]
     pub fn at(time: SystemTime) -> Used {
         let since = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-        Used(u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        let millis = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
+        Used::of_millis(millis.min(CLOCK_MILLIS_MAX))
+    }
+
+    pub fn read(millis: u64) -> Result<Used, String> {
+        if millis <= USED_MILLIS_MAX {
+            Ok(Used(millis))
+        } else {
+            Err(format!("a use at {millis} ms is past {USED_MILLIS_MAX} ms"))
+        }
     }
 
     #[must_use]
     pub fn of_millis(millis: u64) -> Used {
+        assert!(millis <= USED_MILLIS_MAX, "a use at {millis} ms is past {USED_MILLIS_MAX} ms");
         Used(millis)
     }
 
@@ -180,8 +196,8 @@ impl Used {
         UNIX_EPOCH + Duration::from_millis(self.0)
     }
 
-    fn after(self) -> Used {
-        Used(self.0.saturating_add(1))
+    fn next_millisecond(self) -> Option<Used> {
+        (self.0 < USED_MILLIS_MAX).then(|| Used(self.0 + 1))
     }
 }
 
@@ -684,20 +700,32 @@ impl Projects {
             },
             Change::CloseWorkstream { workstream } => {
                 let (project, at) = changed.workstream(workstream)?;
-                project.workstreams.remove(at);
+                let closed = project.workstreams.remove(at);
+                for terminal in closed.view.terminals() {
+                    let id = layout::Leaf::id(terminal);
+                    assert!(!changed.holds(id.0), "terminal {id} goes with its workstream");
+                }
                 None
             },
             Change::Went { workstream, at } => {
                 let others = self.workstreams().filter(|(_, it)| it.id != workstream);
                 let newest = others.filter_map(|(_, it)| it.used).max();
-                let at = newest.map_or(at, |newest| at.max(newest.after()));
+                let at = match newest {
+                    None => at,
+                    Some(newest) => {
+                        let past = || format!("no workstream is used past {USED_MILLIS_MAX} ms");
+                        at.max(newest.next_millisecond().ok_or_else(past)?)
+                    },
+                };
                 let (project, place) = changed.workstream(workstream)?;
                 let went = &mut project.workstreams[place];
                 if went.used.is_none_or(|used| used < at) {
                     went.used = Some(at);
                 }
-                let last = went.used.is_some_and(|used| newest.is_none_or(|newest| used > newest));
-                assert!(last, "workstream {workstream}, gone to last, is the one used last");
+                let used = went.used.expect("a workstream gone to is used");
+                if let Some(newest) = newest {
+                    assert!(used > newest, "workstream {workstream}, gone to last, is used last");
+                }
                 None
             },
             Change::RenameTerminal { terminal, to } => {
@@ -1271,6 +1299,15 @@ mod tests {
         assert!(change(&projects, unknown).unwrap_err().contains("no workstream has the id"));
         let at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_234);
         assert_eq!((Used::at(at).millis(), Used::of_millis(1_234).time()), (1_234, at));
+        let far = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::MAX);
+        assert_eq!(Used::at(far).millis(), CLOCK_MILLIS_MAX, "a clock past 9999 is held there");
+        let past = Used::read(USED_MILLIS_MAX + 1).unwrap_err();
+        assert!(past.contains("is past"), "{past}");
+        (projects, _) = change(&projects, went(one, USED_MILLIS_MAX)).unwrap();
+        let refused = change(&projects, went(two, 1)).unwrap_err();
+        assert!(refused.contains("no workstream is used past"), "{refused}");
+        let (same, _) = change(&projects, went(one, 1)).unwrap();
+        assert_eq!(same, projects, "the workstream used last is gone to still");
     }
 
     #[test]

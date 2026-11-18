@@ -32,9 +32,16 @@ const PROGRAM: &str = "luneta-mux";
 
 pub const ANOTHER_RUNS: u8 = 3;
 
-const CONNECT: Duration = Duration::from_secs(1);
+const CONNECT: Duration = Duration::from_millis(500);
 
-const ANSWER: Duration = Duration::from_secs(5);
+const ANSWER: Duration = Duration::from_millis(1500);
+
+const WAITS_PER_ANSWER_MAX: u128 = 2;
+
+const _: () = assert!(
+    WAITS_PER_ANSWER_MAX * (CONNECT.as_millis() + ANSWER.as_millis())
+        < crate::client::ANSWER.as_millis()
+);
 
 const MAKING: Duration = Duration::from_secs(10);
 

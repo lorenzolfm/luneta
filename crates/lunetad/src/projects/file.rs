@@ -90,7 +90,7 @@ struct KeptWorkstream {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    used: Option<u64>,
+    used_millis: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -361,10 +361,13 @@ fn parse(text: &str) -> Result<Projects, String> {
     let named = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { name: Some(_), .. }))
     };
-    let used = workstreams().any(|it| it.used.is_some());
-    if version <= WITHOUT_NAMES_OR_USE && (used || nodes.any(named)) {
-        let without = "which holds no terminal's name and no workstream's use";
-        return Err(format!("it is of version {version}, {without}"));
+    if version <= WITHOUT_NAMES_OR_USE {
+        if nodes.any(named) {
+            return Err(format!("it is of version {version}, which holds no terminal's name"));
+        }
+        if workstreams().any(|it| it.used_millis.is_some()) {
+            return Err(format!("it is of version {version}, which holds no workstream's use"));
+        }
     }
     let projects = kept.projects.into_iter().map(KeptProject::read);
     Projects::checked(projects.collect::<Result<_, _>>()?)
@@ -403,7 +406,9 @@ impl KeptWorkstream {
             renamed: self.name.as_deref().map(Name::parse).transpose()?,
             below: Below::parse(&self.below)?,
             view,
-            used: self.used.map(Used::of_millis),
+            used: self.used_millis.map(Used::read).transpose().map_err(|why| {
+                format!("workstream {id}: {why}")
+            })?,
         })
     }
 
@@ -413,7 +418,7 @@ impl KeptWorkstream {
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
             below: workstream.below.0.clone(),
             view: KeptView::of(&workstream.view),
-            used: workstream.used.map(Used::millis),
+            used_millis: workstream.used.map(Used::millis),
         }
     }
 }
@@ -777,20 +782,24 @@ mod tests {
                 ]}} {used}}}]}}]}}"#
             )
         };
-        let (name, used) = (r#""name": "tests","#, r#", "used": 1763460000123"#);
+        let (name, used) = (r#""name": "tests","#, r#", "used_millis": 1763460000123"#);
         let kept = parse(&text(4, name, used)).unwrap();
         let (workstream, held) = kept.holding(TerminalId::of(3).unwrap()).unwrap();
         assert_eq!(held.name().map(Name::as_str), Some("tests"));
         assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
         let again = written(&kept);
-        assert!(again.contains(r#""name": "tests""#) && again.contains(r#""used": 1763460000123"#));
+        assert!(again.contains(r#""name": "tests""#));
+        assert!(again.contains(r#""used_millis": 1763460000123"#));
         assert_eq!(parse(&again), Ok(kept));
-        let without = "which holds no terminal's name and no workstream's use";
-        for (name, used) in [(name, ""), ("", used)] {
+        let refusals = [(name, "", "terminal's name"), ("", used, "workstream's use")];
+        for (name, used, without) in refusals {
             let refused = parse(&text(3, name, used));
-            assert_eq!(refused, Err(format!("it is of version 3, {without}")));
+            assert_eq!(refused, Err(format!("it is of version 3, which holds no {without}")));
         }
         assert!(parse(&text(4, r#""name": "","#, "")).unwrap_err().contains("a name is empty"));
+        let past = format!(r#", "used_millis": {}"#, u64::MAX);
+        let refused = parse(&text(4, "", &past)).unwrap_err();
+        assert!(refused.contains("workstream 0000000000000002: a use at"), "{refused}");
     }
 
     #[test]
