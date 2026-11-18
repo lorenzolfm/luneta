@@ -491,7 +491,13 @@ dim `◇`. Sessions of zellij's that run still show in the sidebar, and going to
 one, as `Enter` on its row does, takes luneta there, and going to an own one
 takes it back. A drag over an own pane selects its text and copies it, as a
 drag over the sidebar does; where the pane's program takes the mouse, hold
-`Shift`. When the own session luneta is in ends, the newest session of this
+`Shift`. A click on a URL or a file path copies the whole of it and shows it
+reversed, as a selection, and the pointer over one underlines it first. A URL
+runs from its scheme, as `https://`, to a blank or a quote, less a stop or a
+bracket it did not open; a path is a word with a `/` in it, as
+`crates/a.rs:12`, between blanks, brackets and quotes. Either goes on into the
+next row where it fills its own to the edge. A click on any other word copies
+nothing. When the own session luneta is in ends, the newest session of this
 machine takes its place, of either kind, and so it does when zellij's ends.
 
 A project's terminals outlive lunetad, as `luneta-mux` holds them. When

@@ -198,6 +198,7 @@ pub(crate) fn draw_screen(
     area: Rect,
     screen: &Screen,
     selection: Option<Selection>,
+    pointed: Option<Selection>,
 ) -> Option<Position> {
     for (row, line) in (0..area.height).zip(&screen.lines) {
         let mut column = 0;
@@ -206,7 +207,14 @@ pub(crate) fn draw_screen(
                 break;
             }
             let at = Spot { row, column };
-            let lit = selection.is_some_and(|selection| selection.holds(at));
+            let holds = |span: Option<Selection>| span.is_some_and(|span| span.holds(at));
+            let mut lit = Modifier::empty();
+            if holds(selection) {
+                lit |= Modifier::REVERSED;
+            }
+            if holds(pointed) {
+                lit |= Modifier::UNDERLINED;
+            }
             paint(buffer, area, at, glyph, lit);
             column += glyph.shows.columns();
         }
@@ -225,17 +233,14 @@ pub(crate) fn within(at: Spot, size: Size) -> Spot {
     Spot { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
 }
 
-fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: bool) {
+fn paint(buffer: &mut Buffer, area: Rect, at: Spot, glyph: &Glyph, lit: Modifier) {
     let columns = glyph.shows.columns();
     let fits = at.column + columns <= area.width;
     let (x, y) = (area.x + at.column, area.y + at.row);
     let Some(cell) = buffer.cell_mut((x, y)) else {
         return;
     };
-    let mut style = styled(&glyph.style);
-    if lit {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
+    let style = styled(&glyph.style).add_modifier(lit);
     cell.set_style(style);
     match &glyph.shows {
         Shows::Narrow(grapheme) => {
@@ -284,6 +289,146 @@ pub(crate) fn text(screen: &Screen, selection: Selection) -> String {
         rows.push(said.trim_end().to_owned());
     }
     rows.join("\n")
+}
+
+const URL_ENDS: &str = "<>\"'`";
+
+const PATH_ENDS: &str = "()[]{}<>\"'`,;|=*";
+
+pub(crate) fn link(screen: &Screen, at: Spot) -> Option<(Selection, String)> {
+    let (cells, clicked) = word(screen, at)?;
+    let shown: Vec<&str> = cells.iter().map(|(_, shown)| *shown).collect();
+    let (first, end) = url(&shown, clicked).or_else(|| path(&shown, clicked))?;
+    assert!(first <= clicked && clicked < end, "a link holds the cell clicked");
+    let selection = Selection { from: cells[first].0, to: cells[end - 1].0 };
+    Some((selection, shown[first..end].concat()))
+}
+
+#[derive(Clone, Copy)]
+struct Cell<'a> {
+    spot: Spot,
+    columns: u16,
+    shown: Option<&'a str>,
+}
+
+fn word(screen: &Screen, at: Spot) -> Option<(Vec<(Spot, &str)>, usize)> {
+    let lines = &screen.lines;
+    let row = usize::from(at.row);
+    lines.get(row)?;
+    let shows = |cell: Option<&Cell>| cell.is_some_and(|cell| cell.shown.is_some());
+    let joins = |above: usize| {
+        let ends = lines[above].wraps_wide() || shows(cells(&lines[above], 0).last());
+        ends && shows(cells(&lines[above + 1], 0).first())
+    };
+    let (mut top, mut bottom) = (row, row);
+    while top > 0 && joins(top - 1) {
+        top -= 1;
+    }
+    while bottom + 1 < lines.len() && joins(bottom) {
+        bottom += 1;
+    }
+    let mut run = Vec::new();
+    for (index, line) in lines.iter().enumerate().take(bottom + 1).skip(top) {
+        run.extend(cells(line, u16::try_from(index).expect("a screen's rows fit a u16")));
+    }
+    let covers = |cell: &Cell| {
+        let Cell { spot, columns, .. } = *cell;
+        spot.row == at.row && spot.column <= at.column && at.column < spot.column + columns
+    };
+    let clicked = run.iter().position(covers)?;
+    run[clicked].shown?;
+    let blank = |cell: &Cell| cell.shown.is_none();
+    let first = run[..clicked].iter().rposition(blank).map_or(0, |at| at + 1);
+    let end = run[clicked..].iter().position(blank).map_or(run.len(), |at| clicked + at);
+    let word = run[first..end].iter().filter_map(|cell| Some((cell.spot, cell.shown?)));
+    Some((word.collect(), clicked - first))
+}
+
+fn cells(line: &Line, row: u16) -> Vec<Cell<'_>> {
+    let mut column = 0;
+    let mut cells = Vec::new();
+    for glyph in line.glyphs() {
+        let shown = match &glyph.shows {
+            Shows::Blank => None,
+            Shows::Narrow(grapheme) | Shows::Wide(grapheme) => {
+                Some(grapheme.as_str()).filter(|shown| !shown.chars().all(char::is_whitespace))
+            },
+        };
+        let columns = glyph.shows.columns();
+        cells.push(Cell { spot: Spot { row, column }, columns, shown });
+        column += columns;
+    }
+    cells
+}
+
+fn one_of(cell: &str, set: &str) -> bool {
+    let mut characters = cell.chars();
+    characters.next().is_some_and(|first| set.contains(first)) && characters.next().is_none()
+}
+
+fn url(word: &[&str], clicked: usize) -> Option<(usize, usize)> {
+    let scheme = |cell: &str| {
+        cell.len() == 1 && cell.chars().all(|it| it.is_ascii_alphanumeric() || "+.-".contains(it))
+    };
+    let marks = (0..word.len()).filter(|at| word.get(*at..at + 3) == Some(&[":", "/", "/"][..]));
+    for marks in marks {
+        let mut first = marks;
+        while first > 0 && scheme(word[first - 1]) {
+            first -= 1;
+        }
+        while first < marks && !word[first].chars().all(|it| it.is_ascii_alphabetic()) {
+            first += 1;
+        }
+        let after = marks + 3;
+        let mut end = after;
+        while end < word.len() && !one_of(word[end], URL_ENDS) {
+            end += 1;
+        }
+        let end = untrailed(word, after, end);
+        if first < marks && after < end && (first..end).contains(&clicked) {
+            return Some((first, end));
+        }
+    }
+    None
+}
+
+fn untrailed(word: &[&str], from: usize, mut end: usize) -> usize {
+    while end > from {
+        let last = word[end - 1];
+        let count = |it: &str| word[from..end].iter().filter(|cell| **cell == it).count();
+        let pairs = [("(", ")"), ("[", "]"), ("{", "}")];
+        let unopened = |&(open, close): &(&str, &str)| last == close && count(open) < count(close);
+        let unopened = pairs.iter().any(unopened);
+        if !one_of(last, ".,;:!?") && !unopened {
+            break;
+        }
+        end -= 1;
+    }
+    end
+}
+
+fn path(word: &[&str], clicked: usize) -> Option<(usize, usize)> {
+    if one_of(word[clicked], PATH_ENDS) {
+        return None;
+    }
+    let mut first = clicked;
+    while first > 0 && !one_of(word[first - 1], PATH_ENDS) {
+        first -= 1;
+    }
+    let mut end = clicked + 1;
+    while end < word.len() && !one_of(word[end], PATH_ENDS) {
+        end += 1;
+    }
+    while first < end && one_of(word[first], ":!?") {
+        first += 1;
+    }
+    while end > first && one_of(word[end - 1], ".:!?") {
+        end -= 1;
+    }
+    let held = &word[first..end];
+    let named = held.iter().any(|cell| cell.chars().any(char::is_alphanumeric));
+    let path = held.contains(&"/") && named;
+    (path && (first..end).contains(&clicked)).then_some((first, end))
 }
 
 fn styled(style: &frames::Style) -> Style {
@@ -483,6 +628,76 @@ mod tests {
         assert_eq!(text(&screen, selection(spot(0, 0), spot(0, 1))), "ab");
     }
 
+    fn typed(rows: &[&str]) -> Screen {
+        let cell = |it: char| if it == ' ' { glyph(Shows::Blank) } else { narrow(&it.to_string()) };
+        let lines = rows.iter().map(|row| line(row.chars().map(cell).collect())).collect();
+        let columns = side(u16::try_from(rows[0].chars().count()).unwrap());
+        let size = Size { columns, rows: side(u16::try_from(rows.len()).unwrap()) };
+        Screen { size, lines, cursor: None, tracks_mouse: false }
+    }
+
+    fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(Spot, Spot, String)> {
+        let (span, text) = link(&typed(rows), spot(row, column))?;
+        Some((span.from, span.to, text))
+    }
+
+    #[test]
+    fn a_click_takes_the_whole_url_it_lands_on_and_not_the_punctuation_around_it() {
+        let said = "see (https://e.io/a_(b)?q=1#x), ok.";
+        let url = Some((spot(0, 5), spot(0, 28), "https://e.io/a_(b)?q=1#x".to_owned()));
+        assert_eq!(clicked(&[said], 0, 5), url);
+        assert_eq!(clicked(&[said], 0, 16), url);
+        assert_eq!(clicked(&[said], 0, 28), url);
+        assert_eq!(clicked(&[said], 0, 29), None, "the bracket closes what the url is in");
+        assert_eq!(clicked(&[said], 0, 4), None);
+        assert_eq!(clicked(&[said], 0, 1), None, "a word is not a link");
+        assert_eq!(clicked(&[said], 0, 3), None, "nor is a blank");
+        let quoted = r#"at "git+ssh://h/r.git"."#;
+        assert_eq!(clicked(&[quoted], 0, 9).unwrap().2, "git+ssh://h/r.git");
+        assert_eq!(clicked(&["[doc](http://x.y/z)"], 0, 8).unwrap().2, "http://x.y/z");
+    }
+
+    #[test]
+    fn a_click_takes_the_file_path_it_lands_on_with_its_line() {
+        let said = "Update(crates/a.rs) ~/b/c.txt: src/m.rs:12:5. and/or";
+        let path = Some((spot(0, 7), spot(0, 17), "crates/a.rs".to_owned()));
+        assert_eq!(clicked(&[said], 0, 9), path);
+        assert_eq!(clicked(&[said], 0, 2), None, "the call is no path");
+        assert_eq!(clicked(&[said], 0, 21).unwrap().2, "~/b/c.txt");
+        assert_eq!(clicked(&[said], 0, 33).unwrap().2, "src/m.rs:12:5");
+        assert_eq!(clicked(&[said], 0, 46).unwrap().2, "and/or", "what has a slash may be a path");
+        assert_eq!(clicked(&["a / b"], 0, 2), None, "a slash alone names nothing");
+        assert_eq!(clicked(&["../up"], 0, 0).unwrap().2, "../up");
+        assert_eq!(clicked(&["README.md"], 0, 0), None, "a name with no folder is a word");
+    }
+
+    #[test]
+    fn a_link_cut_at_the_edge_goes_on_in_the_next_row() {
+        let rows = ["go https://e.", "io/a/b now   ", "x            "];
+        let url = Some((spot(0, 3), spot(1, 5), "https://e.io/a/b".to_owned()));
+        assert_eq!(clicked(&rows, 0, 4), url);
+        assert_eq!(clicked(&rows, 1, 1), url);
+        assert_eq!(clicked(&rows, 1, 8), None, "a row that ends in a blank ends its word");
+        let wide = || glyph(Shows::Wide(grapheme("日")));
+        let blank = || glyph(Shows::Blank);
+        let screen = |columns: u16, lines: Vec<Line>| {
+            let size = Size { columns: side(columns), rows: side(2) };
+            Screen { size, lines, cursor: None, tracks_mouse: false }
+        };
+        let ends_wide = screen(
+            5,
+            vec![
+                line(vec![narrow("a"), narrow("b"), narrow("/"), wide()]),
+                line(vec![narrow("x"), narrow("/"), narrow("y"), blank(), blank()]),
+            ],
+        );
+        assert_eq!(link(&ends_wide, spot(0, 4)).unwrap().1, "ab/日x/y", "either half of it");
+        let early = Line::new(vec![narrow("a"), narrow("b"), narrow("/")], true, side(4)).unwrap();
+        let wrapped = screen(4, vec![early, line(vec![wide(), narrow("y"), blank()])]);
+        let (span, text) = link(&wrapped, spot(0, 0)).unwrap();
+        assert_eq!((span.to, text.as_str()), (spot(1, 2), "ab/日y"), "a wide glyph wrapped early");
+    }
+
     #[test]
     fn a_glyph_is_drawn_as_wide_as_the_server_says() {
         let wide = glyph(Shows::Wide(grapheme("👍🏽")));
@@ -490,13 +705,13 @@ mod tests {
         let size = Size { columns: side(4), rows: side(1) };
         let screen = Screen { size, lines: rows, cursor: None, tracks_mouse: false };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
-        draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None);
+        draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None, None);
         assert_eq!(buffer[(2, 0)].symbol(), "👍🏽");
         assert_eq!(buffer[(2, 0)].diff_option, CellDiffOption::ForcedWidth(side(2)));
         assert_eq!(buffer[(3, 0)].diff_option, CellDiffOption::Skip);
         assert_eq!(buffer[(4, 0)].symbol(), "b");
         let mut cut = Buffer::empty(Rect::new(0, 0, 2, 1));
-        draw_screen(&mut cut, Rect::new(0, 0, 2, 1), &screen, None);
+        draw_screen(&mut cut, Rect::new(0, 0, 2, 1), &screen, None, None);
         assert_eq!((cut[(0, 0)].symbol(), cut[(1, 0)].symbol()), ("a", " "));
     }
 
