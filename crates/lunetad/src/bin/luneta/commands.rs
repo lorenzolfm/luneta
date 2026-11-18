@@ -32,8 +32,7 @@ use tonic::transport::Channel;
 use crate::bridge;
 use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
-use crate::machines::{self, Added, Machine};
-use crate::order::Order;
+use crate::machines::{self, Added};
 use crate::prune;
 use crate::zellij::{self, Seat};
 
@@ -493,16 +492,14 @@ pub fn unread(unread: Unread) -> String {
 async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     let asked = WatchRequest { after: None, kept: None, shown: false };
     let host = daemon.watch(asked).await?.into_inner();
-    let order = Order::shared();
-    let here = as_rows(&host.sessions, Some(&Machine::Local), &order);
+    let here = as_rows(&host.sessions);
     sessions_of(&here, &host.work_trees, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
         match &remote.reached {
             Some(Reached::Host(host)) => {
                 println!("{machine}/");
-                let far = machine.parse().map(Machine::Remote).ok();
-                let far = as_rows(&host.sessions, far.as_ref(), &order);
+                let far = as_rows(&host.sessions);
                 sessions_of(&far, &host.work_trees, &host.pull_requests, "  ");
             },
             Some(Reached::Reaching(())) => println!("{machine}/  (reaching it)"),
@@ -522,19 +519,12 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn as_rows<'a>(
-    sessions: &'a [Session],
-    machine: Option<&Machine>,
-    order: &Order,
-) -> Vec<&'a Session> {
+fn as_rows(sessions: &[Session]) -> Vec<&Session> {
     let mut rows: Vec<&Session> = sessions.iter().collect();
     rows.sort_by_cached_key(|session| {
         let started = session.started();
         (started.is_none(), started, session.name.clone())
     });
-    if let Some(machine) = machine {
-        order.sessions(machine, &mut rows, |session| session.name.as_str());
-    }
     rows
 }
 

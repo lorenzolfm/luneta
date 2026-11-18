@@ -5,31 +5,33 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
+use lunetad::projects::{ProjectId, WorkstreamId};
 use lunetad::Destination;
 use notify::RecommendedWatcher;
 
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::state;
-use crate::zellij::SessionName;
-
-const LOCAL: &str = "-";
 
 #[derive(Clone, Copy, Debug)]
 pub enum Fold<'a> {
-    Machine(&'a Machine),
-    Session(&'a Machine, &'a SessionName),
+    Project(&'a Machine, ProjectId),
+    Workstream(&'a Machine, WorkstreamId),
 }
 
 impl Fold<'_> {
     fn file(self) -> (Kept, String) {
-        match self {
-            Fold::Session(Machine::Local, name) => (Kept::Sessions, name.as_str().to_owned()),
-            Fold::Session(Machine::Remote(destination), name) => {
+        let (machine, name) = match self {
+            Fold::Project(machine, project) => (machine, format!("project-{:016x}", project.get())),
+            Fold::Workstream(machine, workstream) => {
+                (machine, format!("workstream-{:016x}", workstream.get()))
+            },
+        };
+        match machine {
+            Machine::Local => (Kept::Sessions, name),
+            Machine::Remote(destination) => {
                 (Kept::Machines, format!("{}:{name}", spelled(destination)))
             },
-            Fold::Machine(Machine::Local) => (Kept::Machines, LOCAL.to_owned()),
-            Fold::Machine(Machine::Remote(destination)) => (Kept::Machines, spelled(destination)),
         }
     }
 }
@@ -175,12 +177,12 @@ mod tests {
 
     use super::*;
 
-    fn name(name: &str) -> SessionName {
-        SessionName::parse(name).unwrap()
+    fn project(id: u64) -> Fold<'static> {
+        Fold::Project(&Machine::Local, ProjectId::of(id).unwrap())
     }
 
-    fn session(name: &SessionName) -> Fold<'_> {
-        Fold::Session(&Machine::Local, name)
+    fn workstream(id: u64) -> Fold<'static> {
+        Fold::Workstream(&Machine::Local, WorkstreamId::of(id).unwrap())
     }
 
     fn within(root: &Path) -> Folds {
@@ -193,44 +195,41 @@ mod tests {
         let root = scratch.path().join("luneta");
         let mut here = within(&root);
         let mut there = within(&root);
-        let (test, work) = (name("test"), name("my work"));
 
-        assert!(here.set(session(&test), true));
-        assert!(here.set(session(&work), true));
+        assert!(here.set(project(1), true));
+        assert!(here.set(workstream(2), true));
         assert!(there.reload());
-        assert!(there.contains(session(&test)) && there.contains(session(&work)));
-        assert!(within(&root).contains(session(&test)));
+        assert!(there.contains(project(1)) && there.contains(workstream(2)));
+        assert!(within(&root).contains(project(1)));
 
-        assert!(there.set(session(&test), false));
+        assert!(there.set(project(1), false));
         assert!(here.reload());
-        assert!(!here.contains(session(&test)) && here.contains(session(&work)));
+        assert!(!here.contains(project(1)) && here.contains(workstream(2)));
         assert!(!here.reload());
 
-        assert!(!here.set(session(&test), false));
-        let later = name("later");
-        assert!(here.set(session(&later), true));
+        assert!(!here.set(project(1), false));
+        assert!(here.set(project(3), true));
         there.reload();
-        assert!(there.contains(session(&later)));
+        assert!(there.contains(project(3)));
         assert_eq!((here.lost(), there.lost()), (None, None));
     }
 
     #[test]
-    fn a_machine_and_its_sessions_fold_apart_from_this_one_s() {
+    fn a_project_and_a_workstream_of_one_id_and_another_machine_s_fold_apart() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = within(scratch.path());
         let odd: Destination = "ssh://me@vps:22".parse().unwrap();
         let (vps, dot) = (Machine::Remote(odd), Machine::Remote(".".parse().unwrap()));
-        let main = name("main");
+        let seven = ProjectId::of(7).unwrap();
 
-        assert!(here.set(Fold::Session(&vps, &main), true));
-        assert!(here.set(Fold::Machine(&dot), true));
-        assert!(here.set(Fold::Machine(&Machine::Local), true));
+        assert!(here.set(Fold::Project(&vps, seven), true));
+        assert!(here.set(Fold::Workstream(&dot, WorkstreamId::of(7).unwrap()), true));
         let next = within(scratch.path());
-        assert!(next.contains(Fold::Session(&vps, &main)));
-        assert!(!next.contains(session(&main)));
-        assert!(!next.contains(Fold::Machine(&vps)));
-        assert!(next.contains(Fold::Machine(&dot)));
-        assert!(next.contains(Fold::Machine(&Machine::Local)));
+        assert!(next.contains(Fold::Project(&vps, seven)));
+        assert!(!next.contains(project(7)));
+        assert!(!next.contains(workstream(7)));
+        assert!(!next.contains(Fold::Project(&dot, seven)));
+        assert!(next.contains(Fold::Workstream(&dot, WorkstreamId::of(7).unwrap())));
         assert_eq!(next.lost(), None);
     }
 
@@ -241,9 +240,8 @@ mod tests {
         fs::write(&file, "").unwrap();
         let mut folds = within(&file);
         assert!(folds.lost().is_some_and(|lost| lost.contains("not a folder")));
-        let work = name("work");
-        assert!(folds.set(session(&work), true));
-        assert!(folds.contains(session(&work)));
+        assert!(folds.set(project(1), true));
+        assert!(folds.contains(project(1)));
     }
 
     #[test]
@@ -256,13 +254,13 @@ mod tests {
         here.reload();
         assert!(heard.recv_timeout(Duration::from_millis(200)).is_err());
 
-        let work = name("work");
-        within(scratch.path()).set(session(&work), true);
+        within(scratch.path()).set(project(1), true);
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
-        assert!(here.reload() && here.contains(session(&work)));
+        assert!(here.reload() && here.contains(project(1)));
         let vps = Machine::Remote("vps".parse().unwrap());
-        within(scratch.path()).set(Fold::Machine(&vps), true);
+        within(scratch.path()).set(Fold::Workstream(&vps, WorkstreamId::of(2).unwrap()), true);
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
-        assert!(here.reload() && here.contains(Fold::Machine(&vps)));
+        let two = WorkstreamId::of(2).unwrap();
+        assert!(here.reload() && here.contains(Fold::Workstream(&vps, two)));
     }
 }

@@ -273,7 +273,10 @@ fn plain(text: &str) -> String {
 
 fn highlighted(target: &Target) -> String {
     let row = match target {
-        Target::Session(_, listed) => format!("session {}", listed.name()),
+        Target::Session(_, listed) => format!("project {}", listed.name()),
+        Target::Workstream(_, row) => {
+            format!("workstream {} of project {}", row.name, row.place.session.name())
+        },
         Target::Pane(_, PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
@@ -492,7 +495,7 @@ mod tests {
         assert_eq!(top(&pane), "┌─ Ask ────────────────── luneta/main ─┐");
         let session = Ask::new(2, &Target::Session(Machine::Local, listed()), Path::new("/w"));
         assert_eq!(session.works, Works::Here(PathBuf::from("/w")));
-        let session_row = "is session luneta: \"this\"";
+        let session_row = "is project luneta: \"this\"";
         assert!(session.highlighted.contains(session_row), "{}", session.highlighted);
 
         let there = |cwd: Option<&str>| {

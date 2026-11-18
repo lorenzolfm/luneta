@@ -40,7 +40,7 @@ fn luneta_shows_its_workstream_and_what_its_shell_prints() {
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || {
         let screen = window.screen();
-        screen.iter().any(|line| line.contains(" work ") && line.contains('◇')).then_some(())
+        screen.iter().any(|line| line.contains(" work ")).then_some(())
     });
 
     window.send(TYPED);
