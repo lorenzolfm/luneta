@@ -15,7 +15,7 @@ use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{view, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorkstreamId};
 use lunetad::folder::Folder;
-use lunetad::{Asked, Beside, Destination, Heard};
+use lunetad::{Asked, Beside, Destination, Heard, Where};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
@@ -1005,7 +1005,8 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let owned = Owned::new();
     let workstream = WorkstreamId::of(workstream_in_home(&owned)).unwrap();
     let folder = folder_in(owned.host.runtime.path()).unwrap();
-    seen_and_typed_into(folder, None, Reach::Mux(owned.socket()), workstream);
+    let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+    seen_and_typed_into(folder, Where::Here { runs_in: None }, reach, workstream);
 }
 
 #[test]
@@ -1020,20 +1021,20 @@ fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
     let lunetad = folder_in(here.runtime.path()).unwrap();
     let destination: Destination = "far".parse().unwrap();
     let reach = Reach::On { lunetad: lunetad.clone(), destination: destination.clone() };
-    seen_and_typed_into(lunetad.clone(), Some(destination), reach, workstream);
+    seen_and_typed_into(lunetad.clone(), Where::On(destination), reach, workstream);
 
     let nowhere: Destination = "nowhere".parse().unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
-    let on = Some(nowhere.clone());
-    let _show = lunetad::show(lunetad.clone(), on, workstream, size, None, false, told);
+    let at = Where::On(nowhere.clone());
+    let _show = lunetad::show(lunetad.clone(), at, workstream, size, false, told);
     match hearing.recv_timeout(HEARD_IN).expect("lunetad answers a view of nowhere") {
         Heard::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
         other => panic!("a view of a machine not reached is lost, not {other:?}"),
     }
     let (seen, seeing) = std::sync::mpsc::channel();
-    let greeting = Greeting { runs_in: None, foreground: None, background: None };
+    let greeting = Greeting { foreground: None, background: None };
     let reach = Reach::On { lunetad, destination: nowhere };
     let _viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     match seeing.recv_timeout(HEARD_IN).expect("lunetad answers a viewer of nowhere") {
@@ -1043,9 +1044,10 @@ fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
 }
 
 #[test]
-fn a_view_is_refused_a_hello_after_the_first_a_word_that_says_nothing_and_a_machine_misnamed() {
+fn a_view_is_refused_words_out_of_turn_a_machine_misnamed_and_a_terminal_here_named_there() {
     let owned = Owned::new();
-    let mut shown = Shown::new(&owned, workstream_in_home(&owned), 80, 24);
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
     shown.open();
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let greeted = Some(mux_api::Greeting { colours: None, runs_in: None });
@@ -1086,6 +1088,21 @@ fn a_view_is_refused_a_hello_after_the_first_a_word_that_says_nothing_and_a_mach
     assert_eq!(refused(vec![hello(None, None)]), invalid("the hello greets nobody"));
     let misnamed = refused(vec![hello(Some("-oops"), greeted)]).expect("a misnamed machine");
     assert_eq!(misnamed.0, Code::InvalidArgument, "{misnamed:?}");
+    let runs_in = Some(mux_api::TerminalKey { id: 1, made_at: None });
+    let greeted_here = Some(mux_api::Greeting { colours: None, runs_in });
+    let runs_in_on = invalid("runs_in names a terminal of this machine, and on names another");
+    assert_eq!(refused(vec![hello(Some("far"), greeted_here)]), runs_in_on);
+    let runs_in = Some(TerminalKey { id: 1, made_at: None });
+    let on = Some(On { destination: "far".to_owned() });
+    let size = Some(size(80, 24));
+    let hello = Hello { workstream, size, runs_in, again: false, on };
+    let words = vec![ShowRequest { event: Some(Event::Hello(hello)) }];
+    let show_refused = owned.block_on(async move {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        daemon.show(tokio_stream::iter(words)).await.err()
+    });
+    let show_refused = show_refused.map(|it| (it.code(), it.message().to_owned()));
+    assert_eq!(show_refused, runs_in_on, "a show names no terminal of here to another machine");
 }
 
 #[test]
@@ -1145,14 +1162,14 @@ fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_be
 
 fn seen_and_typed_into(
     folder: Folder,
-    on: Option<Destination>,
+    at: Where,
     reach: Reach,
     workstream: WorkstreamId,
 ) {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
-    let show = lunetad::show(folder, on, workstream, size, None, false, told);
+    let show = lunetad::show(folder, at, workstream, size, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1168,7 +1185,7 @@ fn seen_and_typed_into(
     assert_eq!(opened.focused(), Some(&pane));
 
     let (seen, seeing) = std::sync::mpsc::channel();
-    let greeting = Greeting { runs_in: None, foreground: None, background: None };
+    let greeting = Greeting { foreground: None, background: None };
     let viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
@@ -1216,7 +1233,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
     let told = move |it| drop(heard.send(it));
-    let show = lunetad::show(folder, None, workstream, size, None, false, told);
+    let show = lunetad::show(folder, Where::Here { runs_in: None }, workstream, size, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1231,8 +1248,9 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let opened = laid();
 
     let (seen, seeing) = std::sync::mpsc::channel();
-    let greeting = Greeting { runs_in: None, foreground: None, background: None };
-    let viewer = view(Reach::Mux(owned.socket()), greeting, move |it| drop(seen.send(it)));
+    let greeting = Greeting { foreground: None, background: None };
+    let reach = Reach::Mux { socket: owned.socket(), runs_in: None };
+    let viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |within: Duration| match seeing.recv_timeout(within) {
         Ok(Seen::Frame(framed)) => Some(framed),

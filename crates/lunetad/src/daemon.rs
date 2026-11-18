@@ -105,6 +105,8 @@ const _: () = assert!(WATCH.as_millis() < client::ANSWER.as_millis());
 
 const QUESTIONS_MAX: u32 = 16;
 
+const RUNS_IN_ON: &str = "runs_in names a terminal of this machine, and on names another";
+
 const STEPS_WAITING: usize = 64;
 
 const UNTALKED: &str = "the turn ended with no answer, as the daemon's runner of it failed";
@@ -1031,8 +1033,11 @@ impl Daemon for Host {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
         let Hello { workstream, size, runs_in, again, on } = hello;
+        if on.is_some() && runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
         if let Some(mut daemon) = self.bridged(on)? {
-            let hello = Hello { workstream, size, runs_in, again, on: None };
+            let hello = Hello { workstream, size, runs_in: None, again, on: None };
             let first = ShowRequest { event: Some(Event::Hello(hello)) };
             let rest = heard.map_while(Result::ok);
             let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
@@ -1088,6 +1093,9 @@ impl Daemon for Host {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
         let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        if on.is_some() && greeting.runs_in.is_some() {
+            return Err(Status::invalid_argument(RUNS_IN_ON));
+        }
         let (refuse, refused) = oneshot::channel();
         let mut refuse = Some(refuse);
         let said = heard.map_while(move |word| {

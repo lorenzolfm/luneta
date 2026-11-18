@@ -557,8 +557,8 @@ fn run_in(
     };
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let lunetad = daemon.clone().unwrap_or_default();
-    let (size, greeting) = (view_size(areas.1), greeting(runs_in, colours));
-    let right = Viewed::start(1, lunetad.clone(), Machine::Local, start, size, greeting, &events);
+    let (size, greeting, here) = (view_size(areas.1), greeting(colours), Machine::Local);
+    let right = Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events);
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
@@ -616,9 +616,9 @@ fn run_in(
     Ok(app.failure())
 }
 
-fn greeting(runs_in: Option<TerminalKey>, colours: Colours) -> Greeting {
+fn greeting(colours: Colours) -> Greeting {
     let (foreground, background) = colours.both();
-    Greeting { runs_in, foreground, background }
+    Greeting { foreground, background }
 }
 
 fn view_size(area: Rect) -> lunetad::projects::Size {
@@ -1950,11 +1950,7 @@ impl App {
         workstream: WorkstreamId,
         terminal: Option<TerminalId>,
     ) {
-        if self.right.machine() == on {
-            self.right.go(workstream);
-        } else {
-            self.right = self.right.on(on.clone(), workstream);
-        }
+        self.right.go(on, workstream);
         assert_eq!(self.right.machine(), on, "luneta shows the machine it went to");
         assert_eq!(self.right.workstream(), workstream, "luneta shows the workstream it went to");
         let (tabs, titles) = self.projected.tabs(on, workstream);

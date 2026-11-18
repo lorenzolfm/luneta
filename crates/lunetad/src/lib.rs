@@ -55,6 +55,8 @@ pub use directory::Directory;
 pub use folder::Refusal;
 pub use process::var;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
-pub use shows::{show, Asked, Beside, Direction, Found, Growth, Heard, Laid, Pane, Rect, Show};
+pub use shows::{
+    show, Asked, Beside, Direction, Found, Growth, Heard, Laid, Pane, Rect, Show, Where,
+};
 pub use remote::{named_by as hosts_named, sharing, Destination, FILE as HOSTS_FILE, HOSTS_MAX};
 pub use mux::{Id as SocketId, SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX};

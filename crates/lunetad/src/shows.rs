@@ -314,27 +314,42 @@ fn untaken() -> String {
     format!("lunetad has yet to take the last {SAID_MAX} words sent its view")
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Where {
+    Here { runs_in: Option<TerminalKey> },
+    On(Destination),
+}
+
+impl Where {
+    #[must_use]
+    pub fn runs_in(&self) -> Option<TerminalKey> {
+        match self {
+            Where::Here { runs_in } => *runs_in,
+            Where::On(_) => None,
+        }
+    }
+}
+
 pub fn show<Told: FnMut(Heard) + Send + 'static>(
     folder: Folder,
-    on: Option<Destination>,
+    at: Where,
     workstream: WorkstreamId,
     size: Size,
-    runs_in: Option<TerminalKey>,
     again: bool,
     told: Told,
 ) -> Show {
-    if on.is_some() {
-        assert!(runs_in.is_none(), "luneta runs in no terminal of another machine");
-    }
     let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
     let showing = move |mut told: Told| {
         let built = runtime::Builder::new_current_thread().enable_all().build();
         let size = Some(size_said(size));
-        let runs_in = runs_in.map(|key| api::TerminalKey {
+        let said = |key: TerminalKey| api::TerminalKey {
             id: key.id.get(),
             made_at: Some(key.made.into()),
-        });
-        let on = on.map(|on| api::On { destination: on.to_string() });
+        };
+        let (runs_in, on) = match at {
+            Where::Here { runs_in } => (runs_in.map(said), None),
+            Where::On(on) => (None, Some(api::On { destination: on.to_string() })),
+        };
         let hello = show_request::Hello { workstream: workstream.get(), size, runs_in, again, on };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),

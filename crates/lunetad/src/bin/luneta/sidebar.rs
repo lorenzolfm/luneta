@@ -319,6 +319,13 @@ impl OwnSeat {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct Sitting {
+    on: Machine,
+    own: OwnSeat,
+    shown: Option<WorkstreamId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HereAgent {
     pub on: Machine,
     pub session: SessionName,
@@ -1072,14 +1079,12 @@ pub struct Sidebar {
     host: Option<Host>,
     this: String,
     away: Option<String>,
-    seat: Option<OwnSeat>,
+    seat: Option<Sitting>,
     seat_name: Option<String>,
-    on: Machine,
     folds: Folds,
     news: News,
     agent: Kept,
     shelves: Vec<Shelf>,
-    shown: Option<WorkstreamId>,
     here_key: Option<Key>,
     finished: HashMap<Key, SystemTime>,
     rows: Vec<Row>,
@@ -1441,42 +1446,43 @@ impl Sidebar {
     }
 
     pub fn attaching(&mut self, on: Machine, session: OwnKey) {
-        self.on = on;
-        self.seat = Some(OwnSeat::Coming(session));
+        self.seat = Some(Sitting { on, own: OwnSeat::Coming(session), shown: None });
         self.unfold_own(session);
         self.rebuild();
     }
 
     pub fn went_own(&mut self, pane: OwnPane, client: OwnClientId) {
-        let was = self.own_seat().map(OwnSeat::session);
-        assert!(was.is_some(), "only a client of an own session goes among them");
-        self.seat = Some(OwnSeat::On { pane, client });
-        if was != Some(pane.session) {
+        let seat = self.seat.as_mut().expect("only a client of an own session goes among them");
+        let was = seat.own.session();
+        seat.own = OwnSeat::On { pane, client };
+        if was != pane.session {
             self.unfold_own(pane.session);
         }
         if let Some(place) = self.own_place(pane) {
-            let spot = Spot::on(&self.on, Place::Pane(place));
+            let on = self.on().clone();
+            let spot = Spot::on(&on, Place::Pane(place));
             if let Some(Place::Workstream(home)) = self.homes.get(&spot).and_then(Spot::place) {
-                self.folds.set(Fold::Workstream(&self.on, home.workstream), false);
+                self.folds.set(Fold::Workstream(&on, home.workstream), false);
             }
         }
         self.rebuild();
     }
 
     pub fn showing(&mut self, workstream: WorkstreamId) {
-        if self.shown != Some(workstream) {
-            self.shown = Some(workstream);
-            self.folds.set(Fold::Workstream(&self.on, workstream), false);
+        let seat = self.seat.as_mut().expect("luneta shows a workstream where it sits");
+        if seat.shown != Some(workstream) {
+            seat.shown = Some(workstream);
+            self.folds.set(Fold::Workstream(&seat.on, workstream), false);
             self.rebuild();
         }
     }
 
     pub fn own_seat(&self) -> Option<OwnSeat> {
-        self.seat
+        self.seat.as_ref().map(|seat| seat.own)
     }
 
     pub fn own_seat_on(&self, on: &Machine) -> Option<OwnSeat> {
-        self.seat.filter(|_| self.on == *on)
+        self.seat.as_ref().filter(|seat| seat.on == *on).map(|seat| seat.own)
     }
 
     pub fn own_title(&self) -> Option<&str> {
@@ -1488,7 +1494,7 @@ impl Sidebar {
     }
 
     fn own_known(&self, key: OwnKey) -> Option<&Known> {
-        let mut known = shelf(&self.shelves, &self.on).iter();
+        let mut known = shelf(&self.shelves, self.on()).iter();
         known.find(|known| known.listed().own_key() == Some(key))
     }
 
@@ -1499,14 +1505,15 @@ impl Sidebar {
 
     fn here_workstream(&self) -> Option<WorkstreamPlace> {
         let known = self.own_known(self.own_seat()?.session())?;
-        let shown = self.shown?;
+        let shown = self.seat.as_ref()?.shown?;
         let stream = known.workstreams.iter().find(|stream| stream.place.workstream == shown)?;
         Some(stream.place.clone())
     }
 
     fn unfold_own(&mut self, key: OwnKey) {
         if let Some(project) = self.own_listed(key).as_ref().and_then(Listed::project) {
-            self.folds.set(Fold::Project(&self.on, project), false);
+            let on = self.on().clone();
+            self.folds.set(Fold::Project(&on, project), false);
         }
     }
 
@@ -1515,11 +1522,11 @@ impl Sidebar {
     }
 
     pub fn on(&self) -> &Machine {
-        &self.on
+        self.seat.as_ref().map_or(&Machine::Local, |seat| &seat.on)
     }
 
     pub fn user(&self, machine: &Machine) -> User {
-        if self.on != *machine {
+        if self.on() != machine {
             return User::Away;
         }
         User::Untold
@@ -1532,13 +1539,13 @@ impl Sidebar {
 
     pub fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
-        let seen = self.seen(&self.on)?;
+        let seen = self.seen(self.on())?;
         let seated = seen.seated();
         let agent = seated.get(&(place.session.at(), place.pane.id()))?;
-        let pane = self.pane_of(&self.on, &place.session, place.pane.id())?;
+        let pane = self.pane_of(self.on(), &place.session, place.pane.id())?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
         Some(HereAgent {
-            on: self.on.clone(),
+            on: self.on().clone(),
             session: place.session.name().clone(),
             pane: place.pane.id(),
             dir: agent_dir(agent, pane).to_owned(),
@@ -1590,7 +1597,7 @@ impl Sidebar {
 
     pub fn whereabouts(&self) -> Option<Here> {
         let seat = self.own_seat()?;
-        let on = self.on.clone();
+        let on = self.on().clone();
         if let Ok(place) = self.here_place() {
             return Some(Here::Pane { on, place });
         }
@@ -1599,13 +1606,13 @@ impl Sidebar {
     }
 
     pub fn far_agent(&self) -> Option<&Destination> {
-        let Machine::Remote(on) = &self.on else {
+        let Machine::Remote(on) = self.on() else {
             return None;
         };
         let Some(Here::Pane { place, .. }) = self.whereabouts() else {
             return None;
         };
-        let seen = self.seen(&self.on)?;
+        let seen = self.seen(self.on())?;
         let seat = (place.session.at(), place.pane.id());
         seen.seated().contains_key(&seat).then_some(on)
     }
@@ -1744,7 +1751,7 @@ impl Sidebar {
         let Some(host) = &self.host else {
             return;
         };
-        let own_seat = self.own_seat();
+        let (own_seat, sits_on) = (self.own_seat(), self.on().clone());
         let now = self.drawn.unwrap_or(SystemTime::UNIX_EPOCH);
         let mut due: Option<SystemTime> = None;
         let listed = machines(host, &self.shelves);
@@ -1768,7 +1775,7 @@ impl Sidebar {
             }
         };
         for (machine, reached) in listed.each() {
-            let on = machine == self.on;
+            let on = machine == sits_on;
             let name = match &machine {
                 Machine::Local => self.this.clone(),
                 Machine::Remote(destination) => destination.to_string(),
@@ -2008,7 +2015,7 @@ impl Sidebar {
         self.unlisted_machines = unlisted_machines;
         self.here_key = here_key;
         self.finished = finished;
-        let here_spot = here_pane.map(|place| Spot::on(&self.on, Place::Pane(place)));
+        let here_spot = here_pane.map(|place| Spot::on(self.on(), Place::Pane(place)));
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
         let gone = |spot: Spot| self.row_of(&spot).is_none();
         match &self.moving {
@@ -2662,7 +2669,7 @@ impl Sidebar {
         self.notice = None;
         let place = Place::Pane(self.here_place().inspect_err(|why| log::say(why))?);
         self.menus += 1;
-        let target = self.target_at(&self.on, place).ok_or(NO_HERE_PANE)?;
+        let target = self.target_at(self.on(), place).ok_or(NO_HERE_PANE)?;
         let agent = self.agent_for(&target);
         self.close_menu();
         self.menu = Some(Menu::new(self.menus, target, agent));

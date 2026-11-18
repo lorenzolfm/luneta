@@ -6,7 +6,7 @@ use lunetad::api::{self, agent, remote, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
-use lunetad::SessionName;
+use lunetad::{Destination, SessionName};
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
@@ -63,7 +63,8 @@ pub fn route(on: &Machine, session: &Listed, pane: PaneKey) -> Result<Route<u32>
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Projected {
-    machines: Vec<(Machine, Vec<Project>)>,
+    here: Vec<Project>,
+    far: BTreeMap<Destination, Vec<Project>>,
 }
 
 #[must_use]
@@ -109,7 +110,7 @@ impl Project {
 impl Projected {
     pub fn adapted(host: &mut Host) -> Result<Projected, String> {
         host.sessions.clear();
-        let mut machines = Vec::new();
+        let mut far_projects = BTreeMap::new();
         let named = machines::named_once(&host.remotes);
         for (remote, destination) in host.remotes.iter_mut().zip(named) {
             if let Some(remote::Reached::Host(far)) = &mut remote.reached {
@@ -119,26 +120,31 @@ impl Projected {
                     projects.iter().filter_map(|it| project(it).ok()).collect();
                 seat(&projects, &mut far.agents, &mut far.unread_files);
                 if let Some(destination) = destination {
-                    machines.push((Machine::Remote(destination), projects));
+                    let held = far_projects.insert(destination, projects);
+                    assert!(held.is_none(), "named_once names each machine once");
                 }
             }
         }
-        let projects = kept(host.projects.as_ref());
-        let projects = projects.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
-        seat(&projects, &mut host.agents, &mut host.unread_files);
-        machines.insert(0, (Machine::Local, projects));
-        Ok(Projected { machines })
+        let here = kept(host.projects.as_ref());
+        let here = here.iter().map(project).collect::<Result<Vec<Project>, _>>()?;
+        seat(&here, &mut host.agents, &mut host.unread_files);
+        Ok(Projected { here, far: far_projects })
     }
 
     #[must_use]
     pub fn reaches(&self, on: &Machine) -> bool {
-        self.machines.iter().any(|(machine, _)| machine == on)
+        match on {
+            Machine::Local => true,
+            Machine::Remote(destination) => self.far.contains_key(destination),
+        }
     }
 
     #[must_use]
     pub fn projects(&self, on: &Machine) -> &[Project] {
-        let held = self.machines.iter().find(|(machine, _)| machine == on);
-        held.map_or(&[], |(_, projects)| projects.as_slice())
+        match on {
+            Machine::Local => &self.here,
+            Machine::Remote(destination) => self.far.get(destination).map_or(&[], Vec::as_slice),
+        }
     }
 
     #[must_use]

@@ -30,21 +30,16 @@ const _: () = assert!(PANES_MAX <= SHOWN_MAX);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Greeting {
-    pub runs_in: Option<TerminalKey>,
     pub foreground: Option<[u8; 3]>,
     pub background: Option<[u8; 3]>,
 }
 
 impl Greeting {
-    fn greeted(self) -> api::Greeting {
+    fn greeted(self, runs_in: Option<TerminalKey>) -> api::Greeting {
         api::Greeting {
             colours: Some(colours(self.foreground, self.background)),
-            runs_in: self.runs_in.map(TerminalKey::said),
+            runs_in: runs_in.map(TerminalKey::said),
         }
-    }
-
-    fn said(self) -> api::FromViewer {
-        api::FromViewer { event: Some(from_viewer::Event::Hello(self.greeted())) }
     }
 }
 
@@ -117,7 +112,7 @@ impl Drop for Viewer {
 
 #[derive(Clone, Debug)]
 pub enum Reach {
-    Mux(PathBuf),
+    Mux { socket: PathBuf, runs_in: Option<TerminalKey> },
     On { lunetad: Folder, destination: Destination },
 }
 
@@ -171,21 +166,22 @@ async fn hearing(
 ) -> Result<Streaming<api::ToViewer>, String> {
     let sent = ReceiverStream::new(sent);
     let heard = match reach {
-        Reach::Mux(socket) => {
+        Reach::Mux { socket, runs_in } => {
             let mut client = match connect(socket, None).await {
                 Ok(Some(client)) => client,
                 Ok(None) => return Err("luneta-mux does not run".to_owned()),
                 Err(error) => return Err(format!("{}: {error}", socket.display())),
             };
-            let heard = client.show(tokio_stream::once(greeting.said()).chain(sent)).await;
+            let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));
+            let first = api::FromViewer { event: Some(hello) };
+            let heard = client.show(tokio_stream::once(first).chain(sent)).await;
             heard.map_err(|status| refused(&status).to_string())
         },
         Reach::On { lunetad, destination } => {
-            assert!(greeting.runs_in.is_none(), "luneta runs in no terminal of another machine");
             let reached = crate::connect(lunetad).await;
             let mut daemon = reached.map_err(|error| format!("lunetad is not reached: {error}"))?;
             let on = Some(On { destination: destination.to_string() });
-            let hello = view_request::Hello { on, greeting: Some(greeting.greeted()) };
+            let hello = view_request::Hello { on, greeting: Some(greeting.greeted(None)) };
             let first = ViewRequest { event: Some(view_request::Event::Hello(hello)) };
             let said = |said| ViewRequest { event: Some(view_request::Event::Said(said)) };
             let heard = daemon.view(tokio_stream::once(first).chain(sent.map(said))).await;
