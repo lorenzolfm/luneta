@@ -775,7 +775,8 @@ impl Projects {
             },
             Change::WorkstreamAt { project, folder } => {
                 let held = changed.project(project)?;
-                let at = held.workstreams.iter().find(|it| held.folder(it) == folder);
+                let there = held.workstreams.iter().filter(|it| held.folder(it) == folder);
+                let at = there.rev().max_by_key(|it| it.used);
                 let Some(found) = at else {
                     let add = Change::AddWorkstream { project, folder, name: None };
                     return self.changed_by(add, draw);
@@ -1332,14 +1333,21 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_at_a_folder_is_the_first_there_or_else_one_made_there() {
+    fn a_workstream_at_a_folder_is_the_one_there_used_last_or_else_one_made_there() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
-        workstream(&mut projects, luneta, "/w/luneta/main");
+        let again = workstream(&mut projects, luneta, "/w/luneta/main");
         let at = |folder: &str| Change::WorkstreamAt { project: luneta, folder: dir(folder) };
         let (same, found) = change(&projects, at("/w/luneta/main")).unwrap();
-        assert_eq!((same == projects, found), (true, Some(main.0)));
+        assert_eq!((same == projects, found), (true, Some(main.0)), "none used: the first");
+        let went = |workstream| Change::Went { workstream, at: Used::of_millis(5_000) };
+        (projects, _) = change(&projects, went(again)).unwrap();
+        let (_, found) = change(&projects, at("/w/luneta/main")).unwrap();
+        assert_eq!(found, Some(again.0), "the one used last");
+        (projects, _) = change(&projects, went(main)).unwrap();
+        let (_, found) = change(&projects, at("/w/luneta/main")).unwrap();
+        assert_eq!(found, Some(main.0), "the one used last");
         let made = WorkstreamId(add(&mut projects, at("/w/luneta/feat")));
         assert_eq!(projects.all()[0].workstreams().len(), 3);
         let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
