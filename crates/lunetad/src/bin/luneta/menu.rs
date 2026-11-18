@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luneta_protocol::github::{PullRequest, State};
 use luneta_protocol::said::Said;
-use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
+use lunetad::projects::{self, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::{Destination, Directory};
 use luneta_protocol::shell::Ending;
@@ -453,11 +453,20 @@ enum Renames {
     Project(ProjectId),
 }
 
+impl Renames {
+    fn parse(self) -> fn(&str) -> Result<projects::Name, String> {
+        match self {
+            Renames::Terminal(_) | Renames::Workstream(_) => projects::Name::parse,
+            Renames::Project(_) => projects::Name::of_project,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rename {
-    Terminal(TerminalId, Option<String>),
-    Workstream(WorkstreamId, Option<String>),
-    Project(ProjectId, String),
+    Terminal(TerminalId, Option<projects::Name>),
+    Workstream(WorkstreamId, Option<projects::Name>),
+    Project(ProjectId, projects::Name),
 }
 
 #[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
@@ -496,30 +505,38 @@ impl Typing {
     }
 
     fn typed(self, typed: &str, on: &Machine) -> Entered {
-        let named = Some(typed.trim().to_owned()).filter(|name| !name.is_empty());
-        match (self, named) {
-            (Typing::Machine, _) => match typed.parse::<Destination>() {
+        let named = |parse: fn(&str) -> Result<projects::Name, String>| {
+            let named = Some(typed.trim()).filter(|name| !name.is_empty());
+            named.map(parse).transpose()
+        };
+        let renamed = |rename: Rename| Entered::Done(Done::Rename(on.clone(), rename));
+        match self {
+            Typing::Machine => match typed.parse::<Destination>() {
                 Ok(destination) => Entered::Done(Done::Ssh(destination)),
                 Err(why) => Entered::Wrong(format!("not a destination: {why}")),
             },
-            (Typing::Folder, _) => match folder_typed(typed) {
+            Typing::Folder => match folder_typed(typed) {
                 Ok(folder) => Entered::Next(Typing::Name(folder)),
                 Err(why) => Entered::Wrong(why),
             },
-            (Typing::Name(folder), name) => {
-                Entered::Done(Done::Project { on: on.clone(), folder, name })
+            Typing::Name(folder) => match named(projects::Name::of_project) {
+                Ok(name) => Entered::Done(Done::Project { on: on.clone(), folder, name }),
+                Err(why) => Entered::Wrong(why),
             },
-            (Typing::Rename(Renames::Terminal(terminal)), name) => {
-                Entered::Done(Done::Rename(on.clone(), Rename::Terminal(terminal, name)))
-            },
-            (Typing::Rename(Renames::Workstream(workstream)), name) => {
-                Entered::Done(Done::Rename(on.clone(), Rename::Workstream(workstream, name)))
-            },
-            (Typing::Rename(Renames::Project(project)), Some(name)) => {
-                Entered::Done(Done::Rename(on.clone(), Rename::Project(project, name)))
-            },
-            (Typing::Rename(Renames::Project(_)), None) => {
-                Entered::Wrong("a project keeps a name: type one".to_owned())
+            Typing::Rename(asked) => match (asked, named(asked.parse())) {
+                (_, Err(why)) => Entered::Wrong(why),
+                (Renames::Terminal(terminal), Ok(name)) => {
+                    renamed(Rename::Terminal(terminal, name))
+                },
+                (Renames::Workstream(workstream), Ok(name)) => {
+                    renamed(Rename::Workstream(workstream, name))
+                },
+                (Renames::Project(project), Ok(Some(name))) => {
+                    renamed(Rename::Project(project, name))
+                },
+                (Renames::Project(_), Ok(None)) => {
+                    Entered::Wrong("a project keeps a name: type one".to_owned())
+                },
             },
         }
     }
@@ -527,8 +544,7 @@ impl Typing {
 
 fn folder_typed(typed: &str) -> Result<String, String> {
     let folder = typed.trim();
-    let home = folder == "~" || folder.starts_with("~/");
-    if home || folder.starts_with('/') {
+    if projects::Dir::below_home(folder).is_some() || folder.starts_with('/') {
         return Ok(folder.to_owned());
     }
     Err(format!("not a folder: {folder:?} is no absolute path, nor one in ~"))
@@ -613,6 +629,26 @@ pub struct ProjectTarget {
     pub empty: bool,
 }
 
+enum Offer<'t> {
+    SearchSkills(&'t PaneRow),
+    Skill(&'t PaneRow, &'static str),
+    Last(&'t PaneRow, Last),
+    FixChecks(&'t PaneRow),
+    NewPane(&'t PaneRow),
+    NewWorkstream(ProjectId),
+    NewProject,
+    NewMachine,
+    Rename(Renames),
+    ClosePane(&'t PaneRow),
+    CloseWorkstream(&'t WorkstreamRow),
+    RemoveProject(ProjectId),
+    ForgetMachine(&'t Destination),
+    DeleteMerged(Directory),
+    Brief(brief::Scope),
+    Ask,
+    FileIssue(Repository),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkstreamRow {
     pub place: WorkstreamPlace,
@@ -672,25 +708,55 @@ impl Target {
     }
 
     fn fits(&self, action: Action) -> bool {
+        self.offer(action).is_some()
+    }
+
+    fn offer(&self, action: Action) -> Option<Offer<'_>> {
         if !action.fits(self.noun(), self.machine()) {
-            return false;
+            return None;
         }
-        match action {
-            Action::FileIssue => self.repository().is_some(),
-            Action::DeleteMerged => self.merged_in().is_some(),
-            Action::NewWorkstream => self.project().is_some(),
-            Action::CloseWorkstream => {
-                matches!(self, Target::Workstream(_, row) if row.place.project.listed().own())
+        let offer = match (action, self) {
+            (Action::SearchSkills, Target::Pane(_, row)) => Offer::SearchSkills(row),
+            (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::Pane(_, row)) => {
+                Offer::Skill(row, action.skill()?)
             },
-            Action::RenameTerminal => {
-                matches!(self, Target::Pane(_, PaneRow { terminal: Some(_), .. }))
+            (Action::FixLast, Target::Pane(_, row)) => Offer::Last(row, Last::Fix),
+            (Action::ExplainLast, Target::Pane(_, row)) => Offer::Last(row, Last::Explain),
+            (Action::FixChecks, Target::Pane(_, row)) => Offer::FixChecks(row),
+            (Action::NewPane, Target::Pane(_, row)) => Offer::NewPane(row),
+            (Action::NewWorkstream, _) => Offer::NewWorkstream(self.project()?.id()),
+            (Action::NewProject, _) => Offer::NewProject,
+            (Action::NewMachine, _) => Offer::NewMachine,
+            (Action::RenameTerminal, Target::Pane(_, PaneRow { terminal: Some(terminal), .. })) => {
+                Offer::Rename(Renames::Terminal(*terminal))
             },
-            Action::RemoveProject => {
-                matches!(self, Target::Project(_, ProjectTarget { empty: true, .. }))
+            (Action::RenameWorkstream, Target::Workstream(_, row)) => {
+                Offer::Rename(Renames::Workstream(row.place.workstream))
             },
-            Action::ForgetMachine => matches!(self, Target::Machine(Machine::Remote(_))),
-            _ => true,
-        }
+            (Action::RenameProject, Target::Project(_, ProjectTarget { project, .. })) => {
+                Offer::Rename(Renames::Project(project.id()))
+            },
+            (Action::ClosePane, Target::Pane(_, row)) => Offer::ClosePane(row),
+            (Action::CloseWorkstream, Target::Workstream(_, row))
+                if row.place.project.listed().own() =>
+            {
+                Offer::CloseWorkstream(row)
+            },
+            (Action::RemoveProject, Target::Project(_, target)) if target.empty => {
+                Offer::RemoveProject(target.project.id())
+            },
+            (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
+                Offer::ForgetMachine(destination)
+            },
+            (Action::DeleteMerged, _) => Offer::DeleteMerged(self.merged_in()?),
+            (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
+            (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
+            (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
+            (Action::Ask, _) => Offer::Ask,
+            (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
+            _ => return None,
+        };
+        Some(offer)
     }
 
     fn project(&self) -> Option<ProjectRow> {
@@ -944,7 +1010,7 @@ pub enum Done {
     Ssh(Destination),
     Forget(Destination),
     Workstream(ProjectId, Directory),
-    Project { on: Machine, folder: String, name: Option<String> },
+    Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
     Remove(Machine, ProjectId),
 }
@@ -1183,8 +1249,7 @@ impl Menu {
         true
     }
 
-    fn act(number: u64, target: &Target, mut keys: Keys, action: Action) -> Did {
-        assert!(target.fits(action), "the menu offers {action:?} only on a row it fits");
+    fn act(number: u64, target: &Target, mut keys: Keys, offer: Offer<'_>) -> Did {
         let stays = |stage: Stage, wants: Wants| {
             Did::Stays(Menu { number, target: target.clone(), stage }, wants)
         };
@@ -1192,41 +1257,15 @@ impl Menu {
             let stage = Stage::Typing { keys, typing, typed: String::new(), wrong: None };
             stays(stage, Wants::Nothing)
         };
-        let deleting = |keys: Keys, session: &Listed, scope: Scope| {
+        let deleting = |keys: Keys, action: Action, session: &Listed, scope: Scope| {
             let (key, session) = (yes_key(action), session.clone());
             let wants = Wants::Plan { session: session.clone(), scope };
             let delete = Delete { key, session, scope };
             stays(Stage::Planning { keys, delete, agreed: None }, wants)
         };
-        let reading = |keys: Keys, row: &PaneRow, last: Last| match row.ended() {
-            Ok((beside, ended)) => {
-                let (session, pane) = (beside.session.clone(), beside.pane);
-                let wants = Wants::Printed { session, pane, ended: ended.clone() };
-                stays(Stage::Reading { keys, last, beside, ended }, wants)
-            },
-            Err(reason) => Did::Closed(Done::Wrong(reason)),
-        };
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
-        let on_pane = move || {
-            let Target::Pane(_, row) = target else {
-                unreachable!("fits() keeps {action:?} to a pane's row");
-            };
-            row
-        };
-        let on_workstream = move || {
-            let Target::Workstream(_, row) = target else {
-                unreachable!("fits() keeps {action:?} to a workstream's row");
-            };
-            row
-        };
-        let on_project = move || {
-            let Target::Project(_, project) = target else {
-                unreachable!("fits() keeps {action:?} to a project's row");
-            };
-            project
-        };
-        match action {
-            Action::SearchSkills => match on_pane().beside() {
+        match offer {
+            Offer::SearchSkills(row) => match row.beside() {
                 Ok(Beside { cwd, .. }) => {
                     keys.search = Some(Search::new());
                     let wants = Wants::Skills { cwd: cwd.into(), agent: keys.agent.harness() };
@@ -1234,23 +1273,26 @@ impl Menu {
                 },
                 Err(reason) => wrong(reason),
             },
-            Action::Review | Action::IllegalStates | Action::TigerStyle => {
-                let skill = action.skill().expect("a skill's action names its skill");
-                match started(&keys, on_pane(), skill) {
-                    Ok((session, wants)) => stays(Stage::Opening { keys, session }, wants),
-                    Err(reason) => wrong(reason),
-                }
+            Offer::Skill(row, skill) => match started(&keys, row, skill) {
+                Ok((session, wants)) => stays(Stage::Opening { keys, session }, wants),
+                Err(reason) => wrong(reason),
             },
-            Action::FixLast => reading(keys, on_pane(), Last::Fix),
-            Action::ExplainLast => reading(keys, on_pane(), Last::Explain),
-            Action::FixChecks => match on_pane().pulled() {
+            Offer::Last(row, last) => match row.ended() {
+                Ok((beside, ended)) => {
+                    let (session, pane) = (beside.session.clone(), beside.pane);
+                    let wants = Wants::Printed { session, pane, ended: ended.clone() };
+                    stays(Stage::Reading { keys, last, beside, ended }, wants)
+                },
+                Err(reason) => wrong(reason),
+            },
+            Offer::FixChecks(row) => match row.pulled() {
                 Ok((beside, page)) => {
                     let wants = Wants::Checks { page: page.clone() };
                     stays(Stage::Fetching { keys, beside, page }, wants)
                 },
                 Err(reason) => wrong(reason),
             },
-            Action::NewPane => match on_pane().beside() {
+            Offer::NewPane(row) => match row.beside() {
                 Ok(Beside { session, pane, cwd }) => {
                     let opens = Opens::Pane { beside: pane.id(), command: Vec::new() };
                     let stage = Stage::Opening { keys, session: session.clone() };
@@ -1258,86 +1300,35 @@ impl Menu {
                 },
                 Err(reason) => wrong(reason),
             },
-            Action::NewWorkstream => {
-                let project = target.project().expect("fits() offers n w only in a project");
-                match target.folder() {
-                    Ok(folder) => Did::Closed(Done::Workstream(project.id(), folder)),
-                    Err(reason) => wrong(reason),
-                }
+            Offer::NewWorkstream(project) => match target.folder() {
+                Ok(folder) => Did::Closed(Done::Workstream(project, folder)),
+                Err(reason) => wrong(reason),
             },
-            Action::NewProject => {
+            Offer::NewProject => {
                 let typed = target.folder_hint();
                 let stage = Stage::Typing { keys, typing: Typing::Folder, typed, wrong: None };
                 stays(stage, Wants::Nothing)
             },
-            Action::NewMachine => typing(keys, Typing::Machine),
-            Action::RenameTerminal => {
-                let terminal = on_pane().terminal;
-                let terminal = terminal.expect("fits() offers r only on a known terminal");
-                typing(keys, Typing::Rename(Renames::Terminal(terminal)))
+            Offer::NewMachine => typing(keys, Typing::Machine),
+            Offer::Rename(renames) => typing(keys, Typing::Rename(renames)),
+            Offer::ClosePane(row) => {
+                deleting(keys, Action::ClosePane, &row.session, Scope::Pane(row.pane))
             },
-            Action::RenameWorkstream => {
-                typing(keys, Typing::Rename(Renames::Workstream(on_workstream().place.workstream)))
-            },
-            Action::RenameProject => {
-                typing(keys, Typing::Rename(Renames::Project(on_project().project.id())))
-            },
-            Action::ClosePane => {
-                let row = on_pane();
-                deleting(keys, &row.session, Scope::Pane(row.pane))
-            },
-            Action::CloseWorkstream => {
-                let row = on_workstream();
+            Offer::CloseWorkstream(row) => {
                 let scope = Scope::Workstream(row.place.workstream);
-                deleting(keys, row.place.project.listed(), scope)
+                deleting(keys, Action::CloseWorkstream, row.place.project.listed(), scope)
             },
-            Action::RemoveProject => {
-                Did::Closed(Done::Remove(target.machine().clone(), on_project().project.id()))
+            Offer::RemoveProject(project) => {
+                Did::Closed(Done::Remove(target.machine().clone(), project))
             },
-            Action::ForgetMachine => {
-                let Target::Machine(Machine::Remote(destination)) = target else {
-                    unreachable!("fits() offers d d on a machine's row only for another machine");
-                };
-                Did::Closed(Done::Forget(destination.clone()))
-            },
-            Action::DeleteMerged => {
-                let dir = target.merged_in().expect("fits() offers d m only in a repository");
+            Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
+            Offer::DeleteMerged(dir) => {
                 let wants = Wants::Prunes { dir: dir.clone() };
                 stays(Stage::Sweeping { keys, dir }, wants)
             },
-            Action::BriefEvery => Did::Closed(Done::Brief(target.brief(brief::Scope::Every))),
-            Action::BriefThis => Did::Closed(Done::Brief(target.brief(brief::Scope::Session))),
-            Action::BriefHighlighted => {
-                Did::Closed(Done::Brief(target.brief(brief::Scope::Highlighted)))
-            },
-            Action::Ask => Did::Closed(Done::Ask(target.clone())),
-            Action::FileIssue => {
-                let repository = target.repository().expect("fits() offers i only in a repository");
-                Did::Closed(Done::Issue(repository))
-            },
-            Action::Search
-            | Action::Unread
-            | Action::Reorder
-            | Action::OpenPull
-            | Action::YankPull
-            | Action::PastedWorktree
-            | Action::PastedReview
-            | Action::PastedTackle
-            | Action::Swap
-            | Action::PaneLeft
-            | Action::PaneDown
-            | Action::PaneUp
-            | Action::PaneRight
-            | Action::Grow
-            | Action::Shrink
-            | Action::Collapse
-            | Action::Menu
-            | Action::Workstreams
-            | Action::Agents
-            | Action::Dirs
-            | Action::Dictate
-            | Action::ReadAloud
-            | Action::StopAloud => unreachable!("{action:?} is no action of the menu's"),
+            Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
+            Offer::Ask => Did::Closed(Done::Ask(target.clone())),
+            Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
         }
     }
 
@@ -1370,7 +1361,10 @@ impl Menu {
                     }
                 },
                 (Pressed::Start(_), _) => stays(Stage::Choosing(keys), Wants::Nothing),
-                (Pressed::Act(action), _) => Menu::act(number, &target, keys, action),
+                (Pressed::Act(action), _) => match target.offer(action) {
+                    Some(offer) => Menu::act(number, &target, keys, offer),
+                    None => stays(Stage::Choosing(keys), Wants::Nothing),
+                },
             },
             Stage::Typing { keys, typing, mut typed, .. } => match type_key(key, &mut typed) {
                 Typed::Close => Did::Closed(Done::Nothing),
@@ -2766,6 +2760,21 @@ mod tests {
     }
 
     #[test]
+    fn each_action_of_the_menu_is_offered_on_some_row() {
+        let vps = Machine::Remote("me@vps".parse().unwrap());
+        let rows = [
+            own_pane(),
+            pane_row(),
+            workstream_on(Machine::Local),
+            project_on(Machine::Local, true),
+            Target::Machine(vps),
+        ];
+        for (action, _) in Action::menu() {
+            assert!(rows.iter().any(|row| row.offer(action).is_some()), "{action:?}");
+        }
+    }
+
+    #[test]
     fn a_key_of_the_skills_group_starts_an_agent_on_its_skill_in_the_harness_named() {
         let (menu, wants) = stays(opened(pane_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
@@ -3152,8 +3161,13 @@ mod tests {
             " _",
             " its name; with none, it is",
         ]);
-        let named = closed(typed(menu, "Notes").key(&enter));
-        let (folder, name) = ("~/notes".to_owned(), Some("Notes".to_owned()));
+        let (menu, _) = stays(typed(menu, "api/v2").key(&enter));
+        let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+            panic!("a project's name the sidebar cannot list keeps its box open, saying why");
+        };
+        assert!(wrong.contains("names no project"), "{wrong}");
+        let named = closed(typed(cleared(menu), "Notes").key(&enter));
+        let (folder, name) = ("~/notes".to_owned(), Some(projects::Name::parse("Notes").unwrap()));
         assert_eq!(named, Done::Project { on: Machine::Local, folder, name });
         let (menu, _) = stays(typed(cleared(asked(remote_header())), "/srv/notes").key(&enter));
         let folder = "/srv/notes".to_owned();
@@ -3170,7 +3184,8 @@ mod tests {
             let menu = to.chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0);
             menu.key(&enter)
         };
-        let to = || Some("logs".to_owned());
+        let logs = || projects::Name::parse("logs").unwrap();
+        let to = || Some(logs());
         let done = closed(renamed(own_pane(), "logs"));
         assert_eq!(done, Done::Rename(Machine::Local, Rename::Terminal(terminal(), to())));
         let done = closed(renamed(Target::Pane(vps(), own_row()), ""));
@@ -3178,7 +3193,7 @@ mod tests {
         let done = closed(renamed(workstream_on(vps()), "logs"));
         assert_eq!(done, Done::Rename(vps(), Rename::Workstream(workstream(), to())));
         let done = closed(renamed(session_row(), "logs"));
-        let project = Rename::Project(project().id(), "logs".to_owned());
+        let project = Rename::Project(project().id(), logs());
         assert_eq!(done, Done::Rename(Machine::Local, project));
         let (menu, _) = stays(renamed(session_row(), " "));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
@@ -3186,6 +3201,21 @@ mod tests {
             "  _",
             " a project keeps a name: type",
         ]);
+        let long = "x".repeat(projects::NAME_CHARS_MAX + 1);
+        let (menu, _) = stays(renamed(workstream_on(Machine::Local), &long));
+        let Stage::Typing { typed, wrong: Some(wrong), .. } = &menu.stage else {
+            panic!("a name too long keeps its box open, saying why");
+        };
+        assert_eq!(*typed, long);
+        assert!(wrong.contains("longer than 64 characters"), "{wrong}");
+        let (menu, _) = stays(renamed(session_row(), "api/v2"));
+        let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
+            panic!("a project's name the sidebar cannot list keeps its box open, saying why");
+        };
+        assert!(wrong.contains("names no project"), "{wrong}");
+        let api = Some(projects::Name::parse("api/v2").unwrap());
+        let done = closed(renamed(workstream_on(Machine::Local), "api/v2"));
+        assert_eq!(done, Done::Rename(Machine::Local, Rename::Workstream(workstream(), api)));
         let (menu, _) = stays(opened(workstream_on(Machine::Local), Some('r')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" _", " its new name; with none, it"]);
         for target in [pane_row(), local_header(), remote_header()] {
@@ -3239,14 +3269,21 @@ mod tests {
         };
         let pane = Target::Pane(vps(), own_row());
         assert_eq!(root(pane.clone()), [
+            " /  Search skills",
             " a  Ask",
             " i  File issue",
+            " c  Skills ▸",
             " n  New ▸",
             " r  Rename the terminal",
             " d  Delete ▸",
             " b  Brief ▸",
             " <ESC> - Close",
         ]);
+        let (_, wants) = stays(stays(opened(pane.clone(), Some('c'))).0.key(&char('t')));
+        let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
+        let opens = Opens::Pane { beside: 4, command };
+        let (session, at) = (project().listed().clone(), PaneKey::terminal(4));
+        assert_eq!(wants, Wants::Open { session, pane: at, cwd: main_dir(), opens });
         let (menu, _) = stays(opened(pane.clone(), Some('n')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
             " p  new pane",

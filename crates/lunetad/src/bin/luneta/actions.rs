@@ -172,7 +172,7 @@ impl Action {
         let menu = Key::Menu;
         match self {
             Action::SearchSkills => {
-                spec("Search skills", &["slash command", "find"], menu(&['/']), PANE, Here)
+                spec("Search skills", &["slash command", "find"], menu(&['/']), PANE, Any)
             },
             Action::Ask => spec("Ask", &["question", "chat"], menu(&['a']), EVERY, Any),
             Action::FileIssue => {
@@ -183,31 +183,31 @@ impl Action {
                 &["critique", "audit"],
                 menu(&['c', 't']),
                 PANE,
-                Here,
+                Any,
             ),
             Action::IllegalStates => spec(
                 "/make-illegal-states-unrepresentable",
                 &["types", "model"],
                 menu(&['c', 'm']),
                 PANE,
-                Here,
+                Any,
             ),
             Action::TigerStyle => {
-                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), PANE, Here)
+                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), PANE, Any)
             },
             Action::FixLast => {
-                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), PANE, Here)
+                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), PANE, Any)
             },
             Action::ExplainLast => spec(
                 "explain the last command",
                 &["error", "shell", "why"],
                 menu(&['c', 'e']),
                 PANE,
-                Here,
+                Any,
             ),
             Action::FixChecks => {
                 let checks = menu(&['c', 'c']);
-                spec("fix the failing checks", &["ci", "pull request"], checks, PANE, Here)
+                spec("fix the failing checks", &["ci", "pull request"], checks, PANE, Any)
             },
             Action::NewPane => {
                 spec("new pane", &["split", "terminal", "shell"], menu(&['n', 'p']), PANE, Any)

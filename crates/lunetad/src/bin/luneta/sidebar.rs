@@ -1056,7 +1056,7 @@ pub enum Asked {
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
     NewWorkstream { project: ProjectId, folder: Directory },
-    AddProject { on: Machine, folder: String, name: Option<String> },
+    AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
     RemoveProject { on: Machine, project: ProjectId },
     Make {
@@ -2973,7 +2973,7 @@ impl Sidebar {
             cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
         let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, pane.id());
-        let terminal = self.terminal_of(machine, &session, pane.id());
+        let terminal = self.terminal_of(machine, &session, pane);
         let row = PaneRow { session, pane, terminal, cwd, branch, repository, pull_request, ran };
         Some(Target::Pane(machine.clone(), row))
     }
@@ -2986,11 +2986,14 @@ impl Sidebar {
         Some(Target::Project(machine.clone(), ProjectTarget { project, dir, empty }))
     }
 
-    fn terminal_of(&self, machine: &Machine, listed: &Listed, pane: u32) -> Option<TerminalId> {
+    fn terminal_of(&self, machine: &Machine, listed: &Listed, pane: PaneKey) -> Option<TerminalId> {
+        let PaneKey::Terminal(key) = pane else {
+            return None;
+        };
         let mut known = shelf(&self.shelves, machine).iter();
         let streams = &known.find(|it| it.listed() == listed)?.workstreams;
         let mut held = streams.iter().flat_map(|stream| &stream.in_panes);
-        held.find(|(id, _)| *id == pane).map(|(_, terminal)| *terminal)
+        held.find(|(id, _)| *id == key.id.get()).map(|(_, terminal)| *terminal)
     }
 
     fn workstream_target(&self, machine: &Machine, place: WorkstreamPlace) -> Option<Target> {

@@ -1558,7 +1558,7 @@ impl App {
                     return;
                 }
                 self.naming_on(move || {
-                    let named = name.as_deref();
+                    let named = name.as_ref();
                     let made = || workstreams::project_made(&Machine::Local, &folder, named);
                     let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
                     Made::Workstream { made, argv: Vec::new() }
@@ -1567,17 +1567,17 @@ impl App {
             },
             Asked::AddProject { on, folder, name } => {
                 self.change(on, move |on| {
-                    workstreams::project_made(on, &folder, name.as_deref()).map(drop)
+                    workstreams::project_made(on, &folder, name.as_ref()).map(drop)
                 });
             },
             Asked::Rename { on, rename } => {
                 self.change(on, move |on| {
                     let renamed = match &rename {
                         Rename::Terminal(terminal, to) => {
-                            workstreams::renamed_terminal(on, *terminal, to.as_deref())
+                            workstreams::renamed_terminal(on, *terminal, to.as_ref())
                         },
                         Rename::Workstream(workstream, to) => {
-                            workstreams::renamed_workstream(on, *workstream, to.as_deref())
+                            workstreams::renamed_workstream(on, *workstream, to.as_ref())
                         },
                         Rename::Project(project, to) => {
                             workstreams::renamed_project(on, *project, to)

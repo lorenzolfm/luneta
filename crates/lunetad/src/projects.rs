@@ -14,6 +14,7 @@ use luneta_protocol::github::{PullRequest, State, Verdict};
 use crate::api;
 use crate::core::{self, Command};
 use crate::watch::Troubles;
+use crate::SessionName;
 
 mod file;
 pub(crate) mod layout;
@@ -157,6 +158,12 @@ impl Name {
         Ok(Name(text.to_owned()))
     }
 
+    pub fn of_project(text: &str) -> Result<Name, String> {
+        let name = Name::parse(text)?;
+        SessionName::running(text).map_err(|why| format!("{text:?} names no project: {why}"))?;
+        Ok(name)
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -251,6 +258,11 @@ impl Dir {
         Dir(format!("{}/{}", self.0, below.0))
     }
 
+    #[must_use]
+    pub fn below_home(path: &str) -> Option<&str> {
+        path.strip_prefix('~').filter(|below| below.is_empty() || below.starts_with('/'))
+    }
+
     pub fn found(path: &str) -> Result<Dir, String> {
         Dir::found_in(path, std::env::var("HOME").ok().as_deref())
     }
@@ -260,10 +272,9 @@ impl Dir {
             let unset = format!("{path}: HOME is not set to an absolute path");
             home.filter(|home| home.starts_with('/')).map(str::to_owned).ok_or(unset)
         };
-        let path = match path.strip_prefix('~') {
-            Some("") => home()?,
-            Some(below) if below.starts_with('/') => format!("{}{below}", home()?),
-            Some(_) | None => path.to_owned(),
+        let path = match Dir::below_home(path) {
+            Some(below) => format!("{}{below}", home()?),
+            None => path.to_owned(),
         };
         let path = path.as_str();
         if !path.starts_with('/') {
@@ -457,7 +468,7 @@ impl Ask {
         let change = match change {
             Asked::AddProject(asked::AddProject { dir, name: named }) => Change::AddProject {
                 dir: Dir::found(&dir).map_err(field("dir"))?,
-                name: name(named).map_err(field("name"))?,
+                name: named.as_deref().map(Name::of_project).transpose().map_err(field("name"))?,
             },
             Asked::AddWorkstream(asked::AddWorkstream { project, folder, name: named }) => {
                 Change::AddWorkstream {
@@ -472,7 +483,7 @@ impl Ask {
             },
             Asked::RenameProject(asked::RenameProject { project, to }) => Change::RenameProject {
                 project: id("project", project).map(ProjectId)?,
-                to: Name::parse(&to).map_err(field("to"))?,
+                to: Name::of_project(&to).map_err(field("to"))?,
             },
             Asked::RenameWorkstream(asked::RenameWorkstream { workstream, to }) => {
                 Change::RenameWorkstream {
@@ -1112,6 +1123,17 @@ mod tests {
         assert!(Name::parse(&"a".repeat(NAME_CHARS_MAX)).is_ok());
         for refused in ["", " a", "a ", "a\nb", &"a".repeat(NAME_CHARS_MAX + 1)] {
             assert!(Name::parse(refused).is_err(), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_s_name_is_one_a_session_may_have() {
+        assert_eq!(Name::of_project("bitwarden backup"), Name::parse("bitwarden backup"));
+        assert!(Name::of_project("a\nb").is_err());
+        for listed_by_none in ["api/v2", ".", ".."] {
+            assert!(Name::parse(listed_by_none).is_ok(), "{listed_by_none:?}");
+            let refused = Name::of_project(listed_by_none).unwrap_err();
+            assert!(refused.contains("names no project"), "{refused}");
         }
     }
 
