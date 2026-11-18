@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, ProjectId, WorkstreamId};
+use lunetad::projects::{self, Dir, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -772,7 +772,7 @@ impl Away {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Known {
     project: ProjectRow,
-    dir: String,
+    dir: Dir,
     workstreams: Vec<Stream>,
     order: Vec<WorkstreamId>,
 }
@@ -781,10 +781,11 @@ struct Known {
 struct Stream {
     place: WorkstreamPlace,
     name: String,
-    folder: String,
-    seen: Option<projects::Seen>,
+    folder: Dir,
+    seen: projects::Seen,
     used: Option<SystemTime>,
     panes: Vec<Pane>,
+    terminals: Vec<TerminalId>,
 }
 
 impl Known {
@@ -794,18 +795,23 @@ impl Known {
             let id = WorkstreamId::of(workstream.id)?;
             let place = WorkstreamPlace { project: project.clone(), workstream: id };
             let panes = workstream.terminals.iter().filter_map(|it| pane_of(it, workstream, tab));
-            let seen = workstream.seen.map(|seen| {
-                projects::Seen::of_api(seen).expect("lunetad says a workstream's stage luneta knows")
-            });
+            let seen = workstream.seen.and_then(projects::Seen::of_api);
+            let seen = seen.expect("lunetad says a workstream's stage luneta knows");
             let used = workstream.used_at.map(|at| {
                 SystemTime::try_from(at).expect("lunetad says a workstream's last use as a time")
             });
-            let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-            Some(Stream { place, name, folder, seen, used, panes: panes.collect() })
+            let folder = Dir::parse(&workstream.folder);
+            let folder = folder.expect("lunetad says a workstream's folder as a folder it keeps");
+            let terminals = workstream.terminals.iter().map(|terminal| {
+                TerminalId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0")
+            });
+            let (name, panes, terminals) = (workstream.name.clone(), panes.collect(), terminals);
+            Some(Stream { place, name, folder, seen, used, panes, terminals: terminals.collect() })
         });
         let workstreams = streams.collect();
         let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
-        Some(Known { project, dir: said.dir.clone(), workstreams, order })
+        let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
+        Some(Known { project, dir, workstreams, order })
     }
 
     fn listed(&self) -> &Listed {
@@ -1880,6 +1886,7 @@ impl Sidebar {
                     seen: stream.seen,
                     used: stream.used,
                     terminals: terminals.collect(),
+                    held: stream.terminals.clone(),
                     waiting: waiting.count(),
                     ending,
                 });
@@ -2263,7 +2270,7 @@ impl Sidebar {
                             machine: machine.clone(),
                             place: stream.place.clone(),
                             name: stream.name.clone(),
-                            missing: stream.seen == Some(projects::Seen::Missing),
+                            missing: stream.seen == projects::Seen::Missing,
                             hits: stream_hits.unwrap_or_default(),
                             under,
                             here,
@@ -2969,7 +2976,7 @@ impl Sidebar {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let stream = known.workstreams.iter().find(|stream| stream.place == place)?;
-        let (name, folder) = (stream.name.clone(), stream.folder.clone());
+        let (name, folder) = (stream.name.clone(), stream.folder.as_str().to_owned());
         let seen = self.seen(machine);
         let trees = seen.iter().flat_map(|seen| seen.work_trees);
         let tree = trees.into_iter().find(|tree| tree.dir == folder);
@@ -3221,8 +3228,8 @@ impl Sidebar {
                 Asked::Closes { menu: number, on, session, pane }
             },
             Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
-                let plan = self.panes_of(&on, workstream).and_then(|panes| {
-                    self.plan(&on, &session, Deletes::Workstream { workstream, panes })
+                let plan = self.deletes_of(&on, workstream).and_then(|deletes| {
+                    self.plan(&on, &session, deletes)
                 });
                 self.planned(plan)
             },
@@ -3346,13 +3353,14 @@ impl Sidebar {
         Ok(close::plan(&self.subject(on, listed, deletes)))
     }
 
-    fn panes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Vec<u32>, String> {
+    fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
         let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
         let mut held = streams.filter(|stream| stream.place.workstream == workstream);
         let Some(stream) = held.next() else {
             return Err(format!("workstream {workstream} is no longer listed"));
         };
-        Ok(stream.panes.iter().map(|pane| pane.id).collect())
+        let panes = stream.panes.iter().map(|pane| pane.id).collect();
+        Ok(Deletes::Workstream { workstream, panes, seen: stream.terminals.clone() })
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -5221,7 +5229,8 @@ mod tests {
                     None => workstreams.push(api::Workstream {
                         id,
                         name: pane.tab_name.clone(),
-                        folder: terminal.folder.clone(),
+                        folder: kept_folder(pane.cwd.as_deref()),
+                        seen: Some(api::workstream::Seen::Unread(())),
                         terminals: vec![terminal],
                         ..api::Workstream::default()
                     }),
@@ -5414,9 +5423,15 @@ mod tests {
             id,
             name: name.to_owned(),
             folder: folder.to_owned(),
+            seen: Some(api::workstream::Seen::Unread(())),
             terminals: panes.iter().map(terminal).collect(),
             ..api::Workstream::default()
         }
+    }
+
+    fn kept_folder(cwd: Option<&str>) -> String {
+        let kept = cwd.filter(|cwd| Dir::parse(cwd).is_ok());
+        kept.unwrap_or("/w").to_owned()
     }
 
     fn a_project(id: u64, name: &str, workstreams: Vec<api::Workstream>) -> api::Project {
@@ -5459,7 +5474,8 @@ mod tests {
         type_in(&mut sidebar, "d");
         let whose = listed("luneta", 7).whose();
         let session = session_name("luneta");
-        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2] };
+        let seen = [1, 2].map(|id| TerminalId::of(id).unwrap()).to_vec();
+        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
         assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
         let after = sidebar.closing.as_ref().and_then(|closing| closing.after.clone());

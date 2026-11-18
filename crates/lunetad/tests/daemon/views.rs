@@ -626,7 +626,16 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     assert_eq!(refused.code(), Code::InvalidArgument);
     assert!(refused.message().contains("holds 2 terminals still"), "{}", refused.message());
 
-    let close = || Change::CloseWorkstream(CloseWorkstream { workstream: closing });
+    let closed = |seen: &[u64]| {
+        Change::CloseWorkstream(CloseWorkstream { workstream: closing, seen: seen.to_vec() })
+    };
+    let close = || closed(&terminals);
+    for stale in [&terminals[..1], &[terminals[0], terminals[1], stays][..], &[]] {
+        let refused = asked(&owned.host, closed(stale)).unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        assert!(refused.message().contains("changed since"), "{}", refused.message());
+    }
+    assert_eq!(watched(&owned, closing).len(), 2, "a close refused as stale closes none");
     let stalled = owned.stall_mux();
     let unclosed = asked(&owned.host, close()).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");

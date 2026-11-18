@@ -1717,11 +1717,12 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        if let Act::Workstream { workstream, .. } = act {
+        if let Act::Workstream { workstream, seen, .. } = act {
             let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
-            let (on, workstream) = (on.clone(), *workstream);
+            let (on, workstream, seen) = (on.clone(), *workstream, seen.clone());
             let deleting = thread::spawn(move || {
-                if let Err(why) = caught(|| workstreams::closed(&lunetad, &on, workstream)) {
+                let closed = || workstreams::closed(&lunetad, &on, workstream, &seen);
+                if let Err(why) = caught(closed) {
                     let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
                 }
             });

@@ -20,14 +20,14 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use lunetad::mux::{Exited, Zellij};
-use lunetad::projects::{self, Name, Seen};
+use lunetad::projects::{self, Name, Seen, TerminalId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
 
 use crate::alerts::Doing;
 use crate::away::{self, Away};
-use crate::close::{self, Act, Deletes, Plan, Untold};
+use crate::close::{self, Act, Deletes, Ends, Plan, Untold};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
@@ -81,7 +81,7 @@ pub struct Shelved {
 #[derive(Clone, Debug)]
 pub struct Housed {
     pub project: ProjectRow,
-    pub dir: String,
+    pub dir: projects::Dir,
     pub workstreams: Vec<Streamed>,
 }
 
@@ -89,11 +89,12 @@ pub struct Housed {
 pub struct Streamed {
     pub place: WorkstreamPlace,
     pub name: String,
-    pub folder: String,
+    pub folder: projects::Dir,
     pub branch: Option<String>,
-    pub seen: Option<Seen>,
+    pub seen: Seen,
     pub used: Option<SystemTime>,
     pub terminals: Vec<PaneKey>,
+    pub held: Vec<TerminalId>,
     pub waiting: usize,
     pub ending: Result<Vec<close::Doing>, Untold>,
 }
@@ -209,7 +210,7 @@ pub enum Ask {
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
     Rename { on: Machine, renames: Renames, to: Name },
-    Close { on: Machine, place: WorkstreamPlace, name: String },
+    Close { on: Machine, place: WorkstreamPlace, name: String, seen: Vec<TerminalId> },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
 }
@@ -290,8 +291,8 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             };
             Heard::Renamed { from: renames.name().to_owned(), to, renamed }
         }),
-        Ask::Close { on, place, name } => Box::new(move || {
-            let closed = workstreams::closed_there(&on, place.workstream);
+        Ask::Close { on, place, name, seen } => Box::new(move || {
+            let closed = workstreams::closed_there(&on, place.workstream, &seen);
             Heard::Closed { name, closed }
         }),
         Ask::Dirs { on, ask } => Box::new(move || {
@@ -331,11 +332,11 @@ pub enum Pick {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
     Workstream { on: Machine, place: WorkstreamPlace },
-    Project { on: Machine, project: ProjectRow },
+    Project { on: Machine, project: ProjectRow, folder: Directory },
     Machine { on: Machine },
     Agent { on: Machine, place: PanePlace },
     Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
-    New { name: Name },
+    New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
 }
 
 #[derive(Clone, Debug)]
@@ -405,7 +406,7 @@ enum Stage {
     Rename { on: Machine, renames: Renames, input: String },
     Planning { on: Machine, place: PanePlace, agreed: Option<Plan> },
     Asking { on: Machine, place: PanePlace, plan: Plan, asks: String },
-    Closing { on: Machine, place: WorkstreamPlace, name: String, asks: String },
+    Closing { on: Machine, place: WorkstreamPlace, name: String, ends: Ends, asks: String },
 }
 
 struct Shot {
@@ -607,19 +608,9 @@ impl Picker {
         workstreams.iter().find(|streamed| streamed.place.workstream == place.workstream)
     }
 
-    fn row_housed(&self, on: &Machine, project: &ProjectRow) -> &Housed {
-        let housed = self.housed(on, project);
-        housed.expect("a project's row is rebuilt with the listing that holds the project")
-    }
-
     fn row_streamed(&self, on: &Machine, place: &WorkstreamPlace) -> &Streamed {
         let streamed = self.streamed(on, place);
         streamed.expect("a workstream's row is rebuilt with the listing that holds it")
-    }
-
-    fn row_new(&self) -> (&Machine, &Housed) {
-        let here = self.here_project();
-        here.expect("a + row is listed only while luneta is in a project")
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -757,9 +748,9 @@ impl Picker {
                 let yes = key.code == KeyCode::Char('y') && plain(key);
                 if yes { self.plan(on, place, Some(plan)) } else { Picked::Nothing }
             },
-            Stage::Closing { on, place, name, asks } => {
+            Stage::Closing { on, place, name, ends, .. } => {
                 if key.code == KeyCode::Char('y') && plain(key) {
-                    self.close(on, place, name, Some(&asks));
+                    self.close(on, place, name, Some(&ends));
                 }
                 Picked::Nothing
             },
@@ -985,17 +976,9 @@ impl Picker {
             Key::Workstream { on, place } => {
                 Picked::Go { on: on.clone(), place: Place::Workstream(place.clone()) }
             },
-            Key::Project { on, project } => {
-                match Directory::parse(self.row_housed(on, project).dir.clone()) {
-                    Ok(folder) => {
-                        Picked::Add { on: on.clone(), project: project.clone(), folder, name: None }
-                    },
-                    Err(why) => {
-                        let name = project.listed().name();
-                        self.error = Some(format!("{name} starts no workstream: {why}"));
-                        Picked::Nothing
-                    },
-                }
+            Key::Project { on, project, folder } => {
+                let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
+                Picked::Add { on, project, folder, name: None }
             },
             Key::Machine { .. } | Key::Dir { session: Err(_), .. } => Picked::Nothing,
             Key::Agent { on, place } => {
@@ -1004,16 +987,9 @@ impl Picker {
             Key::Dir { on, path, session: Ok(session) } => {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
-            Key::New { name } => {
-                let (on, housed) = self.row_new();
-                let (on, project, name) = (on.clone(), housed.project.clone(), Some(name.clone()));
-                match Directory::parse(housed.dir.clone()) {
-                    Ok(folder) => Picked::Add { on, project, folder, name },
-                    Err(why) => {
-                        self.error = Some(format!("no workstream made: {why}"));
-                        Picked::Nothing
-                    },
-                }
+            Key::New { on, project, folder, name } => {
+                let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
+                Picked::Add { on, project, folder, name: Some(name.clone()) }
             },
         }
     }
@@ -1023,9 +999,11 @@ impl Picker {
         Some((on, self.housed(on, &place.project)?))
     }
 
-    fn new_name(&self) -> Option<Name> {
-        self.here_project()?;
-        Name::parse(&self.term).ok()
+    fn new_key(&self) -> Option<Key> {
+        let (on, housed) = self.here_project()?;
+        let name = Name::parse(&self.term).ok()?;
+        let (on, project, folder) = (on.clone(), housed.project.clone(), (&housed.dir).into());
+        Some(Key::New { on, project, folder, name })
     }
 
     fn delete(&mut self) -> Picked {
@@ -1048,22 +1026,23 @@ impl Picker {
         }
     }
 
-    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String, agreed: Option<&str>) {
+    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String, agreed: Option<&Ends>) {
         let Some(streamed) = self.streamed(&on, &place) else {
             self.error = Some(format!("{name} is listed no more"));
             return;
         };
-        let ending = streamed.ending.as_deref().map_err(|untold| *untold);
-        let asks = close::question(&format!("Close workstream {name}"), ending);
+        let ends = Ends::of(&streamed.held, streamed.ending.as_deref().map_err(|untold| *untold));
         if let Some(why) = self.out_of_reach(&on) {
             self.error = Some(format!("{name} stays: {why}"));
             return;
         }
-        if let Some(asks) = asks.filter(|asks| agreed != Some(asks.as_str())) {
-            self.stage = Stage::Closing { on, place, name, asks };
+        if agreed != Some(&ends)
+            && let Some(asks) = ends.question(&format!("Close workstream {name}"))
+        {
+            self.stage = Stage::Closing { on, place, name, ends, asks };
             return;
         }
-        self.asking.push(Ask::Close { on, place, name });
+        self.asking.push(Ask::Close { on, place, name, seen: ends.seen });
     }
 
     fn plan(&mut self, on: Machine, place: PanePlace, agreed: Option<Plan>) -> Picked {
@@ -1081,7 +1060,9 @@ impl Picker {
                 let name = self.row_streamed(on, place).name.clone();
                 (on.clone(), Renames::Workstream { place: place.clone(), name })
             },
-            Some(Key::Project { on, project }) => (on.clone(), Renames::Project(project.clone())),
+            Some(Key::Project { on, project, .. }) => {
+                (on.clone(), Renames::Project(project.clone()))
+            },
             Some(Key::Machine { .. } | Key::Agent { .. } | Key::Dir { .. } | Key::New { .. })
             | None => return,
         };
@@ -1158,9 +1139,9 @@ impl Picker {
         }
         let mut workstreams = self.workstream_rows(finder.as_ref());
         if workstreams.is_empty()
-            && let Some(name) = self.new_name()
+            && let Some(key) = self.new_key()
         {
-            workstreams.push(Row::plain(Key::New { name }, self.term.clone()));
+            workstreams.push(Row::plain(key, self.term.clone()));
         }
         let (dirs, aimed) = self.dir_rows();
         let workstream_start = match workstreams.first().map(|row| &row.key) {
@@ -1190,13 +1171,14 @@ impl Picker {
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
                 if housed.workstreams.is_empty() {
-                    let key = Key::Project { on: on.clone(), project: housed.project.clone() };
-                    let dir = sidebar::short_cwd(&housed.dir);
+                    let (row, folder) = (housed.project.clone(), (&housed.dir).into());
+                    let key = Key::Project { on: on.clone(), project: row, folder };
+                    let dir = sidebar::short_cwd(housed.dir.as_str());
                     found.push((None, project.to_owned(), None, dir, key));
                 }
                 for streamed in &housed.workstreams {
                     let name = format!("{project} › {}", streamed.name);
-                    let folder = sidebar::short_cwd(&streamed.folder);
+                    let folder = sidebar::short_cwd(streamed.folder.as_str());
                     let key = Key::Workstream { on: on.clone(), place: streamed.place.clone() };
                     found.push((streamed.used, name, streamed.branch.as_deref(), folder, key));
                 }
@@ -1547,25 +1529,22 @@ impl Picker {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
-            Key::New { name } => {
-                let (_, housed) = self.row_new();
-                let project = housed.project.listed().name();
+            Key::New { project, folder, name, .. } => {
+                let project = project.listed().name();
                 let words = format!(
                     "no workstream matches: Enter makes one named {}, in {project}'s folder, \
-                     {}, and goes to it",
+                     {folder}, and goes to it",
                     name.as_str(),
-                    housed.dir,
                 );
                 let lines = said(vec![Span::styled(" new", grey)], &words);
                 framed(buffer, area, &row.name, "", lines);
                 return;
             },
-            Key::Project { on, project } => {
+            Key::Project { on, folder, .. } => {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 caption.push(Span::styled("no workstream", grey));
-                let dir = &self.row_housed(on, project).dir;
-                let words = format!("Enter starts a workstream in {dir}");
+                let words = format!("Enter starts a workstream in {folder}");
                 framed(buffer, area, &row.name, "", said(caption, &words));
                 return;
             },
@@ -1585,7 +1564,7 @@ impl Picker {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
-                caption.push(Span::styled(sidebar::tail(&streamed.folder, room), grey));
+                caption.push(Span::styled(sidebar::tail(streamed.folder.as_str(), room), grey));
                 let Some(focus) = self.focus(on, streamed) else {
                     let lines = said(caption, "it holds no terminal to look at");
                     framed(buffer, area, &row.name, &right, lines);
@@ -1691,8 +1670,8 @@ impl Picker {
                     Ok(there(&format!("Make \"{session}\""), on))
                 },
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
-                Key::New { name } => {
-                    let project = self.row_new().1.project.listed().name();
+                Key::New { project, name, .. } => {
+                    let project = project.listed().name();
                     Ok(format!("New workstream \"{}\" in {project}", name.as_str()))
                 },
             },
@@ -1897,16 +1876,15 @@ fn machine_rule(name: &str, width: usize) -> Line<'static> {
     ])
 }
 
-fn staged(seen: Option<Seen>) -> (&'static str, ratatui::style::Color) {
+fn staged(seen: Seen) -> (&'static str, ratatui::style::Color) {
     match seen {
-        None => ("", gruvbox::GREY),
-        Some(Seen::Missing) => ("missing", ERROR),
-        Some(Seen::Unread) => ("…", gruvbox::GREY),
-        Some(Seen::Read(projects::Stage::NoBranch)) => ("no branch", gruvbox::GREY),
-        Some(Seen::Read(projects::Stage::Working)) => ("working", gruvbox::BLUE),
-        Some(Seen::Read(projects::Stage::PullRequestOpen)) => ("PR open", gruvbox::AQUA),
-        Some(Seen::Read(projects::Stage::ChecksFailing)) => ("checks failing", gruvbox::RED),
-        Some(Seen::Read(projects::Stage::Merged)) => ("merged", gruvbox::PURPLE),
+        Seen::Missing => ("missing", ERROR),
+        Seen::Unread => ("…", gruvbox::GREY),
+        Seen::Read(projects::Stage::NoBranch) => ("no branch", gruvbox::GREY),
+        Seen::Read(projects::Stage::Working) => ("working", gruvbox::BLUE),
+        Seen::Read(projects::Stage::PullRequestOpen) => ("PR open", gruvbox::AQUA),
+        Seen::Read(projects::Stage::ChecksFailing) => ("checks failing", gruvbox::RED),
+        Seen::Read(projects::Stage::Merged) => ("merged", gruvbox::PURPLE),
     }
 }
 
@@ -2095,18 +2073,24 @@ mod tests {
         Streamed {
             place,
             name: name.to_owned(),
-            folder: format!("/home/you/{name}"),
+            folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
             branch: None,
-            seen: Some(Seen::Read(projects::Stage::Working)),
+            seen: Seen::Read(projects::Stage::Working),
             used: used.map(|at| UNIX_EPOCH + Duration::from_secs(at)),
             terminals: terminals.iter().map(|id| PaneKey::terminal(*id)).collect(),
+            held: held(terminals),
             waiting: 0,
             ending: Ok(Vec::new()),
         }
     }
 
+    fn held(terminals: &[u32]) -> Vec<TerminalId> {
+        terminals.iter().map(|id| TerminalId::of(u64::from(*id)).unwrap()).collect()
+    }
+
     fn housed(name: &str, id: u64, workstreams: Vec<Streamed>) -> Housed {
-        Housed { project: project(name, id), dir: format!("/home/you/{name}"), workstreams }
+        let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
+        Housed { project: project(name, id), dir, workstreams }
     }
 
     fn shelved(on: Machine, projects: Vec<Housed>) -> Shelved {
@@ -2455,10 +2439,10 @@ mod tests {
         let mut picker = opened(busy(works()));
         assert_eq!(lit(&picker), "web › api");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let close = |place, name: &str| {
-            Ask::Close { on: Machine::Local, place, name: name.to_owned() }
+        let close = |place, name: &str, terminals: &[u32]| {
+            Ask::Close { on: Machine::Local, place, name: name.to_owned(), seen: held(terminals) }
         };
-        assert_eq!(picker.asks(), [close(api(), "api")]);
+        assert_eq!(picker.asks(), [close(api(), "api", &[4])]);
 
         down_to(&mut picker, "luneta › main");
         assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
@@ -2470,7 +2454,7 @@ mod tests {
         assert_eq!(picker.asks(), [] as [Ask; 0]);
         press(&mut picker, KeyCode::Delete);
         press(&mut picker, KeyCode::Char('y'));
-        assert_eq!(picker.asks(), [close(main_place(), "main")]);
+        assert_eq!(picker.asks(), [close(main_place(), "main", &[1, 2])]);
         let closed = Err("luneta-mux did not answer".to_owned());
         picker.heard(Heard::Closed { name: "main".to_owned(), closed });
         let stays = "main stays: luneta-mux did not answer";
@@ -2515,9 +2499,17 @@ mod tests {
         assert_eq!(picker.asks(), [] as [Ask; 0]);
         let untold_asks = "Close workstream main? luneta cannot tell which agents";
         assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
+        let mut grown = busy(works());
+        let shelf = &mut grown.shelves[0].projects[0].workstreams;
+        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        (main.ending, main.held) = (Err(Untold::Away), held(&[2, 9, 1]));
+        picker.listed(grown);
         press(&mut picker, KeyCode::Char('y'));
-        let close = Ask::Close { on: Machine::Local, place: main_place(), name: "main".to_owned() };
-        assert_eq!(picker.asks(), [close]);
+        assert_eq!(picker.asks(), [] as [Ask; 0], "a terminal came since, as the question did not");
+        assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
+        press(&mut picker, KeyCode::Char('y'));
+        let (place, name, seen) = (main_place(), "main".to_owned(), held(&[1, 2, 9]));
+        assert_eq!(picker.asks(), [Ask::Close { on: Machine::Local, place, name, seen }]);
     }
 
     #[test]
@@ -2619,8 +2611,9 @@ mod tests {
         let gateway = place("api", 4, 1);
         assert_eq!(press(&mut picker, KeyCode::Enter), go(nixos(), gateway.clone()));
         press(&mut picker, KeyCode::Delete);
-        let name = "gateway".to_owned();
-        assert_eq!(picker.asks(), [Ask::Close { on: nixos(), place: gateway.clone(), name }]);
+        let (name, seen) = ("gateway".to_owned(), held(&[6]));
+        let close = Ask::Close { on: nixos(), place: gateway.clone(), name, seen };
+        assert_eq!(picker.asks(), [close]);
         control(&mut picker, 'r');
         assert!(said(&picker).contains(r#"renaming "gateway" on nixos"#), "{}", said(&picker));
         typed(&mut picker, "gw");

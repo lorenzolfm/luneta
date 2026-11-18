@@ -429,7 +429,7 @@ pub struct Ran {
 #[derive(Debug)]
 pub enum Ask {
     Change(Change),
-    CloseWorkstream(WorkstreamId),
+    CloseWorkstream { workstream: WorkstreamId, seen: BTreeSet<TerminalId> },
 }
 
 impl Ask {
@@ -488,9 +488,11 @@ impl Ask {
                 let workstream = id("workstream", workstream).map(WorkstreamId)?;
                 Change::ForgetWorkstream { workstream }
             },
-            Asked::CloseWorkstream(asked::CloseWorkstream { workstream }) => {
+            Asked::CloseWorkstream(asked::CloseWorkstream { workstream, seen }) => {
                 let workstream = id("workstream", workstream).map(WorkstreamId)?;
-                return Ok(Ask::CloseWorkstream(workstream));
+                let seen = seen.into_iter().map(|it| id("seen", it).map(TerminalId));
+                let seen = seen.collect::<Result<BTreeSet<TerminalId>, String>>()?;
+                return Ok(Ask::CloseWorkstream { workstream, seen });
             },
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {

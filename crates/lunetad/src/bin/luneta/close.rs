@@ -5,7 +5,7 @@ use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 use lunetad::mux::{OwnKey, TabId};
-use lunetad::projects::WorkstreamId;
+use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, PaneKey, Place};
@@ -48,7 +48,7 @@ impl Scope {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: PaneKey, closes: Closes },
-    Workstream { workstream: WorkstreamId, panes: Vec<u32> },
+    Workstream { workstream: WorkstreamId, panes: Vec<u32>, seen: Vec<TerminalId> },
     Session,
 }
 
@@ -118,7 +118,13 @@ pub struct Subject<'a> {
 pub enum Act {
     Pane { session: SessionName, whose: Whose, pane: PaneKey },
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
-    Workstream { session: SessionName, whose: Whose, workstream: WorkstreamId, panes: Vec<u32> },
+    Workstream {
+        session: SessionName,
+        whose: Whose,
+        workstream: WorkstreamId,
+        panes: Vec<u32>,
+        seen: Vec<TerminalId>,
+    },
     Kill { session: SessionName, whose: Whose },
     Leave { session: SessionName, whose: Whose, to: Place },
 }
@@ -170,8 +176,9 @@ pub fn plan(subject: &Subject) -> Plan {
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
             Act::Tab { session, whose, tab: *id, panes: panes.clone() }
         },
-        Deletes::Workstream { workstream, panes } => {
-            Act::Workstream { session, whose, workstream: *workstream, panes: panes.clone() }
+        Deletes::Workstream { workstream, panes, seen } => {
+            let (workstream, panes, seen) = (*workstream, panes.clone(), seen.clone());
+            Act::Workstream { session, whose, workstream, panes, seen }
         },
         Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
             Seat::Elsewhere => Act::Kill { session, whose },
@@ -251,8 +258,22 @@ impl Plan {
     }
 }
 
-pub fn question(what: &str, doing: Result<&[Doing], Untold>) -> Option<String> {
-    asked(what, doing.map(|doing| Ending::of(doing.iter().copied())))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ends {
+    pub seen: Vec<TerminalId>,
+    ending: Result<Ending, Untold>,
+}
+
+impl Ends {
+    pub fn of(seen: &[TerminalId], doing: Result<&[Doing], Untold>) -> Ends {
+        let mut seen = seen.to_vec();
+        seen.sort_unstable();
+        Ends { seen, ending: doing.map(|doing| Ending::of(doing.iter().copied())) }
+    }
+
+    pub fn question(&self, what: &str) -> Option<String> {
+        asked(what, self.ending)
+    }
 }
 
 fn asked(what: &str, ending: Result<Ending, Untold>) -> Option<String> {
@@ -333,13 +354,15 @@ mod tests {
     fn a_workstream_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
         let luneta = luneta();
         let workstream = WorkstreamId::of(31).unwrap();
-        let deletes = || Deletes::Workstream { workstream, panes: vec![4, 5] };
+        let seen = vec![TerminalId::of(4).unwrap(), TerminalId::of(5).unwrap()];
+        let deletes = || Deletes::Workstream { workstream, panes: vec![4, 5], seen: seen.clone() };
         let planned = |agents| plan(&subject(&luneta, Seat::In, deletes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
         let asks = planned(vec![(5, Doing::Waiting)]).question();
         assert_eq!(asks.as_deref(), Some("Delete the workstream? 1 agent, 1 waiting"));
         let (session, whose) = (luneta.name().clone(), luneta.whose());
-        let act = Act::Workstream { session, whose, workstream, panes: vec![4, 5] };
+        let panes = vec![4, 5];
+        let act = Act::Workstream { session, whose, workstream, panes, seen: seen.clone() };
         assert_eq!(planned(Vec::new()).act, act, "the seat in the project leaves nothing");
     }
 
