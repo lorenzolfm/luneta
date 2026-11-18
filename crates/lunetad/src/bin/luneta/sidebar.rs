@@ -3350,7 +3350,21 @@ impl Sidebar {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
+        let deletes = match (deletes, listed.own_key()) {
+            (Deletes::Session, Some(key)) => self.project_deletes(on, listed, key)?,
+            (deletes, _) => deletes,
+        };
         Ok(close::plan(&self.subject(on, listed, deletes)))
+    }
+
+    fn project_deletes(&self, on: &Machine, listed: &Listed, key: OwnKey) -> Result<Deletes, String> {
+        let unlisted = || format!("project {} is no longer listed", listed.name());
+        let project = listed.project().ok_or_else(unlisted)?;
+        let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
+        let known = known.ok_or_else(unlisted)?;
+        let workstreams = known.workstreams.iter().map(|stream| stream.place.workstream).collect();
+        let seen = known.workstreams.iter().flat_map(|stream| stream.terminals.iter().copied());
+        Ok(Deletes::Project { key, project, workstreams, seen: seen.collect() })
     }
 
     fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
@@ -3483,9 +3497,10 @@ impl Sidebar {
                 matches!(place, Place::Workstream(at) if at.workstream == *workstream)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
-            (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
-                place.session() == session.as_str()
-            },
+            (
+                Act::Project { session, .. } | Act::Kill { session, .. } | Act::Leave { session, .. },
+                _,
+            ) => place.session() == session.as_str(),
         };
         let takes = |spot: &Spot| {
             spot.place().is_some_and(|place| spot.machine() == on && takes_place(place))
@@ -5076,6 +5091,14 @@ mod tests {
 
     fn delete_here(act: Act) -> Asked {
         Asked::Delete { on: Machine::Local, act }
+    }
+
+    fn project_deleted(name: &str, id: u64, workstreams: &[u64], seen: &[u64]) -> Act {
+        let key = OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(0) };
+        let (project, workstreams) = (ProjectId::of(id).unwrap(), workstreams.iter());
+        let workstreams = workstreams.map(|it| WorkstreamId::of(*it).unwrap()).collect();
+        let seen = seen.iter().map(|it| TerminalId::of(*it).unwrap()).collect();
+        Act::Project { session: session_name(name), key, project, workstreams, seen }
     }
 
     fn go_here(place: Place) -> Asked {
@@ -7978,9 +8001,7 @@ mod tests {
             type_in(sidebar, "d");
             sidebar.key(&char('s'), moment(160_000))
         };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("own"), whose };
+        let kill = project_deleted("own", 1, &[], &[]);
         assert_eq!(delete(&mut sidebar), delete_here(kill.clone()));
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(2).unwrap(), made });
@@ -7988,7 +8009,7 @@ mod tests {
     }
 
     #[test]
-    fn an_own_client_is_where_its_server_says_and_leaves_its_project_to_delete_it() {
+    fn an_own_client_is_where_its_server_says_and_kills_its_project_to_delete_it() {
         let mut sidebar = fresh();
         let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
@@ -8008,10 +8029,8 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let newest = Place::Session(Listed::new_project("newest", 2));
-        let whose = Whose::Own(key);
-        let leave = Act::Leave { session: session_name("twin"), whose, to: newest };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
     }
 
     #[test]
@@ -8028,7 +8047,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
     }
 
@@ -8976,9 +8995,7 @@ mod tests {
         let in_own = UnreadFile { pid: 200, zellij: None, own, terminal: None };
         let zellij = Zellij { named: "twin".to_owned(), session: Some("twin".to_owned()), pane: 1 };
         let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("twin"), whose };
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
         for (file, asks) in [(in_own, true), (in_zellij, false)] {
             let mut sidebar = fresh();
             let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
@@ -8991,7 +9008,7 @@ mod tests {
             type_in(&mut sidebar, "d");
             let went = sidebar.key(&char('s'), moment(160_000));
             let lines = screen(&mut sidebar, true, 60, 16);
-            let question = " Delete session twin? 1 agent, 1 unknown";
+            let question = " Delete project twin? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
             assert_eq!((went == delete_here(kill.clone()), asked), (!asks, asks), "{lines:#?}");
         }
@@ -9047,11 +9064,9 @@ mod tests {
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
-        let to = Place::Session(own_listed("young", 2));
-        let whose = own_listed("older", 1).whose();
-        let leave = Act::Leave { session: session_name("older"), whose, to };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
+        assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
+        let kill = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
         assert!(sidebar.menu.is_none());
     }
 
