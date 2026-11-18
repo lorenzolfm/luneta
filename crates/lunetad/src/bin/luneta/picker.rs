@@ -182,7 +182,7 @@ pub enum Picked {
     Nothing,
     Close,
     Go { on: Machine, place: Place },
-    Add { on: Machine, project: ProjectRow, folder: Directory, name: Name },
+    Add { on: Machine, project: ProjectRow, folder: Directory, name: Option<Name> },
     Make { on: Machine, session: SessionName, cwd: Directory },
     Plan { on: Machine, session: Listed, deletes: Deletes },
     Delete { on: Machine, act: Act },
@@ -970,11 +970,13 @@ impl Picker {
             },
             Key::Project { on, project } => {
                 let dir = self.housed(on, project).map(|housed| housed.dir.clone());
-                let session = project.listed().name().clone();
                 match Directory::parse(dir.unwrap_or_default()) {
-                    Ok(cwd) => Picked::Make { on: on.clone(), session, cwd },
+                    Ok(folder) => {
+                        Picked::Add { on: on.clone(), project: project.clone(), folder, name: None }
+                    },
                     Err(why) => {
-                        self.error = Some(format!("{session} starts no workstream: {why}"));
+                        let name = project.listed().name();
+                        self.error = Some(format!("{name} starts no workstream: {why}"));
                         Picked::Nothing
                     },
                 }
@@ -990,7 +992,7 @@ impl Picker {
                 let Some((on, housed)) = self.beside() else {
                     return Picked::Nothing;
                 };
-                let (on, project, name) = (on.clone(), housed.project.clone(), name.clone());
+                let (on, project, name) = (on.clone(), housed.project.clone(), Some(name.clone()));
                 match Directory::parse(housed.dir.clone()) {
                     Ok(folder) => Picked::Add { on, project, folder, name },
                     Err(why) => {
@@ -2284,9 +2286,13 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Close);
         down_to(&mut picker, "notes");
         assert!(said(&picker).contains("<ENTER> Start a workstream"), "{}", said(&picker));
-        let session = SessionName::parse("notes").unwrap();
-        let made = Picked::Make { on: Machine::Local, session, cwd: directory("/home/you/notes") };
-        assert_eq!(press(&mut picker, KeyCode::Enter), made);
+        let added = Picked::Add {
+            on: Machine::Local,
+            project: project("notes", 2),
+            folder: directory("/home/you/notes"),
+            name: None,
+        };
+        assert_eq!(press(&mut picker, KeyCode::Enter), added);
 
         let mut later = works();
         let shelf = &mut later.shelves[0].projects[0].workstreams;
@@ -2405,7 +2411,7 @@ mod tests {
             on: Machine::Local,
             project: project("luneta", 1),
             folder: directory("/home/you/luneta"),
-            name: Name::parse("zzz").unwrap(),
+            name: Some(Name::parse("zzz").unwrap()),
         };
         assert_eq!(press(&mut picker, KeyCode::Enter), added);
         typed(&mut picker, " ");

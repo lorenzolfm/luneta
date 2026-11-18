@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{TerminalId, WorkstreamId};
+use lunetad::projects::{Name, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
@@ -1787,7 +1787,7 @@ impl App {
             Picked::Add { on: Machine::Local, project, folder, name } => {
                 let project = project.id();
                 self.make_workstream(folder.clone(), move |lunetad, _| {
-                    let named = Some(name.as_str());
+                    let named = name.as_ref().map(Name::as_str);
                     workstreams::add_workstream(lunetad, project, folder.as_str(), named).map(Some)
                 });
                 self.give(Focus::on(self.focus.side.session()));

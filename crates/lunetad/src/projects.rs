@@ -233,6 +233,9 @@ impl Dir {
 
     #[must_use]
     pub fn below(&self, folder: &Dir) -> Option<Below> {
+        if folder == self {
+            return Some(Below::OWN);
+        }
         let rest = folder.0.strip_prefix(&self.0)?.strip_prefix('/')?;
         assert!(!rest.is_empty(), "a dir ends in no /, and so {folder:?} names a part below it");
         let below = Below(rest.to_owned());
@@ -242,6 +245,9 @@ impl Dir {
 
     #[must_use]
     pub fn join(&self, below: &Below) -> Dir {
+        if below.is_own() {
+            return self.clone();
+        }
         Dir(format!("{}/{}", self.0, below.0))
     }
 
@@ -258,7 +264,7 @@ impl Dir {
     }
 
     fn nests(&self, other: &Dir) -> bool {
-        self == other || self.below(other).is_some() || other.below(self).is_some()
+        self.below(other).is_some() || other.below(self).is_some()
     }
 }
 
@@ -266,9 +272,11 @@ impl Dir {
 pub struct Below(String);
 
 impl Below {
+    pub const OWN: Below = Below(String::new());
+
     pub fn parse(text: &str) -> Result<Below, String> {
         if text.is_empty() {
-            return Err("no workstream is in its project's own folder".to_owned());
+            return Ok(Below::OWN);
         }
         if text.len() > PATH_BYTES_MAX {
             return Err(format!("a path is longer than {PATH_BYTES_MAX} bytes"));
@@ -295,6 +303,11 @@ impl Below {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    #[must_use]
+    pub fn is_own(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -679,10 +692,6 @@ impl Projects {
                     return Err(format!("{many}, as many as are kept"));
                 }
                 let project = changed.project(project)?;
-                if folder == project.dir {
-                    let own = &folder.0;
-                    return Err(format!("{own} is the project's own folder: no workstream"));
-                }
                 let below = project.dir.below(&folder).ok_or_else(|| {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
@@ -1072,7 +1081,7 @@ mod tests {
         for refused in ["/", "home", "/a/", "/a//b", "/a/./b", "/a/../b", "/a\tb"] {
             assert!(Dir::parse(refused).is_err(), "{refused:?}");
         }
-        assert!(Below::parse("").unwrap_err().contains("its project's own folder"));
+        assert_eq!(Below::parse(""), Ok(Below::OWN));
         assert!(Below::parse("/a").is_err());
     }
 
@@ -1095,7 +1104,8 @@ mod tests {
     #[test]
     fn a_folder_is_below_a_dir_only_by_whole_names() {
         let luneta = dir("/w/luneta");
-        assert_eq!(luneta.below(&dir("/w/luneta")), None);
+        assert_eq!(luneta.below(&dir("/w/luneta")), Some(Below::OWN));
+        assert_eq!(luneta.join(&Below::OWN), luneta);
         assert_eq!(luneta.below(&dir("/w/luneta/issue-1/src")).unwrap().as_str(), "issue-1/src");
         assert_eq!(luneta.below(&dir("/w/luneta-old")), None);
         assert_eq!(luneta.below(&dir("/w")), None);
@@ -1175,14 +1185,17 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_own_folder_holds_no_workstream() {
+    fn a_workstream_asked_for_in_its_project_s_own_folder_is_made_there() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let add = Change::AddWorkstream { project: luneta, folder: dir("/w/luneta"), name: None };
-        assert!(change(&projects, add).unwrap_err().contains("the project's own folder"));
-        let at = Change::WorkstreamAt { project: luneta, folder: dir("/w/luneta") };
-        assert!(change(&projects, at).unwrap_err().contains("the project's own folder"));
         assert_eq!(projects.all()[0].workstreams(), []);
+        let own = workstream(&mut projects, luneta, "/w/luneta");
+        let held = &projects.all()[0];
+        assert!(held.workstreams()[0].below().is_own());
+        assert_eq!(held.folder(&held.workstreams()[0]), dir("/w/luneta"));
+        let at = Change::WorkstreamAt { project: luneta, folder: dir("/w/luneta") };
+        let (same, found) = change(&projects, at).unwrap();
+        assert_eq!((same == projects, found), (true, Some(own.0)));
     }
 
     #[test]
