@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::ErrorKind;
@@ -36,7 +36,7 @@ impl Fold<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kept {
     Sessions,
     Machines,
@@ -58,6 +58,7 @@ fn spelled(destination: &Destination) -> String {
 pub struct Folds {
     sessions: BTreeSet<String>,
     machines: BTreeSet<String>,
+    heard: HashMap<Machine, BTreeSet<(Kept, String)>>,
     sharing: Sharing,
 }
 
@@ -114,6 +115,21 @@ impl Folds {
 
     pub fn set(&mut self, fold: Fold, folded: bool) -> bool {
         let (kept, name) = fold.file();
+        self.set_file(kept, name, folded)
+    }
+
+    pub fn listed(&mut self, machine: &Machine, live: &[Fold<'_>]) -> bool {
+        let named: BTreeSet<(Kept, String)> = live.iter().map(|fold| fold.file()).collect();
+        let heard = self.heard.insert(machine.clone(), named.clone()).unwrap_or_default();
+        let folded = |(kept, name): &&(Kept, String)| self.names(*kept).contains(name);
+        let gone: Vec<(Kept, String)> = heard.difference(&named).filter(folded).cloned().collect();
+        for (kept, name) in &gone {
+            self.set_file(*kept, name.clone(), false);
+        }
+        !gone.is_empty()
+    }
+
+    fn set_file(&mut self, kept: Kept, name: String, folded: bool) -> bool {
         if let Sharing::Folders { sessions, machines } = &self.sharing {
             let dir = match kept {
                 Kept::Sessions => sessions,
@@ -231,6 +247,24 @@ mod tests {
         assert!(!next.contains(Fold::Project(&dot, seven)));
         assert!(next.contains(Fold::Workstream(&dot, WorkstreamId::of(7).unwrap())));
         assert_eq!(next.lost(), None);
+    }
+
+    #[test]
+    fn a_fold_of_what_a_listing_no_longer_holds_goes_once_this_luneta_heard_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut here = within(scratch.path());
+        let vps = Machine::Remote("vps".parse().unwrap());
+        let far = Fold::Project(&vps, ProjectId::of(5).unwrap());
+        for fold in [project(1), workstream(2), project(3), far] {
+            here.set(fold, true);
+        }
+        assert!(!here.listed(&Machine::Local, &[project(1), workstream(2)]));
+        assert!(here.contains(project(3)), "a fold this luneta never heard of stays");
+        assert!(here.listed(&Machine::Local, &[project(1)]));
+        assert!(!here.contains(workstream(2)));
+        assert!(!within(scratch.path()).contains(workstream(2)), "its file goes too");
+        assert!(here.contains(project(1)) && here.contains(far));
+        assert!(!here.listed(&Machine::Local, &[project(1)]));
     }
 
     #[test]

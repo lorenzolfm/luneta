@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, RenameProject};
-use lunetad::api::change_projects_request::{MoveProject, MoveWorkstream, WorkstreamAt};
+use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, On, WatchRequest};
@@ -15,7 +15,7 @@ use lunetad::names::session_for;
 use crate::daemon;
 use crate::machines::Machine;
 use crate::projected::{self, Project};
-use crate::sidebar::Moved;
+use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
 
@@ -120,25 +120,22 @@ pub fn renamed(project: ProjectId, to: &str) -> Result<(), String> {
     changed(&path, change).map(drop).map_err(Unmade::said)
 }
 
-pub fn moved(path: &Path, machine: &Machine, moves: &[Moved]) -> Result<(), String> {
+pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<(), String> {
     let on = match machine {
         Machine::Local => None,
         Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
     };
-    for moved in moves {
-        let change = match *moved {
-            Moved::Project { project, to } => {
-                let to = u32::try_from(to).map_err(|_| format!("no place {to} to move to"))?;
-                Change::MoveProject(MoveProject { project: project.get(), to })
-            },
-            Moved::Workstream { workstream, to } => {
-                let to = u32::try_from(to).map_err(|_| format!("no place {to} to move to"))?;
-                Change::MoveWorkstream(MoveWorkstream { workstream: workstream.get(), to })
-            },
-        };
-        changed_on(path, on.clone(), change).map_err(Unmade::said)?;
-    }
-    Ok(())
+    let change = match order {
+        Reorder::Projects(projects) => {
+            let projects = projects.iter().map(|it| it.get()).collect();
+            Change::ReorderProjects(ReorderProjects { projects })
+        },
+        Reorder::Workstreams { project, workstreams } => {
+            let workstreams = workstreams.iter().map(|it| it.get()).collect();
+            Change::ReorderWorkstreams(ReorderWorkstreams { project: project.get(), workstreams })
+        },
+    };
+    changed_on(path, on, change).map(drop).map_err(Unmade::said)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {

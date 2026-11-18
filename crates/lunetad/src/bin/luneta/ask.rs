@@ -275,7 +275,7 @@ fn highlighted(target: &Target) -> String {
     let row = match target {
         Target::Session(_, listed) => format!("project {}", listed.name()),
         Target::Workstream(_, row) => {
-            format!("workstream {} of project {}", row.name, row.place.session.name())
+            format!("workstream {} of project {}", row.name, row.place.project.listed().name())
         },
         Target::Pane(_, PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),

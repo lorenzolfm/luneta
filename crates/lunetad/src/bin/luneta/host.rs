@@ -1597,10 +1597,10 @@ impl App {
                     self.sidebar.notify(format!("forget {destination}: {why}"));
                 }
             },
-            Asked::Move { on, moves } => {
+            Asked::Move { on, order } => {
                 let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
                 thread::spawn(move || {
-                    if let Err(why) = caught(|| workstreams::moved(&lunetad, &on, &moves)) {
+                    if let Err(why) = caught(|| workstreams::reordered(&lunetad, &on, &order)) {
                         let _ = events.send(Event::Notice(format!("not moved: {why}")));
                     }
                 });

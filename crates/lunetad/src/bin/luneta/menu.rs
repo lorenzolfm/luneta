@@ -891,7 +891,7 @@ impl Target {
     fn own(&self) -> bool {
         match self {
             Target::Session(_, session) => session.own(),
-            Target::Workstream(_, row) => row.place.session.own(),
+            Target::Workstream(_, row) => row.place.project.listed().own(),
             Target::Pane(_, row) => row.session.own(),
             Target::Machine(_) => false,
         }
@@ -964,12 +964,11 @@ impl Target {
                 Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane.id())
             },
             (
-                Target::Session(machine, session)
-                | Target::Workstream(machine, WorkstreamRow {
-                    place: WorkstreamPlace { session, .. },
-                    ..
-                })
-                | Target::Pane(machine, PaneRow { session, .. }),
+                Target::Workstream(machine, row),
+                brief::Scope::Session | brief::Scope::Highlighted,
+            ) => Briefed::Session(machine.clone(), row.place.project.listed().name().clone()),
+            (
+                Target::Session(machine, session) | Target::Pane(machine, PaneRow { session, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(machine.clone(), session.name().clone()),
         }
