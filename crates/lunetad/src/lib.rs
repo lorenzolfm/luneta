@@ -40,6 +40,7 @@ mod shells;
 mod streams;
 pub mod skills;
 pub mod state;
+pub mod terminate;
 mod topics;
 pub mod transcripts;
 pub mod turns;
@@ -59,7 +60,7 @@ pub use shows::{
     show, Asked, Beside, Direction, Found, Growth, Heard, Laid, Pane, Rect, Show, Where,
 };
 pub use remote::{
-    named_by as hosts_named, sharing, Destination, FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX,
-    HOSTS_MAX,
+    named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Parsed as HostsParsed,
+    FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX,
 };
 pub use mux::{Id as SocketId, SessionName, NAME_BYTES_MAX as SESSION_NAME_BYTES_MAX};

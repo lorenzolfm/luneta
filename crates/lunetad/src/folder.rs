@@ -1,6 +1,8 @@
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, DirBuilder, File, TryLockError};
 use std::io::{self, ErrorKind};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
@@ -12,9 +14,24 @@ pub const LOG: &str = "lunetad.log";
 
 #[must_use]
 pub fn find() -> Option<PathBuf> {
+    find_by(|name| std::env::var_os(name))
+}
+
+#[must_use]
+pub fn find_in(environ: &[OsString]) -> Option<PathBuf> {
+    find_by(|name| {
+        let mut set = environ.iter().map(|entry| entry.as_bytes()).filter_map(|entry| {
+            let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
+            Some(OsStr::from_bytes(value).to_owned())
+        });
+        set.next()
+    })
+}
+
+fn find_by(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     ["XDG_RUNTIME_DIR", "TMPDIR"]
         .into_iter()
-        .filter_map(std::env::var_os)
+        .filter_map(var)
         .find(|root| !root.is_empty())
         .map(|root| PathBuf::from(root).join("luneta"))
 }

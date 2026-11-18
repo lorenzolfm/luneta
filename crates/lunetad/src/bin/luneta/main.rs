@@ -47,6 +47,7 @@ mod speech;
 mod spots;
 mod state;
 mod sweep;
+mod terminate;
 mod viewed;
 mod voice;
 mod watch;

@@ -4,7 +4,7 @@ use std::io::{self, ErrorKind};
 use std::path::Path;
 
 use lunetad::api::Remote;
-use lunetad::{Destination, HOSTS_FILE, HOSTS_MAX};
+use lunetad::{Destination, HostsParsed, HOSTS_FILE, HOSTS_MAX};
 
 use crate::state;
 
@@ -46,6 +46,10 @@ pub fn add(destination: &Destination) -> Result<Added, String> {
 
 pub fn forget(destination: &Destination) -> Result<bool, String> {
     forget_in(&file()?, destination)
+}
+
+pub fn parsed() -> Result<HostsParsed, String> {
+    Ok(lunetad::hosts_parsed(&read(&file()?)?))
 }
 
 fn file() -> Result<std::path::PathBuf, String> {

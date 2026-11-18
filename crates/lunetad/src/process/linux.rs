@@ -1,14 +1,18 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::io::{retry_on_intr, Errno};
-use rustix::process::{pidfd_open, Pid, PidfdFlags};
+use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
 use rustix::time::{clock_gettime, ClockId};
+
+use super::{Found, Id, Unended};
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -57,9 +61,104 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 
 #[must_use]
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
-    let raw = fs::read(proc(pid, "environ")).ok()?;
+    Some(nul_split(&fs::read(proc(pid, "environ")).ok()?))
+}
+
+fn nul_split(raw: &[u8]) -> Vec<OsString> {
     let entries = raw.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-    Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
+    entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
+}
+
+#[must_use]
+pub fn mine(names: &[&str]) -> Vec<Found> {
+    let Ok(listed) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let uid = rustix::process::getuid().as_raw();
+    let mut found = Vec::new();
+    for entry in listed.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
+            continue;
+        }
+        let Ok(name) = fs::read_to_string(proc(pid, "comm")) else {
+            continue;
+        };
+        let name = name.trim_end_matches('\n');
+        if !names.contains(&name) {
+            continue;
+        }
+        let Some(start) = start(pid) else {
+            continue;
+        };
+        let Some(environ) = environ(pid) else {
+            continue;
+        };
+        let Ok(cmdline) = fs::read(proc(pid, "cmdline")) else {
+            continue;
+        };
+        let argv = nul_split(&cmdline).into_iter().map(|arg| arg.to_string_lossy().into_owned());
+        let argv = argv.collect();
+        let id = Id { pid, start };
+        found.push(Found { id, name: name.to_owned(), argv, environ });
+    }
+    found
+}
+
+#[must_use]
+pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended)> {
+    let mut left = Vec::new();
+    let mut waiting: Vec<(&Id, OwnedFd)> = Vec::new();
+    for id in ids {
+        let Some(pid) = i32::try_from(id.pid).ok().and_then(Pid::from_raw) else {
+            left.push((id.clone(), Unended::Unsignalled(Errno::INVAL)));
+            continue;
+        };
+        let held = match pidfd_open(pid, PidfdFlags::empty()) {
+            Ok(held) => held,
+            Err(Errno::SRCH) => continue,
+            Err(error) => {
+                left.push((id.clone(), Unended::Unsignalled(error)));
+                continue;
+            },
+        };
+        if start(id.pid).as_ref() != Some(&id.start) {
+            continue;
+        }
+        match pidfd_send_signal(&held, signal) {
+            Ok(()) => waiting.push((id, held)),
+            Err(Errno::SRCH) => {},
+            Err(error) => left.push((id.clone(), Unended::Unsignalled(error))),
+        }
+    }
+    let deadline = Instant::now() + wait;
+    while !waiting.is_empty() {
+        let Some(until) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        let until = Timespec::try_from(until).expect("a wait of seconds is a timespec");
+        let mut ready: Vec<PollFd<'_>> =
+            waiting.iter().map(|(_, held)| PollFd::new(held, PollFlags::IN)).collect();
+        match poll(&mut ready, Some(&until)) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Err(Errno::INTR) => continue,
+            Err(error) => {
+                drop(ready);
+                let unwatched = Unended::Unwatched(error);
+                left.extend(waiting.drain(..).map(|(id, _)| (id.clone(), unwatched)));
+                break;
+            },
+        }
+        let ended: Vec<bool> = ready.iter().map(|ready| !ready.revents().is_empty()).collect();
+        drop(ready);
+        let mut ended = ended.into_iter();
+        waiting.retain(|_| !ended.next().unwrap_or(false));
+    }
+    left.extend(waiting.into_iter().map(|(id, _)| (id.clone(), Unended::Outlived)));
+    left
 }
 
 pub struct Domain {

@@ -19,7 +19,7 @@ mod file;
 pub(crate) mod layout;
 mod view;
 
-pub use file::{Changed, Failed, Revision, Store};
+pub use file::{forget, kept, Changed, Failed, Forgotten, Revision, Store};
 pub use layout::{Size, FRAME_CELLS, PANES_MAX};
 pub use view::{Line, Placed, Runs, Session, Terminal, View, LINE_BYTES_MAX, SESSION_BYTES_MAX};
 

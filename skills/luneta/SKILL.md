@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, and delete the worktrees of merged pull requests. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, or clean up merged worktrees, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -59,6 +59,7 @@ luneta turn pane <session>:<pane>
 luneta turn tab <session>:<pane> --into <session>:<pane>
 luneta close <session>[:<pane>]... [--yes <plan>]
 luneta prune [--repo <dir>] [--yes <plan>]
+luneta terminate [--yes <plan>]
 ```
 
 - `open pane` opens beside your pane by default, in its tab. `open tab` opens
@@ -87,6 +88,8 @@ luneta prune [--repo <dir>] [--yes <plan>]
   there to tell the user.
 - `prune` deletes the worktrees of a repository's merged pull requests: see
   [Merged worktrees](#merged-worktrees).
+- `terminate` ends luneta on every machine and forgets every project: see
+  [Reset luneta](#reset-luneta).
 
 ## Which session a tab opens in
 
@@ -264,3 +267,29 @@ delete worktrees or branches yourself instead: it has checked what git can't, an
 files git ignores go with a worktree, build output included.
 
 Never run it unless the user asked.
+
+## Reset luneta
+
+When the user asks to reset luneta, or start it from scratch, run `luneta
+terminate`. It ends nothing, prints what would end on each machine, and exits 3.
+Its last line, on stderr, names the plan:
+
+```text
+mac (this machine): ends 1 luneta, lunetad and luneta-mux, and 3 agents with them, 1 busy; forgets 4 projects and 9 workstreams
+pi: skipped, as ssh does not reach it, and so luneta runs on there and keeps its projects: ssh: connect to host pi port 22: Operation timed out
+luneta: ended nothing; run it again with --yes 5f0c2a9e81d4b37a to end what it says
+```
+
+Show that to the user and ask, as for `close`. Say that every agent on those
+machines ends, busy ones too, and that you end with them: you run in a terminal
+of luneta-mux. Run it again with that `--yes <plan>` only after a clear yes, in a
+later turn. If the plan changed, it ends nothing, prints the new one and exits 3:
+show that and ask again. Once it runs, whatever it says shows nowhere, so tell
+the user before you run it that they can run `luneta terminate` from a terminal
+of their own to see what is left.
+
+In luneta's ask box, you cannot run it, as it would end the lunetad you run in:
+tell the user to run `luneta terminate` in a terminal instead.
+
+Never run it unless the user asked for exactly that. Closing sessions or panes is
+`close`.

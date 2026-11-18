@@ -32,6 +32,8 @@ mod shells;
 #[cfg(test)]
 mod starts;
 #[cfg(test)]
+mod terminate;
+#[cfg(test)]
 mod topics;
 #[cfg(test)]
 mod turns;

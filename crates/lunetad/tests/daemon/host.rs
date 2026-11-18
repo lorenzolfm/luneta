@@ -61,6 +61,8 @@ impl<'a> Vars<'a> {
             "LUNETA_MUX_SESSION",
             "LUNETA_MUX_MADE",
             "LUNETA_MUX_PANE",
+            "LUNETA_MUX_TERMINAL",
+            "LUNETA_MUX_TERMINAL_MADE",
         ];
         let turns = ["LUNETA_TURN", "LUNETA_TURN_BEFORE"];
         for name in names.into_iter().chain(panes).chain(turns) {

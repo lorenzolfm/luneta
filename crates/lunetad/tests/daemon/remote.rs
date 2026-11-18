@@ -80,6 +80,10 @@ if [ ! -x "$to/$destination" ]; then
     echo "ssh: Could not resolve hostname $destination: Name or service not known" >&2
     exit 255
 fi
+if [ "$1" = luneta ] && [ "$2" = terminate ] && [ -x "$to/$destination.luneta" ]; then
+    shift
+    exec "$to/$destination.luneta" "$@"
+fi
 if [ "$*" != "luneta bridge" ]; then
     echo "this ssh runs luneta bridge alone, and was asked: $*" >&2
     exit 255
@@ -93,6 +97,10 @@ exec "$to/$destination"
 
     pub fn reaches(&self, destination: &str, vars: Vars) {
         script(&self.to.join(destination), &bridge(&vars));
+    }
+
+    pub fn runs_luneta(&self, destination: &str, vars: Vars) {
+        script(&self.to.join(format!("{destination}.luneta")), &luneta(&vars, "\"$@\""));
     }
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
@@ -152,6 +160,10 @@ impl Drop for StalledAnswers {
 }
 
 fn bridge(vars: &Vars) -> String {
+    luneta(vars, "bridge")
+}
+
+fn luneta(vars: &Vars, args: &str) -> String {
     let bridge = vars.command(LUNETA);
     let (mut unset, mut set) = (String::new(), String::new());
     for (name, value) in bridge.get_envs() {
@@ -161,7 +173,7 @@ fn bridge(vars: &Vars) -> String {
             Some(value) => write!(set, " {name}={}", quoted(value.to_str().unwrap())).unwrap(),
         }
     }
-    format!("exec env{unset}{set} {} bridge\n", quoted(LUNETA))
+    format!("exec env{unset}{set} {} {args}\n", quoted(LUNETA))
 }
 
 fn quoted(text: &str) -> String {
