@@ -1165,6 +1165,7 @@ impl Projects {
             (project.folder(it).as_str().len(), it.used)
         };
         if let Some((_, home)) = homes.max_by_key(deepest) {
+            assert_ne!(home.id, from.id, "a terminal's own workstream that fits keeps it");
             return Home::In(home.id);
         }
         let Some(top) = top else {

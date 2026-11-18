@@ -71,7 +71,6 @@ pub enum Heeded {
 
 struct View {
     workstream: WorkstreamId,
-    arrived: bool,
     runs_in: Option<TerminalKey>,
     laid: Option<Laid>,
     screens: BTreeMap<TerminalKey, Screen>,
@@ -84,7 +83,6 @@ impl View {
     fn new(workstream: WorkstreamId, runs_in: Option<TerminalKey>) -> View {
         View {
             workstream,
-            arrived: false,
             runs_in,
             laid: None,
             screens: BTreeMap::new(),
@@ -109,14 +107,14 @@ impl View {
 
     fn go(&mut self, workstream: WorkstreamId) {
         self.workstream = workstream;
-        self.arrived = false;
         self.laid = None;
         self.screens.clear();
         self.pointer = Pointer::Free;
     }
 
     fn followed(&mut self, laid: &Laid) -> bool {
-        let follows = self.arrived && laid.workstream() != self.workstream;
+        let arrived = self.laid.is_some();
+        let follows = arrived && laid.workstream() != self.workstream;
         if follows {
             self.workstream = laid.workstream();
             self.pointer = Pointer::Free;
@@ -128,7 +126,6 @@ impl View {
         if laid.workstream() != self.workstream {
             return false;
         }
-        self.arrived = true;
         if self.focused() != laid.focused().map(|pane| pane.terminal) {
             self.pointer = Pointer::Free;
         }
