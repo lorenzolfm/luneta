@@ -52,7 +52,7 @@ use crate::api::{
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
     ShowResponse, StartRequest,
     TranscriptEndsRequest, TranscriptEndsResponse, TurnIntoPanesRequest, TurnIntoPanesResponse,
-    TurnIntoTabRequest, TurnIntoTabResponse,
+    TurnIntoTabRequest, TurnIntoTabResponse, ViewRequest,
 };
 use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
@@ -60,6 +60,8 @@ use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
 use crate::projects::{Ask, Failed, Id, Store, WorkstreamId};
 use crate::views;
+use crate::mux::own::api::{FromViewer, ToViewer};
+use crate::mux::own::viewer;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
@@ -1028,7 +1030,14 @@ impl Daemon for Host {
         let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let Hello { workstream, size, runs_in, again } = hello;
+        let Hello { workstream, size, runs_in, again, on } = hello;
+        if let Some(mut daemon) = self.bridged(on)? {
+            let hello = Hello { workstream, size, runs_in, again, on: None };
+            let first = ShowRequest { event: Some(Event::Hello(hello)) };
+            let rest = heard.map_while(Result::ok);
+            let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
+            return Ok(Response::new(Box::pin(answer.into_inner())));
+        }
         let workstream = views::id("workstream", workstream).map(WorkstreamId::new);
         let workstream = workstream.map_err(Status::invalid_argument)?;
         let size = views::size_of(size).map_err(Status::invalid_argument)?;
@@ -1062,6 +1071,37 @@ impl Daemon for Host {
             let _ = task::spawn_blocking(move || views.send(views::Command::Left(client))).await;
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(answers))))
+    }
+
+    type ViewStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
+
+    async fn view(
+        &self,
+        request: Request<Streaming<ViewRequest>>,
+    ) -> Result<Response<Self::ViewStream>, Status> {
+        use crate::api::view_request::{Event, Hello};
+        use crate::mux::own::api::from_viewer;
+        let mut heard = request.into_inner();
+        let Some(ViewRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
+            heard.message().await?
+        else {
+            return Err(Status::invalid_argument("the first word is no hello"));
+        };
+        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        let said = heard.map_while(|word| match word {
+            Ok(ViewRequest { event: Some(Event::Said(said)) }) => Some(said),
+            Ok(ViewRequest { event: Some(Event::Hello(_)) | None }) | Err(_) => None,
+        });
+        if let Some(mut daemon) = self.bridged(on)? {
+            let hello = Hello { on: None, greeting: Some(greeting) };
+            let first = ViewRequest { event: Some(Event::Hello(hello)) };
+            let rest = said.map(|said| ViewRequest { event: Some(Event::Said(said)) });
+            let answer = daemon.view(tokio_stream::once(first).chain(rest)).await?;
+            return Ok(Response::new(Box::pin(answer.into_inner())));
+        }
+        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
+        Ok(Response::new(Box::pin(answer)))
     }
 
     async fn change_projects(

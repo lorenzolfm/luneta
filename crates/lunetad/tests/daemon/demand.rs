@@ -736,6 +736,15 @@ impl Daemon for StandIn {
     ) -> Result<Response<Self::ShowStream>, Status> {
         Err(Status::unimplemented("a stand-in shows no view"))
     }
+
+    type ViewStream = tokio_stream::Empty<Result<lunetad::mux::own::api::ToViewer, Status>>;
+
+    async fn view(
+        &self,
+        _: Request<Streaming<api::ViewRequest>>,
+    ) -> Result<Response<Self::ViewStream>, Status> {
+        Err(Status::unimplemented("a stand-in shows no terminal"))
+    }
 }
 
 #[test]

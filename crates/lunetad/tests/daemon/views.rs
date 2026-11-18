@@ -11,17 +11,20 @@ use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
-use lunetad::mux::own::viewer::{view, Greeting, Seen, FRAMES_MAX};
+use lunetad::mux::own::viewer::{view, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorkstreamId};
-use lunetad::{Asked, Beside, Heard};
+use lunetad::folder::Folder;
+use lunetad::{Asked, Beside, Destination, Heard};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
-use crate::host::{eventually, folder_in, script};
+use crate::host::{eventually, folder_in, script, start, Host};
 use crate::own::Owned;
 use crate::projects::{asked, kept, project, workstream};
+use crate::remote::{hosts, reached, FakeSsh};
+use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -61,12 +64,14 @@ impl<'a> Shown<'a> {
         (columns, rows): (u32, u32),
         runs_in: Option<TerminalKey>,
     ) -> Shown<'a> {
-        let hello = Hello { workstream, size: Some(size(columns, rows)), runs_in, again: false };
+        let size = Some(size(columns, rows));
+        let hello = Hello { workstream, size, runs_in, again: false, on: None };
         Shown::greeted(owned, hello)
     }
 
     fn again(owned: &'a Owned, workstream: u64) -> Shown<'a> {
-        let hello = Hello { workstream, size: Some(size(80, 24)), runs_in: None, again: true };
+        let size = Some(size(80, 24));
+        let hello = Hello { workstream, size, runs_in: None, again: true, on: None };
         Shown::greeted(owned, hello)
     }
 
@@ -999,9 +1004,108 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
     let owned = Owned::new();
     let workstream = WorkstreamId::of(workstream_in_home(&owned)).unwrap();
     let folder = folder_in(owned.host.runtime.path()).unwrap();
+    seen_and_typed_into(folder, None, Reach::Mux(owned.socket()), workstream);
+}
+
+#[test]
+fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
+    let far = Owned::new();
+    let workstream = WorkstreamId::of(workstream_in_home(&far)).unwrap();
+    let here = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let lunetad = folder_in(here.runtime.path()).unwrap();
+    let destination: Destination = "far".parse().unwrap();
+    let reach = Reach::On { lunetad: lunetad.clone(), destination: destination.clone() };
+    seen_and_typed_into(lunetad.clone(), Some(destination), reach, workstream);
+
+    let nowhere: Destination = "nowhere".parse().unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
+    let told = move |it| drop(heard.send(it));
+    let on = Some(nowhere.clone());
+    let _show = lunetad::show(lunetad.clone(), on, workstream, size, None, false, told);
+    match hearing.recv_timeout(HEARD_IN).expect("lunetad answers a view of nowhere") {
+        Heard::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
+        other => panic!("a view of a machine not reached is lost, not {other:?}"),
+    }
+    let (seen, seeing) = std::sync::mpsc::channel();
+    let greeting = Greeting { runs_in: None, foreground: None, background: None };
+    let reach = Reach::On { lunetad, destination: nowhere };
+    let _viewer = view(reach, greeting, move |it| drop(seen.send(it)));
+    match seeing.recv_timeout(HEARD_IN).expect("lunetad answers a viewer of nowhere") {
+        Seen::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
+        other => panic!("a viewer of a machine not reached is lost, not {other:?}"),
+    }
+}
+
+#[test]
+fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_beside() {
+    if !makes_shells() {
+        return;
+    }
+    let far = Owned::new();
+    let home = fs::canonicalize(far.host.home.path()).unwrap();
+    let made = project(&far.host, &home, Some("faraway"));
+    let workstream = workstream(&far.host, made, &home);
+    let mut shown = Shown::new(&far, workstream, 400, 200);
+    let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);
+    drop(shown);
+    let here = Owned::new();
+    FakeSsh::new(here.host.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here.host, "far\n");
+    let mut window = Window::open(&here.host, &directory("project"), &[]);
+    window.spot_of("faraway");
+    assert!(!window.shows("far-is-42"));
+    let mut clicked: Option<Instant> = None;
+    eventually("luneta shows far's terminal", || {
+        if window.shows("far-is-42") {
+            return Some(());
+        }
+        if clicked.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
+            let (row, column) = window.spot_of(home.file_name().unwrap().to_str().unwrap());
+            let row = (row + 1, column + 4);
+            window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
+            clicked = Some(Instant::now());
+        }
+        None
+    });
+    window.send("echo typed-$((40 + 2))\r");
+    eventually("far's terminal shows what was typed here", || {
+        window.shows("typed-42").then_some(())
+    });
+    let far_terminal = |owned: &Owned| {
+        let projects = projects_of(owned);
+        let workstreams = projects.into_iter().flat_map(|project| project.workstreams);
+        let terminals = workstreams.flat_map(|workstream| workstream.terminals);
+        terminals.into_iter().any(|it| it.id == terminal)
+    };
+    assert!(far_terminal(&far), "the terminal typed into is far's");
+
+    let far_terminals = || {
+        let projects = projects_of(&far);
+        let workstreams = projects.into_iter().flat_map(|project| project.workstreams);
+        let held = workstreams.into_iter().find(|it| it.id == workstream);
+        held.map_or(0, |it| it.terminals.len())
+    };
+    window.send("\x1ba");
+    window.spot_of("New");
+    window.send("np");
+    eventually("n p opens a terminal beside it, there", || (far_terminals() == 2).then_some(()));
+}
+
+fn seen_and_typed_into(
+    folder: Folder,
+    on: Option<Destination>,
+    reach: Reach,
+    workstream: WorkstreamId,
+) {
+    let (heard, hearing) = std::sync::mpsc::channel();
+    let size = Size::of(80, 24).unwrap();
+    let told = move |it| drop(heard.send(it));
+    let show = lunetad::show(folder, on, workstream, size, None, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1018,7 +1122,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
 
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { runs_in: None, foreground: None, background: None };
-    let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
+    let viewer = view(reach, greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let paste = |text: &str| typed::Event::Paste(mux_api::Paste { text: text.to_owned() });
     viewer.typed(key, paste("echo seen-$((40 + 2))"));
@@ -1064,7 +1168,8 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     let (heard, hearing) = std::sync::mpsc::channel();
     let size = Size::of(80, 24).unwrap();
-    let show = lunetad::show(folder, workstream, size, None, false, move |it| drop(heard.send(it)));
+    let told = move |it| drop(heard.send(it));
+    let show = lunetad::show(folder, None, workstream, size, None, false, told);
     let laid = || match hearing.recv_timeout(HEARD_IN).expect("lunetad lays the view out") {
         Heard::Laid(laid) => laid,
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
@@ -1080,7 +1185,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
 
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { runs_in: None, foreground: None, background: None };
-    let viewer = view(owned.socket(), greeting, move |it| drop(seen.send(it)));
+    let viewer = view(Reach::Mux(owned.socket()), greeting, move |it| drop(seen.send(it)));
     viewer.show(opened.keys());
     let frame = |within: Duration| match seeing.recv_timeout(within) {
         Ok(Seen::Frame(framed)) => Some(framed),

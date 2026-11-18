@@ -1444,8 +1444,8 @@ impl Sidebar {
         keep(it).then_some(held)
     }
 
-    pub fn attaching(&mut self, session: OwnKey) {
-        self.on = Machine::Local;
+    pub fn attaching(&mut self, on: Machine, session: OwnKey) {
+        self.on = on;
         self.seat = Some(OwnSeat::Coming(session));
         self.unfold_own(session);
         self.rebuild();
@@ -1459,9 +1459,9 @@ impl Sidebar {
             self.unfold_own(pane.session);
         }
         if let Some(place) = self.own_place(pane) {
-            let spot = Spot::on(&Machine::Local, Place::Pane(place));
-            if let Some(Spot::Local(Place::Workstream(home))) = self.homes.get(&spot) {
-                self.folds.set(Fold::Workstream(&Machine::Local, home.workstream), false);
+            let spot = Spot::on(&self.on, Place::Pane(place));
+            if let Some(Place::Workstream(home)) = self.homes.get(&spot).and_then(Spot::place) {
+                self.folds.set(Fold::Workstream(&self.on, home.workstream), false);
             }
         }
         self.rebuild();
@@ -1470,7 +1470,7 @@ impl Sidebar {
     pub fn showing(&mut self, workstream: WorkstreamId) {
         if self.shown != Some(workstream) {
             self.shown = Some(workstream);
-            self.folds.set(Fold::Workstream(&Machine::Local, workstream), false);
+            self.folds.set(Fold::Workstream(&self.on, workstream), false);
             self.rebuild();
         }
     }
@@ -1488,7 +1488,7 @@ impl Sidebar {
     }
 
     fn own_known(&self, key: OwnKey) -> Option<&Known> {
-        let mut known = shelf(&self.shelves, &Machine::Local).iter();
+        let mut known = shelf(&self.shelves, &self.on).iter();
         known.find(|known| known.listed().own_key() == Some(key))
     }
 
@@ -1506,7 +1506,7 @@ impl Sidebar {
 
     fn unfold_own(&mut self, key: OwnKey) {
         if let Some(project) = self.own_listed(key).as_ref().and_then(Listed::project) {
-            self.folds.set(Fold::Project(&Machine::Local, project), false);
+            self.folds.set(Fold::Project(&self.on, project), false);
         }
     }
 
@@ -1590,7 +1590,7 @@ impl Sidebar {
 
     pub fn whereabouts(&self) -> Option<Here> {
         let seat = self.own_seat()?;
-        let on = Machine::Local;
+        let on = self.on.clone();
         if let Ok(place) = self.here_place() {
             return Some(Here::Pane { on, place });
         }
@@ -5029,7 +5029,7 @@ mod tests {
         let key = place.listed().own_key().expect("an own session");
         let pane = OwnPane::new(key, place.pane().expect("a pane")).expect("a pane");
         if sidebar.own_seat().is_none() {
-            sidebar.attaching(key);
+            sidebar.attaching(Machine::Local, key);
         }
         sidebar.went_own(pane, OwnClientId::new(1).unwrap());
     }
@@ -5569,7 +5569,7 @@ mod tests {
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
         assert_eq!(sidebar.own_title(), Some("older"));
         let unlisted = OwnKey { id: OwnId::new(3).unwrap(), made: OwnMade::from_nanos(0) };
-        sidebar.attaching(unlisted);
+        sidebar.attaching(Machine::Local, unlisted);
         assert_eq!(sidebar.own_title(), Some("older"));
         sit(&mut sidebar, &own_pane_of("young", 2, 1));
         assert_eq!(sidebar.own_title(), Some("young"));
@@ -5590,7 +5590,7 @@ mod tests {
         assert!(!folded(&sidebar, "older"));
         let mut sidebar = away();
         let made = OwnMade::from_nanos(0);
-        sidebar.attaching(OwnKey { id: OwnId::new(1).unwrap(), made });
+        sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(1).unwrap(), made });
         assert!(!folded(&sidebar, "older"));
     }
 
@@ -7585,7 +7585,7 @@ mod tests {
         let kill = Act::Kill { session: session_name("own"), whose };
         assert_eq!(delete(&mut sidebar), delete_here(kill.clone()));
         let made = OwnMade::from_nanos(0);
-        sidebar.attaching(OwnKey { id: OwnId::new(2).unwrap(), made });
+        sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(2).unwrap(), made });
         assert_eq!(delete(&mut sidebar), delete_here(kill));
     }
 
@@ -7597,7 +7597,7 @@ mod tests {
         sidebar.hear(host(sessions, Vec::new()));
         let id = OwnId::new(1).unwrap();
         let key = OwnKey { id, made: OwnMade::from_nanos(0) };
-        sidebar.attaching(key);
+        sidebar.attaching(Machine::Local, key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_PANE));
         assert_eq!(sidebar.user(&Machine::Local), User::Untold);
         let client = OwnClientId::new(4).unwrap();
@@ -8157,7 +8157,7 @@ mod tests {
         }];
         sidebar.hear(host);
         let made = OwnMade::from_nanos(0);
-        sidebar.attaching(OwnKey { id: OwnId::new(1).unwrap(), made });
+        sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(1).unwrap(), made });
         assert_eq!(sidebar.float_menu(), Err(NO_HERE_PANE));
         assert!(sidebar.floating().is_none());
         sit(&mut sidebar, &own_pane_of("older", 1, 1));

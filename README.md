@@ -1205,21 +1205,16 @@ lunetad runs ssh to it again, every 30 seconds at the longest, and
 are kept one to a line in `$XDG_STATE_HOME/luneta/hosts`, or
 `~/.local/state/luneta/hosts`, which lunetad reads again as it changes.
 
-`Enter` or a click on another machine's session or pane takes you there:
-luneta ends its zellij client and runs `ssh -t <machine> zellij attach
-<session>` in its place, so the machine needs `zellij` on its `PATH` too. That
-ssh goes on the connection lunetad's ssh to the machine shares, a
-`ControlMaster` on a socket in luneta's runtime folder, so you log in to a
-machine once, and any prompt of ssh's shows where zellij does. Between two
-sessions of that machine, zellij there moves the client, as it does here; a
-session of this machine's attaches here again. Where that ssh fails, as where the machine went away,
-luneta goes back to the session you left, and the notes say what ssh said.
-Where the session there ends, luneta goes on in the newest session of that
-machine's, or of this one's where it has none left, or of the next machine's
-that has one. Where ssh then fails to a machine luneta went on to, at once or
-an hour later, it goes on to the next, but to none whose ssh failed since
-zellij was last in a session, and the notes say what ssh said; `luneta.log`
-says why luneta passed over each machine it did.
+`Enter` or a click on another machine's workstream or pane shows it here:
+luneta draws that machine's terminals itself, beside this machine's sidebar,
+and what you type, paste or click goes to them. lunetad here hands the view on
+to lunetad there, through the ssh it reaches the machine with, and lunetad
+there to its luneta-mux, so the machine needs only `luneta` on its `PATH`.
+The tab bar lists the workstreams of that project, and `Ctrl h` and `Ctrl l`
+cross into them at the edge, as here. `n p` on a pane there opens a terminal
+beside it, there. Where lunetad loses the machine, the notes say so, and the
+view comes back once lunetad reaches it again. Making a workstream there,
+closing its terminals and the picker's preview of them come later.
 
 The menu on another machine's pane opens what it opens here, there: `n p`,
 `n t` and the agents of the Skills group open in zellij on that machine, `c f`

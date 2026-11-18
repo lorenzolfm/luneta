@@ -11,6 +11,7 @@ use tonic::{Code, Status};
 use crate::api::{self, show_request, show_response};
 use crate::folder::Folder;
 use crate::mux::TerminalKey;
+use crate::remote::Destination;
 use crate::projects::{Size, TerminalId, WorkstreamId, FRAME_CELLS, PANES_MAX};
 use crate::streams::{self, Inbox, Next, Outbox};
 
@@ -315,6 +316,7 @@ fn untaken() -> String {
 
 pub fn show<Told: FnMut(Heard) + Send + 'static>(
     folder: Folder,
+    on: Option<Destination>,
     workstream: WorkstreamId,
     size: Size,
     runs_in: Option<TerminalKey>,
@@ -329,7 +331,8 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             id: key.id.get(),
             made_at: Some(key.made.into()),
         });
-        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in, again };
+        let on = on.map(|on| api::On { destination: on.to_string() });
+        let hello = show_request::Hello { workstream: workstream.get(), size, runs_in, again, on };
         let last = match built {
             Ok(runtime) => runtime.block_on(stream(&folder, hello, inbox, &mut told)),
             Err(error) => Heard::Lost(format!("no runtime: {error}")),
