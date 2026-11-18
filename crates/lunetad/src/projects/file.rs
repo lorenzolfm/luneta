@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
-use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Refused, Runs, Session};
-use super::{Terminal, TerminalId, Used, WorkstreamId};
+use super::{Below, Change, Closing, Dir, Id, Line, Name, Project, Projects, Refused, Runs};
+use super::{Session, Terminal, TerminalId, Used, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -255,6 +255,15 @@ impl Store {
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
         let (changed, made) = self.applied(change)?;
         assert!(made.is_none(), "a change that follows the mux makes no id");
+        self.follows(changed)
+    }
+
+    pub fn closed(&mut self, closing: Closing) -> Result<Option<String>, Failed> {
+        let changed = self.kept()?.closed(closing).map_err(Failed::Refused)?;
+        self.follows(changed)
+    }
+
+    fn follows(&mut self, changed: Projects) -> Result<Option<String>, Failed> {
         if self.projects() == Some(&changed) {
             return Ok(None);
         }
@@ -267,12 +276,15 @@ impl Store {
         Ok(unwritten)
     }
 
+    fn kept(&self) -> Result<&Projects, Failed> {
+        match &self.keeping {
+            Keeping::Kept { projects, .. } => Ok(projects),
+            Keeping::Unkept(why) => Err(Failed::NotKept(why.clone())),
+        }
+    }
+
     fn applied(&self, change: Change) -> Result<(Projects, Option<Id>), Failed> {
-        let projects = match &self.keeping {
-            Keeping::Kept { projects, .. } => projects,
-            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
-        };
-        projects.changed(change, Id::random).map_err(|refused| match refused {
+        self.kept()?.changed(change, Id::random).map_err(|refused| match refused {
             Refused::Nests(why) => Failed::Nests(why),
             Refused::Stale(why) => Failed::Stale(why),
             Refused::Said(why) => Failed::Refused(why),
@@ -1032,7 +1044,7 @@ mod tests {
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
-        let unwritten = store.followed(Change::CloseWorkstream { workstream });
+        let unwritten = store.closed(Closing::Workstream(workstream));
         let flushed = store.flush();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
         let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
@@ -1045,7 +1057,7 @@ mod tests {
 
         store.flush().unwrap();
         assert!(read(&file).unwrap().find(workstream).is_none(), "a flush writes the close");
-        let again = store.followed(Change::CloseWorkstream { workstream });
+        let again = store.closed(Closing::Workstream(workstream));
         assert!(matches!(again, Err(Failed::Refused(_))), "{again:?}");
     }
 

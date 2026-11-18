@@ -637,7 +637,7 @@ pub fn close(what: &[Address], yes: Option<Agreed>, folder: &Path) -> ExitCode {
     let holds_here = |plan: &Plan| {
         let holds = |here: &Here| {
             let act = &plan.act;
-            whose_of(act) == here.whose()
+            act.whose() == here.whose()
                 && session_of(act) == here.pane.session
                 && act.takes(here.pane.pane)
         };
@@ -744,6 +744,7 @@ fn session_of(act: &Act) -> &str {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
         | Act::Workstream { session, .. }
+        | Act::Project { session, .. }
         | Act::Kill { session, .. }
         | Act::Leave { session, .. } => session.as_str(),
     }
@@ -759,19 +760,10 @@ fn says(act: &Act) -> String {
         Act::Workstream { session, workstream, .. } => {
             format!("close workstream {workstream} of {session}")
         },
+        Act::Project { session, .. } => format!("delete project {session}"),
         Act::Kill { session, .. } | Act::Leave { session, .. } => {
             format!("delete session {session}")
         },
-    }
-}
-
-fn whose_of(act: &Act) -> Whose {
-    match act {
-        Act::Pane { whose, .. }
-        | Act::Tab { whose, .. }
-        | Act::Workstream { whose, .. }
-        | Act::Kill { whose, .. }
-        | Act::Leave { whose, .. } => *whose,
     }
 }
 
@@ -892,9 +884,11 @@ fn act(act: &Act) -> Result<(), String> {
         Act::Workstream { .. } => {
             unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
         },
-        Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
-            closes::killed(session, whose.started(session)?)
+        Act::Project { .. } => {
+            unreachable!("only the sidebar plans a project's delete, and lunetad acts on it")
         },
+        Act::Kill { session, whose } => closes::killed(session, whose.started(session)?),
+        Act::Leave { session, started, .. } => closes::killed(session, *started),
     }
 }
 

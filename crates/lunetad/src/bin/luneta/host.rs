@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Name, TerminalId, WorkstreamId};
+use lunetad::projects::{Name, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
@@ -83,6 +83,12 @@ pub enum Made {
 pub struct Pulled {
     workstream: WorkstreamId,
     argv: Vec<String>,
+}
+
+#[derive(Debug)]
+enum Doomed {
+    Workstream { workstream: WorkstreamId, seen: Vec<TerminalId> },
+    Project { project: ProjectId, workstreams: Vec<WorkstreamId>, seen: Vec<TerminalId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1523,7 +1529,7 @@ impl App {
             },
             Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
-                Act::Workstream { .. } => self.project_act(&on, &act),
+                Act::Workstream { .. } | Act::Project { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
                     zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
                 },
@@ -1584,12 +1590,6 @@ impl App {
                         },
                     };
                     renamed.map_err(|why| format!("not renamed: {why}"))
-                });
-            },
-            Asked::RemoveProject { on, project } => {
-                self.change(on, move |on| {
-                    let removed = workstreams::forgotten_project(on, project);
-                    removed.map_err(|why| format!("not removed: {why}"))
                 });
             },
             Asked::Make { menu, on, session, holder, cwd, name, command } => {
@@ -1699,27 +1699,42 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        if let Act::Workstream { workstream, seen, .. } = act {
-            let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
-            let (on, workstream, seen) = (on.clone(), *workstream, seen.clone());
-            let deleting = thread::spawn(move || {
-                let closed = || workstreams::closed(&lunetad, &on, workstream, &seen);
-                if let Err(why) = caught(closed) {
-                    let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
-                }
-            });
-            self.keep_change(deleting);
-            return;
+        match (on, act) {
+            (_, Act::Workstream { workstream, seen, .. }) => {
+                let (workstream, seen) = (*workstream, seen.clone());
+                self.project_act_delete(on, Doomed::Workstream { workstream, seen });
+            },
+            (_, Act::Project { project, workstreams, seen, .. }) => {
+                let (project, workstreams, seen) = (*project, workstreams.clone(), seen.clone());
+                self.project_act_delete(on, Doomed::Project { project, workstreams, seen });
+            },
+            (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
+                let (terminal, events) = (*terminal, self.events.clone());
+                thread::spawn(move || {
+                    if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
+                        let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
+                    }
+                });
+            },
+            _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
         }
-        let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {
-            return self.sidebar.notify(format!("menu: {NOT_YET}"));
-        };
-        let (terminal, events) = (*terminal, self.events.clone());
-        thread::spawn(move || {
-            if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
-                let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
+    }
+
+    fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
+        let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
+        self.keep_change(thread::spawn(move || {
+            let closed = caught(|| match &doomed {
+                Doomed::Workstream { workstream, seen } => {
+                    workstreams::closed(&lunetad, &on, *workstream, seen)
+                },
+                Doomed::Project { project, workstreams, seen } => {
+                    workstreams::closed_project(&lunetad, &on, *project, workstreams, seen)
+                },
+            });
+            if let Err(why) = closed {
+                let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
             }
-        });
+        }));
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {

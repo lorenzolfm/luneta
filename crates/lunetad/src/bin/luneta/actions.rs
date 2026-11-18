@@ -120,7 +120,7 @@ actions! {
     RenameProject,
     ClosePane,
     CloseWorkstream,
-    RemoveProject,
+    DeleteProject,
     ForgetMachine,
     DeleteMerged,
     BriefEvery,
@@ -240,9 +240,13 @@ impl Action {
                 WORKSTREAM,
                 Any,
             ),
-            Action::RemoveProject => {
-                spec("remove the project", &["forget", "delete"], menu(&['d', 'd']), PROJECT, Any)
-            },
+            Action::DeleteProject => spec(
+                "delete the project",
+                &["remove", "forget", "close", "workstreams"],
+                menu(&['d', 'd']),
+                PROJECT,
+                Any,
+            ),
             Action::ForgetMachine => {
                 let forget = menu(&['d', 'd']);
                 spec("forget the machine", &["remove", "ssh", "host"], forget, MACHINE, Any)

@@ -306,7 +306,7 @@ mod tests {
 
     fn project_on(on: Machine) -> Target {
         let project = ProjectRow::of(Listed::new_project("luneta", 3)).unwrap();
-        Target::Project(on, ProjectTarget { project, dir: "/w/luneta".to_owned(), empty: false })
+        Target::Project(on, ProjectTarget { project, dir: "/w/luneta".to_owned() })
     }
 
     fn nixos() -> Machine {

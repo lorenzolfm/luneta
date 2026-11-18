@@ -1058,7 +1058,6 @@ pub enum Asked {
     NewWorkstream { project: ProjectId, folder: Directory },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
-    RemoveProject { on: Machine, project: ProjectId },
     Make {
         menu: u64,
         on: Machine,
@@ -1103,7 +1102,6 @@ impl Asked {
             | Asked::NewWorkstream { .. }
             | Asked::AddProject { .. }
             | Asked::Rename { .. }
-            | Asked::RemoveProject { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
             | Asked::Issue(_)
@@ -2982,8 +2980,7 @@ impl Sidebar {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.listed() == listed)?;
         let (project, dir) = (known.project.clone(), known.dir.as_str().to_owned());
-        let empty = known.workstreams.is_empty();
-        Some(Target::Project(machine.clone(), ProjectTarget { project, dir, empty }))
+        Some(Target::Project(machine.clone(), ProjectTarget { project, dir }))
     }
 
     fn terminal_of(&self, machine: &Machine, listed: &Listed, pane: PaneKey) -> Option<TerminalId> {
@@ -3153,7 +3150,6 @@ impl Sidebar {
                     Done::Workstream(project, folder) => Asked::NewWorkstream { project, folder },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
                     Done::Rename(on, rename) => Asked::Rename { on, rename },
-                    Done::Remove(on, project) => Asked::RemoveProject { on, project },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
                     Done::Go(_, place) => {
                         let said = Self::went_said(&place);
@@ -3238,6 +3234,12 @@ impl Sidebar {
             },
             Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
                 let plan = self.deletes_of(&on, workstream).and_then(|deletes| {
+                    self.plan(&on, &session, deletes)
+                });
+                self.planned(plan)
+            },
+            Wants::Plan { session, scope: Scope::Project } => {
+                let plan = self.project_deletes(&on, &session).and_then(|deletes| {
                     self.plan(&on, &session, deletes)
                 });
                 self.planned(plan)
@@ -3356,6 +3358,16 @@ impl Sidebar {
             return Err(why);
         }
         Ok(close::plan(&self.subject(on, listed, deletes)))
+    }
+
+    fn project_deletes(&self, on: &Machine, listed: &Listed) -> Result<Deletes, String> {
+        let unlisted = || format!("project {} is no longer listed", listed.name());
+        let (project, key) = listed.project().zip(listed.own_key()).ok_or_else(unlisted)?;
+        let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
+        let known = known.ok_or_else(unlisted)?;
+        let workstreams = known.workstreams.iter().map(|stream| stream.place.workstream).collect();
+        let seen = known.workstreams.iter().flat_map(|stream| stream.terminals.iter().copied());
+        Ok(Deletes::Project { key, project, workstreams, seen: seen.collect() })
     }
 
     fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
@@ -3491,9 +3503,10 @@ impl Sidebar {
                 matches!(place, Place::Workstream(at) if at.workstream == *workstream)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
-            (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
-                place.session() == session.as_str()
-            },
+            (
+                Act::Project { session, .. } | Act::Kill { session, .. } | Act::Leave { session, .. },
+                _,
+            ) => place.session() == session.as_str(),
         };
         let takes = |spot: &Spot| {
             spot.place().is_some_and(|place| spot.machine() == on && takes_place(place))
@@ -5051,6 +5064,14 @@ mod tests {
 
     fn delete_here(act: Act) -> Asked {
         Asked::Delete { on: Machine::Local, act }
+    }
+
+    fn project_deleted(name: &str, id: u64, workstreams: &[u64], seen: &[u64]) -> Act {
+        let key = OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(0) };
+        let (project, workstreams) = (ProjectId::of(id).unwrap(), workstreams.iter());
+        let workstreams = workstreams.map(|it| WorkstreamId::of(*it).unwrap()).collect();
+        let seen = seen.iter().map(|it| TerminalId::of(*it).unwrap()).collect();
+        Act::Project { session: session_name(name), key, project, workstreams, seen }
     }
 
     fn go_here(place: Place) -> Asked {
@@ -7909,7 +7930,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_project_is_removed_by_its_id() {
+    fn an_empty_project_is_deleted_by_its_id() {
         let mut sidebar = fresh();
         let own = own_session("own", 1, Vec::new());
         let sessions = vec![own_session("here", 2, Vec::new()), own];
@@ -7921,16 +7942,15 @@ mod tests {
             type_in(sidebar, "d");
             sidebar.key(&char('d'), moment(160_000))
         };
-        let project = ProjectId::of(1).unwrap();
-        let removed = Asked::RemoveProject { on: Machine::Local, project };
-        assert_eq!(remove(&mut sidebar), removed);
+        let deleted = delete_here(project_deleted("own", 1, &[], &[]));
+        assert_eq!(remove(&mut sidebar), deleted);
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(2).unwrap(), made });
-        assert_eq!(remove(&mut sidebar), removed);
+        assert_eq!(remove(&mut sidebar), deleted);
     }
 
     #[test]
-    fn an_own_client_is_where_its_server_says_and_its_project_has_no_delete() {
+    fn an_own_client_is_where_its_server_says_and_closes_its_project_to_delete_it() {
         let mut sidebar = fresh();
         let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
@@ -7950,7 +7970,8 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
-        assert!(sidebar.menu.is_none());
+        let deleted = project_deleted("twin", 1, &[1000], &[1]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
     }
 
     #[test]
@@ -8985,6 +9006,13 @@ mod tests {
             panes: vec![1],
         };
         assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
+        sidebar.cursor = Some(Spot::Local(Place::Session(own_listed("older", 1))));
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
+        let lines = screen(&mut sidebar, true, 32, 16);
+        assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
+        let deleted = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), delete_here(deleted));
         assert!(sidebar.menu.is_none());
     }
 

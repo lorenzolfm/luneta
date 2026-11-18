@@ -626,7 +626,6 @@ pub enum Target {
 pub struct ProjectTarget {
     pub project: ProjectRow,
     pub dir: String,
-    pub empty: bool,
 }
 
 enum Offer<'t> {
@@ -641,7 +640,7 @@ enum Offer<'t> {
     Rename(Renames),
     ClosePane(&'t PaneRow),
     CloseWorkstream(&'t WorkstreamRow),
-    RemoveProject(ProjectId),
+    DeleteProject(&'t Listed),
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Brief(brief::Scope),
@@ -742,8 +741,8 @@ impl Target {
             {
                 Offer::CloseWorkstream(row)
             },
-            (Action::RemoveProject, Target::Project(_, target)) if target.empty => {
-                Offer::RemoveProject(target.project.id())
+            (Action::DeleteProject, Target::Project(_, target)) => {
+                Offer::DeleteProject(target.project.listed())
             },
             (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
                 Offer::ForgetMachine(destination)
@@ -862,7 +861,8 @@ fn started(keys: &Keys, row: &PaneRow, skill: &str) -> Result<(Listed, Wants), S
     Ok((session.clone(), Wants::Open { session, pane, cwd, opens }))
 }
 
-const ASKS_FIRST: [Action; 3] = [Action::ClosePane, Action::CloseWorkstream, Action::DeleteMerged];
+const ASKS_FIRST: [Action; 4] =
+    [Action::ClosePane, Action::CloseWorkstream, Action::DeleteProject, Action::DeleteMerged];
 
 const _: () = {
     let mut at = 0;
@@ -1012,7 +1012,6 @@ pub enum Done {
     Workstream(ProjectId, Directory),
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
-    Remove(Machine, ProjectId),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1318,8 +1317,8 @@ impl Menu {
                 let scope = Scope::Workstream(row.place.workstream);
                 deleting(keys, Action::CloseWorkstream, row.place.project.listed(), scope)
             },
-            Offer::RemoveProject(project) => {
-                Did::Closed(Done::Remove(target.machine().clone(), project))
+            Offer::DeleteProject(listed) => {
+                deleting(keys, Action::DeleteProject, listed, Scope::Project)
             },
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
@@ -2557,13 +2556,13 @@ mod tests {
         Target::Pane(Machine::Local, own_row())
     }
 
-    fn project_on(on: Machine, empty: bool) -> Target {
+    fn project_on(on: Machine) -> Target {
         let dir = "/w/luneta".to_owned();
-        Target::Project(on, ProjectTarget { project: project(), dir, empty })
+        Target::Project(on, ProjectTarget { project: project(), dir })
     }
 
     fn session_row() -> Target {
-        project_on(Machine::Local, false)
+        project_on(Machine::Local)
     }
 
     fn workstream() -> WorkstreamId {
@@ -2665,7 +2664,7 @@ mod tests {
         assert_eq!(made(session_row()), Done::Workstream(id, directory("/w/luneta")));
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let far = Target::Pane(vps(), own_row());
-        for target in [pane_row(), far, workstream_on(vps()), project_on(vps(), false)] {
+        for target in [pane_row(), far, workstream_on(vps()), project_on(vps())] {
             let (menu, _) = stays(opened(target.clone(), Some('n')));
             let lines = text(&menu.lines(31, 9, 0).0);
             assert!(!lines.contains(&" w  new workstream".to_owned()), "{target:?}: {lines:?}");
@@ -2726,7 +2725,7 @@ mod tests {
                 " b  Brief ▸",
             ]
         );
-        assert_eq!(text(&legend(Some(&project_on(Machine::Local, true)), 31, 15).0)[6..], [
+        assert_eq!(text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[6..], [
             " a  Ask",
             " n  New ▸",
             " r  Rename the project",
@@ -2766,7 +2765,7 @@ mod tests {
             own_pane(),
             pane_row(),
             workstream_on(Machine::Local),
-            project_on(Machine::Local, true),
+            project_on(Machine::Local),
             Target::Machine(vps),
         ];
         for (action, _) in Action::menu() {
@@ -3306,7 +3305,7 @@ mod tests {
         let name = || project().listed().name().clone();
         for (row, highlighted) in [
             (pane, Briefed::Agent(vps(), name(), 4)),
-            (project_on(vps(), false), Briefed::Session(vps(), name())),
+            (project_on(vps()), Briefed::Session(vps(), name())),
         ] {
             for (key, briefed) in [
                 ('z', Briefed::Every),
@@ -3363,7 +3362,7 @@ mod tests {
 
         let outside = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
         let unplaced = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
-        for target in [outside, unplaced, project_on(Machine::Local, true), remote_header()] {
+        for target in [outside, unplaced, project_on(Machine::Local), remote_header()] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing, "{target:?}");
@@ -3560,11 +3559,12 @@ mod tests {
             " a  Ask",
             " n  New ▸",
             " r  Rename the project",
+            " d  Delete ▸",
             " b  Brief ▸",
             " <ESC> - Close",
         ]);
-        assert_eq!(at(project_on(Machine::Local, true), Some('d')), [
-            " d  remove the project",
+        assert_eq!(at(project_on(Machine::Local), Some('d')), [
+            " d  delete the project",
             " <BS> - Back, <ESC> - Close",
         ]);
         assert_eq!(at(session_row(), Some('n')), [
@@ -3858,12 +3858,43 @@ mod tests {
     }
 
     #[test]
-    fn d_d_on_an_empty_project_removes_it_and_on_one_with_workstreams_is_none() {
+    fn d_d_on_a_project_deletes_it_with_its_workstreams_asking_first_for_an_agent_at_work() {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
+        let workstreams = vec![workstream()];
+        let deletes = || Deletes::Project {
+            key: project().listed().own_key().unwrap(),
+            project: project().id(),
+            workstreams: workstreams.clone(),
+            seen: workstream_seen(),
+        };
+        let planned = |agents: Vec<(u32, Doing)>| {
+            let (session, seat) = (project().listed().clone(), Seat::Elsewhere);
+            let agents = Ok(agents);
+            close::plan(&Subject { session: &session, seat, deletes: deletes(), agents, refuge: None })
+        };
+        let act = Act::Project {
+            session: project().listed().name().clone(),
+            key: project().listed().own_key().unwrap(),
+            project: project().id(),
+            workstreams: workstreams.clone(),
+            seen: workstream_seen(),
+        };
         for on in [Machine::Local, vps()] {
-            let (menu, _) = stays(opened(project_on(on.clone(), true), Some('d')));
-            assert_eq!(closed(menu.key(&char('d'))), Done::Remove(on.clone(), project().id()));
-            assert!(Menu::open(1, project_on(on, false), Some('d'), PICKED).is_none());
+            let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
+            let (menu, wants) = stays(menu.key(&char('d')));
+            let (session, scope) = (project().listed().clone(), Scope::Project);
+            assert_eq!(wants, Wants::Plan { session, scope });
+            let (menu, _) = stays(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
+            assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [
+                " Delete project luneta? 1",
+                " agent, 1 busy",
+            ]);
+            let (menu, _) = stays(menu.key(&char('d')));
+            let done = closed(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
+            assert_eq!(done, Done::Act(on.clone(), act.clone()));
+            let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
+            let (menu, _) = stays(menu.key(&char('d')));
+            assert_eq!(closed(menu.planned(Ok(planned(Vec::new())))), Done::Act(on, act.clone()));
         }
     }
 
