@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseWorkstream};
+use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseProject};
+use lunetad::api::change_projects_request::CloseWorkstream;
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::daemon_client::DaemonClient;
@@ -39,6 +40,41 @@ impl Unmade {
             Unmade::Nests(why) | Unmade::Failed(why) => why,
         }
     }
+}
+
+enum Tried {
+    Went(String),
+    Failed(String),
+}
+
+impl From<String> for Tried {
+    fn from(why: String) -> Tried {
+        Tried::Failed(why)
+    }
+}
+
+impl Tried {
+    fn said(self) -> String {
+        match self {
+            Tried::Went(why) | Tried::Failed(why) => why,
+        }
+    }
+}
+
+fn twice<T>(mut tried: impl FnMut() -> Result<T, Tried>) -> Result<T, String> {
+    match tried() {
+        Err(Tried::Went(_)) => tried().map_err(Tried::said),
+        done => done.map_err(Tried::said),
+    }
+}
+
+fn in_kept<T>(path: &Path, project: ProjectId, made: Result<T, String>) -> Result<T, Tried> {
+    let why = match made {
+        Ok(made) => return Ok(made),
+        Err(why) => why,
+    };
+    let went = kept(path)?.iter().all(|it| it.id != project);
+    Err(if went { Tried::Went(why) } else { Tried::Failed(why) })
 }
 
 fn asked<T, E: From<String>>(
@@ -136,6 +172,20 @@ fn close(workstream: WorkstreamId, seen: &[TerminalId]) -> Change {
     Change::CloseWorkstream(CloseWorkstream { workstream, seen })
 }
 
+pub fn closed_project(
+    path: &Path,
+    machine: &Machine,
+    project: ProjectId,
+    workstreams: &[WorkstreamId],
+    seen: &[TerminalId],
+) -> Result<(), String> {
+    let project = project.get();
+    let workstreams = workstreams.iter().map(|it| it.get()).collect();
+    let seen = seen.iter().map(|it| it.get()).collect();
+    let change = Change::CloseProject(CloseProject { project, workstreams, seen });
+    changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
+}
+
 fn on(machine: &Machine) -> Option<On> {
     match machine {
         Machine::Local => None,
@@ -202,16 +252,12 @@ fn last_used(project: &Project) -> Option<WorkstreamId> {
     last.map(|it| it.id)
 }
 
-fn at_folder(
-    path: &Path,
-    project: &Project,
-    folder: &str,
-) -> Result<Option<WorkstreamId>, String> {
+fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Option<WorkstreamId>, Tried> {
     assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
     if project.dir == folder {
         return Ok(last_used(project));
     }
-    workstream_at(path, project.id, folder).map(Some)
+    in_kept(path, project.id, workstream_at(path, project.id, folder)).map(Some)
 }
 
 fn chosen(
@@ -220,7 +266,7 @@ fn chosen(
     name: Option<&str>,
     cwd: &Path,
     folder: &str,
-) -> Option<Result<Option<WorkstreamId>, String>> {
+) -> Option<Result<Option<WorkstreamId>, Tried>> {
     if let Some(name) = name {
         let named: Vec<&Project> = projects.iter().filter(|project| project.name == name).collect();
         match named[..] {
@@ -229,9 +275,9 @@ fn chosen(
             [..] => {
                 let dirs: Vec<&str> = named.iter().map(|project| project.dir.as_str()).collect();
                 let dirs = dirs.join(", ");
-                return Some(Err(format!(
+                return Some(Err(Tried::Failed(format!(
                     "projects in {dirs} are all named {name}: start luneta in the one you mean"
-                )));
+                ))));
             },
         }
     }
@@ -240,9 +286,9 @@ fn chosen(
         && name != holding.name
     {
         let (cwd, holding) = (cwd.display(), &holding.name);
-        return Some(Err(format!(
+        return Some(Err(Tried::Failed(format!(
             "{cwd} is in project {holding}, and no project is made inside another"
-        )));
+        ))));
     }
     Some(at_folder(path, holding, folder))
 }
@@ -254,13 +300,23 @@ pub fn start(
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
 ) -> Result<Option<WorkstreamId>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    twice(|| started(path, name, cwd, folder, &seen))
+}
+
+fn started(
+    path: &Path,
+    name: Option<&str>,
+    cwd: &Path,
+    folder: &str,
+    seen: &impl Fn(ProjectId) -> Option<SystemTime>,
+) -> Result<Option<WorkstreamId>, Tried> {
     if let Some(chosen) = chosen(path, &kept(path)?, name, cwd, folder) {
         return chosen;
     }
     let unmade = if name.is_some() || session_for(cwd).is_some() {
         match add_project(path, folder, name) {
             Ok(_) => return Ok(None),
-            Err(Unmade::Failed(why)) => return Err(why),
+            Err(Unmade::Failed(why)) => return Err(Tried::Failed(why)),
             Err(Unmade::Nests(why)) => why,
         }
     } else {
@@ -271,7 +327,7 @@ pub fn start(
         return chosen;
     }
     if name.is_some() {
-        return Err(unmade);
+        return Err(Tried::Failed(unmade));
     }
     let last = |project: &&Project| seen(project.id);
     Ok(last_used(projects.iter().max_by_key(last).ok_or(unmade)?))
@@ -279,17 +335,19 @@ pub fn start(
 
 pub fn here(path: &Path, cwd: &Path, name: Option<&str>) -> Result<Option<WorkstreamId>, String> {
     let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
-    if let Some(project) = holding(&kept(path)?, cwd) {
-        return at_folder(path, &project, folder);
-    }
-    match add_project(path, folder, name) {
-        Ok(_) => Ok(None),
-        Err(Unmade::Failed(why)) => Err(why),
-        Err(Unmade::Nests(why)) => match holding(&kept(path)?, cwd) {
-            Some(project) => at_folder(path, &project, folder),
-            None => Err(why),
-        },
-    }
+    twice(|| {
+        if let Some(project) = holding(&kept(path)?, cwd) {
+            return at_folder(path, &project, folder);
+        }
+        match add_project(path, folder, name) {
+            Ok(_) => Ok(None),
+            Err(Unmade::Failed(why)) => Err(Tried::Failed(why)),
+            Err(Unmade::Nests(why)) => match holding(&kept(path)?, cwd) {
+                Some(project) => at_folder(path, &project, folder),
+                None => Err(Tried::Failed(why)),
+            },
+        }
+    })
 }
 
 fn utf8(dir: &Path) -> Result<&str, String> {
@@ -302,13 +360,14 @@ pub fn pulled(
     (holder, cwd): (&Path, &Path),
     name: &str,
 ) -> Result<WorkstreamId, String> {
-    let projects = kept(path)?;
     let (dir, folder) = (utf8(holder)?, utf8(cwd)?);
-    let id = match holding(&projects, cwd) {
-        Some(project) => project.id,
-        None => add_project(path, dir, Some(project)).map_err(Unmade::said)?,
-    };
-    add_workstream(path, id, folder, Some(name))
+    twice(|| {
+        let id = match holding(&kept(path)?, cwd) {
+            Some(project) => project.id,
+            None => add_project(path, dir, Some(project)).map_err(Unmade::said)?,
+        };
+        in_kept(path, id, add_workstream(path, id, folder, Some(name)))
+    })
 }
 
 #[must_use]

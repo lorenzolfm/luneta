@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
-    Change, CloseWorkstream, ForgetWorkstream, RenameTerminal,
+    Change, CloseProject, CloseWorkstream, ForgetWorkstream, RenameTerminal,
 };
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
@@ -452,6 +452,8 @@ fn a_workstream_goes_with_the_last_terminal_its_view_closes_and_the_mux_takes_th
     let ended = shown.until_ended();
     assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
     assert_eq!(watched_workstream(&owned, closing), None);
+    assert!(projects_of(&owned).is_empty(), "the project goes with its last workstream");
+    let project = project_in_home(&owned);
     let next = workstream(&owned.host, project, &work_folder(&owned));
     let mut again = Shown::new(&owned, next, 80, 24);
     let opened = again.open();
@@ -656,6 +658,66 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     let again = asked(&owned.host, close()).unwrap_err();
     assert_eq!(again.code(), Code::InvalidArgument);
     assert!(again.message().contains("no workstream has the id"), "{}", again.message());
+}
+
+#[test]
+fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgotten() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let folder = |at: &str| {
+        let folder = home.join(at);
+        fs::create_dir_all(&folder).unwrap();
+        folder
+    };
+    let made = project(&owned.host, &folder("closing"), None);
+    let add = || workstream(&owned.host, made, &folder("closing/work"));
+    let (one, two) = (add(), add());
+    let other = project(&owned.host, &folder("other"), None);
+    let stays = workstream(&owned.host, other, &folder("other/work"));
+    let mut first = Shown::new(&owned, one, 80, 24);
+    let mut second = Shown::new(&owned, two, 80, 24);
+    let mut beside = Shown::new(&owned, stays, 80, 24);
+    let terminals = [first.open(), first.open(), second.open()];
+    let kept_open = beside.open();
+    let closed = |project, workstreams: &[u64], seen: &[u64]| {
+        let (workstreams, seen) = (workstreams.to_vec(), seen.to_vec());
+        Change::CloseProject(CloseProject { project, workstreams, seen })
+    };
+    let close = || closed(made, &[one, two], &terminals);
+    let stale_ones: [(&[u64], &[u64]); 4] = [
+        (&[one], &terminals),
+        (&[one, two, stays], &terminals),
+        (&[one, two], &terminals[..2]),
+        (&[one, two], &[terminals[0], terminals[1], terminals[2], kept_open]),
+    ];
+    for (workstreams, seen) in stale_ones {
+        let refused = asked(&owned.host, closed(made, workstreams, seen)).unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        assert!(refused.message().contains("changed since"), "{}", refused.message());
+    }
+    let listing = owned.listing();
+    let all_kept = terminals.iter().all(|terminal| tagged(&listing, *terminal).is_some());
+    assert!(all_kept, "a close refused as stale closes none");
+    assert_eq!(asked(&owned.host, close()).unwrap(), None);
+    eventually("the project's terminals leave the mux", || {
+        let listing = owned.listing();
+        terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
+    });
+    assert!(tagged(&owned.listing(), kept_open).is_some(), "another project's terminal stays");
+    assert_eq!(first.until_ended().code(), Code::NotFound);
+    assert_eq!(second.until_ended().code(), Code::NotFound);
+    let ids: Vec<u64> = projects_of(&owned).iter().map(|it| it.id).collect();
+    assert_eq!(ids, [other], "the project goes with its last workstream, and no other");
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    assert!(!file.contains(&format!("{made:016x}")), "{file}");
+    let again = asked(&owned.host, close()).unwrap_err();
+    assert_eq!(again.code(), Code::InvalidArgument);
+    assert!(again.message().contains("no project has the id"), "{}", again.message());
+
+    let empty = project(&owned.host, &folder("empty"), None);
+    assert_eq!(asked(&owned.host, closed(empty, &[], &[])).unwrap(), None);
+    let ids: Vec<u64> = projects_of(&owned).iter().map(|it| it.id).collect();
+    assert_eq!(ids, [other], "a project with no workstream is forgotten");
 }
 
 #[test]

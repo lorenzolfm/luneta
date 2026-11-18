@@ -19,9 +19,11 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Changed, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs};
+use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Id, Line, Placed, ProjectId};
+use crate::projects::{Projects, Ran, Runs};
 use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
 use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
+use crate::projects::WORKSTREAMS_MAX;
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -414,6 +416,9 @@ impl Views {
                     Ask::CloseWorkstream { workstream, seen } => {
                         self.close_workstream(workstream, &seen)
                     },
+                    Ask::CloseProject { project, workstreams, seen } => {
+                        self.close_project(project, &workstreams, &seen)
+                    },
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -503,6 +508,36 @@ impl Views {
         }
     }
 
+    fn close_project(
+        &mut self,
+        project: ProjectId,
+        seen_workstreams: &BTreeSet<WorkstreamId>,
+        seen: &BTreeSet<TerminalId>,
+    ) -> Result<Option<Id>, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let unknown = || Failed::Refused(format!("no project has the id {project}"));
+        let held = projects.project_of(project).ok_or_else(unknown)?;
+        let workstreams: Vec<WorkstreamId> = held.workstreams().iter().map(Workstream::id).collect();
+        let views = held.workstreams().iter().map(Workstream::view);
+        let terminals: Vec<TerminalId> = views.flat_map(View::terminals).map(layout::Leaf::id).collect();
+        assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
+        assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
+        let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
+        let held_terminals: BTreeSet<TerminalId> = terminals.iter().copied().collect();
+        if held_workstreams != *seen_workstreams || held_terminals != *seen {
+            let changed = format!("project {project}'s workstreams or terminals are not those seen");
+            return Err(Failed::Stale(format!("{changed}: they changed since")));
+        }
+        self.close_terminals(&terminals)?;
+        if let Some(why) = self.store.closed(Closing::Project(project))? {
+            self.unwritten(&why);
+        }
+        let projects = self.store.projects().expect("projects just changed are kept");
+        assert!(projects.project_of(project).is_none(), "project {project} is closed");
+        self.forget_closed(&workstreams, &terminals);
+        Ok(None)
+    }
+
     fn close_workstream(
         &mut self,
         workstream: WorkstreamId,
@@ -516,12 +551,22 @@ impl Views {
             let changed = format!("workstream {workstream}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
+        assert!(terminals.len() <= PANES_MAX, "a view holds at most {PANES_MAX} terminals");
+        self.close_terminals(&terminals)?;
+        if let Some(why) = self.store.closed(Closing::Workstream(workstream))? {
+            self.unwritten(&why);
+        }
+        self.forget_closed(&[workstream], &terminals);
+        Ok(None)
+    }
+
+    fn close_terminals(&mut self, terminals: &[TerminalId]) -> Result<(), Failed> {
+        assert!(terminals.len() <= TERMINALS_MAX, "at most {TERMINALS_MAX} terminals are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
         let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
-        assert!(terminals.len() <= PANES_MAX, "a view holds at most {PANES_MAX} terminals");
         let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
-        let mut done: Vec<TerminalId> = Vec::new();
-        for terminal in &terminals {
+        let mut done: Vec<TerminalId> = Vec::with_capacity(terminals.len());
+        for terminal in terminals {
             let known = self.known.get(terminal).map(|known| known.key);
             let found = || {
                 let found = tags.iter().find(|(tag, _)| tagged(tag) == Some(*terminal));
@@ -539,21 +584,27 @@ impl Views {
             }
             done.push(*terminal);
         }
-        if let Some(why) = self.store.followed(Change::CloseWorkstream { workstream })? {
-            self.unwritten(&why);
-        }
-        for terminal in &terminals {
+        assert_eq!(done, terminals, "each terminal is closed in the mux, in order");
+        Ok(())
+    }
+
+    fn forget_closed(&mut self, workstreams: &[WorkstreamId], terminals: &[TerminalId]) {
+        for terminal in terminals {
             self.known.remove(terminal);
         }
-        self.last_focus.remove(&workstream);
+        for workstream in workstreams {
+            self.last_focus.remove(workstream);
+        }
         let projects = self.store.projects().expect("projects just changed are kept");
-        assert!(projects.find(workstream).is_none(), "workstream {workstream} is closed");
-        for terminal in &terminals {
+        for workstream in workstreams {
+            assert!(projects.find(*workstream).is_none(), "workstream {workstream} is closed");
+            let focused = self.last_focus.contains_key(workstream);
+            assert!(!focused, "closed workstream {workstream} has no focus");
+        }
+        for terminal in terminals {
             assert!(projects.holding(*terminal).is_none(), "terminal {terminal} left its view");
             assert!(!self.known.contains_key(terminal), "terminal {terminal} is known no more");
         }
-        assert!(!self.last_focus.contains_key(&workstream), "a closed workstream has no focus");
-        Ok(None)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
