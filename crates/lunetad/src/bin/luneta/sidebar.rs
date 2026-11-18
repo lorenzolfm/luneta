@@ -2082,6 +2082,16 @@ impl Sidebar {
         self.rows.iter().position(|row| row.spot() == *spot)
     }
 
+    fn home_row(&self, at: usize) -> Option<usize> {
+        let row = &self.rows[at];
+        if !matches!(row, Row::Pane { .. }) {
+            return None;
+        }
+        let home = self.row_of(self.homes.get(&row.spot())?)?;
+        assert!(home < at, "a workstream's row sits above its panes");
+        Some(home)
+    }
+
     fn settle(&mut self, best: Option<usize>, seek: bool) {
         let held = self.cursor.as_ref().and_then(|spot| self.row_of(&self.row_for(spot)?));
         let at = if seek { best.or(held) } else { held.or(best) };
@@ -3582,15 +3592,16 @@ impl Sidebar {
             lines.push(Line::styled(none, Style::new().add_modifier(Modifier::DIM)));
         }
         let lit = match (&landing, highlight) {
-            (Some((_, lifted)), _) => Some((lifted.clone(), LIT)),
+            (Some((_, lifted)), _) => Some((lifted.clone(), None, LIT)),
             (None, Highlight::Lit(at)) => {
                 let held = self.selected().map(|(spans, held)| {
                     let rows = spans.rows();
-                    rows[held.start].start..rows[held.end - 1].end
+                    (rows[held.start].start..rows[held.end - 1].end, None)
                 });
-                held.or(at.map(|at| at..at + 1)).map(|rows| (rows, LIT))
+                let one = at.map(|at| (at..at + 1, self.home_row(at)));
+                held.or(one).map(|(rows, home)| (rows, home, LIT))
             },
-            (None, Highlight::Resting(at)) => Some((at..at + 1, RESTING)),
+            (None, Highlight::Resting(at)) => Some((at..at + 1, self.home_row(at), RESTING)),
             (None, Highlight::Off) => None,
         };
         let order = match &landing {
@@ -3603,8 +3614,11 @@ impl Sidebar {
         let mut rows = Vec::with_capacity(order.len());
         for at in order {
             let row = &self.rows[at];
-            let on = lit.as_ref().filter(|(rows, _)| rows.contains(&at));
-            let background = on.map(|(_, background)| *background);
+            let lights = |(rows, home, _): &&(Range<usize>, Option<usize>, Color)| {
+                rows.contains(&at) || *home == Some(at)
+            };
+            let on = lit.as_ref().filter(lights);
+            let background = on.map(|(_, _, background)| *background);
             let RowLines { lines: row_drawn, number, cuts: row_cuts } =
                 row_lines(row, width, frame, now);
             if !lifted
@@ -5458,18 +5472,18 @@ mod tests {
         let nvim = "▌    \u{e6ae} nvim src/main.rs";
         let (lines, lit) = seen(&mut sidebar, false, 32, 13);
         assert_eq!(lines[6..9], ["  ▾ Tab #2", "       main", nvim]);
-        assert_eq!(lit, [8]);
+        assert_eq!(lit, [6, 7, 8]);
         let (_, lit) = seen(&mut sidebar, true, 32, 7);
-        assert_eq!(lit, [6]);
+        assert_eq!(lit, [4, 5, 6]);
         sidebar.key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), moment(160_000));
         let (lines, lit) = seen(&mut sidebar, true, 32, 7);
         assert_eq!((lines[6].as_str(), lit.as_slice()), (nvim, &[3][..]));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
-        assert_eq!(lit, [6]);
+        assert_eq!(lit, [4, 5, 6]);
         let fish = own_pane_of("older", 2, 1);
         assert_eq!(click(&mut sidebar, 10, 3, Rect::new(0, 0, 32, 14)), go_here(fish));
         let (_, lit) = seen(&mut sidebar, false, 32, 14);
-        assert_eq!(lit, [6]);
+        assert_eq!(lit, [4, 5, 6]);
     }
 
     #[test]
@@ -8715,7 +8729,7 @@ mod tests {
 
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
-        assert_eq!(drawn_rows(&mut sidebar).1, [4]);
+        assert_eq!(drawn_rows(&mut sidebar).1, [3, 4]);
         assert_eq!(sidebar.key(&shifted('K'), moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
     }
