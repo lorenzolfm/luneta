@@ -2,7 +2,7 @@ use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
+use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
     Change, CloseWorkstream, ForgetWorkstream, RenameTerminal,
@@ -461,7 +461,8 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let left = shown.open();
     let right = shown.open();
     let towards_left: i32 = show_request::Direction::Left.into();
-    let resize = |grow| show_request::Resize { direction: Some(towards_left), grow };
+    let sides = Some(resize::Sides::Direction(towards_left));
+    let resize = |grow| show_request::Resize { sides, grow };
     shown.ask(Event::Resize(resize(true)));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[0].rect == Some(rect(0, 0, 36, 24))
@@ -484,13 +485,14 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
 }
 
 #[test]
-fn a_resize_that_names_no_direction_moves_every_border_of_the_focused_terminal() {
+fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     shown.open();
     shown.open();
-    let around = |grow| Event::Resize(show_request::Resize { direction: None, grow });
+    let every = Some(resize::Sides::Every(()));
+    let around = |grow| Event::Resize(show_request::Resize { sides: every, grow });
     shown.ask(around(true));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[1].rect == Some(rect(36, 0, 44, 24))
@@ -498,9 +500,11 @@ fn a_resize_that_names_no_direction_moves_every_border_of_the_focused_terminal()
     assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 36, 24)));
     shown.ask(around(false));
     shown.until("the border back", |laid| laid.panes[1].rect == Some(rect(40, 0, 40, 24)));
-    let unknown = Event::Resize(show_request::Resize { direction: Some(0), grow: true });
-    shown.ask(unknown);
+    let unknown = Some(resize::Sides::Direction(0));
+    shown.ask(Event::Resize(show_request::Resize { sides: unknown, grow: true }));
     assert!(shown.until_refused().contains("no direction it knows"));
+    shown.ask(Event::Resize(show_request::Resize { sides: None, grow: true }));
+    assert!(shown.until_refused().contains("it says no side to move"));
 }
 
 #[test]

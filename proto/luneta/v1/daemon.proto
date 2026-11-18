@@ -1063,7 +1063,10 @@ message ShowRequest {
   }
 
   message Resize {
-    optional Direction direction = 1;
+    oneof sides {
+      Direction direction = 1;
+      google.protobuf.Empty every = 3;
+    }
     bool grow = 2;
   }
 

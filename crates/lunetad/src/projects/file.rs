@@ -218,26 +218,49 @@ impl Store {
 
     pub fn change(&mut self, change: Change) -> Result<Option<Id>, Failed> {
         let at_once = change.kept_at_once();
-        let projects = match &mut self.keeping {
-            Keeping::Kept { projects, .. } => projects,
-            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
-        };
-        let (changed, made) = projects.changed(change, Id::random).map_err(|refused| match refused {
-            Refused::Nests(why) => Failed::Nests(why),
-            Refused::Said(why) => Failed::Refused(why),
-        })?;
-        if changed == *projects {
+        let (changed, made) = self.applied(change)?;
+        if self.projects() == Some(&changed) {
             return Ok(made);
         }
         if at_once {
             self.written_as(&changed)?;
         }
+        self.took(changed)?;
+        Ok(made)
+    }
+
+    pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
+        let (changed, made) = self.applied(change)?;
+        assert!(made.is_none(), "a change that follows the mux makes no id");
+        if self.projects() == Some(&changed) {
+            return Ok(None);
+        }
+        let unwritten = match self.written_as(&changed) {
+            Ok(()) => None,
+            Err(Failed::Unwritten(why)) => Some(why),
+            Err(failed) => return Err(failed),
+        };
+        self.took(changed)?;
+        Ok(unwritten)
+    }
+
+    fn applied(&self, change: Change) -> Result<(Projects, Option<Id>), Failed> {
+        let projects = match &self.keeping {
+            Keeping::Kept { projects, .. } => projects,
+            Keeping::Unkept(why) => return Err(Failed::NotKept(why.clone())),
+        };
+        projects.changed(change, Id::random).map_err(|refused| match refused {
+            Refused::Nests(why) => Failed::Nests(why),
+            Refused::Said(why) => Failed::Refused(why),
+        })
+    }
+
+    fn took(&mut self, changed: Projects) -> Result<(), Failed> {
         let Keeping::Kept { projects, .. } = &mut self.keeping else {
-            unreachable!("projects written are kept");
+            unreachable!("projects changed are kept");
         };
         *projects = changed;
-        self.tell()?;
-        Ok(made)
+        self.tell()
     }
 
     pub fn flush(&mut self) -> Result<(), Failed> {
@@ -938,6 +961,41 @@ mod tests {
         store.change(Change::AddProject { dir: dir("/c"), name: None }).unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
         assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
+    }
+
+    #[test]
+    fn a_change_that_follows_the_mux_is_kept_unwritten_until_a_flush_writes_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        let (core, commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core).unwrap();
+        let made = store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
+        let project = ProjectId::new(made.unwrap());
+        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
+        let terminal = Terminal::new(TerminalId::of(7).unwrap(), dir("/a"), Runs::Shell);
+        let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
+        store.change(Change::Open { workstream, terminal, placed, size }).unwrap();
+        let written = fs::read_to_string(&file).unwrap();
+        heard(&commands);
+
+        let folder = file.parent().unwrap();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
+        let unwritten = store.followed(Change::CloseWorkstream { workstream });
+        let flushed = store.flush();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
+        assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
+        assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+        let [told] = heard(&commands).try_into().unwrap();
+        assert!(told.unwrap().find(workstream).is_none(), "the core hears of the close");
+        assert!(store.projects().unwrap().find(workstream).is_none());
+
+        store.flush().unwrap();
+        assert!(read(&file).unwrap().find(workstream).is_none(), "a flush writes the close");
+        let again = store.followed(Change::CloseWorkstream { workstream });
+        assert!(matches!(again, Err(Failed::Refused(_))), "{again:?}");
     }
 
     #[test]

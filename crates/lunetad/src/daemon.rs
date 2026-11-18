@@ -58,7 +58,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Change, Failed, Id, Store, WorkstreamId};
+use crate::projects::{Ask, Failed, Id, Store, WorkstreamId};
 use crate::views;
 use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
@@ -1075,7 +1075,7 @@ impl Daemon for Host {
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let views = self.views.clone();
         let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
-            let change = Change::of_api(change).map_err(Status::invalid_argument)?;
+            let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
             let stopped = "it is kept, but the daemon's core has stopped";
             let asked = views::ask(&views, |answer| views::Command::Change { change, answer });
             let changed = asked.ok_or_else(|| Status::unavailable("the views have stopped"))?;

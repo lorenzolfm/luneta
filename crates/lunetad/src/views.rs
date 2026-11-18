@@ -19,7 +19,7 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
+use crate::projects::{Ask, Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
 use crate::projects::{Size, Store, Terminal, TerminalId, Used, View, Workstream, WorkstreamId};
 use crate::projects::{FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::shells::Doing;
@@ -70,7 +70,7 @@ pub type Out = answers::Sender<Result<api::ShowResponse, Status>>;
 pub struct ClientId(u64);
 
 pub enum Command {
-    Change { change: Change, answer: oneshot::Sender<Result<Option<Id>, Failed>> },
+    Change { change: Ask, answer: oneshot::Sender<Result<Option<Id>, Failed>> },
     Came {
         workstream: WorkstreamId,
         size: Size,
@@ -154,11 +154,12 @@ impl Asked {
                     },
                 })
             },
-            Event::Resize(show_request::Resize { direction, grow }) => {
+            Event::Resize(show_request::Resize { sides, grow }) => {
+                use show_request::resize;
                 let change = if grow { layout::Change::Grow } else { layout::Change::Shrink };
-                let sides = match direction {
-                    None => Sides::Every,
-                    Some(direction) => Sides::One(direction_of(direction)?),
+                let sides = match sides.ok_or("resize: it says no side to move")? {
+                    resize::Sides::Direction(direction) => Sides::One(direction_of(direction)?),
+                    resize::Sides::Every(()) => Sides::Every,
                 };
                 Asked::Resize { sides, change }
             },
@@ -392,8 +393,8 @@ impl Views {
         match command {
             Command::Change { change, answer } => {
                 let changed = match change {
-                    Change::CloseWorkstream { workstream } => self.close_workstream(workstream),
-                    change => self.store.change(change),
+                    Ask::Change(change) => self.store.change(change),
+                    Ask::CloseWorkstream(workstream) => self.close_workstream(workstream),
                 };
                 let _ = answer.send(changed);
             },
@@ -501,7 +502,9 @@ impl Views {
             }
             done.push(*terminal);
         }
-        let made = self.store.change(Change::CloseWorkstream { workstream })?;
+        if let Some(why) = self.store.followed(Change::CloseWorkstream { workstream })? {
+            self.unwritten(&why);
+        }
         for terminal in &terminals {
             self.known.remove(terminal);
         }
@@ -513,7 +516,7 @@ impl Views {
             assert!(!self.known.contains_key(terminal), "terminal {terminal} is known no more");
         }
         assert!(!self.last_focus.contains_key(&workstream), "a closed workstream has no focus");
-        Ok(made)
+        Ok(None)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -525,6 +528,17 @@ impl Views {
 
     fn changed(&mut self, change: Change) -> Result<(), String> {
         self.store.change(change).map(drop).map_err(said)
+    }
+
+    fn followed(&mut self, change: Change) -> Result<(), String> {
+        if let Some(why) = self.store.followed(change).map_err(said)? {
+            self.unwritten(&why);
+        }
+        Ok(())
+    }
+
+    fn unwritten(&mut self, why: &str) {
+        self.troubles.say(format!("the views are kept, and written on the next sweep: {why}"));
     }
 
     fn flushed(&mut self) {
@@ -675,7 +689,7 @@ impl Views {
         let key = match self.mux.made(&cwd, opened, tag(terminal), inner) {
             Ok(key) => key,
             Err(failure) => {
-                if let Err(why) = self.changed(Change::Close { terminal }) {
+                if let Err(why) = self.followed(Change::Close { terminal }) {
                     self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
                 }
                 return Err(failure.to_string());
@@ -915,7 +929,7 @@ impl Views {
         let workstream = held_in.id();
         let tree = held_in.view().tree().expect("a view that holds a terminal is laid");
         let heir = tree.heir(terminal);
-        self.changed(Change::Close { terminal })?;
+        self.followed(Change::Close { terminal })?;
         self.known.remove(&terminal);
         for client in self.clients.values_mut().filter(|client| client.focus == Some(terminal)) {
             client.focus = heir;
@@ -1669,7 +1683,7 @@ mod tests {
 
     #[test]
     fn a_show_word_reads_into_what_it_asks() {
-        use show_request::{focus, open, Event};
+        use show_request::{focus, open, resize, Event};
         let terminal = Event::Focus(show_request::Focus { to: Some(focus::To::Terminal(3)) });
         let three = TerminalId::of(3).unwrap();
         assert_eq!(Asked::of_api(terminal), Ok(Asked::Focus(Focus::Terminal(three))));
@@ -1688,10 +1702,19 @@ mod tests {
         let open = show_request::Open { beside: Some(open::Beside::Alone(())), argv: vec![] };
         let asked = Asked::Open { beside: Beside::Alone, argv: vec![] };
         assert_eq!(Asked::of_api(Event::Open(open)), Ok(asked));
+        let (one_side, every) = (resize::Sides::Direction, Some(resize::Sides::Every(())));
+        let around = Event::Resize(show_request::Resize { sides: every, grow: false });
+        let asked = Asked::Resize { sides: Sides::Every, change: layout::Change::Shrink };
+        assert_eq!(Asked::of_api(around), Ok(asked));
+        let left = Some(one_side(show_request::Direction::Left.into()));
+        let towards = Event::Resize(show_request::Resize { sides: left, grow: true });
+        let (sides, change) = (Sides::One(Direction::Left), layout::Change::Grow);
+        assert_eq!(Asked::of_api(towards), Ok(Asked::Resize { sides, change }));
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None }),
-            Event::Resize(show_request::Resize { direction: Some(0), grow: true }),
+            Event::Resize(show_request::Resize { sides: None, grow: true }),
+            Event::Resize(show_request::Resize { sides: Some(one_side(0)), grow: true }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
             Event::Open(show_request::Open { beside: None, argv: vec![] }),
             Event::Open(show_request::Open { beside: largest(), argv: vec![String::new()] }),
