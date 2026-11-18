@@ -12,7 +12,7 @@ use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
-use lunetad::{Asked, Beside, Found, Heard, Laid, Pane, Rect as Placed, Show};
+use lunetad::{Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -179,6 +179,24 @@ impl View {
         }
         let key = self.focused_key()?;
         Some((inner, key, self.screens.get(&key)?))
+    }
+
+    fn at_edge(&self, direction: Direction) -> bool {
+        let Some(laid) = self.laid() else {
+            return true;
+        };
+        let Some(focused) = laid.focused() else {
+            return true;
+        };
+        let (columns, rows) = laid.size().get();
+        let rect = focused.rect;
+        let end = |from: u16, cells: u16| u32::from(from) + u32::from(cells);
+        match direction {
+            Direction::Left => rect.column == 0,
+            Direction::Up => rect.row == 0,
+            Direction::Right => end(rect.column, rect.columns) == u32::from(columns),
+            Direction::Down => end(rect.row, rect.rows) == u32::from(rows),
+        }
     }
 
     fn named_tabs(&self) -> impl Iterator<Item = (WorkstreamId, &str)> {
@@ -542,6 +560,11 @@ impl Viewed {
         self.watch();
     }
 
+    #[must_use]
+    pub fn at_edge(&self, direction: Direction) -> bool {
+        self.view.at_edge(direction)
+    }
+
     pub fn open_in(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
         if workstream != self.view.workstream {
             return;
@@ -780,6 +803,19 @@ mod tests {
         assert!(view.drawn().is_empty() && view.wanted().is_empty() && view.screens.is_empty());
         assert!(!view.laid_out(laid(halves(), 11, false)));
         assert!(view.drawn().is_empty() && view.focused().is_none());
+    }
+
+    #[test]
+    fn the_focused_terminal_is_at_each_edge_of_the_view_it_touches_and_one_unlaid_at_all() {
+        let edges = |view: &View| Direction::ALL.map(|direction| view.at_edge(direction));
+        let mut view = split_view();
+        assert_eq!(edges(&view), [true, false, true, true], "left, right, up, down");
+        assert!(!view.laid_out(laid(halves(), 12, false)));
+        assert_eq!(edges(&view), [false, true, true, true]);
+        assert!(!view.laid_out(laid(halves(), 11, true)));
+        assert_eq!(edges(&view), [true, false, true, true], "a full one keeps its place");
+        view.go(workstream(2));
+        assert_eq!(edges(&view), [true; 4]);
     }
 
     #[test]

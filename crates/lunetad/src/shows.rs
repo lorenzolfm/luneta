@@ -16,7 +16,7 @@ use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
-pub use crate::projects::layout::Rect;
+pub use crate::projects::layout::{Change, Direction, Rect};
 
 fn right(rect: Rect) -> u32 {
     u32::from(rect.column) + u32::from(rect.columns)
@@ -229,6 +229,8 @@ pub enum Asked {
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(TerminalId),
+    Step(Direction),
+    Resize(Change),
     Fullscreen,
 }
 
@@ -252,9 +254,27 @@ impl Asked {
                 let to = show_request::focus::To::Terminal(terminal.get());
                 Event::Focus(show_request::Focus { to: Some(to) })
             },
+            Asked::Step(direction) => {
+                let to = show_request::focus::To::Direction(direction_said(direction).into());
+                Event::Focus(show_request::Focus { to: Some(to) })
+            },
+            Asked::Resize(change) => {
+                let sides = Some(show_request::resize::Sides::Every(()));
+                Event::Resize(show_request::Resize { sides, grow: change == Change::Grow })
+            },
             Asked::Fullscreen => Event::Fullscreen(()),
         };
         api::ShowRequest { event: Some(event) }
+    }
+}
+
+fn direction_said(direction: Direction) -> show_request::Direction {
+    use show_request::Direction as Said;
+    match direction {
+        Direction::Left => Said::Left,
+        Direction::Right => Said::Right,
+        Direction::Up => Said::Up,
+        Direction::Down => Said::Down,
     }
 }
 

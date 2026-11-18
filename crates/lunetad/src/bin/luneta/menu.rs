@@ -69,6 +69,7 @@ impl std::fmt::Display for Label {
             (KeyModifiers::CONTROL, "Ctrl"),
             (KeyModifiers::ALT, "Alt"),
             (KeyModifiers::SHIFT, "Shift"),
+            (KeyModifiers::SUPER, "Super"),
         ];
         for (modifier, name) in held {
             if modifiers.contains(modifier) {

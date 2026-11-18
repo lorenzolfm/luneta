@@ -7,7 +7,7 @@ use lunetad::api::{self, agent, terminal, Host};
 use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
-use lunetad::SessionName;
+use lunetad::{Direction, SessionName};
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
@@ -170,6 +170,22 @@ impl Projected {
             let found = project.workstreams.iter().find(|it| it.id == workstream)?;
             Some((project, found))
         })
+    }
+
+    #[must_use]
+    pub fn tab_beside(
+        &self,
+        workstream: WorkstreamId,
+        direction: Direction,
+    ) -> Option<WorkstreamId> {
+        let (project, _) = self.holding(workstream)?;
+        let at = project.workstreams.iter().position(|it| it.id == workstream)?;
+        let beside = match direction {
+            Direction::Left => at.checked_sub(1)?,
+            Direction::Right => at + 1,
+            Direction::Up | Direction::Down => return None,
+        };
+        project.workstreams.get(beside).map(|it| it.id)
     }
 
     #[must_use]
@@ -383,6 +399,18 @@ mod tests {
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
         let lost = TerminalId::of(22).unwrap();
         assert_eq!(titles.get(&lost).map(String::as_str), Some("sleep 600"));
+    }
+
+    #[test]
+    fn the_tab_beside_a_workstream_is_its_project_s_next_or_last_and_none_past_the_ends() {
+        let projected = Projected::adapted(&mut host()).unwrap();
+        let (main, docs) = (workstream(11), workstream(12));
+        assert_eq!(projected.tab_beside(main, Direction::Right), Some(docs));
+        assert_eq!(projected.tab_beside(docs, Direction::Left), Some(main));
+        assert_eq!(projected.tab_beside(main, Direction::Left), None);
+        assert_eq!(projected.tab_beside(docs, Direction::Right), None);
+        assert_eq!(projected.tab_beside(main, Direction::Down), None);
+        assert_eq!(projected.tab_beside(workstream(99), Direction::Right), None);
     }
 
     fn kept(host: &mut Host) -> &mut api::Project {

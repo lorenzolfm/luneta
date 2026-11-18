@@ -2009,23 +2009,6 @@ impl Sidebar {
         self.rebuild();
     }
 
-    pub fn next_pane(&self) -> Option<Place> {
-        let here = self.here_row.as_ref().and_then(|spot| self.row_of(spot));
-        let from = here.map_or(0, |at| at + 1);
-        let count = self.rows.len();
-        let (next, place) = (0..count).map(|step| (from + step) % count).find_map(|at| {
-            match &self.rows[at] {
-                Row::Pane { machine, session, pane, .. }
-                    if *machine == self.on && session.own() =>
-                {
-                    Some((at, Place::Pane(PanePlace { session: session.clone(), pane: *pane })))
-                },
-                Row::Machine { .. } | Row::Session { .. } | Row::Pane { .. } => None,
-            }
-        })?;
-        (Some(next) != here).then_some(place)
-    }
-
     pub fn key(&mut self, key: &KeyEvent, now: SystemTime) -> Asked {
         self.key_from(key, now, Came::Typed)
     }
@@ -5418,44 +5401,6 @@ mod tests {
     }
 
     #[test]
-    fn the_next_pane_is_the_one_listed_after_luneta_s() {
-        let older = |pane| own_pane_of("older", 1, pane);
-        let newer = own_pane_of("young", 2, 1);
-        let cases = [
-            ("within its session", older(1), older(2)),
-            ("into the next session", older(2), newer.clone()),
-            ("from the last to the first", newer.clone(), older(1)),
-        ];
-        for (case, on, next) in cases {
-            let mut sidebar = own_two_sessions();
-            sit(&mut sidebar, &on);
-            assert_eq!(sidebar.next_pane(), Some(next), "{case}");
-        }
-        assert_eq!(own_two_sessions().next_pane(), Some(older(1)));
-    }
-
-    #[test]
-    fn the_next_pane_passes_over_a_folded_session() {
-        let mut sidebar = own_two_sessions();
-        sit(&mut sidebar, &own_pane_of("older", 1, 2));
-        sidebar.key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), moment(160_000));
-        let newer = own_pane_of("young", 2, 1);
-        assert_eq!(sidebar.next_pane(), Some(newer.clone()));
-        sit(&mut sidebar, &newer);
-        assert_eq!(sidebar.next_pane(), None);
-    }
-
-    #[test]
-    fn the_next_pane_passes_over_a_session_of_zellij_s() {
-        let mut sidebar = own_two_sessions();
-        let mut host = sidebar.host.take().expect("heard");
-        host.sessions.push(session("zellij", 15, vec![pane(1, 0, "/w/z", "fish")]));
-        sidebar.heard(host);
-        sit(&mut sidebar, &own_pane_of("older", 1, 2));
-        assert_eq!(sidebar.next_pane(), Some(own_pane_of("young", 2, 1)));
-    }
-
-    #[test]
     fn going_to_a_folded_session_unfolds_it() {
         let older = |pane| own_pane_of("older", 1, pane);
         let away = || {
@@ -5468,7 +5413,6 @@ mod tests {
         assert!(folded(&sidebar, "older"));
         sit(&mut sidebar, &older(1));
         assert!(!folded(&sidebar, "older"));
-        assert_eq!(sidebar.next_pane(), Some(older(2)));
         let mut sidebar = away();
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(OwnKey { id: OwnId::new(1).unwrap(), made });
