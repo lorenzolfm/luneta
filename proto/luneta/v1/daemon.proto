@@ -965,6 +965,8 @@ message ChangeProjectsRequest {
     ReorderProjects reorder_projects = 15;
     ReorderWorkstreams reorder_workstreams = 16;
     CloseProject close_project = 17;
+    Start start = 18;
+    Pull pull = 19;
   }
 
   reserved 6, 7, 13, 14;
@@ -1004,6 +1006,18 @@ message ChangeProjectsRequest {
     string folder = 2;
   }
 
+  message Start {
+    string folder = 1;
+    optional string name = 2;
+  }
+
+  message Pull {
+    string holder = 1;
+    string folder = 2;
+    string project = 3;
+    string name = 4;
+  }
+
   message RenameTerminal {
     fixed64 terminal = 1;
     optional string to = 2;
@@ -1033,8 +1047,13 @@ message ChangeProjectsRequest {
 }
 
 message ChangeProjectsResponse {
-  optional fixed64 made = 1;
+  oneof made {
+    fixed64 project = 3;
+    fixed64 workstream = 4;
+  }
   Version kept = 2;
+
+  reserved 1;
 }
 
 message ShowRequest {

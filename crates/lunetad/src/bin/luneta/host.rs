@@ -76,11 +76,12 @@ use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
-    Workstream { made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
+    Workstream { on: Machine, made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
 pub struct Pulled {
+    on: Machine,
     workstream: WorkstreamId,
     argv: Vec<String>,
 }
@@ -372,7 +373,10 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         Ok(lunetad) => lunetad.clone(),
         Err(why) => return did_not_start(why),
     };
-    let cwd = workstreams::real(&dir);
+    let cwd = match workstreams::real(&dir) {
+        Ok(cwd) => cwd,
+        Err(why) => return did_not_start(&format!("no directory to start in: {why}")),
+    };
     let named = session.map(SessionName::as_str);
     let seen = |project| {
         news.last_seen(crate::ledger::Session::Project(project))
@@ -1551,30 +1555,23 @@ impl App {
             Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
                 zellij::open(menu, &on, open, &self.events);
             },
-            Asked::NewWorkstream { project, folder } => {
-                self.make_workstream(folder, move |lunetad, cwd| {
-                    let unspelled = || format!("{} is not UTF-8", cwd.display());
-                    let folder = cwd.to_str().ok_or_else(unspelled)?;
-                    workstreams::add_workstream(lunetad, project, folder, None).map(Some)
-                });
-                self.leave();
-            },
-            Asked::AddProject { on: Machine::Local, folder, name } => {
-                if self.refuse_naming(None) {
-                    return;
-                }
-                self.naming_on(move || {
-                    let named = name.as_ref();
-                    let made = || workstreams::project_made(&Machine::Local, &folder, named);
-                    let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
-                    Made::Workstream { made, argv: Vec::new() }
+            Asked::NewWorkstream { on, project, folder } => {
+                self.make_workstream(on, folder, move |lunetad, on, folder| {
+                    let folder = folder.as_str();
+                    workstreams::add_workstream(lunetad, on, project, folder, None).map(Some)
                 });
                 self.leave();
             },
             Asked::AddProject { on, folder, name } => {
-                self.change(on, move |on| {
-                    workstreams::project_made(on, &folder, name.as_ref()).map(drop)
+                if self.refuse_naming(None) {
+                    return;
+                }
+                self.naming_on(move || {
+                    let made = || workstreams::project_made(&on, &folder, name.as_ref());
+                    let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
+                    Made::Workstream { on, made, argv: Vec::new() }
                 });
+                self.leave();
             },
             Asked::Rename { on, rename } => {
                 self.change(on, move |on| {
@@ -1598,15 +1595,10 @@ impl App {
                 }
                 let lunetad = self.lunetad.clone();
                 self.naming_on(move || {
-                    let made = caught(|| match on {
-                        Machine::Local => {
-                            let holder = workstreams::real(Path::new(holder.as_str()));
-                            let cwd = workstreams::real(Path::new(cwd.as_str()));
-                            let (session, at) = (session.as_str(), (holder.as_path(), cwd.as_path()));
-                            let made = workstreams::pulled(&lunetad, session, at, &name)?;
-                            Ok(Pulled { workstream: made, argv: command })
-                        },
-                        Machine::Remote(_) => Err(menu::HERE_ONLY.to_owned()),
+                    let made = caught(|| {
+                        let (session, at) = (session.as_str(), (&holder, &cwd));
+                        let made = workstreams::pulled(&lunetad, &on, session, at, &name)?;
+                        Ok(Pulled { on, workstream: made, argv: command })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -1752,11 +1744,8 @@ impl App {
                 self.go_workstream(on, workstream, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
             },
-            Open::Tab { .. } if *on != Machine::Local => {
-                self.sidebar.notify(format!("menu: {NOT_YET}"));
-            },
             Open::Tab { tab, .. } => {
-                let (lunetad, id) = (self.lunetad.clone(), project.id);
+                let (lunetad, id, on) = (self.lunetad.clone(), project.id, on.clone());
                 let (cwd, name, argv) = (tab.cwd.clone(), tab.name.clone(), tab.command.clone());
                 if self.refuse_naming(None) {
                     return;
@@ -1764,10 +1753,11 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(|| {
                         let named = name.as_deref();
-                        workstreams::add_workstream(&lunetad, id, cwd.as_str(), named).map(Some)
+                        let folder = cwd.as_str();
+                        workstreams::add_workstream(&lunetad, &on, id, folder, named).map(Some)
                     });
                     let made = made.map_err(|why| format!("menu: no workstream made: {why}"));
-                    Made::Workstream { made, argv }
+                    Made::Workstream { on, made, argv }
                 });
             },
         }
@@ -1781,21 +1771,18 @@ impl App {
                 self.go(&on, &place);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Add { on: Machine::Local, project, folder, name } => {
+            Picked::Add { on, project, folder, name } => {
                 let project = project.id();
-                self.make_workstream(folder.clone(), move |lunetad, _| {
+                self.make_workstream(on, folder, move |lunetad, on, folder| {
                     let named = name.as_ref().map(Name::as_str);
-                    workstreams::add_workstream(lunetad, project, folder.as_str(), named).map(Some)
+                    let folder = folder.as_str();
+                    workstreams::add_workstream(lunetad, on, project, folder, named).map(Some)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Add { on: Machine::Remote(_), .. }
-            | Picked::Make { on: Machine::Remote(_), .. } => {
-                self.sidebar.notify(format!("picker: {}", menu::HERE_ONLY));
-            },
-            Picked::Make { on: Machine::Local, session, cwd } => {
-                self.make_workstream(cwd, move |lunetad, cwd| {
-                    workstreams::here(lunetad, cwd, Some(session.as_str()))
+            Picked::Make { on, session, cwd } => {
+                self.make_workstream(on, cwd, move |lunetad, on, cwd| {
+                    workstreams::made_at(lunetad, on, cwd, Some(session.as_str()))
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2165,17 +2152,20 @@ impl App {
 
     fn make_workstream(
         &mut self,
+        on: Machine,
         cwd: Directory,
-        made: impl FnOnce(&Path, &Path) -> Result<Option<WorkstreamId>, String> + Send + 'static,
+        made: impl FnOnce(&Path, &Machine, &Directory) -> Result<Option<WorkstreamId>, String>
+            + Send
+            + 'static,
     ) {
         if self.refuse_naming(None) {
             return;
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| made(&lunetad, &workstreams::real(Path::new(cwd.as_str()))));
+            let made = caught(|| made(&lunetad, &on, &cwd));
             let made = made.map_err(|why| format!("no workstream made: {why}"));
-            Made::Workstream { made, argv: Vec::new() }
+            Made::Workstream { on, made, argv: Vec::new() }
         });
     }
 
@@ -2200,7 +2190,9 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Workstream { made: Ok(Some(made)), argv } => self.go_opening(made, argv),
+            Made::Workstream { on, made: Ok(Some(made)), argv } => {
+                self.go_opening(&on, made, argv);
+            },
             Made::Workstream { made: Ok(None), .. } => {
                 self.sidebar.notify(format!("menu: {}", UNSHOWN.join(" ")));
             },
@@ -2209,8 +2201,8 @@ impl App {
         }
     }
 
-    fn go_opening(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
-        self.go_workstream(&Machine::Local, workstream, None);
+    fn go_opening(&mut self, on: &Machine, workstream: WorkstreamId, argv: Vec<String>) {
+        self.go_workstream(on, workstream, None);
         if !argv.is_empty() {
             self.shown().open_in(workstream, argv);
         }
@@ -2222,8 +2214,8 @@ impl App {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
-        let Pulled { workstream, argv } = made;
-        self.go_opening(workstream, argv);
+        let Pulled { on, workstream, argv } = made;
+        self.go_opening(&on, workstream, argv);
     }
 
     fn give(&mut self, focus: Focus) {
