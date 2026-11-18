@@ -743,6 +743,7 @@ fn session_of(act: &Act) -> &str {
     match act {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
+        | Act::Workstream { session, .. }
         | Act::Kill { session, .. }
         | Act::Leave { session, .. } => session.as_str(),
     }
@@ -755,6 +756,9 @@ fn says(act: &Act) -> String {
             let panes: Vec<String> = panes.iter().map(|pane| format!("{session}:{pane}")).collect();
             format!("close the tab of {}", panes.join(", "))
         },
+        Act::Workstream { session, workstream, .. } => {
+            format!("delete workstream {workstream} of {session}")
+        },
         Act::Kill { session, .. } | Act::Leave { session, .. } => {
             format!("delete session {session}")
         },
@@ -765,6 +769,7 @@ fn whose_of(act: &Act) -> Whose {
     match act {
         Act::Pane { whose, .. }
         | Act::Tab { whose, .. }
+        | Act::Workstream { whose, .. }
         | Act::Kill { whose, .. }
         | Act::Leave { whose, .. } => *whose,
     }
@@ -883,6 +888,9 @@ fn act(act: &Act) -> Result<(), String> {
         Act::Tab { session, whose, tab, panes } => {
             let close = Close::Tab { id: *tab, panes: panes.clone() };
             closes::closed(session, whose.started(session)?, &close)
+        },
+        Act::Workstream { .. } => {
+            unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
         },
         Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
             closes::killed(session, whose.started(session)?)

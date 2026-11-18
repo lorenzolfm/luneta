@@ -736,7 +736,7 @@ impl Views {
         let key = match self.mux.made(&cwd, opened, tag(terminal), inner) {
             Ok(key) => key,
             Err(failure) => {
-                if let Err(why) = self.followed(Change::Close { terminal }) {
+                if let Err(why) = self.followed(Change::Unopen { terminal }) {
                     self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
                 }
                 return Err(failure.to_string());
@@ -991,6 +991,9 @@ impl Views {
         assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its view");
         if let Some(heir) = heir {
             assert!(projects.holding(heir).is_some(), "terminal {heir} took the room it left");
+        } else {
+            let gone = projects.find(workstream).is_none();
+            assert!(gone, "workstream {workstream} goes with its last terminal");
         }
         let focused = self.clients.values().any(|client| client.focus == Some(terminal));
         assert!(!focused, "no client focuses terminal {terminal}, which closed");

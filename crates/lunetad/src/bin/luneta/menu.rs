@@ -947,6 +947,11 @@ impl Target {
                     .and(row.cwd.clone())
                     .and_then(|cwd| Directory::parse(cwd).ok()),
             }),
+            Target::Workstream(_, row) if row.place.project.listed().own() => Some(Removes::Row {
+                session: row.place.project.listed().clone(),
+                scope: Scope::Workstream(row.place.workstream),
+                merged_in: None,
+            }),
             Target::Machine(Machine::Remote(destination)) => {
                 Some(Removes::Machine(destination.clone()))
             },
@@ -1087,6 +1092,7 @@ pub enum Wants {
     Checks { page: PullPage },
     Make {
         session: SessionName,
+        holder: Directory,
         cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -1721,9 +1727,9 @@ impl Menu {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
                 opening(session, pane, opens)
             },
-            (At::Clone { name, .. }, _) => {
+            (At::Clone { cwd: holder, name }, _) => {
                 let (session, cwd, tab) = (name.clone(), dir, work.tab());
-                let wants = Wants::Make { session, cwd, name: tab, command };
+                let wants = Wants::Make { session, holder, cwd, name: tab, command };
                 let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Making(name)) };
                 Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
             },
@@ -4300,6 +4306,7 @@ mod tests {
             wants,
             Wants::Make {
                 session: name.clone(),
+                holder: directory("/w/cdk"),
                 cwd: directory("/w/cdk/feat-x"),
                 name: "#2736".to_owned(),
                 command: Vec::new(),

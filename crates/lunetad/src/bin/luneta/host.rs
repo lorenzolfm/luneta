@@ -32,7 +32,9 @@ use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
 use crate::alerts::{self, Alerts};
@@ -73,7 +75,7 @@ use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName, Turned};
 
 pub enum Made {
-    Workstream { made: Result<WorkstreamId, String>, argv: Vec<String> },
+    Workstream { made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
@@ -93,6 +95,11 @@ const NAMING: &str = "menu: luneta names a session already: try again once it ha
 const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
 pub const NOT_YET: &str = "luneta does not do that to a workstream yet";
+
+const UNSHOWN: [&str; 2] =
+    ["No workstream to show yet.", "The menu on a project's row makes one."];
+
+const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 
 const CLIENT: u64 = 1;
 
@@ -341,7 +348,9 @@ impl Inbox {
 }
 
 struct App {
-    right: Viewed,
+    right: Option<Viewed>,
+    view_number_dropped: u64,
+    runs_in: Option<TerminalKey>,
     projected: Projected,
     seated: Option<OwnPane>,
     lunetad: PathBuf,
@@ -380,7 +389,6 @@ struct App {
     events: Sender<Event>,
     _watching: Vec<notify::RecommendedWatcher>,
     dir: PathBuf,
-    ended: bool,
     gave_up: Option<String>,
     deleting: Vec<JoinHandle<()>>,
     naming: Naming,
@@ -503,7 +511,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    (start, runs_in): (WorkstreamId, Option<TerminalKey>),
+    (start, runs_in): (Option<WorkstreamId>, Option<TerminalKey>),
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -561,11 +569,16 @@ fn run_in(
     let areas = areas(Rect::from((Position::ORIGIN, terminal.size()?)), width.columns());
     let lunetad = daemon.clone().unwrap_or_default();
     let (size, greeting, here) = (view_size(areas.1), greeting(colours), Machine::Local);
-    let right = Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events);
+    let right = start.map(|start| {
+        Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events)
+    });
+    let keys = if right.is_some() { Side::Session } else { Side::Sidebar };
     let desktop = Desktop::start(&events);
     let focused = true;
     let mut app = App {
         right,
+        view_number_dropped: 0,
+        runs_in,
         projected: Projected::default(),
         seated: None,
         lunetad,
@@ -575,7 +588,7 @@ fn run_in(
         width,
         held: Held::Nothing,
         last_press: LastPress::Elsewhere,
-        focus: Focus::on(Side::Session),
+        focus: Focus::on(keys),
         focused,
         burst: None,
         settling: Settling::default(),
@@ -604,7 +617,6 @@ fn run_in(
         events,
         _watching: watching,
         dir: dir.to_owned(),
-        ended: false,
         gave_up: None,
         deleting: Vec::new(),
         naming: Naming::Idle,
@@ -715,9 +727,6 @@ fn run_loop(
             };
             app.handle(event, terminal)?;
         }
-        if app.ended {
-            return Ok(());
-        }
         app.ticked(Instant::now());
         app.alerting(Instant::now());
         app.sidebar.ticked(SystemTime::now(), Instant::now(), app.focused);
@@ -753,14 +762,14 @@ impl App {
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             Event::Shown(number, heard) => {
-                if self.right.number() == number {
-                    let heeded = self.right.heard(heard);
+                if let Some(right) = self.right.as_mut().filter(|it| it.number() == number) {
+                    let heeded = right.heard(heard);
                     self.heeded(heeded);
                 }
             },
             Event::Seen { number, watcher, seen } => {
-                if self.right.number() == number {
-                    let heeded = self.right.seen(watcher, seen);
+                if let Some(right) = self.right.as_mut().filter(|it| it.number() == number) {
+                    let heeded = right.seen(watcher, seen);
                     self.heeded(heeded);
                 }
             },
@@ -770,9 +779,10 @@ impl App {
                     self.sidebar.notify(format!("lunetad's projects: {why}"));
                     Projected::default()
                 });
-                let (on, workstream) = (self.right.machine(), self.right.workstream());
-                let (tabs, titles) = self.projected.tabs(on, workstream);
-                self.right.tabs(tabs, titles);
+                if let Some(right) = &mut self.right {
+                    let (tabs, titles) = self.projected.tabs(right.machine(), right.workstream());
+                    right.tabs(tabs, titles);
+                }
                 self.sidebar.heard(host);
                 self.seat();
                 if let Some(machines) = self.sidebar.reaches() {
@@ -1042,7 +1052,9 @@ impl App {
             picker.ticked(now);
         }
         self.ask_picker();
-        self.right.ticked();
+        if let Some(right) = &mut self.right {
+            right.ticked();
+        }
     }
 
     fn ask_picker(&mut self) {
@@ -1212,7 +1224,7 @@ impl App {
         }
         if let Some(change) = resized(chord) {
             self.leave();
-            self.right.ask(lunetad::Asked::Resize(change));
+            self.ask_right(lunetad::Asked::Resize(change));
             return;
         }
         if self.focus.session() && !self.sidebar.pressed() {
@@ -1227,15 +1239,27 @@ impl App {
     }
 
     fn key_to_session(&mut self, key: &KeyEvent) {
-        self.right.key(key);
+        if let Some(right) = &mut self.right {
+            right.key(key);
+        }
     }
 
     fn paste(&mut self, text: &str) {
-        self.right.paste(text);
+        if let Some(right) = &mut self.right {
+            right.paste(text);
+        }
     }
 
     fn tell_focus(&mut self, has: bool) {
-        self.right.focus(has);
+        if let Some(right) = &mut self.right {
+            right.focus(has);
+        }
+    }
+
+    fn ask_right(&self, asked: lunetad::Asked) {
+        if let Some(right) = &self.right {
+            right.ask(asked);
+        }
     }
 
     fn key_for_image(&mut self, key: &KeyEvent) -> bool {
@@ -1454,8 +1478,12 @@ impl App {
 
     fn session_mouse(&mut self, mouse: MouseEvent) {
         let at = self.session_cell(mouse);
-        if let Some(workstream) = self.right.mouse(mouse, at, self.areas.1.width) {
-            let on = self.right.machine().clone();
+        let width = self.areas.1.width;
+        let Some(right) = &mut self.right else {
+            return;
+        };
+        if let Some(workstream) = right.mouse(mouse, at, width) {
+            let on = right.machine().clone();
             self.go_workstream(&on, workstream, None);
         }
     }
@@ -1469,7 +1497,9 @@ impl App {
 
     fn select(&mut self, mouse: MouseEvent) -> bool {
         let at = self.session_cell(mouse);
-        let own = &mut self.right;
+        let Some(own) = &mut self.right else {
+            return false;
+        };
         match (mouse.kind, self.held) {
             (MouseEventKind::Down(_), _) if own.selects(mouse, at) => {
                 own.select_from(at);
@@ -1559,6 +1589,7 @@ impl App {
             },
             Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
+                Act::Workstream { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
                     zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
                 },
@@ -1596,7 +1627,7 @@ impl App {
                 }
                 self.leave();
             },
-            Asked::Make { menu, on, session, cwd, name, command } => {
+            Asked::Make { menu, on, session, holder, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
                     return;
                 }
@@ -1604,9 +1635,10 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(|| match on {
                         Machine::Local => {
+                            let holder = workstreams::real(Path::new(holder.as_str()));
                             let cwd = workstreams::real(Path::new(cwd.as_str()));
-                            let session = session.as_str();
-                            let made = workstreams::pulled(&lunetad, session, &cwd, &name)?;
+                            let (session, at) = (session.as_str(), (holder.as_path(), cwd.as_path()));
+                            let made = workstreams::pulled(&lunetad, session, at, &name)?;
                             Ok(Pulled { workstream: made, argv: command })
                         },
                         Machine::Remote(_) => Err(menu::HERE_ONLY.to_owned()),
@@ -1685,6 +1717,18 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
+        if let Act::Workstream { workstream, .. } = act {
+            let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
+            let (on, workstream) = (on.clone(), *workstream);
+            let deleting = thread::spawn(move || {
+                if let Err(why) = caught(|| workstreams::closed(&lunetad, &on, workstream)) {
+                    let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
+                }
+            });
+            self.deleting.retain(|deleting| !deleting.is_finished());
+            self.deleting.push(deleting);
+            return;
+        }
         let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {
             return self.sidebar.notify(format!("menu: {NOT_YET}"));
         };
@@ -1709,7 +1753,7 @@ impl App {
                     return self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
                 };
                 self.go_workstream(on, workstream, Some(terminal));
-                self.right.open_beside_focused(command.clone());
+                self.shown().open_beside_focused(command.clone());
             },
             Open::Tab { .. } if *on != Machine::Local => {
                 self.sidebar.notify(format!("menu: {NOT_YET}"));
@@ -1722,7 +1766,8 @@ impl App {
                 }
                 self.naming_on(move || {
                     let made = caught(|| {
-                        workstreams::add_workstream(&lunetad, id, cwd.as_str(), name.as_deref())
+                        let named = name.as_deref();
+                        workstreams::add_workstream(&lunetad, id, cwd.as_str(), named).map(Some)
                     });
                     let made = made.map_err(|why| format!("menu: no workstream made: {why}"));
                     Made::Workstream { made, argv }
@@ -1950,12 +1995,15 @@ impl App {
 
     fn step(&mut self, direction: Direction) {
         self.leave();
-        self.right.ask(lunetad::Asked::Step(direction));
+        self.ask_right(lunetad::Asked::Step(direction));
     }
 
     fn cross(&mut self, direction: Direction) {
-        let on = self.right.machine().clone();
-        let (before, after) = self.projected.tabs_beside(&on, self.right.workstream());
+        let Some(right) = &self.right else {
+            return;
+        };
+        let on = right.machine().clone();
+        let (before, after) = self.projected.tabs_beside(&on, right.workstream());
         let beside = match direction {
             Direction::Left => before,
             Direction::Right => after,
@@ -1989,7 +2037,9 @@ impl App {
             return Err(format!("{session} is no project lunetad keeps"));
         };
         let shows = |workstream| {
-            self.right.machine() == machine && self.right.workstream() == workstream
+            self.right.as_ref().is_some_and(|right| {
+                right.machine() == machine && right.workstream() == workstream
+            })
         };
         if let Place::Workstream(place) = place {
             let held = project.workstreams.iter().any(|it| it.id == place.workstream);
@@ -2024,24 +2074,55 @@ impl App {
         workstream: WorkstreamId,
         terminal: Option<TerminalId>,
     ) {
-        self.right.go(on, workstream);
-        assert_eq!(self.right.machine(), on, "luneta shows the machine it went to");
-        assert_eq!(self.right.workstream(), workstream, "luneta shows the workstream it went to");
+        if let Some(right) = &mut self.right {
+            right.go(on, workstream);
+        } else {
+            let (size, greeting) = (view_size(self.areas.1), greeting(self.colours));
+            let (folder, events) = (self.lunetad.clone(), &self.events);
+            let (number, on) = (self.view_number_dropped + 1, on.clone());
+            let runs_in = self.runs_in;
+            let started =
+                Viewed::start(number, folder, on, workstream, size, greeting, runs_in, events);
+            self.right = Some(started);
+        }
+        let right = self.shown();
+        assert_eq!(right.machine(), on, "luneta shows the machine it went to");
+        assert_eq!(right.workstream(), workstream, "luneta shows the workstream it went to");
         let (tabs, titles) = self.projected.tabs(on, workstream);
-        self.right.tabs(tabs, titles);
+        let right = self.shown();
+        right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
-            self.right.ask(lunetad::Asked::Focus(terminal));
+            right.ask(lunetad::Asked::Focus(terminal));
         }
         self.seat();
     }
 
+    fn shown(&mut self) -> &mut Viewed {
+        self.right.as_mut().expect("luneta went to a workstream")
+    }
+
+    fn unview(&mut self) {
+        if let Some(right) = self.right.take() {
+            let number = right.number();
+            assert!(number > self.view_number_dropped, "a view's number grows past the last dropped");
+            self.view_number_dropped = number;
+        }
+        self.sidebar.unseat();
+        self.seated = None;
+        self.give(Focus::on(Side::Sidebar));
+        assert_eq!(self.focus.side, Side::Sidebar, "with no workstream shown, no keys go to it");
+    }
+
     fn seat(&mut self) {
-        let (on, workstream) = (self.right.machine().clone(), self.right.workstream());
+        let Some(right) = &self.right else {
+            return;
+        };
+        let (on, workstream) = (right.machine().clone(), right.workstream());
         let Some((project, _)) = self.projected.holding(&on, workstream) else {
             return;
         };
         let key = project.key;
-        let pane = self.right.focused().and_then(|focused| project.pane_of(focused));
+        let pane = right.focused().and_then(|focused| project.pane_of(focused));
         let seated = |sidebar: &Sidebar| sidebar.own_seat_on(&on).map(sidebar::OwnSeat::session);
         if seated(&self.sidebar) != Some(key) {
             self.sidebar.attaching(on.clone(), key);
@@ -2064,7 +2145,10 @@ impl App {
             Heeded::Edged(direction) => self.cross(direction),
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Forgotten(why) => {
-                let (on, forgotten) = (self.right.machine().clone(), self.right.workstream());
+                let Some(right) = &self.right else {
+                    return;
+                };
+                let (on, forgotten) = (right.machine().clone(), right.workstream());
                 let held = |machine: &Machine| {
                     let projects = self.projected.projects(machine).iter();
                     let mut workstreams = projects.flat_map(|it| &it.workstreams).map(|it| it.id);
@@ -2077,7 +2161,7 @@ impl App {
                 let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
                 match other {
                     Some((machine, other)) => self.go_workstream(&machine, other, None),
-                    None => self.end("no workstream is left to show"),
+                    None => self.unview(),
                 }
                 self.sidebar.notify(format!("lunetad's view: {why}"));
             },
@@ -2089,7 +2173,7 @@ impl App {
     fn make_workstream(
         &mut self,
         cwd: Directory,
-        made: impl FnOnce(&Path, &Path) -> Result<WorkstreamId, String> + Send + 'static,
+        made: impl FnOnce(&Path, &Path) -> Result<Option<WorkstreamId>, String> + Send + 'static,
     ) {
         if self.refuse_naming(None) {
             return;
@@ -2123,7 +2207,10 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Workstream { made: Ok(made), argv } => self.go_opening(made, argv),
+            Made::Workstream { made: Ok(Some(made)), argv } => self.go_opening(made, argv),
+            Made::Workstream { made: Ok(None), .. } => {
+                self.sidebar.notify(format!("menu: {}", UNSHOWN.join(" ")));
+            },
             Made::Workstream { made: Err(why), .. } => self.sidebar.notify(why),
             Made::Pulled { menu, made } => self.pulled_made(menu, made),
         }
@@ -2132,7 +2219,7 @@ impl App {
     fn go_opening(&mut self, workstream: WorkstreamId, argv: Vec<String>) {
         self.go_workstream(&Machine::Local, workstream, None);
         if !argv.is_empty() {
-            self.right.open_in(workstream, argv);
+            self.shown().open_in(workstream, argv);
         }
     }
 
@@ -2152,6 +2239,12 @@ impl App {
     }
 
     fn give_from(&mut self, had: bool, focus: Focus) {
+        let focus = match focus.side {
+            Side::Session | Side::Collapsed if self.right.is_none() => {
+                Focus { side: Side::Sidebar, ..focus }
+            },
+            Side::Session | Side::Sidebar | Side::Collapsed => focus,
+        };
         if focus.side == Side::Collapsed || focus.over.is_some() {
             self.let_go();
             self.sidebar.let_go();
@@ -2225,11 +2318,6 @@ impl App {
         }
     }
 
-    fn end(&mut self, why: &str) {
-        say_ends(why);
-        self.ended = true;
-    }
-
     fn answered(&mut self, answer: Answer, terminal: &mut DefaultTerminal) -> io::Result<()> {
         match answer {
             Answer::Foreground(_) | Answer::Background(_) => self.colours.hear(answer),
@@ -2260,7 +2348,9 @@ impl App {
             let (sidebar, right) = areas(frame.area(), own);
             self.areas = (sidebar, right);
             let size = window(right);
-            self.right.resize(size.columns, size.lines);
+            if let Some(right) = &mut self.right {
+                right.resize(size.columns, size.lines);
+            }
             let buffer = frame.buffer_mut();
             let beside = if collapsed {
                 self.sidebar.draw_collapsed(buffer, sidebar, now);
@@ -2272,7 +2362,12 @@ impl App {
             let uncovered = |at: &Position| self.focus.over.is_none() && right.contains(*at);
             let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
             let hover = self.pointer.filter(uncovered).map(spot);
-            let cursor = self.right.draw(buffer, right, hover);
+            let cursor = if let Some(shown) = &self.right {
+                shown.draw(buffer, right, hover)
+            } else {
+                draw_unshown(buffer, right);
+                None
+            };
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
                     briefing.draw(buffer, right, now);
@@ -2317,7 +2412,7 @@ impl App {
             }
             self.drawn = drawn;
         })?;
-        let cursor = self.right.cursor_style();
+        let cursor = self.right.as_ref().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
             self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
@@ -2362,6 +2457,24 @@ fn pastes(written: &named::Written, harness: agents::Harness) -> Vec<String> {
     let command = written.command.iter().map(|command| format!("{} ", spelled(command)));
     let text = (!written.text.is_empty()).then(|| format!("{} ", written.text));
     command.chain(text).collect()
+}
+
+fn draw_unshown(buffer: &mut Buffer, area: Rect) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
+            }
+        }
+    }
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let rows = u16::try_from(UNSHOWN.len()).expect("a few rows");
+    let top = area.y + area.height.saturating_sub(rows) / 2;
+    for (line, y) in UNSHOWN.iter().zip(top..area.bottom()) {
+        let width = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        buffer.set_stringn(x, y, line, usize::from(area.width), dim);
+    }
 }
 
 fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {

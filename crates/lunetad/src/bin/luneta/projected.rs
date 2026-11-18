@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
+use std::time::SystemTime;
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, agent, remote, terminal, Host};
@@ -22,6 +23,7 @@ pub struct Workstream {
     pub tab: u32,
     pub terminals: Vec<(TerminalId, Option<TerminalKey>)>,
     pub titles: BTreeMap<TerminalId, String>,
+    pub used: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,7 +280,9 @@ pub fn project(project: &api::Project) -> Result<Project, String> {
             }
         }
         let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-        Ok(Workstream { id, name, folder, tab, terminals, titles })
+        let used = workstream.used_at.map(SystemTime::try_from).transpose();
+        let used = used.map_err(|why| format!("workstream {named}'s last use: {why}"))?;
+        Ok(Workstream { id, name, folder, tab, terminals, titles, used })
     };
     let workstreams = project.workstreams.iter().zip(0..).map(workstream);
     Ok(Project {

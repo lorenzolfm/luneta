@@ -1035,6 +1035,7 @@ pub enum Asked {
         menu: u64,
         on: Machine,
         session: SessionName,
+        holder: Directory,
         cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -1674,6 +1675,13 @@ impl Sidebar {
         self.seat = Some(Sitting { on, own: OwnSeat::Coming(session), shown: None });
         self.unfold_own(session);
         self.rebuild();
+    }
+
+    pub fn unseat(&mut self) {
+        if self.seat.take().is_some() {
+            self.rebuild();
+        }
+        assert!(self.seat.is_none(), "luneta sits nowhere when it shows no workstream");
     }
 
     pub fn went_own(&mut self, pane: OwnPane, client: OwnClientId) {
@@ -3140,13 +3148,19 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { session, cwd, name, command } => {
-                Asked::Make { menu: number, on, session, cwd, name, command }
+            Wants::Make { session, holder, cwd, name, command } => {
+                Asked::Make { menu: number, on, session, holder, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
                 Asked::Closes { menu: number, on, session, pane }
+            },
+            Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
+                let plan = self.panes_of(&on, workstream).and_then(|panes| {
+                    self.plan(&on, &session, Deletes::Workstream { workstream, panes })
+                });
+                self.planned(plan)
             },
             Wants::Plan { session, scope: Scope::Session } => {
                 let plan = self.plan(&on, &session, Deletes::Session);
@@ -3268,6 +3282,15 @@ impl Sidebar {
         Ok(close::plan(&self.subject(on, listed, deletes)))
     }
 
+    fn panes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Vec<u32>, String> {
+        let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
+        let mut held = streams.filter(|stream| stream.place.workstream == workstream);
+        let Some(stream) = held.next() else {
+            return Err(format!("workstream {workstream} is no longer listed"));
+        };
+        Ok(stream.panes.iter().map(|pane| pane.id).collect())
+    }
+
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
         match on {
             Machine::Remote(destination) if self.seen(on).is_none() => {
@@ -3380,8 +3403,12 @@ impl Sidebar {
             (Act::Pane { session, pane, .. }, Some(at)) => {
                 place.session() == session.as_str() && at == pane.id()
             },
-            (Act::Tab { session, panes, .. }, Some(at)) => {
-                place.session() == session.as_str() && panes.contains(&at)
+            (
+                Act::Tab { session, panes, .. } | Act::Workstream { session, panes, .. },
+                Some(at),
+            ) => place.session() == session.as_str() && panes.contains(&at),
+            (Act::Workstream { workstream, .. }, None) => {
+                matches!(place, Place::Workstream(at) if at.workstream == *workstream)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
             (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
@@ -5351,6 +5378,29 @@ mod tests {
         let solo = project_row("solo", 8);
         let place = Place::Workstream(WorkstreamPlace { project: solo, workstream });
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(place));
+    }
+
+    #[test]
+    fn a_workstream_s_row_deletes_the_workstream_with_its_panes() {
+        let mut sidebar = fresh();
+        let fix = workstream_of(31, "fix", "/w/fix", &[1, 2]);
+        let main = workstream_of(32, "main", "/w/main", &[3]);
+        let projects = vec![a_project(7, "luneta", vec![fix, main])];
+        sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
+        sidebar.focus(Keys::Sidebar);
+        let workstream = WorkstreamId::of(31).unwrap();
+        let project = project_row("luneta", 7);
+        let place = Place::Workstream(WorkstreamPlace { project, workstream });
+        sidebar.cursor = Some(Spot::Local(place));
+        type_in(&mut sidebar, "d");
+        let whose = listed("luneta", 7).whose();
+        let session = session_name("luneta");
+        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2] };
+        let asked = sidebar.key(&char('d'), moment(160_000));
+        assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
+        let after = sidebar.closing.as_ref().and_then(|closing| closing.after.clone());
+        let past = "the cursor goes past the workstream's panes";
+        assert_eq!(after, Some(Spot::Local(pane_of("luneta", 7, 3))), "{past}");
     }
 
     #[test]
@@ -7885,6 +7935,24 @@ mod tests {
     }
 
     #[test]
+    fn luneta_unseated_sits_in_no_project_and_its_delete_leaves_none() {
+        let mut sidebar = fresh();
+        let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
+        let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
+        sidebar.hear(host(sessions, Vec::new()));
+        let key = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
+        sidebar.attaching(Machine::Local, key);
+        sidebar.went_own(OwnPane::new(key, 1).unwrap(), OwnClientId::new(4).unwrap());
+        sidebar.unseat();
+        assert_eq!(sidebar.own_seat(), None);
+        sidebar.cursor = Some(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "d");
+        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
+    }
+
+    #[test]
     fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
@@ -7932,6 +8000,7 @@ mod tests {
             menu: 1,
             on: Machine::Local,
             session: session_name("newer-2"),
+            holder: directory("/w/n"),
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
             command: Vec::new(),

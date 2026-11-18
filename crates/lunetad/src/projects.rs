@@ -233,20 +233,15 @@ impl Dir {
 
     #[must_use]
     pub fn below(&self, folder: &Dir) -> Option<Below> {
-        let below = if folder == self {
-            Below(String::new())
-        } else {
-            Below(folder.0.strip_prefix(&self.0)?.strip_prefix('/')?.to_owned())
-        };
+        let rest = folder.0.strip_prefix(&self.0)?.strip_prefix('/')?;
+        assert!(!rest.is_empty(), "a dir ends in no /, and so {folder:?} names a part below it");
+        let below = Below(rest.to_owned());
         assert_eq!(&self.join(&below), folder);
         Some(below)
     }
 
     #[must_use]
     pub fn join(&self, below: &Below) -> Dir {
-        if below.0.is_empty() {
-            return self.clone();
-        }
         Dir(format!("{}/{}", self.0, below.0))
     }
 
@@ -263,15 +258,18 @@ impl Dir {
     }
 
     fn nests(&self, other: &Dir) -> bool {
-        self.below(other).is_some() || other.below(self).is_some()
+        self == other || self.below(other).is_some() || other.below(self).is_some()
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Below(String);
 
 impl Below {
     pub fn parse(text: &str) -> Result<Below, String> {
+        if text.is_empty() {
+            return Err("no workstream is in its project's own folder".to_owned());
+        }
         if text.len() > PATH_BYTES_MAX {
             return Err(format!("a path is longer than {PATH_BYTES_MAX} bytes"));
         }
@@ -396,6 +394,7 @@ pub enum Change {
     RenameTerminal { terminal: TerminalId, to: Option<Name> },
     Open { workstream: WorkstreamId, terminal: Terminal, placed: Placed, size: Size },
     Close { terminal: TerminalId },
+    Unopen { terminal: TerminalId },
     Resize {
         terminal: TerminalId,
         sides: layout::Sides,
@@ -507,7 +506,8 @@ impl Change {
             | Change::CloseWorkstream { .. }
             | Change::RenameTerminal { .. }
             | Change::Open { .. }
-            | Change::Close { .. } => true,
+            | Change::Close { .. }
+            | Change::Unopen { .. } => true,
             Change::Went { .. }
             | Change::Resize { .. }
             | Change::Swap { .. }
@@ -679,6 +679,10 @@ impl Projects {
                     return Err(format!("{many}, as many as are kept"));
                 }
                 let project = changed.project(project)?;
+                if folder == project.dir {
+                    let own = &folder.0;
+                    return Err(format!("{own} is the project's own folder: no workstream"));
+                }
                 let below = project.dir.below(&folder).ok_or_else(|| {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
@@ -782,7 +786,22 @@ impl Projects {
                 None
             },
             Change::Close { terminal } => {
+                let held_in = self.holding(terminal).map(|(workstream, _)| workstream.id());
+                let workstream = held_in.ok_or_else(|| unknown("terminal", terminal))?;
+                let (project, at) = changed.workstream(workstream)?;
+                if project.workstreams[at].view.closed(terminal).is_none() {
+                    project.workstreams.remove(at);
+                    assert!(changed.find(workstream).is_none(), "{workstream} goes with its last");
+                }
+                assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
+                None
+            },
+            Change::Unopen { terminal } => {
+                let held_in = self.holding(terminal).map(|(workstream, _)| workstream.id());
+                let workstream = held_in.ok_or_else(|| unknown("terminal", terminal))?;
                 changed.view_of(terminal)?.closed(terminal);
+                assert!(changed.find(workstream).is_some(), "{workstream} stays, if empty");
+                assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
                 None
             },
             Change::Resize { terminal, sides, growth, size } => {
@@ -1053,7 +1072,7 @@ mod tests {
         for refused in ["/", "home", "/a/", "/a//b", "/a/./b", "/a/../b", "/a\tb"] {
             assert!(Dir::parse(refused).is_err(), "{refused:?}");
         }
-        assert!(Below::parse("").is_ok());
+        assert!(Below::parse("").unwrap_err().contains("its project's own folder"));
         assert!(Below::parse("/a").is_err());
     }
 
@@ -1076,7 +1095,7 @@ mod tests {
     #[test]
     fn a_folder_is_below_a_dir_only_by_whole_names() {
         let luneta = dir("/w/luneta");
-        assert_eq!(luneta.below(&dir("/w/luneta")).unwrap().as_str(), "");
+        assert_eq!(luneta.below(&dir("/w/luneta")), None);
         assert_eq!(luneta.below(&dir("/w/luneta/issue-1/src")).unwrap().as_str(), "issue-1/src");
         assert_eq!(luneta.below(&dir("/w/luneta-old")), None);
         assert_eq!(luneta.below(&dir("/w")), None);
@@ -1124,16 +1143,16 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_is_in_its_project_s_folder_or_below_it_and_may_share_it() {
+    fn a_workstream_is_below_its_project_s_folder_and_may_share_one() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let again = workstream(&mut projects, luneta, "/w/luneta/main");
-        let top = workstream(&mut projects, luneta, "/w/luneta");
+        let deep = workstream(&mut projects, luneta, "/w/luneta/main/src");
         assert_eq!(projects.all()[0].workstreams().len(), 3);
-        assert!(main != again && again != top);
+        assert!(main != again && again != deep);
         let folders: Vec<Dir> = projects.folders().collect();
-        let want = ["/w/luneta", "/w/luneta/main", "/w/luneta/main", "/w/luneta"].map(dir);
+        let want = ["/w/luneta", "/w/luneta/main", "/w/luneta/main", "/w/luneta/main/src"].map(dir);
         assert_eq!(folders, want);
         let outside = Change::AddWorkstream { project: luneta, folder: dir("/w/elo"), name: None };
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
@@ -1153,6 +1172,17 @@ mod tests {
         let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
         assert_eq!(again, Some(made.0));
         assert!(change(&projects, at("/w/elo")).unwrap_err().contains("is not in /w/luneta"));
+    }
+
+    #[test]
+    fn a_project_s_own_folder_holds_no_workstream() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let add = Change::AddWorkstream { project: luneta, folder: dir("/w/luneta"), name: None };
+        assert!(change(&projects, add).unwrap_err().contains("the project's own folder"));
+        let at = Change::WorkstreamAt { project: luneta, folder: dir("/w/luneta") };
+        assert!(change(&projects, at).unwrap_err().contains("the project's own folder"));
+        assert_eq!(projects.all()[0].workstreams(), []);
     }
 
     #[test]
@@ -1253,9 +1283,9 @@ mod tests {
         assert!(said.contains("as many as are kept"));
         let first = projects.all()[0].id();
         for _ in 0..WORKSTREAMS_MAX {
-            workstream(&mut projects, first, "/p0");
+            workstream(&mut projects, first, "/p0/w");
         }
-        let over = Change::AddWorkstream { project: first, folder: dir("/p0"), name: None };
+        let over = Change::AddWorkstream { project: first, folder: dir("/p0/w"), name: None };
         assert!(change(&projects, over).unwrap_err().contains("as many as are kept"));
     }
 
@@ -1300,7 +1330,7 @@ mod tests {
     fn a_view_opens_closes_and_fills_itself_with_one_of_its_terminals() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         assert!(view(&projects, main).is_empty());
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
@@ -1328,17 +1358,49 @@ mod tests {
         let refused = change(&projects, Change::ForgetWorkstream { workstream: main });
         assert!(refused.unwrap_err().contains("holds 1 terminals still"));
         (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
+        assert_eq!(projects.all()[0].workstreams(), [], "a workstream goes with its last terminal");
+    }
+
+    #[test]
+    fn a_view_s_last_terminal_closes_with_its_workstream_and_no_other_does() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let kept = workstream(&mut projects, luneta, "/w/luneta/main");
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let two = opened(&mut projects, main, 101, right);
+        (projects, _) = change(&projects, Change::Close { terminal: one }).unwrap();
+        let held_in = projects.holding(two).map(|(it, _)| it.id());
+        assert_eq!(held_in, Some(main), "a terminal not its view's last leaves the workstream");
+        (projects, _) = change(&projects, Change::Close { terminal: two }).unwrap();
+        let left = projects.all()[0].workstreams().iter().map(|it| it.id);
+        assert_eq!(left.collect::<Vec<_>>(), [kept]);
+        assert_eq!(projects.terminals().count(), 0);
+        let gone = change(&projects, Change::Close { terminal: two });
+        assert!(gone.unwrap_err().contains("no terminal has the id"));
+    }
+
+    #[test]
+    fn an_open_taken_back_leaves_its_workstream_even_empty() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        (projects, _) = change(&projects, Change::Unopen { terminal: one }).unwrap();
         assert!(view(&projects, main).is_empty());
-        (projects, _) = change(&projects, Change::ForgetWorkstream { workstream: main }).unwrap();
-        assert_eq!(projects.all()[0].workstreams(), []);
+        let left = projects.all()[0].workstreams().iter().map(|it| it.id);
+        assert_eq!(left.collect::<Vec<_>>(), [main], "a workstream an open failed in stays");
+        let gone = change(&projects, Change::Unopen { terminal: one });
+        assert!(gone.unwrap_err().contains("no terminal has the id"));
     }
 
     #[test]
     fn a_workstream_closes_with_its_terminals_where_a_forget_is_refused() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
-        let kept = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let kept = workstream(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         opened(&mut projects, main, 101, right);
@@ -1392,7 +1454,7 @@ mod tests {
     fn a_terminal_keeps_the_name_it_is_given_until_taken_back() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let name = |projects: &Projects| projects.holding(one).unwrap().1.name().cloned();
         assert_eq!(name(&projects), None);
@@ -1414,7 +1476,7 @@ mod tests {
     fn a_terminal_is_placed_only_where_its_view_has_it_and_its_id_is_free() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let size = Size::of(80, 24).unwrap();
         let terminal = |id| {
             Terminal::new(TerminalId::of(id).unwrap(), dir("/w/luneta"), Runs::Shell)
