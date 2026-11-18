@@ -477,7 +477,7 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 4,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 5,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();

@@ -682,6 +682,13 @@ impl Projects {
             if let Some(other) = projects[..at].iter().find(|other| other.dir.nests(&project.dir)) {
                 return Err(nested(&project.dir, other));
             }
+            for workstream in &project.workstreams {
+                let folders = workstream.view.terminals().map(Terminal::folder);
+                if let Some(to) = left_for(&project.dir, &workstream.below, folders) {
+                    let (at, to) = (project.folder(workstream), project.dir.join(&to));
+                    return Err(format!("{}: its terminals all went to {}", at.0, to.0));
+                }
+            }
         }
         Ok(Projects { projects })
     }
