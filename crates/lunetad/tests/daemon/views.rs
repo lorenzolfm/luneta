@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -252,10 +253,19 @@ fn root_of(owned: &Owned, terminal: u64) -> u32 {
     runs.pid
 }
 
-fn workstream_in_home(owned: &Owned) -> u64 {
+fn work_folder(owned: &Owned) -> PathBuf {
+    let folder = fs::canonicalize(owned.host.home.path()).unwrap().join("work");
+    fs::create_dir_all(&folder).unwrap();
+    folder
+}
+
+fn project_in_home(owned: &Owned) -> u64 {
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    let made = project(&owned.host, &home, None);
-    workstream(&owned.host, made, &home)
+    project(&owned.host, &home, None)
+}
+
+fn workstream_in_home(owned: &Owned) -> u64 {
+    workstream(&owned.host, project_in_home(owned), &work_folder(owned))
 }
 
 #[test]
@@ -423,13 +433,31 @@ fn a_closed_terminal_leaves_the_mux_and_its_view_to_the_terminal_beside_it() {
     let laid = shown.until("the terminal closed outside gone", |laid| laid.panes.len() == 1);
     assert_eq!((laid.panes[0].terminal, focused_of(&laid)), (first, Some(first)));
     closed_outside(&owned, &laid, first);
-    let laid = shown.until("the view empty", |laid| laid.panes.is_empty());
-    assert_eq!(focused_of(&laid), None);
+    let ended = shown.until_ended();
+    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
+    assert_eq!(watched_workstream(&owned, workstream), None);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(!file.contains(r#""view""#), "an empty view is kept as no view: {file}");
-    let again = shown.open();
+    let gone = !file.contains(&format!("{workstream:016x}"));
+    assert!(gone, "a workstream goes with its last terminal: {file}");
+}
+
+#[test]
+fn a_workstream_goes_with_the_last_terminal_its_view_closes_and_the_mux_takes_the_next() {
+    let owned = Owned::new();
+    let project = project_in_home(&owned);
+    let closing = workstream(&owned.host, project, &work_folder(&owned));
+    let mut shown = Shown::new(&owned, closing, 80, 24);
+    let last = shown.open();
+    shown.ask(Event::Close(()));
+    let ended = shown.until_ended();
+    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
+    assert_eq!(watched_workstream(&owned, closing), None);
+    let next = workstream(&owned.host, project, &work_folder(&owned));
+    let mut again = Shown::new(&owned, next, 80, 24);
+    let opened = again.open();
+    let listing = owned.listing();
     let made = "the mux that ended with its last terminal gives way to the next";
-    assert!(tagged(&owned.listing(), again).is_some(), "{made}");
+    assert!(tagged(&listing, last).is_none() && tagged(&listing, opened).is_some(), "{made}");
 }
 
 #[test]
@@ -587,7 +615,7 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     let owned = Owned::new();
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let made = project(&owned.host, &home, None);
-    let add = || workstream(&owned.host, made, &home);
+    let add = || workstream(&owned.host, made, &work_folder(&owned));
     let (closing, other) = (add(), add());
     let mut shown = Shown::new(&owned, closing, 80, 24);
     let terminals = [shown.open(), shown.open()];
@@ -626,7 +654,7 @@ fn a_terminal_s_name_and_the_last_use_of_a_workstream_reach_watch_and_the_file()
     let owned = Owned::new();
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let made = project(&owned.host, &home, None);
-    let [first, second] = [(); 2].map(|()| workstream(&owned.host, made, &home));
+    let [first, second] = [(); 2].map(|()| workstream(&owned.host, made, &work_folder(&owned)));
     let used = |workstream| watched_workstream(&owned, workstream).unwrap().used_at;
     assert_eq!((used(first), used(second)), (None, None));
     let mut shown = Shown::new(&owned, first, 80, 24);
@@ -822,7 +850,7 @@ fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     owned.start_daemon();
     let mut again = Shown::new(&owned, workstream, 80, 24);
     again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
-    let folder = format!(r#""folder": "{}""#, home.display());
+    let folder = format!(r#""folder": "{}""#, work_folder(&owned).display());
     let file = eventually("what the terminal restored runs is read", || {
         let file = fs::read_to_string(kept(&owned.host)).ok()?;
         file.contains(&folder).then_some(file)
@@ -899,7 +927,6 @@ fn heard_in_below(owned: &Owned, shown: &mut Shown, runs: &str) -> u64 {
 #[test]
 fn a_workstream_lists_its_view_s_terminals_on_watch_in_their_order() {
     let owned = Owned::new();
-    let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     let plain = shown.open();
@@ -922,7 +949,8 @@ fn a_workstream_lists_its_view_s_terminals_on_watch_in_their_order() {
     let topic = told[1].titled.as_ref().and_then(|titled| titled.topic.as_deref());
     assert_eq!(topic, Some("Fixing the tests"));
     for terminal in &told {
-        assert_eq!((terminal.folder.as_str(), terminal.held), (home.to_str().unwrap(), false));
+        let work = work_folder(&owned);
+        assert_eq!((terminal.folder.as_str(), terminal.held), (work.to_str().unwrap(), false));
     }
 
     owned.kill_mux();
@@ -1178,7 +1206,9 @@ fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_be
     let far = Owned::new();
     let home = fs::canonicalize(far.host.home.path()).unwrap();
     let made = project(&far.host, &home, Some("faraway"));
-    let workstream = workstream(&far.host, made, &home);
+    let yonder = home.join("yonder");
+    fs::create_dir(&yonder).unwrap();
+    let workstream = workstream(&far.host, made, &yonder);
     let mut shown = Shown::new(&far, workstream, 400, 200);
     let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);
     drop(shown);
@@ -1194,7 +1224,7 @@ fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_be
             return Some(());
         }
         if clicked.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
-            let (row, column) = window.spot_of(home.file_name().unwrap().to_str().unwrap());
+            let (row, column) = window.spot_of("yonder");
             let row = (row + 1, column + 4);
             window.send(&[mouse(0, row, 'M'), mouse(0, row, 'm')].concat());
             clicked = Some(Instant::now());

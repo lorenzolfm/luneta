@@ -57,13 +57,13 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone, vault) = (scratch.join("up"), scratch.join("luneta"), scratch.join("Vault"));
     cloned_as_wt(&scratch, &up, &clone);
-    fs::create_dir(&vault).unwrap();
+    fs::create_dir_all(vault.join("notes")).unwrap();
     let daemon = start(host.vars()).unwrap();
 
     let luneta = project(&host, &clone, None);
     let main = workstream(&host, luneta, &clone.join("main"));
     let backup = project(&host, &vault, Some("bitwarden backup"));
-    let notes = workstream(&host, backup, &vault);
+    let notes = workstream(&host, backup, &vault.join("notes"));
     let want = Held::Kept(Kept {
         projects: vec![
             api::Project {
@@ -88,9 +88,9 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                 missing: false,
                 workstreams: vec![api::Workstream {
                     id: notes,
-                    name: "Vault".to_owned(),
+                    name: "notes".to_owned(),
                     renamed: false,
-                    folder: text(&vault),
+                    folder: text(&vault.join("notes")),
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
                     used_at: None,

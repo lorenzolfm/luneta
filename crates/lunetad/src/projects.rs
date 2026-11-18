@@ -606,6 +606,9 @@ impl Projects {
                     return Err(format!("the id {id} comes twice"));
                 }
             }
+            if project.workstreams.iter().any(|workstream| workstream.below.0.is_empty()) {
+                return Err(format!("a workstream of {} sits in its own folder", project.dir.0));
+            }
             if let Some(other) = projects[..at].iter().find(|other| other.dir.nests(&project.dir)) {
                 return Err(nested(&project.dir, other));
             }
@@ -667,6 +670,10 @@ impl Projects {
                     return Err(format!("{many}, as many as are kept"));
                 }
                 let project = changed.project(project)?;
+                if folder == project.dir {
+                    let own = &folder.0;
+                    return Err(format!("{own} is the project's own folder: no workstream"));
+                }
                 let below = project.dir.below(&folder).ok_or_else(|| {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
@@ -1124,16 +1131,16 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_is_in_its_project_s_folder_or_below_it_and_may_share_it() {
+    fn a_workstream_is_below_its_project_s_folder_and_may_share_one() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
         let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let again = workstream(&mut projects, luneta, "/w/luneta/main");
-        let top = workstream(&mut projects, luneta, "/w/luneta");
+        let deep = workstream(&mut projects, luneta, "/w/luneta/main/src");
         assert_eq!(projects.all()[0].workstreams().len(), 3);
-        assert!(main != again && again != top);
+        assert!(main != again && again != deep);
         let folders: Vec<Dir> = projects.folders().collect();
-        let want = ["/w/luneta", "/w/luneta/main", "/w/luneta/main", "/w/luneta"].map(dir);
+        let want = ["/w/luneta", "/w/luneta/main", "/w/luneta/main", "/w/luneta/main/src"].map(dir);
         assert_eq!(folders, want);
         let outside = Change::AddWorkstream { project: luneta, folder: dir("/w/elo"), name: None };
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
@@ -1153,6 +1160,17 @@ mod tests {
         let (_, again) = change(&projects, at("/w/luneta/feat")).unwrap();
         assert_eq!(again, Some(made.0));
         assert!(change(&projects, at("/w/elo")).unwrap_err().contains("is not in /w/luneta"));
+    }
+
+    #[test]
+    fn a_project_s_own_folder_holds_no_workstream() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let add = Change::AddWorkstream { project: luneta, folder: dir("/w/luneta"), name: None };
+        assert!(change(&projects, add).unwrap_err().contains("the project's own folder"));
+        let at = Change::WorkstreamAt { project: luneta, folder: dir("/w/luneta") };
+        assert!(change(&projects, at).unwrap_err().contains("the project's own folder"));
+        assert_eq!(projects.all()[0].workstreams(), []);
     }
 
     #[test]
@@ -1258,9 +1276,9 @@ mod tests {
         assert!(said.contains("as many as are kept"));
         let first = projects.all()[0].id();
         for _ in 0..WORKSTREAMS_MAX {
-            workstream(&mut projects, first, "/p0");
+            workstream(&mut projects, first, "/p0/w");
         }
-        let over = Change::AddWorkstream { project: first, folder: dir("/p0"), name: None };
+        let over = Change::AddWorkstream { project: first, folder: dir("/p0/w"), name: None };
         assert!(change(&projects, over).unwrap_err().contains("as many as are kept"));
     }
 
@@ -1305,7 +1323,7 @@ mod tests {
     fn a_view_opens_closes_and_fills_itself_with_one_of_its_terminals() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         assert!(view(&projects, main).is_empty());
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
@@ -1342,8 +1360,8 @@ mod tests {
     fn a_workstream_closes_with_its_terminals_where_a_forget_is_refused() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
-        let kept = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
+        let kept = workstream(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let right = Placed::Beside { at: one, towards: layout::Towards::Right };
         opened(&mut projects, main, 101, right);
@@ -1397,7 +1415,7 @@ mod tests {
     fn a_terminal_keeps_the_name_it_is_given_until_taken_back() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let one = opened(&mut projects, main, 100, Placed::Alone);
         let name = |projects: &Projects| projects.holding(one).unwrap().1.name().cloned();
         assert_eq!(name(&projects), None);
@@ -1419,7 +1437,7 @@ mod tests {
     fn a_terminal_is_placed_only_where_its_view_has_it_and_its_id_is_free() {
         let mut projects = Projects::default();
         let luneta = project(&mut projects, "/w/luneta");
-        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta/main");
         let size = Size::of(80, 24).unwrap();
         let terminal = |id| {
             Terminal::new(TerminalId::of(id).unwrap(), dir("/w/luneta"), Runs::Shell)

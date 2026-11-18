@@ -5,6 +5,7 @@ use luneta_protocol::unread::Unplaced;
 use lunetad::api::agent::Status as Reported;
 use lunetad::api::{Agent, Status};
 use lunetad::mux::{OwnKey, TabId};
+use lunetad::projects::WorkstreamId;
 use lunetad::seats::Where;
 
 use crate::sidebar::{Listed, PaneKey, Place};
@@ -30,6 +31,7 @@ impl Whose {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Pane(PaneKey),
+    Workstream(WorkstreamId),
     Session,
 }
 
@@ -37,6 +39,7 @@ impl Scope {
     pub fn does(self) -> &'static str {
         match self {
             Scope::Pane(_) => "close the pane",
+            Scope::Workstream(_) => "delete the workstream",
             Scope::Session => "delete the session",
         }
     }
@@ -45,6 +48,7 @@ impl Scope {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: PaneKey, closes: Closes },
+    Workstream { workstream: WorkstreamId, panes: Vec<u32> },
     Session,
 }
 
@@ -114,6 +118,7 @@ pub struct Subject<'a> {
 pub enum Act {
     Pane { session: SessionName, whose: Whose, pane: PaneKey },
     Tab { session: SessionName, whose: Whose, tab: TabId, panes: Vec<u32> },
+    Workstream { session: SessionName, whose: Whose, workstream: WorkstreamId, panes: Vec<u32> },
     Kill { session: SessionName, whose: Whose },
     Leave { session: SessionName, whose: Whose, to: Place },
 }
@@ -123,6 +128,7 @@ impl Act {
         let whose = match self {
             Act::Pane { whose, .. }
             | Act::Tab { whose, .. }
+            | Act::Workstream { whose, .. }
             | Act::Kill { whose, .. }
             | Act::Leave { whose, .. } => whose,
         };
@@ -133,6 +139,7 @@ impl Act {
         match self {
             Act::Pane { .. } => "Close the pane".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
+            Act::Workstream { .. } => "Delete the workstream".to_owned(),
             Act::Kill { session, .. } | Act::Leave { session, .. } => {
                 format!("Delete session {session}")
             },
@@ -142,7 +149,7 @@ impl Act {
     pub fn takes(&self, pane: u32) -> bool {
         match self {
             Act::Pane { pane: closed, .. } => pane == closed.id(),
-            Act::Tab { panes, .. } => panes.contains(&pane),
+            Act::Tab { panes, .. } | Act::Workstream { panes, .. } => panes.contains(&pane),
             Act::Kill { .. } | Act::Leave { .. } => true,
         }
     }
@@ -162,6 +169,9 @@ pub fn plan(subject: &Subject) -> Plan {
         },
         Deletes::Pane { closes: Closes::Tab { id, panes }, .. } => {
             Act::Tab { session, whose, tab: *id, panes: panes.clone() }
+        },
+        Deletes::Workstream { workstream, panes } => {
+            Act::Workstream { session, whose, workstream: *workstream, panes: panes.clone() }
         },
         Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
             Seat::Elsewhere => Act::Kill { session, whose },
@@ -308,6 +318,20 @@ mod tests {
             let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
             assert_eq!(planned.question(), asks);
         }
+    }
+
+    #[test]
+    fn a_workstream_s_delete_asks_first_only_for_an_agent_at_work_in_its_panes() {
+        let luneta = luneta();
+        let workstream = WorkstreamId::of(31).unwrap();
+        let deletes = || Deletes::Workstream { workstream, panes: vec![4, 5] };
+        let planned = |agents| plan(&subject(&luneta, Seat::In, deletes(), agents));
+        assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
+        let asks = planned(vec![(5, Doing::Waiting)]).question();
+        assert_eq!(asks.as_deref(), Some("Delete the workstream? 1 agent, 1 waiting"));
+        let (session, whose) = (luneta.name().clone(), luneta.whose());
+        let act = Act::Workstream { session, whose, workstream, panes: vec![4, 5] };
+        assert_eq!(planned(Vec::new()).act, act, "the seat in the project leaves nothing");
     }
 
     #[test]

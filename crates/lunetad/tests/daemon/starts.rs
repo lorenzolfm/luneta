@@ -34,7 +34,9 @@ const ENDS: Duration = Duration::from_secs(30);
 
 const RUNS: Duration = Duration::from_secs(5);
 
-const CD_FEAT: &str = "cd feat && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
+pub const UNSHOWN: &str = "No workstream to show yet.";
+
+const CD_FEAT: &str = "cd ../feat && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
 pub struct Ended {
     pub status: ExitStatus,
@@ -85,6 +87,14 @@ pub fn directory(name: &str) -> Directory {
     let path = parent.path().join(name);
     fs::create_dir(&path).unwrap();
     Directory { _parent: parent, path }
+}
+
+pub fn work_in(owned: &Owned, name: &str) -> Directory {
+    let mut made = directory(name);
+    project(&owned.host, Path::new(&real(&made.path)), None);
+    made.path.push("main");
+    fs::create_dir(&made.path).unwrap();
+    made
 }
 
 pub fn luneta(vars: Vars, dir: &Path) -> Command {
@@ -227,19 +237,42 @@ pub fn shown(owned: &Owned, folder: &Path) -> Option<api::Workstream> {
 }
 
 #[test]
-fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_a_shell_there() {
+fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_no_workstream_in_it() {
+    let owned = Owned::new();
+    let dir = directory("project");
+    let window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows no workstream", || window.shows(UNSHOWN).then_some(()));
+    let projects = projects_of(&owned);
+    let made: Vec<(&str, &str, usize)> = projects
+        .iter()
+        .map(|project| (project.name.as_str(), project.dir.as_str(), project.workstreams.len()))
+        .collect();
+    assert_eq!(made, [("project", real(&dir.path).as_str(), 0)]);
+}
+
+#[test]
+fn a_bare_luneta_in_a_project_s_own_folder_shows_its_workstream_used_last() {
     if !makes_shells() {
         return;
     }
     let owned = Owned::new();
     let dir = directory("project");
+    let made = project(&owned.host, Path::new(&real(&dir.path)), None);
+    let folders = ["one", "two"].map(|name| dir.path.join(name));
+    for folder in &folders {
+        fs::create_dir(folder).unwrap();
+        workstream(&owned.host, made, Path::new(&real(folder)));
+    }
+    let window = Window::running(luneta(owned.host.vars(), &folders[1]));
+    eventually("luneta shows two", || shown(&owned, &folders[1]));
+    drop(window);
     let _window = Window::open(&owned.host, &dir, &[]);
-    let workstream = eventually("luneta shows its directory", || shown(&owned, &dir.path));
-    assert_eq!(workstream.terminals.len(), 1, "one shell opens in the empty view");
-    let projects = projects_of(&owned);
-    let made: Vec<(&str, &str)> =
-        projects.iter().map(|project| (project.name.as_str(), project.dir.as_str())).collect();
-    assert_eq!(made, [("project", real(&dir.path).as_str())]);
+    thread::sleep(Duration::from_secs(1));
+    let shown = eventually("luneta shows two again", || shown(&owned, &folders[1]));
+    assert_eq!(shown.terminals.len(), 1, "{:?}", projects_of(&owned));
+    assert!(self::shown(&owned, &folders[0]).is_none(), "one, used never, stays empty");
+    let workstreams = projects_of(&owned).iter().map(|it| it.workstreams.len()).sum::<usize>();
+    assert_eq!(workstreams, 2, "no workstream is made in the project's own folder");
 }
 
 #[test]
@@ -251,13 +284,15 @@ fn a_bare_luneta_in_a_project_shows_the_workstream_of_its_folder() {
     let dir = directory("project");
     let below = dir.path.join("below");
     fs::create_dir(&below).unwrap();
+    let other = dir.path.join("other");
+    fs::create_dir(&other).unwrap();
     let made = project(&owned.host, Path::new(&real(&dir.path)), None);
-    workstream(&owned.host, made, Path::new(&real(&dir.path)));
+    workstream(&owned.host, made, Path::new(&real(&other)));
     let in_below = workstream(&owned.host, made, Path::new(&real(&below)));
     let _window = Window::running(luneta(owned.host.vars(), &below));
     let shown = eventually("luneta shows the folder's workstream", || shown(&owned, &below));
     assert_eq!(shown.id, in_below);
-    assert!(self::shown(&owned, &dir.path).is_none(), "the project's other stays empty");
+    assert!(self::shown(&owned, &other).is_none(), "the project's other stays empty");
     assert_eq!(projects_of(&owned).len(), 1);
 }
 
@@ -267,8 +302,8 @@ fn a_new_session_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_pro
         return;
     }
     let owned = Owned::new();
-    let dir = directory("work");
-    let feat = dir.path.join("feat");
+    let dir = work_in(&owned, "work");
+    let feat = dir.path.parent().unwrap().join("feat");
     fs::create_dir(&feat).unwrap();
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
@@ -299,9 +334,11 @@ fn a_named_luneta_shows_the_project_of_that_name_wherever_it_starts() {
     let owned = Owned::new();
     let named = directory("named");
     let made = project(&owned.host, Path::new(&real(&named.path)), None);
-    workstream(&owned.host, made, Path::new(&real(&named.path)));
+    let main = named.path.join("main");
+    fs::create_dir(&main).unwrap();
+    workstream(&owned.host, made, Path::new(&real(&main)));
     let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
-    eventually("luneta shows named", || shown(&owned, &named.path));
+    eventually("luneta shows named", || shown(&owned, &main));
     assert_eq!(projects_of(&owned).len(), 1);
 }
 
@@ -344,9 +381,11 @@ fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
     let inner = outer.path.join("inner");
     fs::create_dir(&inner).unwrap();
     let made = project(&owned.host, Path::new(&real(&inner)), None);
-    workstream(&owned.host, made, Path::new(&real(&inner)));
+    let main = inner.join("main");
+    fs::create_dir(&main).unwrap();
+    workstream(&owned.host, made, Path::new(&real(&main)));
     let _window = Window::open(&owned.host, &outer, &[]);
-    eventually("luneta shows inner", || shown(&owned, &inner));
+    eventually("luneta shows inner", || shown(&owned, &main));
     assert_eq!(projects_of(&owned).len(), 1, "no project is made around another");
 }
 
@@ -363,7 +402,7 @@ fn a_bare_luneta_where_the_directory_names_no_project_asks_for_a_name() {
 #[test]
 fn the_log_says_luneta_ended_by_a_signal() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let command = luneta(owned.host.vars(), &dir.path);
     let ended = on_terminal_with(command, |luneta| {
         eventually("luneta shows work", || shown(&owned, &dir.path));
@@ -377,7 +416,7 @@ fn the_log_says_luneta_ended_by_a_signal() {
 #[test]
 fn a_daemon_that_goes_away_is_started_again_in_moments() {
     let mut owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let _window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     thread::sleep(Duration::from_secs(3));
@@ -396,7 +435,7 @@ fn a_daemon_that_goes_away_is_started_again_in_moments() {
 fn an_answer_of_another_daemon_than_the_one_reached_is_dropped() {
     const OTHER: u32 = 1;
     let mut owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let command = luneta(owned.host.vars(), &dir.path);
     let notes = owned.host.home.path().join("notes");
     let mut stand_in = None;
@@ -433,7 +472,7 @@ fn a_lunetad_that_does_not_start_is_started_once_a_second_at_the_most() {
     script(&elsewhere.path().join("lunetad"), &note);
     let program = elsewhere.path().join("luneta").display().to_string();
 
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let command = luneta_at(&program, owned.host.vars(), &dir.path);
     let mut began = None;
     let ended = on_terminal_with(command, |luneta| {

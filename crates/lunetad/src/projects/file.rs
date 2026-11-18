@@ -398,7 +398,8 @@ fn parse(text: &str) -> Result<Projects, String> {
 
 impl KeptProject {
     fn read(self) -> Result<Project, String> {
-        let workstreams = self.workstreams.into_iter().map(KeptWorkstream::read);
+        let workstreams = self.workstreams.into_iter();
+        let workstreams = workstreams.filter(|it| !it.below.is_empty()).map(KeptWorkstream::read);
         Ok(Project {
             id: self.id.parse()?,
             name: Name::parse(&self.name)?,
@@ -605,7 +606,7 @@ mod tests {
         let made = store.change(Change::AddProject { dir: dir("/home/me/Vault"), name: vault });
         let vault = ProjectId::new(made.unwrap().unwrap());
         store.change(Change::AddProject { dir: dir("/w/luneta"), name: None }).unwrap();
-        let top = dir("/home/me/Vault");
+        let top = dir("/home/me/Vault/notes");
         store.change(Change::AddWorkstream { project: vault, folder: top, name: None }).unwrap();
         let (sub, named) = (dir("/home/me/Vault/a/b"), Some(Name::parse("release").unwrap()));
         store.change(Change::AddWorkstream { project: vault, folder: sub, name: named }).unwrap();
@@ -637,7 +638,7 @@ mod tests {
         let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
-        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta/top"), name: None };
         (projects, _) = projects.changed(top, &mut draw).unwrap();
         let named = Some(Name::parse("release").unwrap());
         let folder = dir("/w/luneta/main");
@@ -652,7 +653,8 @@ mod tests {
       "dir": "/w/luneta",
       "workstreams": [
         {
-          "id": "0000000000000002"
+          "id": "0000000000000002",
+          "below": "top"
         },
         {
           "id": "0000000000000003",
@@ -681,7 +683,7 @@ mod tests {
         let change = Change::AddProject { dir: dir("/w/luneta"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
-        let top = Change::AddWorkstream { project, folder: dir("/w/luneta"), name: None };
+        let top = Change::AddWorkstream { project, folder: dir("/w/luneta/top"), name: None };
         (projects, _) = projects.changed(top, &mut draw).unwrap();
         let workstream = WorkstreamId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
@@ -718,6 +720,7 @@ mod tests {
       "workstreams": [
         {
           "id": "0000000000000002",
+          "below": "top",
           "view": {
             "full": "0000000000000005",
             "tree": [
@@ -776,11 +779,23 @@ mod tests {
     }
 
     #[test]
+    fn a_workstream_kept_in_its_project_s_own_folder_is_dropped_when_read() {
+        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
+            "dir": "/a", "workstreams": [{"id": "0000000000000002"},
+            {"id": "0000000000000003", "below": "b"}]}]}"#;
+        let kept = parse(text).unwrap();
+        let ids: Vec<u64> = kept.all()[0].workstreams().iter().map(|it| it.id().get()).collect();
+        assert_eq!(ids, [3]);
+        assert!(!written(&kept).contains("0000000000000002"));
+    }
+
+    #[test]
     fn a_line_left_unrun_is_kept_apart_from_a_command_and_only_from_version_3() {
         let text = |version: u32, runs: &str| {
             format!(
                 r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
-                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "view": {{"tree": [
+                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "below": "b",
+                "view": {{"tree": [
                 {{"terminal": {{"id": "0000000000000003", "folder": "/a", "runs": {runs}}}}}]}}}}]}}]}}"#
             )
         };
@@ -800,7 +815,8 @@ mod tests {
         let text = |version: u32, name: &str, used: &str| {
             format!(
                 r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
-                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "view": {{"tree": [
+                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "below": "b",
+                "view": {{"tree": [
                 {{"terminal": {{"id": "0000000000000003", {name} "folder": "/a", "runs": "shell"}}}}
                 ]}} {used}}}]}}]}}"#
             )
@@ -846,25 +862,29 @@ mod tests {
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
-                "workstreams": [{"id": "0000000000000002", "view": {"tree": [{"terminal": {
+                "workstreams": [{"id": "0000000000000002", "below": "b",
+                "view": {"tree": [{"terminal": {
                 "id": "0000000000000001", "folder": "/a", "runs": "shell"}}]}}]}]}"#,
                 "comes twice",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
-                "workstreams": [{"id": "0000000000000002", "view": {"full": "0000000000000003",
+                "workstreams": [{"id": "0000000000000002", "below": "b",
+                "view": {"full": "0000000000000003",
                 "tree": [{"terminal": {"id": "0000000000000003", "folder": "/a",
                 "runs": "shell"}}]}}]}]}"#,
                 "a view of one terminal shows it whole already",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
-                "workstreams": [{"id": "0000000000000002", "view": {"tree": []}}]}]}"#,
+                "workstreams": [{"id": "0000000000000002", "below": "b",
+                "view": {"tree": []}}]}]}"#,
                 "workstream 0000000000000002's view: a view holds no terminal",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
-                "workstreams": [{"id": "0000000000000002", "view": {"tree": [{"terminal": {
+                "workstreams": [{"id": "0000000000000002", "below": "b",
+                "view": {"tree": [{"terminal": {
                 "id": "0000000000000003", "folder": "/a", "runs": {"command": "a\u0007"}}}]}}]}]}"#,
                 "terminal 0000000000000003: a command line holds a control character",
             ),
@@ -971,7 +991,7 @@ mod tests {
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         let made = store.change(Change::AddProject { dir: dir("/a"), name: None }).unwrap();
         let project = ProjectId::new(made.unwrap());
-        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
         let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
         let terminal = Terminal::new(TerminalId::of(7).unwrap(), dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
@@ -1049,7 +1069,7 @@ mod tests {
         let mut store = Store::at(Ok(file.clone()), core).unwrap();
         let project = store.change(Change::AddProject { dir: dir("/a"), name: None });
         let project = ProjectId::new(project.unwrap().unwrap());
-        let add = Change::AddWorkstream { project, folder: dir("/a"), name: None };
+        let add = Change::AddWorkstream { project, folder: dir("/a/b"), name: None };
         let workstream = WorkstreamId::new(store.change(add).unwrap().unwrap());
         let size = super::super::Size::of(80, 24).unwrap();
         let [one, two] = [store.fresh().unwrap(), TerminalId::of(u64::MAX).unwrap()];

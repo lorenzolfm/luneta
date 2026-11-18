@@ -947,6 +947,11 @@ impl Target {
                     .and(row.cwd.clone())
                     .and_then(|cwd| Directory::parse(cwd).ok()),
             }),
+            Target::Workstream(_, row) if row.place.project.listed().own() => Some(Removes::Row {
+                session: row.place.project.listed().clone(),
+                scope: Scope::Workstream(row.place.workstream),
+                merged_in: None,
+            }),
             Target::Machine(Machine::Remote(destination)) => {
                 Some(Removes::Machine(destination.clone()))
             },

@@ -7,7 +7,7 @@ use lunetad::api::terminal::Found;
 use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
 use crate::projects::workstream;
-use crate::starts::{directory, mouse, projects_of, shown, Window};
+use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, UNSHOWN};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -25,6 +25,8 @@ const SHRINK: &str = "\x1b[45;3u";
 
 const SPLIT: &str = "\x1b[97;3unp";
 
+const CLOSE: &str = "\x1b[97;3udd";
+
 fn seam(window: &Window) -> Option<usize> {
     window.screen().iter().find_map(|line| {
         let (at, _) = line.char_indices().filter(|(_, c)| *c == '╭').nth(1)?;
@@ -35,7 +37,7 @@ fn seam(window: &Window) -> Option<usize> {
 #[test]
 fn luneta_shows_its_workstream_and_what_its_shell_prints() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || {
@@ -56,7 +58,7 @@ fn luneta_shows_its_workstream_and_what_its_shell_prints() {
 #[test]
 fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
@@ -71,17 +73,23 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
         let tops = window.screen().iter().map(|line| line.matches('╭').count()).max()?;
         (tops == 2).then_some(())
     });
-    window.send("\x1b[97;3udd");
-    eventually("the pane luneta is on closes", || {
-        let terminals = shown(&owned, &dir.path)?.terminals;
-        (terminals.len() == 1).then_some(())
+    window.send(CLOSE);
+    let id = eventually("the pane luneta is on closes", || {
+        let workstream = shown(&owned, &dir.path)?;
+        (workstream.terminals.len() == 1).then_some(workstream.id)
+    });
+    window.send(CLOSE);
+    eventually("the workstream goes with its last pane", || {
+        let projects = projects_of(&owned);
+        let held = projects.iter().flat_map(|it| &it.workstreams).any(|it| it.id == id);
+        (!held && window.shows(UNSHOWN)).then_some(())
     });
 }
 
 #[test]
 fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focused_one() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
@@ -104,11 +112,11 @@ fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focu
 #[test]
 fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_workstream_beside_but_not_past_the_project() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
     let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
-    let docs = dir.path.join("docs");
+    let docs = dir.path.parent().unwrap().join("docs");
     fs::create_dir(&docs).unwrap();
     let second = workstream(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
@@ -133,20 +141,13 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
             let ended = window.luneta.ended_within(Duration::ZERO);
             assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
         }
-        windows.iter().all(|window| window.shows(name)).then_some(())
+        let shows = |window: &Window| window.shows(name) && window.shows(UNSHOWN);
+        windows.iter().all(shows).then_some(())
     });
     let projects = projects_of(owned);
     let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
     assert_eq!(made.len(), 1, "{projects:?}");
-    assert_eq!(made[0].workstreams.len(), 1, "{projects:?}");
-    let terminals = || {
-        let projects = projects_of(owned);
-        let made = projects.into_iter().find(|project| project.name == name)?;
-        Some(made.workstreams.iter().map(|it| it.terminals.len()).sum::<usize>())
-    };
-    eventually("a shell opens in the empty view", || terminals().filter(|count| *count > 0));
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(terminals(), Some(1), "{:?}", projects_of(owned));
+    assert_eq!(made[0].workstreams.len(), 0, "{projects:?}");
 }
 
 #[test]
@@ -168,7 +169,7 @@ fn named_lunetas_started_at_once_show_the_project_one_of_them_made() {
 #[test]
 fn a_luneta_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     let owned = Owned::new();
-    let dir = directory("work");
+    let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     let size = || owned.listing().terminals.first()?.size.map(|it| (it.columns, it.rows));
