@@ -20,7 +20,9 @@ use lunetad::Directory;
 use crate::agents::{self, Harness};
 use crate::close::{self, Act, Doing, Plan, Untold, Whose};
 use crate::commands;
+use crate::machines::Machine;
 use crate::sidebar::PaneKey;
+use crate::terminate;
 use crate::zellij::{self, pane_address, Close, Closing, Open, Pane, Seat, SessionName, Tab};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -519,9 +521,13 @@ impl Agreed {
         Agreed(hasher.finish())
     }
 
-    pub fn of_terminate(machines: &[(String, Option<u64>)], turn: Option<u64>) -> Self {
+    pub fn of_terminate(
+        machines: &[(Machine, Option<terminate::Key>)],
+        unread: &[String],
+        turn: Option<u64>,
+    ) -> Self {
         let mut hasher = DefaultHasher::new();
-        machines.hash(&mut hasher);
+        (machines, unread).hash(&mut hasher);
         turn.hash(&mut hasher);
         Agreed(hasher.finish())
     }

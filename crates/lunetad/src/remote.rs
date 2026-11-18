@@ -383,20 +383,34 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
     }))
 }
 
-pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Parsed {
+    pub machines: Vec<Destination>,
+    pub unread: Vec<String>,
+}
+
+#[must_use]
+pub fn parsed(text: &str) -> Parsed {
     let mut seen = HashSet::new();
-    let mut named = Named::default();
+    let mut parsed = Parsed::default();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         match line.parse::<Destination>() {
             Ok(destination) if seen.insert(destination.clone()) => {
-                named.machines.push(destination);
+                parsed.machines.push(destination);
             },
             Ok(_) => {},
-            Err(why) => {
-                trouble(format!("{why}, and is left out"));
-                named.unread = named.unread.saturating_add(1);
-            },
+            Err(why) => parsed.unread.push(why),
         }
+    }
+    parsed
+}
+
+pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
+    let Parsed { machines, unread } = parsed(text);
+    let mut named = Named { machines, unread: 0 };
+    for why in unread {
+        trouble(format!("{why}, and is left out"));
+        named.unread = named.unread.saturating_add(1);
     }
     if named.machines.len() > HOSTS_MAX {
         let past: Vec<String> = named.machines.drain(HOSTS_MAX..).map(|it| it.0).collect();

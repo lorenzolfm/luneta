@@ -107,6 +107,7 @@ impl Host {
 pub fn process(pane: Option<(&str, u32)>) -> Running {
     let mut command = Command::new("sleep");
     command.arg("600").env_remove("ZELLIJ_SESSION_NAME").env_remove("ZELLIJ_PANE_ID");
+    command.env_remove("LUNETA_MUX_TERMINAL").env_remove("LUNETA_MUX_TERMINAL_MADE");
     if let Some((session, id)) = pane {
         command.env("ZELLIJ_SESSION_NAME", session).env("ZELLIJ_PANE_ID", id.to_string());
     }

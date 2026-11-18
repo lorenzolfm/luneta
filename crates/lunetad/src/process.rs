@@ -18,14 +18,27 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("lunetad reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, mine, start, started, Domain};
+pub use os::{environ, mine, signalled, start, started, Domain};
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Id {
+    pub pid: u32,
+    pub start: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
-    pub pid: u32,
+    pub id: Id,
     pub name: String,
     pub argv: Vec<String>,
     pub environ: Vec<OsString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unended {
+    Outlived,
+    Unsignalled(Errno),
+    Unwatched(Errno),
 }
 
 pub fn var(name: &str) -> Result<Option<String>, String> {

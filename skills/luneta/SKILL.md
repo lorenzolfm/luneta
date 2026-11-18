@@ -288,5 +288,8 @@ show that and ask again. Once it runs, whatever it says shows nowhere, so tell
 the user before you run it that they can run `luneta terminate` from a terminal
 of their own to see what is left.
 
+In luneta's ask box, you cannot run it, as it would end the lunetad you run in:
+tell the user to run `luneta terminate` in a terminal instead.
+
 Never run it unless the user asked for exactly that. Closing sessions or panes is
 `close`.

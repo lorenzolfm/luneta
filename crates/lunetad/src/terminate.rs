@@ -1,13 +1,12 @@
 use std::fs;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use rustix::io::Errno;
-use rustix::process::{kill_process, Pid, Signal};
+use rustix::process::Signal;
 
 use crate::{folder, process};
+
+pub use crate::process::{Id, Unended};
 
 pub const LUNETA: &str = "luneta";
 
@@ -17,19 +16,22 @@ pub const MUX: &str = "luneta-mux";
 
 pub const GRACE: Duration = Duration::from_secs(5);
 
-pub const KILLED: Duration = Duration::from_secs(2);
+pub const KILL_WAIT: Duration = Duration::from_secs(2);
+
+const _: () = assert!(!GRACE.is_zero(), "a process has a while to end at its SIGTERM");
+const _: () = assert!(!KILL_WAIT.is_zero(), "a process has a while to end at its SIGKILL");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Luneta {
-    pub pid: u32,
+    pub id: Id,
     pub argv: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Running {
     pub lunetas: Vec<Luneta>,
-    pub lunetads: Vec<u32>,
-    pub muxes: Vec<u32>,
+    pub lunetads: Vec<Id>,
+    pub muxes: Vec<Id>,
 }
 
 impl Running {
@@ -39,8 +41,8 @@ impl Running {
     }
 
     #[must_use]
-    pub fn luneta_pids(&self) -> Vec<u32> {
-        self.lunetas.iter().map(|luneta| luneta.pid).collect()
+    pub fn luneta_ids(&self) -> Vec<Id> {
+        self.lunetas.iter().map(|luneta| luneta.id.clone()).collect()
     }
 }
 
@@ -52,18 +54,22 @@ pub fn running(folder: &Path) -> Running {
 fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
     let mut running = Running::default();
     for found in found {
-        let theirs = folder::find_in(&found.environ);
-        if found.pid == me || !theirs.is_some_and(|theirs| same(&theirs, folder)) {
+        if found.id.pid == me {
             continue;
         }
-        match found.name.as_str() {
-            LUNETA => running.lunetas.push(Luneta { pid: found.pid, argv: found.argv }),
-            LUNETAD => running.lunetads.push(found.pid),
-            MUX => running.muxes.push(found.pid),
-            _ => {},
+        let Some(theirs) = folder::find_in(&found.environ) else {
+            continue;
+        };
+        if same(&theirs, folder) {
+            match found.name.as_str() {
+                LUNETA => running.lunetas.push(Luneta { id: found.id, argv: found.argv }),
+                LUNETAD => running.lunetads.push(found.id),
+                MUX => running.muxes.push(found.id),
+                _ => {},
+            }
         }
     }
-    running.lunetas.sort_by_key(|luneta| luneta.pid);
+    running.lunetas.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     running.lunetads.sort_unstable();
     running.muxes.sort_unstable();
     running
@@ -74,54 +80,15 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 
 #[must_use]
-pub fn ended(pids: &[u32]) -> Vec<u32> {
-    let left = signalled(pids, Signal::TERM, GRACE);
-    if left.is_empty() {
-        return left;
+pub fn end(ids: &[Id]) -> Vec<(Id, Unended)> {
+    let termed = process::signalled(ids, Signal::TERM, GRACE);
+    let (outlived, mut left): (Vec<_>, Vec<_>) =
+        termed.into_iter().partition(|(_, why)| *why == Unended::Outlived);
+    if !outlived.is_empty() {
+        let outlived: Vec<Id> = outlived.into_iter().map(|(id, _)| id).collect();
+        left.extend(process::signalled(&outlived, Signal::KILL, KILL_WAIT));
     }
-    signalled(&left, Signal::KILL, KILLED)
-}
-
-fn signalled(pids: &[u32], signal: Signal, wait: Duration) -> Vec<u32> {
-    let (ends, heard) = mpsc::channel();
-    let (mut left, mut waiting) = (Vec::new(), Vec::new());
-    for &pid in pids {
-        let Some(id) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-            continue;
-        };
-        match kill_process(id, signal) {
-            Ok(()) => {},
-            Err(Errno::SRCH) => continue,
-            Err(_) => {
-                left.push(pid);
-                continue;
-            },
-        }
-        let ends = ends.clone();
-        let watching = thread::Builder::new().name(format!("ends {pid}")).spawn(move || {
-            if process::ends(pid).is_ok() {
-                let _ = ends.send(pid);
-            }
-        });
-        if watching.is_ok() {
-            waiting.push(pid);
-        } else {
-            left.push(pid);
-        }
-    }
-    drop(ends);
-    let deadline = Instant::now() + wait;
-    while !waiting.is_empty() {
-        let Some(until) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        match heard.recv_timeout(until) {
-            Ok(pid) => waiting.retain(|waits| *waits != pid),
-            Err(_) => break,
-        }
-    }
-    left.extend(waiting);
-    left.sort_unstable();
+    left.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     left
 }
 
@@ -129,9 +96,14 @@ fn signalled(pids: &[u32], signal: Signal, wait: Duration) -> Vec<u32> {
 mod tests {
     use std::ffi::OsString;
     use std::io::{BufRead as _, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
+    use std::time::Instant;
 
     use super::*;
+
+    fn id_of(child: &Child) -> Id {
+        Id { pid: child.id(), start: process::start(child.id()).unwrap() }
+    }
 
     #[test]
     fn a_process_ends_at_its_term_and_one_that_holds_out_at_its_kill() {
@@ -143,17 +115,29 @@ mod tests {
         BufReader::new(holds.stdout.take().unwrap()).read_line(&mut held).unwrap();
         assert_eq!(held, "held\n");
         let started = Instant::now();
-        assert_eq!(ended(&[ends.id(), holds.id()]), Vec::<u32>::new());
+        let (ends_id, holds_id) = (id_of(&ends), id_of(&holds));
+        assert_eq!(end(&[ends_id.clone(), holds_id]), []);
         assert!(started.elapsed() >= GRACE, "the one that holds out has its grace");
         assert!(ends.wait().unwrap().code().is_none());
         assert!(holds.wait().unwrap().code().is_none());
-        assert_eq!(ended(&[ends.id()]), Vec::<u32>::new(), "one that has ended is left alone");
+        assert_eq!(end(&[ends_id]), [], "one that has ended is left alone");
+    }
+
+    #[test]
+    fn a_process_that_took_an_ended_one_s_pid_is_left_alone() {
+        let mut runs = Command::new("sleep").arg("60").spawn().unwrap();
+        let earlier = Id { pid: runs.id(), start: "0".to_owned() };
+        assert_eq!(end(&[earlier]), []);
+        assert!(runs.try_wait().unwrap().is_none(), "another process of its pid was ended");
+        runs.kill().unwrap();
+        runs.wait().unwrap();
     }
 
     fn found(pid: u32, name: &str, environ: &[&str]) -> process::Found {
+        let id = Id { pid, start: "1".to_owned() };
         let argv = vec![name.to_owned()];
         let environ = environ.iter().map(OsString::from).collect();
-        process::Found { pid, name: name.to_owned(), argv, environ }
+        process::Found { id, name: name.to_owned(), argv, environ }
     }
 
     #[test]
@@ -170,7 +154,9 @@ mod tests {
             found(8, LUNETAD, &["XDG_RUNTIME_DIR=/run/user/1000", "XDG_RUNTIME_DIR=/tmp"]),
         ];
         let running = running_of(listed, folder, 7);
-        let lunetas: Vec<u32> = running.luneta_pids();
-        assert_eq!((lunetas, running.lunetads, running.muxes), (vec![1], vec![2, 8], vec![3]));
+        let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
+        let front_ends = pids(running.luneta_ids());
+        let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
+        assert_eq!((front_ends, daemons, muxes), (vec![1], vec![2, 8], vec![3]));
     }
 }

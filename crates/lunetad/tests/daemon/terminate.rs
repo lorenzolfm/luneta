@@ -1,13 +1,13 @@
 use std::fs;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use lunetad::api::projects::Held;
 use lunetad::mux::own::api::terminal::Program;
 use rustix::process::{test_kill_process, Pid};
 
-use crate::host::{answered, eventually, start, Host, Running, Vars, LUNETA};
+use crate::host::{answered, eventually, start, Host, Running, Vars, LUNETA, LUNETAD};
 use crate::own::{built_server, Owned};
 use crate::projects::{kept, project, workstream};
 use crate::remote::{hosts, FakeSsh};
@@ -143,6 +143,121 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
     assert!(far_daemon.ended_within(ENDS).is_some(), "far's lunetad runs on");
     assert!(!kept(&far).exists());
     assert!(!Path::new(&kept(&here_host)).exists());
+}
+
+fn named_bash(name: &str, at: &Path) -> std::path::PathBuf {
+    let found = Command::new("sh").args(["-c", "command -v bash"]).output().unwrap();
+    let bash = String::from_utf8(found.stdout).unwrap();
+    let named = at.join(name);
+    fs::copy(bash.trim(), &named).unwrap();
+    named
+}
+
+#[test]
+fn luneta_terminate_forgets_again_what_a_lunetad_started_meanwhile_kept() {
+    let host = Host::new();
+    let mut daemon = start(host.vars()).unwrap();
+    kept_in_home(&host);
+    let scratch = tempfile::tempdir().unwrap();
+    let saved = scratch.path().join("saved");
+    fs::copy(kept(&host), &saved).unwrap();
+    let mux = named_bash("luneta-mux", scratch.path());
+    let log = scratch.path().join("lunetad.log");
+    let up = scratch.path().join("up");
+    let script = "trap 'kill \"$idle\"; cp \"$1\" \"$2\"; \"$3\" >/dev/null 2>\"$4\" & \
+                  until grep -q \"listening on\" \"$4\" 2>/dev/null; do sleep 0.05; done; \
+                  exit' TERM; sleep 3600 & idle=$!; : >\"$5\"; wait \"$idle\"";
+    let mut writer = host.vars().command(mux.to_str().unwrap());
+    writer.args(["-c", script, "luneta-mux"]);
+    let (kept_at, lunetad) = (kept(&host), Path::new(LUNETAD));
+    let paths = [saved.as_path(), kept_at.as_path(), lunetad, log.as_path(), up.as_path()];
+    writer.args(paths);
+    let mut writer = Running::spawn(writer.stdin(Stdio::null()).stdout(Stdio::null()));
+    eventually("the writer is up", || up.exists().then_some(()));
+
+    let planned = terminate(host.vars(), None);
+    assert_eq!(planned.code, Some(3), "{}", planned.stderr);
+    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 workstream";
+    assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
+
+    let ended = terminate(host.vars(), Some(&plan_in(&planned)));
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    let says = "ended 2 lunetads and luneta-mux; forgot 1 project and 1 workstream";
+    assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
+    assert!(daemon.ended_within(ENDS).is_some(), "lunetad runs on");
+    assert!(writer.ended_within(ENDS).is_some(), "luneta-mux runs on");
+    assert!(fs::read_to_string(&log).unwrap().contains("listening on"), "no lunetad started");
+    assert!(!kept(&host).exists(), "what the lunetad started meanwhile kept is kept still");
+}
+
+#[test]
+fn luneta_terminate_says_each_line_of_the_hosts_file_that_names_no_machine() {
+    let host = Host::new();
+    hosts(&host, "two words\n");
+    let planned = terminate(host.vars(), None);
+    assert_eq!(planned.code, Some(3), "{}", planned.stderr);
+    let [local, unread] = &planned.lines[..] else {
+        panic!("a line for this machine and one for the line: {:?}", planned.lines);
+    };
+    assert_eq!(here(local), "nothing of luneta runs; keeps no project to forget");
+    let skipped = "hosts file: skipped a line, as it names no machine ssh could be asked of, and \
+                   so any luneta it meant runs on there and keeps its projects: \"two words\" is \
+                   more than one word";
+    assert_eq!(unread, skipped);
+
+    hosts(&host, "three more words\n");
+    let refused = terminate(host.vars(), Some(&plan_in(&planned)));
+    assert_eq!(refused.code, Some(3), "{}", refused.stderr);
+    assert!(refused.stderr.contains("told yes to another plan than this"), "{}", refused.stderr);
+
+    let ended = terminate(host.vars(), Some(&plan_in(&refused)));
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    let [_, unread] = &ended.lines[..] else {
+        panic!("a line for this machine and one for the line: {:?}", ended.lines);
+    };
+    assert!(unread.ends_with("\"three more words\" is more than one word"), "{unread}");
+}
+
+fn here_ending(vars: Vars, key: &str, set: &[(&str, &str)]) -> Said {
+    let mut command = vars.command(LUNETA);
+    command.args(["terminate", "--here", "--ending", key]).stdin(Stdio::null());
+    command.envs(set.iter().copied());
+    let output = answered(&mut command);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    Said {
+        code: output.status.code(),
+        lines: stdout.lines().map(str::to_owned).collect(),
+        stderr: String::from_utf8(output.stderr).unwrap(),
+    }
+}
+
+#[test]
+fn luneta_terminate_here_ends_nothing_in_luneta_s_terminal_or_on_a_key_that_changed() {
+    let host = Host::new();
+    let mut daemon = start(host.vars()).unwrap();
+    let mut asked = host.vars().command(LUNETA);
+    let asked = answered(asked.args(["terminate", "--here"]).stdin(Stdio::null()));
+    assert!(asked.status.success(), "{}", String::from_utf8_lossy(&asked.stderr));
+    let stdout = String::from_utf8(asked.stdout).unwrap();
+    let key = stdout.lines().next().expect("a key comes first").to_owned();
+
+    let terminal = [("LUNETA_MUX_TERMINAL", "7"), ("LUNETA_MUX_TERMINAL_MADE", "60")];
+    let zellij = [("ZELLIJ_SESSION_NAME", "work"), ("ZELLIJ_PANE_ID", "2")];
+    for set in [&terminal[..], &zellij[..]] {
+        let refused = here_ending(host.vars(), &key, set);
+        assert_eq!(refused.code, Some(1), "{set:?}: {}", refused.stderr);
+        assert!(refused.stderr.contains("runs in a terminal of luneta's"), "{}", refused.stderr);
+        assert!(refused.lines.is_empty(), "{:?}", refused.lines);
+    }
+    let stale = here_ending(host.vars(), "0000000000000000", &[]);
+    assert_eq!(stale.code, Some(1), "{}", stale.stderr);
+    assert!(stale.stderr.contains("changed since: ends lunetad"), "{}", stale.stderr);
+    assert!(daemon.ended_within(Duration::from_millis(500)).is_none(), "lunetad was ended");
+
+    let ended = here_ending(host.vars(), &key, &[]);
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    assert_eq!(ended.lines, ["ended lunetad; kept no project to forget"]);
+    assert!(daemon.ended_within(ENDS).is_some(), "lunetad runs on");
 }
 
 #[test]

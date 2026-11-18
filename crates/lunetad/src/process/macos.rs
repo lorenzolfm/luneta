@@ -1,16 +1,16 @@
 use std::ffi::OsString;
 use std::io;
 use std::ptr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::event::kqueue::{kevent, kqueue, Event, EventFilter, EventFlags, ProcessEvents};
 use rustix::io::Errno;
-use rustix::process::Pid;
+use rustix::process::{kill_process, Pid, Signal};
 use sysinfo::{
     Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
 };
 
-use super::Found;
+use super::{Found, Id, Unended};
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -55,11 +55,102 @@ pub fn mine(names: &[&str]) -> Vec<Found> {
         if !mine || process.status() == ProcessStatus::Zombie {
             continue;
         }
+        let Some(start) = i64::try_from(process.start_time()).ok().map(lstart) else {
+            continue;
+        };
         let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
         let environ = process.environ().to_vec();
-        found.push(Found { pid: pid.as_u32(), name: name.to_owned(), argv, environ });
+        let id = Id { pid: pid.as_u32(), start };
+        found.push(Found { id, name: name.to_owned(), argv, environ });
     }
     found
+}
+
+fn living_start(pid: u32) -> Option<String> {
+    let living = |process: &Process| {
+        (process.status() != ProcessStatus::Zombie).then(|| process.start_time())
+    };
+    let secs = with(pid, ProcessRefreshKind::nothing(), living)??;
+    Some(lstart(i64::try_from(secs).ok()?))
+}
+
+#[expect(
+    unsafe_code,
+    reason = "rustix's kevent is unsafe for the files an event may name, and these name none"
+)]
+#[must_use]
+pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended)> {
+    let queue = match kqueue() {
+        Ok(queue) => queue,
+        Err(error) => {
+            return ids.iter().map(|id| (id.clone(), Unended::Unsignalled(error))).collect();
+        },
+    };
+    let mut left = Vec::new();
+    let mut waiting: Vec<(&Id, Pid)> = Vec::new();
+    for id in ids {
+        let Some(pid) = i32::try_from(id.pid).ok().and_then(Pid::from_raw) else {
+            left.push((id.clone(), Unended::Unsignalled(Errno::INVAL)));
+            continue;
+        };
+        if living_start(id.pid).as_ref() != Some(&id.start) {
+            continue;
+        }
+        match kill_process(pid, signal) {
+            Ok(()) => {},
+            Err(Errno::SRCH) => continue,
+            Err(error) => {
+                left.push((id.clone(), Unended::Unsignalled(error)));
+                continue;
+            },
+        }
+        let flags = ProcessEvents::EXIT;
+        let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+        let mut unheard: [Event; 0] = [];
+        match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
+            Ok(_) => waiting.push((id, pid)),
+            Err(Errno::SRCH) => {},
+            Err(error) => left.push((id.clone(), Unended::Unwatched(error))),
+        }
+    }
+    let deadline = Instant::now() + wait;
+    let flags = ProcessEvents::EXIT;
+    let blank = EventFilter::Proc { pid: Pid::INIT, flags };
+    let blank = Event::new(blank, EventFlags::empty(), ptr::null_mut());
+    while !waiting.is_empty() {
+        let Some(until) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        let mut heard = vec![blank; waiting.len()];
+        let count = match unsafe { kevent(&queue, &[], &mut heard[..], Some(until)) } {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(Errno::INTR) => continue,
+            Err(error) => {
+                let unwatched = Unended::Unwatched(error);
+                left.extend(waiting.drain(..).map(|(id, _)| (id.clone(), unwatched)));
+                break;
+            },
+        };
+        for event in heard.iter().take(count) {
+            let EventFilter::Proc { pid, .. } = event.filter() else {
+                continue;
+            };
+            let Some(index) = waiting.iter().position(|(_, waits)| *waits == pid) else {
+                continue;
+            };
+            let (id, _) = waiting.swap_remove(index);
+            if !event.flags().contains(EventFlags::ERROR) {
+                continue;
+            }
+            let error = i32::try_from(event.data()).map_or(Errno::INVAL, Errno::from_raw_os_error);
+            if error != Errno::SRCH {
+                left.push((id.clone(), Unended::Unwatched(error)));
+            }
+        }
+    }
+    left.extend(waiting.into_iter().map(|(id, _)| (id.clone(), Unended::Outlived)));
+    left
 }
 
 #[expect(

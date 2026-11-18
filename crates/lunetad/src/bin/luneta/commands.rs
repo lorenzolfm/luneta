@@ -184,10 +184,13 @@ pub enum Command {
         #[arg(
             long,
             hide = true,
+            value_name = "KEY",
+            value_parser = terminate::key,
             requires = "here",
-            help = "End it all here at once, and say what ended"
+            help = "End it all here at once, while what would end here is still what `--here` \
+                    said as `KEY`, and say what ended; refused in a terminal of luneta's"
         )]
-        ending: bool,
+        ending: Option<terminate::Key>,
     },
     #[command(
         about = "Read text aloud on the machine you sit at, whichever machine this runs on: queue \

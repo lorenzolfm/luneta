@@ -356,15 +356,22 @@ fn locked(file: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     let opened = options.create(true).truncate(false).write(true).open(&path);
     let lock = opened.map_err(|error| failed(&path, error))?;
-    for _ in 0..HELD_TRIES {
-        match lock.try_lock() {
-            Ok(()) => return Ok(lock),
-            Err(TryLockError::WouldBlock) => thread::sleep(HELD_PAUSE),
-            Err(TryLockError::Error(error)) => return Err(failed(&path, error)),
-        }
+    if held(&lock).map_err(|error| failed(&path, error))? {
+        return Ok(lock);
     }
     let folder = folder.display();
     Err(format!("another lunetad keeps the projects in {folder}, and so none are kept here"))
+}
+
+fn held(lock: &File) -> io::Result<bool> {
+    for _ in 0..HELD_TRIES {
+        match lock.try_lock() {
+            Ok(()) => return Ok(true),
+            Err(TryLockError::WouldBlock) => thread::sleep(HELD_PAUSE),
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 pub fn kept() -> Result<Projects, String> {
@@ -393,12 +400,8 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
         },
         Err(error) => return Err(failed(error)),
     };
-    match lock.try_lock() {
-        Ok(()) => {},
-        Err(TryLockError::WouldBlock) => {
-            return Err(format!("a lunetad keeps them still, as it holds {}", path.display()));
-        },
-        Err(TryLockError::Error(error)) => return Err(failed(error)),
+    if !held(&lock).map_err(failed)? {
+        return Err(format!("a lunetad keeps them still, as it holds {}", path.display()));
     }
     let held = match read(file) {
         Ok(projects) => Forgotten::Read(projects),
