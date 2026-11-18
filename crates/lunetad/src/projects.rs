@@ -252,9 +252,13 @@ impl Dir {
     }
 
     pub fn found(path: &str) -> Result<Dir, String> {
+        Dir::found_in(path, std::env::var("HOME").ok().as_deref())
+    }
+
+    fn found_in(path: &str, home: Option<&str>) -> Result<Dir, String> {
         let home = || {
             let unset = format!("{path}: HOME is not set to an absolute path");
-            std::env::var("HOME").ok().filter(|home| home.starts_with('/')).ok_or(unset)
+            home.filter(|home| home.starts_with('/')).map(str::to_owned).ok_or(unset)
         };
         let path = match path.strip_prefix('~') {
             Some("") => home()?,
@@ -1134,12 +1138,14 @@ mod tests {
         assert!(Dir::found(file.to_str().unwrap()).unwrap_err().ends_with("is no folder"));
         assert!(Dir::found("real").unwrap_err().contains("no absolute path"));
         assert!(Dir::found("~me/real").unwrap_err().contains("no absolute path"));
-        if let Ok(home) = std::env::var("HOME") {
-            let home = fs::canonicalize(home).unwrap();
-            for at in ["~", "~/"] {
-                assert_eq!(Dir::found(at).unwrap().as_str(), home.to_str().unwrap(), "{at}");
-            }
+        let home = real.to_str();
+        for at in ["~", "~/"] {
+            assert_eq!(Dir::found_in(at, home).unwrap().as_str(), real.to_str().unwrap());
         }
+        let below = Dir::found_in("~/file", home).unwrap_err();
+        assert!(below.ends_with("is no folder"), "{below}");
+        let unset = Dir::found_in("~", None).unwrap_err();
+        assert!(unset.contains("HOME is not set"), "{unset}");
         let nowhere = real.join("nowhere");
         assert!(Dir::found(nowhere.to_str().unwrap()).unwrap_err().contains("No such file"));
     }
