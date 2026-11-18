@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod bounds;
 #[cfg(test)]
+mod folder;
+#[cfg(test)]
 mod host;
 #[cfg(test)]
 mod shells;

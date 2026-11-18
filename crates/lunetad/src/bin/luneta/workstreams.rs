@@ -374,7 +374,7 @@ pub fn real(cwd: &Path) -> Result<PathBuf, String> {
 }
 
 fn made_there(machine: &Machine, change: Change) -> Result<Option<Made>, String> {
-    let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
+    let path = lunetad::folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"))?;
     changed_on(&path, on(machine), change).map_err(Unmade::said)
 }
 

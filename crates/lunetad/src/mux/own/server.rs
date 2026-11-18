@@ -99,8 +99,11 @@ pub(super) fn refused(status: &Status) -> Failure {
 }
 
 pub fn socket() -> Result<PathBuf, Failure> {
-    let unset = || Failure::Own("neither XDG_RUNTIME_DIR nor TMPDIR is set".to_owned());
-    Ok(folder::find().ok_or_else(unset)?.join(SOCKET))
+    Ok(listened_in()?.join(SOCKET))
+}
+
+fn listened_in() -> Result<PathBuf, Failure> {
+    folder::find().map_err(|unfound| Failure::Own(unfound.to_string()))
 }
 
 pub(super) async fn connect(
@@ -535,6 +538,7 @@ struct Started {
 
 impl Started {
     fn spawned() -> Result<Started, Failure> {
+        let folder = listened_in()?;
         let (reaper, handed) = mpsc::sync_channel::<Child>(1);
         let reaping = move || {
             if let Ok(mut child) = handed.recv()
@@ -547,6 +551,7 @@ impl Started {
         thread.map_err(|error| Failure::Own(format!("no thread to reap it: {error}")))?;
         let program = program();
         let mut command = Command::new(&program);
+        command.arg(&folder);
         in_no_pane(&mut command);
         command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
         let spawned = command.spawn();

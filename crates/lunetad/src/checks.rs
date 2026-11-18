@@ -247,7 +247,7 @@ pub fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     };
     let repositories: Vec<&str> =
         [page.repository.as_str()].into_iter().chain(head.as_deref()).collect();
-    let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
+    let runtime = folder::find().map_err(|unfound| format!("{unfound}, to keep it in"))?;
     Ok(keep(&runtime, viewed.head_ref_oid, &checks, &repositories, fetch, SystemTime::now()))
 }
 

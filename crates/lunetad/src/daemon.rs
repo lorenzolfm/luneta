@@ -1198,7 +1198,7 @@ fn kept_image(
     mut parts: Streaming<KeepImageRequest>,
     size: Size,
 ) -> Result<String, String> {
-    let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
+    let runtime = folder::find().map_err(|unfound| format!("{unfound}, to keep it in"))?;
     let mut keeping = Keeping::new(&runtime, size, SystemTime::now())?;
     let deadline = tokio::time::Instant::now() + images::PATIENCE;
     let minutes = images::PATIENCE.as_secs() / 60;

@@ -123,7 +123,7 @@ fn checked(path: &Path) -> Result<PathBuf, String> {
 pub fn wait(events: Sender<Event>) {
     thread::spawn(move || {
         let found = lunetad::folder::find();
-        let found = found.ok_or_else(|| "neither XDG_RUNTIME_DIR nor TMPDIR is set".to_owned());
+        let found = found.map_err(|unfound| unfound.to_string());
         if let Err(why) = found.and_then(|folder| take(&folder, &events)) {
             let why = format!("no notifications, and nothing read aloud: {why}");
             let _ = events.send(Event::Notice(why));

@@ -57,7 +57,7 @@ fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
         if found.id.pid == me {
             continue;
         }
-        let Some(theirs) = folder::find_in(&found.environ) else {
+        let Ok(theirs) = folder::find_in(&found.environ) else {
             continue;
         };
         if same(&theirs, folder) {

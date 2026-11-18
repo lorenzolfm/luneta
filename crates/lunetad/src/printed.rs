@@ -59,7 +59,7 @@ pub fn kept_in(terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
 }
 
 fn kept(dump: &str, typed: &Said) -> Result<Printed, String> {
-    let runtime = folder::find().ok_or("neither XDG_RUNTIME_DIR nor TMPDIR is set, to keep it in")?;
+    let runtime = folder::find().map_err(|unfound| format!("{unfound}, to keep it in"))?;
     keep(&runtime, cut(dump, typed.as_str()), SystemTime::now())
 }
 

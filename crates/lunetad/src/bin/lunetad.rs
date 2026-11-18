@@ -42,9 +42,12 @@ fn main() -> ExitCode {
         log::say(&format!("no session of its own: {error}"));
         return ExitCode::FAILURE;
     }
-    let Some(folder) = folder::find() else {
-        log::say("neither XDG_RUNTIME_DIR nor TMPDIR is set, to listen in");
-        return ExitCode::FAILURE;
+    let folder = match folder::find() {
+        Ok(folder) => folder,
+        Err(unfound) => {
+            log::say(&format!("{unfound}, to listen in"));
+            return ExitCode::FAILURE;
+        },
     };
     let claim = match Claim::take(&folder) {
         Ok(claim) => claim,

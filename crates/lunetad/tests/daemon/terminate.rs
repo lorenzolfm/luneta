@@ -62,6 +62,7 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
     kept_in_home(&owned.host);
     let server = built_server();
     let mut mux = owned.host.vars().command(server.to_str().unwrap());
+    mux.arg(owned.host.folder());
     let mut mux = Running::spawn(mux.stdin(Stdio::null()));
     let socket = owned.socket();
     eventually("the server listens", || socket.exists().then_some(()));
