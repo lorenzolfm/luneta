@@ -419,6 +419,7 @@ impl Views {
                     Ask::CloseProject { project, workstreams, seen } => {
                         self.close_project(project, &workstreams, &seen)
                     },
+                    Ask::Bring { workstream, from } => self.bring(workstream, from),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -605,6 +606,31 @@ impl Views {
             assert!(projects.holding(*terminal).is_none(), "terminal {terminal} left its view");
             assert!(!self.known.contains_key(terminal), "terminal {terminal} is known no more");
         }
+    }
+
+    fn bring(
+        &mut self,
+        workstream: WorkstreamId,
+        from: TerminalKey,
+    ) -> Result<Option<Made>, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        if projects.find(workstream).is_none() {
+            return Err(Failed::Refused(format!("no workstream has the id {workstream}")));
+        }
+        let held = self.known.iter().find(|(_, known)| known.key == from);
+        let Some((&held, _)) = held else {
+            return Ok(None);
+        };
+        let sent = api::ShowResponse { event: Some(show_response::Event::Sent(workstream.get())) };
+        let focused = |it: &Client| it.focus == Some(held) && it.workstream != workstream;
+        let brought = self.clients.iter().filter(|(_, it)| focused(it)).map(|(id, _)| *id);
+        let brought: Vec<ClientId> = brought.collect();
+        for client in brought {
+            if !told(&self.clients[&client].out, sent.clone()) {
+                self.clients.remove(&client);
+            }
+        }
+        Ok(None)
     }
 
     fn kept(&self) -> Result<&Projects, String> {

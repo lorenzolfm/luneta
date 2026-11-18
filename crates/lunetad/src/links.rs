@@ -998,7 +998,8 @@ fn cloned(
     best.map(|(_, at)| at)
 }
 
-fn holder(dir: &str) -> Option<String> {
+#[must_use]
+pub fn holder(dir: &str) -> Option<String> {
     let Common::Of(common) = common_dir(dir) else {
         return None;
     };

@@ -967,6 +967,7 @@ message ChangeProjectsRequest {
     CloseProject close_project = 17;
     Start start = 18;
     Pull pull = 19;
+    Bring bring = 20;
   }
 
   reserved 6, 7, 13, 14;
@@ -1043,6 +1044,11 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
     repeated fixed64 workstreams = 2;
     repeated fixed64 seen = 3;
+  }
+
+  message Bring {
+    fixed64 workstream = 1;
+    TerminalKey from = 2;
   }
 }
 
@@ -1161,6 +1167,7 @@ message ShowResponse {
     Laid laid = 1;
     string refused = 2;
     Edged edged = 3;
+    fixed64 sent = 4;
   }
 
   message Edged {

@@ -34,6 +34,7 @@ use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::prune;
+use crate::start;
 use crate::terminate;
 use crate::zellij::{self, Seat};
 
@@ -90,6 +91,23 @@ pub enum Command {
                  follows a rename"
     )]
     Here,
+    #[command(
+        about = "Start a workstream, and say its folder. A folder opens a workstream there, in \
+                 the project it is in, or in a project made of it, named after it. A branch has \
+                 a worktree made of it, as `wt add` does, in the clone wt made that this runs \
+                 in. An issue has a branch and a worktree made for it, as a pasted link has, and \
+                 an agent started there on it. A pull request has a worktree made of it. Run in \
+                 a terminal of luneta's, it takes the luneta on that terminal to the workstream"
+    )]
+    Start {
+        #[arg(
+            value_name = "WHAT",
+            help = "A folder, a branch, an issue as `#<number>` or by its link, or the link of a \
+                    pull request, on GitHub, with or without its `https://`. A folder of the \
+                    name goes before a branch of it"
+        )]
+        what: String,
+    },
     #[command(about = "Open a pane, a tab or a session, as the menu's New group does")]
     Open {
         #[command(subcommand)]
@@ -237,6 +255,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
+        Command::Start { what } => start::run(what, folder),
     }
 }
 

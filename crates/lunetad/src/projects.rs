@@ -13,6 +13,7 @@ use luneta_protocol::github::{PullRequest, State, Verdict};
 
 use crate::api;
 use crate::core::{self, Command};
+use crate::mux::own::TerminalKey;
 use crate::watch::Troubles;
 use crate::SessionName;
 
@@ -505,6 +506,7 @@ pub enum Ask {
         workstreams: BTreeSet<WorkstreamId>,
         seen: BTreeSet<TerminalId>,
     },
+    Bring { workstream: WorkstreamId, from: TerminalKey },
 }
 
 impl Ask {
@@ -586,6 +588,12 @@ impl Ask {
                 let seen = seen.into_iter().map(|it| id("seen", it).map(TerminalId));
                 let seen = seen.collect::<Result<BTreeSet<TerminalId>, String>>()?;
                 return Ok(Ask::CloseProject { project, workstreams, seen });
+            },
+            Asked::Bring(asked::Bring { workstream, from }) => {
+                let workstream = id("workstream", workstream).map(WorkstreamId)?;
+                let from = from.ok_or("from: it names no terminal")?;
+                let from = TerminalKey::of(&from).map_err(field("from"))?;
+                return Ok(Ask::Bring { workstream, from });
             },
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {

@@ -2123,6 +2123,13 @@ impl App {
         match heeded {
             Heeded::Quiet => {},
             Heeded::Edged(direction) => self.cross(direction),
+            Heeded::Sent(workstream) => {
+                let Some(right) = &self.right else {
+                    return;
+                };
+                let on = right.machine().clone();
+                self.go_workstream(&on, workstream, None);
+            },
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Forgotten(why) => {
                 let Some(right) = &self.right else {

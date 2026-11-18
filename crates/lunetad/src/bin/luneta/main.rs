@@ -46,6 +46,7 @@ mod skills;
 mod speaker;
 mod speech;
 mod spots;
+mod start;
 mod state;
 mod sweep;
 mod terminate;
