@@ -782,7 +782,6 @@ struct Stream {
     place: WorkstreamPlace,
     name: String,
     folder: String,
-    missing: bool,
     seen: Option<projects::Seen>,
     used: Option<SystemTime>,
     panes: Vec<Pane>,
@@ -795,11 +794,14 @@ impl Known {
             let id = WorkstreamId::of(workstream.id)?;
             let place = WorkstreamPlace { project: project.clone(), workstream: id };
             let panes = workstream.terminals.iter().filter_map(|it| pane_of(it, workstream, tab));
-            let missing = matches!(workstream.seen, Some(api::workstream::Seen::Missing(())));
-            let seen = workstream.seen.and_then(seen_of);
-            let used = workstream.used_at.and_then(|at| SystemTime::try_from(at).ok());
+            let seen = workstream.seen.map(|seen| {
+                projects::Seen::of_api(seen).expect("lunetad says a workstream's stage luneta knows")
+            });
+            let used = workstream.used_at.map(|at| {
+                SystemTime::try_from(at).expect("lunetad says a workstream's last use as a time")
+            });
             let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-            Some(Stream { place, name, folder, missing, seen, used, panes: panes.collect() })
+            Some(Stream { place, name, folder, seen, used, panes: panes.collect() })
         });
         let workstreams = streams.collect();
         let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
@@ -817,23 +819,6 @@ impl Known {
     fn pane(&self, id: u32) -> Option<&Pane> {
         self.panes().find(|pane| pane.id == id)
     }
-}
-
-fn seen_of(seen: api::workstream::Seen) -> Option<projects::Seen> {
-    use projects::Stage;
-    let stage = match seen {
-        api::workstream::Seen::Missing(()) => return Some(projects::Seen::Missing),
-        api::workstream::Seen::Unread(()) => return Some(projects::Seen::Unread),
-        api::workstream::Seen::Stage(stage) => api::Stage::try_from(stage).ok()?,
-    };
-    Some(projects::Seen::Read(match stage {
-        api::Stage::NoBranch => Stage::NoBranch,
-        api::Stage::Working => Stage::Working,
-        api::Stage::PullRequestOpen => Stage::PullRequestOpen,
-        api::Stage::ChecksFailing => Stage::ChecksFailing,
-        api::Stage::Merged => Stage::Merged,
-        api::Stage::Unspecified => return None,
-    }))
 }
 
 fn project_of(spot: &Spot) -> Option<Spot> {
@@ -2278,7 +2263,7 @@ impl Sidebar {
                             machine: machine.clone(),
                             place: stream.place.clone(),
                             name: stream.name.clone(),
-                            missing: stream.missing,
+                            missing: stream.seen == Some(projects::Seen::Missing),
                             hits: stream_hits.unwrap_or_default(),
                             under,
                             here,

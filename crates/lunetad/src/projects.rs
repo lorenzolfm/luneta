@@ -568,6 +568,18 @@ impl Stage {
             Stage::Merged => api::Stage::Merged,
         }
     }
+
+    #[must_use]
+    pub fn of_api(stage: api::Stage) -> Option<Stage> {
+        match stage {
+            api::Stage::Unspecified => None,
+            api::Stage::NoBranch => Some(Stage::NoBranch),
+            api::Stage::Working => Some(Stage::Working),
+            api::Stage::PullRequestOpen => Some(Stage::PullRequestOpen),
+            api::Stage::ChecksFailing => Some(Stage::ChecksFailing),
+            api::Stage::Merged => Some(Stage::Merged),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -584,6 +596,18 @@ impl Seen {
             Seen::Missing => api::workstream::Seen::Missing(()),
             Seen::Unread => api::workstream::Seen::Unread(()),
             Seen::Read(stage) => api::workstream::Seen::Stage(stage.to_api().into()),
+        }
+    }
+
+    #[must_use]
+    pub fn of_api(seen: api::workstream::Seen) -> Option<Seen> {
+        match seen {
+            api::workstream::Seen::Missing(()) => Some(Seen::Missing),
+            api::workstream::Seen::Unread(()) => Some(Seen::Unread),
+            api::workstream::Seen::Stage(stage) => {
+                let stage = api::Stage::try_from(stage).ok()?;
+                Some(Seen::Read(Stage::of_api(stage)?))
+            },
         }
     }
 }
@@ -1517,6 +1541,24 @@ mod tests {
         let checks = Some(Checks { pending: 0, failed, passed: 1 });
         let number = NonZeroU32::new(1).unwrap();
         PullRequest { number, state, url: None, checks, stale: false }
+    }
+
+    #[test]
+    fn what_is_seen_of_a_workstream_comes_back_from_the_api_as_it_went() {
+        let stages = [
+            Stage::NoBranch,
+            Stage::Working,
+            Stage::PullRequestOpen,
+            Stage::ChecksFailing,
+            Stage::Merged,
+        ];
+        let read = stages.map(Seen::Read);
+        for seen in [Seen::Missing, Seen::Unread].into_iter().chain(read) {
+            assert_eq!(Seen::of_api(seen.to_api()), Some(seen));
+        }
+        let unspecified = api::workstream::Seen::Stage(api::Stage::Unspecified.into());
+        assert_eq!(Seen::of_api(unspecified), None);
+        assert_eq!(Seen::of_api(api::workstream::Seen::Stage(i32::MAX)), None);
     }
 
     #[test]

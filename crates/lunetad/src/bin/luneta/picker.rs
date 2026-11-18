@@ -291,9 +291,7 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
             Heard::Renamed { from: renames.name().to_owned(), to, renamed }
         }),
         Ask::Close { on, place, name } => Box::new(move || {
-            let closed = lunetad::folder::find()
-                .ok_or_else(|| "lunetad has made no folder to keep projects in".to_owned())
-                .and_then(|path| workstreams::closed(&path, &on, place.workstream));
+            let closed = workstreams::closed_there(&on, place.workstream);
             Heard::Closed { name, closed }
         }),
         Ask::Dirs { on, ask } => Box::new(move || {
@@ -381,6 +379,10 @@ impl Rows {
         let last = rows.len().checked_sub(1);
         self.at = at.or_else(|| last.map(|last| was.min(last)));
         self.rows = rows;
+        assert_eq!(self.at.is_some(), !self.rows.is_empty(), "a row is lit while there is one");
+        if let Some(at) = self.at {
+            assert!(at < self.rows.len(), "the lit row {at} is one of {}", self.rows.len());
+        }
     }
 
     fn selected(&self) -> Option<&Row> {
@@ -605,6 +607,21 @@ impl Picker {
         workstreams.iter().find(|streamed| streamed.place.workstream == place.workstream)
     }
 
+    fn row_housed(&self, on: &Machine, project: &ProjectRow) -> &Housed {
+        let housed = self.housed(on, project);
+        housed.expect("a project's row is rebuilt with the listing that holds the project")
+    }
+
+    fn row_streamed(&self, on: &Machine, place: &WorkstreamPlace) -> &Streamed {
+        let streamed = self.streamed(on, place);
+        streamed.expect("a workstream's row is rebuilt with the listing that holds it")
+    }
+
+    fn row_new(&self) -> (&Machine, &Housed) {
+        let here = self.here_project();
+        here.expect("a + row is listed only while luneta is in a project")
+    }
+
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
         self.shelved(on)?.away?;
         Some(format!("lunetad does not reach {} now", self.machine_name(on)))
@@ -740,9 +757,9 @@ impl Picker {
                 let yes = key.code == KeyCode::Char('y') && plain(key);
                 if yes { self.plan(on, place, Some(plan)) } else { Picked::Nothing }
             },
-            Stage::Closing { on, place, name, .. } => {
+            Stage::Closing { on, place, name, asks } => {
                 if key.code == KeyCode::Char('y') && plain(key) {
-                    self.close(on, place, name);
+                    self.close(on, place, name, Some(&asks));
                 }
                 Picked::Nothing
             },
@@ -969,8 +986,7 @@ impl Picker {
                 Picked::Go { on: on.clone(), place: Place::Workstream(place.clone()) }
             },
             Key::Project { on, project } => {
-                let dir = self.housed(on, project).map(|housed| housed.dir.clone());
-                match Directory::parse(dir.unwrap_or_default()) {
+                match Directory::parse(self.row_housed(on, project).dir.clone()) {
                     Ok(folder) => {
                         Picked::Add { on: on.clone(), project: project.clone(), folder, name: None }
                     },
@@ -989,9 +1005,7 @@ impl Picker {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
             Key::New { name } => {
-                let Some((on, housed)) = self.beside() else {
-                    return Picked::Nothing;
-                };
+                let (on, housed) = self.row_new();
                 let (on, project, name) = (on.clone(), housed.project.clone(), Some(name.clone()));
                 match Directory::parse(housed.dir.clone()) {
                     Ok(folder) => Picked::Add { on, project, folder, name },
@@ -1004,13 +1018,13 @@ impl Picker {
         }
     }
 
-    fn beside(&self) -> Option<(&Machine, &Housed)> {
+    fn here_project(&self) -> Option<(&Machine, &Housed)> {
         let (on, place) = self.listing.shown.as_ref()?;
         Some((on, self.housed(on, &place.project)?))
     }
 
     fn new_name(&self) -> Option<Name> {
-        self.beside()?;
+        self.here_project()?;
         Name::parse(&self.term).ok()
     }
 
@@ -1020,21 +1034,8 @@ impl Picker {
         };
         match key {
             Key::Workstream { on, place } => {
-                let Some(streamed) = self.streamed(&on, &place) else {
-                    return Picked::Nothing;
-                };
-                let name = streamed.name.clone();
-                if let Some(why) = self.out_of_reach(&on) {
-                    self.error = Some(format!("{name} stays: {why}"));
-                    return Picked::Nothing;
-                }
-                let what = format!("Close workstream {name}");
-                let ending = streamed.ending.as_deref().map_err(|untold| *untold);
-                let asks = close::question(&what, ending);
-                match asks {
-                    Some(asks) => self.stage = Stage::Closing { on, place, name, asks },
-                    None => self.close(on, place, name),
-                }
+                let name = self.row_streamed(&on, &place).name.clone();
+                self.close(on, place, name, None);
                 Picked::Nothing
             },
             Key::Project { project, .. } => {
@@ -1047,9 +1048,19 @@ impl Picker {
         }
     }
 
-    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String) {
-        if self.streamed(&on, &place).is_none() {
+    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String, agreed: Option<&str>) {
+        let Some(streamed) = self.streamed(&on, &place) else {
             self.error = Some(format!("{name} is listed no more"));
+            return;
+        };
+        let ending = streamed.ending.as_deref().map_err(|untold| *untold);
+        let asks = close::question(&format!("Close workstream {name}"), ending);
+        if let Some(why) = self.out_of_reach(&on) {
+            self.error = Some(format!("{name} stays: {why}"));
+            return;
+        }
+        if let Some(asks) = asks.filter(|asks| agreed != Some(asks.as_str())) {
+            self.stage = Stage::Closing { on, place, name, asks };
             return;
         }
         self.asking.push(Ask::Close { on, place, name });
@@ -1067,10 +1078,7 @@ impl Picker {
         }
         let (on, renames) = match self.workstreams.selected().map(|row| &row.key) {
             Some(Key::Workstream { on, place }) => {
-                let Some(streamed) = self.streamed(on, place) else {
-                    return;
-                };
-                let name = streamed.name.clone();
+                let name = self.row_streamed(on, place).name.clone();
                 (on.clone(), Renames::Workstream { place: place.clone(), name })
             },
             Some(Key::Project { on, project }) => (on.clone(), Renames::Project(project.clone())),
@@ -1171,7 +1179,7 @@ impl Picker {
     }
 
     fn workstream_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
-        let tagged = self.listing.shelves.len() > 1;
+        let tagged = self.tagged();
         let mut found = Vec::new();
         let mut machines = Vec::new();
         for shelved in &self.listing.shelves {
@@ -1254,10 +1262,11 @@ impl Picker {
 
     fn follow(&mut self) {
         let preview = match self.rows().selected().map(|row| &row.key) {
-            Some(Key::Workstream { on, place }) => self.streamed(on, place).and_then(|streamed| {
-                let focus = self.focus(on, streamed)?;
-                Some(Preview::Screen((on.clone(), place.project.listed().clone(), Some(focus))))
-            }),
+            Some(Key::Workstream { on, place }) => {
+                let focus = self.focus(on, self.row_streamed(on, place));
+                let looked = |focus| (on.clone(), place.project.listed().clone(), Some(focus));
+                focus.map(|focus| Preview::Screen(looked(focus)))
+            },
             Some(Key::Agent { on, place }) => {
                 Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.pane))))
             },
@@ -1390,9 +1399,7 @@ impl Picker {
         let grey = Style::new().fg(gruvbox::GREY);
         let (lead, name_style, right) = match &row.key {
             Key::Workstream { on, place } => {
-                let Some(streamed) = self.streamed(on, place) else {
-                    return Line::from(Span::raw(" ".repeat(width)));
-                };
+                let streamed = self.row_streamed(on, place);
                 let away = self.shelved(on).and_then(|shelved| shelved.away);
                 let mut right = Vec::new();
                 if streamed.waiting > 0 {
@@ -1463,9 +1470,11 @@ impl Picker {
         spans.extend(name);
         let gap = width.saturating_sub(1 + lead_width + named + right_width + 1);
         if matches!(&row.key, Key::Workstream { on, place } if self.is_shown(on, place)) {
+            let here = Span::styled(" here", Style::new().fg(ACCENT));
+            let rule = gap.saturating_sub(1 + here.width() + 1);
             spans.push(Span::raw(" "));
-            spans.push(Span::styled("─".repeat(gap.saturating_sub(7)), Style::new().fg(ACCENT)));
-            spans.push(Span::styled(" here", Style::new().fg(ACCENT)));
+            spans.push(Span::styled("─".repeat(rule), Style::new().fg(ACCENT)));
+            spans.push(here);
             spans.push(Span::raw(" "));
         } else {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -1475,8 +1484,12 @@ impl Picker {
         Line::from(spans)
     }
 
+    fn tagged(&self) -> bool {
+        self.listing.shelves.len() > 1
+    }
+
     fn tag(&self, on: &Machine, away: Option<&'static str>) -> Vec<Span<'static>> {
-        if self.listing.shelves.len() < 2 {
+        if !self.tagged() {
             return Vec::new();
         }
         let machine = self.machine_name(on);
@@ -1517,7 +1530,7 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
-            if self.list == List::Workstreams && self.beside().is_some() {
+            if self.list == List::Workstreams && self.here_project().is_some() {
                 lines.push(Line::default());
                 lines.push(Line::styled(" type a name to make a workstream of it", grey));
             }
@@ -1535,9 +1548,7 @@ impl Picker {
                 return;
             },
             Key::New { name } => {
-                let Some((_, housed)) = self.beside() else {
-                    return;
-                };
+                let (_, housed) = self.row_new();
                 let project = housed.project.listed().name();
                 let words = format!(
                     "no workstream matches: Enter makes one named {}, in {project}'s folder, \
@@ -1553,7 +1564,7 @@ impl Picker {
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 caption.push(Span::styled("no workstream", grey));
-                let dir = self.housed(on, project).map_or("", |housed| housed.dir.as_str());
+                let dir = &self.row_housed(on, project).dir;
                 let words = format!("Enter starts a workstream in {dir}");
                 framed(buffer, area, &row.name, "", said(caption, &words));
                 return;
@@ -1567,9 +1578,7 @@ impl Picker {
                 return;
             },
             Key::Workstream { on, place } => {
-                let Some(streamed) = self.streamed(on, place) else {
-                    return;
-                };
+                let streamed = self.row_streamed(on, place);
                 let count = streamed.terminals.len();
                 let right =
                     if count == 1 { "1 terminal".to_owned() } else { format!("{count} terminals") };
@@ -1683,9 +1692,8 @@ impl Picker {
                 },
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
                 Key::New { name } => {
-                    let project = self.beside().map(|(_, housed)| housed.project.listed().name());
-                    let name = name.as_str();
-                    Ok(project.map_or_default(|it| format!("New workstream \"{name}\" in {it}")))
+                    let project = self.row_new().1.project.listed().name();
+                    Ok(format!("New workstream \"{}\" in {project}", name.as_str()))
                 },
             },
             None if self.list == List::Workstreams && !self.term.is_empty() => {
@@ -2489,6 +2497,27 @@ mod tests {
         press(&mut picker, KeyCode::Delete);
         let asks = "Close workstream api? luneta cannot tell which agents";
         assert!(said(&picker).contains(asks), "{}", said(&picker));
+    }
+
+    #[test]
+    fn a_yes_to_closing_a_workstream_asks_again_when_what_would_end_changed_since() {
+        let mut picker = opened(busy(works()));
+        down_to(&mut picker, "luneta › main");
+        press(&mut picker, KeyCode::Delete);
+        let busy_asks = "Close workstream main? 2 agents, 1 busy";
+        assert!(said(&picker).contains(busy_asks), "{}", said(&picker));
+        let mut untold = busy(works());
+        let shelf = &mut untold.shelves[0].projects[0].workstreams;
+        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        main.ending = Err(Untold::Away);
+        picker.listed(untold);
+        press(&mut picker, KeyCode::Char('y'));
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        let untold_asks = "Close workstream main? luneta cannot tell which agents";
+        assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
+        press(&mut picker, KeyCode::Char('y'));
+        let close = Ask::Close { on: Machine::Local, place: main_place(), name: "main".to_owned() };
+        assert_eq!(picker.asks(), [close]);
     }
 
     #[test]

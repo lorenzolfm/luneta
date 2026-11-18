@@ -312,6 +312,11 @@ fn changed_there(machine: &Machine, change: Change) -> Result<(), String> {
     changed_on(&path, on(machine), change).map(drop).map_err(Unmade::said)
 }
 
+pub fn closed_there(machine: &Machine, workstream: WorkstreamId) -> Result<(), String> {
+    let workstream = workstream.get();
+    changed_there(machine, Change::CloseWorkstream(CloseWorkstream { workstream }))
+}
+
 pub fn renamed_project(machine: &Machine, project: ProjectId, to: &str) -> Result<(), String> {
     let (project, to) = (project.get(), to.to_owned());
     changed_there(machine, Change::RenameProject(RenameProject { project, to }))
