@@ -828,7 +828,6 @@ impl Projects {
                     project.workstreams.remove(at);
                     assert!(changed.find(workstream).is_none(), "{workstream} goes with its last");
                 }
-                changed.followed();
                 assert!(!changed.holds(terminal.0), "terminal {terminal} left its view");
                 None
             },
@@ -862,10 +861,13 @@ impl Projects {
                     let view = changed.view_of(terminal)?;
                     view.terminal_mut(terminal).expect("its view holds it").ran(folder, runs);
                 }
-                changed.followed();
                 None
             },
         };
+        changed.followed();
+        let mut again = changed.clone();
+        again.followed();
+        assert_eq!(again, changed, "a workstream followed is where its terminals went");
         assert_eq!(Projects::checked(changed.projects.clone()).as_ref(), Ok(&changed));
         Ok((changed, made))
     }
@@ -943,6 +945,12 @@ impl Projects {
                 if let Some(to) = left_for(dir, &workstream.below, folders) {
                     assert_ne!(to, workstream.below, "a workstream follows its terminals elsewhere");
                     workstream.below = to;
+                    let followed = dir.join(&workstream.below);
+                    for terminal in workstream.view.terminals() {
+                        let folder = terminal.folder();
+                        let held = followed.below(folder).is_some();
+                        assert!(held, "{} holds {}, its terminal's folder", followed.0, folder.0);
+                    }
                 }
             }
         }
@@ -994,11 +1002,11 @@ fn left_for<'a>(
 ) -> Option<Below> {
     let mut shared: Option<&'a str> = None;
     for folder in folders {
-        let under = folder.as_str().strip_prefix(project.as_str())?.strip_prefix('/')?;
-        if within(below.as_str(), under) {
+        let folder_below = folder.as_str().strip_prefix(project.as_str())?.strip_prefix('/')?;
+        if within(below.as_str(), folder_below) {
             return None;
         }
-        shared = Some(shared.map_or(under, |shared| shared_part(shared, under)));
+        shared = Some(shared.map_or(folder_below, |shared| shared_part(shared, folder_below)));
     }
     let shared = shared.filter(|shared| !shared.is_empty())?;
     assert!(!within(below.as_str(), shared), "{shared} is no part of {}", below.as_str());
@@ -1006,6 +1014,9 @@ fn left_for<'a>(
 }
 
 fn within(outer: &str, inner: &str) -> bool {
+    if outer.is_empty() {
+        return true;
+    }
     inner.strip_prefix(outer).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
@@ -1018,7 +1029,7 @@ fn shared_part<'a>(one: &'a str, other: &str) -> &'a str {
         end += usize::from(end > 0) + part.len();
     }
     let shared = &one[..end];
-    assert!(within(shared, one) || shared.is_empty(), "{shared} is a part of {one}");
+    assert!(within(shared, one), "{shared} is a part of {one}");
     shared
 }
 
@@ -1569,6 +1580,18 @@ mod tests {
         assert_eq!(folder(&projects), dir("/w/luneta/issue"), "no workstream is out of luneta");
         projects = ran(&projects, two, "/w/luneta-other/issue");
         assert_eq!(folder(&projects), dir("/w/luneta/issue"), "luneta-other is not in luneta");
+    }
+
+    #[test]
+    fn a_workstream_in_its_project_s_own_folder_stays_there() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let own = workstream(&mut projects, luneta, "/w/luneta");
+        let one = opened(&mut projects, own, 100, Placed::Alone);
+        let ran = Ran { terminal: one, folder: dir("/w/luneta/src"), runs: Runs::Shell };
+        (projects, _) = change(&projects, Change::Ran(vec![ran])).unwrap();
+        let (project, workstream) = projects.find(own).unwrap();
+        assert_eq!(project.folder(workstream), dir("/w/luneta"), "/w/luneta holds src");
     }
 
     #[test]
