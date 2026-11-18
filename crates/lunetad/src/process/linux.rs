@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +10,8 @@ use rustix::event::{poll, PollFd, PollFlags};
 use rustix::io::{retry_on_intr, Errno};
 use rustix::process::{pidfd_open, Pid, PidfdFlags};
 use rustix::time::{clock_gettime, ClockId};
+
+use super::Found;
 
 fn proc(pid: u32, leaf: &str) -> PathBuf {
     PathBuf::from("/proc").join(pid.to_string()).join(leaf)
@@ -57,9 +60,43 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 
 #[must_use]
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
-    let raw = fs::read(proc(pid, "environ")).ok()?;
+    Some(nul_split(&fs::read(proc(pid, "environ")).ok()?))
+}
+
+fn nul_split(raw: &[u8]) -> Vec<OsString> {
     let entries = raw.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-    Some(entries.map(|entry| OsString::from_vec(entry.to_vec())).collect())
+    entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
+}
+
+#[must_use]
+pub fn mine(names: &[&str]) -> Vec<Found> {
+    let Ok(listed) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let uid = rustix::process::getuid().as_raw();
+    let mut found = Vec::new();
+    for entry in listed.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
+            continue;
+        }
+        let Ok(name) = fs::read_to_string(proc(pid, "comm")) else {
+            continue;
+        };
+        let name = name.trim_end_matches('\n');
+        if !names.contains(&name) || start(pid).is_none() {
+            continue;
+        }
+        let Some(environ) = environ(pid) else {
+            continue;
+        };
+        let argv = nul_split(&fs::read(proc(pid, "cmdline")).unwrap_or_default());
+        let argv = argv.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        found.push(Found { pid, name: name.to_owned(), argv, environ });
+    }
+    found
 }
 
 pub struct Domain {

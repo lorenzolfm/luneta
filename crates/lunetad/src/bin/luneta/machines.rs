@@ -48,6 +48,11 @@ pub fn forget(destination: &Destination) -> Result<bool, String> {
     forget_in(&file()?, destination)
 }
 
+pub fn named() -> Result<Vec<Destination>, String> {
+    let file = file()?;
+    Ok(lunetad::hosts_named(&read(&file)?, |_| {}).machines)
+}
+
 fn file() -> Result<std::path::PathBuf, String> {
     state::path(HOSTS_FILE).map_err(|unset| unset.to_string())
 }

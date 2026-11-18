@@ -62,6 +62,10 @@ impl Owned {
         self.daemon = None;
     }
 
+    pub fn daemon_ended_within(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+        self.daemon.as_mut().expect("a daemon was started").ended_within(limit)
+    }
+
     pub fn start_daemon(&mut self) {
         assert!(self.daemon.is_none(), "one daemon runs at a time");
         self.daemon = Some(start(self.host.vars()).unwrap());

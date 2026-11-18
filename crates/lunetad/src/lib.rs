@@ -40,6 +40,7 @@ mod shells;
 mod streams;
 pub mod skills;
 pub mod state;
+pub mod terminate;
 mod topics;
 pub mod transcripts;
 pub mod turns;

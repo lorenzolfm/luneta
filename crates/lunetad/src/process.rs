@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::io;
 
 use rustix::io::Errno;
@@ -17,7 +18,15 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("lunetad reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{environ, start, started, Domain};
+pub use os::{environ, mine, start, started, Domain};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub pid: u32,
+    pub name: String,
+    pub argv: Vec<String>,
+    pub environ: Vec<OsString>,
+}
 
 pub fn var(name: &str) -> Result<Option<String>, String> {
     match env::var(name) {

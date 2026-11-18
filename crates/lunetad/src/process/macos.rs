@@ -6,7 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rustix::event::kqueue::{kevent, kqueue, Event, EventFilter, EventFlags, ProcessEvents};
 use rustix::io::Errno;
 use rustix::process::Pid;
-use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{
+    Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
+};
+
+use super::Found;
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
     let mut system = System::new();
@@ -31,6 +35,31 @@ pub fn started(pid: u32) -> Option<SystemTime> {
 pub fn environ(pid: u32) -> Option<Vec<OsString>> {
     let refresh = ProcessRefreshKind::nothing().with_environ(UpdateKind::Always);
     with(pid, refresh, |process| process.environ().to_vec())
+}
+
+#[must_use]
+pub fn mine(names: &[&str]) -> Vec<Found> {
+    let mut system = System::new();
+    let refresh = ProcessRefreshKind::nothing()
+        .with_user(UpdateKind::Always)
+        .with_cmd(UpdateKind::Always)
+        .with_environ(UpdateKind::Always);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    let uid = rustix::process::getuid().as_raw();
+    let mut found = Vec::new();
+    for (pid, process) in system.processes() {
+        let Some(name) = process.name().to_str().filter(|name| names.contains(name)) else {
+            continue;
+        };
+        let mine = process.user_id().is_some_and(|it| **it == uid);
+        if !mine || process.status() == ProcessStatus::Zombie {
+            continue;
+        }
+        let argv = process.cmd().iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let environ = process.environ().to_vec();
+        found.push(Found { pid: pid.as_u32(), name: name.to_owned(), argv, environ });
+    }
+    found
 }
 
 #[expect(

@@ -34,6 +34,7 @@ use crate::daemon;
 use crate::drive::{self, Address, Agreed, Opening, Turning};
 use crate::machines::{self, Added};
 use crate::prune;
+use crate::terminate;
 use crate::zellij::{self, Seat};
 
 #[derive(Subcommand)]
@@ -156,6 +157,39 @@ pub enum Command {
         yes: Option<Agreed>,
     },
     #[command(
+        about = "Reset luneta: end every luneta, lunetad and luneta-mux, on this machine and on \
+                 each machine of luneta's hosts file, and the shells and agents in luneta-mux's \
+                 terminals with them, and forget every project and workstream, so that the next \
+                 `luneta` starts with none. luneta's hosts file, its logs and the rest of its \
+                 state stay. A machine ssh does not reach is skipped, and keeps its own. Without \
+                 `--yes`, say what would end on each machine, and the plan to tell `--yes`, and \
+                 end nothing. Run in a terminal of luneta's, it ends with luneta"
+    )]
+    Terminate {
+        #[arg(
+            long,
+            value_name = "PLAN",
+            value_parser = drive::agreed,
+            conflicts_with_all = ["here", "ending"],
+            help = "End it all, while what would end is still the plan said as `PLAN`"
+        )]
+        yes: Option<Agreed>,
+        #[arg(
+            long,
+            hide = true,
+            help = "On this machine alone, and for the luneta that asks it through ssh: say \
+                    what would end here, as a key and then in words, and end nothing"
+        )]
+        here: bool,
+        #[arg(
+            long,
+            hide = true,
+            requires = "here",
+            help = "End it all here at once, and say what ended"
+        )]
+        ending: bool,
+    },
+    #[command(
         about = "Read text aloud on the machine you sit at, whichever machine this runs on: queue \
                  it, after what waits to be read, and return once lunetad has it, without waiting \
                  for it to be read. It fails at once where no lunetad runs"
@@ -199,6 +233,7 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
         Command::Close { what, yes } => drive::close(what, *yes, folder),
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
+        Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
     }
 }
 

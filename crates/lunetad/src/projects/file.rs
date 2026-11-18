@@ -367,6 +367,52 @@ fn locked(file: &Path) -> Result<File, String> {
     Err(format!("another lunetad keeps the projects in {folder}, and so none are kept here"))
 }
 
+pub fn kept() -> Result<Projects, String> {
+    let file = state::path(FILE).map_err(|unset| unset.to_string())?;
+    read(&file).map_err(|why| format!("{}: {why}", file.display()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Forgotten {
+    Read(Projects),
+    Unread(String),
+}
+
+pub fn forget() -> Result<Forgotten, String> {
+    forget_at(&state::path(FILE).map_err(|unset| unset.to_string())?)
+}
+
+fn forget_at(file: &Path) -> Result<Forgotten, String> {
+    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let path = folder.join(LOCK);
+    let failed = |error: io::Error| format!("{}: {error}", path.display());
+    let lock = match OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(Forgotten::Read(Projects::default()));
+        },
+        Err(error) => return Err(failed(error)),
+    };
+    match lock.try_lock() {
+        Ok(()) => {},
+        Err(TryLockError::WouldBlock) => {
+            return Err(format!("a lunetad keeps them still, as it holds {}", path.display()));
+        },
+        Err(TryLockError::Error(error)) => return Err(failed(error)),
+    }
+    let held = match read(file) {
+        Ok(projects) => Forgotten::Read(projects),
+        Err(why) => Forgotten::Unread(why),
+    };
+    match fs::remove_file(file) {
+        Ok(()) => {},
+        Err(error) if error.kind() == ErrorKind::NotFound => {},
+        Err(error) => return Err(format!("{}: {error}", file.display())),
+    }
+    drop(lock);
+    Ok(held)
+}
+
 fn unchanged(file: &Path, projects: &Projects) -> Result<(), String> {
     match read(file) {
         Ok(now) if now == *projects => Ok(()),
@@ -658,6 +704,36 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, [FILE, LOCK]);
+    }
+
+    #[test]
+    fn projects_are_forgotten_only_once_no_store_keeps_them() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = file_in(&scratch);
+        assert_eq!(forget_at(&file), Ok(Forgotten::Read(Projects::default())));
+        assert!(!file.parent().unwrap().exists(), "nothing is made to forget nothing");
+
+        let (core, _commands) = channel();
+        let mut store = Store::at(Ok(file.clone()), core.clone()).unwrap();
+        let made = store.change(Change::AddProject { dir: dir("/w/luneta"), name: None });
+        let luneta = ProjectId::new(made.unwrap().unwrap());
+        let folder = dir("/w/luneta/main");
+        store.change(Change::AddWorkstream { project: luneta, folder, name: None }).unwrap();
+        let held = store.projects().unwrap().clone();
+        let refused = forget_at(&file).unwrap_err();
+        assert!(refused.starts_with("a lunetad keeps them still"), "{refused}");
+        assert!(file.exists());
+
+        drop(store);
+        assert_eq!(forget_at(&file), Ok(Forgotten::Read(held)));
+        assert!(!file.exists());
+        let again = Store::at(Ok(file.clone()), core).unwrap();
+        assert_eq!(again.projects(), Some(&Projects::default()));
+        drop(again);
+
+        fs::write(&file, "{").unwrap();
+        assert!(matches!(forget_at(&file), Ok(Forgotten::Unread(_))));
+        assert!(!file.exists(), "a file that does not read is forgotten too");
     }
 
     #[test]

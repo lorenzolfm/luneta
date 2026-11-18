@@ -518,6 +518,13 @@ impl Agreed {
         turn.hash(&mut hasher);
         Agreed(hasher.finish())
     }
+
+    pub fn of_terminate(machines: &[(String, Option<u64>)], turn: Option<u64>) -> Self {
+        let mut hasher = DefaultHasher::new();
+        machines.hash(&mut hasher);
+        turn.hash(&mut hasher);
+        Agreed(hasher.finish())
+    }
 }
 
 impl fmt::Display for Agreed {
