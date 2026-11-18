@@ -9,15 +9,17 @@ use lunetad::api::change_projects_request::{
 };
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
-use lunetad::api::{view_request, On, ViewRequest};
+use lunetad::api::daemon_client::DaemonClient;
+use lunetad::api::{view_request, CheckNameRequest, On, ViewRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{view, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorkstreamId};
 use lunetad::folder::Folder;
-use lunetad::{Asked, Beside, Destination, Heard, Where};
+use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::Channel;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
@@ -1041,6 +1043,69 @@ fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
         Seen::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
         other => panic!("a viewer of a machine not reached is lost, not {other:?}"),
     }
+}
+
+async fn shown_through(
+    daemon: &mut DaemonClient<Channel>,
+    workstream: u64,
+) -> Result<(mpsc::Sender<ShowRequest>, Streaming<ShowResponse>), Status> {
+    let on = Some(On { destination: "far".to_owned() });
+    let hello = Hello { workstream, size: Some(size(80, 24)), runs_in: None, again: false, on };
+    let (asks, asked) = mpsc::channel(1);
+    asks.send(ShowRequest { event: Some(Event::Hello(hello)) }).await.unwrap();
+    let mut heard = daemon.show(ReceiverStream::new(asked)).await?.into_inner();
+    match heard.message().await? {
+        Some(ShowResponse { event: Some(show_response::Event::Laid(_)) }) => Ok((asks, heard)),
+        other => panic!("a show through the bridge is laid out first, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_bridge_holds_its_most_shows_and_views_open_and_keeps_room_for_questions() {
+    let far = Owned::new();
+    let workstream = workstream_in_home(&far);
+    let here = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.host.vars());
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let folder = folder_in(here.runtime.path()).unwrap();
+    let on = || Some(On { destination: "far".to_owned() });
+    far.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let mut held = Vec::new();
+        for _ in 0..BRIDGE_HELD_MAX {
+            let shown = shown_through(&mut daemon, workstream).await;
+            held.push(shown.expect("a show within the most is laid out"));
+        }
+        let refused = shown_through(&mut daemon, workstream).await.err();
+        let refused = refused.expect("a show past the most is refused");
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+        let greeting = Some(mux_api::Greeting { colours: None, runs_in: None });
+        let hello = view_request::Hello { on: on(), greeting };
+        let words = vec![ViewRequest { event: Some(view_request::Event::Hello(hello)) }];
+        let refused = daemon.view(tokio_stream::iter(words)).await.err();
+        let refused = refused.expect("a view past the most is refused");
+        assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
+        let check = CheckNameRequest { on: on(), name: "fresh".to_owned() };
+        let checked = tokio::time::timeout(HEARD_IN, daemon.check_name(check)).await;
+        assert!(checked.as_ref().is_ok_and(Result::is_ok), "{checked:?}");
+
+        drop(held.pop());
+        let deadline = tokio::time::Instant::now() + HEARD_IN;
+        loop {
+            match shown_through(&mut daemon, workstream).await {
+                Ok(again) => break held.push(again),
+                Err(full)
+                    if full.code() == Code::ResourceExhausted
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                },
+                Err(refused) => panic!("a show let go makes room for another: {refused:?}"),
+            }
+        }
+    });
 }
 
 #[test]
