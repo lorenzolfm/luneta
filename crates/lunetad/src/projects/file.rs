@@ -429,8 +429,7 @@ fn parse(text: &str) -> Result<Projects, String> {
 
 impl KeptProject {
     fn read(self) -> Result<Project, String> {
-        let workstreams = self.workstreams.into_iter();
-        let workstreams = workstreams.filter(|it| !it.below.is_empty()).map(KeptWorkstream::read);
+        let workstreams = self.workstreams.into_iter().map(KeptWorkstream::read);
         Ok(Project {
             id: self.id.parse()?,
             name: Name::parse(&self.name)?,
@@ -810,14 +809,15 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_kept_in_its_project_s_own_folder_is_dropped_when_read() {
+    fn a_workstream_kept_in_its_project_s_own_folder_is_read_and_written_back() {
         let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
             "dir": "/a", "workstreams": [{"id": "0000000000000002"},
             {"id": "0000000000000003", "below": "b"}]}]}"#;
         let kept = parse(text).unwrap();
-        let ids: Vec<u64> = kept.all()[0].workstreams().iter().map(|it| it.id().get()).collect();
-        assert_eq!(ids, [3]);
-        assert!(!written(&kept).contains("0000000000000002"));
+        let project = &kept.all()[0];
+        let folders: Vec<Dir> = project.workstreams().iter().map(|it| project.folder(it)).collect();
+        assert_eq!(folders, [dir("/a"), dir("/a/b")]);
+        assert_eq!(parse(&written(&kept)), Ok(kept));
     }
 
     #[test]
