@@ -29,7 +29,6 @@ use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
-use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -37,6 +36,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
+use crate::actions::{
+    Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, RIGHT, WORKSTREAMS, SHRINK, SWAP, UP,
+};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
@@ -49,13 +51,12 @@ use crate::checks;
 use crate::close::{Act, Whose};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
-use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice};
+use crate::menu::{self, Choice, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -72,7 +73,7 @@ use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
 use crate::workstreams::{self, Unmoved};
 use crate::width::Width;
-use crate::zellij::{self, Close, Closes, Open, SessionName, Turned};
+use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
     Workstream { made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
@@ -127,9 +128,6 @@ pub enum Event {
     Opened { menu: u64, opened: Result<u32, String> },
     Named(Made),
     Closes { menu: u64, closes: Result<Closes, String> },
-    Tabs { menu: u64, tabs: Result<Vec<OtherTab>, String> },
-    IntoPanes { menu: u64, pane: u32, came: Result<IntoPanes, String> },
-    NoClient { menu: u64, owed: Due<u32>, on: Machine, turned: Turned },
     Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
     Pulled { menu: u64, found: Result<Found, String> },
     Prunes { menu: u64, plan: Result<prunes::Plan, String> },
@@ -168,56 +166,14 @@ const TICK: Duration = Duration::from_secs(1);
 
 const FRAME_EVENTS_MAX: usize = 256;
 
-const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
-
-const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
-
-const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
-
-const WORKSTREAMS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
-
-const LEFT: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::CONTROL);
-
-const DOWN: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
-
-const UP: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::CONTROL);
-
-const RIGHT: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::CONTROL);
-
-const GROW: (KeyCode, KeyModifiers) = (KeyCode::Char('='), KeyModifiers::ALT);
-
-const GROWS: [(KeyCode, KeyModifiers); 4] = [
+const GROWS: [Chord; 4] = [
     GROW,
     (KeyCode::Char('+'), KeyModifiers::ALT),
     (KeyCode::Char('='), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
     (KeyCode::Char('+'), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
 ];
 
-const SHRINK: (KeyCode, KeyModifiers) = (KeyCode::Char('-'), KeyModifiers::ALT);
-
-const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
-
-const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
-
-pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 15] = [
-    (SWAP, "Sidebar or panes"),
-    (LEFT, "Pane left, or the workstream before"),
-    (DOWN, "Pane below"),
-    (UP, "Pane above"),
-    (RIGHT, "Pane right, or the workstream after"),
-    (GROW, "Grow the pane"),
-    (SHRINK, "Shrink the pane"),
-    (COLLAPSE, "Collapse sidebar"),
-    (MENU, "Menu over panes"),
-    (WORKSTREAMS, "Pick a workstream"),
-    (AGENTS, "Pick an agent"),
-    (DIRS, "Pick a directory"),
-    (dictation::KEY, "Hold to dictate"),
-    (aloud::KEY, "Read aloud, pause"),
-    (aloud::STOPS, "Stop reading"),
-];
-
-fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
+fn stepped(chord: Chord) -> Option<Direction> {
     match chord {
         LEFT => Some(Direction::Left),
         DOWN => Some(Direction::Down),
@@ -227,7 +183,7 @@ fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
     }
 }
 
-fn resized(chord: (KeyCode, KeyModifiers)) -> Option<Growth> {
+fn resized(chord: Chord) -> Option<Growth> {
     if GROWS.contains(&chord) {
         return Some(Growth::Grow);
     }
@@ -396,7 +352,7 @@ struct App {
     _watching: Vec<notify::RecommendedWatcher>,
     dir: PathBuf,
     gave_up: Option<String>,
-    deleting: Vec<JoinHandle<()>>,
+    changes: Vec<JoinHandle<()>>,
     naming: Naming,
     alerts: Alerts,
     desktop: Desktop,
@@ -624,15 +580,15 @@ fn run_in(
         _watching: watching,
         dir: dir.to_owned(),
         gave_up: None,
-        deleting: Vec::new(),
+        changes: Vec::new(),
         naming: Naming::Idle,
         alerts: Alerts::new(focused),
         desktop,
     };
     app.watch();
     let ran = run_loop(terminal, &mut app, inbox);
-    for deleting in app.deleting.drain(..) {
-        let _ = deleting.join();
+    for change in app.changes.drain(..) {
+        let _ = change.join();
     }
     ran?;
     Ok(app.failure())
@@ -849,28 +805,6 @@ impl App {
             Event::Closes { menu, closes } => {
                 let asked = self.sidebar.closes(menu, closes);
                 self.follow(asked);
-            },
-            Event::Tabs { menu, tabs } => {
-                let asked = self.sidebar.tabs(menu, tabs);
-                self.follow(asked);
-            },
-            Event::IntoPanes { menu, pane, came } => {
-                let asked = self.sidebar.turned_into_panes(menu, pane, came);
-                self.follow(asked);
-            },
-            Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
-                Some(sidebar::Held::Open) => {
-                    let place = Place::Pane(turned.place().clone());
-                    let gone = self.go(&on, &place);
-                    owed.pay(Err(zellij::NOT_THERE_YET.to_owned()));
-                    if !gone {
-                        self.sidebar.drop_menu(menu);
-                    }
-                },
-                Some(sidebar::Held::Kept) => {
-                    owed.pay(Err(lunetad::opens::no_client(turned.place().session.name())));
-                },
-                None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Named(made) => self.named(made),
@@ -1604,8 +1538,7 @@ impl App {
                     zellij::close(&on, session, whose, close, &self.events);
                 },
                 Act::Kill { session, whose } => {
-                    self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(zellij::kill(&on, session, whose, &self.events));
+                    self.keep_change(zellij::kill(&on, session, whose, &self.events));
                 },
                 Act::Leave { session, to, .. } => {
                     self.go(&on, &to);
@@ -1618,20 +1551,46 @@ impl App {
             Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
                 zellij::open(menu, &on, open, &self.events);
             },
-            Asked::Tabs { menu, on, turned } => {
-                zellij::other_tabs(menu, &on, &turned, &self.events);
-            },
-            Asked::Turn { menu, on, turned, turn } => {
-                zellij::turn(menu, &on, turned, turn, &self.events);
-            },
-            Asked::StartOwn { starts } => {
-                match lunetad::names::free_at(starts) {
-                    Ok((name, _, dir)) => self.make_workstream(dir, move |lunetad, cwd| {
-                        workstreams::here(lunetad, cwd, Some(name.as_str()))
-                    }),
-                    Err(why) => self.sidebar.notify(format!("menu: no workstream made: {why}")),
-                }
+            Asked::NewWorkstream { project, folder } => {
+                self.make_workstream(folder, move |lunetad, cwd| {
+                    let unspelled = || format!("{} is not UTF-8", cwd.display());
+                    let folder = cwd.to_str().ok_or_else(unspelled)?;
+                    workstreams::add_workstream(lunetad, project, folder, None).map(Some)
+                });
                 self.leave();
+            },
+            Asked::AddProject { on: Machine::Local, folder, name } => {
+                if self.refuse_naming(None) {
+                    return;
+                }
+                self.naming_on(move || {
+                    let named = name.as_ref();
+                    let made = || workstreams::project_made(&Machine::Local, &folder, named);
+                    let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
+                    Made::Workstream { made, argv: Vec::new() }
+                });
+                self.leave();
+            },
+            Asked::AddProject { on, folder, name } => {
+                self.change(on, move |on| {
+                    workstreams::project_made(on, &folder, name.as_ref()).map(drop)
+                });
+            },
+            Asked::Rename { on, rename } => {
+                self.change(on, move |on| {
+                    let renamed = match &rename {
+                        Rename::Terminal(terminal, to) => {
+                            workstreams::renamed_terminal(on, *terminal, to.as_ref())
+                        },
+                        Rename::Workstream(workstream, to) => {
+                            workstreams::renamed_workstream(on, *workstream, to.as_ref())
+                        },
+                        Rename::Project(project, to) => {
+                            workstreams::renamed_project(on, *project, to)
+                        },
+                    };
+                    renamed.map_err(|why| format!("not renamed: {why}"))
+                });
             },
             Asked::Make { menu, on, session, holder, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
@@ -1660,8 +1619,7 @@ impl App {
                 let here = on == Machine::Local;
                 let deleting = prune::delete(menu, on, dir, agreed, &self.events);
                 if here {
-                    self.deleting.retain(|deleting| !deleting.is_finished());
-                    self.deleting.push(deleting);
+                    self.keep_change(deleting);
                 }
             },
             Asked::Find { menu, on, cwd, agent } => {
@@ -1722,6 +1680,24 @@ impl App {
         }
     }
 
+    fn change(
+        &mut self,
+        on: Machine,
+        change: impl FnOnce(&Machine) -> Result<(), String> + Send + 'static,
+    ) {
+        let events = self.events.clone();
+        self.keep_change(thread::spawn(move || {
+            if let Err(why) = caught(|| change(&on)) {
+                let _ = events.send(Event::Notice(format!("menu: {why}")));
+            }
+        }));
+    }
+
+    fn keep_change(&mut self, change: JoinHandle<()>) {
+        self.changes.retain(|change| !change.is_finished());
+        self.changes.push(change);
+    }
+
     fn project_act(&mut self, on: &Machine, act: &Act) {
         match (on, act) {
             (_, Act::Workstream { workstream, seen, .. }) => {
@@ -1746,7 +1722,7 @@ impl App {
 
     fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
-        let deleting = thread::spawn(move || {
+        self.keep_change(thread::spawn(move || {
             let closed = caught(|| match &doomed {
                 Doomed::Workstream { workstream, seen } => {
                     workstreams::closed(&lunetad, &on, *workstream, seen)
@@ -1756,11 +1732,9 @@ impl App {
                 },
             });
             if let Err(why) = closed {
-                let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
+                let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
             }
-        });
-        self.deleting.retain(|deleting| !deleting.is_finished());
-        self.deleting.push(deleting);
+        }));
     }
 
     fn project_open(&mut self, menu: u64, on: &Machine, key: OwnKey, open: &Open) {

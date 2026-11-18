@@ -6,10 +6,9 @@ use std::time::{Duration, Instant, SystemTime};
 use lunetad::mux::{self, Mux, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{closes_now, closes_together, Close, Closes, Closing};
 use lunetad::closes::{self, running_in};
-pub use lunetad::names::{session_for, Starts};
+pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
-use lunetad::turns::{self, IntoPanes, IntoTab, OtherTab};
 use lunetad::Directory;
 pub use lunetad::{var, SessionName};
 
@@ -18,7 +17,6 @@ use crate::close::Whose;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::sidebar::PanePlace;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
@@ -160,8 +158,6 @@ fn started(session: &SessionName, patience: Duration) -> Option<SystemTime> {
     }
 }
 
-pub const NOT_THERE_YET: &str = "luneta cannot tell when its client is there";
-
 pub fn stays(session: &SessionName, events: &Sender<Event>) {
     let when = format!("when its client has left \"{session}\", which stays");
     let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
@@ -185,69 +181,6 @@ fn told(opened: Opened, events: &Sender<Event>) -> u32 {
 
 pub fn owed(menu: u64, events: &Sender<Event>) -> Due<u32> {
     Due::new(events, move |opened| Event::Opened { menu, opened })
-}
-
-pub fn other_tabs(menu: u64, on: &Machine, turned: &Turned, events: &Sender<Event>) {
-    let (on, events) = (on.clone(), events.clone());
-    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane.id());
-    thread::spawn(move || {
-        let tabs = There::on(&on).and_then(|mut there| there.other_tabs(&session, pane));
-        let _ = events.send(Event::Tabs { menu, tabs });
-    });
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Turned {
-    place: PanePlace,
-    started: SystemTime,
-}
-
-impl Turned {
-    pub fn of(place: PanePlace) -> Option<Self> {
-        match place.session.whose() {
-            Whose::Zellij(started) => Some(Turned { place, started }),
-            Whose::Own(_) => None,
-        }
-    }
-
-    pub fn place(&self) -> &PanePlace {
-        &self.place
-    }
-}
-
-pub const OWN_TURNS: &str = "luneta's own sessions cannot turn a pane yet";
-
-pub fn turn(menu: u64, on: &Machine, turned: Turned, turn: turns::Turn, events: &Sender<Event>) {
-    match turn {
-        turns::Turn::PaneIntoTab => pane_into_tab(menu, on, turned, events),
-        turns::Turn::TabIntoPanes { beside } => tab_into_panes(menu, on, &turned, beside, events),
-    }
-}
-
-fn pane_into_tab(menu: u64, on: &Machine, turned: Turned, events: &Sender<Event>) {
-    let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
-    thread::spawn(move || {
-        let (session, pane) = (turned.place.session.name(), turned.place.pane.id());
-        let started = turned.started;
-        match There::on(&on).and_then(|mut there| there.turn_into_tab(session, started, pane)) {
-            Ok(IntoTab::Done) => owed.pay(Ok(pane)),
-            Ok(IntoTab::NoClient) => {
-                let _ = events.send(Event::NoClient { menu, owed, on, turned });
-            },
-            Err(why) => owed.pay(Err(why)),
-        }
-    });
-}
-
-fn tab_into_panes(menu: u64, on: &Machine, turned: &Turned, beside: u32, events: &Sender<Event>) {
-    let (session, pane) = (turned.place.session.name().clone(), turned.place.pane.id());
-    let owed = Due::new(events, move |came| Event::IntoPanes { menu, pane, came });
-    let (on, started) = (on.clone(), turned.started);
-    thread::spawn(move || {
-        let came = There::on(&on)
-            .and_then(|mut there| there.turn_into_panes(&session, started, pane, beside));
-        owed.pay(came);
-    });
 }
 
 pub fn closes(menu: u64, on: &Machine, session: SessionName, pane: u32, events: &Sender<Event>) {
@@ -315,38 +248,6 @@ impl There {
         match self {
             There::Here => opening(open),
             There::Away(away) => away.open(open),
-        }
-    }
-
-    fn other_tabs(&mut self, session: &SessionName, pane: u32) -> Result<Vec<OtherTab>, String> {
-        match self {
-            There::Here => turns::other_tabs(session, pane),
-            There::Away(away) => away.other_tabs(session, pane),
-        }
-    }
-
-    fn turn_into_tab(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        pane: u32,
-    ) -> Result<IntoTab, String> {
-        match self {
-            There::Here => turns::into_tab(session, started, pane),
-            There::Away(away) => away.turn_into_tab(session, started, pane),
-        }
-    }
-
-    fn turn_into_panes(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        pane: u32,
-        beside: u32,
-    ) -> Result<IntoPanes, String> {
-        match self {
-            There::Here => turns::into_panes(session, started, pane, beside),
-            There::Away(away) => away.turn_into_panes(session, started, pane, beside),
         }
     }
 

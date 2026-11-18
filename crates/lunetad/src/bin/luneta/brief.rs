@@ -63,26 +63,6 @@ pub enum Scope {
     Highlighted,
 }
 
-impl Scope {
-    pub const ALL: [Scope; 3] = [Scope::Every, Scope::Session, Scope::Highlighted];
-
-    pub const fn key(self) -> char {
-        match self {
-            Scope::Every => 'z',
-            Scope::Session => 's',
-            Scope::Highlighted => 'h',
-        }
-    }
-
-    pub const fn does(self) -> &'static str {
-        match self {
-            Scope::Every => "Every session",
-            Scope::Session => "This session",
-            Scope::Highlighted => "Highlighted",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Over {
     Sessions {

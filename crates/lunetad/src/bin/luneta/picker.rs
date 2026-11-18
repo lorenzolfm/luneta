@@ -283,10 +283,10 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
                 Renames::Workstream { place, .. } => {
-                    workstreams::renamed_workstream(&on, place.workstream, to.as_str())
+                    workstreams::renamed_workstream(&on, place.workstream, Some(&to))
                 },
                 Renames::Project(project) => {
-                    workstreams::renamed_project(&on, project.id(), to.as_str())
+                    workstreams::renamed_project(&on, project.id(), &to)
                 },
             };
             Heard::Renamed { from: renames.name().to_owned(), to, renamed }
@@ -1101,7 +1101,10 @@ impl Picker {
     }
 
     fn rename_to(&self, on: &Machine, renames: &Renames, name: &str) -> Result<Name, String> {
-        let name = Name::parse(name)?;
+        let name = match renames {
+            Renames::Workstream { .. } => Name::parse(name)?,
+            Renames::Project(_) => Name::of_project(name)?,
+        };
         if name.as_str() == renames.name() {
             return Err("already called that".to_owned());
         }
@@ -2543,7 +2546,11 @@ mod tests {
         down_to(&mut picker, "notes");
         control(&mut picker, 'r');
         assert!(said(&picker).contains(r#"renaming "notes", a project"#), "{}", said(&picker));
-        typed(&mut picker, "jots");
+        typed(&mut picker, "jots/old");
+        press(&mut picker, KeyCode::Enter);
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        assert!(said(&picker).contains("names no project"), "{}", said(&picker));
+        retyped(&mut picker, "jots");
         press(&mut picker, KeyCode::Enter);
         let renames = Renames::Project(project("notes", 2));
         let to = Name::parse("jots").unwrap();
