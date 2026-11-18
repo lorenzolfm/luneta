@@ -136,7 +136,7 @@ fn the_extension_goes_where_pi_finds_it_once_pi_has_run() {
 fn a_pi_in_a_shell_that_moved_tmpdir_is_listed() {
     let host = Host::new();
     fs::create_dir_all(host.pi_folder()).unwrap();
-    let _daemon = start(Vars { runtime: None, temp: Some(host.runtime()), ..host.vars() }).unwrap();
+    let _daemon = start(host.vars()).unwrap();
     eventually("the extension is there", || extension(&host).is_file().then_some(()));
 
     let moved = tempfile::tempdir().unwrap();

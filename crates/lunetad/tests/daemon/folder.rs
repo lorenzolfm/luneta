@@ -8,12 +8,16 @@ type Case = for<'p> fn(&'p Path, &'p Path) -> (Vars<'p>, &'p Path);
 
 #[test]
 fn the_cli_finds_the_daemon_where_the_variables_say() {
-    let cases: [Case; 4] = [
+    let mut cases: Vec<Case> = vec![
         |a, _| (Vars { runtime: Some(a), ..Vars::default() }, a),
-        |_, b| (Vars { temp: Some(b), ..Vars::default() }, b),
         |a, b| (Vars { runtime: Some(a), temp: Some(b), ..Vars::default() }, a),
-        |_, b| (Vars { runtime: Some(Path::new("")), temp: Some(b), ..Vars::default() }, b),
     ];
+    if !cfg!(target_os = "macos") {
+        cases.push(|_, b| (Vars { temp: Some(b), ..Vars::default() }, b));
+        cases.push(|_, b| {
+            (Vars { runtime: Some(Path::new("")), temp: Some(b), ..Vars::default() }, b)
+        });
+    }
     for case in cases {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (vars, root) = case(a.path(), b.path());

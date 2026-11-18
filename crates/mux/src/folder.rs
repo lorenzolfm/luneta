@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
@@ -12,11 +13,34 @@ pub const ANOTHER_RUNS: u8 = 3;
 
 #[must_use]
 pub fn find() -> Option<PathBuf> {
-    ["XDG_RUNTIME_DIR", "TMPDIR"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find(|root| !root.is_empty())
-        .map(|root| PathBuf::from(root).join("luneta"))
+    let set = |name| std::env::var_os(name).filter(|root| !root.is_empty());
+    let root = set("XDG_RUNTIME_DIR").or_else(user_temp).or_else(|| set("TMPDIR"))?;
+    Some(PathBuf::from(root).join("luneta"))
+}
+
+#[cfg(target_os = "macos")]
+fn user_temp() -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let mut buffer = [0_u8; 1024];
+    #[expect(
+        unsafe_code,
+        reason = "confstr is C, which libc only declares. It writes no more than the \
+                  `buffer.len()` bytes it is given"
+    )]
+    let needed = unsafe {
+        libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len())
+    };
+    if needed == 0 || needed > buffer.len() {
+        return None;
+    }
+    let root = &buffer[..needed - 1];
+    (!root.is_empty()).then(|| std::ffi::OsStr::from_bytes(root).to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_temp() -> Option<OsString> {
+    None
 }
 
 #[derive(Debug)]

@@ -46,6 +46,7 @@ xn = "=0.2.13"
 wt = { git = "https://github.com/lorenzolfm/wt", rev = "a6fee7e0024b5a8f245c3777bbc27543913b22ac" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

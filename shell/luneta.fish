@@ -7,6 +7,8 @@ if status is-interactive; and set -q ZELLIJ_PANE_ID; and test -t 0
     set -gx __luneta_pane "$ZELLIJ_SESSION_NAME $ZELLIJ_PANE_ID"
     set -gx __luneta_pane_tty (tty)
     set -l root $XDG_RUNTIME_DIR
+    test -n "$root"; or test (uname) != Darwin
+    or set root (getconf DARWIN_USER_TEMP_DIR | string trim -r -c /)
     test -n "$root"; or set root $TMPDIR
     set -g __luneta_root $root/luneta
     set -g __luneta_dir $__luneta_root/commands/$ZELLIJ_SESSION_NAME
