@@ -4,7 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::mux::{self, Mux, PaneId, PaneVars, Zellij, ZellijPane};
-pub use lunetad::closes::{closes_now, closes_together, deleted, Close, Closes, Closing};
+pub use lunetad::closes::{closes_now, closes_together, Close, Closes, Closing};
 use lunetad::closes::{self, running_in};
 pub use lunetad::names::{session_for, Starts};
 pub use lunetad::opens::{opening, Open, Opened, Tab};

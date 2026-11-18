@@ -240,10 +240,7 @@ impl Plan {
     }
 
     pub fn question(&self) -> Option<String> {
-        match self.ending {
-            Ok(ending) if !ending.at_work() => None,
-            Ok(_) | Err(_) => Some(format!("{}? {}", self.act.what(), self.ends())),
-        }
+        asked(&self.act.what(), self.ending)
     }
 
     pub fn ends(&self) -> String {
@@ -251,6 +248,18 @@ impl Plan {
             Ok(ending) => ending.says(),
             Err(untold) => format!("{UNTOLD}: {untold}"),
         }
+    }
+}
+
+pub fn question(what: &str, doing: Result<&[Doing], Untold>) -> Option<String> {
+    asked(what, doing.map(|doing| Ending::of(doing.iter().copied())))
+}
+
+fn asked(what: &str, ending: Result<Ending, Untold>) -> Option<String> {
+    match ending {
+        Ok(ending) if !ending.at_work() => None,
+        Ok(ending) => Some(format!("{what}? {}", ending.says())),
+        Err(untold) => Some(format!("{what}? {UNTOLD}: {untold}")),
     }
 }
 

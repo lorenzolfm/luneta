@@ -168,7 +168,7 @@ const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CON
 
 const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
 
-const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
+const WORKSTREAMS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 const LEFT: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::CONTROL);
 
@@ -203,7 +203,7 @@ pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 15] = [
     (SHRINK, "Shrink the pane"),
     (COLLAPSE, "Collapse sidebar"),
     (MENU, "Menu over panes"),
-    (SESSIONS, "Pick a session"),
+    (WORKSTREAMS, "Pick a workstream"),
     (AGENTS, "Pick an agent"),
     (DIRS, "Pick a directory"),
     (dictation::KEY, "Hold to dictate"),
@@ -1191,7 +1191,7 @@ impl App {
             return;
         }
         let list = match chord {
-            SESSIONS => Some(List::Sessions),
+            WORKSTREAMS => Some(List::Workstreams),
             AGENTS => Some(List::Agents),
             DIRS => Some(List::Dirs),
             _ => None,
@@ -1199,7 +1199,7 @@ impl App {
         if let Some(list) = list {
             self.pickers += 1;
             let aim = match (list, self.focus.side) {
-                (List::Sessions | List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
                 _ => None,
             };
             let aim = aim.unwrap_or_default();
@@ -1784,21 +1784,17 @@ impl App {
                 self.go(&on, &place);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Start { on: Machine::Local, session } => {
-                match Directory::parse(self.dir.to_string_lossy().into_owned()) {
-                    Ok(cwd) => self.make_workstream(cwd, move |lunetad, cwd| {
-                        workstreams::start(lunetad, Some(session.as_str()), cwd, |_| None)
-                    }),
-                    Err(why) => self.sidebar.notify(format!("no workstream made: {why}")),
-                }
+            Picked::Add { on: Machine::Local, project, folder, name } => {
+                let project = project.id();
+                self.make_workstream(folder.clone(), move |lunetad, _| {
+                    let named = Some(name.as_str());
+                    workstreams::add_workstream(lunetad, project, folder.as_str(), named).map(Some)
+                });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Start { on: Machine::Remote(_), .. }
+            Picked::Add { on: Machine::Remote(_), .. }
             | Picked::Make { on: Machine::Remote(_), .. } => {
                 self.sidebar.notify(format!("picker: {}", menu::HERE_ONLY));
-            },
-            Picked::BringBack { session, .. } => {
-                self.sidebar.notify(format!("picker: zellij keeps {session}: {}", menu::OWN_ONLY));
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
                 self.make_workstream(cwd, move |lunetad, cwd| {

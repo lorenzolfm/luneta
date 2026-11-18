@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, WorkstreamId};
+use lunetad::projects::{self, ProjectId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -53,7 +53,7 @@ use crate::menu::{
     Ran, Target, Top, Wants, WorkstreamRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
+use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Streamed};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -149,6 +149,11 @@ impl ProjectRow {
     #[must_use]
     pub fn id(&self) -> ProjectId {
         self.id
+    }
+
+    #[cfg(test)]
+    pub fn new(name: &str, id: u64) -> Self {
+        ProjectRow::of(Listed::new_project(name, id)).unwrap()
     }
 }
 
@@ -767,6 +772,7 @@ impl Away {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Known {
     project: ProjectRow,
+    dir: String,
     workstreams: Vec<Stream>,
     order: Vec<WorkstreamId>,
 }
@@ -777,6 +783,8 @@ struct Stream {
     name: String,
     folder: String,
     missing: bool,
+    seen: Option<projects::Seen>,
+    used: Option<SystemTime>,
     panes: Vec<Pane>,
 }
 
@@ -788,12 +796,14 @@ impl Known {
             let place = WorkstreamPlace { project: project.clone(), workstream: id };
             let panes = workstream.terminals.iter().filter_map(|it| pane_of(it, workstream, tab));
             let missing = matches!(workstream.seen, Some(api::workstream::Seen::Missing(())));
+            let seen = workstream.seen.and_then(seen_of);
+            let used = workstream.used_at.and_then(|at| SystemTime::try_from(at).ok());
             let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-            Some(Stream { place, name, folder, missing, panes: panes.collect() })
+            Some(Stream { place, name, folder, missing, seen, used, panes: panes.collect() })
         });
         let workstreams = streams.collect();
         let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
-        Some(Known { project, workstreams, order })
+        Some(Known { project, dir: said.dir.clone(), workstreams, order })
     }
 
     fn listed(&self) -> &Listed {
@@ -807,6 +817,23 @@ impl Known {
     fn pane(&self, id: u32) -> Option<&Pane> {
         self.panes().find(|pane| pane.id == id)
     }
+}
+
+fn seen_of(seen: api::workstream::Seen) -> Option<projects::Seen> {
+    use projects::Stage;
+    let stage = match seen {
+        api::workstream::Seen::Missing(()) => return Some(projects::Seen::Missing),
+        api::workstream::Seen::Unread(()) => return Some(projects::Seen::Unread),
+        api::workstream::Seen::Stage(stage) => api::Stage::try_from(stage).ok()?,
+    };
+    Some(projects::Seen::Read(match stage {
+        api::Stage::NoBranch => Stage::NoBranch,
+        api::Stage::Working => Stage::Working,
+        api::Stage::PullRequestOpen => Stage::PullRequestOpen,
+        api::Stage::ChecksFailing => Stage::ChecksFailing,
+        api::Stage::Merged => Stage::Merged,
+        api::Stage::Unspecified => return None,
+    }))
 }
 
 fn project_of(spot: &Spot) -> Option<Spot> {
@@ -1799,6 +1826,7 @@ impl Sidebar {
         let mut listing = Listing { away, this, ..Listing::default() };
         if let Some(host) = &self.host {
             for (machine, seen) in machines(host, &self.shelves).each() {
+                listing.shelves.push(self.shelved(&machine, seen.as_ref(), here.as_ref()));
                 let Ok(seen) = seen else {
                     continue;
                 };
@@ -1809,8 +1837,73 @@ impl Sidebar {
                 }
             }
         }
+        listing.shown = self.here_workstream().map(|place| (Machine::Local, place));
         listing.here = here;
         listing
+    }
+
+    fn shelved(
+        &self,
+        machine: &Machine,
+        seen: Result<&Seen<'_>, &Away>,
+        here: Option<&Here>,
+    ) -> Shelved {
+        let here = here.filter(|here| here.on() == machine);
+        let here_key = here.and_then(Here::pane).map(|place| place.session.key(place.pane.id()));
+        let heard = seen.ok();
+        let seated = heard.map_or_default(|seen| seen.seated());
+        let unread = heard.filter(|_| self.away.is_none()).map(|seen| seen.unread_seats());
+        let trees: HashMap<&str, &lunetad::api::WorkTree> = heard
+            .iter()
+            .flat_map(|seen| seen.work_trees)
+            .map(|tree| (tree.dir.as_str(), tree))
+            .collect();
+        let mut projects = Vec::new();
+        for known in shelf(&self.shelves, machine) {
+            let listed = known.listed();
+            let mut workstreams = Vec::with_capacity(known.workstreams.len());
+            for stream in &known.workstreams {
+                let held = |pane: u32| stream.panes.iter().any(|it| it.id == pane);
+                let agents = stream.panes.iter().filter_map(|pane| {
+                    Some((listed.key(pane.id), *seated.get(&(listed.at(), pane.id))?))
+                });
+                let waiting = agents.clone().filter(|(key, agent)| {
+                    let (marked, _) = agent_marked(&self.news, agent, *key, here_key == Some(*key));
+                    marked.mark == Mark::Waiting
+                });
+                let ending = match &unread {
+                    Some(Ok(seats)) => {
+                        let doing = agents.clone().map(|(_, agent)| close::Doing::from(agent));
+                        let files = close::unread_in(seats, listed.at());
+                        let files = files.filter(|(pane, _)| held(*pane)).map(|(_, doing)| doing);
+                        Ok(doing.chain(files).collect())
+                    },
+                    Some(Err(unplaced)) => Err(Untold::Unplaced(*unplaced)),
+                    None => Err(Untold::Away),
+                };
+                let branch = trees.get(stream.folder.as_str()).and_then(|tree| {
+                    Some(checkout(&WorkTree::of_api(tree)?, None)?.branch)
+                });
+                let terminals = stream.panes.iter().filter_map(|pane| {
+                    PanePlace::of(listed.clone(), pane).map(|place| place.pane)
+                });
+                workstreams.push(Streamed {
+                    place: stream.place.clone(),
+                    name: stream.name.clone(),
+                    folder: stream.folder.clone(),
+                    branch,
+                    seen: stream.seen,
+                    used: stream.used,
+                    terminals: terminals.collect(),
+                    waiting: waiting.count(),
+                    ending,
+                });
+            }
+            let (project, dir) = (known.project.clone(), known.dir.clone());
+            projects.push(Housed { project, dir, workstreams });
+        }
+        let away = seen.err().map(|away| away.said().0);
+        Shelved { on: machine.clone(), away, projects }
     }
 
     pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
@@ -1857,7 +1950,6 @@ impl Sidebar {
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
             let listed = known.listed();
-            let mut waiting = 0;
             for pane in known.panes() {
                 let Some(agent) = seated.get(&(listed.at(), pane.id)) else {
                     continue;
@@ -1867,7 +1959,6 @@ impl Sidebar {
                 };
                 let key = listed.key(pane.id);
                 let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
-                waiting += usize::from(marked.mark == Mark::Waiting);
                 runs.agents.push(Seated {
                     place,
                     label: label(Some(agent), pane),
@@ -1880,18 +1971,6 @@ impl Sidebar {
                     doing: alerts::Doing::of(agent),
                 });
             }
-            let shown = |pane: &Pane| Shown {
-                id: pane.id,
-                tab: pane.tab_name.clone(),
-                label: label(seated.get(&(listed.at(), pane.id)).copied(), pane),
-            };
-            runs.sessions.push(Live {
-                started: listed.kept.started(),
-                panes: known.panes().map(shown).collect(),
-                focus: None,
-                waiting,
-                place: Place::Session(listed.clone()),
-            });
         }
         let here = here.map(Here::session);
         runs.agents.sort_by_key(|seated| here != Some(seated.place.session.name().as_str()));
@@ -9816,16 +9895,23 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let listing = sidebar.listing();
-        let names = |runs: &Runs| {
-            let sessions = runs.sessions.iter().map(|live| live.place.session().to_owned());
-            let agents = runs.agents.iter().map(|seated| seated.label.clone());
-            (sessions.collect::<Vec<_>>(), agents.collect::<Vec<_>>())
-        };
-        let here = (vec!["main".to_owned()], Vec::new());
-        assert_eq!((listing.this.as_str(), names(&listing.local)), ("mac", here));
+        let names = |runs: &Runs| runs.agents.iter().map(|seated| seated.label.clone()).collect();
+        assert_eq!((listing.this.as_str(), names(&listing.local)), ("mac", Vec::<String>::new()));
         let remotes: Vec<_> = listing.remotes.iter().map(|(at, runs)| (at, names(runs))).collect();
-        let there = (vec!["main".to_owned()], vec!["fix".to_owned()]);
-        assert_eq!(remotes, [(&nixos(), there)]);
+        assert_eq!(remotes, [(&nixos(), vec!["fix".to_owned()])]);
+        let each = listing.shelves.iter().map(|shelved| {
+            let projects = shelved.projects.iter().map(|housed| housed.project.listed().name());
+            (shelved.on.clone(), shelved.away, projects.map(ToString::to_string).collect())
+        });
+        let main = || vec!["main".to_owned()];
+        let far = |at: &str| Machine::Remote(at.parse().unwrap());
+        let shelves: Vec<(Machine, Option<&str>, Vec<String>)> = each.collect();
+        assert_eq!(shelves, [
+            (Machine::Local, None, main()),
+            (Machine::Remote(nixos()), None, main()),
+            (far("me@vps"), Some("unreachable"), Vec::new()),
+            (far("pi"), Some("reaching…"), Vec::new()),
+        ]);
         sidebar.cursor = Some(Spot::Machine(Machine::Remote(nixos())));
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));

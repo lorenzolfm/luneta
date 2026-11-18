@@ -9,11 +9,10 @@ use lunetad::api::keep_checks_response::{self, failed};
 use lunetad::api::keep_printed_response::{self, File};
 use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
-    closes_response, AskResponse, ClosesRequest, DeleteExitedRequest, DumpScreenRequest,
-    IssueRepositoriesRequest, KeepChecksRequest, KeepPrintedRequest, KillRequest,
-    ListContentsRequest, ListDirsRequest, ListDirsResponse, ListExitedRequest, ListExitedResponse,
-    ListSkillsRequest, On, OtherTabsRequest, RenameSessionRequest, TurnIntoPanesRequest,
-    TurnIntoTabRequest,
+    closes_response, AskResponse, ClosesRequest, DumpScreenRequest, IssueRepositoriesRequest,
+    KeepChecksRequest, KeepPrintedRequest, KillRequest, ListContentsRequest, ListDirsRequest,
+    ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, On,
+    OtherTabsRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
@@ -271,17 +270,6 @@ impl Away {
             log::say(&format!("{on}: left out {left_out} sessions zellij keeps that do not read"));
         }
         Ok(exited)
-    }
-
-    pub fn delete(&mut self, session: &SessionName) -> Result<(), String> {
-        let request = DeleteExitedRequest { on: Some(self.on()), session: session.to_string() };
-        self.ask(|mut daemon| async move { daemon.delete_exited(request).await })
-    }
-
-    pub fn rename(&mut self, session: &SessionName, to: &SessionName) -> Result<(), String> {
-        let (session, to) = (session.to_string(), to.to_string());
-        let request = RenameSessionRequest { on: Some(self.on()), session, to };
-        self.ask(|mut daemon| async move { daemon.rename_session(request).await })
     }
 
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, String>, String> {
