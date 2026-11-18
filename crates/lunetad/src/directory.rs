@@ -28,3 +28,9 @@ impl From<Directory> for String {
         directory.0
     }
 }
+
+impl From<&crate::projects::Dir> for Directory {
+    fn from(dir: &crate::projects::Dir) -> Self {
+        Directory(dir.as_str().to_owned())
+    }
+}

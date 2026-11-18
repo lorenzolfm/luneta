@@ -744,6 +744,7 @@ fn session_of(act: &Act) -> &str {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
         | Act::Workstream { session, .. }
+        | Act::Project { session, .. }
         | Act::Kill { session, .. }
         | Act::Leave { session, .. } => session.as_str(),
     }
@@ -759,6 +760,7 @@ fn says(act: &Act) -> String {
         Act::Workstream { session, workstream, .. } => {
             format!("delete workstream {workstream} of {session}")
         },
+        Act::Project { session, .. } => format!("delete project {session}"),
         Act::Kill { session, .. } | Act::Leave { session, .. } => {
             format!("delete session {session}")
         },
@@ -881,6 +883,9 @@ fn act(act: &Act) -> Result<(), String> {
         },
         Act::Workstream { .. } => {
             unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
+        },
+        Act::Project { .. } => {
+            unreachable!("only the sidebar plans a project's delete, and lunetad acts on it")
         },
         Act::Kill { session, whose } => closes::killed(session, whose.started(session)?),
         Act::Leave { session, started, .. } => closes::killed(session, *started),

@@ -19,14 +19,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use lunetad::mux::{Exited, Mux, Zellij};
+use lunetad::mux::{Exited, Zellij};
+use lunetad::projects::{self, Name, Seen, TerminalId};
 use lunetad::transcripts::SessionId;
 use lunetad::zoxide::{self, Dir};
 use lunetad::{eza, screens, Destination, Directory};
 
 use crate::alerts::Doing;
 use crate::away::{self, Away};
-use crate::close::{Act, Deletes, Plan};
+use crate::close::{self, Act, Deletes, Ends, Plan, Untold};
 use crate::gruvbox;
 use crate::host::Event;
 use crate::screen;
@@ -34,6 +35,7 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::sidebar::{
     self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place,
+    ProjectRow, WorkstreamPlace,
 };
 use crate::spots::{Drawn, Spots};
 use crate::projected::{self, Projected, Route};
@@ -61,10 +63,40 @@ const MIN_ACTION: usize = 12;
 #[derive(Debug, Default)]
 pub struct Listing {
     pub here: Option<Here>,
+    pub shown: Option<(Machine, WorkstreamPlace)>,
     pub local: Runs,
     pub remotes: Vec<(Destination, Runs)>,
+    pub shelves: Vec<Shelved>,
     pub away: Option<String>,
     pub this: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Shelved {
+    pub on: Machine,
+    pub away: Option<&'static str>,
+    pub projects: Vec<Housed>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Housed {
+    pub project: ProjectRow,
+    pub dir: projects::Dir,
+    pub workstreams: Vec<Streamed>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Streamed {
+    pub place: WorkstreamPlace,
+    pub name: String,
+    pub folder: projects::Dir,
+    pub branch: Option<String>,
+    pub seen: Seen,
+    pub used: Option<SystemTime>,
+    pub terminals: Vec<PaneKey>,
+    pub held: Vec<TerminalId>,
+    pub waiting: usize,
+    pub ending: Result<Vec<close::Doing>, Untold>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,24 +129,7 @@ impl Here {
 
 #[derive(Debug, Default)]
 pub struct Runs {
-    pub sessions: Vec<Live>,
     pub agents: Vec<Seated>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Live {
-    pub place: Place,
-    pub started: Option<SystemTime>,
-    pub panes: Vec<Shown>,
-    pub focus: Option<PaneKey>,
-    pub waiting: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct Shown {
-    pub id: u32,
-    pub tab: String,
-    pub label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -132,7 +147,7 @@ pub struct Seated {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum List {
-    Sessions,
+    Workstreams,
     Agents,
     Dirs,
 }
@@ -140,23 +155,23 @@ pub enum List {
 impl List {
     fn next(self) -> List {
         match self {
-            List::Sessions => List::Agents,
+            List::Workstreams => List::Agents,
             List::Agents => List::Dirs,
-            List::Dirs => List::Sessions,
+            List::Dirs => List::Workstreams,
         }
     }
 
     fn back(self) -> List {
         match self {
-            List::Sessions => List::Dirs,
-            List::Agents => List::Sessions,
+            List::Workstreams => List::Dirs,
+            List::Agents => List::Workstreams,
             List::Dirs => List::Agents,
         }
     }
 
     fn title(self) -> &'static str {
         match self {
-            List::Sessions => "Sessions",
+            List::Workstreams => "Workstreams",
             List::Agents => "Agents",
             List::Dirs => "Directories",
         }
@@ -168,8 +183,7 @@ pub enum Picked {
     Nothing,
     Close,
     Go { on: Machine, place: Place },
-    Start { on: Machine, session: SessionName },
-    BringBack { on: Machine, session: SessionName },
+    Add { on: Machine, project: ProjectRow, folder: Directory, name: Option<Name> },
     Make { on: Machine, session: SessionName, cwd: Directory },
     Plan { on: Machine, session: Listed, deletes: Deletes },
     Delete { on: Machine, act: Act },
@@ -184,8 +198,8 @@ pub enum Heard {
         peek: Result<(u32, String), String>,
     },
     Closes { on: Machine, place: PanePlace, closes: Result<Closes, String> },
-    Renamed { from: SessionName, to: SessionName, renamed: Result<(), String> },
-    Deleted { on: Machine, session: SessionName, deleted: Result<(), String> },
+    Renamed { from: String, to: Name, renamed: Result<(), String> },
+    Closed { name: String, closed: Result<(), String> },
     Dirs { on: Machine, ask: u64, visited: Result<Vec<Dir>, String> },
     Listed { on: Machine, path: Directory, listed: Result<String, String> },
 }
@@ -195,10 +209,25 @@ pub enum Ask {
     Exited { on: Machine, ask: u64 },
     Peek { on: Machine, session: Listed, asked: Option<PaneKey> },
     Closes { on: Machine, place: PanePlace },
-    Rename { on: Machine, from: Listed, to: SessionName },
-    Delete { on: Machine, session: SessionName },
+    Rename { on: Machine, renames: Renames, to: Name },
+    Close { on: Machine, place: WorkstreamPlace, name: String, seen: Vec<TerminalId> },
     Dirs { on: Machine, ask: u64 },
     List { on: Machine, path: Directory },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Renames {
+    Workstream { place: WorkstreamPlace, name: String },
+    Project(ProjectRow),
+}
+
+impl Renames {
+    fn name(&self) -> &str {
+        match self {
+            Renames::Workstream { name, .. } => name,
+            Renames::Project(project) => project.listed().name().as_str(),
+        }
+    }
 }
 
 pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>) {
@@ -251,26 +280,20 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
                 Heard::Closes { on, place, closes }
             })
         },
-        Ask::Rename { on, from, to } => Box::new(move || {
-            let project = from.own_key().and_then(projected::project_of);
-            let from = from.name().clone();
-            let renamed = match (&on, project) {
-                (Machine::Local, Some(project)) => workstreams::renamed(project, to.as_str()),
-                (Machine::Local, None) => Mux::Zellij(&from).renamed(&to),
-                (Machine::Remote(destination), _) => {
-                    reach(destination).and_then(|mut away| away.rename(&from, &to))
+        Ask::Rename { on, renames, to } => Box::new(move || {
+            let renamed = match &renames {
+                Renames::Workstream { place, .. } => {
+                    workstreams::renamed_workstream(&on, place.workstream, to.as_str())
+                },
+                Renames::Project(project) => {
+                    workstreams::renamed_project(&on, project.id(), to.as_str())
                 },
             };
-            Heard::Renamed { from, to, renamed }
+            Heard::Renamed { from: renames.name().to_owned(), to, renamed }
         }),
-        Ask::Delete { on, session } => Box::new(move || {
-            let deleted = match &on {
-                Machine::Local => zellij::deleted(&session),
-                Machine::Remote(destination) => {
-                    reach(destination).and_then(|mut away| away.delete(&session))
-                },
-            };
-            Heard::Deleted { on, session, deleted }
+        Ask::Close { on, place, name, seen } => Box::new(move || {
+            let closed = workstreams::closed_there(&on, place.workstream, &seen);
+            Heard::Closed { name, closed }
         }),
         Ask::Dirs { on, ask } => Box::new(move || {
             let visited = match &on {
@@ -304,16 +327,16 @@ fn reach(destination: &Destination) -> Result<Away, String> {
 pub enum Pick {
     Key(KeyEvent),
     Row(Key),
-    Machine(Machine),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
-    Live { on: Machine, place: Place },
-    Exited { on: Machine, session: SessionName },
+    Workstream { on: Machine, place: WorkstreamPlace },
+    Project { on: Machine, project: ProjectRow, folder: Directory },
+    Machine { on: Machine },
     Agent { on: Machine, place: PanePlace },
     Dir { on: Machine, path: Directory, session: Result<SessionName, &'static str> },
-    New { session: SessionName },
+    New { on: Machine, project: ProjectRow, folder: Directory, name: Name },
 }
 
 #[derive(Clone, Debug)]
@@ -324,15 +347,19 @@ struct Row {
     rules: Rules,
 }
 
+impl Row {
+    fn plain(key: Key, name: String) -> Row {
+        Row { key, name, hits: Vec::new(), rules: Rules::default() }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct Rules {
     machine: Option<String>,
-    ended: bool,
 }
 
 enum Item<'a> {
     Machine(&'a str),
-    Ended,
     Row(usize),
 }
 
@@ -353,6 +380,10 @@ impl Rows {
         let last = rows.len().checked_sub(1);
         self.at = at.or_else(|| last.map(|last| was.min(last)));
         self.rows = rows;
+        assert_eq!(self.at.is_some(), !self.rows.is_empty(), "a row is lit while there is one");
+        if let Some(at) = self.at {
+            assert!(at < self.rows.len(), "the lit row {at} is one of {}", self.rows.len());
+        }
     }
 
     fn selected(&self) -> Option<&Row> {
@@ -372,63 +403,10 @@ impl Rows {
 #[derive(Debug)]
 enum Stage {
     Search,
-    Rename { on: Machine, session: Listed, input: String },
-    Choose { session: SessionName, at: Machine },
-    Planning { target: Target, agreed: Option<Plan> },
-    Asking { target: Target, plan: Plan, asks: String },
-}
-
-#[derive(Debug)]
-enum Target {
-    Session { on: Machine, place: Place },
-    Pane { on: Machine, place: PanePlace },
-}
-
-impl Target {
-    fn machine(&self) -> &Machine {
-        match self {
-            Target::Session { on, .. } | Target::Pane { on, .. } => on,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refused {
-    Here,
-    Runs,
-    Ended,
-    Asking,
-    Failed,
-    Gone,
-}
-
-impl Refused {
-    fn taken(self) -> bool {
-        matches!(self, Refused::Here | Refused::Runs | Refused::Ended | Refused::Gone)
-    }
-
-    fn short(self) -> &'static str {
-        match self {
-            Refused::Here => "you are in it",
-            Refused::Runs => "runs there",
-            Refused::Ended => "ended there",
-            Refused::Asking => "asking zellij…",
-            Refused::Failed => "zellij did not say",
-            Refused::Gone => "listed no more",
-        }
-    }
-
-    fn why(self, name: &SessionName, machine: Option<&str>) -> String {
-        let on = machine.map_or_default(|machine| format!(" on {machine}"));
-        match self {
-            Refused::Here => format!("you are in {name}{on}"),
-            Refused::Runs => format!("{name} runs{on} already"),
-            Refused::Ended => format!("zellij{on} keeps {name}, which ended, to bring back"),
-            Refused::Asking => format!("zellij{on} has yet to say which sessions ended"),
-            Refused::Failed => format!("zellij{on} did not say which sessions ended"),
-            Refused::Gone => format!("{} is listed no more", machine.unwrap_or("the machine")),
-        }
-    }
+    Rename { on: Machine, renames: Renames, input: String },
+    Planning { on: Machine, place: PanePlace, agreed: Option<Plan> },
+    Asking { on: Machine, place: PanePlace, plan: Plan, asks: String },
+    Closing { on: Machine, place: WorkstreamPlace, name: String, ends: Ends, asks: String },
 }
 
 struct Shot {
@@ -475,15 +453,15 @@ impl Shot {
 #[derive(Debug)]
 enum Peek {
     Reading,
-    Ready { pane: u32, shot: Shot },
+    Ready { shot: Shot },
     Failed(String),
 }
 
 impl Peek {
-    fn of(pane: u32, dumped: &str) -> Peek {
+    fn of(dumped: &str) -> Peek {
         let lines: Vec<&str> = dumped.lines().collect();
         let lines = &lines[lines.len().saturating_sub(PEEK_LINES_MAX)..];
-        Peek::Ready { pane, shot: Shot::of(lines) }
+        Peek::Ready { shot: Shot::of(lines) }
     }
 }
 
@@ -522,65 +500,8 @@ enum Visited {
 #[derive(Debug)]
 enum Ended {
     Asking(u64),
-    Heard { exited: Vec<Exited>, at: SystemTime },
-    Stale { exited: Vec<Exited>, at: SystemTime, next: Next },
-    Failed(String),
-}
-
-#[derive(Debug)]
-enum Next {
-    Answer(u64),
-    LettingGo(HashSet<SessionName>),
-}
-
-impl Ended {
-    fn asked(self, ask: u64) -> Ended {
-        match self {
-            Ended::Stale { exited, at, next: Next::LettingGo(going) } if !going.is_empty() => {
-                Ended::Stale { exited, at, next: Next::LettingGo(going) }
-            },
-            Ended::Heard { exited, at } | Ended::Stale { exited, at, .. } => {
-                Ended::Stale { exited, at, next: Next::Answer(ask) }
-            },
-            Ended::Asking(_) | Ended::Failed(_) => Ended::Asking(ask),
-        }
-    }
-
-    fn forgot(self, session: &SessionName) -> Ended {
-        let (mut exited, at, mut going) = match self {
-            Ended::Heard { exited, at } | Ended::Stale { exited, at, next: Next::Answer(_) } => {
-                (exited, at, HashSet::new())
-            },
-            Ended::Stale { exited, at, next: Next::LettingGo(going) } => (exited, at, going),
-            ended @ (Ended::Asking(_) | Ended::Failed(_)) => return ended,
-        };
-        exited.retain(|exited| exited.name != *session);
-        going.insert(session.clone());
-        Ended::Stale { exited, at, next: Next::LettingGo(going) }
-    }
-
-    fn let_go(mut self, session: &SessionName) -> Ended {
-        if let Ended::Stale { next: Next::LettingGo(going), .. } = &mut self {
-            going.remove(session);
-        }
-        self
-    }
-
-    fn awaits(&self, ask: u64) -> bool {
-        match self {
-            Ended::Asking(open) | Ended::Stale { next: Next::Answer(open), .. } => *open == ask,
-            Ended::Stale { next: Next::LettingGo(_), .. }
-            | Ended::Heard { .. }
-            | Ended::Failed(_) => false,
-        }
-    }
-
-    fn listed(&self) -> Option<(&[Exited], SystemTime)> {
-        match self {
-            Ended::Heard { exited, at } | Ended::Stale { exited, at, .. } => Some((exited, *at)),
-            Ended::Asking(_) | Ended::Failed(_) => None,
-        }
-    }
+    Heard(Vec<Exited>),
+    Failed,
 }
 
 #[derive(Debug)]
@@ -594,7 +515,7 @@ pub struct Picker {
     exited_asked: u64,
     visited: HashMap<Machine, Visited>,
     dirs_asked: u64,
-    sessions: Rows,
+    workstreams: Rows,
     agents: Rows,
     dirs: Rows,
     peeks: HashMap<Looked, Peek>,
@@ -618,7 +539,7 @@ impl Picker {
             exited_asked: 0,
             visited: HashMap::new(),
             dirs_asked: 0,
-            sessions: Rows::default(),
+            workstreams: Rows::default(),
             agents: Rows::default(),
             dirs: Rows::default(),
             peeks: HashMap::new(),
@@ -644,30 +565,10 @@ impl Picker {
     }
 
     pub fn listed(&mut self, listing: Listing) {
-        let names = |runs: &Runs| -> HashSet<String> {
-            runs.sessions.iter().map(|live| live.place.session().to_owned()).collect()
-        };
-        let before: HashMap<Machine, HashSet<String>> =
-            self.each().map(|(on, runs)| (on, names(runs))).collect();
         self.listing = listing;
         let machines = self.machines();
         self.visited.retain(|on, _| machines.contains(on));
         self.exited.retain(|on, _| machines.contains(on));
-        if let Stage::Choose { at, .. } = &self.stage
-            && !machines.contains(at)
-        {
-            self.error = Some(format!("{} is listed no more", self.machine_name(at)));
-            self.stage = Stage::Search;
-        }
-        let ended: Vec<Machine> = self
-            .each()
-            .filter(|(on, runs)| before.get(on).is_some_and(|ran| !ran.is_subset(&names(runs))))
-            .map(|(on, _)| on)
-            .filter(|on| self.exited.contains_key(on))
-            .collect();
-        for on in ended {
-            self.ask_exited(on);
-        }
         self.ask_kept();
         self.ask_dirs();
         self.rebuild(false);
@@ -693,8 +594,38 @@ impl Picker {
         }
     }
 
-    fn live(&self, on: &Machine, place: &Place) -> Option<&Live> {
-        self.runs(on)?.sessions.iter().find(|live| live.place == *place)
+    fn shelved(&self, on: &Machine) -> Option<&Shelved> {
+        self.listing.shelves.iter().find(|shelved| shelved.on == *on)
+    }
+
+    fn housed(&self, on: &Machine, project: &ProjectRow) -> Option<&Housed> {
+        let projects = &self.shelved(on)?.projects;
+        projects.iter().find(|housed| housed.project.id() == project.id())
+    }
+
+    fn streamed(&self, on: &Machine, place: &WorkstreamPlace) -> Option<&Streamed> {
+        let workstreams = &self.housed(on, &place.project)?.workstreams;
+        workstreams.iter().find(|streamed| streamed.place.workstream == place.workstream)
+    }
+
+    fn row_streamed(&self, on: &Machine, place: &WorkstreamPlace) -> &Streamed {
+        let streamed = self.streamed(on, place);
+        streamed.expect("a workstream's row is rebuilt with the listing that holds it")
+    }
+
+    fn out_of_reach(&self, on: &Machine) -> Option<String> {
+        self.shelved(on)?.away?;
+        Some(format!("lunetad does not reach {} now", self.machine_name(on)))
+    }
+
+    fn is_shown(&self, on: &Machine, place: &WorkstreamPlace) -> bool {
+        self.listing.shown.as_ref().is_some_and(|(at, shown)| at == on && shown == place)
+    }
+
+    fn focus(&self, on: &Machine, streamed: &Streamed) -> Option<PaneKey> {
+        let here = self.here_pane(on).map(|place| place.pane);
+        let focused = here.filter(|pane| streamed.terminals.contains(pane));
+        focused.or_else(|| streamed.terminals.first().copied())
     }
 
     fn seated(&self, on: &Machine, place: &PanePlace) -> Option<&Seated> {
@@ -715,37 +646,30 @@ impl Picker {
     fn ask_kept(&mut self) {
         for on in self.machines() {
             if !self.exited.contains_key(&on) {
-                self.ask_exited(on);
+                self.exited_asked += 1;
+                let ask = self.exited_asked;
+                self.exited.insert(on.clone(), Ended::Asking(ask));
+                self.asking.push(Ask::Exited { on, ask });
             }
         }
-    }
-
-    fn ask_exited(&mut self, on: Machine) {
-        let ask = self.exited_asked + 1;
-        let ended = self.exited.remove(&on).map_or(Ended::Asking(ask), |ended| ended.asked(ask));
-        if ended.awaits(ask) {
-            self.exited_asked = ask;
-            self.asking.push(Ask::Exited { on: on.clone(), ask });
-        }
-        self.exited.insert(on, ended);
     }
 
     pub fn heard(&mut self, heard: Heard) -> Picked {
         match heard {
             Heard::Exited { on, ask, exited } => {
-                if !self.exited.get(&on).is_some_and(|ended| ended.awaits(ask)) {
+                if !matches!(self.exited.get(&on), Some(Ended::Asking(asked)) if *asked == ask) {
                     return Picked::Nothing;
                 }
                 let ended = match exited {
-                    Ok(exited) => Ended::Heard { exited, at: SystemTime::now() },
-                    Err(why) => Ended::Failed(why),
+                    Ok(exited) => Ended::Heard(exited),
+                    Err(_) => Ended::Failed,
                 };
                 self.exited.insert(on, ended);
                 self.rebuild(false);
             },
             Heard::Peek { on, session, asked, peek } => {
                 let peek = match peek {
-                    Ok((pane, dumped)) => Peek::of(pane, &dumped),
+                    Ok((_, dumped)) => Peek::of(&dumped),
                     Err(why) => Peek::Failed(why),
                 };
                 self.peeks.insert((on, session, asked), peek);
@@ -753,7 +677,7 @@ impl Picker {
             Heard::Closes { on, place, closes } => {
                 let planning = matches!(
                     &self.stage,
-                    Stage::Planning { target: Target::Pane { on: planned, place: at }, .. }
+                    Stage::Planning { on: planned, place: at, .. }
                         if (planned, at) == (&on, &place)
                 );
                 if !planning {
@@ -774,16 +698,12 @@ impl Picker {
             },
             Heard::Renamed { from, to, renamed } => {
                 if let Err(why) = renamed {
-                    self.error = Some(format!("{from} is not called {to}: {why}"));
+                    self.error = Some(format!("{from} is not called {}: {why}", to.as_str()));
                 }
             },
-            Heard::Deleted { on, session, deleted } => {
-                if let Err(why) = deleted {
-                    self.error = Some(format!("{session} stays: {why}"));
-                }
-                if let Some(ended) = self.exited.remove(&on) {
-                    self.exited.insert(on.clone(), ended.let_go(&session));
-                    self.ask_exited(on);
+            Heard::Closed { name, closed } => {
+                if let Err(why) = closed {
+                    self.error = Some(format!("{name} stays: {why}"));
                 }
             },
             Heard::Dirs { on, ask, visited } => {
@@ -817,17 +737,22 @@ impl Picker {
         self.aiming = false;
         let picked = match std::mem::replace(&mut self.stage, Stage::Search) {
             Stage::Search => self.search_key(key),
-            Stage::Rename { on, session, input } => self.rename_key(key, on, session, input),
-            Stage::Choose { session, at } => self.choose_key(key, session, at),
-            Stage::Planning { target, agreed } => {
+            Stage::Rename { on, renames, input } => self.rename_key(key, on, renames, input),
+            Stage::Planning { on, place, agreed } => {
                 if key.code != KeyCode::Esc {
-                    self.stage = Stage::Planning { target, agreed };
+                    self.stage = Stage::Planning { on, place, agreed };
                 }
                 Picked::Nothing
             },
-            Stage::Asking { target, plan, .. } => {
+            Stage::Asking { on, place, plan, .. } => {
                 let yes = key.code == KeyCode::Char('y') && plain(key);
-                if yes { self.plan(target, Some(plan)) } else { Picked::Nothing }
+                if yes { self.plan(on, place, Some(plan)) } else { Picked::Nothing }
+            },
+            Stage::Closing { on, place, name, ends, .. } => {
+                if key.code == KeyCode::Char('y') && plain(key) {
+                    self.close(on, place, name, Some(&ends));
+                }
+                Picked::Nothing
             },
         };
         self.follow();
@@ -843,43 +768,21 @@ impl Picker {
                 self.rebuild(true);
             },
             Stage::Rename { input, .. } => input.push_str(&text),
-            Stage::Choose { .. } | Stage::Planning { .. } | Stage::Asking { .. } => {},
+            Stage::Planning { .. } | Stage::Asking { .. } | Stage::Closing { .. } => {},
         }
     }
 
     pub fn scroll(&mut self, by: isize) {
         self.aiming = false;
-        match &self.stage {
-            Stage::Search => {
-                self.rows_mut().step(by);
-                self.follow();
-            },
-            Stage::Choose { at, .. } => {
-                let at = self.machine_by(at, by);
-                if let Stage::Choose { at: was, .. } = &mut self.stage {
-                    *was = at;
-                }
-            },
-            Stage::Rename { .. } | Stage::Planning { .. } | Stage::Asking { .. } => {},
+        if let Stage::Search = self.stage {
+            self.rows_mut().step(by);
+            self.follow();
         }
     }
 
     pub fn click(&mut self, pick: Pick) -> Picked {
         let row = match pick {
             Pick::Key(key) => return self.key(&key),
-            Pick::Machine(machine) => {
-                let listed = self.machines().contains(&machine);
-                return match std::mem::replace(&mut self.stage, Stage::Search) {
-                    Stage::Choose { session, .. } if listed => {
-                        self.error = None;
-                        self.choose_key(&KeyEvent::from(KeyCode::Enter), session, machine)
-                    },
-                    stage => {
-                        self.stage = stage;
-                        Picked::Nothing
-                    },
-                };
-            },
             Pick::Row(row) => row,
         };
         let at = self.rows().rows.iter().position(|it| it.key == row);
@@ -894,7 +797,8 @@ impl Picker {
     }
 
     pub fn planned(&mut self, plan: Result<Plan, String>) -> Picked {
-        let Stage::Planning { target, agreed } = std::mem::replace(&mut self.stage, Stage::Search)
+        let Stage::Planning { on, place, agreed } =
+            std::mem::replace(&mut self.stage, Stage::Search)
         else {
             return Picked::Nothing;
         };
@@ -907,10 +811,10 @@ impl Picker {
         };
         let asks = if agreed.as_ref() == Some(&plan) { None } else { plan.question() };
         if let Some(asks) = asks {
-            self.stage = Stage::Asking { target, plan, asks };
+            self.stage = Stage::Asking { on, place, plan, asks };
             return Picked::Nothing;
         }
-        Picked::Delete { on: target.machine().clone(), act: plan.act }
+        Picked::Delete { on, act: plan.act }
     }
 
     pub fn due(&self) -> Option<Instant> {
@@ -965,12 +869,8 @@ impl Picker {
         };
         framed(buffer, area, TITLE, "", Vec::new());
         let layout = Layout::of(Rect::new(area.x + 1, area.y + 1, width, height));
-        if let Stage::Rename { on, session, input } = &self.stage {
-            let spots = self.draw_rename(buffer, &layout, on, session.name(), input);
-            return Drawn::Picker { number: self.number, area, spots };
-        }
-        if let Stage::Choose { session, at } = &self.stage {
-            let spots = self.draw_choose(buffer, &layout, session, at);
+        if let Stage::Rename { on, renames, input } = &self.stage {
+            let spots = self.draw_rename(buffer, &layout, on, renames, input);
             return Drawn::Picker { number: self.number, area, spots };
         }
         let mut spots = Spots::default();
@@ -999,7 +899,7 @@ impl Picker {
 
     fn rows(&self) -> &Rows {
         match self.list {
-            List::Sessions => &self.sessions,
+            List::Workstreams => &self.workstreams,
             List::Agents => &self.agents,
             List::Dirs => &self.dirs,
         }
@@ -1007,7 +907,7 @@ impl Picker {
 
     fn rows_mut(&mut self) -> &mut Rows {
         match self.list {
-            List::Sessions => &mut self.sessions,
+            List::Workstreams => &mut self.workstreams,
             List::Agents => &mut self.agents,
             List::Dirs => &mut self.dirs,
         }
@@ -1027,7 +927,7 @@ impl Picker {
                 Picked::Nothing
             },
             KeyCode::Char('j') if held_super => {
-                self.list = List::Sessions;
+                self.list = List::Workstreams;
                 Picked::Nothing
             },
             KeyCode::Char('b') if control => {
@@ -1072,91 +972,38 @@ impl Picker {
             return Picked::Nothing;
         };
         match &row.key {
-            Key::Live { on, place } if self.is_here(on, place) => Picked::Close,
-            Key::Live { on, place } => Picked::Go { on: on.clone(), place: place.clone() },
+            Key::Workstream { on, place } if self.is_shown(on, place) => Picked::Close,
+            Key::Workstream { on, place } => {
+                Picked::Go { on: on.clone(), place: Place::Workstream(place.clone()) }
+            },
+            Key::Project { on, project, folder } => {
+                let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
+                Picked::Add { on, project, folder, name: None }
+            },
+            Key::Machine { .. } | Key::Dir { session: Err(_), .. } => Picked::Nothing,
             Key::Agent { on, place } => {
                 Picked::Go { on: on.clone(), place: Place::Pane(place.clone()) }
-            },
-            Key::Exited { on, session } => {
-                Picked::BringBack { on: on.clone(), session: session.clone() }
             },
             Key::Dir { on, path, session: Ok(session) } => {
                 Picked::Make { on: on.clone(), session: session.clone(), cwd: path.clone() }
             },
-            Key::Dir { session: Err(_), .. } => Picked::Nothing,
-            Key::New { session } => {
-                let session = session.clone();
-                self.choose(session)
+            Key::New { on, project, folder, name } => {
+                let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
+                Picked::Add { on, project, folder, name: Some(name.clone()) }
             },
         }
     }
 
-    fn new_name(&self) -> Option<SessionName> {
-        let name = SessionName::parse(&self.term).ok()?;
-        let free = |on: &Machine| !self.makes_on(on, &name).is_err_and(Refused::taken);
-        self.machines().iter().any(free).then_some(name)
+    fn here_project(&self) -> Option<(&Machine, &Housed)> {
+        let (on, place) = self.listing.shown.as_ref()?;
+        Some((on, self.housed(on, &place.project)?))
     }
 
-    fn makes_on(&self, on: &Machine, name: &SessionName) -> Result<(), Refused> {
-        if self.here_session(on) == Some(name.as_str()) {
-            return Err(Refused::Here);
-        }
-        let runs = self.runs(on).ok_or(Refused::Gone)?;
-        if runs.sessions.iter().any(|live| live.place.session() == name.as_str()) {
-            return Err(Refused::Runs);
-        }
-        match self.exited.get(on) {
-            Some(Ended::Heard { exited, .. }) if exited.iter().any(|it| it.name == *name) => {
-                Err(Refused::Ended)
-            },
-            Some(Ended::Heard { .. }) => Ok(()),
-            Some(Ended::Failed(_)) => Err(Refused::Failed),
-            Some(Ended::Asking(_) | Ended::Stale { .. }) | None => Err(Refused::Asking),
-        }
-    }
-
-    fn choose(&mut self, session: SessionName) -> Picked {
-        let machines = self.machines();
-        if let [only] = machines.as_slice() {
-            return match self.makes_on(only, &session) {
-                Ok(()) => Picked::Start { on: only.clone(), session },
-                Err(_) => Picked::Nothing,
-            };
-        }
-        let may = |on: &&Machine| !self.makes_on(on, &session).is_err_and(Refused::taken);
-        let makes = |on: &&Machine| self.makes_on(on, &session).is_ok();
-        let aimed = machines.iter().filter(may).find(|on| **on == self.aim);
-        let at = aimed.or_else(|| machines.iter().find(makes));
-        let at = at.or_else(|| machines.iter().find(may)).cloned().unwrap_or(Machine::Local);
-        self.stage = Stage::Choose { session, at };
-        Picked::Nothing
-    }
-
-    fn choose_key(&mut self, key: &KeyEvent, session: SessionName, at: Machine) -> Picked {
-        let by = match key.code {
-            KeyCode::Esc => return Picked::Nothing,
-            KeyCode::Enter if self.makes_on(&at, &session).is_ok() => {
-                return Picked::Start { on: at, session };
-            },
-            KeyCode::Char('j') if plain(key) => 1,
-            KeyCode::Char('k') if plain(key) => -1,
-            KeyCode::Down => 1,
-            KeyCode::Up => -1,
-            _ => 0,
-        };
-        let at = self.machine_by(&at, by);
-        self.stage = Stage::Choose { session, at };
-        Picked::Nothing
-    }
-
-    fn machine_by(&self, at: &Machine, by: isize) -> Machine {
-        let machines = self.machines();
-        let Some(was) = machines.iter().position(|on| on == at) else {
-            return at.clone();
-        };
-        let last = machines.len().saturating_sub(1);
-        let to = if by < 0 { was.saturating_sub(by.unsigned_abs()) } else { was + by.unsigned_abs() };
-        machines[to.min(last)].clone()
+    fn new_key(&self) -> Option<Key> {
+        let (on, housed) = self.here_project()?;
+        let name = Name::parse(&self.term).ok()?;
+        let (on, project, folder) = (on.clone(), housed.project.clone(), (&housed.dir).into());
+        Some(Key::New { on, project, folder, name })
     }
 
     fn delete(&mut self) -> Picked {
@@ -1164,69 +1011,83 @@ impl Picker {
             return Picked::Nothing;
         };
         match key {
-            Key::Exited { on, session } => {
-                if let Some(ended) = self.exited.remove(&on) {
-                    self.exited.insert(on.clone(), ended.forgot(&session));
-                }
-                self.asking.push(Ask::Delete { on, session });
-                self.rebuild(false);
+            Key::Workstream { on, place } => {
+                let name = self.row_streamed(&on, &place).name.clone();
+                self.close(on, place, name, None);
                 Picked::Nothing
             },
-            Key::Live { on, place } => self.plan(Target::Session { on, place }, None),
-            Key::Agent { on, place } => self.plan(Target::Pane { on, place }, None),
-            Key::Dir { .. } | Key::New { .. } => Picked::Nothing,
+            Key::Project { project, .. } => {
+                let name = project.listed().name();
+                self.error = Some(format!("{name} holds no workstream to close"));
+                Picked::Nothing
+            },
+            Key::Agent { on, place } => self.plan(on, place, None),
+            Key::Machine { .. } | Key::Dir { .. } | Key::New { .. } => Picked::Nothing,
         }
     }
 
-    fn plan(&mut self, target: Target, agreed: Option<Plan>) -> Picked {
-        let picked = match &target {
-            Target::Session { on, place } => {
-                let (on, session) = (on.clone(), place.listed().clone());
-                Picked::Plan { on, session, deletes: Deletes::Session }
-            },
-            Target::Pane { on, place } => {
-                self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
-                Picked::Nothing
-            },
+    fn close(&mut self, on: Machine, place: WorkstreamPlace, name: String, agreed: Option<&Ends>) {
+        let Some(streamed) = self.streamed(&on, &place) else {
+            self.error = Some(format!("{name} is listed no more"));
+            return;
         };
-        self.stage = Stage::Planning { target, agreed };
-        picked
+        let ends = Ends::of(&streamed.held, streamed.ending.as_deref().map_err(|untold| *untold));
+        if let Some(why) = self.out_of_reach(&on) {
+            self.error = Some(format!("{name} stays: {why}"));
+            return;
+        }
+        if agreed != Some(&ends)
+            && let Some(asks) = ends.question(&format!("Close workstream {name}"))
+        {
+            self.stage = Stage::Closing { on, place, name, ends, asks };
+            return;
+        }
+        self.asking.push(Ask::Close { on, place, name, seen: ends.seen });
+    }
+
+    fn plan(&mut self, on: Machine, place: PanePlace, agreed: Option<Plan>) -> Picked {
+        self.asking.push(Ask::Closes { on: on.clone(), place: place.clone() });
+        self.stage = Stage::Planning { on, place, agreed };
+        Picked::Nothing
     }
 
     fn rename(&mut self) {
-        if self.list != List::Sessions {
+        if self.list != List::Workstreams {
             return;
         }
-        match self.sessions.selected().map(|row| &row.key) {
-            Some(Key::Live { on, place }) => {
-                let (on, session) = (on.clone(), place.listed().clone());
-                self.stage = Stage::Rename { on, session, input: String::new() };
+        let (on, renames) = match self.workstreams.selected().map(|row| &row.key) {
+            Some(Key::Workstream { on, place }) => {
+                let name = self.row_streamed(on, place).name.clone();
+                (on.clone(), Renames::Workstream { place: place.clone(), name })
             },
-            Some(Key::Exited { session, .. }) => {
-                self.error = Some(format!(
-                    "{session} ended, and zellij renames only a session that runs: Enter \
-                     brings it back"
-                ));
+            Some(Key::Project { on, project, .. }) => {
+                (on.clone(), Renames::Project(project.clone()))
             },
-            Some(Key::Agent { .. } | Key::Dir { .. } | Key::New { .. }) | None => {},
+            Some(Key::Machine { .. } | Key::Agent { .. } | Key::Dir { .. } | Key::New { .. })
+            | None => return,
+        };
+        if let Some(why) = self.out_of_reach(&on) {
+            self.error = Some(format!("{} keeps its name: {why}", renames.name()));
+            return;
         }
+        self.stage = Stage::Rename { on, renames, input: String::new() };
     }
 
     fn rename_key(
         &mut self,
         key: &KeyEvent,
         on: Machine,
-        session: Listed,
+        renames: Renames,
         mut input: String,
     ) -> Picked {
         match key.code {
             KeyCode::Esc => return Picked::Nothing,
             KeyCode::Enter => {
-                let Ok(to) = self.rename_to(&on, session.name(), &input) else {
-                    self.stage = Stage::Rename { on, session, input };
+                let Ok(to) = self.rename_to(&on, &renames, &input) else {
+                    self.stage = Stage::Rename { on, renames, input };
                     return Picked::Nothing;
                 };
-                self.asking.push(Ask::Rename { on, from: session, to });
+                self.asking.push(Ask::Rename { on, renames, to });
                 return Picked::Nothing;
             },
             KeyCode::Backspace => {
@@ -1235,95 +1096,103 @@ impl Picker {
             KeyCode::Char(c) if plain(key) => input.push(c),
             _ => {},
         }
-        self.stage = Stage::Rename { on, session, input };
+        self.stage = Stage::Rename { on, renames, input };
         Picked::Nothing
     }
 
-    fn rename_to(
-        &self,
-        on: &Machine,
-        session: &SessionName,
-        name: &str,
-    ) -> Result<SessionName, String> {
-        let name = SessionName::parse(name).map_err(str::to_owned)?;
-        if name == *session {
+    fn rename_to(&self, on: &Machine, renames: &Renames, name: &str) -> Result<Name, String> {
+        let name = Name::parse(name)?;
+        if name.as_str() == renames.name() {
             return Err("already called that".to_owned());
         }
-        self.makes_on(on, &name).map_err(|refused| refused.why(&name, None))?;
+        let listed = match renames {
+            Renames::Workstream { place, .. } => self.streamed(on, place).is_some(),
+            Renames::Project(project) => self.housed(on, project).is_some(),
+        };
+        if !listed {
+            return Err(format!("{} is listed no more", renames.name()));
+        }
         Ok(name)
     }
 
     fn taken(&self, on: &Machine) -> Result<Vec<&str>, &'static str> {
         let exited = match self.exited.get(on) {
-            Some(Ended::Heard { exited, .. }) => exited,
-            Some(Ended::Asking(_) | Ended::Stale { .. }) | None => {
+            Some(Ended::Heard(exited)) => exited,
+            Some(Ended::Asking(_)) | None => {
                 return Err("zellij has yet to say which sessions ended");
             },
-            Some(Ended::Failed(_)) => return Err("zellij did not say which sessions ended"),
+            Some(Ended::Failed) => return Err("zellij did not say which sessions ended"),
         };
-        let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
-        let live = sessions.iter().map(|live| live.place.session());
+        let projects = self.shelved(on).into_iter().flat_map(|shelved| &shelved.projects);
+        let projects = projects.map(|housed| housed.project.listed().name().as_str());
         let ended = exited.iter().map(|exited| exited.name.as_str());
-        Ok(self.here_session(on).into_iter().chain(live).chain(ended).collect())
-    }
-
-    fn kept(&self, on: &Machine) -> Option<(&[Exited], SystemTime)> {
-        self.exited.get(on)?.listed()
+        Ok(self.here_session(on).into_iter().chain(projects).chain(ended).collect())
     }
 
     fn rebuild(&mut self, snap: bool) {
         let finder = (!self.term.is_empty()).then(|| Finder::new(&self.term));
         let ruled = !self.listing.remotes.is_empty();
-        let (mut sessions, mut agents) = (Vec::new(), Vec::new());
-        if let Some(session) = self.new_name() {
-            let key = Key::New { session };
-            let made = Row { key, name: self.term.clone(), hits: Vec::new(), rules: Rules::default() };
-            sessions.push(made);
-        }
+        let mut agents = Vec::new();
         for (on, runs) in self.each() {
-            let rule = || ruled.then(|| self.machine_name(&on));
-            grouped(&mut sessions, self.session_rows(finder.as_ref(), &on, runs), rule());
-            grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule());
+            let rule = ruled.then(|| self.machine_name(&on));
+            grouped(&mut agents, self.agent_rows(finder.as_ref(), &on, runs), rule);
+        }
+        let mut workstreams = self.workstream_rows(finder.as_ref());
+        if workstreams.is_empty()
+            && let Some(key) = self.new_key()
+        {
+            workstreams.push(Row::plain(key, self.term.clone()));
         }
         let (dirs, aimed) = self.dir_rows();
-        let start = |rows: &[Row]| match rows.first().map(|row| &row.key) {
-            Some(Key::Live { on, place }) if self.is_here(on, place) => {
+        let workstream_start = match workstreams.first().map(|row| &row.key) {
+            Some(Key::Workstream { on, place }) if self.is_shown(on, place) => {
                 usize::from(self.term.is_empty())
             },
-            Some(Key::New { .. }) => usize::from(rows.len() > 1),
             Some(_) | None => 0,
         };
-        let (session_start, agent_start) = (start(&sessions), start(&agents));
         let held = |rows: &Rows| rows.selected().map(|row| row.key.clone()).filter(|_| !snap);
-        let (held_session, held_agent) = (held(&self.sessions), held(&self.agents));
+        let (held_workstream, held_agent) = (held(&self.workstreams), held(&self.agents));
         let held_dir = held(&self.dirs).filter(|_| !self.aiming);
-        self.sessions.replace(sessions, held_session.as_ref(), session_start);
-        self.agents.replace(agents, held_agent.as_ref(), agent_start);
+        self.workstreams.replace(workstreams, held_workstream.as_ref(), workstream_start);
+        self.agents.replace(agents, held_agent.as_ref(), 0);
         self.dirs.replace(dirs, held_dir.as_ref(), aimed.unwrap_or(0));
         self.follow();
     }
 
-    fn session_rows(&self, finder: Option<&Finder<'_>>, on: &Machine, runs: &Runs) -> Vec<Row> {
-        let mut sessions = Vec::new();
-        for live in &runs.sessions {
-            let rank = u8::from(!self.is_here(on, &live.place));
-            let key = Key::Live { on: on.clone(), place: live.place.clone() };
-            sessions.push((rank, live.place.session().to_owned(), key));
+    fn workstream_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+        let tagged = self.tagged();
+        let mut found = Vec::new();
+        let mut machines = Vec::new();
+        for shelved in &self.listing.shelves {
+            let on = &shelved.on;
+            if shelved.projects.is_empty() && (tagged || shelved.away.is_some()) {
+                machines.push(Row::plain(Key::Machine { on: on.clone() }, self.machine_name(on)));
+            }
+            for housed in &shelved.projects {
+                let project = housed.project.listed().name().as_str();
+                if housed.workstreams.is_empty() {
+                    let (row, folder) = (housed.project.clone(), (&housed.dir).into());
+                    let key = Key::Project { on: on.clone(), project: row, folder };
+                    let dir = sidebar::short_cwd(housed.dir.as_str());
+                    found.push((None, project.to_owned(), None, dir, key));
+                }
+                for streamed in &housed.workstreams {
+                    let name = format!("{project} › {}", streamed.name);
+                    let folder = sidebar::short_cwd(streamed.folder.as_str());
+                    let key = Key::Workstream { on: on.clone(), place: streamed.place.clone() };
+                    found.push((streamed.used, name, streamed.branch.as_deref(), folder, key));
+                }
+            }
         }
-        let mut exited: Vec<&Exited> = self.kept(on).map_or(&[][..], |(it, _)| it).iter().collect();
-        exited.sort_by_key(|exited| exited.ago);
-        for exited in exited {
-            let key = Key::Exited { on: on.clone(), session: exited.name.clone() };
-            sessions.push((2, exited.name.to_string(), key));
+        found.sort_by_key(|(used, ..)| Reverse(*used));
+        let candidates = found.iter().map(|(_, name, branch, folder, key)| {
+            (name.clone(), vec![*branch, Some(folder.as_str())], key.clone())
+        });
+        let mut rows = matched(finder, candidates);
+        if finder.is_none() {
+            rows.extend(machines);
         }
-        sessions.sort_by_key(|(rank, ..)| *rank);
-        let sessions = sessions.into_iter().map(|(_, name, key)| (name, Vec::new(), key));
-        let mut sessions = matched(finder, sessions);
-        let first = sessions.iter_mut().find(|row| matches!(row.key, Key::Exited { .. }));
-        if let Some(first) = first {
-            first.rules.ended = true;
-        }
-        sessions
+        rows
     }
 
     fn agent_rows(&self, finder: Option<&Finder<'_>>, on: &Machine, runs: &Runs) -> Vec<Row> {
@@ -1375,15 +1244,16 @@ impl Picker {
 
     fn follow(&mut self) {
         let preview = match self.rows().selected().map(|row| &row.key) {
-            Some(Key::Live { on, place }) => {
-                let focus = self.live(on, place).and_then(|live| live.focus);
-                Some(Preview::Screen((on.clone(), place.listed().clone(), focus)))
+            Some(Key::Workstream { on, place }) => {
+                let focus = self.focus(on, self.row_streamed(on, place));
+                let looked = |focus| (on.clone(), place.project.listed().clone(), Some(focus));
+                focus.map(|focus| Preview::Screen(looked(focus)))
             },
             Some(Key::Agent { on, place }) => {
                 Some(Preview::Screen((on.clone(), place.session.clone(), Some(place.pane))))
             },
             Some(Key::Dir { on, path, .. }) => Some(Preview::Dir((on.clone(), path.clone()))),
-            Some(Key::Exited { .. } | Key::New { .. }) | None => None,
+            Some(Key::Project { .. } | Key::Machine { .. } | Key::New { .. }) | None => None,
         };
         match (preview, &self.wanted) {
             (Some(preview), Some((wanted, _))) if preview == *wanted => {},
@@ -1409,7 +1279,7 @@ impl Picker {
     fn notes(&self, width: usize) -> Vec<Line<'static>> {
         let error = Style::new().fg(ERROR);
         let mut notes = Vec::new();
-        if let Stage::Asking { asks, .. } = &self.stage {
+        if let Stage::Asking { asks, .. } | Stage::Closing { asks, .. } = &self.stage {
             let asking = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
             notes.extend(menu::wrap(asks, width, asking));
         }
@@ -1417,14 +1287,7 @@ impl Picker {
             notes.extend(menu::wrap(why, width, error));
         }
         match self.list {
-            List::Sessions => {
-                for on in self.machines() {
-                    if let Some(Ended::Failed(why)) = self.exited.get(&on) {
-                        let why = format!("no ended sessions: {why}");
-                        notes.extend(menu::wrap(&why, width, error));
-                    }
-                }
-            },
+            List::Workstreams => {},
             List::Agents => {
                 if let Some(why) = &self.listing.away {
                     let why = format!("lunetad does not answer: {why}");
@@ -1472,7 +1335,6 @@ impl Picker {
         let mut lit_at = 0;
         for (at, row) in rows.rows.iter().enumerate() {
             items.extend(row.rules.machine.as_deref().map(Item::Machine));
-            items.extend(row.rules.ended.then_some(Item::Ended));
             if rows.at == Some(at) {
                 lit_at = items.len();
             }
@@ -1484,10 +1346,6 @@ impl Picker {
             let row = match item {
                 Item::Machine(name) => {
                     lines.push(machine_rule(name, width));
-                    continue;
-                },
-                Item::Ended => {
-                    lines.push(separator("ended", width));
                     continue;
                 },
                 Item::Row(row) => *row,
@@ -1511,10 +1369,6 @@ impl Picker {
         self.listing.here.as_ref().filter(|here| here.on() == on)?.pane()
     }
 
-    fn is_here(&self, on: &Machine, place: &Place) -> bool {
-        self.here_session(on) == Some(place.session())
-    }
-
     fn yours(&self) -> Option<(&Seated, &[Seated])> {
         let here = self.listing.here.as_ref()?;
         let (pane, agents) = (here.pane()?, &self.runs(here.on())?.agents);
@@ -1524,34 +1378,42 @@ impl Picker {
     fn row_line(&self, row: &Row, width: usize, frame: usize, now: SystemTime) -> Line<'static> {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let dim = Style::new().add_modifier(Modifier::DIM);
+        let grey = Style::new().fg(gruvbox::GREY);
         let (lead, name_style, right) = match &row.key {
-            Key::Live { on, place } => {
-                let live = self.live(on, place);
-                if self.is_here(on, place) {
-                    let style = Style::new().fg(NAME).add_modifier(Modifier::BOLD);
-                    let rule = Span::styled("here", Style::new().fg(ACCENT));
-                    (None, style, vec![rule])
-                } else {
-                    let mut right = Vec::new();
-                    if let Some(live) = live.filter(|live| live.waiting > 0) {
-                        let (dot, style) = Mark::Waiting.glyph(frame);
-                        right.push(Span::styled(format!("{dot}{} ", live.waiting), style));
-                    }
-                    if let Some(started) = live.and_then(|live| live.started) {
-                        let age = format!("{} ago", sidebar::age(started, now));
-                        right.push(Span::styled(age, Style::new().fg(gruvbox::GREY)));
-                    }
-                    (None, bold, right)
+            Key::Workstream { on, place } => {
+                let streamed = self.row_streamed(on, place);
+                let away = self.shelved(on).and_then(|shelved| shelved.away);
+                let mut right = Vec::new();
+                if streamed.waiting > 0 {
+                    let (dot, style) = Mark::Waiting.glyph(frame);
+                    right.push(Span::styled(format!("{dot}{} ", streamed.waiting), style));
                 }
+                right.extend(self.tag(on, away));
+                let (stage, colour) = staged(streamed.seen);
+                let style = if away.is_some() { dim } else { Style::new().fg(colour) };
+                right.push(Span::styled(stage, style));
+                let style = match away {
+                    Some(_) => dim,
+                    None if self.is_shown(on, place) => {
+                        Style::new().fg(NAME).add_modifier(Modifier::BOLD)
+                    },
+                    None => bold,
+                };
+                (None, style, right)
             },
-            Key::Exited { on, session } => {
-                let made = self.kept(on).and_then(|(kept, at)| {
-                    let exited = kept.iter().find(|exited| exited.name == *session)?;
-                    at.checked_sub(exited.ago)
-                });
-                let age = made.map(|made| format!("{} ago", sidebar::age(made, now)));
-                let grey = Style::new().fg(gruvbox::GREY);
-                (None, dim, age.into_iter().map(|age| Span::styled(age, grey)).collect())
+            Key::Project { on, .. } => {
+                let away = self.shelved(on).and_then(|shelved| shelved.away);
+                let mut right = self.tag(on, away);
+                right.push(Span::styled("no workstream", grey));
+                (None, if away.is_some() { dim } else { bold }, right)
+            },
+            Key::Machine { on } => {
+                let away = self.shelved(on).and_then(|shelved| shelved.away);
+                let said = match away {
+                    Some(word) => Span::styled(word, Style::new().fg(ERROR)),
+                    None => Span::styled("no projects", grey),
+                };
+                (None, dim, vec![said])
             },
             Key::Agent { on, place } => {
                 let Some(seated) = self.seated(on, place) else {
@@ -1573,11 +1435,9 @@ impl Picker {
                 (Some(Span::styled(glyph, style)), name_style, right)
             },
             Key::Dir { path, .. } => return dir_line(row, path.as_str(), width),
-            Key::New { session } => {
+            Key::New { .. } => {
                 let lead = Span::styled("+", Style::new().fg(gruvbox::GREEN));
-                let makes = self.machines().iter().any(|on| self.makes_on(on, session).is_ok());
-                let style = if makes { bold } else { dim };
-                (Some(lead), style, vec![Span::styled("new", Style::new().fg(gruvbox::GREY))])
+                (Some(lead), bold, vec![Span::styled("new workstream", grey)])
             },
         };
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
@@ -1591,9 +1451,12 @@ impl Picker {
         }
         spans.extend(name);
         let gap = width.saturating_sub(1 + lead_width + named + right_width + 1);
-        if matches!(&row.key, Key::Live { on, place } if self.is_here(on, place)) {
+        if matches!(&row.key, Key::Workstream { on, place } if self.is_shown(on, place)) {
+            let here = Span::styled(" here", Style::new().fg(ACCENT));
+            let rule = gap.saturating_sub(1 + here.width() + 1);
             spans.push(Span::raw(" "));
-            spans.push(Span::styled("─".repeat(gap.saturating_sub(2)), Style::new().fg(ACCENT)));
+            spans.push(Span::styled("─".repeat(rule), Style::new().fg(ACCENT)));
+            spans.push(here);
             spans.push(Span::raw(" "));
         } else {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -1603,15 +1466,29 @@ impl Picker {
         Line::from(spans)
     }
 
+    fn tagged(&self) -> bool {
+        self.listing.shelves.len() > 1
+    }
+
+    fn tag(&self, on: &Machine, away: Option<&'static str>) -> Vec<Span<'static>> {
+        if !self.tagged() {
+            return Vec::new();
+        }
+        let machine = self.machine_name(on);
+        let tag = match away {
+            Some(word) => Span::styled(format!("{machine} · {word}"), Style::new().fg(ERROR)),
+            None => Span::styled(machine, Style::new().add_modifier(Modifier::DIM)),
+        };
+        vec![tag, Span::raw("  ")]
+    }
+
     fn empty(&self) -> String {
         if !self.term.is_empty() {
             return format!("no match for \"{}\"", self.term);
         }
         match self.list {
-            List::Sessions if self.exited.values().any(|it| matches!(it, Ended::Asking(_))) => {
-                "asking zellij…".to_owned()
-            },
-            List::Sessions => "no sessions".to_owned(),
+            List::Workstreams if self.listing.away.is_some() => "no workstreams".to_owned(),
+            List::Workstreams => "lunetad keeps no workstream yet".to_owned(),
             List::Agents if self.listing.away.is_some() => "no agents".to_owned(),
             List::Agents if self.yours().is_some() => "no other agents".to_owned(),
             List::Agents => "no agents running".to_owned(),
@@ -1635,66 +1512,77 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
-            if self.list == List::Sessions {
+            if self.list == List::Workstreams && self.here_project().is_some() {
                 lines.push(Line::default());
-                lines.push(Line::styled(" type a name to make a session of it", grey));
+                lines.push(Line::styled(" type a name to make a workstream of it", grey));
             }
             framed(buffer, area, "Preview", "", lines);
             return;
         };
+        let said = |caption: Vec<Span<'static>>, said: &str| {
+            let mut lines = vec![Line::from(caption), Line::default()];
+            lines.extend(menu::wrap(said, inner, grey));
+            lines
+        };
         let (right, caption, looked) = match &row.key {
-            Key::Exited { on, .. } => {
-                let mut caption = vec![Span::raw(" ")];
-                caption.extend(machined(on, inner));
-                caption.push(Span::styled("ended", grey));
-                let mut lines = vec![Line::from(caption), Line::default()];
-                let said = "zellij kept how it was laid out to bring it back from, and nothing \
-                            runs in it to look at";
-                lines.extend(menu::wrap(said, inner, grey));
-                framed(buffer, area, &row.name, "", lines);
-                return;
-            },
             Key::Dir { on, path, .. } => {
                 self.draw_contents(buffer, area, &row.name, on, path);
                 return;
             },
-            Key::New { session } => {
-                let mut lines = vec![Line::styled(" new", grey), Line::default()];
-                let machines = self.machines();
-                if let [only] = machines.as_slice() {
-                    let said = match self.makes_on(only, session) {
-                        Ok(()) => "no session has this name, nor one that ended: Enter makes it, \
-                                   and takes zellij to it"
-                            .to_owned(),
-                        Err(refused) => refused.why(session, None),
-                    };
-                    lines.extend(menu::wrap(&said, inner, grey));
-                } else {
-                    let said = "Enter has you pick the machine to make it on:";
-                    lines.extend(menu::wrap(said, inner, grey));
-                    lines.push(Line::default());
-                    lines.extend(machines.iter().map(|on| self.machine_line(on, session, inner)));
-                }
+            Key::New { project, folder, name, .. } => {
+                let project = project.listed().name();
+                let words = format!(
+                    "no workstream matches: Enter makes one named {}, in {project}'s folder, \
+                     {folder}, and goes to it",
+                    name.as_str(),
+                );
+                let lines = said(vec![Span::styled(" new", grey)], &words);
                 framed(buffer, area, &row.name, "", lines);
                 return;
             },
-            Key::Live { on, place } => {
-                let live = self.live(on, place);
-                let panes = live.map_or(0, |live| live.panes.len());
-                let right = if panes == 1 { "1 pane".to_owned() } else { format!("{panes} panes") };
-                let focus = live.and_then(|live| live.focus);
-                (right, None, (on.clone(), place.listed().clone(), focus))
+            Key::Project { on, folder, .. } => {
+                let mut caption = vec![Span::raw(" ")];
+                caption.extend(machined(on, inner));
+                caption.push(Span::styled("no workstream", grey));
+                let words = format!("Enter starts a workstream in {folder}");
+                framed(buffer, area, &row.name, "", said(caption, &words));
+                return;
+            },
+            Key::Machine { on } => {
+                let words = match self.out_of_reach(on) {
+                    Some(why) => format!("{why}, and heard of no project there before"),
+                    None => format!("lunetad on {} keeps no project", self.machine_name(on)),
+                };
+                framed(buffer, area, &row.name, "", said(Vec::new(), &words));
+                return;
+            },
+            Key::Workstream { on, place } => {
+                let streamed = self.row_streamed(on, place);
+                let count = streamed.terminals.len();
+                let right =
+                    if count == 1 { "1 terminal".to_owned() } else { format!("{count} terminals") };
+                let mut caption = vec![Span::raw(" ")];
+                caption.extend(machined(on, inner));
+                let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
+                caption.push(Span::styled(sidebar::tail(streamed.folder.as_str(), room), grey));
+                let Some(focus) = self.focus(on, streamed) else {
+                    let lines = said(caption, "it holds no terminal to look at");
+                    framed(buffer, area, &row.name, &right, lines);
+                    return;
+                };
+                let looked = (on.clone(), place.project.listed().clone(), Some(focus));
+                (right, Line::from(caption), looked)
             },
             Key::Agent { on, place } => {
-                let caption = self.seated(on, place).map(|seated| {
+                let mut caption = vec![Span::raw(" ")];
+                caption.extend(machined(on, inner));
+                if let Some(seated) = self.seated(on, place) {
                     let status = if seated.mark == Mark::Waiting {
                         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
                     } else {
                         Style::new().fg(gruvbox::FG1)
                     };
                     let age = seated.since.map(|since| sidebar::age(since, now));
-                    let mut caption = vec![Span::raw(" ")];
-                    caption.extend(machined(on, inner));
                     caption.extend([
                         Span::styled(seated.status.clone(), status),
                         Span::styled(" · ", dim),
@@ -1702,33 +1590,12 @@ impl Picker {
                         Span::styled(" · ", dim),
                         Span::styled(seated.dir.clone(), grey),
                     ]);
-                    Line::from(caption)
-                });
-                (String::new(), caption, (on.clone(), place.session.clone(), Some(place.pane)))
+                }
+                let looked = (on.clone(), place.session.clone(), Some(place.pane));
+                (String::new(), Line::from(caption), looked)
             },
         };
         let peek = self.peeks.get(&looked);
-        let caption = caption.unwrap_or_else(|| {
-            let (on, session, asked) = &looked;
-            let pane = match peek {
-                Some(Peek::Ready { pane, .. }) => Some(*pane),
-                _ => asked.map(PaneKey::id),
-            };
-            let sessions = self.runs(on).map_or(&[][..], |runs| &runs.sessions);
-            let live = sessions.iter().find(|live| live.place.listed() == session);
-            let panes = live.map_or(&[][..], |live| &live.panes);
-            let shown = pane.and_then(|pane| panes.iter().find(|shown| shown.id == pane));
-            let mut caption = vec![Span::raw(" ")];
-            caption.extend(machined(on, inner));
-            if let Some(shown) = shown {
-                caption.extend([
-                    Span::styled(shown.tab.clone(), grey),
-                    Span::styled(" · ", dim),
-                    Span::styled(shown.label.clone(), dim),
-                ]);
-            }
-            Line::from(caption)
-        });
         let mut lines = vec![caption, Line::default()];
         match peek {
             None | Some(Peek::Reading) => lines.push(Line::styled(" reading…", grey)),
@@ -1790,26 +1657,26 @@ impl Picker {
     fn prompt(&self, width: usize) -> Line<'static> {
         let action = match self.rows().selected() {
             Some(row) => match &row.key {
-                Key::Live { on, place } if self.is_here(on, place) => {
+                Key::Workstream { on, place } if self.is_shown(on, place) => {
                     Ok("you are in it".to_owned())
                 },
-                Key::Live { on, .. } => Ok(there("Attach", on)),
-                Key::Exited { on, .. } => Ok(there("Bring back", on)),
+                Key::Workstream { on, .. } => Ok(there("Go", on)),
+                Key::Project { on, .. } => Ok(there("Start a workstream", on)),
+                Key::Machine { on } => Err(self.out_of_reach(on).unwrap_or_else(|| {
+                    format!("{} keeps no project", self.machine_name(on))
+                })),
                 Key::Agent { on, .. } => Ok(there("Go to agent", on)),
                 Key::Dir { on, session: Ok(session), .. } => {
                     Ok(there(&format!("Make \"{session}\""), on))
                 },
                 Key::Dir { session: Err(why), .. } => Err((*why).to_owned()),
-                Key::New { session } => match self.machines().as_slice() {
-                    [only] => match self.makes_on(only, session) {
-                        Ok(()) => Ok(format!("Make \"{session}\"")),
-                        Err(refused) => Err(refused.why(session, None)),
-                    },
-                    _ => Ok(format!("Make \"{session}\" on…")),
+                Key::New { project, name, .. } => {
+                    let project = project.listed().name();
+                    Ok(format!("New workstream \"{}\" in {project}", name.as_str()))
                 },
             },
-            None if self.list == List::Sessions && !self.term.is_empty() => {
-                SessionName::parse(&self.term).map(|_| String::new()).map_err(str::to_owned)
+            None if self.list == List::Workstreams && !self.term.is_empty() => {
+                Name::parse(&self.term).map(|_| String::new())
             },
             None => Ok(String::new()),
         };
@@ -1827,21 +1694,17 @@ impl Picker {
 
     fn keys(&self) -> Vec<(Hint, &'static str)> {
         match (&self.stage, self.list) {
-            (Stage::Asking { .. }, _) => vec![(Hint::Char('y'), "Yes"), (Hint::AnyOtherKey, "No")],
+            (Stage::Asking { .. } | Stage::Closing { .. }, _) => {
+                vec![(Hint::Char('y'), "Yes"), (Hint::AnyOtherKey, "No")]
+            },
             (Stage::Planning { .. }, _) => vec![(Hint::Esc, "Give up")],
             (Stage::Rename { .. }, _) => vec![(Hint::Enter, "Rename"), (Hint::Esc, "Cancel")],
-            (Stage::Choose { .. }, _) => vec![
-                (Hint::Char('j'), "Down"),
-                (Hint::Char('k'), "Up"),
-                (Hint::Enter, "Make"),
-                (Hint::Esc, "Back"),
-            ],
-            (Stage::Search, List::Sessions) => vec![
+            (Stage::Search, List::Workstreams) => vec![
                 (Hint::Moves, "Move"),
                 (Hint::Enter, "Go"),
-                (Hint::Tab, List::Sessions.next().title()),
+                (Hint::Tab, List::Workstreams.next().title()),
                 (Hint::Ctrl('r'), "Rename"),
-                (Hint::Delete, "Delete"),
+                (Hint::Delete, "Close it"),
                 (Hint::Esc, "Close"),
             ],
             (Stage::Search, List::Agents) => vec![
@@ -1865,86 +1728,27 @@ impl Picker {
         buffer: &mut Buffer,
         layout: &Layout,
         on: &Machine,
-        session: &SessionName,
+        renames: &Renames,
         input: &str,
     ) -> Spots<Pick> {
         if let Some(full) = layout.full {
             let inner = usize::from(full.width.saturating_sub(2));
             let mut lines = vec![Line::default()];
-            let mut what = there(&format!("renaming \"{session}\""), on);
-            if self.here_session(on) == Some(session.as_str()) {
-                what.push_str(", the session you are in");
+            let mut what = there(&format!("renaming \"{}\"", renames.name()), on);
+            match renames {
+                Renames::Workstream { place, .. } if self.is_shown(on, place) => {
+                    what.push_str(", the workstream you are in");
+                },
+                Renames::Workstream { .. } => {},
+                Renames::Project(_) => what.push_str(", a project"),
             }
             lines.extend(menu::wrap(&what, inner, Style::new().fg(gruvbox::GREY)));
             framed(buffer, full, "Rename", "", lines);
         }
         let width = usize::from(layout.input.width.saturating_sub(2));
-        let action = self.rename_to(on, session, input).map(|_| there("Rename", on));
+        let action = self.rename_to(on, renames, input).map(|_| there("Rename", on));
         draw_input(buffer, layout, "Rename", typed(input, action, width));
         self.draw_help(buffer, layout.help)
-    }
-
-    fn draw_choose(
-        &self,
-        buffer: &mut Buffer,
-        layout: &Layout,
-        session: &SessionName,
-        at: &Machine,
-    ) -> Spots<Pick> {
-        let mut spots = Spots::default();
-        if let Some(full) = layout.full {
-            let inner = usize::from(full.width.saturating_sub(2));
-            let room = usize::from(full.height.saturating_sub(2));
-            let grey = Style::new().fg(gruvbox::GREY);
-            let mut lines = vec![Line::default()];
-            lines.extend(menu::wrap(&format!("make \"{session}\" on"), inner, grey));
-            lines.push(Line::default());
-            let machines = self.machines();
-            let lit = machines.iter().position(|on| on == at);
-            let shown = room.saturating_sub(lines.len());
-            let (start, end) = viewport(lit.unwrap_or(0), machines.len(), shown);
-            let mut picks = Spots::default();
-            for (number, on) in machines.iter().enumerate().take(end).skip(start) {
-                let line = self.machine_line(on, session, inner);
-                picks.add(lines.len(), 0..inner, Pick::Machine(on.clone()));
-                let line = if lit == Some(number) { line.patch_style(Style::new().bg(LIT)) } else { line };
-                lines.push(line);
-            }
-            framed(buffer, full, "Make", "", lines);
-            spots.extend(picks.placed(full.inner(Margin::new(1, 1))));
-        }
-        let width = usize::from(layout.input.width.saturating_sub(2));
-        let machine = self.machine_name(at);
-        let action = match self.makes_on(at, session) {
-            Ok(()) => Ok(format!("Make \"{session}\" on {machine}")),
-            Err(refused) => Err(refused.why(session, Some(&machine))),
-        };
-        draw_input(buffer, layout, self.list.title(), typed(&self.term, action, width));
-        spots.extend(self.draw_help(buffer, layout.help));
-        spots
-    }
-
-    fn machine_line(&self, on: &Machine, session: &SessionName, width: usize) -> Line<'static> {
-        let refused = self.makes_on(on, session).err();
-        let style = Style::new().add_modifier(if refused.is_some() {
-            Modifier::DIM
-        } else {
-            Modifier::BOLD
-        });
-        let right = match (refused, on) {
-            (Some(refused), _) => refused.short(),
-            (None, Machine::Local) => "this one",
-            (None, Machine::Remote(_)) => "",
-        };
-        let name = sidebar::cut(&self.machine_name(on), width.saturating_sub(3 + right.width()));
-        let gap = width.saturating_sub(2 + name.width() + right.width());
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(name, style),
-            Span::raw(" ".repeat(gap)),
-            Span::styled(right, Style::new().fg(gruvbox::GREY)),
-            Span::raw(" "),
-        ])
     }
 }
 
@@ -2072,14 +1876,16 @@ fn machine_rule(name: &str, width: usize) -> Line<'static> {
     ])
 }
 
-fn separator(label: &str, width: usize) -> Line<'static> {
-    let rule = width.saturating_sub(1 + label.width() + 1 + 1);
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(label.to_owned(), Style::new().fg(gruvbox::GREY)),
-        Span::raw(" "),
-        Span::styled("─".repeat(rule), Style::new().add_modifier(Modifier::DIM)),
-    ])
+fn staged(seen: Seen) -> (&'static str, ratatui::style::Color) {
+    match seen {
+        Seen::Missing => ("missing", ERROR),
+        Seen::Unread => ("…", gruvbox::GREY),
+        Seen::Read(projects::Stage::NoBranch) => ("no branch", gruvbox::GREY),
+        Seen::Read(projects::Stage::Working) => ("working", gruvbox::BLUE),
+        Seen::Read(projects::Stage::PullRequestOpen) => ("PR open", gruvbox::AQUA),
+        Seen::Read(projects::Stage::ChecksFailing) => ("checks failing", gruvbox::RED),
+        Seen::Read(projects::Stage::Merged) => ("merged", gruvbox::PURPLE),
+    }
 }
 
 fn viewport(selected: usize, total: usize, visible: usize) -> (usize, usize) {
@@ -2186,6 +1992,7 @@ impl Layout {
 mod tests {
     use std::time::UNIX_EPOCH;
 
+    use lunetad::projects::WorkstreamId;
     use ratatui::layout::Position;
 
     use super::*;
@@ -2200,16 +2007,6 @@ mod tests {
 
     fn listed(name: &str, started: u64) -> Listed {
         Listed::new(name, UNIX_EPOCH + Duration::from_secs(started))
-    }
-
-    fn live(name: &str, started: u64, focus: Option<u32>) -> Live {
-        Live {
-            place: Place::Session(listed(name, started)),
-            started: Some(UNIX_EPOCH + Duration::from_secs(started)),
-            panes: vec![Shown { id: 0, tab: "Tab #1".to_owned(), label: format!("{name}/w") }],
-            focus: focus.map(PaneKey::Zellij),
-            waiting: 0,
-        }
     }
 
     fn seated(name: &str, started: u64, pane: u32, label: &str, mark: Mark) -> Seated {
@@ -2230,12 +2027,8 @@ mod tests {
         Here::Session { on: Machine::Local, session: session.to_owned() }
     }
 
-    fn sessions(sessions: Vec<Live>) -> Runs {
-        Runs { sessions, agents: Vec::new() }
-    }
-
     fn agents(agents: Vec<Seated>) -> Runs {
-        Runs { sessions: Vec::new(), agents }
+        Runs { agents }
     }
 
     fn ended(name: &str, ago: u64) -> Exited {
@@ -2262,14 +2055,87 @@ mod tests {
         picker.asks().into_iter().filter(|ask| matches!(ask, Ask::Exited { .. })).collect()
     }
 
-    fn three() -> Picker {
-        let listing = Listing {
-            here: Some(here("b")),
-            local: sessions(vec![live("c", 30, None), live("b", 20, Some(1)), live("a", 10, None)]),
+    fn project(name: &str, id: u64) -> ProjectRow {
+        ProjectRow::new(name, id)
+    }
+
+    fn place(project: &str, id: u64, workstream: u64) -> WorkstreamPlace {
+        let workstream = WorkstreamId::of(id * 10 + workstream).unwrap();
+        WorkstreamPlace { project: self::project(project, id), workstream }
+    }
+
+    fn stream(
+        place: WorkstreamPlace,
+        name: &str,
+        used: Option<u64>,
+        terminals: &[u32],
+    ) -> Streamed {
+        Streamed {
+            place,
+            name: name.to_owned(),
+            folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
+            branch: None,
+            seen: Seen::Read(projects::Stage::Working),
+            used: used.map(|at| UNIX_EPOCH + Duration::from_secs(at)),
+            terminals: terminals.iter().map(|id| PaneKey::terminal(*id)).collect(),
+            held: held(terminals),
+            waiting: 0,
+            ending: Ok(Vec::new()),
+        }
+    }
+
+    fn held(terminals: &[u32]) -> Vec<TerminalId> {
+        terminals.iter().map(|id| TerminalId::of(u64::from(*id)).unwrap()).collect()
+    }
+
+    fn housed(name: &str, id: u64, workstreams: Vec<Streamed>) -> Housed {
+        let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
+        Housed { project: project(name, id), dir, workstreams }
+    }
+
+    fn shelved(on: Machine, projects: Vec<Housed>) -> Shelved {
+        Shelved { on, away: None, projects }
+    }
+
+    fn fix() -> WorkstreamPlace {
+        place("luneta", 1, 2)
+    }
+
+    fn api() -> WorkstreamPlace {
+        place("web", 3, 1)
+    }
+
+    fn main_place() -> WorkstreamPlace {
+        place("luneta", 1, 1)
+    }
+
+    fn luneta() -> Housed {
+        housed("luneta", 1, vec![
+            stream(main_place(), "main", Some(30), &[1, 2]),
+            stream(fix(), "fix", Some(50), &[5, 3]),
+            stream(place("luneta", 1, 3), "docs", None, &[]),
+        ])
+    }
+
+    fn works() -> Listing {
+        let projects = vec![
+            luneta(),
+            housed("notes", 2, Vec::new()),
+            housed("web", 3, vec![stream(api(), "api", Some(40), &[4])]),
+        ];
+        let at = PanePlace { session: fix().project.listed().clone(), pane: PaneKey::terminal(3) };
+        Listing {
+            here: Some(Here::Pane { on: Machine::Local, place: at }),
+            shown: Some((Machine::Local, fix())),
+            shelves: vec![shelved(Machine::Local, projects)],
             ..Listing::default()
-        };
-        let mut picker = Picker::open(1, List::Sessions, listing, Machine::Local);
-        picker.heard(kept_here(Ok(vec![ended("x", 100), ended("y", 10)])));
+        }
+    }
+
+    fn opened(listing: Listing) -> Picker {
+        let mut picker = Picker::open(1, List::Workstreams, listing, Machine::Local);
+        picker.heard(kept_here(Ok(Vec::new())));
+        picker.asks();
         picker
     }
 
@@ -2285,6 +2151,13 @@ mod tests {
         for c in text.chars() {
             press(picker, KeyCode::Char(c));
         }
+    }
+
+    fn retyped(picker: &mut Picker, text: &str) {
+        for _ in 0..20 {
+            press(picker, KeyCode::Backspace);
+        }
+        typed(picker, text);
     }
 
     fn drawn(picker: &Picker) -> Buffer {
@@ -2326,6 +2199,15 @@ mod tests {
         lines.map(|(y, line)| (line, lit(y))).filter(|(line, _)| !line.is_empty()).collect()
     }
 
+    fn named(line: &str) -> String {
+        let name = line.split("  ").next().unwrap_or("");
+        name.split(" ─").next().unwrap_or("").trim().to_owned()
+    }
+
+    fn rows(picker: &Picker) -> Vec<String> {
+        list(picker).0.iter().map(|line| named(line)).collect()
+    }
+
     fn names(picker: &Picker) -> Vec<String> {
         let (lines, _) = list(picker);
         lines.iter().map(|line| line.split(' ').next().unwrap_or("").to_owned()).collect()
@@ -2360,29 +2242,56 @@ mod tests {
 
     fn lit(picker: &Picker) -> String {
         let (_, lit) = list(picker);
-        lit.unwrap_or_default().split(' ').next().unwrap_or("").to_owned()
+        named(&lit.unwrap_or_default())
+    }
+
+    fn go(on: Machine, place: WorkstreamPlace) -> Picked {
+        Picked::Go { on, place: Place::Workstream(place) }
+    }
+
+    fn down_to(picker: &mut Picker, row: &str) {
+        for _ in 0..10 {
+            if lit(picker) == row {
+                return;
+            }
+            press(picker, KeyCode::Down);
+        }
+        panic!("no row {row}: {:?}", rows(picker));
     }
 
     #[test]
-    fn the_sessions_go_yours_first_then_those_that_run_then_those_that_ended() {
-        let listing = Listing { here: Some(here("b")), ..Listing::default() };
+    fn the_workstreams_go_by_their_last_use_and_an_empty_project_is_one_row() {
+        let mut picker = Picker::open(1, List::Workstreams, works(), Machine::Local);
         let on = Machine::Local;
         let asks = vec![Ask::Exited { on: on.clone(), ask: 1 }, Ask::Dirs { on, ask: 1 }];
-        assert_eq!(Picker::open(1, List::Sessions, listing, Machine::Local).asks(), asks);
-        let mut picker = three();
-        assert_eq!(names(&picker), ["b", "c", "a", "ended", "y", "x"]);
-        assert_eq!(lit(&picker), "c");
-        let c = Place::Session(listed("c", 30));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Go { on: Machine::Local, place: c });
+        assert_eq!(picker.asks(), asks);
+        let shown = ["luneta › fix", "web › api", "luneta › main", "luneta › docs", "notes"];
+        assert_eq!(rows(&picker), shown);
+        let (lines, _) = list(&picker);
+        assert!(lines[0].contains("─ here") && lines[0].ends_with("working"), "{lines:?}");
+        assert!(lines[4].ends_with("no workstream"), "{lines:?}");
+        assert_eq!(lit(&picker), "web › api");
+        assert!(said(&picker).contains("<ENTER> Go"), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), go(Machine::Local, api()));
         press(&mut picker, KeyCode::Up);
+        assert!(said(&picker).contains("you are in it"), "{}", said(&picker));
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Close);
-        for _ in 0..3 {
-            press(&mut picker, KeyCode::Down);
-        }
-        assert_eq!(lit(&picker), "y");
-        let y = SessionName::running("y").unwrap();
-        let back = Picked::BringBack { on: Machine::Local, session: y };
-        assert_eq!(press(&mut picker, KeyCode::Enter), back);
+        down_to(&mut picker, "notes");
+        assert!(said(&picker).contains("<ENTER> Start a workstream"), "{}", said(&picker));
+        let added = Picked::Add {
+            on: Machine::Local,
+            project: project("notes", 2),
+            folder: directory("/home/you/notes"),
+            name: None,
+        };
+        assert_eq!(press(&mut picker, KeyCode::Enter), added);
+
+        let mut later = works();
+        let shelf = &mut later.shelves[0].projects[0].workstreams;
+        shelf[0].used = Some(UNIX_EPOCH + Duration::from_secs(60));
+        picker.listed(later);
+        assert_eq!(rows(&picker)[..3], ["luneta › main", "luneta › fix", "web › api"]);
+        assert_eq!(lit(&picker), "notes");
     }
 
     fn clicks(picker: &Picker, key: &str) -> (Vec<(String, Option<Pick>)>, Option<Pick>) {
@@ -2399,7 +2308,10 @@ mod tests {
         let (results, _) = parts();
         let lines = (results.y..results.bottom()).zip(text(&buffer, results));
         let rows = lines.filter(|(_, line)| !line.is_empty()).map(|(y, line)| {
-            let word = line.split(' ').next().unwrap_or("").to_owned();
+            let word = match line.strip_prefix("─ ") {
+                Some(rule) => format!("── {}", rule.split(' ').next().unwrap_or("")),
+                None => named(&line),
+            };
             (word, pick(Position::new(results.x + 2, y)))
         });
         let help = (over.top()..over.bottom()).rev().find_map(|y| {
@@ -2414,147 +2326,423 @@ mod tests {
 
     #[test]
     fn a_click_on_a_row_does_what_enter_does_on_it() {
-        let mut picker = three();
+        let mut picker = opened(works());
         let (rows, tab) = clicks(&picker, "<TAB>");
-        let spotted: Vec<(&str, bool)> =
-            rows.iter().map(|(word, pick)| (word.as_str(), pick.is_some())).collect();
-        let rule = ("ended", false);
-        assert_eq!(spotted, [("b", true), ("c", true), ("a", true), rule, ("y", true), ("x", true)]);
+        assert!(rows.len() == 5 && rows.iter().all(|(_, pick)| pick.is_some()), "{rows:?}");
         let row = |word: &str| {
             let shown = rows.iter().find(|(it, _)| it == word);
             shown.and_then(|(_, pick)| pick.clone()).expect("a row")
         };
         assert_eq!(tab, Some(Pick::Key(KeyEvent::from(KeyCode::Tab))));
         assert_eq!(clicks(&picker, "<↓↑>").1, None);
-        let running = vec![
-            live("d", 40, None),
-            live("c", 30, None),
-            live("b", 20, Some(1)),
-            live("a", 10, None),
-        ];
-        let local = sessions(running);
-        picker.listed(Listing { here: Some(here("b")), local, ..Listing::default() });
-        let c = Picked::Go { on: Machine::Local, place: Place::Session(listed("c", 30)) };
-        assert_eq!(picker.click(row("c")), c);
-        assert_eq!(picker.click(row("b")), Picked::Close);
-        let y = SessionName::running("y").unwrap();
-        assert_eq!(picker.click(row("y")), Picked::BringBack { on: Machine::Local, session: y });
-        typed(&mut picker, "c");
-        assert_eq!(picker.click(row("a")), Picked::Nothing);
+        let main = go(Machine::Local, main_place());
+        assert_eq!(picker.click(row("luneta › main")), main);
+        assert_eq!(picker.click(row("luneta › fix")), Picked::Close);
+        typed(&mut picker, "api");
+        assert_eq!(picker.click(row("luneta › main")), Picked::Nothing);
         press(&mut picker, KeyCode::Backspace);
-        assert_eq!(picker.click(row("c")), c);
+        press(&mut picker, KeyCode::Backspace);
+        press(&mut picker, KeyCode::Backspace);
+        assert_eq!(picker.click(row("luneta › main")), main);
         control(&mut picker, 'r');
-        assert_eq!(picker.click(row("a")), Picked::Nothing);
+        assert_eq!(picker.click(row("web › api")), Picked::Nothing);
         let rename = clicks(&picker, "<ENTER>").1;
         assert_eq!(rename, Some(Pick::Key(KeyEvent::from(KeyCode::Enter))));
     }
 
-    #[test]
-    fn no_row_is_a_spot_while_a_delete_waits_or_asks() {
-        let mut picker = three();
-        let session = listed("c", 30);
-        let planning = Picked::Plan { on: Machine::Local, session, deletes: Deletes::Session };
-        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        let (rows, give_up) = clicks(&picker, "<ESC>");
-        assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
-        assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
-        let c = listed("c", 30);
-        let kill = Act::Kill { session: c.name().clone(), whose: c.whose() };
-        let plan = Plan::of(kill, Ok(&[(0, Doing::Busy)]));
-        assert_eq!(picker.planned(Ok(plan)), Picked::Nothing);
-        let (rows, yes) = clicks(&picker, "<y>");
-        assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
-        assert_eq!(yes, Some(Pick::Key(KeyEvent::from(KeyCode::Char('y')))));
+    fn busy(mut listing: Listing) -> Listing {
+        let shelf = &mut listing.shelves[0].projects[0].workstreams;
+        shelf[0].ending = Ok(vec![Doing::Busy, Doing::Idle]);
+        shelf[2].ending = Ok(vec![Doing::Unknown]);
+        listing
     }
 
     #[test]
-    fn what_is_typed_narrows_the_list_and_enter_makes_a_session_no_row_has() {
+    fn no_row_is_a_spot_while_a_delete_waits_or_asks() {
+        let mut picker = opened(busy(works()));
+        down_to(&mut picker, "luneta › main");
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        let (rows, yes) = clicks(&picker, "<y>");
+        assert!(rows.len() > 1 && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
+        assert_eq!(yes, Some(Pick::Key(KeyEvent::from(KeyCode::Char('y')))));
+        press(&mut picker, KeyCode::Esc);
+
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
         let listing = Listing {
-            here: Some(here("elo")),
-            local: sessions(vec![
-                live("luneta-main", 30, None),
-                live("luneta", 20, None),
-                live("elo", 10, None),
-            ]),
+            local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
             ..Listing::default()
         };
-        let mut picker = Picker::open(1, List::Sessions, listing, Machine::Local);
-        typed(&mut picker, "luneta");
-        assert_eq!(names(&picker), ["luneta", "luneta-main"]);
-        typed(&mut picker, "-new");
-        let (rows, lit) = list(&picker);
-        assert_eq!(names(&picker), ["+"]);
-        assert!(rows[0].starts_with("+ luneta-new ") && rows[0].ends_with(" new"), "{rows:?}");
-        assert_eq!(lit.as_ref(), rows.first());
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        press(&mut picker, KeyCode::Delete);
+        let heard = Heard::Closes { on: Machine::Local, place, closes: Ok(Closes::Pane) };
+        assert!(matches!(picker.heard(heard), Picked::Plan { .. }));
+        let (rows, give_up) = clicks(&picker, "<ESC>");
+        assert!(!rows.is_empty() && rows.iter().all(|(_, pick)| pick.is_none()), "{rows:?}");
+        assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
+    }
+
+    #[test]
+    fn what_is_typed_narrows_the_list_and_enter_makes_a_workstream_no_row_matches() {
+        let mut picker = opened(works());
+        typed(&mut picker, "api");
+        assert_eq!(rows(&picker), ["web › api"]);
+        retyped(&mut picker, "luneta");
+        assert_eq!(rows(&picker), ["luneta › fix", "luneta › main", "luneta › docs"]);
+        assert_eq!(lit(&picker), "luneta › fix");
+        retyped(&mut picker, "zzz");
+        let (lines, lit) = list(&picker);
+        let new = lines[0].starts_with("+ zzz ") && lines[0].ends_with(" new workstream");
+        assert!(new, "{lines:?}");
+        assert_eq!(lit.as_ref(), lines.first());
+        let words = r#"<ENTER> New workstream "zzz" in luneta"#;
+        assert!(said(&picker).contains(words), "{}", said(&picker));
+        let (_, preview) = parts();
+        let shown = text(&drawn(&picker), preview).join(" ");
+        assert!(shown.contains("named zzz, in luneta's folder, /home/you/luneta"), "{shown}");
+        let added = Picked::Add {
+            on: Machine::Local,
+            project: project("luneta", 1),
+            folder: directory("/home/you/luneta"),
+            name: Some(Name::parse("zzz").unwrap()),
+        };
+        assert_eq!(press(&mut picker, KeyCode::Enter), added);
+        typed(&mut picker, " ");
+        assert_eq!(list(&picker).0, [r#"no match for "zzz ""#]);
+        assert!(said(&picker).contains("begins or ends with a space"), "{}", said(&picker));
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        let why = "zellij has yet to say which sessions ended";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        picker.heard(kept_here(Ok(Vec::new())));
-        assert!(said(&picker).contains(r#"<ENTER> Make "luneta-new""#), "{}", said(&picker));
-        let new = SessionName::parse("luneta-new").unwrap();
-        let start = Picked::Start { on: Machine::Local, session: new };
-        assert_eq!(press(&mut picker, KeyCode::Enter), start);
+
+        let mut picker = opened(Listing { shown: None, ..works() });
+        typed(&mut picker, "zzz");
+        assert_eq!(list(&picker).0, [r#"no match for "zzz""#]);
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+
         let titled = |picker: &Picker, title: &str| {
             let buffer = drawn(picker);
             let (results, _) = parts();
             let rule = Rect::new(results.x - 1, results.y - 1, results.width + 2, 1);
             text(&buffer, rule)[0].starts_with(&format!("┌─ {title} ─"))
         };
-        assert!(titled(&picker, "Sessions"));
+        assert!(titled(&picker, "Workstreams"));
         for title in ["Agents", "Directories"] {
             press(&mut picker, KeyCode::Tab);
             assert!(titled(&picker, title), "{title}");
             assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
         }
-        for title in ["Agents", "Sessions", "Directories"] {
+        for title in ["Agents", "Workstreams", "Directories"] {
             press(&mut picker, KeyCode::BackTab);
             assert!(titled(&picker, title), "{title}");
-        }
-        press(&mut picker, KeyCode::Tab);
-        for (term, why) in [("a/b", "name cannot contain '/'"), ("elo", "you are in it")] {
-            for _ in 0..20 {
-                press(&mut picker, KeyCode::Backspace);
-            }
-            typed(&mut picker, term);
-            if term == "elo" {
-                assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Close);
-                continue;
-            }
-            assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-            let buffer = drawn(&picker);
-            assert!(text(&buffer, buffer.area).iter().any(|line| line.contains(why)), "{term}");
         }
     }
 
     #[test]
-    fn del_asks_before_ending_an_agent_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
-        let mut picker = three();
-        let c = listed("c", 30);
-        let deletes = Deletes::Session;
-        let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes };
-        let kill = || Act::Kill { session: c.name().clone(), whose: c.whose() };
-        let plan = |doing: Doing| Plan::of(kill(), Ok(&[(0, doing)]));
-        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
-        let asks = |picker: &Picker| {
-            let buffer = drawn(picker);
-            text(&buffer, buffer.area).iter().any(|line| line.contains("Delete session c?"))
+    fn del_closes_a_workstream_and_asks_first_where_an_agent_at_work_or_unread_files_end() {
+        let mut picker = opened(busy(works()));
+        assert_eq!(lit(&picker), "web › api");
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        let close = |place, name: &str, terminals: &[u32]| {
+            Ask::Close { on: Machine::Local, place, name: name.to_owned(), seen: held(terminals) }
         };
-        assert!(asks(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Char('n')), Picked::Nothing);
-        assert!(!asks(&picker));
+        assert_eq!(picker.asks(), [close(api(), "api", &[4])]);
 
-        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        picker.planned(Ok(plan(Doing::Busy)));
-        assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
-        assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
-        assert!(asks(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Char('y')), planning);
-        let killed = Picked::Delete { on: Machine::Local, act: kill() };
-        assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), killed);
+        down_to(&mut picker, "luneta › main");
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        let asks = "Close workstream main? 2 agents, 1 busy";
+        assert!(said(&picker).contains(asks), "{}", said(&picker));
+        press(&mut picker, KeyCode::Char('n'));
+        assert!(!said(&picker).contains(asks), "{}", said(&picker));
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        press(&mut picker, KeyCode::Delete);
+        press(&mut picker, KeyCode::Char('y'));
+        assert_eq!(picker.asks(), [close(main_place(), "main", &[1, 2])]);
+        let closed = Err("luneta-mux did not answer".to_owned());
+        picker.heard(Heard::Closed { name: "main".to_owned(), closed });
+        let stays = "main stays: luneta-mux did not answer";
+        assert!(said(&picker).contains(stays), "{}", said(&picker));
 
-        assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        assert_eq!(picker.planned(Ok(plan(Doing::Idle))), killed);
+        down_to(&mut picker, "luneta › docs");
+        press(&mut picker, KeyCode::Delete);
+        let asks = "Close workstream docs? 1 agent, 1 unknown";
+        assert!(said(&picker).contains(asks), "{}", said(&picker));
+        let mut gone = busy(works());
+        gone.shelves[0].projects[0].workstreams.pop();
+        picker.listed(gone);
+        press(&mut picker, KeyCode::Char('y'));
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        assert!(said(&picker).contains("docs is listed no more"), "{}", said(&picker));
+
+        down_to(&mut picker, "notes");
+        press(&mut picker, KeyCode::Delete);
+        assert!(said(&picker).contains("notes holds no workstream to close"), "{}", said(&picker));
+
+        let mut untold = works();
+        untold.shelves[0].projects[2].workstreams[0].ending = Err(Untold::Away);
+        let mut picker = opened(untold);
+        press(&mut picker, KeyCode::Delete);
+        let asks = "Close workstream api? luneta cannot tell which agents";
+        assert!(said(&picker).contains(asks), "{}", said(&picker));
+    }
+
+    #[test]
+    fn a_yes_to_closing_a_workstream_asks_again_when_what_would_end_changed_since() {
+        let mut picker = opened(busy(works()));
+        down_to(&mut picker, "luneta › main");
+        press(&mut picker, KeyCode::Delete);
+        let busy_asks = "Close workstream main? 2 agents, 1 busy";
+        assert!(said(&picker).contains(busy_asks), "{}", said(&picker));
+        let mut untold = busy(works());
+        let shelf = &mut untold.shelves[0].projects[0].workstreams;
+        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        main.ending = Err(Untold::Away);
+        picker.listed(untold);
+        press(&mut picker, KeyCode::Char('y'));
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        let untold_asks = "Close workstream main? luneta cannot tell which agents";
+        assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
+        let mut grown = busy(works());
+        let shelf = &mut grown.shelves[0].projects[0].workstreams;
+        let main = shelf.iter_mut().find(|streamed| streamed.name == "main").unwrap();
+        (main.ending, main.held) = (Err(Untold::Away), held(&[2, 9, 1]));
+        picker.listed(grown);
+        press(&mut picker, KeyCode::Char('y'));
+        assert_eq!(picker.asks(), [] as [Ask; 0], "a terminal came since, as the question did not");
+        assert!(said(&picker).contains(untold_asks), "{}", said(&picker));
+        press(&mut picker, KeyCode::Char('y'));
+        let (place, name, seen) = (main_place(), "main".to_owned(), held(&[1, 2, 9]));
+        assert_eq!(picker.asks(), [Ask::Close { on: Machine::Local, place, name, seen }]);
+    }
+
+    #[test]
+    fn ctrl_r_renames_the_highlighted_workstream_or_empty_project() {
+        let mut picker = opened(works());
+        control(&mut picker, 'r');
+        assert!(said(&picker).contains(r#"renaming "api""#), "{}", said(&picker));
+        let refused = [("", "a name is empty"), ("api", "already called that")];
+        for (to, why) in refused {
+            retyped(&mut picker, to);
+            press(&mut picker, KeyCode::Enter);
+            assert!(picker.asks().is_empty(), "{to}");
+            assert!(said(&picker).contains(why), "{to}: {}", said(&picker));
+        }
+        retyped(&mut picker, "gateway");
+        assert!(said(&picker).contains("<ENTER> Rename"), "{}", said(&picker));
+        press(&mut picker, KeyCode::Enter);
+        let renames = Renames::Workstream { place: api(), name: "api".to_owned() };
+        let to = Name::parse("gateway").unwrap();
+        assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to: to.clone() }]);
+        assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
+        let refused = Err("lunetad: no".to_owned());
+        picker.heard(Heard::Renamed { from: "api".to_owned(), to, renamed: refused });
+        assert!(said(&picker).contains("api is not called gateway: lunetad: no"));
+
+        press(&mut picker, KeyCode::Up);
+        control(&mut picker, 'r');
+        let yours = r#"renaming "fix", the workstream you are in"#;
+        assert!(said(&picker).contains(yours), "{}", said(&picker));
+        press(&mut picker, KeyCode::Esc);
+        down_to(&mut picker, "notes");
+        control(&mut picker, 'r');
+        assert!(said(&picker).contains(r#"renaming "notes", a project"#), "{}", said(&picker));
+        typed(&mut picker, "jots");
+        press(&mut picker, KeyCode::Enter);
+        let renames = Renames::Project(project("notes", 2));
+        let to = Name::parse("jots").unwrap();
+        assert_eq!(picker.asks(), [Ask::Rename { on: Machine::Local, renames, to }]);
+
+        press(&mut picker, KeyCode::Up);
+        control(&mut picker, 'r');
+        typed(&mut picker, "docs-2");
+        let mut gone = works();
+        gone.shelves[0].projects[0].workstreams.pop();
+        picker.listed(gone);
+        press(&mut picker, KeyCode::Enter);
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        assert!(said(&picker).contains("docs is listed no more"), "{}", said(&picker));
+    }
+
+    fn machines() -> Listing {
+        let mut far = shelved(Machine::Remote("far".parse().unwrap()), vec![housed(
+            "old",
+            5,
+            vec![stream(place("old", 5, 1), "stale", Some(10), &[7])],
+        )]);
+        far.away = Some("unreachable");
+        let gateway = stream(place("api", 4, 1), "gateway", Some(60), &[6]);
+        let shelves = vec![
+            shelved(Machine::Local, vec![luneta()]),
+            shelved(nixos(), vec![housed("api", 4, vec![gateway])]),
+            far,
+            shelved(Machine::Remote("mini".parse().unwrap()), Vec::new()),
+        ];
+        let mini = ("mini".parse().unwrap(), Runs::default());
+        let remotes = vec![("nixos".parse().unwrap(), Runs::default()), mini];
+        let (shown, this) = (Some((Machine::Local, fix())), "desk".to_owned());
+        Listing { shown, remotes, shelves, this, ..Listing::default() }
+    }
+
+    #[test]
+    fn every_machine_s_workstreams_are_listed_an_unreachable_one_s_greyed() {
+        let mut picker = opened(machines());
+        let shown = [
+            "api › gateway",
+            "luneta › fix",
+            "luneta › main",
+            "old › stale",
+            "luneta › docs",
+            "mini",
+        ];
+        assert_eq!(rows(&picker), shown);
+        let (lines, _) = list(&picker);
+        assert!(lines[0].ends_with("nixos  working"), "{lines:?}");
+        assert!(lines[1].contains("desk  working"), "{lines:?}");
+        assert!(lines[3].ends_with("far · unreachable  working"), "{lines:?}");
+        assert!(lines[5].ends_with("no projects"), "{lines:?}");
+        let buffer = drawn(&picker);
+        let (results, _) = parts();
+        let shown = text(&buffer, results);
+        let dimmed = |row: &str| {
+            let y = shown.iter().position(|line| line.starts_with(row)).expect("a row");
+            let y = results.y + u16::try_from(y).unwrap();
+            buffer[(results.x + 1, y)].modifier.contains(Modifier::DIM)
+        };
+        assert!(dimmed("old › stale") && !dimmed("luneta › main"));
+        assert_eq!(lit(&picker), "api › gateway");
+        assert!(said(&picker).contains("<ENTER> Go on nixos"), "{}", said(&picker));
+        let gateway = place("api", 4, 1);
+        assert_eq!(press(&mut picker, KeyCode::Enter), go(nixos(), gateway.clone()));
+        press(&mut picker, KeyCode::Delete);
+        let (name, seen) = ("gateway".to_owned(), held(&[6]));
+        let close = Ask::Close { on: nixos(), place: gateway.clone(), name, seen };
+        assert_eq!(picker.asks(), [close]);
+        control(&mut picker, 'r');
+        assert!(said(&picker).contains(r#"renaming "gateway" on nixos"#), "{}", said(&picker));
+        typed(&mut picker, "gw");
+        press(&mut picker, KeyCode::Enter);
+        let renames = Renames::Workstream { place: gateway, name: "gateway".to_owned() };
+        let to = Name::parse("gw").unwrap();
+        assert_eq!(picker.asks(), [Ask::Rename { on: nixos(), renames, to }]);
+
+        down_to(&mut picker, "old › stale");
+        let far = Machine::Remote("far".parse().unwrap());
+        assert_eq!(press(&mut picker, KeyCode::Enter), go(far, place("old", 5, 1)));
+        press(&mut picker, KeyCode::Delete);
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        let why = "stale stays: lunetad does not reach far now";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        control(&mut picker, 'r');
+        assert!(!said(&picker).contains("renaming"), "{}", said(&picker));
+        let why = "stale keeps its name: lunetad does not reach far now";
+        assert!(said(&picker).contains(why), "{}", said(&picker));
+        down_to(&mut picker, "mini");
+        assert!(said(&picker).contains("mini keeps no project"), "{}", said(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
+
+        typed(&mut picker, "a");
+        assert!(!rows(&picker).contains(&"mini".to_owned()), "{:?}", rows(&picker));
+    }
+
+    #[test]
+    fn the_preview_shows_the_terminal_luneta_is_on_else_the_workstream_s_first() {
+        let mut picker = opened(works());
+        let peek = |session: Listed, pane| Ask::Peek {
+            on: Machine::Local,
+            session,
+            asked: Some(PaneKey::terminal(pane)),
+        };
+        let due = picker.due().unwrap();
+        picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
+        assert_eq!(picker.asks(), [] as [Ask; 0]);
+        picker.ticked(due);
+        let web = || api().project.listed().clone();
+        assert_eq!(picker.asks(), [peek(web(), 4)]);
+        assert_eq!(picker.due(), None);
+        press(&mut picker, KeyCode::Up);
+        picker.ticked(picker.due().unwrap());
+        let luneta = || fix().project.listed().clone();
+        assert_eq!(picker.asks(), [peek(luneta(), 3)]);
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Down);
+        picker.ticked(picker.due().unwrap());
+        assert_eq!(picker.asks(), [peek(luneta(), 1)]);
+        press(&mut picker, KeyCode::Down);
+        assert_eq!(picker.due(), None);
+        let (_, preview) = parts();
+        let shown = text(&drawn(&picker), preview);
+        assert_eq!(shown[..3], ["/home/you/docs", "", "it holds no terminal to look at"]);
+    }
+
+    #[test]
+    fn the_preview_shows_the_last_lines_of_the_screen_inside_its_box() {
+        let mut picker = opened(works());
+        let dumped = (1..=40).map(|n| format!("\x1b[mline {n}")).collect::<Vec<_>>().join("\n");
+        let peek = Ok((4, format!("{dumped}\n\n\n")));
+        let (session, asked) = (api().project.listed().clone(), Some(PaneKey::terminal(4)));
+        picker.heard(Heard::Peek { on: Machine::Local, session, asked, peek });
+        let buffer = drawn(&picker);
+        let area = Picker::area(Rect::new(0, 0, 200, 50));
+        assert_eq!((area.x, area.y, area.width, area.height), (40, 10, 120, 30));
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "┘");
+        let (_, preview) = parts();
+        let lines = text(&buffer, preview);
+        assert_eq!(lines[0], "/home/you/api");
+        let rule = text(&buffer, Rect { y: preview.y - 1, height: 1, ..preview });
+        assert!(rule[0].starts_with("─ web › api ─") && rule[0].ends_with(" 1 terminal ─"));
+        assert_eq!(lines.last().map(String::as_str), Some("line 40"));
+        assert_eq!(lines[2], format!("line {}", 40 - (lines.len() - 3)));
+        for y in preview.y..preview.bottom() {
+            assert_eq!(buffer[(preview.x - 1, y)].symbol(), "│");
+            assert_eq!(buffer[(preview.right(), y)].symbol(), "│");
+        }
+    }
+
+    #[test]
+    fn the_preview_of_another_machine_s_workstream_is_its_screen_there() {
+        let mut picker = opened(machines());
+        picker.ticked(picker.due().unwrap());
+        let session = place("api", 4, 1).project.listed().clone();
+        let asked = Some(PaneKey::terminal(6));
+        assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: session.clone(), asked }]);
+        let peek = |on, session, screen: &str| {
+            let peek = Ok((6, screen.to_owned()));
+            Heard::Peek { on, session, asked, peek }
+        };
+        let shown = |picker: &Picker| text(&drawn(picker), parts().1);
+        picker.heard(peek(Machine::Local, session.clone(), "here"));
+        assert_eq!(shown(&picker)[..3], ["nixos · /home/you/gateway", "", "reading…"]);
+        picker.heard(peek(nixos(), session, "there"));
+        assert_eq!(shown(&picker)[..3], ["nixos · /home/you/gateway", "", "there"]);
+    }
+
+    #[test]
+    fn a_preview_that_failed_is_asked_for_again_as_the_highlight_comes_back() {
+        let mut picker = opened(works());
+        picker.ticked(picker.due().unwrap());
+        let (session, asked) = (api().project.listed().clone(), Some(PaneKey::terminal(4)));
+        let peek = || Ask::Peek { on: Machine::Local, session: session.clone(), asked };
+        assert_eq!(picker.asks(), [peek()]);
+        let failed = Err("luneta-mux did not answer".to_owned());
+        let on = Machine::Local;
+        picker.heard(Heard::Peek { on, session: session.clone(), asked, peek: failed });
+        assert_eq!(picker.due(), None);
+        press(&mut picker, KeyCode::Down);
+        press(&mut picker, KeyCode::Up);
+        picker.ticked(picker.due().unwrap());
+        assert_eq!(picker.asks(), [peek()]);
+
+        let path = || directory("/home/you/luneta");
+        control(&mut picker, 'd');
+        picker.heard(heard_here(Ok(vec![visited("/home/you/luneta", "luneta")])));
+        picker.ticked(picker.due().unwrap());
+        let list = || Ask::List { on: Machine::Local, path: path() };
+        assert_eq!(picker.asks(), [list()]);
+        let failed = Err("Permission denied".to_owned());
+        picker.heard(Heard::Listed { on: Machine::Local, path: path(), listed: failed });
+        assert_eq!(picker.due(), None);
+        picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
+        control(&mut picker, 'd');
+        picker.ticked(picker.due().unwrap());
+        assert_eq!(picker.asks(), [list()]);
     }
 
     #[test]
@@ -2563,12 +2751,57 @@ mod tests {
         control(&mut picker, 'j');
         assert_eq!(picker.list, List::Agents, "Ctrl j is the panes' Down");
         picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
-        assert_eq!(picker.list, List::Sessions);
+        assert_eq!(picker.list, List::Workstreams);
         control(&mut picker, 'd');
         assert_eq!(picker.list, List::Dirs);
         control(&mut picker, 'b');
         assert_eq!(picker.list, List::Agents);
         assert_eq!(picker.term, "", "no key typed into the search");
+    }
+
+    #[test]
+    fn del_on_an_agent_asks_before_ending_it_at_work_and_goes_ahead_on_yes_to_the_same_plan() {
+        let place = PanePlace { session: listed("c", 30), pane: PaneKey::Zellij(4) };
+        let listing = Listing {
+            local: agents(vec![seated("c", 30, 4, "fold", Mark::Idle)]),
+            ..Listing::default()
+        };
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        picker.asks();
+        let c = listed("c", 30);
+        let deletes = || Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
+        let planning = Picked::Plan { on: Machine::Local, session: c.clone(), deletes: deletes() };
+        let act = || {
+            Act::Pane { session: c.name().clone(), whose: c.whose(), pane: PaneKey::Zellij(4) }
+        };
+        let plan = |doing: Doing| Plan::of(act(), Ok(&[(4, doing)]));
+        let closes = |picker: &mut Picker| {
+            assert_eq!(picker.asks(), [Ask::Closes { on: Machine::Local, place: place.clone() }]);
+            let closes = Ok(Closes::Pane);
+            picker.heard(Heard::Closes { on: Machine::Local, place: place.clone(), closes })
+        };
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        assert_eq!(closes(&mut picker), planning);
+        assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
+        let asks = |picker: &Picker| said(picker).contains("Close the pane? 1 agent, 1 busy");
+        assert!(asks(&picker));
+        assert_eq!(press(&mut picker, KeyCode::Char('n')), Picked::Nothing);
+        assert!(!asks(&picker));
+
+        press(&mut picker, KeyCode::Delete);
+        closes(&mut picker);
+        picker.planned(Ok(plan(Doing::Busy)));
+        assert_eq!(press(&mut picker, KeyCode::Char('y')), Picked::Nothing);
+        assert_eq!(closes(&mut picker), planning);
+        assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), Picked::Nothing);
+        press(&mut picker, KeyCode::Char('y'));
+        closes(&mut picker);
+        let ended = Picked::Delete { on: Machine::Local, act: act() };
+        assert_eq!(picker.planned(Ok(plan(Doing::Waiting))), ended);
+
+        press(&mut picker, KeyCode::Delete);
+        closes(&mut picker);
+        assert_eq!(picker.planned(Ok(plan(Doing::Idle))), ended);
     }
 
     #[test]
@@ -2590,143 +2823,6 @@ mod tests {
         let deletes = Deletes::Pane { pane: PaneKey::Zellij(4), closes: Closes::Pane };
         let plan = Picked::Plan { on: Machine::Local, session: listed("c", 30), deletes };
         assert_eq!(picker.heard(heard(Machine::Local, place)), plan);
-    }
-
-    #[test]
-    fn del_lets_go_of_a_session_that_ended_at_once() {
-        let mut picker = three();
-        picker.asks();
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "y");
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let delete = |session| Ask::Delete { on: Machine::Local, session };
-        let y = SessionName::running("y").unwrap();
-        assert_eq!(picker.asks(), vec![delete(y.clone())]);
-        assert!(!names(&picker).contains(&"y".to_owned()));
-        assert_eq!(lit(&picker), "x");
-        let deleted = Err("zellij: no".to_owned());
-        picker.heard(Heard::Deleted { on: Machine::Local, session: y, deleted });
-        assert_eq!(picker.asks(), vec![Ask::Exited { on: Machine::Local, ask: 2 }]);
-        let (lines, _) = list(&picker);
-        assert!(lines.iter().any(|line| line.contains("y stays: zellij: no")), "{lines:?}");
-
-        typed(&mut picker, "x");
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(picker.asks(), vec![delete(SessionName::running("x").unwrap())]);
-        assert_eq!(names(&picker), ["+"]);
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-
-        let mut picker = Picker::open(1, List::Sessions, Listing::default(), Machine::Local);
-        picker.heard(kept_here(Ok(vec![ended("x", 10), ended("xy", 20)])));
-        typed(&mut picker, "x");
-        assert_eq!(names(&picker), ["ended", "x", "xy"]);
-        assert_eq!(lit(&picker), "x");
-        press(&mut picker, KeyCode::Delete);
-        assert_eq!(names(&picker), ["+", "ended", "xy"]);
-        assert_eq!(lit(&picker), "xy");
-    }
-
-    #[test]
-    fn a_session_let_go_of_stays_off_the_list_till_zellij_said_it_let_go() {
-        let mut picker = three();
-        picker.asks();
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "y");
-        press(&mut picker, KeyCode::Delete);
-        assert_eq!(lit(&picker), "x");
-        press(&mut picker, KeyCode::Delete);
-        picker.asks();
-        let a_ended = Listing {
-            here: Some(here("b")),
-            local: sessions(vec![live("c", 30, None), live("b", 20, Some(1))]),
-            ..Listing::default()
-        };
-        picker.listed(a_ended);
-        assert_eq!(exited_asks(&mut picker), [] as [Ask; 0]);
-        let let_go = |picker: &mut Picker, name: &str| {
-            let session = SessionName::running(name).unwrap();
-            picker.heard(Heard::Deleted { on: Machine::Local, session, deleted: Ok(()) });
-            exited_asks(picker)
-        };
-        assert_eq!(let_go(&mut picker, "y"), [] as [Ask; 0]);
-        assert_eq!(names(&picker), ["b", "c"]);
-        assert_eq!(let_go(&mut picker, "x"), [Ask::Exited { on: Machine::Local, ask: 2 }]);
-        picker.heard(Heard::Exited { on: Machine::Local, ask: 2, exited: Ok(vec![ended("a", 5)]) });
-        assert_eq!(names(&picker), ["b", "c", "ended", "a"]);
-    }
-
-    #[test]
-    fn ctrl_r_renames_the_highlighted_session_to_a_name_no_session_has() {
-        let mut picker = three();
-        picker.asks();
-        let renaming = |picker: &Picker| {
-            let buffer = drawn(picker);
-            text(&buffer, buffer.area).iter().any(|line| line.contains(r#"renaming "c""#))
-        };
-        control(&mut picker, 'r');
-        assert!(renaming(&picker));
-        let refused = [
-            ("a", "a runs already"),
-            ("b", "you are in b"),
-            ("x", "zellij keeps x, which ended, to bring back"),
-            ("c", "already called that"),
-        ];
-        for (taken, why) in refused {
-            typed(&mut picker, taken);
-            press(&mut picker, KeyCode::Enter);
-            assert!(picker.asks().is_empty(), "{taken}");
-            assert!(said(&picker).contains(why), "{taken}: {}", said(&picker));
-            press(&mut picker, KeyCode::Backspace);
-        }
-        typed(&mut picker, "d");
-        press(&mut picker, KeyCode::Enter);
-        let to = SessionName::parse("d").unwrap();
-        let from = listed("c", 30);
-        assert_eq!(picker.asks(), vec![Ask::Rename { on: Machine::Local, from, to }]);
-        assert!(!renaming(&picker));
-
-        typed(&mut picker, "x");
-        control(&mut picker, 'r');
-        let buffer = drawn(&picker);
-        let said = text(&buffer, buffer.area).join(" ");
-        assert!(!said.contains("renaming"));
-        assert!(said.contains("zellij renames only a session that runs"), "{said}");
-    }
-
-    #[test]
-    fn no_name_is_free_until_zellij_says_again_which_sessions_ended() {
-        let mut picker = three();
-        picker.asks();
-        let listing = |newer: &[Live]| {
-            let running = [newer, &[live("c", 30, None), live("b", 20, Some(1))][..]].concat();
-            Listing { here: Some(here("b")), local: sessions(running), ..Listing::default() }
-        };
-        picker.listed(listing(&[]));
-        picker.listed(listing(&[live("d", 40, None)]));
-        picker.listed(listing(&[]));
-        let exited = |ask| Ask::Exited { on: Machine::Local, ask };
-        assert_eq!(picker.asks(), vec![exited(2), exited(3)]);
-        assert!(names(&picker).contains(&"x".to_owned()));
-        control(&mut picker, 'r');
-        typed(&mut picker, "d");
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        let before_d = vec![ended("x", 100), ended("y", 10)];
-        picker.heard(Heard::Exited { on: Machine::Local, ask: 2, exited: Ok(before_d.clone()) });
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        let since_d = [vec![ended("d", 1)], before_d].concat();
-        picker.heard(Heard::Exited { on: Machine::Local, ask: 3, exited: Ok(since_d) });
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        press(&mut picker, KeyCode::Backspace);
-        typed(&mut picker, "a");
-        press(&mut picker, KeyCode::Enter);
-        let (from, to) = (listed("c", 30), SessionName::parse("a").unwrap());
-        assert_eq!(picker.asks(), vec![Ask::Rename { on: Machine::Local, from, to }]);
     }
 
     #[test]
@@ -2786,52 +2882,11 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_asks_zellij_once_the_highlight_rests() {
-        let mut picker = three();
-        picker.asks();
-        let due = picker.due().unwrap();
-        picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        picker.ticked(due);
-        let peek = |session, asked| Ask::Peek { on: Machine::Local, session, asked };
-        assert_eq!(picker.asks(), vec![peek(listed("c", 30), None)]);
-        assert_eq!(picker.due(), None);
-        press(&mut picker, KeyCode::Up);
-        let due = picker.due().unwrap();
-        picker.ticked(due);
-        assert_eq!(picker.asks(), vec![peek(listed("b", 20), Some(PaneKey::Zellij(1)))]);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(picker.due(), None);
-    }
-
-    #[test]
-    fn the_preview_shows_the_last_lines_zellij_dumped_inside_its_box() {
-        let mut picker = three();
-        let dumped = (1..=40).map(|n| format!("\x1b[mline {n}")).collect::<Vec<_>>().join("\n");
-        let peek = Ok((0, format!("{dumped}\n\n\n")));
-        let c = listed("c", 30);
-        picker.heard(Heard::Peek { on: Machine::Local, session: c, asked: None, peek });
-        let buffer = drawn(&picker);
-        let area = Picker::area(Rect::new(0, 0, 200, 50));
-        assert_eq!((area.x, area.y, area.width, area.height), (40, 10, 120, 30));
-        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
-        assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "┘");
-        let (_, preview) = parts();
-        let lines = text(&buffer, preview);
-        assert_eq!(lines[0], "Tab #1 · c/w");
-        assert_eq!(lines.last().map(String::as_str), Some("line 40"));
-        assert_eq!(lines[2], format!("line {}", 40 - (lines.len() - 3)));
-        for y in preview.y..preview.bottom() {
-            assert_eq!(buffer[(preview.x - 1, y)].symbol(), "│");
-            assert_eq!(buffer[(preview.right(), y)].symbol(), "│");
-        }
-    }
-
-    #[test]
     fn each_directory_is_named_for_the_session_enter_makes_there() {
+        let projects = vec![housed("notes", 1, Vec::new()), housed("luneta", 2, Vec::new())];
         let listing = Listing {
             here: Some(here("notes")),
-            local: sessions(vec![live("notes", 20, Some(1)), live("luneta", 10, None)]),
+            shelves: vec![shelved(Machine::Local, projects)],
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
@@ -2863,21 +2918,16 @@ mod tests {
     fn no_session_takes_the_name_luneta_s_zellij_is_on_its_way_to() {
         let listing = Listing {
             here: Some(here("notes")),
-            local: sessions(vec![live("luneta", 10, None)]),
+            shelves: vec![shelved(Machine::Local, vec![housed("luneta", 1, Vec::new())])],
             ..Listing::default()
         };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
         picker.heard(kept_here(Ok(Vec::new())));
-        picker.heard(heard_here(Ok(vec![visited("/home/you/notes", "notes")])));
-        assert_eq!(names(&picker), ["notes-2"]);
-        press(&mut picker, KeyCode::Tab);
-        assert_eq!(lit(&picker), "luneta");
-        picker.asks();
-        control(&mut picker, 'r');
-        typed(&mut picker, "notes");
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        assert!(said(&picker).contains("you are in notes"), "{}", said(&picker));
+        picker.heard(heard_here(Ok(vec![
+            visited("/home/you/notes", "notes"),
+            visited("/home/you/luneta", "luneta"),
+        ])));
+        assert_eq!(names(&picker), ["notes-2", "luneta-2"]);
     }
 
     #[test]
@@ -2940,7 +2990,7 @@ mod tests {
     #[test]
     fn the_preview_lists_what_eza_says_is_in_the_directory() {
         let path = "/home/you/luneta";
-        let mut picker = three();
+        let mut picker = opened(works());
         control(&mut picker, 'd');
         picker.heard(heard_here(Ok(vec![visited(path, "luneta")])));
         picker.asks();
@@ -3085,321 +3135,25 @@ mod tests {
     }
 
     #[test]
-    fn every_machine_s_sessions_go_under_its_rule_this_one_s_first() {
-        let there = || sessions(vec![live("api", 40, None), live("blog", 5, None)]);
-        let listing = || Listing {
-            here: Some(here("b")),
-            local: sessions(vec![live("c", 30, None), live("b", 20, Some(1))]),
-            ..on_nixos(there())
-        };
-        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
-        let exited = |on, ask| Ask::Exited { on, ask };
-        assert_eq!(exited_asks(&mut picker), [exited(Machine::Local, 1), exited(nixos(), 2)]);
-        picker.heard(kept_here(Ok(vec![ended("x", 100)])));
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(vec![ended("old", 50)]) });
-        let rows = ["── desk", "b", "c", "ended", "x", "── nixos", "api", "blog", "ended", "old"];
-        assert_eq!(grouped(&picker), rows);
-        assert_eq!(lit(&picker), "c");
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "api");
-        assert!(said(&picker).contains("<ENTER> Attach on nixos"), "{}", said(&picker));
-        let api = Place::Session(listed("api", 40));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Go { on: nixos(), place: api });
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "old");
-        assert!(said(&picker).contains("<ENTER> Bring back on nixos"), "{}", said(&picker));
-        assert_eq!(text(&drawn(&picker), parts().1)[0], "nixos · ended");
-        let old = SessionName::running("old").unwrap();
-        let back = Picked::BringBack { on: nixos(), session: old };
-        assert_eq!(press(&mut picker, KeyCode::Enter), back);
-
-        typed(&mut picker, "b");
-        assert_eq!(grouped(&picker), ["+", "── desk", "b", "── nixos", "blog"]);
-        assert_eq!(lit(&picker), "b");
-        let ended_there = sessions(vec![live("api", 40, None)]);
-        picker.listed(Listing { remotes: on_nixos(ended_there).remotes, ..listing() });
-        assert_eq!(picker.asks(), [exited(nixos(), 3)]);
-    }
-
-    fn machines(picker: &Picker) -> (Vec<String>, Option<String>) {
-        let buffer = drawn(picker);
-        let inner = |rect: Rect| rect.inner(Margin::new(1, 1));
-        let full = inner(Layout::of(inner(Picker::area(buffer.area))).full.unwrap());
-        let squeezed = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
-        let (mut listed, mut lit) = (Vec::new(), None);
-        for (y, line) in (full.y..full.bottom()).zip(text(&buffer, full)).skip(3) {
-            if line.is_empty() {
-                continue;
-            }
-            if buffer[(full.x, y)].bg == LIT {
-                lit = Some(squeezed(&line));
-            }
-            listed.push(squeezed(&line));
-        }
-        (listed, lit)
-    }
-
-    #[test]
-    fn enter_on_a_name_typed_has_you_pick_the_machine_to_make_it_on() {
-        let listing = || Listing {
-            local: sessions(vec![live("web", 30, None)]),
-            ..on_nixos(sessions(vec![live("api", 40, None)]))
-        };
-        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
-        let name = |name: &str| SessionName::parse(name).unwrap();
-        let lit_machine = |picker: &Picker| machines(picker).1.unwrap_or_default();
-        let retyped = |picker: &mut Picker, term: &str| {
-            for _ in 0..10 {
-                press(picker, KeyCode::Backspace);
-            }
-            typed(picker, term);
-        };
-        typed(&mut picker, "web");
-        assert_eq!(grouped(&picker), ["+", "── desk", "web"]);
-        press(&mut picker, KeyCode::Up);
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
-        press(&mut picker, KeyCode::Esc);
-        retyped(&mut picker, "notes");
-        assert_eq!(grouped(&picker), ["+"]);
-        assert_eq!(lit(&picker), "+");
-        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on…"#), "{}", said(&picker));
-        let preview = text(&drawn(&picker), parts().1);
-        let shows = |start: &str, end: &str| {
-            preview.iter().any(|line| line.starts_with(start) && line.ends_with(end))
-        };
-        assert!(shows("desk", "this one") && shows("nixos", "asking zellij…"), "{preview:?}");
-
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        assert_eq!(machines(&picker).0, ["desk this one", "nixos asking zellij…"]);
-        assert_eq!(lit_machine(&picker), "desk this one");
-        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on desk"#), "{}", said(&picker));
-        press(&mut picker, KeyCode::Char('j'));
-        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
-        let why = "zellij on nixos has yet to say which sessions ended";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        press(&mut picker, KeyCode::Char('j'));
-        assert_eq!(lit_machine(&picker), "nixos asking zellij…");
-        let exited = vec![ended("old", 10), ended("web", 5)];
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(exited) });
-        assert_eq!(lit_machine(&picker), "nixos");
-        assert!(said(&picker).contains(r#"<ENTER> Make "notes" on nixos"#), "{}", said(&picker));
-        let there = Picked::Start { on: nixos(), session: name("notes") };
-        assert_eq!(press(&mut picker, KeyCode::Enter), there);
-
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Up);
-        press(&mut picker, KeyCode::Char('k'));
-        assert_eq!(lit_machine(&picker), "desk this one");
-        assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
-        assert_eq!(lit(&picker), "+");
-        press(&mut picker, KeyCode::Enter);
-        let (rows, j) = clicks(&picker, "<j>");
-        assert_eq!(j, Some(Pick::Key(KeyEvent::from(KeyCode::Char('j')))));
-        let spot = rows.iter().find(|(word, _)| word == "nixos").and_then(|(_, pick)| pick.clone());
-        assert_eq!(spot, Some(Pick::Machine(nixos())));
-        assert_eq!(picker.click(spot.unwrap()), there);
-
-        retyped(&mut picker, "api");
-        assert_eq!(grouped(&picker), ["+", "── nixos", "api"]);
-        assert_eq!(lit(&picker), "api");
-        press(&mut picker, KeyCode::Up);
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(machines(&picker).0, ["desk this one", "nixos runs there"]);
-        press(&mut picker, KeyCode::Char('j'));
-        assert!(said(&picker).contains("api runs on nixos already"), "{}", said(&picker));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        press(&mut picker, KeyCode::Char('k'));
-        let api = Picked::Start { on: Machine::Local, session: name("api") };
-        assert_eq!(press(&mut picker, KeyCode::Enter), api);
-        retyped(&mut picker, "old");
-        assert_eq!(grouped(&picker), ["+", "── nixos", "ended", "old"]);
-        press(&mut picker, KeyCode::Up);
-        press(&mut picker, KeyCode::Enter);
-        press(&mut picker, KeyCode::Char('j'));
-        assert_eq!(lit_machine(&picker), "nixos ended there");
-        let why = "zellij on nixos keeps old, which ended, to bring back";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        typed(&mut picker, "x");
-        assert_eq!(lit_machine(&picker), "nixos ended there");
-        press(&mut picker, KeyCode::Esc);
-        retyped(&mut picker, "web");
-        assert_eq!(grouped(&picker), ["── desk", "web", "── nixos", "ended", "web"]);
-
-        retyped(&mut picker, "notes");
-        press(&mut picker, KeyCode::Enter);
-        press(&mut picker, KeyCode::Char('j'));
-        picker.listed(Listing { remotes: Vec::new(), ..listing() });
-        assert!(said(&picker).contains("nixos is listed no more"), "{}", said(&picker));
-        assert_eq!(lit(&picker), "+");
-        let here = Picked::Start { on: Machine::Local, session: name("notes") };
-        assert_eq!(press(&mut picker, KeyCode::Enter), here);
-    }
-
-    #[test]
-    fn ctrl_j_on_a_machine_s_header_starts_the_machines_on_it() {
-        let there = sessions(vec![live("api", 40, None)]);
-        let listing = Listing { local: sessions(vec![live("blog", 30, None)]), ..on_nixos(there) };
-        let mut picker = Picker::open(1, List::Sessions, listing, nixos());
-        picker.heard(kept_here(Ok(Vec::new())));
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(Vec::new()) });
-        assert_eq!(lit(&picker), "blog");
-        typed(&mut picker, "x");
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
-        assert_eq!(machines(&picker).1.as_deref(), Some("nixos"));
-        let made = Picked::Start { on: nixos(), session: SessionName::parse("x").unwrap() };
-        assert_eq!(press(&mut picker, KeyCode::Enter), made);
-        press(&mut picker, KeyCode::Backspace);
-        typed(&mut picker, "api");
-        press(&mut picker, KeyCode::Up);
-        assert_eq!(lit(&picker), "+");
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(machines(&picker).1.as_deref(), Some("desk this one"));
-    }
-
-    #[test]
-    fn del_and_ctrl_r_act_on_another_machine_s_rows_there() {
-        let there = Runs {
-            sessions: vec![live("api", 40, None), live("web", 20, None)],
-            agents: vec![seated("api", 40, 2, "fix", Mark::Idle)],
-        };
-        let listing = Listing { local: sessions(vec![live("here", 30, None)]), ..on_nixos(there) };
-        let mut picker = Picker::open(1, List::Sessions, listing, Machine::Local);
-        picker.heard(kept_here(Ok(vec![ended("gone", 100)])));
-        picker.asks();
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "api");
-        control(&mut picker, 'r');
-        assert!(said(&picker).contains(r#"renaming "api" on nixos"#), "{}", said(&picker));
-        let rename = |picker: &mut Picker, to: &str| {
-            for _ in 0..10 {
-                press(picker, KeyCode::Backspace);
-            }
-            typed(picker, to);
-            press(picker, KeyCode::Enter);
-            picker.asks()
-        };
-        assert_eq!(rename(&mut picker, "here"), [] as [Ask; 0]);
-        let why = "zellij has yet to say which sessions ended";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(vec![ended("old", 10)]) });
-        for taken in ["web", "old"] {
-            assert!(rename(&mut picker, taken).is_empty(), "{taken}");
-        }
-        let from = listed("api", 40);
-        let to = SessionName::parse("here").unwrap();
-        assert_eq!(rename(&mut picker, "here"), [Ask::Rename { on: nixos(), from, to }]);
-
-        let deletes = Deletes::Session;
-        let plan = Picked::Plan { on: nixos(), session: listed("api", 40), deletes };
-        assert_eq!(press(&mut picker, KeyCode::Delete), plan);
-        press(&mut picker, KeyCode::Esc);
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "old");
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let old = SessionName::running("old").unwrap();
-        assert_eq!(picker.asks(), [Ask::Delete { on: nixos(), session: old.clone() }]);
-        assert!(!names(&picker).contains(&"old".to_owned()));
-        picker.heard(Heard::Deleted { on: nixos(), session: old, deleted: Ok(()) });
-        assert_eq!(picker.asks(), [Ask::Exited { on: nixos(), ask: 3 }]);
-
-        control(&mut picker, 'b');
-        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
-        let place = PanePlace { session: listed("api", 40), pane: PaneKey::Zellij(2) };
-        assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place }]);
-    }
-
-    #[test]
-    fn a_session_of_a_machine_listed_no_more_takes_no_name() {
-        let listing = || Listing {
-            local: sessions(vec![live("here", 30, None)]),
-            ..on_nixos(sessions(vec![live("api", 40, None)]))
-        };
-        let mut picker = Picker::open(1, List::Sessions, listing(), Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Ok(Vec::new()) });
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(lit(&picker), "api");
-        control(&mut picker, 'r');
-        typed(&mut picker, "fresh");
-        assert!(said(&picker).contains("Rename on nixos"), "{}", said(&picker));
-        picker.listed(Listing { remotes: Vec::new(), ..listing() });
-        picker.asks();
-        press(&mut picker, KeyCode::Enter);
-        assert_eq!(picker.asks(), [] as [Ask; 0]);
-        let why = "the machine is listed no more";
-        assert!(said(&picker).contains(why), "{}", said(&picker));
-    }
-
-    #[test]
     fn each_machine_s_zellij_is_asked_which_sessions_ended_as_it_is_listed() {
-        let mut picker = Picker::open(1, List::Sessions, Listing::default(), Machine::Local);
+        let mut picker = Picker::open(1, List::Dirs, Listing::default(), Machine::Local);
         assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: Machine::Local, ask: 1 }]);
         picker.heard(kept_here(Ok(Vec::new())));
         picker.listed(two_machines());
         assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: nixos(), ask: 2 }]);
-        assert_eq!(list(&picker).0, ["asking zellij…"]);
-        let older = "nixos: its lunetad, or this one, is older than what luneta asked of it";
-        picker.heard(Heard::Exited { on: nixos(), ask: 2, exited: Err(older.to_owned()) });
-        let said = list(&picker).0.join(" ");
-        assert!(said.contains(&format!("no ended sessions: {older}")), "{said}");
+        picker.listed(two_machines());
+        assert_eq!(exited_asks(&mut picker), [] as [Ask; 0]);
 
         let gone = || Listing { remotes: Vec::new(), ..two_machines() };
         picker.listed(gone());
         picker.listed(two_machines());
         assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: nixos(), ask: 3 }]);
-        picker.listed(gone());
-        picker.listed(two_machines());
-        assert_eq!(exited_asks(&mut picker), [Ask::Exited { on: nixos(), ask: 4 }]);
-        let before = Ok(vec![ended("before", 5)]);
-        picker.heard(Heard::Exited { on: nixos(), ask: 3, exited: before });
-        picker.heard(Heard::Exited { on: nixos(), ask: 4, exited: Ok(vec![ended("old", 5)]) });
-        assert_eq!(grouped(&picker), ["── nixos", "ended", "old"]);
-        picker.listed(gone());
-        assert_eq!(list(&picker).0, ["no sessions"]);
     }
 
     #[test]
-    fn a_preview_that_failed_is_asked_for_again_as_the_highlight_comes_back() {
-        let mut picker = three();
-        picker.asks();
-        picker.ticked(picker.due().unwrap());
-        let peek = || Ask::Peek { on: Machine::Local, session: listed("c", 30), asked: None };
-        assert_eq!(picker.asks(), [peek()]);
-        let failed = Err("zellij: it did not answer in time".to_owned());
-        let c = listed("c", 30);
-        picker.heard(Heard::Peek { on: Machine::Local, session: c, asked: None, peek: failed });
-        assert_eq!(picker.due(), None);
-        press(&mut picker, KeyCode::Down);
-        press(&mut picker, KeyCode::Up);
-        picker.ticked(picker.due().unwrap());
-        assert_eq!(picker.asks(), [peek()]);
-
-        let path = || directory("/home/you/luneta");
-        control(&mut picker, 'd');
-        picker.heard(heard_here(Ok(vec![visited("/home/you/luneta", "luneta")])));
-        picker.ticked(picker.due().unwrap());
-        let list = || Ask::List { on: Machine::Local, path: path() };
-        assert_eq!(picker.asks(), [list()]);
-        let failed = Err("Permission denied".to_owned());
-        picker.heard(Heard::Listed { on: Machine::Local, path: path(), listed: failed });
-        assert_eq!(picker.due(), None);
-        picker.key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SUPER));
-        control(&mut picker, 'd');
-        picker.ticked(picker.due().unwrap());
-        assert_eq!(picker.asks(), [list()]);
-    }
-
-    #[test]
-    fn a_session_another_machine_runs_takes_no_name_here() {
-        let listing = on_nixos(sessions(vec![live("api", 40, None)]));
+    fn a_project_of_another_machine_takes_no_name_here() {
+        let shelves = vec![shelved(nixos(), vec![housed("api", 1, Vec::new())])];
+        let listing = Listing { shelves, ..two_machines() };
         let mut picker = Picker::open(1, List::Dirs, listing, Machine::Local);
         picker.heard(kept_here(Ok(Vec::new())));
         picker.heard(heard_here(Ok(vec![visited("/home/you/api", "api")])));
@@ -3407,36 +3161,19 @@ mod tests {
     }
 
     #[test]
-    fn luneta_s_zellij_on_another_machine_is_here_among_that_machine_s_rows() {
+    fn luneta_s_agent_on_another_machine_is_pinned_over_that_machine_s_rows() {
         let at = |pane| PanePlace { session: listed("api", 40), pane };
-        let there = Runs {
-            sessions: vec![live("web", 50, None), live("api", 40, Some(9))],
-            agents: vec![
-                seated("api", 40, 9, "mine", Mark::Busy),
-                seated("api", 40, 2, "fix", Mark::Idle),
-            ],
-        };
+        let there = agents(vec![
+            seated("api", 40, 9, "mine", Mark::Busy),
+            seated("api", 40, 2, "fix", Mark::Idle),
+        ]);
         let listing = Listing {
             here: Some(Here::Pane { on: nixos(), place: at(PaneKey::Zellij(9)) }),
-            local: Runs {
-                sessions: vec![live("api", 30, None)],
-                agents: vec![seated("api", 30, 1, "fix", Mark::Idle)],
-            },
+            local: agents(vec![seated("api", 30, 1, "fix", Mark::Idle)]),
             ..on_nixos(there)
         };
-        let mut picker = Picker::open(1, List::Sessions, listing, Machine::Local);
-        picker.heard(kept_here(Ok(Vec::new())));
-        assert_eq!(grouped(&picker), ["── desk", "api", "── nixos", "api", "web"]);
-        let (lines, _) = list(&picker);
-        assert!(!lines[1].ends_with("here") && lines[3].ends_with("─ here"), "{lines:?}");
-        assert_eq!(lit(&picker), "api");
-        press(&mut picker, KeyCode::Down);
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Close);
-        press(&mut picker, KeyCode::Down);
-        let web = Place::Session(listed("web", 50));
-        assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Go { on: nixos(), place: web });
-
-        control(&mut picker, 'b');
+        let mut picker = Picker::open(1, List::Agents, listing, Machine::Local);
+        picker.asks();
         let (lines, _) = list(&picker);
         assert!(lines[0].starts_with("mine ─") && lines[0].ends_with("─ here"), "{lines:?}");
         let name = |line: &String| {
@@ -3451,31 +3188,8 @@ mod tests {
         press(&mut picker, KeyCode::Down);
         let fix = Picked::Go { on: nixos(), place: Place::Pane(at(PaneKey::Zellij(2))) };
         assert_eq!(press(&mut picker, KeyCode::Enter), fix);
-    }
-
-    #[test]
-    fn the_preview_of_another_machine_s_session_is_its_screen_there() {
-        let listing = Listing {
-            local: sessions(vec![live("main", 30, None)]),
-            ..on_nixos(sessions(vec![live("main", 40, Some(0))]))
-        };
-        let mut picker = Picker::open(1, List::Sessions, listing, Machine::Local);
-        picker.asks();
-        press(&mut picker, KeyCode::Down);
-        picker.ticked(picker.due().unwrap());
-        let main = listed("main", 40);
-        let asked = Some(PaneKey::Zellij(0));
-        assert_eq!(picker.asks(), [Ask::Peek { on: nixos(), session: main.clone(), asked }]);
-        let peek = |on, session, screen: &str| {
-            let peek = Ok((0, screen.to_owned()));
-            Heard::Peek { on, session, asked, peek }
-        };
-        let shown = |picker: &Picker| text(&drawn(picker), parts().1);
-        picker.heard(peek(Machine::Local, main.clone(), "here"));
-        picker.heard(peek(nixos(), listed("main", 10), "ended"));
-        assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "reading…"]);
-        picker.heard(peek(nixos(), main, "there"));
-        assert_eq!(shown(&picker)[..3], ["nixos · Tab #1 · main/w", "", "there"]);
+        assert_eq!(press(&mut picker, KeyCode::Delete), Picked::Nothing);
+        assert_eq!(picker.asks(), [Ask::Closes { on: nixos(), place: at(PaneKey::Zellij(2)) }]);
     }
 
     fn asked(ask: Ask, projected: &Projected) -> Heard {

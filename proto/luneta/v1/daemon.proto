@@ -1011,10 +1011,13 @@ message ChangeProjectsRequest {
 
   message CloseWorkstream {
     fixed64 workstream = 1;
+    repeated fixed64 seen = 2;
   }
 
   message CloseProject {
     fixed64 project = 1;
+    repeated fixed64 workstreams = 2;
+    repeated fixed64 seen = 3;
   }
 
   message ReorderProjects {

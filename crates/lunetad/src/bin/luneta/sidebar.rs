@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, WorkstreamId};
+use lunetad::projects::{self, Dir, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -53,7 +53,7 @@ use crate::menu::{
     Ran, Target, Top, Wants, WorkstreamRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Listing, Live, Runs, Seated, Shown};
+use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Streamed};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -149,6 +149,11 @@ impl ProjectRow {
     #[must_use]
     pub fn id(&self) -> ProjectId {
         self.id
+    }
+
+    #[cfg(test)]
+    pub fn new(name: &str, id: u64) -> Self {
+        ProjectRow::of(Listed::new_project(name, id)).unwrap()
     }
 }
 
@@ -767,6 +772,7 @@ impl Away {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Known {
     project: ProjectRow,
+    dir: Dir,
     workstreams: Vec<Stream>,
     order: Vec<WorkstreamId>,
 }
@@ -775,9 +781,11 @@ struct Known {
 struct Stream {
     place: WorkstreamPlace,
     name: String,
-    folder: String,
-    missing: bool,
+    folder: Dir,
+    seen: projects::Seen,
+    used: Option<SystemTime>,
     panes: Vec<Pane>,
+    terminals: Vec<TerminalId>,
 }
 
 impl Known {
@@ -787,13 +795,23 @@ impl Known {
             let id = WorkstreamId::of(workstream.id)?;
             let place = WorkstreamPlace { project: project.clone(), workstream: id };
             let panes = workstream.terminals.iter().filter_map(|it| pane_of(it, workstream, tab));
-            let missing = matches!(workstream.seen, Some(api::workstream::Seen::Missing(())));
-            let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-            Some(Stream { place, name, folder, missing, panes: panes.collect() })
+            let seen = workstream.seen.and_then(projects::Seen::of_api);
+            let seen = seen.expect("lunetad says a workstream's stage luneta knows");
+            let used = workstream.used_at.map(|at| {
+                SystemTime::try_from(at).expect("lunetad says a workstream's last use as a time")
+            });
+            let folder = Dir::parse(&workstream.folder);
+            let folder = folder.expect("lunetad says a workstream's folder as a folder it keeps");
+            let terminals = workstream.terminals.iter().map(|terminal| {
+                TerminalId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0")
+            });
+            let (name, panes, terminals) = (workstream.name.clone(), panes.collect(), terminals);
+            Some(Stream { place, name, folder, seen, used, panes, terminals: terminals.collect() })
         });
         let workstreams = streams.collect();
         let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
-        Some(Known { project, workstreams, order })
+        let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
+        Some(Known { project, dir, workstreams, order })
     }
 
     fn listed(&self) -> &Listed {
@@ -1799,6 +1817,7 @@ impl Sidebar {
         let mut listing = Listing { away, this, ..Listing::default() };
         if let Some(host) = &self.host {
             for (machine, seen) in machines(host, &self.shelves).each() {
+                listing.shelves.push(self.shelved(&machine, seen.as_ref(), here.as_ref()));
                 let Ok(seen) = seen else {
                     continue;
                 };
@@ -1809,8 +1828,74 @@ impl Sidebar {
                 }
             }
         }
+        listing.shown = self.here_workstream().map(|place| (self.on().clone(), place));
         listing.here = here;
         listing
+    }
+
+    fn shelved(
+        &self,
+        machine: &Machine,
+        seen: Result<&Seen<'_>, &Away>,
+        here: Option<&Here>,
+    ) -> Shelved {
+        let here = here.filter(|here| here.on() == machine);
+        let here_key = here.and_then(Here::pane).map(|place| place.session.key(place.pane.id()));
+        let heard = seen.ok();
+        let seated = heard.map_or_default(|seen| seen.seated());
+        let unread = heard.filter(|_| self.away.is_none()).map(|seen| seen.unread_seats());
+        let trees: HashMap<&str, &lunetad::api::WorkTree> = heard
+            .iter()
+            .flat_map(|seen| seen.work_trees)
+            .map(|tree| (tree.dir.as_str(), tree))
+            .collect();
+        let mut projects = Vec::new();
+        for known in shelf(&self.shelves, machine) {
+            let listed = known.listed();
+            let mut workstreams = Vec::with_capacity(known.workstreams.len());
+            for stream in &known.workstreams {
+                let held = |pane: u32| stream.panes.iter().any(|it| it.id == pane);
+                let agents = stream.panes.iter().filter_map(|pane| {
+                    Some((listed.key(pane.id), *seated.get(&(listed.at(), pane.id))?))
+                });
+                let waiting = agents.clone().filter(|(key, agent)| {
+                    let (marked, _) = agent_marked(&self.news, agent, *key, here_key == Some(*key));
+                    marked.mark == Mark::Waiting
+                });
+                let ending = match &unread {
+                    Some(Ok(seats)) => {
+                        let doing = agents.clone().map(|(_, agent)| close::Doing::from(agent));
+                        let files = close::unread_in(seats, listed.at());
+                        let files = files.filter(|(pane, _)| held(*pane)).map(|(_, doing)| doing);
+                        Ok(doing.chain(files).collect())
+                    },
+                    Some(Err(unplaced)) => Err(Untold::Unplaced(*unplaced)),
+                    None => Err(Untold::Away),
+                };
+                let branch = trees.get(stream.folder.as_str()).and_then(|tree| {
+                    Some(checkout(&WorkTree::of_api(tree)?, None)?.branch)
+                });
+                let terminals = stream.panes.iter().filter_map(|pane| {
+                    PanePlace::of(listed.clone(), pane).map(|place| place.pane)
+                });
+                workstreams.push(Streamed {
+                    place: stream.place.clone(),
+                    name: stream.name.clone(),
+                    folder: stream.folder.clone(),
+                    branch,
+                    seen: stream.seen,
+                    used: stream.used,
+                    terminals: terminals.collect(),
+                    held: stream.terminals.clone(),
+                    waiting: waiting.count(),
+                    ending,
+                });
+            }
+            let (project, dir) = (known.project.clone(), known.dir.clone());
+            projects.push(Housed { project, dir, workstreams });
+        }
+        let away = seen.err().map(|away| away.said().0);
+        Shelved { on: machine.clone(), away, projects }
     }
 
     pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
@@ -1857,7 +1942,6 @@ impl Sidebar {
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
             let listed = known.listed();
-            let mut waiting = 0;
             for pane in known.panes() {
                 let Some(agent) = seated.get(&(listed.at(), pane.id)) else {
                     continue;
@@ -1867,7 +1951,6 @@ impl Sidebar {
                 };
                 let key = listed.key(pane.id);
                 let (marked, _) = agent_marked(&self.news, agent, key, here_key == Some(key));
-                waiting += usize::from(marked.mark == Mark::Waiting);
                 runs.agents.push(Seated {
                     place,
                     label: label(Some(agent), pane),
@@ -1880,18 +1963,6 @@ impl Sidebar {
                     doing: alerts::Doing::of(agent),
                 });
             }
-            let shown = |pane: &Pane| Shown {
-                id: pane.id,
-                tab: pane.tab_name.clone(),
-                label: label(seated.get(&(listed.at(), pane.id)).copied(), pane),
-            };
-            runs.sessions.push(Live {
-                started: listed.kept.started(),
-                panes: known.panes().map(shown).collect(),
-                focus: None,
-                waiting,
-                place: Place::Session(listed.clone()),
-            });
         }
         let here = here.map(Here::session);
         runs.agents.sort_by_key(|seated| here != Some(seated.place.session.name().as_str()));
@@ -2199,7 +2270,7 @@ impl Sidebar {
                             machine: machine.clone(),
                             place: stream.place.clone(),
                             name: stream.name.clone(),
-                            missing: stream.missing,
+                            missing: stream.seen == projects::Seen::Missing,
                             hits: stream_hits.unwrap_or_default(),
                             under,
                             here,
@@ -2905,7 +2976,7 @@ impl Sidebar {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let stream = known.workstreams.iter().find(|stream| stream.place == place)?;
-        let (name, folder) = (stream.name.clone(), stream.folder.clone());
+        let (name, folder) = (stream.name.clone(), stream.folder.as_str().to_owned());
         let seen = self.seen(machine);
         let trees = seen.iter().flat_map(|seen| seen.work_trees);
         let tree = trees.into_iter().find(|tree| tree.dir == folder);
@@ -3157,8 +3228,8 @@ impl Sidebar {
                 Asked::Closes { menu: number, on, session, pane }
             },
             Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
-                let plan = self.panes_of(&on, workstream).and_then(|panes| {
-                    self.plan(&on, &session, Deletes::Workstream { workstream, panes })
+                let plan = self.deletes_of(&on, workstream).and_then(|deletes| {
+                    self.plan(&on, &session, deletes)
                 });
                 self.planned(plan)
             },
@@ -3279,16 +3350,31 @@ impl Sidebar {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
+        let deletes = match (deletes, listed.own_key()) {
+            (Deletes::Session, Some(key)) => self.project_deletes(on, listed, key)?,
+            (deletes, _) => deletes,
+        };
         Ok(close::plan(&self.subject(on, listed, deletes)))
     }
 
-    fn panes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Vec<u32>, String> {
+    fn project_deletes(&self, on: &Machine, listed: &Listed, key: OwnKey) -> Result<Deletes, String> {
+        let unlisted = || format!("project {} is no longer listed", listed.name());
+        let project = listed.project().ok_or_else(unlisted)?;
+        let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
+        let known = known.ok_or_else(unlisted)?;
+        let workstreams = known.workstreams.iter().map(|stream| stream.place.workstream).collect();
+        let seen = known.workstreams.iter().flat_map(|stream| stream.terminals.iter().copied());
+        Ok(Deletes::Project { key, project, workstreams, seen: seen.collect() })
+    }
+
+    fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
         let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
         let mut held = streams.filter(|stream| stream.place.workstream == workstream);
         let Some(stream) = held.next() else {
             return Err(format!("workstream {workstream} is no longer listed"));
         };
-        Ok(stream.panes.iter().map(|pane| pane.id).collect())
+        let panes = stream.panes.iter().map(|pane| pane.id).collect();
+        Ok(Deletes::Workstream { workstream, panes, seen: stream.terminals.clone() })
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -3411,9 +3497,10 @@ impl Sidebar {
                 matches!(place, Place::Workstream(at) if at.workstream == *workstream)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
-            (Act::Kill { session, .. } | Act::Leave { session, .. }, _) => {
-                place.session() == session.as_str()
-            },
+            (
+                Act::Project { session, .. } | Act::Kill { session, .. } | Act::Leave { session, .. },
+                _,
+            ) => place.session() == session.as_str(),
         };
         let takes = |spot: &Spot| {
             spot.place().is_some_and(|place| spot.machine() == on && takes_place(place))
@@ -5006,6 +5093,14 @@ mod tests {
         Asked::Delete { on: Machine::Local, act }
     }
 
+    fn project_deleted(name: &str, id: u64, workstreams: &[u64], seen: &[u64]) -> Act {
+        let key = OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(0) };
+        let (project, workstreams) = (ProjectId::of(id).unwrap(), workstreams.iter());
+        let workstreams = workstreams.map(|it| WorkstreamId::of(*it).unwrap()).collect();
+        let seen = seen.iter().map(|it| TerminalId::of(*it).unwrap()).collect();
+        Act::Project { session: session_name(name), key, project, workstreams, seen }
+    }
+
     fn go_here(place: Place) -> Asked {
         Asked::Go { on: Machine::Local, place }
     }
@@ -5157,7 +5252,8 @@ mod tests {
                     None => workstreams.push(api::Workstream {
                         id,
                         name: pane.tab_name.clone(),
-                        folder: terminal.folder.clone(),
+                        folder: kept_folder(pane.cwd.as_deref()),
+                        seen: Some(api::workstream::Seen::Unread(())),
                         terminals: vec![terminal],
                         ..api::Workstream::default()
                     }),
@@ -5350,9 +5446,15 @@ mod tests {
             id,
             name: name.to_owned(),
             folder: folder.to_owned(),
+            seen: Some(api::workstream::Seen::Unread(())),
             terminals: panes.iter().map(terminal).collect(),
             ..api::Workstream::default()
         }
+    }
+
+    fn kept_folder(cwd: Option<&str>) -> String {
+        let kept = cwd.filter(|cwd| Dir::parse(cwd).is_ok());
+        kept.unwrap_or("/w").to_owned()
     }
 
     fn a_project(id: u64, name: &str, workstreams: Vec<api::Workstream>) -> api::Project {
@@ -5395,7 +5497,8 @@ mod tests {
         type_in(&mut sidebar, "d");
         let whose = listed("luneta", 7).whose();
         let session = session_name("luneta");
-        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2] };
+        let seen = [1, 2].map(|id| TerminalId::of(id).unwrap()).to_vec();
+        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
         assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
         let after = sidebar.closing.as_ref().and_then(|closing| closing.after.clone());
@@ -7898,9 +8001,7 @@ mod tests {
             type_in(sidebar, "d");
             sidebar.key(&char('s'), moment(160_000))
         };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("own"), whose };
+        let kill = project_deleted("own", 1, &[], &[]);
         assert_eq!(delete(&mut sidebar), delete_here(kill.clone()));
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(2).unwrap(), made });
@@ -7928,7 +8029,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
     }
 
@@ -7946,7 +8047,7 @@ mod tests {
         sidebar.cursor = Some(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
-        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
     }
 
@@ -8894,9 +8995,7 @@ mod tests {
         let in_own = UnreadFile { pid: 200, zellij: None, own, terminal: None };
         let zellij = Zellij { named: "twin".to_owned(), session: Some("twin".to_owned()), pane: 1 };
         let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("twin"), whose };
+        let kill = project_deleted("twin", 1, &[1000], &[1]);
         for (file, asks) in [(in_own, true), (in_zellij, false)] {
             let mut sidebar = fresh();
             let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
@@ -8966,8 +9065,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 16);
         assert_eq!(lines[13..15], [" Delete project older? 1", " agent, 1 waiting"]);
-        let whose = own_listed("older", 1).whose();
-        let kill = Act::Kill { session: session_name("older"), whose };
+        let kill = project_deleted("older", 1, &[1000, 1001], &[1, 2]);
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
         assert!(sidebar.menu.is_none());
     }
@@ -9813,20 +9911,39 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let listing = sidebar.listing();
-        let names = |runs: &Runs| {
-            let sessions = runs.sessions.iter().map(|live| live.place.session().to_owned());
-            let agents = runs.agents.iter().map(|seated| seated.label.clone());
-            (sessions.collect::<Vec<_>>(), agents.collect::<Vec<_>>())
-        };
-        let here = (vec!["main".to_owned()], Vec::new());
-        assert_eq!((listing.this.as_str(), names(&listing.local)), ("mac", here));
+        let names = |runs: &Runs| runs.agents.iter().map(|seated| seated.label.clone()).collect();
+        assert_eq!((listing.this.as_str(), names(&listing.local)), ("mac", Vec::<String>::new()));
         let remotes: Vec<_> = listing.remotes.iter().map(|(at, runs)| (at, names(runs))).collect();
-        let there = (vec!["main".to_owned()], vec!["fix".to_owned()]);
-        assert_eq!(remotes, [(&nixos(), there)]);
+        assert_eq!(remotes, [(&nixos(), vec!["fix".to_owned()])]);
+        let each = listing.shelves.iter().map(|shelved| {
+            let projects = shelved.projects.iter().map(|housed| housed.project.listed().name());
+            (shelved.on.clone(), shelved.away, projects.map(ToString::to_string).collect())
+        });
+        let main = || vec!["main".to_owned()];
+        let far = |at: &str| Machine::Remote(at.parse().unwrap());
+        let shelves: Vec<(Machine, Option<&str>, Vec<String>)> = each.collect();
+        assert_eq!(shelves, [
+            (Machine::Local, None, main()),
+            (Machine::Remote(nixos()), None, main()),
+            (far("me@vps"), Some("unreachable"), Vec::new()),
+            (far("pi"), Some("reaching…"), Vec::new()),
+        ]);
         sidebar.cursor = Some(Spot::Machine(Machine::Remote(nixos())));
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
         assert_eq!(sidebar.on_header(), None);
+    }
+
+    #[test]
+    fn the_picker_is_told_the_workstream_luneta_shows_on_the_machine_it_sits_on() {
+        let mut sidebar = fresh();
+        sidebar.hear(machines());
+        let there = listed("main", 20);
+        sidebar.attaching(Machine::Remote(nixos()), there.own_key().unwrap());
+        sidebar.showing(tab_of(20, 0));
+        let project = ProjectRow::of(there).unwrap();
+        let place = WorkstreamPlace { project, workstream: tab_of(20, 0) };
+        assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));
     }
 
     #[test]

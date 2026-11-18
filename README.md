@@ -25,7 +25,7 @@
 ## What is luneta
 
 zellij in your terminal, beside a sidebar of every session and agent, and a
-picker over it with sessions, agents and directories tabs.
+picker over it with workstreams, agents and directories tabs.
 
 * Create, hop between and delete sessions
 * Jump to the agent that is waiting for you
@@ -49,7 +49,7 @@ picker over it with sessions, agents and directories tabs.
 
 | `Tab` | list | `Enter` |
 |---|---|---|
-| 1 | **Sessions** — live and resurrectable, newest first | attach, resurrect, or create |
+| 1 | **Workstreams** — every machine's, the one used last first | go there, or start one |
 | 2 | **Agents** — the agents running and their status | jump to that agent's pane |
 | 3 | **Directories** — where you work, in frecency order | create a session there |
 
@@ -544,7 +544,7 @@ them, whichever side has the keys:
 - `Alt a` opens the [menu](#menu) over zellij, for the pane zellij is on, and
   closes it again.
 - `Super j` (`Cmd j` on a Mac) opens the picker over zellij, on the
-  sessions, `Ctrl b` on the agents, and `Ctrl d` on the directories.
+  workstreams, `Ctrl b` on the agents, and `Ctrl d` on the directories.
 - `Alt r` [dictates](#dictate) into the pane zellij is on, the ask box or the
   issue box: hold it and talk.
 - `Alt u` [reads aloud](#read-aloud) what you selected, and pauses what plays
@@ -564,30 +564,34 @@ keyboard protocol, as Ghostty does. Where it does not, `Ctrl h` comes as the
 byte many terminals send for `Ctrl Backspace` too, and some for `Backspace`,
 so those keys move to the pane on the left as well.
 
-The picker floats over zellij's side. It lists the sessions, the agents and
-the directories of every machine, each machine's under a rule of its own, this
-one's first. Its sessions are the one zellij is in, then the others that run,
-newest first, and under each machine's those zellij keeps to bring back; its
-agents are as the [agents](#agents) tab lists them, and its directories as the
-[directories](#directories) tab does, as each machine's zoxide and eza list
-them. `Tab` goes from one list to the next, what you type narrows all three,
-and the preview beside the list shows the screen of the highlighted agent's
-pane, or of the pane you would come to in the highlighted session, as zellij
-on its machine dumps it, or what is in the highlighted directory. `Enter`
-takes zellij there, on its machine, brings back a session that ended, makes
-the session you typed the name of, or makes one in the highlighted directory,
-named for it, on its machine. A name you type that a machine has no session
-of is a row of its own, `+`, over all the sessions: a session the search finds
-is highlighted first, and the `+` row where it finds none. `Enter` on it makes
-the session, and where more than one machine is listed, asks which machine
-first: `j` and `k`, or `↓` and `↑`, move through them, `Enter` makes it on the
-highlighted one, and `Esc` goes back to the search. A machine that has a
-session by that name, or whose zellij has yet to say which sessions ended, is
-dimmed, and says why. `Del` deletes the highlighted session, lets go of
-one that ended, or closes the agent's pane, on its machine, and asks first, as
-the menu's delete does, while an agent at work would end: `y` goes ahead.
-`Ctrl r` renames the highlighted session, on its machine. `Esc`, or a click
-off the box, closes it. A
+The picker floats over zellij's side. It lists the workstreams, the agents and
+the directories of every machine. Its workstreams are every machine's in one
+list, each row its project and its name, `luneta › fix`, then the machine's
+name where more than one is listed, and the stage lunetad derives for it from
+git and its pull request: `no branch`, `working`, `PR open`, `checks failing`,
+`merged`, or `missing` where its folder is gone. The one used last comes first,
+by the stamp lunetad keeps of each go, so the one luneta shows is first and the
+highlight starts on the one used before it; a project with no workstream is one
+row, under them. A machine lunetad does not reach lists the projects it last
+heard, dimmed, its name saying why, as `nixos · unreachable`, and one that keeps
+no project is a row of its own. Its agents are as the [agents](#agents) tab lists
+them, each machine's under a rule of its own, this one's first, and its
+directories as the [directories](#directories) tab does, as each machine's
+zoxide and eza list them. `Tab` goes from one list to the next, what you type
+narrows all three, the workstreams by their name, their project's, their
+branch or their folder, and the preview beside the list shows the screen of
+the highlighted agent's pane, or of the workstream's terminal luneta is on, or
+else its first, or what is in the highlighted directory. `Enter` goes to the
+workstream or the agent, starts a workstream in an empty project's folder, or
+makes a session in the highlighted directory, named for it, on its machine. A
+name you type that no workstream matches is a row of its own, `+`: `Enter` on
+it makes a workstream of that name in the project you are in, in its folder,
+and goes there. `Del` closes the highlighted workstream, its terminals with it,
+or the agent's pane, on its machine, and asks first, as the menu's delete does,
+while an agent at work, or one luneta cannot tell from the files it could not
+read, would end: `y` goes ahead. `Ctrl r` renames the highlighted workstream,
+or an empty project, on its machine. A machine lunetad does not reach renames
+and closes nothing. `Esc`, or a click off the box, closes it. A
 click on a row does what `Enter` does on it, the wheel moves the highlight,
 and a click on a key the line under the search names presses it, as `<TAB>`.
 
@@ -1255,13 +1259,11 @@ lunetad there looks for the file, with that machine's `~/`, so a file only this
 machine has says `no such file`, after the machine's name. `Ctrl d` on its header
 opens the picker on the directories with the highlight on that machine's,
 which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
-makes the session there, named as that machine names one. `Super j` on its
-header opens the picker on the sessions, and the machines `Enter` on the `+`
-row asks you to pick from start on that one. The picker lists its
-sessions and agents too, under its rule, each previewed as zellij there dumps
-its screen, and the sessions zellij there keeps to bring back: `Enter` on one
-goes there, or brings it back there, and `Del` and `Ctrl r` delete and rename
-there. Moving its sessions comes later.
+makes the session there, named as that machine names one. The picker lists
+its workstreams and agents too, the agents under its rule: `Enter` on its
+workstream waits for luneta to draw that machine's terminals here, as its rows
+in the sidebar do, and `Del` and `Ctrl r` close and rename it there. Moving its
+sessions comes later.
 `u` marks
 its panes read, and their dots and folds are kept as this machine's are, a
 folded machine and another machine's folded sessions in
@@ -1989,17 +1991,17 @@ one's number.
 
 ## Usage
 
-`Super j` opens the picker on the sessions, `Ctrl b` on the agents and `Ctrl d`
-on the directories. Type, press `Enter`.
+`Super j` opens the picker on the workstreams, `Ctrl b` on the agents and
+`Ctrl d` on the directories. Type, press `Enter`.
 
 | key | does |
 |---|---|
 | *any character* | filter, fuzzily |
 | `↓` / `↑` | move the highlight |
-| `Enter` | act on the highlighted row — the prompt says which action; on the `+` row, make the session typed, on the machine you pick with `j` / `k` and `Enter` |
+| `Enter` | act on the highlighted row — the prompt says which action; on the `+` row, make the workstream typed, in the project you are in |
 | `Tab` / `Shift-Tab` | next / previous list, keeping the search term |
-| `Ctrl-r` | rename the highlighted session |
-| `Del` | delete a live session, or let go of a dead one; close an agent's pane, and its tab once nothing else holds it open |
+| `Ctrl-r` | rename the highlighted workstream, or an empty project |
+| `Del` | close the highlighted workstream and its terminals; close an agent's pane, and its tab once nothing else holds it open |
 | `Backspace` | delete a character |
 | `Esc` / `Ctrl-c` | close |
 

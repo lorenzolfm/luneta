@@ -86,6 +86,7 @@ struct KeptWorkstream {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    #[serde(default)]
     below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
@@ -820,18 +821,15 @@ mod tests {
     }
 
     #[test]
-    fn a_workstream_kept_in_its_project_s_own_folder_is_refused_when_read() {
-        let text = |kept: &str| {
-            format!(
-                r#"{{"version": 4, "projects": [{{"id": "0000000000000001", "name": "a",
-                "dir": "/a", "workstreams": [{kept},
-                {{"id": "0000000000000003", "below": "b"}}]}}]}}"#
-            )
-        };
-        let unsaid = parse(&text(r#"{"id": "0000000000000002"}"#)).unwrap_err();
-        assert!(unsaid.contains("missing field `below`"), "{unsaid}");
-        let own = parse(&text(r#"{"id": "0000000000000002", "below": ""}"#));
-        assert_eq!(own, Err("no workstream is in its project's own folder".to_owned()));
+    fn a_workstream_kept_in_its_project_s_own_folder_is_read_and_written_back() {
+        let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
+            "dir": "/a", "workstreams": [{"id": "0000000000000002"},
+            {"id": "0000000000000003", "below": "b"}]}]}"#;
+        let kept = parse(text).unwrap();
+        let project = &kept.all()[0];
+        let folders: Vec<Dir> = project.workstreams().iter().map(|it| project.folder(it)).collect();
+        assert_eq!(folders, [dir("/a"), dir("/a/b")]);
+        assert_eq!(parse(&written(&kept)), Ok(kept));
     }
 
     #[test]

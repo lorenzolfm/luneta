@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{ProjectId, TerminalId, WorkstreamId};
+use lunetad::projects::{Name, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
@@ -84,10 +84,10 @@ pub struct Pulled {
     argv: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum Doomed {
-    Workstream(WorkstreamId),
-    Project(ProjectId),
+    Workstream { workstream: WorkstreamId, seen: Vec<TerminalId> },
+    Project { project: ProjectId, workstreams: Vec<WorkstreamId>, seen: Vec<TerminalId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +174,7 @@ const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CON
 
 const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
 
-const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
+const WORKSTREAMS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 const LEFT: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::CONTROL);
 
@@ -209,7 +209,7 @@ pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 15] = [
     (SHRINK, "Shrink the pane"),
     (COLLAPSE, "Collapse sidebar"),
     (MENU, "Menu over panes"),
-    (SESSIONS, "Pick a session"),
+    (WORKSTREAMS, "Pick a workstream"),
     (AGENTS, "Pick an agent"),
     (DIRS, "Pick a directory"),
     (dictation::KEY, "Hold to dictate"),
@@ -1197,7 +1197,7 @@ impl App {
             return;
         }
         let list = match chord {
-            SESSIONS => Some(List::Sessions),
+            WORKSTREAMS => Some(List::Workstreams),
             AGENTS => Some(List::Agents),
             DIRS => Some(List::Dirs),
             _ => None,
@@ -1205,7 +1205,7 @@ impl App {
         if let Some(list) = list {
             self.pickers += 1;
             let aim = match (list, self.focus.side) {
-                (List::Sessions | List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
+                (List::Dirs, Side::Sidebar) => self.sidebar.on_header(),
                 _ => None,
             };
             let aim = aim.unwrap_or_default();
@@ -1595,7 +1595,7 @@ impl App {
             },
             Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
-                Act::Workstream { .. } => self.project_act(&on, &act),
+                Act::Workstream { .. } | Act::Project { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
                     zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
                 },
@@ -1724,15 +1724,13 @@ impl App {
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
         match (on, act) {
-            (_, Act::Workstream { workstream, .. }) => {
-                self.project_act_delete(on, Doomed::Workstream(*workstream));
+            (_, Act::Workstream { workstream, seen, .. }) => {
+                let (workstream, seen) = (*workstream, seen.clone());
+                self.project_act_delete(on, Doomed::Workstream { workstream, seen });
             },
-            (_, Act::Kill { session, whose: Whose::Own(key) }) => {
-                let Some(project) = projected::project_of(*key) else {
-                    let why = format!("{session} is no project's");
-                    return self.sidebar.notify(format!("menu: not deleted: {why}"));
-                };
-                self.project_act_delete(on, Doomed::Project(project));
+            (_, Act::Project { project, workstreams, seen, .. }) => {
+                let (project, workstreams, seen) = (*project, workstreams.clone(), seen.clone());
+                self.project_act_delete(on, Doomed::Project { project, workstreams, seen });
             },
             (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
                 let (terminal, events) = (*terminal, self.events.clone());
@@ -1749,9 +1747,13 @@ impl App {
     fn project_act_delete(&mut self, on: &Machine, doomed: Doomed) {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
         let deleting = thread::spawn(move || {
-            let closed = caught(|| match doomed {
-                Doomed::Workstream(workstream) => workstreams::closed(&lunetad, &on, workstream),
-                Doomed::Project(project) => workstreams::closed_project(&lunetad, &on, project),
+            let closed = caught(|| match &doomed {
+                Doomed::Workstream { workstream, seen } => {
+                    workstreams::closed(&lunetad, &on, *workstream, seen)
+                },
+                Doomed::Project { project, workstreams, seen } => {
+                    workstreams::closed_project(&lunetad, &on, *project, workstreams, seen)
+                },
             });
             if let Err(why) = closed {
                 let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
@@ -1805,21 +1807,17 @@ impl App {
                 self.go(&on, &place);
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Start { on: Machine::Local, session } => {
-                match Directory::parse(self.dir.to_string_lossy().into_owned()) {
-                    Ok(cwd) => self.make_workstream(cwd, move |lunetad, cwd| {
-                        workstreams::start(lunetad, Some(session.as_str()), cwd, |_| None)
-                    }),
-                    Err(why) => self.sidebar.notify(format!("no workstream made: {why}")),
-                }
+            Picked::Add { on: Machine::Local, project, folder, name } => {
+                let project = project.id();
+                self.make_workstream(folder.clone(), move |lunetad, _| {
+                    let named = name.as_ref().map(Name::as_str);
+                    workstreams::add_workstream(lunetad, project, folder.as_str(), named).map(Some)
+                });
                 self.give(Focus::on(self.focus.side.session()));
             },
-            Picked::Start { on: Machine::Remote(_), .. }
+            Picked::Add { on: Machine::Remote(_), .. }
             | Picked::Make { on: Machine::Remote(_), .. } => {
                 self.sidebar.notify(format!("picker: {}", menu::HERE_ONLY));
-            },
-            Picked::BringBack { session, .. } => {
-                self.sidebar.notify(format!("picker: zellij keeps {session}: {}", menu::OWN_ONLY));
             },
             Picked::Make { on: Machine::Local, session, cwd } => {
                 self.make_workstream(cwd, move |lunetad, cwd| {

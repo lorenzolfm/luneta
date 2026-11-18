@@ -628,7 +628,16 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     assert_eq!(refused.code(), Code::InvalidArgument);
     assert!(refused.message().contains("holds 2 terminals still"), "{}", refused.message());
 
-    let close = || Change::CloseWorkstream(CloseWorkstream { workstream: closing });
+    let closed = |seen: &[u64]| {
+        Change::CloseWorkstream(CloseWorkstream { workstream: closing, seen: seen.to_vec() })
+    };
+    let close = || closed(&terminals);
+    for stale in [&terminals[..1], &[terminals[0], terminals[1], stays][..], &[]] {
+        let refused = asked(&owned.host, closed(stale)).unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        assert!(refused.message().contains("changed since"), "{}", refused.message());
+    }
+    assert_eq!(watched(&owned, closing).len(), 2, "a close refused as stale closes none");
     let stalled = owned.stall_mux();
     let unclosed = asked(&owned.host, close()).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
@@ -670,8 +679,26 @@ fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgott
     let mut beside = Shown::new(&owned, stays, 80, 24);
     let terminals = [first.open(), first.open(), second.open()];
     let kept_open = beside.open();
-    let close = |project| Change::CloseProject(CloseProject { project });
-    assert_eq!(asked(&owned.host, close(made)).unwrap(), None);
+    let closed = |project, workstreams: &[u64], seen: &[u64]| {
+        let (workstreams, seen) = (workstreams.to_vec(), seen.to_vec());
+        Change::CloseProject(CloseProject { project, workstreams, seen })
+    };
+    let close = || closed(made, &[one, two], &terminals);
+    let stale_ones: [(&[u64], &[u64]); 4] = [
+        (&[one], &terminals),
+        (&[one, two, stays], &terminals),
+        (&[one, two], &terminals[..2]),
+        (&[one, two], &[terminals[0], terminals[1], terminals[2], kept_open]),
+    ];
+    for (workstreams, seen) in stale_ones {
+        let refused = asked(&owned.host, closed(made, workstreams, seen)).unwrap_err();
+        assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
+        assert!(refused.message().contains("changed since"), "{}", refused.message());
+    }
+    let listing = owned.listing();
+    let all_kept = terminals.iter().all(|terminal| tagged(&listing, *terminal).is_some());
+    assert!(all_kept, "a close refused as stale closes none");
+    assert_eq!(asked(&owned.host, close()).unwrap(), None);
     eventually("the project's terminals leave the mux", || {
         let listing = owned.listing();
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
@@ -683,12 +710,12 @@ fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgott
     assert_eq!(ids, [other], "the project goes with its last workstream, and no other");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(!file.contains(&format!("{made:016x}")), "{file}");
-    let again = asked(&owned.host, close(made)).unwrap_err();
+    let again = asked(&owned.host, close()).unwrap_err();
     assert_eq!(again.code(), Code::InvalidArgument);
     assert!(again.message().contains("no project has the id"), "{}", again.message());
 
     let empty = project(&owned.host, &folder("empty"), None);
-    assert_eq!(asked(&owned.host, close(empty)).unwrap(), None);
+    assert_eq!(asked(&owned.host, closed(empty, &[], &[])).unwrap(), None);
     let ids: Vec<u64> = projects_of(&owned).iter().map(|it| it.id).collect();
     assert_eq!(ids, [other], "a project with no workstream is forgotten");
 }

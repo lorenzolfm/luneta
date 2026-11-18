@@ -413,8 +413,12 @@ impl Views {
             Command::Change { change, answer } => {
                 let changed = match change {
                     Ask::Change(change) => self.store.change(change),
-                    Ask::Close(Closing::Workstream(it)) => self.close_workstream(it),
-                    Ask::Close(Closing::Project(project)) => self.close_project(project),
+                    Ask::CloseWorkstream { workstream, seen } => {
+                        self.close_workstream(workstream, &seen)
+                    },
+                    Ask::CloseProject { project, workstreams, seen } => {
+                        self.close_project(project, &workstreams, &seen)
+                    },
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -504,7 +508,12 @@ impl Views {
         }
     }
 
-    fn close_project(&mut self, project: ProjectId) -> Result<Option<Id>, Failed> {
+    fn close_project(
+        &mut self,
+        project: ProjectId,
+        seen_workstreams: &BTreeSet<WorkstreamId>,
+        seen: &BTreeSet<TerminalId>,
+    ) -> Result<Option<Id>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
@@ -513,6 +522,12 @@ impl Views {
         let terminals: Vec<TerminalId> = views.flat_map(View::terminals).map(layout::Leaf::id).collect();
         assert!(workstreams.len() <= WORKSTREAMS_MAX, "a project holds at most {WORKSTREAMS_MAX}");
         assert!(terminals.len() <= TERMINALS_MAX, "a project holds at most {TERMINALS_MAX} terminals");
+        let held_workstreams: BTreeSet<WorkstreamId> = workstreams.iter().copied().collect();
+        let held_terminals: BTreeSet<TerminalId> = terminals.iter().copied().collect();
+        if held_workstreams != *seen_workstreams || held_terminals != *seen {
+            let changed = format!("project {project}'s workstreams or terminals are not those seen");
+            return Err(Failed::Stale(format!("{changed}: they changed since")));
+        }
         self.close_terminals(&terminals)?;
         if let Some(why) = self.store.closed(Closing::Project(project))? {
             self.unwritten(&why);
@@ -523,11 +538,19 @@ impl Views {
         Ok(None)
     }
 
-    fn close_workstream(&mut self, workstream: WorkstreamId) -> Result<Option<Id>, Failed> {
+    fn close_workstream(
+        &mut self,
+        workstream: WorkstreamId,
+        seen: &BTreeSet<TerminalId>,
+    ) -> Result<Option<Id>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
         let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;
         let terminals: Vec<TerminalId> = shown.view().terminals().map(layout::Leaf::id).collect();
+        if terminals.iter().copied().collect::<BTreeSet<_>>() != *seen {
+            let changed = format!("workstream {workstream}'s terminals are not the ones seen");
+            return Err(Failed::Stale(format!("{changed}: they changed since")));
+        }
         assert!(terminals.len() <= PANES_MAX, "a view holds at most {PANES_MAX} terminals");
         self.close_terminals(&terminals)?;
         if let Some(why) = self.store.closed(Closing::Workstream(workstream))? {
