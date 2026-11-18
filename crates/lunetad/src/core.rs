@@ -16,7 +16,7 @@ use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
 use crate::projects::layout::Leaf as _;
-use crate::projects::{Dir, Name, Project, Projects, Seen, Stage, TerminalId, Workstream};
+use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, TerminalId, Workstream};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -61,7 +61,7 @@ pub enum Command {
     Shells(Vec<Shell>),
     Topics(HashMap<SessionId, Said>),
     Hosts(Named),
-    Projects(Result<Projects, String>),
+    Projects { projects: Result<Projects, String>, revision: Revision },
     Missing(BTreeSet<Dir>),
     Remote { destination: Destination, reached: Reached },
     Say { said: ToSay, at: SystemTime, answer: oneshot::Sender<Result<(), String>> },
@@ -123,6 +123,7 @@ struct Known {
     remotes: Vec<(Destination, Reached)>,
     unread_hosts: u32,
     projects: Result<Projects, String>,
+    revision: Revision,
     missing: BTreeSet<Dir>,
     words: u64,
     told: HashMap<Id, u64>,
@@ -148,6 +149,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         remotes: Vec::new(),
         unread_hosts: 0,
         projects: Err("lunetad has read no projects yet".to_owned()),
+        revision: Revision::default(),
         missing: BTreeSet::new(),
         words: 0,
         told: HashMap::new(),
@@ -214,9 +216,10 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Topics(now) => known.topics = now,
             Command::Hosts(now) => known.named(now),
-            Command::Projects(now) => {
+            Command::Projects { projects, revision } => {
                 let before = known.dirs();
-                known.projects = now;
+                known.projects = projects;
+                known.revision = revision;
                 if !known.dirs().is_subset(&before) {
                     wake(&wakes.git);
                 }
@@ -524,7 +527,8 @@ impl Known {
             missing: self.missing.contains(project.dir()),
             workstreams: workstreams(project),
         };
-        let kept = api::projects::Kept { projects: projects.all().iter().map(project).collect() };
+        let projects = projects.all().iter().map(project).collect();
+        let kept = api::projects::Kept { projects, version: Some(self.revision.to_api()) };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 

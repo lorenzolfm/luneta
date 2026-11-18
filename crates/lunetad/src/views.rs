@@ -19,9 +19,9 @@ use crate::mux::own::TerminalKey;
 use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
-use crate::projects::{Ask, Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
-use crate::projects::{Size, Store, Terminal, TerminalId, Used, View, Workstream, WorkstreamId};
-use crate::projects::{FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
+use crate::projects::{Ask, Change, Changed, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs};
+use crate::projects::{Session, Size, Store, Terminal, TerminalId, Used, View, Workstream};
+use crate::projects::{WorkstreamId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, TERMINALS_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
 use crate::watch::Troubles;
@@ -71,7 +71,7 @@ pub type Out = answers::Sender<Result<api::ShowResponse, Status>>;
 pub struct ClientId(u64);
 
 pub enum Command {
-    Change { change: Ask, answer: oneshot::Sender<Result<Option<Id>, Failed>> },
+    Change { change: Ask, answer: oneshot::Sender<Result<Changed, Failed>> },
     Came {
         workstream: WorkstreamId,
         size: Size,
@@ -413,7 +413,8 @@ impl Views {
                     Ask::Change(change) => self.store.change(change),
                     Ask::CloseWorkstream(workstream) => self.close_workstream(workstream),
                 };
-                let _ = answer.send(changed);
+                let kept = self.store.revision();
+                let _ = answer.send(changed.map(|made| Changed { made, kept }));
             },
             Command::Came { workstream, size, runs_in, again, out, answer } => {
                 let _ = answer.send(self.came(workstream, size, runs_in, again, out));
@@ -1345,6 +1346,7 @@ fn said(failed: Failed) -> String {
     match failed {
         Failed::NotKept(why)
         | Failed::Nests(why)
+        | Failed::Stale(why)
         | Failed::Refused(why)
         | Failed::Unwritten(why)
         | Failed::Unclosed(why) => why,

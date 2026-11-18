@@ -764,7 +764,7 @@ mod tests {
             Some(unreached.projects)
         };
         let project = api::Project { id: 7, name: "luneta".to_owned(), ..api::Project::default() };
-        let kept = api::projects::Kept { projects: vec![project] };
+        let kept = api::projects::Kept { projects: vec![project], version: None };
         let heard = Some(api::Projects { held: Some(api::projects::Held::Kept(kept)) });
 
         let broke = answered_with(heard.clone()).failed(refused());
