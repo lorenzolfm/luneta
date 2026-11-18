@@ -10,7 +10,7 @@ use lunetad::SessionName;
 
 use crate::close::Whose;
 use crate::host::NOT_YET;
-use crate::machines::Machine;
+use crate::machines::{self, Machine};
 use crate::sidebar::{Listed, PaneKey};
 use crate::viewed::Tab;
 
@@ -110,14 +110,15 @@ impl Projected {
     pub fn adapted(host: &mut Host) -> Result<Projected, String> {
         host.sessions.clear();
         let mut machines = Vec::new();
-        for remote in &mut host.remotes {
+        let named = machines::named_once(&host.remotes);
+        for (remote, destination) in host.remotes.iter_mut().zip(named) {
             if let Some(remote::Reached::Host(far)) = &mut remote.reached {
                 far.sessions.clear();
                 let projects = kept(far.projects.as_ref());
                 let projects: Vec<Project> =
                     projects.iter().filter_map(|it| project(it).ok()).collect();
                 seat(&projects, &mut far.agents, &mut far.unread_files);
-                if let Ok(destination) = remote.destination.parse() {
+                if let Some(destination) = destination {
                     machines.push((Machine::Remote(destination), projects));
                 }
             }
@@ -127,6 +128,11 @@ impl Projected {
         seat(&projects, &mut host.agents, &mut host.unread_files);
         machines.insert(0, (Machine::Local, projects));
         Ok(Projected { machines })
+    }
+
+    #[must_use]
+    pub fn reaches(&self, on: &Machine) -> bool {
+        self.machines.iter().any(|(machine, _)| machine == on)
     }
 
     #[must_use]
@@ -377,6 +383,9 @@ mod tests {
         assert_eq!((names(&here), names(&nixos)), both);
         let gone = Machine::Remote("gone".parse().unwrap());
         assert!(projected.projects(&gone).is_empty(), "a machine not reached holds no project");
+        assert!(projected.reaches(&here), "this machine is reached");
+        assert!(projected.reaches(&nixos), "nixos is reached");
+        assert!(!projected.reaches(&gone), "gone is not reached");
     }
 
     #[test]

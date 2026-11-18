@@ -47,7 +47,7 @@ use crate::icons;
 use crate::issue::Repository;
 use crate::ledger::{self, Key};
 use crate::live::Lists;
-use crate::machines::Machine;
+use crate::machines::{self, Machine};
 use crate::menu::{
     self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Label, Menu, Opening, Opens, PaneRow,
     Ran, Target, Top, Wants, WorkstreamRow,
@@ -856,14 +856,10 @@ fn wanted(all: &[u64], listed: &[u64]) -> Vec<u64> {
 
 fn shelves(host: &Host) -> Vec<Shelf> {
     let mut shelves = vec![shelved(Machine::Local, host.projects.as_ref())];
-    let mut named = HashSet::new();
-    for remote in &host.remotes {
-        let Ok(destination) = remote.destination.parse::<Destination>() else {
+    for (remote, destination) in host.remotes.iter().zip(machines::named_once(&host.remotes)) {
+        let Some(destination) = destination else {
             continue;
         };
-        if !named.insert(destination.clone()) {
-            continue;
-        }
         let projects = match &remote.reached {
             Some(Reached::Host(host)) => host.projects.as_ref(),
             Some(Reached::Unreached(unreached)) => unreached.projects.as_ref(),
@@ -1477,6 +1473,10 @@ impl Sidebar {
 
     pub fn own_seat(&self) -> Option<OwnSeat> {
         self.seat
+    }
+
+    pub fn own_seat_on(&self, on: &Machine) -> Option<OwnSeat> {
+        self.seat.filter(|_| self.on == *on)
     }
 
     pub fn own_title(&self) -> Option<&str> {
@@ -2972,7 +2972,7 @@ impl Sidebar {
                 continue;
             };
             let pull = pulls.get(dir).and_then(|it| Link::parse(it.url.as_deref()?));
-            let here = self.on == *on && Self::seats_here(self.own_seat(), listed);
+            let here = Self::seats_here(self.own_seat_on(on), listed);
             let Some(PanePlace { session, pane }) = PanePlace::of(listed.clone(), pane) else {
                 continue;
             };
@@ -3013,9 +3013,10 @@ impl Sidebar {
     }
 
     fn subject<'a>(&'a self, on: &Machine, listed: &'a Listed, deletes: Deletes) -> Subject<'a> {
-        let seat = match self.own_seat() {
-            Some(seat) if self.on == *on && listed.own_key() == Some(seat.session()) => Seat::In,
-            Some(_) | None => Seat::Elsewhere,
+        let seat = if Self::seats_here(self.own_seat_on(on), listed) {
+            Seat::In
+        } else {
+            Seat::Elsewhere
         };
         let mut agents = Err(Untold::Away);
         let mut refuge: Option<Listed> = None;

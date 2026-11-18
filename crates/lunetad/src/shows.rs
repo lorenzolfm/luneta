@@ -323,6 +323,9 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
     again: bool,
     told: Told,
 ) -> Show {
+    if on.is_some() {
+        assert!(runs_in.is_none(), "luneta runs in no terminal of another machine");
+    }
     let (outbox, inbox) = streams::boxes(SAID_MAX, untaken);
     let showing = move |mut told: Told| {
         let built = runtime::Builder::new_current_thread().enable_all().build();

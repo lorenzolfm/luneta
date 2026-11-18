@@ -9,6 +9,7 @@ use lunetad::api::change_projects_request::{
 };
 use lunetad::api::projects::Held;
 use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
+use lunetad::api::{view_request, On, ViewRequest};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{view, Greeting, Reach, Seen, FRAMES_MAX};
@@ -1039,6 +1040,52 @@ fn a_view_of_another_machine_is_laid_out_and_seen_there_through_the_bridge() {
         Seen::Lost(why) => assert_eq!(why, "lunetad does not reach nowhere now"),
         other => panic!("a viewer of a machine not reached is lost, not {other:?}"),
     }
+}
+
+#[test]
+fn a_view_is_refused_a_hello_after_the_first_a_word_that_says_nothing_and_a_machine_misnamed() {
+    let owned = Owned::new();
+    let mut shown = Shown::new(&owned, workstream_in_home(&owned), 80, 24);
+    shown.open();
+    let folder = folder_in(owned.host.runtime.path()).unwrap();
+    let greeted = Some(mux_api::Greeting { colours: None, runs_in: None });
+    let hello = |on: Option<&str>, greeting: Option<mux_api::Greeting>| {
+        let on = on.map(|destination| On { destination: destination.to_owned() });
+        let hello = view_request::Hello { on, greeting };
+        ViewRequest { event: Some(view_request::Event::Hello(hello)) }
+    };
+    let showing = mux_api::from_viewer::Event::Showing(mux_api::Showing { terminals: Vec::new() });
+    let said = mux_api::FromViewer { event: Some(showing) };
+    let showing = ViewRequest { event: Some(view_request::Event::Said(said)) };
+    let refused = |words: Vec<ViewRequest>| -> Option<(Code, String)> {
+        let folder = folder.clone();
+        owned.block_on(async move {
+            let mut daemon = lunetad::connect(&folder).await.unwrap();
+            let mut heard = match daemon.view(tokio_stream::iter(words)).await {
+                Ok(answer) => answer.into_inner(),
+                Err(refused) => return Some((refused.code(), refused.message().to_owned())),
+            };
+            let ended = async move {
+                loop {
+                    match heard.message().await {
+                        Ok(Some(_)) => {},
+                        Ok(None) => return None,
+                        Err(refused) => return Some((refused.code(), refused.message().to_owned())),
+                    }
+                }
+            };
+            tokio::time::timeout(HEARD_IN, ended).await.expect("the view ends when its words do")
+        })
+    };
+    let invalid = |why: &str| Some((Code::InvalidArgument, why.to_owned()));
+    assert_eq!(refused(vec![hello(None, greeted), showing.clone()]), None, "said well, it ends");
+    let again = vec![hello(None, greeted), showing.clone(), hello(None, greeted)];
+    assert_eq!(refused(again), invalid("a hello comes only first"));
+    let nothing = vec![hello(None, greeted), ViewRequest { event: None }];
+    assert_eq!(refused(nothing), invalid("a word of the view says nothing"));
+    assert_eq!(refused(vec![hello(None, None)]), invalid("the hello greets nobody"));
+    let misnamed = refused(vec![hello(Some("-oops"), greeted)]).expect("a misnamed machine");
+    assert_eq!(misnamed.0, Code::InvalidArgument, "{misnamed:?}");
 }
 
 #[test]

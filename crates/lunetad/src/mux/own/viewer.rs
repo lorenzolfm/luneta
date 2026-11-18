@@ -181,6 +181,7 @@ async fn hearing(
             heard.map_err(|status| refused(&status).to_string())
         },
         Reach::On { lunetad, destination } => {
+            assert!(greeting.runs_in.is_none(), "luneta runs in no terminal of another machine");
             let reached = crate::connect(lunetad).await;
             let mut daemon = reached.map_err(|error| format!("lunetad is not reached: {error}"))?;
             let on = Some(On { destination: destination.to_string() });

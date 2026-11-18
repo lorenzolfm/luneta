@@ -1088,20 +1088,29 @@ impl Daemon for Host {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
         let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
-        let said = heard.map_while(|word| match word {
-            Ok(ViewRequest { event: Some(Event::Said(said)) }) => Some(said),
-            Ok(ViewRequest { event: Some(Event::Hello(_)) | None }) | Err(_) => None,
+        let (refuse, refused) = oneshot::channel();
+        let mut refuse = Some(refuse);
+        let said = heard.map_while(move |word| {
+            let refusal = match word {
+                Ok(ViewRequest { event: Some(Event::Said(said)) }) => return Some(said),
+                Ok(ViewRequest { event: Some(Event::Hello(_)) }) => "a hello comes only first",
+                Ok(ViewRequest { event: None }) => "a word of the view says nothing",
+                Err(_) => return None,
+            };
+            let refuse = refuse.take().expect("a view's words end at the first refused");
+            drop(refuse.send(Status::invalid_argument(refusal)));
+            None
         });
         if let Some(mut daemon) = self.bridged(on)? {
             let hello = Hello { on: None, greeting: Some(greeting) };
             let first = ViewRequest { event: Some(Event::Hello(hello)) };
             let rest = said.map(|said| ViewRequest { event: Some(Event::Said(said)) });
             let answer = daemon.view(tokio_stream::once(first).chain(rest)).await?;
-            return Ok(Response::new(Box::pin(answer.into_inner())));
+            return Ok(Response::new(ended_by(answer.into_inner(), refused)));
         }
         let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
         let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
-        Ok(Response::new(Box::pin(answer)))
+        Ok(Response::new(ended_by(answer, refused)))
     }
 
     async fn change_projects(
@@ -1199,6 +1208,14 @@ fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecks
         }),
     });
     KeepChecksResponse { head, failed: failed.collect(), pending, passed }
+}
+
+fn ended_by(
+    answer: impl Stream<Item = Result<ToViewer, Status>> + Send + 'static,
+    mut refused: oneshot::Receiver<Status>,
+) -> Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>> {
+    let refusal = tokio_stream::once(()).filter_map(move |()| refused.try_recv().ok().map(Err));
+    Box::pin(answer.chain(refusal))
 }
 
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>

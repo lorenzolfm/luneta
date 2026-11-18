@@ -367,6 +367,13 @@ struct Watcher {
     showing: BTreeSet<TerminalKey>,
 }
 
+fn greeting_on(machine: &Machine, greeting_here: Greeting) -> Greeting {
+    match machine {
+        Machine::Local => greeting_here,
+        Machine::Remote(_) => Greeting { runs_in: None, ..greeting_here },
+    }
+}
+
 pub struct Viewed {
     number: u64,
     folder: PathBuf,
@@ -375,7 +382,7 @@ pub struct Viewed {
     shown_at: Instant,
     laid_in: Option<WorkstreamId>,
     size: Size,
-    greeting: Greeting,
+    greeting_here: Greeting,
     view: View,
     watcher: Option<Watcher>,
     watchers: u64,
@@ -391,13 +398,10 @@ impl Viewed {
         machine: Machine,
         workstream: WorkstreamId,
         size: Size,
-        greeting: Greeting,
+        greeting_here: Greeting,
         events: &Sender<Event>,
     ) -> Viewed {
-        let runs_in = match machine {
-            Machine::Local => greeting.runs_in,
-            Machine::Remote(_) => None,
-        };
+        let runs_in = greeting_on(&machine, greeting_here).runs_in;
         let mut viewed = Viewed {
             number,
             folder,
@@ -406,7 +410,7 @@ impl Viewed {
             shown_at: Instant::now(),
             laid_in: None,
             size,
-            greeting,
+            greeting_here,
             view: View::new(workstream, runs_in),
             watcher: None,
             watchers: 0,
@@ -420,8 +424,14 @@ impl Viewed {
 
     #[must_use]
     pub fn on(&self, machine: Machine, workstream: WorkstreamId) -> Viewed {
+        assert_ne!(machine, self.machine, "a view moves within its machine by go");
         let (number, folder, events) = (self.number + 1, self.folder.clone(), &self.events);
-        Viewed::start(number, folder, machine, workstream, self.size, self.greeting, events)
+        let greeting = self.greeting_here;
+        Viewed::start(number, folder, machine, workstream, self.size, greeting, events)
+    }
+
+    fn greeting(&self) -> Greeting {
+        greeting_on(&self.machine, self.greeting_here)
     }
 
     fn destination(&self) -> Option<Destination> {
@@ -443,7 +453,7 @@ impl Viewed {
         let events = self.events.clone();
         let told = move |heard| drop(events.send(Event::Shown(number, heard)));
         let workstream = self.view.workstream;
-        let (runs_in, again) = (self.view.runs_in, self.laid_in == Some(workstream));
+        let (runs_in, again) = (self.greeting().runs_in, self.laid_in == Some(workstream));
         let on = self.destination();
         self.show = Some(lunetad::show(opened, on, workstream, self.size, runs_in, again, told));
     }
@@ -514,7 +524,7 @@ impl Viewed {
                         return;
                     },
                 };
-                let greeting = Greeting { runs_in: self.view.runs_in, ..self.greeting };
+                let greeting = self.greeting();
                 let told = move |seen| drop(events.send(Event::Seen { number, watcher, seen }));
                 let viewer = viewer::view(reach, greeting, told);
                 viewer.show(wanted.clone());

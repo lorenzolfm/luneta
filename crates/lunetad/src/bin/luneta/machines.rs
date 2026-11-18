@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::path::Path;
 
+use lunetad::api::Remote;
 use lunetad::{Destination, HOSTS_FILE, HOSTS_MAX};
 
 use crate::state;
@@ -20,6 +22,16 @@ pub fn local_name() -> String {
         Some(short) if !short.is_empty() => short.to_owned(),
         _ => "this machine".to_owned(),
     }
+}
+
+#[must_use]
+pub fn named_once(remotes: &[Remote]) -> Vec<Option<Destination>> {
+    let mut named = HashSet::new();
+    let named_once = remotes.iter().map(|remote| {
+        let destination = remote.destination.parse::<Destination>().ok()?;
+        named.insert(destination.clone()).then_some(destination)
+    });
+    named_once.collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -120,6 +132,14 @@ mod tests {
 
     fn machine(name: &str) -> Destination {
         name.parse().unwrap()
+    }
+
+    #[test]
+    fn a_remote_is_named_by_its_first_listing_and_never_by_an_unparsed_one() {
+        let remote = |destination: &str| Remote { destination: destination.to_owned(), reached: None };
+        let remotes = [remote("nixos"), remote("-oops"), remote("pi"), remote("nixos")];
+        let named = [Some(machine("nixos")), None, Some(machine("pi")), None];
+        assert_eq!(named_once(&remotes), named);
     }
 
     #[test]

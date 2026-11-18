@@ -1906,8 +1906,14 @@ impl App {
         let Some(key) = listed.own_key() else {
             return Err(format!("{session} is one of zellij's sessions: {}", menu::OWN_ONLY));
         };
-        let project = self.projected.project(machine, key);
-        let project = project.ok_or_else(|| format!("{session} is no project lunetad keeps"))?;
+        let Some(project) = self.projected.project(machine, key) else {
+            if let Machine::Remote(destination) = machine
+                && !self.projected.reaches(machine)
+            {
+                return Err(format!("lunetad does not reach {destination} now"));
+            }
+            return Err(format!("{session} is no project lunetad keeps"));
+        };
         let shows = |workstream| {
             self.right.machine() == machine && self.right.workstream() == workstream
         };
@@ -1949,6 +1955,8 @@ impl App {
         } else {
             self.right = self.right.on(on.clone(), workstream);
         }
+        assert_eq!(self.right.machine(), on, "luneta shows the machine it went to");
+        assert_eq!(self.right.workstream(), workstream, "luneta shows the workstream it went to");
         let (tabs, titles) = self.projected.tabs(on, workstream);
         self.right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
@@ -1964,11 +1972,12 @@ impl App {
         };
         let key = project.key;
         let pane = self.right.focused().and_then(|focused| project.pane_of(focused));
-        let seated = self.sidebar.own_seat().map(sidebar::OwnSeat::session);
-        if seated != Some(key) || *self.sidebar.on() != on {
-            self.sidebar.attaching(on, key);
+        let seated = |sidebar: &Sidebar| sidebar.own_seat_on(&on).map(sidebar::OwnSeat::session);
+        if seated(&self.sidebar) != Some(key) {
+            self.sidebar.attaching(on.clone(), key);
             self.seated = None;
         }
+        assert_eq!(seated(&self.sidebar), Some(key), "the sidebar sits where luneta shows");
         self.sidebar.showing(workstream);
         if let Some(pane) = pane
             && self.seated != Some(pane)
@@ -1989,7 +1998,10 @@ impl App {
                 let held = |machine: &Machine| {
                     let projects = self.projected.projects(machine).iter();
                     let mut workstreams = projects.flat_map(|it| &it.workstreams).map(|it| it.id);
-                    workstreams.find(|id| *machine != on || *id != forgotten)
+                    workstreams.find(|id| {
+                        let is_forgotten = *machine == on && *id == forgotten;
+                        !is_forgotten
+                    })
                 };
                 let other = held(&on).map(|id| (on.clone(), id));
                 let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
