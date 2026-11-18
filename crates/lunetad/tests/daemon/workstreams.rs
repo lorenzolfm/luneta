@@ -10,6 +10,7 @@ use lunetad::{Asked, Beside, Heard, Where};
 
 use crate::host::{eventually, folder_in, script, Host, LUNETA};
 use crate::own::Owned;
+use crate::projects::{project, workstream};
 use crate::worktree::{cloned_as_wt, git};
 
 fn started(host: &Host, from: &Path, what: &str, env: &[(&str, String)]) -> Output {
@@ -131,6 +132,37 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
     assert!(plain.contains("is in a clone git made"), "{plain}");
     let nowhere = refused(&started(&owned.host, &scratch, "feat", &[]));
     assert!(nowhere.starts_with("luneta: wt add: "), "{nowhere}");
+}
+
+#[test]
+fn a_branch_joins_the_project_of_its_clone_made_at_a_worktree_which_widens_to_the_clone() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(&scratch, &up, &clone);
+    let (main, feat) = (clone.join("main"), clone.join("feat"));
+    let made = project(host, &main, None);
+    workstream(host, made, &main);
+
+    assert_eq!(said(&started(host, &main, "feat", &[])), shown(&feat));
+    let both = [&main, &feat].map(|it| it.display().to_string()).to_vec();
+    let widened = vec![("main".to_owned(), clone.display().to_string(), both)];
+    assert_eq!(folders(host), widened);
+    assert_eq!(projects(host)[0].id, made, "the workstream joins the project there was");
+
+
+    let two = scratch.join("m");
+    cloned_as_wt(&scratch, &scratch.join("up-m"), &two);
+    let bare = two.join(".bare");
+    git(&bare, &["worktree", "add", "-q", "../docs", "feat"]);
+    git(&bare, &["branch", "next", "main"]);
+    project(host, &two.join("main"), None);
+    project(host, &two.join("docs"), None);
+    let many = refused(&started(host, &two.join("main"), "next", &[]));
+    assert!(many.contains("projects main, docs are all of the clone in"), "{many}");
+    assert_eq!(projects(host).len(), 3, "no project is made for it");
 }
 
 #[test]

@@ -6,7 +6,7 @@ use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, C
 use lunetad::api::change_projects_request::{CloseWorkstream, Pull, Start};
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
-use lunetad::api::change_projects_request::{Bring, RenameTerminal};
+use lunetad::api::change_projects_request::{Bring, RenameTerminal, WidenProject};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
@@ -436,19 +436,45 @@ fn spelled(name: &Name) -> String {
     name.as_str().to_owned()
 }
 
-pub fn worked_in(path: &Path, folder: &Path, clone: &str) -> Result<(WorkstreamId, bool), String> {
+pub fn worked_in(
+    path: &Path,
+    folder: &Path,
+    clone: &str,
+    of_clone: impl Fn(&str) -> Option<String>,
+) -> Result<(WorkstreamId, bool), String> {
     let projects = kept(path)?;
     let mut workstreams = projects.iter().flat_map(|project| &project.workstreams);
     if let Some(found) = workstreams.find(|it| Path::new(&it.folder) == folder) {
         return Ok((found.id, false));
     }
+    let in_clone = |it: &&Project| it.dir == clone || of_clone(&it.dir).as_deref() == Some(clone);
+    let cloned: Vec<&Project> = projects.iter().filter(in_clone).collect();
     let holding = projects.iter().find(|project| holds(&project.dir, folder));
-    let id = match holding {
-        Some(project) => project.id,
-        None => add_project(path, clone, None).map_err(Unmade::said)?,
+    let id = match (cloned.as_slice(), holding) {
+        ([], Some(project)) => project.id,
+        ([], None) => add_project(path, clone, None).map_err(Unmade::said)?,
+        ([one], _) if one.dir == clone => one.id,
+        ([one], _) => {
+            widen(path, one.id, clone)?;
+            one.id
+        },
+        (many, _) => {
+            let named: Vec<&str> = many.iter().map(|it| it.name.as_str()).collect();
+            return Err(format!(
+                "projects {} are all of the clone in {clone}, and luneta widens one alone to \
+                 hold it: forget all but one",
+                named.join(", ")
+            ));
+        },
     };
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
     Ok((add_workstream(path, &Machine::Local, id, folder, None)?, true))
+}
+
+fn widen(path: &Path, project: ProjectId, dir: &str) -> Result<(), String> {
+    let (project, dir) = (project.get(), dir.to_owned());
+    let change = Change::WidenProject(WidenProject { project, dir });
+    changed_on(path, None, change).map(drop).map_err(Unmade::said)
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {

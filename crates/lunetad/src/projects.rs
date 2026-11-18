@@ -453,6 +453,7 @@ pub enum Change {
     Start { folder: Dir, name: Option<Name> },
     Pull { holder: Dir, folder: Dir, project: Name, name: Name },
     RenameProject { project: ProjectId, to: Name },
+    WidenProject { project: ProjectId, dir: Dir },
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     ReorderProjects { seen: Vec<ProjectId>, projects: Vec<ProjectId> },
     ReorderWorkstreams {
@@ -547,6 +548,10 @@ impl Ask {
                 project: id("project", project).map(ProjectId)?,
                 to: Name::of_project(&to).map_err(field("to"))?,
             },
+            Asked::WidenProject(asked::WidenProject { project, dir }) => Change::WidenProject {
+                project: id("project", project).map(ProjectId)?,
+                dir: Dir::found(&dir).map_err(field("dir"))?,
+            },
             Asked::RenameWorkstream(asked::RenameWorkstream { workstream, to }) => {
                 Change::RenameWorkstream {
                     workstream: id("workstream", workstream).map(WorkstreamId)?,
@@ -616,6 +621,7 @@ impl Change {
             | Change::Start { .. }
             | Change::Pull { .. }
             | Change::RenameProject { .. }
+            | Change::WidenProject { .. }
             | Change::RenameWorkstream { .. }
             | Change::ReorderProjects { .. }
             | Change::ReorderWorkstreams { .. }
@@ -785,6 +791,12 @@ impl Projects {
         if let Some(why) = self.stale(&change) {
             return Err(Refused::Stale(why));
         }
+        let other = |it: &&Project, project: ProjectId, dir| it.id != project && it.dir.nests(dir);
+        if let Change::WidenProject { project, dir } = &change
+            && let Some(other) = self.projects.iter().find(|it| other(it, *project, dir))
+        {
+            return Err(Refused::Nests(nested(dir, other)));
+        }
         self.changed_by(change, draw).map_err(Refused::Said)
     }
 
@@ -873,6 +885,20 @@ impl Projects {
             },
             Change::RenameProject { project, to } => {
                 changed.project(project)?.name = to;
+                None
+            },
+            Change::WidenProject { project, dir } => {
+                let held = changed.project(project)?;
+                if dir.below(&held.dir).is_none() {
+                    let (dir, own) = (&dir.0, &held.dir.0);
+                    return Err(format!("{dir} does not hold {own}, the project's folder"));
+                }
+                let folders: Vec<Dir> = held.workstreams.iter().map(|it| held.folder(it)).collect();
+                for (workstream, folder) in held.workstreams.iter_mut().zip(folders) {
+                    let below = dir.below(&folder);
+                    workstream.below = below.expect("what holds the project's folder holds it");
+                }
+                held.dir = dir;
                 None
             },
             Change::RenameWorkstream { workstream, to } => {
@@ -1469,6 +1495,30 @@ mod tests {
         assert_eq!(folders, want);
         let outside = Change::AddWorkstream { project: luneta, folder: dir("/w/elo"), name: None };
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
+    }
+
+    #[test]
+    fn a_project_widens_to_a_folder_that_holds_it_and_its_workstreams_stay_where_they_are() {
+        let mut projects = Projects::default();
+        let main = project(&mut projects, "/w/luneta/main");
+        workstream(&mut projects, main, "/w/luneta/main");
+        workstream(&mut projects, main, "/w/luneta/main/docs");
+        let elo = project(&mut projects, "/w/elo");
+        let widen = |project, at| Change::WidenProject { project, dir: dir(at) };
+        (projects, _) = change(&projects, widen(main, "/w/luneta")).unwrap();
+        let widened = &projects.all()[0];
+        assert_eq!((widened.id(), widened.dir().as_str()), (main, "/w/luneta"));
+        assert_eq!(widened.name().as_str(), "main", "a widened project keeps its name");
+        let folders: Vec<Dir> = projects.workstream_folders().collect();
+        assert_eq!(folders, ["/w/luneta/main", "/w/luneta/main/docs"].map(dir));
+        workstream(&mut projects, main, "/w/luneta/feat");
+
+        let narrower = change(&projects, widen(main, "/w/luneta/main")).unwrap_err();
+        assert!(narrower.contains("does not hold /w/luneta"), "{narrower}");
+        let Err(Refused::Nests(said)) = refused(&projects, widen(elo, "/w")) else {
+            panic!("a project is widened over another");
+        };
+        assert!(said.contains("holds /w/luneta"), "{said}");
     }
 
     #[test]

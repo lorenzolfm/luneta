@@ -138,7 +138,7 @@ fn in_clone(path: &Path, folder: &Path) -> Result<(WorkstreamId, bool), String> 
     let worktree = utf8(folder)?;
     let clone = links::holder(worktree)
         .ok_or_else(|| format!("git does not say what repository {worktree} is"))?;
-    workstreams::worked_in(path, folder, &clone)
+    workstreams::worked_in(path, folder, &clone, links::holder)
 }
 
 fn numbered(number: NonZeroU32, cwd: &Path) -> Result<Link, String> {
