@@ -517,21 +517,26 @@ and the session runs on. luneta attaches zellij to that session again, on
 whichever machine it is, and the notes say so. Should zellij drop six clients
 in a row, each within 30 seconds of its start, luneta ends and says so.
 
-zellij's keys are yours as they were, but nine, which luneta takes before
-zellij sees them, whichever of the two has the keys:
+The keys are your panes', but these, which luneta takes before a pane sees
+them, whichever side has the keys:
 
 - `Ctrl a` goes back and forth between zellij and the sidebar. A click goes to
   whichever you click.
-- `Alt Tab` goes to the next pane the sidebar lists, across sessions, and from
-  the last back to the first. A folded session lists none of its panes, so it
-  goes past them.
+- `Ctrl h`, `Ctrl j`, `Ctrl k` and `Ctrl l` go to the pane left of, below,
+  above or right of the one you are on, and give the panes the keys. Where no
+  pane is left of it, `Ctrl h` goes to the workstream before it on the tab
+  bar, and where none is right of it, `Ctrl l` goes to the one after it; past
+  the project's first or last workstream, they stay.
+- `Alt =` or `Alt +` grows the pane you are on, moving each of its borders a
+  step, and `Alt -` shrinks it. Where no border can move, as with one pane,
+  they do nothing.
 - `Ctrl q` collapses the sidebar to a strip four columns wide, zellij taking
   the rest of its columns, and opens it again, as a click on the strip does.
   `Ctrl a` opens it too, and goes into it.
 - `Alt a` opens the [menu](#menu) over zellij, for the pane zellij is on, and
   closes it again.
-- `Ctrl j` opens the picker over zellij, on the sessions, `Ctrl b` on the
-  agents, and `Ctrl d` on the directories.
+- `Super j` (`Cmd j` on a Mac) opens the picker over zellij, on the
+  sessions, `Ctrl b` on the agents, and `Ctrl d` on the directories.
 - `Alt r` [dictates](#dictate) into the pane zellij is on, the ask box or the
   issue box: hold it and talk.
 - `Alt u` [reads aloud](#read-aloud) what you selected, and pauses what plays
@@ -540,12 +545,16 @@ zellij sees them, whichever of the two has the keys:
 `?` in the sidebar lists them too, under Anywhere, with the sidebar's and the
 menu's own keys.
 
-Claude Code binds `Ctrl b` to send a task to the background, `Ctrl j` to a new
-line, `Ctrl d` to exit, and `Ctrl x` `Ctrl a` to what shows above its prompt,
-and a shell ends on `Ctrl d`. zellij's default config binds `Ctrl b` to tmux
-mode and `Ctrl q` to quit. luneta takes all nine first: if you use those,
-bind them to other keys, in zellij's config or in Claude Code's
-`~/.claude/keybindings.json`.
+Claude Code binds every `Ctrl` letter but `q`, among them `Ctrl b` to send a
+task to the background, `Ctrl j` to a new line, `Ctrl d` to exit, and `Ctrl x`
+`Ctrl a` to what shows above its prompt; a shell ends on `Ctrl d`, fish binds
+`Ctrl h`, and vim moves among its windows on `Ctrl h`, `Ctrl j`, `Ctrl k` and
+`Ctrl l`. luneta takes all of these first: if you use those, bind them to
+other keys, in Claude Code's `~/.claude/keybindings.json` or your editor's
+config. `Super j` reaches luneta only where your terminal speaks the kitty
+keyboard protocol, as Ghostty does. Where it does not, `Ctrl h` comes as the
+byte many terminals send for `Ctrl Backspace` too, and some for `Backspace`,
+so those keys move to the pane on the left as well.
 
 The picker floats over zellij's side. It lists the sessions, the agents and
 the directories of every machine, each machine's under a rule of its own, this
@@ -1245,9 +1254,8 @@ luneta ends its zellij client and runs `ssh -t <machine> zellij attach
 ssh goes on the connection lunetad's ssh to the machine shares, a
 `ControlMaster` on a socket in luneta's runtime folder, so you log in to a
 machine once, and any prompt of ssh's shows where zellij does. Between two
-sessions of that machine, zellij there moves the client, as it does here, and
-`Alt Tab` goes among that machine's panes only; a session of this machine's
-attaches here again. Where that ssh fails, as where the machine went away,
+sessions of that machine, zellij there moves the client, as it does here; a
+session of this machine's attaches here again. Where that ssh fails, as where the machine went away,
 luneta goes back to the session you left, and the notes say what ssh said.
 Where the session there ends, luneta goes on in the newest session of that
 machine's, or of this one's where it has none left, or of the next machine's
@@ -1283,7 +1291,7 @@ lunetad there looks for the file, with that machine's `~/`, so a file only this
 machine has says `no such file`, after the machine's name. `Ctrl d` on its header
 opens the picker on the directories with the highlight on that machine's,
 which lunetad there lists as its zoxide knows them, and its eza; `Enter` on one
-makes the session there, named as that machine names one. `Ctrl j` on its
+makes the session there, named as that machine names one. `Super j` on its
 header opens the picker on the sessions, and the machines `Enter` on the `+`
 row asks you to pick from start on that one. The picker lists its
 sessions and agents too, under its rule, each previewed as zellij there dumps
@@ -2017,7 +2025,7 @@ one's number.
 
 ## Usage
 
-`Ctrl j` opens the picker on the sessions, `Ctrl b` on the agents and `Ctrl d`
+`Super j` opens the picker on the sessions, `Ctrl b` on the agents and `Ctrl d`
 on the directories. Type, press `Enter`.
 
 | key | does |

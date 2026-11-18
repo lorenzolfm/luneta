@@ -1064,11 +1064,13 @@ message ShowRequest {
   }
 
   message Resize {
+    reserved 2;
+    reserved "grow";
     oneof sides {
       Direction direction = 1;
       google.protobuf.Empty every = 3;
     }
-    bool grow = 2;
+    Growth growth = 4;
   }
 
   message Move {
@@ -1097,12 +1099,24 @@ message ShowRequest {
     ORDER_NEXT = 1;
     ORDER_PREVIOUS = 2;
   }
+
+  enum Growth {
+    GROWTH_UNSPECIFIED = 0;
+    GROWTH_GROW = 1;
+    GROWTH_SHRINK = 2;
+  }
 }
 
 message ShowResponse {
   oneof event {
     Laid laid = 1;
     string refused = 2;
+    Edged edged = 3;
+  }
+
+  message Edged {
+    fixed64 workstream = 1;
+    ShowRequest.Direction direction = 2;
   }
 
   message Laid {

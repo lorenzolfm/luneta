@@ -12,7 +12,7 @@ use lunetad::mux::own::frames::{self, Frame, Rows};
 use lunetad::mux::own::viewer::{self, Greeting, Seen, Viewer};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Size, TerminalId, WorkstreamId};
-use lunetad::{Asked, Beside, Found, Heard, Laid, Pane, Rect as Placed, Show};
+use lunetad::{Asked, Beside, Direction, Found, Heard, Laid, Pane, Rect as Placed, Show};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -58,6 +58,7 @@ enum Moused {
 
 pub enum Heeded {
     Quiet,
+    Edged(Direction),
     Note(String),
     Forgotten(String),
     Lost(String),
@@ -179,6 +180,10 @@ impl View {
         }
         let key = self.focused_key()?;
         Some((inner, key, self.screens.get(&key)?))
+    }
+
+    fn edged(&self, workstream: WorkstreamId, direction: Direction) -> Option<Direction> {
+        (workstream == self.workstream).then_some(direction)
     }
 
     fn named_tabs(&self) -> impl Iterator<Item = (WorkstreamId, &str)> {
@@ -443,6 +448,9 @@ impl Viewed {
                 }
                 self.watch();
                 Heeded::Quiet
+            },
+            Heard::Edged { workstream, direction } => {
+                self.view.edged(workstream, direction).map_or(Heeded::Quiet, Heeded::Edged)
             },
             Heard::Refused(why) => Heeded::Note(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) => {
@@ -780,6 +788,15 @@ mod tests {
         assert!(view.drawn().is_empty() && view.wanted().is_empty() && view.screens.is_empty());
         assert!(!view.laid_out(laid(halves(), 11, false)));
         assert!(view.drawn().is_empty() && view.focused().is_none());
+    }
+
+    #[test]
+    fn an_edge_is_heeded_only_from_the_workstream_the_view_is_on() {
+        let mut view = split_view();
+        assert_eq!(view.edged(workstream(1), Direction::Right), Some(Direction::Right));
+        view.go(workstream(2));
+        assert_eq!(view.edged(workstream(1), Direction::Right), None, "an edge of the one left");
+        assert_eq!(view.edged(workstream(2), Direction::Left), Some(Direction::Left));
     }
 
     #[test]

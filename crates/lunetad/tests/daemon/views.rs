@@ -39,6 +39,7 @@ struct Shown<'a> {
     heard: Streaming<ShowResponse>,
     laid: Option<Laid>,
     refused: Vec<String>,
+    edged: Vec<show_response::Edged>,
 }
 
 fn size(columns: u32, rows: u32) -> show_request::Size {
@@ -77,7 +78,8 @@ impl<'a> Shown<'a> {
             let mut daemon = lunetad::connect(&folder).await.unwrap();
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
         });
-        let mut shown = Shown { owned, asks, heard, laid: None, refused: Vec::new() };
+        let (refused, edged) = (Vec::new(), Vec::new());
+        let mut shown = Shown { owned, asks, heard, laid: None, refused, edged };
         shown.until("the first view", |_| true);
         shown
     }
@@ -131,6 +133,7 @@ impl<'a> Shown<'a> {
                     }
                 },
                 show_response::Event::Refused(why) => self.refused.push(why),
+                show_response::Event::Edged(edged) => self.edged.push(edged),
             }
         }
     }
@@ -163,6 +166,22 @@ impl<'a> Shown<'a> {
             match word.event.expect("a word says something") {
                 show_response::Event::Laid(laid) => self.laid = Some(laid),
                 show_response::Event::Refused(why) => return why,
+                show_response::Event::Edged(edged) => self.edged.push(edged),
+            }
+        }
+    }
+
+    fn until_edged(&mut self) -> show_response::Edged {
+        loop {
+            if !self.edged.is_empty() {
+                return self.edged.remove(0);
+            }
+            let heard = self.heard_in_time();
+            let word = heard.expect("an edge comes").unwrap().expect("the view goes on");
+            match word.event.expect("a word says something") {
+                show_response::Event::Laid(laid) => self.laid = Some(laid),
+                show_response::Event::Refused(why) => panic!("refused, not edged: {why}"),
+                show_response::Event::Edged(edged) => return edged,
             }
         }
     }
@@ -338,6 +357,35 @@ fn focus_is_each_client_s_own_and_fullscreen_is_the_view_s() {
     assert!(other.until_refused().contains("no workstream"), "a go to nowhere is refused");
 }
 
+#[test]
+fn a_step_with_no_terminal_that_way_says_the_edge_of_the_workstream_it_is_on() {
+    use show_request::Direction::{Left, Right, Up};
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    let step = |direction: show_request::Direction| {
+        let to = Some(focus::To::Direction(direction.into()));
+        Event::Focus(show_request::Focus { to })
+    };
+    let edged = |direction: show_request::Direction| show_response::Edged {
+        workstream,
+        direction: direction.into(),
+    };
+    shown.ask(step(Left));
+    assert_eq!(shown.until_edged(), edged(Left), "an empty view is at every edge");
+    let left = shown.open();
+    shown.open();
+    shown.ask(step(Right));
+    assert_eq!(shown.until_edged(), edged(Right));
+    shown.ask(step(Up));
+    assert_eq!(shown.until_edged(), edged(Up));
+    shown.ask(step(Left));
+    shown.until("the left terminal focused", |laid| focused_of(laid) == Some(left));
+    shown.ask(step(Left));
+    assert_eq!(shown.until_edged(), edged(Left));
+    assert!(shown.refused.is_empty(), "an edge is no refusal: {:?}", shown.refused);
+}
+
 fn closed_outside(owned: &Owned, laid: &Laid, terminal: u64) {
     let pane = laid.panes.iter().find(|pane| pane.terminal == terminal).unwrap();
     let key = key(pane).unwrap();
@@ -471,8 +519,9 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let right = shown.open();
     let towards_left: i32 = show_request::Direction::Left.into();
     let sides = Some(resize::Sides::Direction(towards_left));
-    let resize = |grow| show_request::Resize { sides, grow };
-    shown.ask(Event::Resize(resize(true)));
+    let grow = show_request::Growth::Grow.into();
+    let resize = |growth| show_request::Resize { sides, growth };
+    shown.ask(Event::Resize(resize(grow)));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[0].rect == Some(rect(0, 0, 36, 24))
     });
@@ -486,11 +535,11 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     assert_eq!((laid.panes[1].terminal, focused_of(&laid)), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
     shown.until("the view full", |laid| full_of(laid) == Some(right));
-    shown.ask(Event::Resize(resize(true)));
-    assert!(shown.until_refused().contains("resized by none"));
+    shown.ask(Event::Resize(resize(grow)));
     let to = Some(r#move::To::Direction(show_request::Direction::Right.into()));
     shown.ask(Event::Move(show_request::Move { to }));
-    assert!(shown.until_refused().contains("moves none"));
+    let refused = shown.until_refused();
+    assert!(refused.contains("moves none"), "a full view's resize is quiet, not {refused}");
 }
 
 #[test]
@@ -498,22 +547,31 @@ fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
     let owned = Owned::new();
     let workstream = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, workstream, 80, 24);
-    shown.open();
-    shown.open();
     let every = Some(resize::Sides::Every(()));
-    let around = |grow| Event::Resize(show_request::Resize { sides: every, grow });
-    shown.ask(around(true));
+    let (grow, shrink) = (show_request::Growth::Grow, show_request::Growth::Shrink);
+    let around = |growth: show_request::Growth| {
+        Event::Resize(show_request::Resize { sides: every, growth: growth.into() })
+    };
+    shown.ask(around(grow));
+    shown.open();
+    shown.ask(around(grow));
+    shown.open();
+    assert!(shown.refused.is_empty(), "a resize that moves nothing is quiet: {:?}", shown.refused);
+    shown.ask(around(grow));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[1].rect == Some(rect(36, 0, 44, 24))
     });
     assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 36, 24)));
-    shown.ask(around(false));
+    shown.ask(around(shrink));
     shown.until("the border back", |laid| laid.panes[1].rect == Some(rect(40, 0, 40, 24)));
     let unknown = Some(resize::Sides::Direction(0));
-    shown.ask(Event::Resize(show_request::Resize { sides: unknown, grow: true }));
+    let growth = grow.into();
+    shown.ask(Event::Resize(show_request::Resize { sides: unknown, growth }));
     assert!(shown.until_refused().contains("no direction it knows"));
-    shown.ask(Event::Resize(show_request::Resize { sides: None, grow: true }));
+    shown.ask(Event::Resize(show_request::Resize { sides: None, growth }));
     assert!(shown.until_refused().contains("it says no side to move"));
+    shown.ask(Event::Resize(show_request::Resize { sides: every, growth: 0 }));
+    assert!(shown.until_refused().contains("neither grow nor shrink"));
 }
 
 #[test]
@@ -949,6 +1007,7 @@ fn a_view_laid_out_by_lunetad_is_seen_and_typed_into_through_the_mux() {
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the view is not laid out: {why}")
         },
+        Heard::Edged { direction, .. } => panic!("the view is at its {direction:?} edge"),
     };
     assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
@@ -1011,6 +1070,7 @@ fn a_viewer_reads_no_more_frames_than_luneta_has_taken() {
         Heard::Refused(why) | Heard::Forgotten(why) | Heard::Lost(why) => {
             panic!("the view is not laid out: {why}")
         },
+        Heard::Edged { direction, .. } => panic!("the view is at its {direction:?} edge"),
     };
     assert!(laid().is_empty());
     let ticking = ["sh", "-c", "while :; do date +%N; sleep 0.005; done"];

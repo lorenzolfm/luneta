@@ -16,7 +16,7 @@ use crate::streams::{self, Inbox, Next, Outbox};
 
 const SAID_MAX: usize = 64;
 
-pub use crate::projects::layout::Rect;
+pub use crate::projects::layout::{Direction, Growth, Rect};
 
 fn right(rect: Rect) -> u32 {
     u32::from(rect.column) + u32::from(rect.columns)
@@ -210,6 +210,7 @@ fn tiles(panes: &[Pane], size: Size) -> Result<(), String> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
     Laid(Laid),
+    Edged { workstream: WorkstreamId, direction: Direction },
     Refused(String),
     Forgotten(String),
     Lost(String),
@@ -229,6 +230,8 @@ pub enum Asked {
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(TerminalId),
+    Step(Direction),
+    Resize(Growth),
     Fullscreen,
 }
 
@@ -252,9 +255,38 @@ impl Asked {
                 let to = show_request::focus::To::Terminal(terminal.get());
                 Event::Focus(show_request::Focus { to: Some(to) })
             },
+            Asked::Step(direction) => {
+                let to = show_request::focus::To::Direction(direction_said(direction).into());
+                Event::Focus(show_request::Focus { to: Some(to) })
+            },
+            Asked::Resize(growth) => {
+                let sides = Some(show_request::resize::Sides::Every(()));
+                let growth = match growth {
+                    Growth::Grow => show_request::Growth::Grow,
+                    Growth::Shrink => show_request::Growth::Shrink,
+                };
+                Event::Resize(show_request::Resize { sides, growth: growth.into() })
+            },
             Asked::Fullscreen => Event::Fullscreen(()),
         };
         api::ShowRequest { event: Some(event) }
+    }
+}
+
+fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
+    let workstream = WorkstreamId::of(edged.workstream).ok_or("an edge of workstream 0")?;
+    let direction = crate::views::direction_of(edged.direction);
+    let direction = direction.map_err(|why| format!("an edge: {why}"))?;
+    Ok(Heard::Edged { workstream, direction })
+}
+
+pub(crate) fn direction_said(direction: Direction) -> show_request::Direction {
+    use show_request::Direction as Said;
+    match direction {
+        Direction::Left => Said::Left,
+        Direction::Right => Said::Right,
+        Direction::Up => Said::Up,
+        Direction::Down => Said::Down,
     }
 }
 
@@ -350,6 +382,12 @@ async fn stream(
                     return Heard::Lost(format!("lunetad said what luneta cannot follow: {why}"));
                 },
             },
+            Some(show_response::Event::Edged(edged)) => match edged_heard(&edged) {
+                Ok(heard) => told(heard),
+                Err(why) => {
+                    return Heard::Lost(format!("lunetad said what luneta cannot follow: {why}"));
+                },
+            },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
             None => return Heard::Lost("lunetad said nothing to luneta's view".to_owned()),
         }
@@ -431,6 +469,18 @@ mod tests {
         assert_eq!((full.full(), drawn), (true, vec![(1, 80)]));
         let empty = Laid::heard(laid(Vec::new(), None)).unwrap();
         assert!(empty.is_empty() && empty.focused().is_none() && empty.drawn().is_empty());
+    }
+
+    #[test]
+    fn an_edge_reads_with_its_workstream_and_a_direction_it_knows() {
+        let edged = |workstream, direction| show_response::Edged { workstream, direction };
+        let left = show_request::Direction::Left.into();
+        let heard = edged_heard(&edged(2, left));
+        let workstream = WorkstreamId::of(2).unwrap();
+        assert_eq!(heard, Ok(Heard::Edged { workstream, direction: Direction::Left }));
+        assert!(edged_heard(&edged(0, left)).is_err(), "workstream 0");
+        assert!(edged_heard(&edged(2, 0)).is_err(), "no direction");
+        assert!(edged_heard(&edged(2, 9)).is_err(), "an unknown direction");
     }
 
     #[test]

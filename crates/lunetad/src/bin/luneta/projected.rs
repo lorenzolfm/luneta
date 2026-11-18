@@ -173,6 +173,22 @@ impl Projected {
     }
 
     #[must_use]
+    pub fn tabs_beside(
+        &self,
+        workstream: WorkstreamId,
+    ) -> (Option<WorkstreamId>, Option<WorkstreamId>) {
+        let held = self.projects.iter().find_map(|project| {
+            Some((project, project.workstreams.iter().position(|it| it.id == workstream)?))
+        });
+        let Some((project, at)) = held else {
+            return (None, None);
+        };
+        let before = at.checked_sub(1).and_then(|it| project.workstreams.get(it));
+        let after = project.workstreams.get(at + 1);
+        (before.map(|it| it.id), after.map(|it| it.id))
+    }
+
+    #[must_use]
     pub fn of_pane(&self, pane: OwnPane) -> Option<(WorkstreamId, TerminalId)> {
         let (workstream, terminal, _) = self.project(pane.session)?.holding(pane.id)?;
         Some((workstream, terminal))
@@ -383,6 +399,15 @@ mod tests {
         assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
         let lost = TerminalId::of(22).unwrap();
         assert_eq!(titles.get(&lost).map(String::as_str), Some("sleep 600"));
+    }
+
+    #[test]
+    fn the_tabs_beside_a_workstream_are_the_ones_before_and_after_it_and_none_past_the_ends() {
+        let projected = Projected::adapted(&mut host()).unwrap();
+        let (main, docs) = (workstream(11), workstream(12));
+        assert_eq!(projected.tabs_beside(main), (None, Some(docs)));
+        assert_eq!(projected.tabs_beside(docs), (Some(main), None));
+        assert_eq!(projected.tabs_beside(workstream(99)), (None, None));
     }
 
     fn kept(host: &mut Host) -> &mut api::Project {

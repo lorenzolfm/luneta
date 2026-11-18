@@ -30,7 +30,7 @@ use lunetad::mux::TerminalKey;
 use lunetad::projects::{TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::turns::{IntoPanes, OtherTab};
-use lunetad::{Destination, Directory};
+use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Position, Rect};
 use ratatui::{DefaultTerminal, Terminal};
@@ -159,19 +159,41 @@ const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL
 
 const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
 
-const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Tab, KeyModifiers::ALT);
-
 const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
 
-const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
+const SESSIONS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
+
+const LEFT: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::CONTROL);
+
+const DOWN: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
+
+const UP: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::CONTROL);
+
+const RIGHT: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::CONTROL);
+
+const GROW: (KeyCode, KeyModifiers) = (KeyCode::Char('='), KeyModifiers::ALT);
+
+const GROWS: [(KeyCode, KeyModifiers); 4] = [
+    GROW,
+    (KeyCode::Char('+'), KeyModifiers::ALT),
+    (KeyCode::Char('='), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
+    (KeyCode::Char('+'), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
+];
+
+const SHRINK: (KeyCode, KeyModifiers) = (KeyCode::Char('-'), KeyModifiers::ALT);
 
 const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
 const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
 
-pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 10] = [
+pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 15] = [
     (SWAP, "Sidebar or panes"),
-    (NEXT, "Next pane"),
+    (LEFT, "Pane left, or the workstream before"),
+    (DOWN, "Pane below"),
+    (UP, "Pane above"),
+    (RIGHT, "Pane right, or the workstream after"),
+    (GROW, "Grow the pane"),
+    (SHRINK, "Shrink the pane"),
     (COLLAPSE, "Collapse sidebar"),
     (MENU, "Menu over panes"),
     (SESSIONS, "Pick a session"),
@@ -181,6 +203,23 @@ pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 10] = [
     (aloud::KEY, "Read aloud, pause"),
     (aloud::STOPS, "Stop reading"),
 ];
+
+fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
+    match chord {
+        LEFT => Some(Direction::Left),
+        DOWN => Some(Direction::Down),
+        UP => Some(Direction::Up),
+        RIGHT => Some(Direction::Right),
+        _ => None,
+    }
+}
+
+fn resized(chord: (KeyCode, KeyModifiers)) -> Option<Growth> {
+    if GROWS.contains(&chord) {
+        return Some(Growth::Grow);
+    }
+    (chord == SHRINK).then_some(Growth::Shrink)
+}
 
 #[derive(Debug)]
 struct Focus {
@@ -1112,8 +1151,13 @@ impl App {
             self.give(Focus::on(if collapsed { Side::Session } else { Side::Collapsed }));
             return;
         }
-        if chord == NEXT {
-            self.next();
+        if let Some(direction) = stepped(chord) {
+            self.step(direction);
+            return;
+        }
+        if let Some(change) = resized(chord) {
+            self.leave();
+            self.right.ask(lunetad::Asked::Resize(change));
             return;
         }
         if self.focus.session() && !self.sidebar.pressed() {
@@ -1831,11 +1875,20 @@ impl App {
         }
     }
 
-    fn next(&mut self) {
+    fn step(&mut self, direction: Direction) {
         self.leave();
-        if let Some(place) = self.sidebar.next_pane() {
-            let machine = self.sidebar.on().clone();
-            self.go(&machine, &place);
+        self.right.ask(lunetad::Asked::Step(direction));
+    }
+
+    fn cross(&mut self, direction: Direction) {
+        let (before, after) = self.projected.tabs_beside(self.right.workstream());
+        let beside = match direction {
+            Direction::Left => before,
+            Direction::Right => after,
+            Direction::Up | Direction::Down => None,
+        };
+        if let Some(beside) = beside {
+            self.go_workstream(beside, None);
         }
     }
 
@@ -1910,6 +1963,7 @@ impl App {
     fn heeded(&mut self, heeded: Heeded) {
         match heeded {
             Heeded::Quiet => {},
+            Heeded::Edged(direction) => self.cross(direction),
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Forgotten(why) => {
                 let forgotten = self.right.workstream();
@@ -2226,6 +2280,20 @@ mod tests {
     use ratatui::{TerminalOptions, Viewport};
 
     use super::*;
+
+    #[test]
+    fn alt_equals_or_plus_grows_with_or_without_shift_and_alt_minus_shrinks() {
+        let (alt, shifted) = (KeyModifiers::ALT, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let grows = [('=', alt), ('+', alt), ('=', shifted), ('+', shifted)];
+        for (key, modifiers) in grows {
+            assert_eq!(resized((KeyCode::Char(key), modifiers)), Some(Growth::Grow), "{key}");
+        }
+        assert_eq!(resized((KeyCode::Char('-'), alt)), Some(Growth::Shrink));
+        let none = [('=', KeyModifiers::NONE), ('-', shifted), ('=', KeyModifiers::CONTROL)];
+        for (key, modifiers) in none {
+            assert_eq!(resized((KeyCode::Char(key), modifiers)), None, "{key} {modifiers:?}");
+        }
+    }
 
     #[test]
     fn what_to_copy_goes_out_as_osc_52() {

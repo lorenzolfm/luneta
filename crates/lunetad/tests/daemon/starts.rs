@@ -153,11 +153,21 @@ impl Window {
         self.typed.write_all(sent.as_bytes()).unwrap();
     }
 
-    pub fn screen(&self) -> Vec<String> {
+    fn term(&self) -> Term<VoidListener> {
         let said = self.said.lock().unwrap().clone();
         let mut screen = Term::new(Config::default(), &TermSize::new(120, 40), VoidListener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         parser.advance(&mut screen, &said);
+        screen
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        let point = self.term().grid().cursor.point;
+        (usize::try_from(point.line.0).unwrap(), point.column.0)
+    }
+
+    pub fn screen(&self) -> Vec<String> {
+        let screen = self.term();
         let grid = screen.grid();
         let line = |row: usize| -> String {
             let row = Line(i32::try_from(row).unwrap());
@@ -471,7 +481,7 @@ fn luneta_goes_to_no_session_of_zellij_s_and_stays_where_it_is() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows mine", || shown(&owned, &dir.path));
     eventually("the sidebar lists project", || window.shows("project").then_some(()));
-    window.send("\x1b[106;5uproject\r");
+    window.send("\x1b[106;9uproject\r");
     let said = "project is one of zellij's sessions: luneta goes to its own sessions only, now";
     eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
     assert_eq!(owned.host.zellij.attached(), [] as [String; 0]);
@@ -488,7 +498,7 @@ fn luneta_goes_to_no_session_of_another_machine_s() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows mine", || shown(&owned, &dir.path));
     eventually("the sidebar lists work", || window.shows("work").then_some(()));
-    window.send("\x1b[106;5uwork\r");
+    window.send("\x1b[106;9uwork\r");
     let said = "work is one of zellij's sessions: luneta goes to its own sessions only, now";
     eventually("luneta says why it stays", || log_of(&owned.host).contains(said).then_some(()));
     assert!(window.luneta.ended_within(Duration::ZERO).is_none(), "luneta goes on");

@@ -248,14 +248,14 @@ impl View {
         &mut self,
         terminal: TerminalId,
         sides: Sides,
-        change: layout::Change,
+        growth: layout::Growth,
         size: Size,
     ) -> Result<(), String> {
         let laid = self.0.as_mut().expect("a resized terminal is in the view");
         if laid.full.is_some() {
             return Err("a view one terminal fills is resized by none".to_owned());
         }
-        if !laid.tree.resize(terminal, sides, change, size) {
+        if !laid.tree.resize(terminal, sides, growth, size) {
             return Err(format!("no border of terminal {terminal} moves that way"));
         }
         Ok(())
