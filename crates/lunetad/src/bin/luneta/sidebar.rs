@@ -26,7 +26,6 @@ use lunetad::projects::{self, Dir, ProjectId, TerminalId, WorkstreamId};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
-use lunetad::turns::{IntoPanes, OtherTab, Turn};
 use lunetad::{log, Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -49,7 +48,7 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Label, Menu, Opening, Opens, PaneRow,
+    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Label, Menu, Opens, PaneRow,
     Ran, Target, Top, Wants, WorkstreamRow,
 };
 use crate::news::News;
@@ -61,7 +60,7 @@ use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
-use crate::zellij::{Closes, Open, SessionName, Starts, Tab, Turned, OWN_TURNS};
+use crate::zellij::{Closes, Open, SessionName, Starts, Tab};
 
 pub const COLUMNS: u16 = 32;
 
@@ -1046,8 +1045,6 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    Tabs { menu: u64, on: Machine, turned: Turned },
-    Turn { menu: u64, on: Machine, turned: Turned, turn: Turn },
     StartOwn { starts: Starts },
     Make {
         menu: u64,
@@ -1077,8 +1074,6 @@ impl Asked {
             | Asked::Prune { menu, .. }
             | Asked::Closes { menu, .. }
             | Asked::Open { menu, .. }
-            | Asked::Tabs { menu, .. }
-            | Asked::Turn { menu, .. }
             | Asked::Make { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
@@ -1681,12 +1676,6 @@ impl Sidebar {
         }
         let seen = self.working.get(&menu).and_then(see)?;
         self.working.remove(&menu).map(|it| (it, Held::Kept, seen))
-    }
-
-    fn holds(&self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<Held> {
-        let open = self.menu.as_ref().filter(|it| it.number() == menu).map(|it| (it, Held::Open));
-        let (it, held) = open.or_else(|| Some((self.working.get(&menu)?, Held::Kept)))?;
-        keep(it).then_some(held)
     }
 
     pub fn attaching(&mut self, on: Machine, session: OwnKey) {
@@ -3190,24 +3179,6 @@ impl Sidebar {
                     Asked::Nothing
                 }
             },
-            Wants::Tabs { session, pane } => {
-                if let Some(turned) = Turned::of(PanePlace { session, pane }) {
-                    Asked::Tabs { menu: number, on, turned }
-                } else {
-                    self.drop_menu(number);
-                    self.notify(format!("menu: {OWN_TURNS}"));
-                    Asked::Nothing
-                }
-            },
-            Wants::Turn { session, pane, turn } => {
-                if let Some(turned) = Turned::of(PanePlace { session, pane }) {
-                    Asked::Turn { menu: number, on, turned, turn }
-                } else {
-                    self.drop_menu(number);
-                    self.notify(format!("menu: {OWN_TURNS}"));
-                    Asked::Nothing
-                }
-            },
             Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
                     let others = self.others(&on);
@@ -3511,15 +3482,11 @@ impl Sidebar {
         let pane = match opened {
             Ok(pane) => pane,
             Err(why) => {
-                let said = match opening {
-                    Opening::Turned(_) => "not turned",
-                    Opening::In(_) => "nothing opened",
-                };
-                self.say(format!("menu: {said}: {why}"));
+                self.say(format!("menu: nothing opened: {why}"));
                 return Asked::Nothing;
             },
         };
-        let (Opening::In(session) | Opening::Turned(session)) = opening;
+        let session = opening;
         let named = session.name().clone();
         let Some(place) = PanePlace::new(session, pane) else {
             self.say(format!("menu: {named} and pane {pane} are of different muxes"));
@@ -3534,38 +3501,9 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    pub fn turned_into_panes(
-        &mut self,
-        menu: u64,
-        pane: u32,
-        came: Result<IntoPanes, String>,
-    ) -> Asked {
-        match came {
-            Ok(IntoPanes::Done) => self.opened(menu, Ok(PaneKey::Zellij(pane))),
-            Ok(IntoPanes::Partly { moved, of, why }) => {
-                if self.take_waited(menu, |it| it.opening().is_some()).is_some() {
-                    self.say(format!("menu: turned {moved} of {of} panes: {why}"));
-                }
-                Asked::Nothing
-            },
-            Err(why) => self.opened(menu, Err(why)),
-        }
-    }
-
     pub fn made_for(&mut self, menu: u64) -> Option<Held> {
         let made = |it: &Menu| it.made().map(|_| ());
         self.take_seen(menu, made).map(|(_, held, ())| held)
-    }
-
-    pub fn waits_on(&self, menu: u64) -> Option<Held> {
-        self.holds(menu, |it| it.opening().is_some())
-    }
-
-    pub fn tabs(&mut self, menu: u64, tabs: Result<Vec<OtherTab>, String>) -> Asked {
-        let Some((waiting, held)) = self.take_waited(menu, Menu::listing) else {
-            return Asked::Nothing;
-        };
-        self.menu_did_after(held, waiting.tabs(tabs))
     }
 
     pub fn closes(&mut self, menu: u64, closes: Result<Closes, String>) -> Asked {
@@ -7573,9 +7511,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
-        assert!(clicked[..7].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
+        assert!(clicked[..8].iter().all(|(_, hit)| hit.is_none()), "{clicked:?}");
         let legend: Vec<(&str, Option<Hit>)> =
-            clicked[7..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
+            clicked[8..].iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         let rule = format!("─ luneta {}", "─".repeat(22));
         assert_eq!(legend, [
             (rule.as_str(), None),
@@ -7588,7 +7526,6 @@ mod tests {
             (" i  File issue", Some(on_legend('i'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
-            (" t  Turn ▸", Some(on_legend('t'))),
             (" d  Delete ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
@@ -8178,10 +8115,10 @@ mod tests {
             open,
         });
         sidebar.focus(Keys::Zellij);
-        assert_eq!(sidebar.waits_on(number), Some(Held::Kept));
+        assert!(sidebar.working.get(&number).is_some_and(|it| it.opening().is_some()));
         assert_eq!(sidebar.opened(number, Ok(PaneKey::terminal(7))), Asked::Nothing);
         assert_eq!(sidebar.notice.as_deref(), Some("menu: opened older:7"));
-        assert_eq!(sidebar.waits_on(number), None);
+        assert!(!sidebar.working.contains_key(&number));
     }
 
     #[test]

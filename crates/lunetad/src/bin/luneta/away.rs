@@ -7,12 +7,10 @@ use luneta_protocol::said::Said;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::keep_checks_response::{self, failed};
 use lunetad::api::keep_printed_response::{self, File};
-use lunetad::api::{other_tabs_response, turn_into_panes_response, turn_into_tab_response};
 use lunetad::api::{
     closes_response, AskResponse, ClosesRequest, DumpScreenRequest, IssueRepositoriesRequest,
     KeepChecksRequest, KeepPrintedRequest, KillRequest, ListContentsRequest, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, On,
-    OtherTabsRequest, TurnIntoPanesRequest, TurnIntoTabRequest,
 };
 use lunetad::asks::{self, Asked, Step};
 use lunetad::checks::{self, Failed, Failing, Log, PullPage};
@@ -26,7 +24,6 @@ use lunetad::printed::{Kept, Printed};
 use lunetad::prunes::{self, Deleting, Plan, Pruned};
 use lunetad::skills::{Name, Runs, Skill};
 use lunetad::transcripts::{Reading, SessionId};
-use lunetad::turns::{IntoPanes, IntoTab, OtherTab};
 use lunetad::zoxide::Dir;
 use lunetad::{log, Destination, Directory, SessionName};
 use tokio::runtime::Runtime;
@@ -195,62 +192,6 @@ impl Away {
     ) -> Result<(), String> {
         let request = close.asked(Some(self.on()), session, started);
         self.ask(|mut daemon| async move { daemon.close(request).await })
-    }
-
-    pub fn other_tabs(
-        &mut self,
-        session: &SessionName,
-        pane: u32,
-    ) -> Result<Vec<OtherTab>, String> {
-        let request = OtherTabsRequest { on: Some(self.on()), session: session.to_string(), pane };
-        let listed = self.ask(|mut daemon| async move { daemon.other_tabs(request).await })?;
-        let tab = |tab: other_tabs_response::Tab| OtherTab { pane: tab.pane, name: tab.name };
-        Ok(listed.tabs.into_iter().map(tab).collect())
-    }
-
-    pub fn turn_into_tab(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        pane: u32,
-    ) -> Result<IntoTab, String> {
-        let (session, started_at) = (session.to_string(), Some(started.into()));
-        let request = TurnIntoTabRequest { on: Some(self.on()), session, pane, started_at };
-        let answer = self.ask(|mut daemon| async move { daemon.turn_into_tab(request).await })?;
-        match answer.came {
-            Some(turn_into_tab_response::Came::Done(())) => Ok(IntoTab::Done),
-            Some(turn_into_tab_response::Came::NoClient(())) => Ok(IntoTab::NoClient),
-            None => Err(self.unread_turn()),
-        }
-    }
-
-    pub fn turn_into_panes(
-        &mut self,
-        session: &SessionName,
-        started: SystemTime,
-        pane: u32,
-        beside: u32,
-    ) -> Result<IntoPanes, String> {
-        let (session, started_at) = (session.to_string(), Some(started.into()));
-        let request =
-            TurnIntoPanesRequest { on: Some(self.on()), session, pane, beside, started_at };
-        let answer = self.ask(|mut daemon| async move { daemon.turn_into_panes(request).await })?;
-        match answer.came {
-            Some(turn_into_panes_response::Came::Done(())) => Ok(IntoPanes::Done),
-            Some(turn_into_panes_response::Came::Partly(partly)) => {
-                let turn_into_panes_response::Partly { moved, of, why } = partly;
-                Ok(IntoPanes::Partly { moved, of, why })
-            },
-            None => Err(self.unread_turn()),
-        }
-    }
-
-    fn unread_turn(&self) -> String {
-        format!(
-            "{}: its lunetad says what came of turning the pane in words this luneta cannot read, \
-             as a newer one does",
-            self.on
-        )
     }
 
     pub fn kill(&mut self, session: &SessionName, started: SystemTime) -> Result<(), String> {

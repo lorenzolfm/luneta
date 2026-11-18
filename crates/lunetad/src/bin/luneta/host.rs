@@ -29,7 +29,6 @@ use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, TerminalId, WorkstreamId};
 use lunetad::prunes;
-use lunetad::turns::{IntoPanes, OtherTab};
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -49,7 +48,6 @@ use crate::checks;
 use crate::close::{Act, Whose};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
-use crate::due::Due;
 use crate::folds::{self, Folds};
 use crate::images::{self, Went};
 use crate::input;
@@ -72,7 +70,7 @@ use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
 use crate::workstreams::{self, Unmoved};
 use crate::width::Width;
-use crate::zellij::{self, Close, Closes, Open, SessionName, Turned};
+use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
     Workstream { made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
@@ -121,9 +119,6 @@ pub enum Event {
     Opened { menu: u64, opened: Result<u32, String> },
     Named(Made),
     Closes { menu: u64, closes: Result<Closes, String> },
-    Tabs { menu: u64, tabs: Result<Vec<OtherTab>, String> },
-    IntoPanes { menu: u64, pane: u32, came: Result<IntoPanes, String> },
-    NoClient { menu: u64, owed: Due<u32>, on: Machine, turned: Turned },
     Skills { menu: u64, agent: agents::Harness, skills: Result<Vec<Skill>, String> },
     Pulled { menu: u64, found: Result<Found, String> },
     Prunes { menu: u64, plan: Result<prunes::Plan, String> },
@@ -843,28 +838,6 @@ impl App {
             Event::Closes { menu, closes } => {
                 let asked = self.sidebar.closes(menu, closes);
                 self.follow(asked);
-            },
-            Event::Tabs { menu, tabs } => {
-                let asked = self.sidebar.tabs(menu, tabs);
-                self.follow(asked);
-            },
-            Event::IntoPanes { menu, pane, came } => {
-                let asked = self.sidebar.turned_into_panes(menu, pane, came);
-                self.follow(asked);
-            },
-            Event::NoClient { menu, owed, on, turned } => match self.sidebar.waits_on(menu) {
-                Some(sidebar::Held::Open) => {
-                    let place = Place::Pane(turned.place().clone());
-                    let gone = self.go(&on, &place);
-                    owed.pay(Err(zellij::NOT_THERE_YET.to_owned()));
-                    if !gone {
-                        self.sidebar.drop_menu(menu);
-                    }
-                },
-                Some(sidebar::Held::Kept) => {
-                    owed.pay(Err(lunetad::opens::no_client(turned.place().session.name())));
-                },
-                None => {},
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
             Event::Named(made) => self.named(made),
@@ -1611,12 +1584,6 @@ impl App {
             },
             Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
                 zellij::open(menu, &on, open, &self.events);
-            },
-            Asked::Tabs { menu, on, turned } => {
-                zellij::other_tabs(menu, &on, &turned, &self.events);
-            },
-            Asked::Turn { menu, on, turned, turn } => {
-                zellij::turn(menu, &on, turned, turn, &self.events);
             },
             Asked::StartOwn { starts } => {
                 match lunetad::names::free_at(starts) {
