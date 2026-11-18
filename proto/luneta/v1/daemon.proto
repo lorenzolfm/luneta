@@ -523,6 +523,7 @@ message Remote {
       google.protobuf.Empty lost = 7;
       google.protobuf.Empty unwatched = 8;
     }
+    Projects projects = 9;
 
     message Ended {
       optional int32 code = 1;

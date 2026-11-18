@@ -9068,6 +9068,7 @@ mod tests {
             stopped: Some(remote::unreached::Stopped::Ended(remote::unreached::Ended {
                 code: Some(255),
             })),
+            projects: None,
         })
     }
 

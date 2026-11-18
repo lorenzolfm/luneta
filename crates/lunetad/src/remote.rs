@@ -92,7 +92,7 @@ impl fmt::Display for Destination {
 pub enum Reached {
     Reaching,
     Host(remote::Host),
-    Unreached { since: SystemTime, why: String, stopped: Stopped },
+    Unreached { since: SystemTime, why: String, stopped: Stopped, projects: Option<api::Projects> },
 }
 
 impl Reached {
@@ -100,11 +100,12 @@ impl Reached {
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host.clone()),
-            Reached::Unreached { since, why, stopped } => {
+            Reached::Unreached { since, why, stopped, projects } => {
                 remote::Reached::Unreached(remote::Unreached {
                     since: Some((*since).into()),
                     why: why.clone(),
                     stopped: Some(stopped.to_api()),
+                    projects: projects.clone(),
                 })
             },
         };
@@ -343,7 +344,8 @@ pub fn follow(
                     let since = unwatched.entry(destination.clone());
                     let since = *since.or_insert_with(SystemTime::now);
                     let why = format!("it is not watched: {error}");
-                    let reached = Reached::Unreached { since, why, stopped: Stopped::Unwatched };
+                    let stopped = Stopped::Unwatched;
+                    let reached = Reached::Unreached { since, why, stopped, projects: None };
                     let destination = destination.clone();
                     if core.send(Command::Remote { destination, reached }).is_err() {
                         return false;
@@ -448,14 +450,15 @@ async fn watched(
                 let logged = matches!(&seen, Seen::Unreached { why: logged, .. } if *logged == why);
                 seen = seen.failed(why);
                 bridged.agree(&seen, daemon.as_ref());
-                if let Seen::Unreached { since, why: (why, stopped), .. } = &seen {
-                    if !logged {
-                        log::say(&format!("{destination}: unreached: {why}"));
-                    }
-                    let (since, why, stopped) = (*since, why.clone(), *stopped);
-                    if !told(&core, &destination, Reached::Unreached { since, why, stopped }) {
-                        return;
-                    }
+                if let Seen::Unreached { why: (why, _), .. } = &seen
+                    && !logged
+                {
+                    log::say(&format!("{destination}: unreached: {why}"));
+                }
+                if let Some(reached) = seen.unreached()
+                    && !told(&core, &destination, reached)
+                {
+                    return;
                 }
                 bridged.waits(again(seen.failures())).await;
                 continue;
@@ -466,7 +469,8 @@ async fn watched(
             log::say(&format!("{destination}: reached, after {unreached_for}s unreached"));
         }
         let told_already = seen.after() == Some(version);
-        seen = Seen::Answered { after: version, at: SystemTime::now() };
+        let projects = host.projects.clone();
+        seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
         bridged.agree(&seen, daemon.as_ref());
         if told_already {
             continue;
@@ -504,9 +508,14 @@ async fn watched(
 
 enum Seen {
     Reaching { since: SystemTime },
-    Answered { after: api::Version, at: SystemTime },
-    Broke { after: api::Version, at: SystemTime },
-    Unreached { since: SystemTime, failures: u32, why: (String, Stopped) },
+    Answered { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
+    Broke { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
+    Unreached {
+        since: SystemTime,
+        failures: u32,
+        why: (String, Stopped),
+        projects: Option<api::Projects>,
+    },
 }
 
 impl Seen {
@@ -528,11 +537,20 @@ impl Seen {
     fn failed(self, why: (String, Stopped)) -> Seen {
         let failures = self.failures().saturating_add(1);
         match self {
-            Seen::Answered { after, at } => Seen::Broke { after, at },
-            Seen::Reaching { since }
-            | Seen::Broke { at: since, .. }
-            | Seen::Unreached { since, .. } => Seen::Unreached { since, failures, why },
+            Seen::Answered { after, at, projects } => Seen::Broke { after, at, projects },
+            Seen::Reaching { since } => Seen::Unreached { since, failures, why, projects: None },
+            Seen::Broke { at: since, projects, .. } | Seen::Unreached { since, projects, .. } => {
+                Seen::Unreached { since, failures, why, projects }
+            },
         }
+    }
+
+    fn unreached(&self) -> Option<Reached> {
+        let Seen::Unreached { since, why: (why, stopped), projects, .. } = self else {
+            return None;
+        };
+        let (since, why, stopped, projects) = (*since, why.clone(), *stopped, projects.clone());
+        Some(Reached::Unreached { since, why, stopped, projects })
     }
 }
 
@@ -636,12 +654,19 @@ mod tests {
     use super::*;
 
     fn answered() -> Seen {
-        Seen::Answered { after: api::Version { pid: 1, seq: 1 }, at: SystemTime::now() }
+        answered_with(None)
+    }
+
+    fn answered_with(projects: Option<api::Projects>) -> Seen {
+        Seen::Answered { after: api::Version { pid: 1, seq: 1 }, at: SystemTime::now(), projects }
+    }
+
+    fn refused() -> (String, Stopped) {
+        ("ssh: Connection refused".to_owned(), Stopped::Ended(Some(255)))
     }
 
     fn lost() -> Seen {
-        let why = ("ssh: Connection refused".to_owned(), Stopped::Ended(Some(255)));
-        Seen::Unreached { since: SystemTime::now(), failures: 2, why }
+        Seen::Unreached { since: SystemTime::now(), failures: 2, why: refused(), projects: None }
     }
 
     fn named_in(text: &str) -> (Vec<String>, u32) {
@@ -718,6 +743,30 @@ mod tests {
         watch.agree(&answered(), Some(&daemon));
         assert!(bridges.to(&destination).is_some());
         assert!(!woke(&mut watch, Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn a_machine_lost_keeps_the_projects_last_heard_and_one_never_reached_has_none() {
+        let shown = |seen: &Seen| {
+            let reached = seen.unreached()?.to_api(&"nixos".parse().unwrap()).reached;
+            let Some(remote::Reached::Unreached(unreached)) = reached else {
+                panic!("{reached:?} is not unreached");
+            };
+            Some(unreached.projects)
+        };
+        let project = api::Project { id: 7, name: "luneta".to_owned(), ..api::Project::default() };
+        let kept = api::projects::Kept { projects: vec![project] };
+        let heard = Some(api::Projects { held: Some(api::projects::Held::Kept(kept)) });
+
+        let broke = answered_with(heard.clone()).failed(refused());
+        assert_eq!(shown(&broke), None);
+        let unreached = broke.failed(refused());
+        assert_eq!(shown(&unreached), Some(heard.clone()));
+        assert_eq!(shown(&unreached.failed(refused())), Some(heard));
+
+        let never = Seen::Reaching { since: SystemTime::now() }.failed(refused());
+        assert_eq!(shown(&never), Some(None));
+        assert_eq!(shown(&never.failed(refused())), Some(None));
     }
 
     #[test]
