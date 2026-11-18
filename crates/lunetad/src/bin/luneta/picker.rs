@@ -283,7 +283,7 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
                 Renames::Workstream { place, .. } => {
-                    workstreams::renamed_workstream(&on, place.workstream, to.as_str())
+                    workstreams::renamed_workstream(&on, place.workstream, Some(to.as_str()))
                 },
                 Renames::Project(project) => {
                     workstreams::renamed_project(&on, project.id(), to.as_str())

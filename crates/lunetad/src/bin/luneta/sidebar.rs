@@ -34,6 +34,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::actions::Action;
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -48,8 +49,8 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Command, Did, Done, Hint, Label, Menu, Opens, PaneRow,
-    Ran, Target, Top, Wants, WorkstreamRow,
+    self, AllKeys, Briefed, Choice, Did, Done, Hint, Label, Menu, Opens, PaneRow, ProjectTarget,
+    Ran, Rename, Target, Top, Wants, WorkstreamRow,
 };
 use crate::news::News;
 use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Streamed};
@@ -60,7 +61,7 @@ use crate::pull::{Found, Kind, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, Spots};
 use crate::sweep::{cells, Page, Sweep};
-use crate::zellij::{Closes, Open, SessionName, Starts, Tab};
+use crate::zellij::{Closes, Open, SessionName, Tab};
 
 pub const COLUMNS: u16 = 32;
 
@@ -129,7 +130,8 @@ pub struct ProjectRow {
 }
 
 impl ProjectRow {
-    fn of(listed: Listed) -> Option<Self> {
+    #[must_use]
+    pub fn of(listed: Listed) -> Option<Self> {
         let id = listed.project()?;
         Some(ProjectRow { listed, id })
     }
@@ -785,6 +787,7 @@ struct Stream {
     used: Option<SystemTime>,
     panes: Vec<Pane>,
     terminals: Vec<TerminalId>,
+    in_panes: Vec<(u32, TerminalId)>,
 }
 
 impl Known {
@@ -793,7 +796,17 @@ impl Known {
         let streams = said.workstreams.iter().zip(0..).filter_map(|(workstream, tab)| {
             let id = WorkstreamId::of(workstream.id)?;
             let place = WorkstreamPlace { project: project.clone(), workstream: id };
-            let panes = workstream.terminals.iter().filter_map(|it| pane_of(it, workstream, tab));
+            let terminals = workstream.terminals.iter().map(|terminal| {
+                TerminalId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0")
+            });
+            let terminals: Vec<TerminalId> = terminals.collect();
+            let found = workstream.terminals.iter().zip(&terminals);
+            let held = found.filter_map(|(it, id)| {
+                Some((*id, pane_of(it, workstream, tab)?))
+            });
+            let held: Vec<(TerminalId, Pane)> = held.collect();
+            let in_panes = held.iter().map(|(id, pane)| (pane.id, *id)).collect();
+            let panes = held.into_iter().map(|(_, pane)| pane).collect();
             let seen = workstream.seen.and_then(projects::Seen::of_api);
             let seen = seen.expect("lunetad says a workstream's stage luneta knows");
             let used = workstream.used_at.map(|at| {
@@ -801,11 +814,8 @@ impl Known {
             });
             let folder = Dir::parse(&workstream.folder);
             let folder = folder.expect("lunetad says a workstream's folder as a folder it keeps");
-            let terminals = workstream.terminals.iter().map(|terminal| {
-                TerminalId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0")
-            });
-            let (name, panes, terminals) = (workstream.name.clone(), panes.collect(), terminals);
-            Some(Stream { place, name, folder, seen, used, panes, terminals: terminals.collect() })
+            let name = workstream.name.clone();
+            Some(Stream { place, name, folder, seen, used, panes, terminals, in_panes })
         });
         let workstreams = streams.collect();
         let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
@@ -1045,7 +1055,10 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    StartOwn { starts: Starts },
+    NewWorkstream { project: ProjectId, folder: Directory },
+    AddProject { on: Machine, folder: String, name: Option<String> },
+    Rename { on: Machine, rename: Rename },
+    RemoveProject { on: Machine, project: ProjectId },
     Make {
         menu: u64,
         on: Machine,
@@ -1087,7 +1100,10 @@ impl Asked {
             | Asked::Browse(_)
             | Asked::Leave
             | Asked::Delete { .. }
-            | Asked::StartOwn { .. }
+            | Asked::NewWorkstream { .. }
+            | Asked::AddProject { .. }
+            | Asked::Rename { .. }
+            | Asked::RemoveProject { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
             | Asked::Issue(_)
@@ -2571,11 +2587,11 @@ impl Sidebar {
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
-                Some(Top::Command(Command::Search)) => self.find(String::new()),
-                Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
-                Some(Top::Command(Command::Reorder)) => self.select(),
-                Some(Top::Command(Command::Open)) => return self.browse(),
-                Some(Top::Shift(_)) => {},
+                Some(Top::Command(Action::Search)) => self.find(String::new()),
+                Some(Top::Command(Action::Unread)) => self.toggle_unread(now),
+                Some(Top::Command(Action::Reorder)) => self.select(),
+                Some(Top::Command(Action::OpenPull)) => return self.browse(),
+                Some(Top::Command(_) | Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
                     if let Some(menu) = &self.menu {
@@ -2678,7 +2694,7 @@ impl Sidebar {
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Shift(by)) => return Some(self.shift(by)),
-                Some(Top::Command(Command::Reorder)) => self.widen(),
+                Some(Top::Command(Action::Reorder)) => self.widen(),
                 _ => {
                     self.unselect();
                     return None;
@@ -2933,7 +2949,7 @@ impl Sidebar {
 
     fn target_at(&self, machine: &Machine, place: Place) -> Option<Target> {
         let (session, pane) = match place {
-            Place::Session(session) => return Some(Target::Session(machine.clone(), session)),
+            Place::Session(session) => return self.project_target(machine, &session),
             Place::Workstream(place) => return self.workstream_target(machine, place),
             Place::Pane(PanePlace { session, pane }) => (session, pane),
         };
@@ -2957,8 +2973,24 @@ impl Sidebar {
             cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
         let pull_request = pull_request.and_then(PullRequest::of_api);
         let ran = self.ran_in(machine, &session, pane.id());
-        let row = PaneRow { session, pane, cwd, branch, repository, pull_request, ran };
+        let terminal = self.terminal_of(machine, &session, pane.id());
+        let row = PaneRow { session, pane, terminal, cwd, branch, repository, pull_request, ran };
         Some(Target::Pane(machine.clone(), row))
+    }
+
+    fn project_target(&self, machine: &Machine, listed: &Listed) -> Option<Target> {
+        let mut known = shelf(&self.shelves, machine).iter();
+        let known = known.find(|it| it.listed() == listed)?;
+        let (project, dir) = (known.project.clone(), known.dir.as_str().to_owned());
+        let empty = known.workstreams.is_empty();
+        Some(Target::Project(machine.clone(), ProjectTarget { project, dir, empty }))
+    }
+
+    fn terminal_of(&self, machine: &Machine, listed: &Listed, pane: u32) -> Option<TerminalId> {
+        let mut known = shelf(&self.shelves, machine).iter();
+        let streams = &known.find(|it| it.listed() == listed)?.workstreams;
+        let mut held = streams.iter().flat_map(|stream| &stream.in_panes);
+        held.find(|(id, _)| *id == pane).map(|(_, terminal)| *terminal)
     }
 
     fn workstream_target(&self, machine: &Machine, place: WorkstreamPlace) -> Option<Target> {
@@ -3115,7 +3147,10 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Own(starts) => Asked::StartOwn { starts },
+                    Done::Workstream(project, folder) => Asked::NewWorkstream { project, folder },
+                    Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
+                    Done::Rename(on, rename) => Asked::Rename { on, rename },
+                    Done::Remove(on, project) => Asked::RemoveProject { on, project },
                     Done::Go(on, place) if held == Held::Open => Asked::Go { on, place },
                     Done::Go(_, place) => {
                         let said = Self::went_said(&place);
@@ -3202,10 +3237,6 @@ impl Sidebar {
                 let plan = self.deletes_of(&on, workstream).and_then(|deletes| {
                     self.plan(&on, &session, deletes)
                 });
-                self.planned(plan)
-            },
-            Wants::Plan { session, scope: Scope::Session } => {
-                let plan = self.plan(&on, &session, Deletes::Session);
                 self.planned(plan)
             },
         }
@@ -3325,6 +3356,9 @@ impl Sidebar {
     }
 
     fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
+        if let Some(why) = self.out_of_reach(on) {
+            return Err(why);
+        }
         let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
         let mut held = streams.filter(|stream| stream.place.workstream == workstream);
         let Some(stream) = held.next() else {
@@ -4138,7 +4172,7 @@ impl Sidebar {
                 (lines, Drawn::Keys(Keyed::Search, spots.down(above)))
             },
             Bottom::Legend => {
-                let (lines, spots) = menu::legend(width, room);
+                let (lines, spots) = menu::legend(self.target().as_ref(), width, room);
                 (lines, Drawn::Keys(Keyed::Legend, spots.down(above)))
             },
             Bottom::Yank => {
@@ -4174,7 +4208,7 @@ impl Sidebar {
         };
         let mut lines = Vec::with_capacity(3);
         if room >= 2 {
-            lines.push(menu::rule(Command::Search.does(), &counted, width));
+            lines.push(menu::rule(Action::Search.name(), &counted, width));
         }
         lines.extend((room >= 1).then(|| query(term, width)));
         if room < 3 || self.keys != Keys::Sidebar {
@@ -4218,7 +4252,7 @@ impl Sidebar {
                 Pending::Nothing | Pending::First { .. } | Pending::Yank { .. } => {
                     match self.moving {
                         Moving::Selected(_) => {
-                            Bottom::Keys(Command::Reorder.does(), &SELECTED_KEYS)
+                            Bottom::Keys(Action::Reorder.name(), &SELECTED_KEYS)
                         },
                         Moving::Still
                         | Moving::Down { .. }
@@ -7523,9 +7557,9 @@ mod tests {
             (" o  Open PR", Some(on_legend('o'))),
             (" y  Yank ▸", Some(on_legend('y'))),
             (" a  Ask", Some(on_legend('a'))),
-            (" i  File issue", Some(on_legend('i'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
+            (" r  Rename the terminal", Some(on_legend('r'))),
             (" d  Delete ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
@@ -7536,8 +7570,8 @@ mod tests {
         assert_eq!(menu[1..], [
             ("─ New ─────────── luneta/main ─", None),
             (" p  new pane", Some(on_menu(KeyCode::Char('p')))),
-            (" t  new tab", Some(on_menu(KeyCode::Char('t')))),
-            (" s  new session", Some(on_menu(KeyCode::Char('s')))),
+            (" w  new workstream", Some(on_menu(KeyCode::Char('w')))),
+            (" P  new project", Some(on_menu(KeyCode::Char('P')))),
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
@@ -7549,11 +7583,11 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.key(&char('?'), moment(160_000));
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
-        let delete = clicks(&mut sidebar, 17);
+        let delete = clicks(&mut sidebar, 18);
         assert_eq!(delete[0].1, Some(on_menu(KeyCode::Char('d'))), "{delete:?}");
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        assert_eq!(clicks(&mut sidebar, 17), delete);
+        assert_eq!(clicks(&mut sidebar, 18), delete);
         let deleted = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
         assert_ne!(deleted, Asked::Nothing);
     }
@@ -7657,13 +7691,16 @@ mod tests {
         let listed = &every[start + 1..every.len() - 1];
         let names: Vec<&str> =
             listed.iter().filter(|line| !line.contains("  ")).map(String::as_str).collect();
-        assert_eq!(names, [" Move", " Sidebar", " Menu", " Anywhere"]);
+        assert_eq!(names, [" Move", " Sidebar", " Menu", " Pasted link", " Anywhere"]);
         for line in [
             " g g    First row",
             " ?      All keys",
             " y p  Yank PR link",
             " n p  new pane",
-            " d d  delete the row",
+            " d d  close the pane",
+            " d d  close the workstream",
+            " r    Rename the project",
+            " w  worktree",
             " BS   back a group",
             " Ctrl a       Sidebar or panes",
             " Alt Shift u  Stop reading",
@@ -7849,83 +7886,48 @@ mod tests {
         assert_eq!(lines[11..], [
             "─ New ─────────── luneta/main ─",
             " p  new pane",
-            " t  new tab",
-            " s  new session",
+            " w  new workstream",
+            " P  new project",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
-        let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
-        let tab = Tab { cwd, name: None, command: Vec::new() };
-        let tab = Open::Tab { session: older, tab, alone_since: None };
-        let tab = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("older", 1).whose(), open: tab };
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
-        let opened = own_pane_of("older", 1, 7);
-        assert_eq!(sidebar.opened(1, Ok(PaneKey::terminal(7))), go_here(opened));
-        assert_eq!(sidebar.opened(1, Ok(PaneKey::terminal(8))), Asked::Nothing);
+        let project = ProjectId::of(1).unwrap();
+        let made = Asked::NewWorkstream { project, folder: directory("/w/luneta/main") };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        assert!(sidebar.menu.is_none());
 
         sidebar.cursor = Some(Spot::Local(own_pane_of("young", 2, 1)));
         type_in(&mut sidebar, "n");
-        let (session, cwd) = (session_name("young"), directory("/w/b"));
-        let tab = Tab { cwd, name: None, command: Vec::new() };
-        let tab = Open::Tab { session, tab, alone_since: None };
-        let asked = Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("young", 2).whose(), open: tab };
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
+        let project = ProjectId::of(2).unwrap();
+        let made = Asked::NewWorkstream { project, folder: directory("/w/b") };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
     }
 
     #[test]
-    fn a_tab_of_an_own_session_opens_at_once_and_luneta_goes_there() {
-        let mut sidebar = fresh();
-        let panes = vec![pane(7, 0, "/w/luneta/main", "fish")];
-        let sessions = vec![session("here", 10, Vec::new()), own_session("own", 1, panes)];
-        sidebar.hear(host(sessions, Vec::new()));
-        sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "gg");
-        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        let tab = Tab { cwd: directory("/w/luneta/main"), name: None, command: Vec::new() };
-        let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
-        let asked = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("own", 1).whose(), open: tab };
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), asked);
-        let own = own_pane_of("own", 1, 8);
-        let go = Asked::Go { on: Machine::Local, place: own };
-        assert_eq!(sidebar.opened(1, Ok(PaneKey::terminal(8))), go);
-        assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), {
-            let tab = Tab { cwd: directory("/w/luneta/main"), name: None, command: Vec::new() };
-            let tab = Open::Tab { session: session_name("own"), tab, alone_since: None };
-            Asked::Open { menu: 2, on: Machine::Local, whose: own_listed("own", 1).whose(), open: tab }
-        });
-        sidebar.focus(Keys::Zellij);
-        assert_eq!(sidebar.opened(2, Ok(PaneKey::terminal(9))), Asked::Nothing);
-        let lines = screen(&mut sidebar, true, 60, 12);
-        assert!(lines.iter().any(|line| line.contains("menu: opened own:9")), "{lines:?}");
-    }
-
-    #[test]
-    fn an_own_session_is_deleted_by_its_id() {
+    fn an_empty_project_is_removed_by_its_id() {
         let mut sidebar = fresh();
         let own = own_session("own", 1, Vec::new());
         let sessions = vec![own_session("here", 2, Vec::new()), own];
         sidebar.hear(host(sessions, Vec::new()));
         sidebar.focus(Keys::Sidebar);
-        let delete = |sidebar: &mut Sidebar| {
+        let remove = |sidebar: &mut Sidebar| {
             let own = Listed::new_project("own", 1);
             sidebar.cursor = Some(Spot::Local(Place::Session(own)));
             type_in(sidebar, "d");
-            sidebar.key(&char('s'), moment(160_000))
+            sidebar.key(&char('d'), moment(160_000))
         };
-        let made = OwnMade::from_nanos(0);
-        let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("own"), whose };
-        assert_eq!(delete(&mut sidebar), delete_here(kill.clone()));
+        let project = ProjectId::of(1).unwrap();
+        let removed = Asked::RemoveProject { on: Machine::Local, project };
+        assert_eq!(remove(&mut sidebar), removed);
         let made = OwnMade::from_nanos(0);
         sidebar.attaching(Machine::Local, OwnKey { id: OwnId::new(2).unwrap(), made });
-        assert_eq!(delete(&mut sidebar), delete_here(kill));
+        assert_eq!(remove(&mut sidebar), removed);
     }
 
     #[test]
-    fn an_own_client_is_where_its_server_says_and_leaves_its_project_to_delete_it() {
+    fn an_own_client_is_where_its_server_says_and_its_project_has_no_delete() {
         let mut sidebar = fresh();
         let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
         let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
@@ -7942,13 +7944,10 @@ mod tests {
         assert_eq!(sidebar.here_place(), Ok(here));
         assert_eq!(sidebar.user(&Machine::Local), User::Untold, "a project's row names no user");
         assert_eq!(sidebar.user(&Machine::Remote(nixos())), User::Away);
-        sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
-        let newest = Place::Session(Listed::new_project("newest", 2));
-        let whose = Whose::Own(key);
-        let leave = Act::Leave { session: session_name("twin"), whose, to: newest };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
+        assert!(sidebar.menu.is_none());
     }
 
     #[test]
@@ -7962,11 +7961,13 @@ mod tests {
         sidebar.went_own(OwnPane::new(key, 1).unwrap(), OwnClientId::new(4).unwrap());
         sidebar.unseat();
         assert_eq!(sidebar.own_seat(), None);
-        sidebar.cursor = Some(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
+        let (twin, pane) = (Listed::new_project("twin", 1), PaneKey::terminal(1));
+        sidebar.cursor = Some(Spot::Local(Place::Pane(PanePlace { session: twin.clone(), pane })));
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes_here(1, twin, pane));
         let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
+        assert_eq!(sidebar.closes(1, Ok(Closes::Session)), delete_here(kill));
     }
 
     #[test]
@@ -8537,6 +8538,7 @@ mod tests {
         assert_eq!(target, Some(Target::Pane(Machine::Local, PaneRow {
             session: Listed::new_project("older", 1),
             pane: PaneKey::terminal(1),
+            terminal: TerminalId::of(1),
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
             repository: None,
@@ -8545,13 +8547,10 @@ mod tests {
         })));
 
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
-        let tab = Tab { cwd: cwd.clone(), name: None, command: vec![] };
-        let tab = Open::Tab { session: older.clone(), tab, alone_since: None };
         type_in(&mut sidebar, "n");
-        let tab = Asked::Open { menu: 1, on: Machine::Local, whose: own_listed("older", 1).whose(), open: tab };
-        assert_eq!(sidebar.key(&char('t'), moment(160_000)), tab);
-        let opened = own_pane_of("older", 1, 7);
-        assert_eq!(sidebar.opened(1, Ok(PaneKey::terminal(7))), go_here(opened));
+        let project = ProjectId::of(1).unwrap();
+        let made = Asked::NewWorkstream { project, folder: cwd.clone() };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         assert!(sidebar.floating().is_none());
         sidebar.focus(Keys::Zellij);
 
@@ -8619,7 +8618,7 @@ mod tests {
 
         assert_eq!(sidebar.float_menu(), Ok(()));
         sidebar.focus(Keys::Menu { lent: false });
-        type_in(&mut sidebar, "nt");
+        type_in(&mut sidebar, "np");
         assert!(sidebar.floating().is_none());
         assert_eq!(sidebar.said().as_deref(), Some(wrong));
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, None));
@@ -8627,12 +8626,12 @@ mod tests {
 
         assert_eq!(sidebar.float_menu(), Ok(()));
         sidebar.focus(Keys::Menu { lent: false });
-        type_in(&mut sidebar, "nt");
+        type_in(&mut sidebar, "np");
         sidebar.focus(Keys::Zellij);
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
 
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "nt");
+        type_in(&mut sidebar, "np");
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
         assert_eq!(sidebar.float_menu(), Ok(()));
         assert!(sidebar.notice.is_none());
@@ -8906,7 +8905,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_of_an_own_session_asks_first_where_a_file_in_it_does_not_read() {
+    fn a_close_of_a_workstream_asks_first_where_a_file_in_it_does_not_read() {
         let made_at = Some(Timestamp::default());
         let own = Some(api::OwnSession { id: 1, made_at });
         let own = Some(api::Own { session: own, pane: 1 });
@@ -8915,22 +8914,25 @@ mod tests {
         let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
         let made = OwnMade::from_nanos(0);
         let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let kill = Act::Kill { session: session_name("twin"), whose };
+        let workstream = tab_of(1, 0);
+        let (twin, panes) = (session_name("twin"), vec![1]);
+        let seen = vec![TerminalId::of(1).unwrap()];
+        let close = Act::Workstream { session: twin, whose, workstream, panes, seen };
         for (file, asks) in [(in_own, true), (in_zellij, false)] {
             let mut sidebar = fresh();
             let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
             let sessions = vec![session("twin", 10, panes()), own_session("twin", 1, panes())];
             let unread_files = vec![file];
             sidebar.hear(Host { unread: 1, unread_files, ..host(sessions, Vec::new()) });
-            let own = Listed::new_project("twin", 1);
-            sidebar.cursor = Some(Spot::Local(Place::Session(own)));
+            let place = WorkstreamPlace { project: project_row("twin", 1), workstream };
             sidebar.focus(Keys::Sidebar);
+            sidebar.cursor = Some(Spot::Local(Place::Workstream(place)));
             type_in(&mut sidebar, "d");
-            let went = sidebar.key(&char('s'), moment(160_000));
+            let went = sidebar.key(&char('d'), moment(160_000));
             let lines = screen(&mut sidebar, true, 60, 16);
-            let question = " Delete session twin? 1 agent, 1 unknown";
+            let question = " Close the workstream? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
-            assert_eq!((went == delete_here(kill.clone()), asked), (!asks, asks), "{lines:#?}");
+            assert_eq!((went == delete_here(close.clone()), asked), (!asks, asks), "{lines:#?}");
         }
     }
 
@@ -8980,15 +8982,6 @@ mod tests {
             panes: vec![1],
         };
         assert_eq!(sidebar.closes(1, Ok(tab())), delete_here(act));
-
-        type_in(&mut sidebar, "d");
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
-        let lines = screen(&mut sidebar, true, 32, 16);
-        assert_eq!(lines[13..15], [" Delete session older? 1", " agent, 1 waiting"]);
-        let to = Place::Session(own_listed("young", 2));
-        let whose = own_listed("older", 1).whose();
-        let leave = Act::Leave { session: session_name("older"), whose, to };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(leave));
         assert!(sidebar.menu.is_none());
     }
 
@@ -9652,13 +9645,16 @@ mod tests {
         let (session, cwd) = (listed("main", 20), Some("/w/b".to_owned()));
         let (branch, repository, ran) = (None, None, Ran::Unhooked);
         let pane = PaneKey::terminal(1);
-        let row = PaneRow { session, pane, cwd, branch, repository, pull_request: None, ran };
+        let terminal = TerminalId::of(1);
+        let row =
+            PaneRow { session, pane, terminal, cwd, branch, repository, pull_request: None, ran };
         let menu = sidebar.menu.as_ref().expect("the menu");
         assert_eq!(menu.target(), &Target::Pane(on.clone(), row.clone()));
         let number = menu.number();
         let (session, cwd) = (session_name("main"), directory("/w/b"));
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
-        let asked = Asked::Open { menu: number, on: on.clone(), whose: listed("main", 20).whose(), open };
+        let whose = listed("main", 20).whose();
+        let asked = Asked::Open { menu: number, on: on.clone(), whose, open };
         assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
         sidebar.close_menu();
 
@@ -9774,37 +9770,34 @@ mod tests {
     }
 
     #[test]
-    fn another_machine_s_pane_closes_there_by_its_agents() {
+    fn another_machine_s_workstream_closes_there_by_its_agents_and_its_pane_stays() {
         let mut sidebar = fresh();
         let mut host = machines();
         let panes = vec![pane(1, 0, "/w/b", "claude"), pane(2, 0, "/w/b", "fish")];
         let agents = vec![agent("main", 1, Status::Waiting, Some("fix"))];
         host.remotes[0] = remote("nixos", up(vec![session("main", 20, panes)], agents));
-        sidebar.hear(host.clone());
+        sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
-        let fix = |pane| Spot::Remote(nixos(), pane_of("main", 20, pane));
-        sidebar.cursor = Some(fix(1));
+        sidebar.cursor = Some(Spot::Remote(nixos(), pane_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
-        let menu = sidebar.menu.as_ref().map_or(0, Menu::number);
-        let on = Machine::Remote(nixos());
-        let (main, one) = (listed("main", 20), PaneKey::terminal(1));
-        let closes = Asked::Closes { menu, on: on.clone(), session: main, pane: one };
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), closes);
-        assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
+        let place = WorkstreamPlace { project: project_row("main", 20), workstream: tab_of(20, 0) };
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(place.clone())));
+        type_in(&mut sidebar, "d");
+        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 120, 16);
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
-        assert!(lines.contains(&"Close the pane? 1 agent, 1 waiting"), "{lines:#?}");
-        assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes);
-        let act = Act::Pane {
+        assert!(lines.contains(&"Close the workstream? 1 agent, 1 waiting"), "{lines:#?}");
+        let act = Act::Workstream {
             session: session_name("main"),
             whose: listed("main", 20).whose(),
-            pane: PaneKey::terminal(1),
+            workstream: place.workstream,
+            panes: vec![1, 2],
+            seen: vec![TerminalId::of(1).unwrap(), TerminalId::of(2).unwrap()],
         };
-        assert_eq!(sidebar.closes(menu, Ok(Closes::Pane)), Asked::Delete { on, act });
-        let left = vec![session("main", 20, vec![pane(2, 0, "/w/b", "fish")])];
-        host.remotes[0] = remote("nixos", up(left, Vec::new()));
-        sidebar.hear(host);
-        assert_eq!(sidebar.cursor, Some(fix(2)));
+        let on = Machine::Remote(nixos());
+        assert_eq!(sidebar.key(&char('y'), moment(160_000)), Asked::Delete { on, act });
+        assert!(sidebar.menu.is_none());
     }
 
     #[test]
@@ -9814,9 +9807,11 @@ mod tests {
             let mut host = machines();
             sidebar.hear(host.clone());
             sidebar.focus(Keys::Sidebar);
-            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
+            let (project, workstream) = (project_row("main", 20), tab_of(20, 0));
+            let place = WorkstreamPlace { project, workstream };
+            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(place)));
             type_in(&mut sidebar, "d");
-            assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
+            assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
             host.remotes[0] = remote("nixos", down(100));
             sidebar.hear(host);
             if !answers {
@@ -9869,7 +9864,7 @@ mod tests {
     }
 
     #[test]
-    fn n_s_on_a_workstream_starts_one_in_its_folder_and_elsewhere_refuses() {
+    fn n_w_on_a_workstream_makes_one_in_its_folder_and_elsewhere_is_none() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
@@ -9878,17 +9873,13 @@ mod tests {
         };
         sidebar.cursor = Some(Spot::Local(Place::Workstream(tab(10))));
         type_in(&mut sidebar, "n");
-        let start = Asked::StartOwn { starts: Starts::In(directory("/w/a")) };
-        assert_eq!(sidebar.key(&char('s'), moment(160_000)), start);
-        let far = Spot::Remote(nixos(), Place::Workstream(tab(20)));
-        let vps = Spot::Machine(Machine::Remote("me@vps".parse().unwrap()));
-        for far in [far, vps] {
-            sidebar.cursor = Some(far);
-            type_in(&mut sidebar, "n");
-            assert_eq!(sidebar.key(&char('s'), moment(160_000)), Asked::Nothing);
-            let refused = format!("menu: {}", menu::HERE_ONLY);
-            assert_eq!(sidebar.notice.as_deref(), Some(refused.as_str()));
-        }
+        let project = ProjectId::of(10).unwrap();
+        let made = Asked::NewWorkstream { project, folder: directory("/w/a") };
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(tab(20))));
+        type_in(&mut sidebar, "n");
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
+        assert!(sidebar.menu.as_ref().is_some_and(|menu| menu.target().cwd() == Some("/w/b")));
     }
 
     #[test]

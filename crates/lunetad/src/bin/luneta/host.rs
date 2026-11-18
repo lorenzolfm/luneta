@@ -36,6 +36,9 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
+use crate::actions::{
+    Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, RIGHT, WORKSTREAMS, SHRINK, SWAP, UP,
+};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
 use crate::answers::{self, Answer, Colours, DisableThemeChange, EnableThemeChange};
@@ -53,7 +56,7 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice};
+use crate::menu::{self, Choice, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -157,56 +160,14 @@ const TICK: Duration = Duration::from_secs(1);
 
 const FRAME_EVENTS_MAX: usize = 256;
 
-const SWAP: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::CONTROL);
-
-const COLLAPSE: (KeyCode, KeyModifiers) = (KeyCode::Char('q'), KeyModifiers::CONTROL);
-
-const MENU: (KeyCode, KeyModifiers) = (KeyCode::Char('a'), KeyModifiers::ALT);
-
-const WORKSTREAMS: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::SUPER);
-
-const LEFT: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::CONTROL);
-
-const DOWN: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::CONTROL);
-
-const UP: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::CONTROL);
-
-const RIGHT: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::CONTROL);
-
-const GROW: (KeyCode, KeyModifiers) = (KeyCode::Char('='), KeyModifiers::ALT);
-
-const GROWS: [(KeyCode, KeyModifiers); 4] = [
+const GROWS: [Chord; 4] = [
     GROW,
     (KeyCode::Char('+'), KeyModifiers::ALT),
     (KeyCode::Char('='), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
     (KeyCode::Char('+'), KeyModifiers::ALT.union(KeyModifiers::SHIFT)),
 ];
 
-const SHRINK: (KeyCode, KeyModifiers) = (KeyCode::Char('-'), KeyModifiers::ALT);
-
-const AGENTS: (KeyCode, KeyModifiers) = (KeyCode::Char('b'), KeyModifiers::CONTROL);
-
-const DIRS: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::CONTROL);
-
-pub const ANYWHERE: [((KeyCode, KeyModifiers), &str); 15] = [
-    (SWAP, "Sidebar or panes"),
-    (LEFT, "Pane left, or the workstream before"),
-    (DOWN, "Pane below"),
-    (UP, "Pane above"),
-    (RIGHT, "Pane right, or the workstream after"),
-    (GROW, "Grow the pane"),
-    (SHRINK, "Shrink the pane"),
-    (COLLAPSE, "Collapse sidebar"),
-    (MENU, "Menu over panes"),
-    (WORKSTREAMS, "Pick a workstream"),
-    (AGENTS, "Pick an agent"),
-    (DIRS, "Pick a directory"),
-    (dictation::KEY, "Hold to dictate"),
-    (aloud::KEY, "Read aloud, pause"),
-    (aloud::STOPS, "Stop reading"),
-];
-
-fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
+fn stepped(chord: Chord) -> Option<Direction> {
     match chord {
         LEFT => Some(Direction::Left),
         DOWN => Some(Direction::Down),
@@ -216,7 +177,7 @@ fn stepped(chord: (KeyCode, KeyModifiers)) -> Option<Direction> {
     }
 }
 
-fn resized(chord: (KeyCode, KeyModifiers)) -> Option<Growth> {
+fn resized(chord: Chord) -> Option<Growth> {
     if GROWS.contains(&chord) {
         return Some(Growth::Grow);
     }
@@ -1585,14 +1546,47 @@ impl App {
             Asked::Open { menu, on, whose: Whose::Zellij(_), open } => {
                 zellij::open(menu, &on, open, &self.events);
             },
-            Asked::StartOwn { starts } => {
-                match lunetad::names::free_at(starts) {
-                    Ok((name, _, dir)) => self.make_workstream(dir, move |lunetad, cwd| {
-                        workstreams::here(lunetad, cwd, Some(name.as_str()))
-                    }),
-                    Err(why) => self.sidebar.notify(format!("menu: no workstream made: {why}")),
-                }
+            Asked::NewWorkstream { project, folder } => {
+                self.make_workstream(folder, move |lunetad, cwd| {
+                    let unspelled = || format!("{} is not UTF-8", cwd.display());
+                    let folder = cwd.to_str().ok_or_else(unspelled)?;
+                    workstreams::add_workstream(lunetad, project, folder, None).map(Some)
+                });
                 self.leave();
+            },
+            Asked::AddProject { on: Machine::Local, folder, name } => {
+                if self.refuse_naming(None) {
+                    return;
+                }
+                self.naming_on(move || {
+                    let named = name.as_deref();
+                    let made = || workstreams::project_made(&Machine::Local, &folder, named);
+                    let made = caught(made).map(Some);
+                    let made = made.map_err(|why| format!("menu: no project made: {why}"));
+                    Made::Workstream { made, argv: Vec::new() }
+                });
+                self.leave();
+            },
+            Asked::AddProject { on, folder, name } => {
+                self.change(on, "no project made", move |on| {
+                    workstreams::project_made(on, &folder, name.as_deref()).map(drop)
+                });
+            },
+            Asked::Rename { on, rename } => {
+                self.change(on, "not renamed", move |on| match &rename {
+                    Rename::Terminal(terminal, to) => {
+                        workstreams::renamed_terminal(on, *terminal, to.as_deref())
+                    },
+                    Rename::Workstream(workstream, to) => {
+                        workstreams::renamed_workstream(on, *workstream, to.as_deref())
+                    },
+                    Rename::Project(project, to) => workstreams::renamed_project(on, *project, to),
+                });
+            },
+            Asked::RemoveProject { on, project } => {
+                self.change(on, "not removed", move |on| {
+                    workstreams::forgotten_project(on, project)
+                });
             },
             Asked::Make { menu, on, session, holder, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
@@ -1683,6 +1677,20 @@ impl App {
         }
     }
 
+    fn change(
+        &self,
+        on: Machine,
+        unchanged: &'static str,
+        change: impl FnOnce(&Machine) -> Result<(), String> + Send + 'static,
+    ) {
+        let events = self.events.clone();
+        thread::spawn(move || {
+            if let Err(why) = caught(|| change(&on)) {
+                let _ = events.send(Event::Notice(format!("menu: {unchanged}: {why}")));
+            }
+        });
+    }
+
     fn project_act(&mut self, on: &Machine, act: &Act) {
         if let Act::Workstream { workstream, seen, .. } = act {
             let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
@@ -1690,7 +1698,7 @@ impl App {
             let deleting = thread::spawn(move || {
                 let closed = || workstreams::closed(&lunetad, &on, workstream, &seen);
                 if let Err(why) = caught(closed) {
-                    let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
+                    let _ = events.send(Event::Notice(format!("menu: not closed: {why}")));
                 }
             });
             self.deleting.retain(|deleting| !deleting.is_finished());

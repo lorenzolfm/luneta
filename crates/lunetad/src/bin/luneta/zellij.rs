@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use lunetad::mux::{self, Mux, PaneId, PaneVars, Zellij, ZellijPane};
 pub use lunetad::closes::{closes_now, closes_together, Close, Closes, Closing};
 use lunetad::closes::{self, running_in};
-pub use lunetad::names::{session_for, Starts};
+pub use lunetad::names::session_for;
 pub use lunetad::opens::{opening, Open, Opened, Tab};
 use lunetad::asks::{self, Turn, User, ASKED_VAR, AWAY_VAR, BEFORE_VAR, TURN_VAR};
 use lunetad::Directory;

@@ -18,7 +18,7 @@ use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Hint, PaneRow, Target};
+use crate::menu::{self, Hint, PaneRow, ProjectTarget, Target};
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -273,7 +273,9 @@ fn plain(text: &str) -> String {
 
 fn highlighted(target: &Target) -> String {
     let row = match target {
-        Target::Session(_, listed) => format!("project {}", listed.name()),
+        Target::Project(_, ProjectTarget { project, .. }) => {
+            format!("project {}", project.listed().name())
+        },
         Target::Workstream(_, row) => {
             format!("workstream {} of project {}", row.name, row.place.project.listed().name())
         },
@@ -296,10 +298,15 @@ mod tests {
 
     use super::*;
     use crate::menu::{PaneRow, Ran};
-    use crate::sidebar::{Listed, PaneKey};
+    use crate::sidebar::{Listed, PaneKey, ProjectRow};
 
     fn listed() -> Listed {
         Listed::new("luneta", SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+    }
+
+    fn project_on(on: Machine) -> Target {
+        let project = ProjectRow::of(Listed::new_project("luneta", 3)).unwrap();
+        Target::Project(on, ProjectTarget { project, dir: "/w/luneta".to_owned(), empty: false })
     }
 
     fn nixos() -> Machine {
@@ -310,6 +317,7 @@ mod tests {
         let row = PaneRow {
             session: listed(),
             pane: PaneKey::Zellij(4),
+            terminal: None,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
             repository: None,
@@ -493,7 +501,7 @@ mod tests {
         let row = "is pane luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
         assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
         assert_eq!(top(&pane), "┌─ Ask ────────────────── luneta/main ─┐");
-        let session = Ask::new(2, &Target::Session(Machine::Local, listed()), Path::new("/w"));
+        let session = Ask::new(2, &project_on(Machine::Local), Path::new("/w"));
         assert_eq!(session.works, Works::Here(PathBuf::from("/w")));
         let session_row = "is project luneta: \"this\"";
         assert!(session.highlighted.contains(session_row), "{}", session.highlighted);
@@ -506,7 +514,7 @@ mod tests {
         assert_eq!(pane.machine(), nixos());
         assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
         assert_eq!(top(&pane), "┌─ Ask ───────── luneta/main on nixos ─┐");
-        let session = Ask::new(4, &Target::Session(nixos(), listed()), Path::new("/w"));
+        let session = Ask::new(4, &project_on(nixos()), Path::new("/w"));
         assert_eq!(session.works, there(None));
         assert_eq!(top(&session), "┌─ Ask ─────────────────── ~ on nixos ─┐");
         let header = Ask::new(5, &Target::Machine(nixos()), Path::new("/w"));

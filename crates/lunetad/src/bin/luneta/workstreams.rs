@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseWorkstream};
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
+use lunetad::api::change_projects_request::{ForgetProject, RenameTerminal};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
@@ -316,9 +317,13 @@ pub fn real(cwd: &Path) -> PathBuf {
     std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned())
 }
 
-fn changed_there(machine: &Machine, change: Change) -> Result<(), String> {
+fn made_there(machine: &Machine, change: Change) -> Result<Option<u64>, String> {
     let path = lunetad::folder::find().ok_or("lunetad has made no folder to keep projects in")?;
-    changed_on(&path, on(machine), change).map(drop).map_err(Unmade::said)
+    changed_on(&path, on(machine), change).map_err(Unmade::said)
+}
+
+fn changed_there(machine: &Machine, change: Change) -> Result<(), String> {
+    made_there(machine, change).map(drop)
 }
 
 pub fn closed_there(
@@ -337,9 +342,35 @@ pub fn renamed_project(machine: &Machine, project: ProjectId, to: &str) -> Resul
 pub fn renamed_workstream(
     machine: &Machine,
     workstream: WorkstreamId,
-    to: &str,
+    to: Option<&str>,
 ) -> Result<(), String> {
-    let (workstream, to) = (workstream.get(), Some(to.to_owned()));
+    let (workstream, to) = (workstream.get(), to.map(str::to_owned));
     let renames = lunetad::api::change_projects_request::RenameWorkstream { workstream, to };
     changed_there(machine, Change::RenameWorkstream(renames))
+}
+
+pub fn renamed_terminal(
+    machine: &Machine,
+    terminal: TerminalId,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let (terminal, to) = (terminal.get(), to.map(str::to_owned));
+    changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
+}
+
+pub fn forgotten_project(machine: &Machine, project: ProjectId) -> Result<(), String> {
+    changed_there(machine, Change::ForgetProject(ForgetProject { project: project.get() }))
+}
+
+pub fn project_made(
+    machine: &Machine,
+    folder: &str,
+    name: Option<&str>,
+) -> Result<WorkstreamId, String> {
+    let (dir, name) = (folder.to_owned(), name.map(str::to_owned));
+    let made = made_there(machine, Change::AddProject(AddProject { dir, name }))?;
+    let project = made.ok_or("lunetad made no project")?;
+    let at = WorkstreamAt { project, folder: folder.to_owned() };
+    let found = made_there(machine, Change::WorkstreamAt(at))?.and_then(WorkstreamId::of);
+    found.ok_or_else(|| "lunetad found and made no workstream".to_owned())
 }

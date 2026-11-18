@@ -160,9 +160,12 @@ A session is named for its directory. A git worktree is named for its repository
 ### Menu
 
 Keys, pressed one after another, that start an agent on a skill, beside the
-agent whose work it is for, open a pane, a tab or a session where it works,
-or delete what you are done with. The menu shows the keys of the group you are in
-and what each does, as which-key does in neovim.
+agent whose work it is for, open a pane or a workstream where it works, make,
+rename and remove projects and workstreams, or close what you are done with.
+The menu shows the keys of the group you are in and what each does, as
+which-key does in neovim. Its keys, the legend's and those `?` lists all come
+from one list of luneta's actions, each with its name, its key and the rows it
+works on, so a key is shown only where it works, and does what it says.
 
 ```text
 ╭─ Skills ─────────────── luneta/sidebar ─╮
@@ -328,31 +331,43 @@ doesn't say what it does is left out, as pi leaves it out. The skills your pi
 settings or pi's packages name are not where luneta looks, and neither are
 pi's ignore files.
 
-The New group, under `n`, opens where the pane works: `n p` your shell in a
-pane of its own beside that pane, `n t` a tab of its session, and `n s` a
-session, which you go to. On this machine the session is an
-[own session](#luneta-in-your-terminal), and on another a session of zellij's.
-It is named as the picker's directories name that directory, `luneta-main` for
-a worktree of `luneta`, with a `-2` when a session has that name. On a
-machine's header, which has no pane, `n s` makes the session in your home on
-that machine, named for it too, as `lorenzo`; on a session's row, the group has
-only `n m`.
+The New group, under `n`, opens where the row works: `n p` your shell in a
+pane of its own beside the pane, and `n w` a workstream of the row's project,
+in the pane's folder, or on a workstream's row in its folder, or on a
+project's row in the project's, which you go to. `n P` makes a project: it asks
+for the folder it holds, with the row's folder typed in already, or luneta's
+own where the row has none, for you to edit. The folder is an absolute path or
+one in `~`, the home of the machine the project goes on, and a relative one is
+refused. Then it asks for the project's name, and with none it is named for its
+folder. The project starts with its first workstream, in that folder, which you
+go to; on another machine's row it is made there, and luneta stays where it
+is. `n m` adds a machine, from any row.
 
 ```text
 ╭─ New ─── luneta/sidebar ─╮
 │ p  new pane              │
-│ t  new tab               │
-│ s  new session           │
+│ w  new workstream        │
+│ P  new project           │
+│ m  new machine           │
 │                          │
 │ <BS> Back  <ESC> Close   │
 ╰──────────────────────────╯
 ```
 
-The Delete group, under `d`, closes the pane with `d d`, and deletes its
-session with `d s`, as [luneta's sidebar](#luneta-in-your-terminal) tells. On a
-pane's row in a repository, `d m` lists the worktrees of its merged pull
-requests, to delete once you say yes, as [Delete merged
-worktrees](#delete-merged-worktrees) tells.
+`r` renames what the row is: the terminal on a pane's row, the workstream on a
+workstream's, and the project on a project's, on whichever machine it is. It
+asks for the new name. With none, a terminal goes back to the name luneta
+gives it, as a workstream does to its issue, branch or folder; a project keeps
+a name, and the box says so.
+
+The Delete group, under `d`, closes the pane with `d d`, and on a
+workstream's row closes the workstream, with every terminal in it, as
+[luneta's sidebar](#luneta-in-your-terminal) tells. On a project's row, once
+the project has no workstream left, `d d` removes it; a project is never
+removed for you, so closing its last workstream leaves it listed, empty, until
+you do. On a pane's or a workstream's row in a repository, `d m` lists the
+worktrees of its merged pull requests, to delete once you say yes, as [Delete
+merged worktrees](#delete-merged-worktrees) tells.
 
 When what a key deletes would end an agent that is busy or waiting on you, the
 menu asks first, and says what goes:
@@ -372,9 +387,9 @@ session file the daemon cannot read, in the pane its process runs in. The menu
 counts every agent of the session, those the list leaves out too: a `claude -p`
 in the pane of the agent it runs from, and one luneta cannot find a pane for,
 which may be in any pane of the session that names it, and asks while it is at
-work. While the daemon does not answer, or cannot tell which session the
-process of a file it cannot read runs in, luneta cannot tell, and asks every
-time, saying why.
+work. Closing a workstream counts every agent in its terminals so. While the
+daemon does not answer, or cannot tell which session the process of a file it
+cannot read runs in, luneta cannot tell, and asks every time, saying why.
 
 Needs `claude` on the zellij server's `PATH`, and `git` for the branch.
 
@@ -469,9 +484,10 @@ and ends, for you to name one.
 
 `luneta <name>` attaches to that one, and makes it in the directory you are in
 if none runs: naming a session is asking for it. A name a session of zellij's
-has is refused, as the two kinds share their names. Inside luneta, `n s` or
-the picker makes one. Run in a pane of an own session, luneta will not attach
-to the session that pane is in, and goes to another that runs instead.
+has is refused, as the two kinds share their names. Inside luneta, the picker
+makes one, and the menu's `n P` and `n w` make a project and a workstream.
+Run in a pane of an own session, luneta will not attach to the session that
+pane is in, and goes to another that runs instead.
 
 Own sessions are of this machine alone, as yet. The sidebar marks each with a
 dim `◇`. Sessions of zellij's that run still show in the sidebar, and going to
@@ -667,12 +683,15 @@ too.
 The sidebar has the [menu](#menu) too, at its bottom, for the highlighted row,
 with luneta's own keys but none of yours: luneta has no configuration to read
 your groups from yet. In their place, its Skills group has keys for a few
-skills, built in. It lists only the keys that work on the row: on a session's
-row, `a`, `n m`, `d d`, `d s` and the Brief group, on another machine's header,
-`a`, `n s`, `n m`, `d d` and the Brief group, and on this machine's the same but
-`d d`; and on a pane's row, `i` and `d m` only where the pane works in a
-repository. A key it does not list does nothing. `Alt a` opens the same menu
-floating at the bottom right of zellij's side, for the pane zellij is on,
+skills, built in. It lists only the keys that work on the row: on a
+project's row, `a`, `n w`, `n P`, `n m`, `r` and the Brief group, and `d d`
+once the project has no workstream; on a workstream's row, the same with
+`d d` closing it, and `i` and `d m` where it works in a repository; on a
+pane's row, the Skills group, `/` and `n p` too; on another machine's header,
+`a`, `n P`, `n m`, `d d` and the Brief group, and on this machine's the same
+but `d d`. On another machine's rows, what opens or closes something here is
+left out: the Skills group, `/`, `n w` and a pane's `d d`. A key it
+does not list does nothing. `Alt a` opens the same menu floating at the bottom right of zellij's side, for the pane zellij is on,
 wherever the keys are and folded or not. It has the keys and the mouse while it is open: `Esc`, `Alt a` again or a
 click off its box closes it, and gives the keys back to zellij, or to the
 sidebar if it had them. A click on an entry presses its key, and on
@@ -684,7 +703,7 @@ tell which pane zellij is on. `Alt a` there tries again. A key that waits for
 something, as a pasted link's does, goes on after the menu closes, wherever the
 keys went: the pasted link's section below says how. While the sidebar
 has the keys and no menu is open, `?` opens the legend at its bottom, which
-lists what you can press there, until the next key:
+lists what you can press on the highlighted row, until the next key:
 
 ```text
 ─ luneta ──────────────────────
@@ -697,6 +716,7 @@ lists what you can press there, until the next key:
  i  File issue
  c  Skills ▸
  n  New ▸
+ r  Rename the terminal
  d  Delete ▸
  b  Brief ▸
 ```
@@ -711,7 +731,7 @@ highlight, so you see what a click hits before you click. A click that comes
 fast after another on the same cell, or one next to it, is none, the second
 of a double click and the third of a triple: a click that opened a group
 leaves another entry under the pointer, as `d` opens Delete onto
-`d  close the pane`, and `s  delete the session` under it.
+`d  close the pane`, and `m  delete merged worktrees` under it.
 
 Without the legend, a key that waits for the next, as `d` waits for what to
 delete, leaves the bottom as it is for a fifth of a second, and only then
@@ -730,21 +750,18 @@ lists the keys of the selection instead:
 ```
 
 `?` in the legend lists every key luneta has in its place, in groups: Move,
-the moves and folds; Sidebar, the legend's commands; Menu, each group's keys; and
-Anywhere, the keys luneta takes before zellij. `j` and `k` scroll it, `Esc`
-closes it, and any other key closes it and does what it does. A legend, or a
+the moves and folds; Sidebar, the legend's commands; Menu, each group's keys,
+for every row; Pasted link, the keys of a pasted link's menu; and Anywhere, the
+keys luneta takes before zellij. `j` and `k` scroll it, `Esc` closes it, and
+any other key closes it and does what it does. A legend, or a
 menu at the bottom of the sidebar, short of room for all its keys, keeps its
 last line for `?  All keys`, so you see that it left keys out; `?` in that
 menu closes it for the list.
 
 `n p` opens your shell in a pane of its own beside the highlighted pane, in its
-tab and in the directory it works in, `n t` a tab of its session there, and
-`n s` a session there, named as the picker's directories name the directory,
-with a `-2` when a session that runs, or one that ended, has that name. On a
-machine's header, `n s` makes the session in your home on that machine. Each
-takes zellij there, and gives it the keys. A tab of another session opens once
-zellij is there: zellij makes a tab as big as a client of its session, and
-most have none attached.
+workstream and in the directory it works in, and `n w` a new workstream of its
+project there, which you go to, named as lunetad names one, for its issue,
+branch or folder.
 `c t` starts an agent on `/thermo-nuclear-review` in a pane of its own
 beside the highlighted pane, in its tab and in the directory it works in; `c m` on `/make-illegal-states-unrepresentable`,
 and `c s` on `/tigerstyle`. For any other skill, `m` opens the menu on its
@@ -753,34 +770,25 @@ first group, where `/` searches the skills the pane's directory can run, and
 keys do, in the harness the line under the skills names, and so does a click on a skill. The wheel over them moves the
 highlight.
 
-`d d` closes the highlighted pane, or its tab once nothing else holds the tab
-open, floating panes and all. `d s` deletes its session: luneta kills it, and
-has zellij keep nothing of it, so it is not left to resurrect. On the last
-pane that holds a session's only tab open, or on a session's row, `d d`
-deletes the session too: zellij would leave an empty tab in a session with no
-client, and end the one zellij is in. The session zellij is in is deleted once
-zellij is in another, the newest, so that zellij stays on screen throughout,
-and the sidebar says where zellij goes until then; with no other, it is
-deleted with zellij in it, and luneta goes on in another machine's newest,
-[as when a session ends](#luneta-in-your-terminal), or ends where no machine
-has one left. When that would end an agent that is busy, waiting on you, or
-that says nothing luneta knows, the menu asks first, as it does for one whose
-session file lunetad cannot read, in the pane its process runs in, which the
-sidebar says at its bottom. So does every delete while lunetad does not
-answer, as what it said last of the agents may be out of date, and while it
-cannot tell which session the process of such a file runs in, which may be
-any: `y`, or the key again, goes ahead, and `n` or `Backspace` goes back.
-luneta asks zellij what a pane takes along as you press the key, and again as
-you go ahead, so a pane that opened in the tab meanwhile keeps the tab open,
-and is not closed with it. A delete leaves you in the sidebar, the highlight on
-the row after once what it took is gone, or, from the menu over zellij, where
-you were.
+`d d` closes the highlighted pane, its terminal with it. On a workstream's
+row, `d d` closes the workstream and every terminal in it, on whichever
+machine it is; where luneta shows it, luneta goes to another workstream, or
+ends with none left to show. When that would end an agent that is busy,
+waiting on you, or that says nothing luneta knows, the menu asks first, as it
+does for one whose session file lunetad cannot read, in the pane its process
+runs in, which the sidebar says at its bottom. So does every delete while
+lunetad does not answer, as what it said last of the agents may be out of
+date, and while it cannot tell which session the process of such a file runs
+in, which may be any: `y`, or the key again, goes ahead, and `n` or
+`Backspace` goes back. A delete leaves you in the sidebar, the highlight on the
+row after once what it took is gone, or, from the menu over zellij, where you
+were.
 
 `b` opens the [brief](#brief)'s keys: `b z` briefs you on every session, `b s`
-on the highlighted row's session, and `b h` on the agent in its pane, or on a
-session's row, on its session; on a machine's header, `b s` and `b h` brief
-you on its sessions. Over zellij, the row is the pane zellij is on,
-and closing the brief gives the keys back where the menu took them from.
+on the highlighted row's project, and `b h` on the agent in its pane, or on a
+project's or a workstream's row, on its project; on a machine's header, `b s`
+and `b h` brief you on its projects. Over zellij, the row is the pane zellij is
+on, and closing the brief gives the keys back where the menu took them from.
 
 `a` opens the [ask box](#from-lunetas-sidebar), where you tell an agent in
 words what you want done, as the menu would do it. From the menu over zellij,
@@ -1204,19 +1212,13 @@ beside it, there. Where lunetad loses the machine, the notes say so, and the
 view comes back once lunetad reaches it again. Making a workstream there,
 closing its terminals and the picker's preview of them come later.
 
-The menu on another machine's pane opens what it opens here, there: `n p`,
-`n t` and the agents of the Skills group open in zellij on that machine, `c f`
-and `c e` keep what the pane printed in a file there, for the agent there to
-read, `c c` has `gh` there fetch the logs of the checks and keeps them there, `/` finds the skills of the pane's directory there, and `n s` makes a
-session there, named as that machine names one, and on its header in your
-home there, which lunetad there knows; luneta's zellij goes to what opened, as
-`Enter` would. While lunetad does not reach the machine, `n s` on its header
-says so. `d d` and `d s` close and delete there what they
-do here, and ask first by that machine's agents. The session luneta's zellij is
-in there is deleted once zellij is in the newest other session of that
-machine's; with none, it is deleted with zellij in it, and luneta goes on as it
-does when a session there ends. While luneta's zellij is on another machine,
-the menu over zellij is for its pane there. The Brief group briefs you on its
+The menu on another machine's row does there what lunetad there can: `r`
+renames there, `d d` closes a workstream there, asking first by that machine's
+agents, and removes an empty project, `n P` makes a project there, and `d m`
+deletes the merged worktrees there. What would open or close a terminal, `n p`,
+`n w`, the Skills group, `/` and a pane's `d d`, waits for luneta to show
+another machine's workstreams, so the menu leaves it out there. While luneta's
+zellij is on another machine, the menu over zellij is for its pane there. The Brief group briefs you on its
 agents as on this machine's, [the ask box](#on-another-machines-row) runs
 its agent there, and [the issue box](#file-an-issue) has the issue written and
 filed there. A pull request's or an issue's link pasted on its row is that
@@ -1364,7 +1366,7 @@ now, and its plan.
 What holds the pane it runs in goes last, and its agent's line says `(this
 runs here)`: the agent ends with it. Where anything before it failed to
 close, it stays, so that the agent can tell you. It deletes only sessions
-that run, as `d s` does, so that zellij keeps nothing of them to resurrect,
+that run, so that zellij keeps nothing of them to resurrect,
 and leaves alone those zellij keeps already.
 
 #### From luneta's sidebar
@@ -1982,15 +1984,13 @@ the highlighted row, which lists only the keys that work on that row:
 | key | does | on |
 |---|---|---|
 | *a key it shows* | open its group, or start its agent | any row |
-| `n p` | open your shell in a pane beside the pane | a pane |
-| `n t` | open a tab of the pane's session | a pane |
-| `n s` | start a session where the pane works, or in your home on a machine's header, and go there: an own session on this machine | a pane, a machine's header |
+| `n p` | open your shell in a pane beside the pane, on its machine | a pane |
+| `n w` | make a workstream of the row's project in the row's folder, and go there | a pane, a workstream or a project of this machine |
+| `n P` | make a project of the row's folder, or one you type, with its first workstream, and go there | any row |
 | `n m` | add a machine, by what you type ssh to it | any row |
-| `t t` | turn the pane into a tab of its own | a pane |
-| `t p` | turn the pane's tab into panes of another tab, which you pick where it has several | a pane |
-| `d d` | close the pane; on a session's row, kill the session; on another machine's header, forget the machine | any row but this machine's header |
-| `d s` | kill the row's session | a pane, a session's row |
-| `d m` | list the [merged worktrees](#delete-merged-worktrees) of the pane's repository, to delete | a pane in a repository |
+| `r` | rename the row's terminal, workstream or project; with no name, a terminal or a workstream goes back to the name luneta gives it | a pane, a workstream, a project |
+| `d d` | close the pane; on a workstream's row, close the workstream and its terminals; on a project's row, remove the project; on another machine's header, forget the machine | a pane of this machine, a workstream, a project with no workstream, another machine's header |
+| `d m` | list the [merged worktrees](#delete-merged-worktrees) of the row's repository, to delete | a pane or a workstream in a repository |
 | `y`, or the key again | go ahead with a delete that asked first | any row |
 | `n` | back to the keys, from a delete that asked first | any row |
 | `Backspace` | back a group, or close from the first; back to the keys from a delete that asked | any row |

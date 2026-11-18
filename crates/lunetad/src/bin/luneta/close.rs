@@ -32,24 +32,12 @@ impl Whose {
 pub enum Scope {
     Pane(PaneKey),
     Workstream(WorkstreamId),
-    Session,
-}
-
-impl Scope {
-    pub fn does(self) -> &'static str {
-        match self {
-            Scope::Pane(_) => "close the pane",
-            Scope::Workstream(_) => "delete the workstream",
-            Scope::Session => "delete the session",
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Deletes {
     Pane { pane: PaneKey, closes: Closes },
     Workstream { workstream: WorkstreamId, panes: Vec<u32>, seen: Vec<TerminalId> },
-    Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +133,7 @@ impl Act {
         match self {
             Act::Pane { .. } => "Close the pane".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
-            Act::Workstream { .. } => "Delete the workstream".to_owned(),
+            Act::Workstream { .. } => "Close the workstream".to_owned(),
             Act::Kill { session, .. } | Act::Leave { session, .. } => {
                 format!("Delete session {session}")
             },
@@ -180,7 +168,7 @@ pub fn plan(subject: &Subject) -> Plan {
             let (workstream, panes, seen) = (*workstream, panes.clone(), seen.clone());
             Act::Workstream { session, whose, workstream, panes, seen }
         },
-        Deletes::Pane { closes: Closes::Session, .. } | Deletes::Session => match subject.seat {
+        Deletes::Pane { closes: Closes::Session, .. } => match subject.seat {
             Seat::Elsewhere => Act::Kill { session, whose },
             Seat::In => match subject.refuge.clone() {
                 Some(to) => Act::Leave { session, whose, to },
@@ -329,25 +317,22 @@ mod tests {
             Act::Tab { session: session.clone(), whose, tab: TabId(3), panes: vec![4, 5] }
         );
         let kill = Act::Kill { session: session.clone(), whose };
-        assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), kill.clone());
+        assert_eq!(planned(Seat::Elsewhere, pane(Closes::Session)), kill);
         let leave = Act::Leave { session, whose, to: elsewhere() };
-        assert_eq!(planned(Seat::In, pane(Closes::Session)), leave.clone());
-        assert_eq!(planned(Seat::In, Deletes::Session), leave);
-        assert_eq!(planned(Seat::Elsewhere, Deletes::Session), kill);
+        assert_eq!(planned(Seat::In, pane(Closes::Session)), leave);
     }
 
     #[test]
     fn the_only_session_is_killed_with_luneta_in_it() {
         let luneta = luneta();
-        for deletes in [Deletes::Session, pane(Closes::Session)] {
-            let agents = vec![(4, Doing::Busy)];
-            let alone = Subject { refuge: None, ..subject(&luneta, Seat::In, deletes, agents) };
-            let planned = plan(&alone);
-            let whose = luneta.whose();
-            assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), whose });
-            let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
-            assert_eq!(planned.question(), asks);
-        }
+        let agents = vec![(4, Doing::Busy)];
+        let deletes = pane(Closes::Session);
+        let alone = Subject { refuge: None, ..subject(&luneta, Seat::In, deletes, agents) };
+        let planned = plan(&alone);
+        let whose = luneta.whose();
+        assert_eq!(planned.act, Act::Kill { session: luneta.name().clone(), whose });
+        let asks = Some("Delete session luneta? 1 agent, 1 busy".to_owned());
+        assert_eq!(planned.question(), asks);
     }
 
     #[test]
@@ -359,7 +344,7 @@ mod tests {
         let planned = |agents| plan(&subject(&luneta, Seat::In, deletes(), agents));
         assert_eq!(planned(vec![(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
         let asks = planned(vec![(5, Doing::Waiting)]).question();
-        assert_eq!(asks.as_deref(), Some("Delete the workstream? 1 agent, 1 waiting"));
+        assert_eq!(asks.as_deref(), Some("Close the workstream? 1 agent, 1 waiting"));
         let (session, whose) = (luneta.name().clone(), luneta.whose());
         let panes = vec![4, 5];
         let act = Act::Workstream { session, whose, workstream, panes, seen: seen.clone() };
@@ -383,7 +368,7 @@ mod tests {
         let tab = Closes::Tab { id: TabId(1), panes: vec![4, 5, 8] };
         assert_eq!(question(pane(tab)), Some("Close its tab? 2 agents, 1 busy".to_owned()));
         assert_eq!(
-            question(Deletes::Session),
+            question(pane(Closes::Session)),
             Some("Delete session luneta? 4 agents, 1 busy, 1 waiting, 1 unknown".to_owned())
         );
         let unknown = Deletes::Pane { pane: PaneKey::Zellij(7), closes: Closes::Pane };

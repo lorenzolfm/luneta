@@ -757,7 +757,7 @@ fn says(act: &Act) -> String {
             format!("close the tab of {}", panes.join(", "))
         },
         Act::Workstream { session, workstream, .. } => {
-            format!("delete workstream {workstream} of {session}")
+            format!("close workstream {workstream} of {session}")
         },
         Act::Kill { session, .. } | Act::Leave { session, .. } => {
             format!("delete session {session}")
