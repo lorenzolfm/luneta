@@ -989,6 +989,7 @@ pub enum Asked {
         menu: u64,
         on: Machine,
         session: SessionName,
+        holder: Directory,
         cwd: Directory,
         name: String,
         command: Vec<String>,
@@ -1449,6 +1450,13 @@ impl Sidebar {
         self.seat = Some(Sitting { on, own: OwnSeat::Coming(session), shown: None });
         self.unfold_own(session);
         self.rebuild();
+    }
+
+    pub fn unseat(&mut self) {
+        if self.seat.take().is_some() {
+            self.rebuild();
+        }
+        assert!(self.seat.is_none(), "luneta sits nowhere when it shows no workstream");
     }
 
     pub fn went_own(&mut self, pane: OwnPane, client: OwnClientId) {
@@ -2892,8 +2900,8 @@ impl Sidebar {
                 Asked::Printed { menu: number, on, session, pane, ended }
             },
             Wants::Checks { page } => Asked::Checks { menu: number, on, page },
-            Wants::Make { session, cwd, name, command } => {
-                Asked::Make { menu: number, on, session, cwd, name, command }
+            Wants::Make { session, holder, cwd, name, command } => {
+                Asked::Make { menu: number, on, session, holder, cwd, name, command }
             },
             Wants::Prunes { dir } => Asked::Prunes { menu: number, on, dir },
             Wants::Prune { dir, agreed } => Asked::Prune { menu: number, on, dir, agreed },
@@ -2901,8 +2909,9 @@ impl Sidebar {
                 Asked::Closes { menu: number, on, session, pane }
             },
             Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
-                let panes = self.panes_of(&on, workstream);
-                let plan = self.plan(&on, &session, Deletes::Workstream { workstream, panes });
+                let plan = self.panes_of(&on, workstream).and_then(|panes| {
+                    self.plan(&on, &session, Deletes::Workstream { workstream, panes })
+                });
                 self.planned(plan)
             },
             Wants::Plan { session, scope: Scope::Session } => {
@@ -3025,10 +3034,13 @@ impl Sidebar {
         Ok(close::plan(&self.subject(on, listed, deletes)))
     }
 
-    fn panes_of(&self, on: &Machine, workstream: WorkstreamId) -> Vec<u32> {
+    fn panes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Vec<u32>, String> {
         let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
         let mut held = streams.filter(|stream| stream.place.workstream == workstream);
-        held.next().map_or_default(|stream| stream.panes.iter().map(|pane| pane.id).collect())
+        let Some(stream) = held.next() else {
+            return Err(format!("workstream {workstream} is no longer listed"));
+        };
+        Ok(stream.panes.iter().map(|pane| pane.id).collect())
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -7677,6 +7689,24 @@ mod tests {
     }
 
     #[test]
+    fn luneta_unseated_sits_in_no_project_and_its_delete_leaves_none() {
+        let mut sidebar = fresh();
+        let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
+        let sessions = vec![own_session("twin", 1, panes()), own_session("newest", 2, Vec::new())];
+        sidebar.hear(host(sessions, Vec::new()));
+        let key = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
+        sidebar.attaching(Machine::Local, key);
+        sidebar.went_own(OwnPane::new(key, 1).unwrap(), OwnClientId::new(4).unwrap());
+        sidebar.unseat();
+        assert_eq!(sidebar.own_seat(), None);
+        sidebar.cursor = Some(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "d");
+        let kill = Act::Kill { session: session_name("twin"), whose: Whose::Own(key) };
+        assert_eq!(sidebar.key(&char('s'), moment(160_000)), delete_here(kill));
+    }
+
+    #[test]
     fn a_pull_request_s_link_pasted_opens_the_menu_for_it() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_pane_of("older", 1, 1));
@@ -7724,6 +7754,7 @@ mod tests {
             menu: 1,
             on: Machine::Local,
             session: session_name("newer-2"),
+            holder: directory("/w/n"),
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
             command: Vec::new(),

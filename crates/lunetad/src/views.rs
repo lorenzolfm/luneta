@@ -735,7 +735,7 @@ impl Views {
         let key = match self.mux.made(&cwd, opened, tag(terminal), inner) {
             Ok(key) => key,
             Err(failure) => {
-                if let Err(why) = self.followed(Change::Close { terminal }) {
+                if let Err(why) = self.followed(Change::Unopen { terminal }) {
                     self.troubles.say(format!("terminal {terminal} stays lost: {why}"));
                 }
                 return Err(failure.to_string());
@@ -985,9 +985,6 @@ impl Views {
                 Some(heir) => self.last_focus.insert(workstream, heir),
                 None => self.last_focus.remove(&workstream),
             };
-        }
-        if heir.is_none() {
-            self.followed(Change::ForgetWorkstream { workstream })?;
         }
         let projects = self.kept()?;
         assert!(projects.holding(terminal).is_none(), "terminal {terminal} left its view");

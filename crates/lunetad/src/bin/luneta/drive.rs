@@ -889,9 +889,8 @@ fn act(act: &Act) -> Result<(), String> {
             let close = Close::Tab { id: *tab, panes: panes.clone() };
             closes::closed(session, whose.started(session)?, &close)
         },
-        Act::Workstream { session, whose, .. } => {
-            whose.started(session)?;
-            Err(format!("{session}'s workstreams are lunetad's, and closed through it"))
+        Act::Workstream { .. } => {
+            unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
         },
         Act::Kill { session, whose } | Act::Leave { session, whose, .. } => {
             closes::killed(session, whose.started(session)?)

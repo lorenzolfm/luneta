@@ -85,7 +85,7 @@ struct KeptWorkstream {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,

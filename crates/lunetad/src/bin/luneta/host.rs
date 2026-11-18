@@ -96,8 +96,6 @@ const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming i
 
 pub const NOT_YET: &str = "luneta does not do that to a workstream yet";
 
-const NO_WORKSTREAM: &str = "no workstream to show yet: the menu on a project's row makes one";
-
 const UNSHOWN: [&str; 2] =
     ["No workstream to show yet.", "The menu on a project's row makes one."];
 
@@ -349,7 +347,7 @@ impl Inbox {
 
 struct App {
     right: Option<Viewed>,
-    views: u64,
+    view_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
     seated: Option<OwnPane>,
@@ -576,7 +574,7 @@ fn run_in(
     let focused = true;
     let mut app = App {
         right,
-        views: 1,
+        view_number_dropped: 0,
         runs_in,
         projected: Projected::default(),
         seated: None,
@@ -1564,7 +1562,7 @@ impl App {
                 }
                 self.leave();
             },
-            Asked::Make { menu, on, session, cwd, name, command } => {
+            Asked::Make { menu, on, session, holder, cwd, name, command } => {
                 if self.refuse_naming(Some(menu)) {
                     return;
                 }
@@ -1572,9 +1570,10 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(|| match on {
                         Machine::Local => {
+                            let holder = workstreams::real(Path::new(holder.as_str()));
                             let cwd = workstreams::real(Path::new(cwd.as_str()));
-                            let session = session.as_str();
-                            let made = workstreams::pulled(&lunetad, session, &cwd, &name)?;
+                            let (session, at) = (session.as_str(), (holder.as_path(), cwd.as_path()));
+                            let made = workstreams::pulled(&lunetad, session, at, &name)?;
                             Ok(Pulled { workstream: made, argv: command })
                         },
                         Machine::Remote(_) => Err(menu::HERE_ONLY.to_owned()),
@@ -1647,11 +1646,13 @@ impl App {
         if let Act::Workstream { workstream, .. } = act {
             let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
             let (on, workstream) = (on.clone(), *workstream);
-            thread::spawn(move || {
+            let deleting = thread::spawn(move || {
                 if let Err(why) = caught(|| workstreams::closed(&lunetad, &on, workstream)) {
                     let _ = events.send(Event::Notice(format!("menu: not deleted: {why}")));
                 }
             });
+            self.deleting.retain(|deleting| !deleting.is_finished());
+            self.deleting.push(deleting);
             return;
         }
         let (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) = (on, act) else {
@@ -2002,10 +2003,9 @@ impl App {
         if let Some(right) = &mut self.right {
             right.go(on, workstream);
         } else {
-            self.views += 1;
             let (size, greeting) = (view_size(self.areas.1), greeting(self.colours));
             let (folder, events) = (self.lunetad.clone(), &self.events);
-            let (number, on) = (self.views, on.clone());
+            let (number, on) = (self.view_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
             let started =
                 Viewed::start(number, folder, on, workstream, size, greeting, runs_in, events);
@@ -2029,9 +2029,14 @@ impl App {
 
     fn unview(&mut self) {
         if let Some(right) = self.right.take() {
-            self.views = self.views.max(right.number());
+            let number = right.number();
+            assert!(number > self.view_number_dropped, "a view's number grows past the last dropped");
+            self.view_number_dropped = number;
         }
+        self.sidebar.unseat();
+        self.seated = None;
         self.give(Focus::on(Side::Sidebar));
+        assert_eq!(self.focus.side, Side::Sidebar, "with no workstream shown, no keys go to it");
     }
 
     fn seat(&mut self) {
@@ -2130,7 +2135,7 @@ impl App {
         match made {
             Made::Workstream { made: Ok(Some(made)), argv } => self.go_opening(made, argv),
             Made::Workstream { made: Ok(None), .. } => {
-                self.sidebar.notify(NO_WORKSTREAM.to_owned());
+                self.sidebar.notify(format!("menu: {}", UNSHOWN.join(" ")));
             },
             Made::Workstream { made: Err(why), .. } => self.sidebar.notify(why),
             Made::Pulled { menu, made } => self.pulled_made(menu, made),
@@ -2161,7 +2166,9 @@ impl App {
 
     fn give_from(&mut self, had: bool, focus: Focus) {
         let focus = match focus.side {
-            Side::Session if self.right.is_none() => Focus { side: Side::Sidebar, ..focus },
+            Side::Session | Side::Collapsed if self.right.is_none() => {
+                Focus { side: Side::Sidebar, ..focus }
+            },
             Side::Session | Side::Sidebar | Side::Collapsed => focus,
         };
         if focus.side == Side::Collapsed || focus.over.is_some() {

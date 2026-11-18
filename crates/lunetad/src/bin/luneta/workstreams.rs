@@ -15,7 +15,7 @@ use lunetad::names::session_for;
 
 use crate::daemon;
 use crate::machines::Machine;
-use crate::projected::{self, Project};
+use crate::projected::{self, Project, Workstream};
 use crate::sidebar::Reorder;
 
 const ASKING: Duration = Duration::from_secs(15);
@@ -156,7 +156,14 @@ fn holding(projects: &[Project], cwd: &Path) -> Option<Project> {
 }
 
 fn last_used(project: &Project) -> Option<WorkstreamId> {
-    project.workstreams.iter().rev().max_by_key(|it| it.used).map(|it| it.id)
+    let mut last: Option<&Workstream> = None;
+    for workstream in &project.workstreams {
+        if last.is_none_or(|last| workstream.used > last.used) {
+            last = Some(workstream);
+        }
+    }
+    assert_eq!(last.is_some(), !project.workstreams.is_empty(), "a project's workstream is last");
+    last.map(|it| it.id)
 }
 
 fn at_folder(
@@ -164,6 +171,7 @@ fn at_folder(
     project: &Project,
     folder: &str,
 ) -> Result<Option<WorkstreamId>, String> {
+    assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
     if project.dir == folder {
         return Ok(last_used(project));
     }
@@ -248,12 +256,21 @@ pub fn here(path: &Path, cwd: &Path, name: Option<&str>) -> Result<Option<Workst
     }
 }
 
-pub fn pulled(path: &Path, project: &str, cwd: &Path, name: &str) -> Result<WorkstreamId, String> {
+fn utf8(dir: &Path) -> Result<&str, String> {
+    dir.to_str().ok_or_else(|| format!("{} is not UTF-8", dir.display()))
+}
+
+pub fn pulled(
+    path: &Path,
+    project: &str,
+    (holder, cwd): (&Path, &Path),
+    name: &str,
+) -> Result<WorkstreamId, String> {
     let projects = kept(path)?;
-    let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    let (dir, folder) = (utf8(holder)?, utf8(cwd)?);
     let id = match holding(&projects, cwd) {
         Some(project) => project.id,
-        None => add_project(path, folder, Some(project)).map_err(Unmade::said)?,
+        None => add_project(path, dir, Some(project)).map_err(Unmade::said)?,
     };
     add_workstream(path, id, folder, Some(name))
 }

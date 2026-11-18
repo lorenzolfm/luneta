@@ -280,7 +280,8 @@ pub fn project(project: &api::Project) -> Result<Project, String> {
             }
         }
         let (name, folder) = (workstream.name.clone(), workstream.folder.clone());
-        let used = workstream.used_at.and_then(|at| SystemTime::try_from(at).ok());
+        let used = workstream.used_at.map(SystemTime::try_from).transpose();
+        let used = used.map_err(|why| format!("workstream {named}'s last use: {why}"))?;
         Ok(Workstream { id, name, folder, tab, terminals, titles, used })
     };
     let workstreams = project.workstreams.iter().zip(0..).map(workstream);
