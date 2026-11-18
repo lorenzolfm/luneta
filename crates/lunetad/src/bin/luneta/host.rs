@@ -1,11 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{self, Write as _};
 use std::num::NonZeroU16;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -21,7 +21,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
-use lunetad::api::Host;
+use lunetad::api::{Host, Version};
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
@@ -64,13 +64,13 @@ use crate::peers;
 use crate::picker::{self, List, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
-use crate::sidebar::{self, Asked, HereAgent, Keys, PaneKey, Place, Sidebar};
+use crate::sidebar::{self, Asked, HereAgent, Keys, PaneKey, Place, Reorder, Sidebar};
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::workstreams;
+use crate::workstreams::{self, Unmoved};
 use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName, Turned};
 
@@ -112,6 +112,8 @@ pub enum Event {
     Reached { claude_folder: Option<PathBuf> },
     Daemon(Result<Host, String>),
     Notice(String),
+    Moved { ticket: u64, kept: Option<Version> },
+    Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unmoved },
     Copy(Link),
     CopyText(String),
     Image(Went),
@@ -352,6 +354,7 @@ struct App {
     projected: Projected,
     seated: Option<OwnPane>,
     lunetad: PathBuf,
+    movers: HashMap<Machine, SyncSender<Move>>,
     sidebar: Sidebar,
     areas: (Rect, Rect),
     width: Width,
@@ -579,6 +582,7 @@ fn run_in(
         projected: Projected::default(),
         seated: None,
         lunetad,
+        movers: HashMap::new(),
         sidebar,
         areas,
         width,
@@ -640,6 +644,59 @@ fn view_size(area: Rect) -> lunetad::projects::Size {
 
 fn caught<T>(named: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(named)).unwrap_or_else(|_| Err(NAMING_PANICKED.to_owned()))
+}
+
+struct Move {
+    ticket: u64,
+    order: Reorder,
+}
+
+const MOVE_PANICKED: &str = "luneta could not ask lunetad for the move: asking panicked";
+
+fn moves_on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> SyncSender<Move> {
+    let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
+    let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
+    thread::spawn(move || {
+        let mut stopped = Stopped::default();
+        for Move { ticket, order } in asked {
+            if stopped.holds(ticket) {
+                continue;
+            }
+            let asked = AssertUnwindSafe(|| workstreams::reordered(&lunetad, &on, &order));
+            let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
+            let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
+                Ok(kept) => Event::Moved { ticket, kept },
+                Err(unmoved) => {
+                    stopped.stop(ticket);
+                    Event::Unmoved { on: on.clone(), ticket, order, unmoved }
+                },
+            };
+            if events.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    moves
+}
+
+#[derive(Default)]
+struct Stopped {
+    tickets: VecDeque<u64>,
+}
+
+impl Stopped {
+    fn holds(&self, ticket: u64) -> bool {
+        self.tickets.contains(&ticket)
+    }
+
+    fn stop(&mut self, ticket: u64) {
+        assert!(!self.holds(ticket), "a ticket stopped sends no more moves");
+        if self.tickets.len() == sidebar::MOVES_MAX {
+            self.tickets.pop_front();
+        }
+        self.tickets.push_back(ticket);
+        assert!(self.tickets.len() <= sidebar::MOVES_MAX);
+    }
 }
 
 fn run_loop(
@@ -738,6 +795,14 @@ impl App {
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
+            Event::Unmoved { on, ticket, order, unmoved } => {
+                let note = match unmoved {
+                    Unmoved::Refused(why) => format!("not moved: {why}"),
+                    Unmoved::Unsure(why) => format!("may have moved: {why}"),
+                };
+                self.sidebar.unmoved(&on, ticket, &order, note);
+            },
             Event::Copy(link) => clip(terminal, ClipboardType::Clipboard, &link.url())?,
             Event::CopyText(text) => {
                 clip(terminal, ClipboardType::Clipboard, &text)?;
@@ -1631,13 +1696,22 @@ impl App {
                     self.sidebar.notify(format!("forget {destination}: {why}"));
                 }
             },
-            Asked::Move { on, order } => {
-                let (lunetad, events) = (self.lunetad.clone(), self.events.clone());
-                thread::spawn(move || {
-                    if let Err(why) = caught(|| workstreams::reordered(&lunetad, &on, &order)) {
-                        let _ = events.send(Event::Notice(format!("not moved: {why}")));
-                    }
-                });
+            Asked::Move { on, order, ticket } => {
+                let (lunetad, events) = (&self.lunetad, &self.events);
+                let mover = self.movers.entry(on.clone());
+                let mover = mover.or_insert_with(|| moves_on(lunetad, &on, events));
+                match mover.try_send(Move { ticket, order }) {
+                    Ok(()) => {},
+                    Err(TrySendError::Full(Move { ticket, order })) => {
+                        let why = format!("{} moves are on their way already", sidebar::MOVES_MAX);
+                        self.sidebar.unsent(ticket, &order, &why);
+                    },
+                    Err(TrySendError::Disconnected(Move { ticket, order })) => {
+                        self.movers.remove(&on);
+                        let why = "the moves have stopped: move it again";
+                        self.sidebar.unsent(ticket, &order, why);
+                    },
+                }
             },
         }
     }
@@ -2285,8 +2359,11 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
+            let uncovered = |at: &Position| self.focus.over.is_none() && right.contains(*at);
+            let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
+            let hover = self.pointer.filter(uncovered).map(spot);
             let cursor = if let Some(shown) = &self.right {
-                shown.draw(buffer, right)
+                shown.draw(buffer, right, hover)
             } else {
                 draw_unshown(buffer, right);
                 None
@@ -2545,5 +2622,20 @@ mod tests {
         parser.advance(&mut screen, &put);
         assert_eq!(screen.grid()[spinner].c, '⠙');
         assert_eq!(screen.cursor_style(), Config::default().default_cursor_style);
+    }
+
+    #[test]
+    fn a_ticket_stopped_sends_no_more_and_the_last_ones_stopped_are_held() {
+        let mut stopped = Stopped::default();
+        assert!(!stopped.holds(1));
+        stopped.stop(1);
+        assert!(stopped.holds(1));
+        assert!(!stopped.holds(2), "another ticket goes on");
+        let last = u64::try_from(sidebar::MOVES_MAX).unwrap() + 1;
+        for ticket in 2..=last {
+            stopped.stop(ticket);
+        }
+        assert!(!stopped.holds(1), "the oldest goes once the most are held");
+        assert!((2..=last).all(|ticket| stopped.holds(ticket)));
     }
 }

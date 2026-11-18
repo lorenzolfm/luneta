@@ -342,7 +342,7 @@ mod tests {
             workstreams: vec![first, second],
             ..api::Project::default()
         };
-        let kept = Held::Kept(Kept { projects: vec![project] });
+        let kept = Held::Kept(Kept { projects: vec![project], version: None });
         let projects = Some(api::Projects { held: Some(kept) });
         let own = api::Session { name: "old".to_owned(), ..api::Session::default() };
         let in_terminal = |pid, id| api::Agent {

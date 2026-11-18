@@ -491,7 +491,13 @@ dim `◇`. Sessions of zellij's that run still show in the sidebar, and going to
 one, as `Enter` on its row does, takes luneta there, and going to an own one
 takes it back. A drag over an own pane selects its text and copies it, as a
 drag over the sidebar does; where the pane's program takes the mouse, hold
-`Shift`. When the own session luneta is in ends, the newest session of this
+`Shift`. A click on a URL or a file path copies the whole of it and shows it
+reversed, as a selection, and the pointer over one underlines it first. A URL
+runs from its scheme, as `https://`, to a blank or a quote, less a stop or a
+bracket it did not open; a path is a word with a `/` in it, as
+`crates/a.rs:12`, between blanks, brackets and quotes. Either goes on into the
+next row where the program's text wraps into it, and neither is longer than
+4096 cells. A click on any other word copies nothing. When the own session luneta is in ends, the newest session of this
 machine takes its place, of either kind, and so it does when zellij's ends.
 
 A project's terminals outlive lunetad, as `luneta-mux` holds them. When
@@ -1119,11 +1125,17 @@ the highlighted terminal, or the highlighted project or workstream, and `v`
 again its project. `j` and `k` grow the selection over the next ones, and `J`
 and `K` move what it holds, one down or one up, as a visual selection and `:m`
 do in vim: a workstream among its project's, a project among its machine's.
-lunetad keeps the order, so every luneta, on any machine, shows it the same,
-and a move shows once lunetad says so. A move asks lunetad for the whole order
-as you saw it, and lunetad turns it down where its order changed since. They
-stay selected, so `JJJ` goes on. `Esc` ends the selection, doing nothing else;
-any other key ends it and does what it does.
+lunetad keeps the order, so every luneta, on any machine, shows it the same.
+A move shows at once. It asks lunetad for the whole order you want next to the
+one you saw, and lunetad turns it down unless the order it keeps is the one you
+saw, so a move made meanwhile from another luneta is not undone. The rows then
+go back to lunetad's order, and the note says why. A move builds on the one
+before it, though lunetad has not said that one yet, and the moves reach lunetad
+in the order pressed, on another machine too. Once one is turned down, or goes
+unanswered, the ones pressed after it are not sent, and where lunetad did not
+answer, the note says it may have moved. They stay selected, so `JJJ` moves
+three. `Esc` ends the selection, doing nothing else; any other key ends it and
+does what it does.
 
 With the mouse, a press on a project's or a workstream's row lifts it once the
 mouse moves a line, and the sidebar takes the keys. It shows where it lands,

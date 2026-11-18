@@ -59,7 +59,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Failed, Id, Store, WorkstreamId};
+use crate::projects::{Ask, Changed, Failed, Id, Store, WorkstreamId};
 use crate::views;
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -1138,7 +1138,7 @@ impl Daemon for Host {
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let views = self.views.clone();
-        let changed = task::spawn_blocking(move || -> Result<Option<Id>, Status> {
+        let changed = task::spawn_blocking(move || -> Result<Changed, Status> {
             let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
             let stopped = "it is kept, but the daemon's core has stopped";
             let asked = views::ask(&views, |answer| views::Command::Change { change, answer });
@@ -1146,14 +1146,16 @@ impl Daemon for Host {
             changed.map_err(|failed| match failed {
                 Failed::NotKept(why) => Status::failed_precondition(why),
                 Failed::Nests(why) => Status::already_exists(why),
+                Failed::Stale(why) => Status::aborted(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
                 Failed::Unclosed(why) => Status::unavailable(why),
                 Failed::KeptUntold => Status::unavailable(stopped),
             })
         });
-        let made = changed.await.map_err(|error| unfinished(&error))??;
-        Ok(Response::new(ChangeProjectsResponse { made: made.map(Id::get) }))
+        let Changed { made, kept } = changed.await.map_err(|error| unfinished(&error))??;
+        let (made, kept) = (made.map(Id::get), Some(kept.to_api()));
+        Ok(Response::new(ChangeProjectsResponse { made, kept }))
     }
 
     async fn keep_image(

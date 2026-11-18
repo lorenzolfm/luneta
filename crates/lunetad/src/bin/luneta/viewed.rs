@@ -20,7 +20,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 
 use crate::attached::{
-    below_bar, border, draw_screen, draw_tab_spans, key_said, mouse_said, on_panes,
+    below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_panes,
     screen_rect, selects, span_under, spot_in, tab_spans, text, within, Pointer, Screen,
     Selection, Spot, TAB_BAR_ROWS,
 };
@@ -267,8 +267,13 @@ impl View {
         let (Some((inner, _, screen)), Some(at)) = (self.focused_screen(), on_panes(at)) else {
             return;
         };
-        let at = within(spot_in(inner, at), screen.size);
-        self.pointer = Pointer::Selecting(Selection { from: at, to: at });
+        let at = spot_in(inner, at);
+        let held = within(at, screen.size);
+        self.pointer = if held == at {
+            Pointer::Pressed(at)
+        } else {
+            Pointer::Selecting(Selection { from: held, to: held })
+        };
     }
 
     fn select_to(&mut self, at: Spot) {
@@ -276,27 +281,43 @@ impl View {
             return;
         };
         let at = within(spot_in(inner, below_bar(at)), screen.size);
-        if let Pointer::Selecting(selection) = &mut self.pointer {
-            selection.to = at;
-        }
+        self.pointer = match self.pointer {
+            Pointer::Pressed(from) if from != at => Pointer::Selecting(Selection { from, to: at }),
+            Pointer::Selecting(selection) => Pointer::Selecting(Selection { to: at, ..selection }),
+            Pointer::Free | Pointer::Sending | Pointer::Pressed(_) | Pointer::Shown(_) => {
+                return;
+            },
+        };
     }
 
     fn selected(&mut self) -> Option<String> {
-        let Pointer::Selecting(selection) = self.pointer else {
-            return None;
-        };
-        let moved = Some(selection).filter(|selection| selection.from != selection.to);
         let screen = self.focused_screen().map(|(_, _, screen)| screen);
-        let text = moved.zip(screen).map(|(selection, screen)| text(screen, selection));
-        let text = text.filter(|text| !text.is_empty());
-        self.pointer = match text {
-            Some(_) => Pointer::Shown(selection),
-            None => Pointer::Free,
+        let chosen = match self.pointer {
+            Pointer::Pressed(at) => screen.and_then(|screen| link(screen, at)),
+            Pointer::Selecting(selection) if selection.from != selection.to => screen
+                .map(|screen| (selection, text(screen, selection)))
+                .filter(|(_, text)| !text.is_empty()),
+            Pointer::Selecting(_) => None,
+            Pointer::Free | Pointer::Sending | Pointer::Shown(_) => return None,
         };
-        text
+        self.pointer = chosen.as_ref().map_or(Pointer::Free, |(lit, _)| Pointer::Shown(*lit));
+        chosen.map(|(_, text)| text)
     }
 
-    fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
+    fn pointed(&self, at: Spot) -> Option<Selection> {
+        let (inner, _, screen) = self.focused_screen()?;
+        let at = on_panes(at).filter(|at| inner.contains(*at))?;
+        if screen.tracks_mouse {
+            return None;
+        }
+        let at = spot_in(inner, at);
+        if within(at, screen.size) != at {
+            return None;
+        }
+        link(screen, at).map(|(span, _)| span)
+    }
+
+    fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 if let Some(cell) = buffer.cell_mut((x, y)) {
@@ -309,6 +330,7 @@ impl View {
         draw_tab_spans(buffer, bar, &tab_spans(self.named_tabs(), bar.width), self.workstream);
         let focused = self.focused();
         let selection = self.pointer.selection();
+        let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
         for (pane, placed) in self.drawn() {
             let mine = Some(pane.terminal) == focused;
@@ -324,7 +346,8 @@ impl View {
                 Found::Key(key) if Some(key) == self.runs_in => HERE,
                 Found::Key(key) => {
                     if let Some(screen) = self.screens.get(&key) {
-                        let drawn = draw_screen(buffer, seen, screen, selection.filter(|_| mine));
+                        let lit = |span: Option<Selection>| span.filter(|_| mine);
+                        let drawn = draw_screen(buffer, seen, screen, lit(selection), lit(pointed));
                         if mine {
                             cursor = drawn;
                         }
@@ -693,8 +716,8 @@ impl Viewed {
     }
 
     #[must_use]
-    pub fn draw(&self, buffer: &mut Buffer, area: Rect) -> Option<Position> {
-        self.view.draw(buffer, area)
+    pub fn draw(&self, buffer: &mut Buffer, area: Rect, hover: Option<Spot>) -> Option<Position> {
+        self.view.draw(buffer, area, hover)
     }
 
     #[must_use]
@@ -709,10 +732,12 @@ mod tests {
 
     use crossterm::event::{KeyModifiers, MouseButton};
     use lunetad::api::{show_request, show_response};
-    use lunetad::mux::own::frames::{Cursor, Glyph, Grapheme, Line, Shows};
+    use lunetad::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Shows};
     use lunetad::mux::own::OwnMade;
+    use ratatui::style::Modifier;
 
     use super::*;
+    use crate::attached::At;
 
     fn side(count: u16) -> NonZeroU16 {
         NonZeroU16::new(count).unwrap()
@@ -726,7 +751,7 @@ mod tests {
     fn lines(rows: &[&str]) -> Vec<Line> {
         let line = |row: &str| {
             let glyphs: Vec<Glyph> = row.chars().map(|it| narrow(&it.to_string())).collect();
-            Line::new(glyphs, false, side(u16::try_from(row.len()).unwrap())).unwrap()
+            Line::new(glyphs, Ending::Here, side(u16::try_from(row.len()).unwrap())).unwrap()
         };
         rows.iter().map(|row| line(row)).collect()
     }
@@ -814,7 +839,7 @@ mod tests {
     fn each_terminal_draws_in_its_frame_under_the_workstreams_and_a_larger_area_keeps_a_margin() {
         let view = split_view();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let cursor = view.draw(&mut buffer, Rect::new(2, 0, 22, 6));
+        let cursor = view.draw(&mut buffer, Rect::new(2, 0, 22, 6), None);
         assert_eq!(row(&buffer, 0, 2, 14), " one   two  ");
         assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (gruvbox::BG0, gruvbox::GREEN));
         assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
@@ -825,7 +850,7 @@ mod tests {
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
-        assert_eq!(view.draw(&mut small, Rect::new(0, 0, 14, 3)), None);
+        assert_eq!(view.draw(&mut small, Rect::new(0, 0, 14, 3), None), None);
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
         assert_eq!(row(&small, 2, 0, 14), "│abcdefgh││qrs");
     }
@@ -853,14 +878,14 @@ mod tests {
         let mut view = split_view();
         view.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        view.draw(&mut buffer, Rect::new(0, 0, 20, 5));
+        view.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = View::new(workstream(1), Some(key(2)));
         let lost = vec![pane(11, (0, 0, 10, 4), None), pane(12, (10, 0, 10, 4), Some(2))];
         here.laid_out(laid(lost, 11, false));
         assert_eq!(here.wanted(), BTreeSet::new(), "luneta never shows the terminal it runs in");
-        here.draw(&mut buffer, Rect::new(0, 0, 20, 5));
+        here.draw(&mut buffer, Rect::new(0, 0, 20, 5), None);
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "luneta r");
     }
@@ -899,6 +924,45 @@ mod tests {
         assert!(matches!(view.pointer, Pointer::Shown(_)));
         view.framed(&whole(1, &["ab"], None)).unwrap();
         assert_eq!(view.pointer, Pointer::Free);
+    }
+
+    #[test]
+    fn a_click_on_a_link_copies_it_and_the_pointer_over_one_underlines_it() {
+        let mut view = split_view();
+        view.framed(&whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
+        view.select_from(spot(2, 3));
+        assert_eq!(view.selected().as_deref(), Some("a/b.rs"));
+        let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
+        assert_eq!(view.pointer, Pointer::Shown(lit));
+        view.select_from(spot(2, 3));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a press that stays is a click");
+        view.select_from(spot(2, 3));
+        view.select_to(spot(2, 6));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected(), None, "a drag that comes back is no click");
+        assert_eq!(view.pointer, Pointer::Free);
+        view.select_from(spot(2, 8));
+        assert_eq!(view.selected(), None, "a click on a word copies nothing");
+        assert_eq!(view.pointer, Pointer::Free);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
+        view.draw(&mut buffer, Rect::new(0, 0, 20, 5), Some(spot(2, 2)));
+        let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
+        let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
+        assert_eq!(line, "______  ");
+        assert_eq!(view.pointed(spot(2, 13)), None, "only in the focused terminal");
+        let size = frames::Size { columns: side(8), rows: side(2) };
+        let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
+        view.framed(&Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
+        assert_eq!(view.pointed(spot(2, 2)), None, "where the program takes the mouse, none shows");
+        view.framed(&whole(1, &["x a/b.rs"], None)).unwrap();
+        assert_eq!(view.pointed(spot(3, 8)), None, "past a screen shorter than its pane, none shows");
+        view.select_from(spot(3, 8));
+        assert_eq!(view.selected(), None, "nor does a click there copy");
+        assert_eq!(view.pointer, Pointer::Free);
+        view.select_from(spot(3, 8));
+        view.select_to(spot(2, 3));
+        assert_eq!(view.selected().as_deref(), Some("a/b.rs"), "a drag from there still selects");
     }
 
     #[test]

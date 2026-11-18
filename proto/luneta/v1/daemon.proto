@@ -900,6 +900,7 @@ message Projects {
 
   message Kept {
     repeated Project projects = 1;
+    Version version = 2;
   }
 }
 
@@ -956,16 +957,17 @@ message ChangeProjectsRequest {
     AddWorkstream add_workstream = 3;
     RenameProject rename_project = 4;
     RenameWorkstream rename_workstream = 5;
-    MoveProject move_project = 6;
-    MoveWorkstream move_workstream = 7;
     ForgetProject forget_project = 8;
     ForgetWorkstream forget_workstream = 9;
     WorkstreamAt workstream_at = 10;
     RenameTerminal rename_terminal = 11;
     CloseWorkstream close_workstream = 12;
-    ReorderProjects reorder_projects = 13;
-    ReorderWorkstreams reorder_workstreams = 14;
+    ReorderProjects reorder_projects = 15;
+    ReorderWorkstreams reorder_workstreams = 16;
   }
+
+  reserved 6, 7, 13, 14;
+  reserved "move_project", "move_workstream";
 
   message AddProject {
     string dir = 1;
@@ -986,16 +988,6 @@ message ChangeProjectsRequest {
   message RenameWorkstream {
     fixed64 workstream = 1;
     optional string to = 2;
-  }
-
-  message MoveProject {
-    fixed64 project = 1;
-    uint32 to = 2;
-  }
-
-  message MoveWorkstream {
-    fixed64 workstream = 1;
-    uint32 to = 2;
   }
 
   message ForgetProject {
@@ -1022,16 +1014,19 @@ message ChangeProjectsRequest {
 
   message ReorderProjects {
     repeated fixed64 projects = 1;
+    repeated fixed64 seen = 2;
   }
 
   message ReorderWorkstreams {
     fixed64 project = 1;
     repeated fixed64 workstreams = 2;
+    repeated fixed64 seen = 3;
   }
 }
 
 message ChangeProjectsResponse {
   optional fixed64 made = 1;
+  Version kept = 2;
 }
 
 message ShowRequest {

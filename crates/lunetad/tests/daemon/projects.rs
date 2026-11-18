@@ -2,22 +2,35 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change};
+use lunetad::api::change_projects_request::{
+    AddProject, AddWorkstream, Change, ReorderProjects, ReorderWorkstreams,
+};
 use lunetad::api::projects::{Held, Kept};
 use lunetad::api::workstream::Seen;
-use lunetad::api::{self, ChangeProjectsRequest, Stage};
+use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
+use lunetad::api::Version;
 use tonic::{Code, Status};
 
 use crate::host::{eventually, folder_in, start, Host};
+use crate::remote::{hosts, reached, FakeSsh};
 use crate::worktree::cloned_as_wt;
 
 pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
+    asked_on(host, None, change)
+}
+
+fn asked_on(host: &Host, on: Option<&str>, change: Change) -> Result<Option<u64>, Status> {
+    answered_on(host, on, change).map(|answered| answered.made)
+}
+
+fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
-        let asked = ChangeProjectsRequest { on: None, change: Some(change) };
-        Ok(daemon.change_projects(asked).await?.into_inner().made)
+        let on = on.map(|destination| On { destination: destination.to_owned() });
+        let asked = ChangeProjectsRequest { on, change: Some(change) };
+        Ok(daemon.change_projects(asked).await?.into_inner())
     })
 }
 
@@ -46,6 +59,14 @@ fn held(host: &Host) -> Held {
     projects.expect("lunetad says whether it keeps projects")
 }
 
+fn unversioned(host: &Host) -> Held {
+    let mut held = held(host);
+    if let Held::Kept(kept) = &mut held {
+        assert!(kept.version.take().is_some(), "lunetad says the version of the projects kept");
+    }
+    held
+}
+
 fn text(path: &Path) -> String {
     path.to_str().unwrap().to_owned()
 }
@@ -65,6 +86,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
     let backup = project(&host, &vault, Some("bitwarden backup"));
     let notes = workstream(&host, backup, &vault.join("notes"));
     let want = Held::Kept(Kept {
+        version: None,
         projects: vec![
             api::Project {
                 id: luneta,
@@ -99,7 +121,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
         ],
     });
     let seen = |host: &Host| {
-        let held = held(host);
+        let held = unversioned(host);
         (held == want).then_some(()).ok_or(held)
     };
     eventually("the projects are watched, the branch read", || seen(&host).ok());
@@ -122,7 +144,7 @@ fn a_workstream_whose_folder_goes_is_kept_and_said_to_be_missing() {
     let notes = project(&host, &top, None);
     workstream(&host, notes, &below);
     let seen = |host: &Host| {
-        let Held::Kept(Kept { projects }) = held(host) else {
+        let Held::Kept(Kept { projects, .. }) = held(host) else {
             panic!("the projects are kept");
         };
         let [project] = projects.as_slice() else {
@@ -170,4 +192,86 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     };
     assert_eq!(unkept, refused.message());
     assert_eq!(fs::read_to_string(&file).unwrap(), newer);
+}
+
+fn order(host: &Host) -> Vec<u64> {
+    let Held::Kept(Kept { projects, .. }) = held(host) else {
+        panic!("the projects are kept");
+    };
+    projects.iter().map(|project| project.id).collect()
+}
+
+fn version(host: &Host) -> Version {
+    let Held::Kept(Kept { version, .. }) = held(host) else {
+        panic!("the projects are kept");
+    };
+    version.expect("lunetad says the version of the projects kept")
+}
+
+#[test]
+fn a_change_from_a_luneta_older_than_the_order_seen_reads_as_no_change() {
+    use prost::Message as _;
+    for field in [6_u8, 7, 13, 14] {
+        let asked = ChangeProjectsRequest::decode([(field << 3) | 2, 0].as_slice()).unwrap();
+        assert_eq!(asked.change, None, "field {field}");
+    }
+}
+
+#[test]
+fn a_reorder_made_on_a_stale_order_is_refused_here_and_on_another_machine() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let scratch = tempfile::tempdir().unwrap();
+
+    for (keeper, on) in [(&here, None), (&far, Some("far"))] {
+        let dir = |name: &str| {
+            let dir = scratch.path().join(on.unwrap_or("here")).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let [a, b, c] = ["a", "b", "c"].map(|name| project(keeper, &dir(name), None));
+        let reorder = |seen: &[u64], projects: &[u64]| {
+            let (seen, projects) = (seen.to_vec(), projects.to_vec());
+            asked_on(&here, on, Change::ReorderProjects(ReorderProjects { projects, seen }))
+        };
+        let kept = |want: Vec<u64>| {
+            let kept = || (order(keeper) == want).then_some(());
+            eventually(&format!("{on:?} keeps {want:?}"), kept);
+        };
+        reorder(&[a, b, c], &[c, a, b]).unwrap();
+        kept(vec![c, a, b]);
+        for seen in [&[a, b, c][..], &[]] {
+            let stale = reorder(seen, &[b, a, c]).unwrap_err();
+            assert_eq!(stale.code(), Code::Aborted, "{on:?}: {stale:?}");
+            assert!(stale.message().contains("they changed since"), "{on:?}: {stale:?}");
+        }
+        let unlike = reorder(&[c, a, b], &[a, b]).unwrap_err();
+        assert_eq!(unlike.code(), Code::InvalidArgument, "{on:?}: {unlike:?}");
+        kept(vec![c, a, b]);
+        reorder(&[c, a, b], &[a, c, b]).unwrap();
+        let last = ReorderProjects { projects: vec![a, b, c], seen: vec![a, c, b] };
+        let answered = answered_on(&here, on, Change::ReorderProjects(last)).unwrap();
+        let landed = answered.kept.expect("lunetad says the version it keeps a move at");
+        let shown = || {
+            let now = version(keeper);
+            (now.pid == landed.pid && now.seq >= landed.seq).then(|| order(keeper))
+        };
+        let shown = eventually(&format!("{on:?} shows the version {landed:?}"), shown);
+        assert_eq!(shown, [a, b, c], "{on:?}: the version a move is kept at shows it");
+
+        let one = workstream(keeper, a, &dir("a/one"));
+        let two = workstream(keeper, a, &dir("a/two"));
+        let swap = |seen: Vec<u64>| {
+            let swap = ReorderWorkstreams { project: a, workstreams: vec![two, one], seen };
+            asked_on(&here, on, Change::ReorderWorkstreams(swap))
+        };
+        swap(vec![one, two]).unwrap();
+        let stale = swap(vec![one, two]).unwrap_err();
+        assert!(stale.message().contains("they changed since"), "{on:?}: {stale:?}");
+    }
 }

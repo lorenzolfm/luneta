@@ -1056,7 +1056,7 @@ mod tests {
     fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
         let workstream = api::Workstream { terminals, ..api::Workstream::default() };
         let project = api::Project { workstreams: vec![workstream], ..api::Project::default() };
-        api::projects::Held::Kept(api::projects::Kept { projects: vec![project] })
+        api::projects::Held::Kept(api::projects::Kept { projects: vec![project], version: None })
     }
 
     fn in_view(folder: &str, found: api::terminal::Found) -> api::Terminal {

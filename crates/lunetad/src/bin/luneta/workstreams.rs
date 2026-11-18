@@ -6,10 +6,10 @@ use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
-use lunetad::api::{ChangeProjectsRequest, On, WatchRequest};
+use lunetad::api::{ChangeProjectsRequest, On, Version, WatchRequest};
 use lunetad::projects::{ProjectId, WorkstreamId};
 use tonic::transport::Channel;
-use tonic::Code;
+use tonic::{Code, Status};
 
 use lunetad::names::session_for;
 
@@ -45,6 +45,14 @@ fn asked<T, E: From<String>>(
     path: &Path,
     asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
 ) -> Result<T, E> {
+    asked_or(path, asking, E::from)
+}
+
+fn asked_or<T, E: From<String>>(
+    path: &Path,
+    asking: impl AsyncFnOnce(&mut Daemon) -> Result<T, E>,
+    late: impl FnOnce(String) -> E,
+) -> Result<T, E> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -52,7 +60,7 @@ fn asked<T, E: From<String>>(
     runtime.block_on(async {
         let mut daemon = daemon::current(path).await.map_err(E::from)?.daemon;
         let answered = tokio::time::timeout(ASKING, asking(&mut daemon)).await;
-        answered.map_err(|_| E::from(format!("lunetad did not answer in {}s", ASKING.as_secs())))?
+        answered.map_err(|_| late(format!("lunetad did not answer in {}s", ASKING.as_secs())))?
     })
 }
 
@@ -133,18 +141,44 @@ fn on(machine: &Machine) -> Option<On> {
     }
 }
 
-pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<(), String> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unmoved {
+    Refused(String),
+    Unsure(String),
+}
+
+impl From<String> for Unmoved {
+    fn from(why: String) -> Unmoved {
+        Unmoved::Refused(why)
+    }
+}
+
+impl Unmoved {
+    fn of(status: &Status) -> Unmoved {
+        let why = status.message().to_owned();
+        let refused = [Code::Aborted, Code::InvalidArgument, Code::FailedPrecondition];
+        if refused.contains(&status.code()) { Unmoved::Refused(why) } else { Unmoved::Unsure(why) }
+    }
+}
+
+pub fn reordered(path: &Path, machine: &Machine, order: &Reorder) -> Result<Option<Version>, Unmoved> {
     let change = match order {
-        Reorder::Projects(projects) => {
-            let projects = projects.iter().map(|it| it.get()).collect();
-            Change::ReorderProjects(ReorderProjects { projects })
+        Reorder::Projects { seen, wanted } => {
+            let ids = |ids: &[ProjectId]| ids.iter().map(|it| it.get()).collect();
+            Change::ReorderProjects(ReorderProjects { projects: ids(wanted), seen: ids(seen) })
         },
-        Reorder::Workstreams { project, workstreams } => {
-            let workstreams = workstreams.iter().map(|it| it.get()).collect();
-            Change::ReorderWorkstreams(ReorderWorkstreams { project: project.get(), workstreams })
+        Reorder::Workstreams { project, seen, wanted } => {
+            let ids = |ids: &[WorkstreamId]| ids.iter().map(|it| it.get()).collect();
+            let (project, workstreams, seen) = (project.get(), ids(wanted), ids(seen));
+            Change::ReorderWorkstreams(ReorderWorkstreams { project, workstreams, seen })
         },
     };
-    changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
+    let request = ChangeProjectsRequest { on: on(machine), change: Some(change) };
+    let asking = async |daemon: &mut Daemon| match daemon.change_projects(request).await {
+        Ok(answered) => Ok(answered.into_inner().kept),
+        Err(status) => Err(Unmoved::of(&status)),
+    };
+    asked_or(path, asking, Unmoved::Unsure)
 }
 
 fn holds(dir: &str, folder: &Path) -> bool {
