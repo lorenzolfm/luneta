@@ -14,6 +14,7 @@ use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
 use crate::agent::Harness;
+use crate::api;
 use crate::core::Command;
 use crate::log;
 use crate::state::{self, Unset};
@@ -157,7 +158,28 @@ enum KeptHarness {
 
 pub struct Store {
     keeping: Keeping,
+    revision: Revision,
     core: SyncSender<Command>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Revision(u64);
+
+impl Revision {
+    #[must_use]
+    pub fn to_api(self) -> api::Version {
+        api::Version { pid: std::process::id(), seq: self.0 }
+    }
+
+    fn next(self) -> Revision {
+        Revision(self.0.checked_add(1).expect("projects change fewer than 2^64 times"))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Changed {
+    pub made: Option<Id>,
+    pub kept: Revision,
 }
 
 enum Keeping {
@@ -169,6 +191,7 @@ enum Keeping {
 pub enum Failed {
     NotKept(String),
     Nests(String),
+    Stale(String),
     Refused(String),
     Unwritten(String),
     Unclosed(String),
@@ -185,7 +208,7 @@ impl Store {
             Err(unset) => Keeping::Unkept(format!("projects are kept nowhere: {unset}")),
             Ok(file) => Keeping::of(file),
         };
-        let store = Store { keeping, core };
+        let store = Store { keeping, revision: Revision::default(), core };
         store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
         Ok(store)
     }
@@ -251,6 +274,7 @@ impl Store {
         };
         projects.changed(change, Id::random).map_err(|refused| match refused {
             Refused::Nests(why) => Failed::Nests(why),
+            Refused::Stale(why) => Failed::Stale(why),
             Refused::Said(why) => Failed::Refused(why),
         })
     }
@@ -260,7 +284,13 @@ impl Store {
             unreachable!("projects changed are kept");
         };
         *projects = changed;
+        self.revision = self.revision.next();
         self.tell()
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     pub fn flush(&mut self) -> Result<(), Failed> {
@@ -295,7 +325,8 @@ impl Store {
             Keeping::Kept { projects, .. } => Ok(projects.clone()),
             Keeping::Unkept(why) => Err(why.clone()),
         };
-        self.core.send(Command::Projects(told)).map_err(|_| Failed::KeptUntold)
+        let told = Command::Projects { projects: told, revision: self.revision };
+        self.core.send(told).map_err(|_| Failed::KeptUntold)
     }
 }
 
@@ -582,7 +613,7 @@ mod tests {
 
     fn heard(commands: &Receiver<Command>) -> Vec<Result<Projects, String>> {
         let told = |command| {
-            let Command::Projects(projects) = command else {
+            let Command::Projects { projects, .. } = command else {
                 panic!("a store tells the core only what it keeps");
             };
             projects

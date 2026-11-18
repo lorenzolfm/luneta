@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -768,7 +768,7 @@ impl Away {
 struct Known {
     project: ProjectRow,
     workstreams: Vec<Stream>,
-    order: Vec<u64>,
+    order: Vec<WorkstreamId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -792,7 +792,7 @@ impl Known {
             Some(Stream { place, name, folder, missing, panes: panes.collect() })
         });
         let workstreams = streams.collect();
-        let order = said.workstreams.iter().map(|workstream| workstream.id).collect();
+        let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
         Some(Known { project, workstreams, order })
     }
 
@@ -838,24 +838,70 @@ struct Shelf {
     machine: Machine,
     projects: Vec<Known>,
     unlisted: usize,
-    order: Vec<u64>,
+    order: Vec<ProjectId>,
+    version: Option<api::Version>,
     kept: bool,
 }
 
+impl Shelf {
+    fn known(&self, project: ProjectId) -> Option<&Known> {
+        self.projects.iter().find(|known| known.project.id() == project)
+    }
+
+    fn orders(&self, order: &Order) -> bool {
+        match order {
+            Order::Projects(order) => permutes(&self.order, order),
+            Order::Workstreams { project, workstreams } => {
+                self.known(*project).is_some_and(|known| permutes(&known.order, workstreams))
+            },
+        }
+    }
+
+    fn reorder(&mut self, order: &Order) {
+        assert!(self.orders(order), "an order reorders what is kept");
+        match order {
+            Order::Projects(order) => {
+                order.clone_into(&mut self.order);
+                self.projects.sort_by_key(|known| position(order, known.project.id()));
+            },
+            Order::Workstreams { project, workstreams } => {
+                let mut known = self.projects.iter_mut();
+                let known = known.find(|known| known.project.id() == *project);
+                let known = known.expect("the project reordered is shelved");
+                workstreams.clone_into(&mut known.order);
+                let at = |stream: &Stream| position(workstreams, stream.place.workstream);
+                known.workstreams.sort_by_key(at);
+            },
+        }
+    }
+}
+
+fn position<I: PartialEq + Copy>(order: &[I], id: I) -> usize {
+    let at = order.iter().position(|it| *it == id);
+    at.expect("an order holds every id it reorders")
+}
+
+fn permutes<I: Ord + Copy>(kept: &[I], order: &[I]) -> bool {
+    let (mut kept, mut order) = (kept.to_vec(), order.to_vec());
+    kept.sort_unstable();
+    order.sort_unstable();
+    kept == order
+}
+
 fn shelved(machine: Machine, projects: Option<&api::Projects>) -> Shelf {
-    let (kept, held) = match projects.and_then(|projects| projects.held.as_ref()) {
-        Some(api::projects::Held::Kept(kept)) => (kept.projects.as_slice(), true),
-        Some(api::projects::Held::Unkept(_)) | None => (&[][..], false),
+    let (kept, version, held) = match projects.and_then(|projects| projects.held.as_ref()) {
+        Some(api::projects::Held::Kept(kept)) => (kept.projects.as_slice(), kept.version, true),
+        Some(api::projects::Held::Unkept(_)) | None => (&[][..], None, false),
     };
     let projects: Vec<Known> = kept.iter().filter_map(Known::of).collect();
     let unlisted = kept.len() - projects.len();
-    let order = kept.iter().map(|project| project.id).collect();
-    Shelf { machine, projects, unlisted, order, kept: held }
+    let order = kept.iter().filter_map(|project| ProjectId::of(project.id)).collect();
+    Shelf { machine, projects, unlisted, order, version, kept: held }
 }
 
-fn wanted(all: &[u64], listed: &[u64]) -> Vec<u64> {
+fn wanted<I: PartialEq + Copy>(all: &[I], listed: &[I]) -> Vec<I> {
     let mut slots = listed.iter();
-    let slot = |id: &u64, slots: &mut std::slice::Iter<'_, u64>| {
+    let slot = |id: &I, slots: &mut std::slice::Iter<'_, I>| {
         if listed.contains(id) { slots.next().copied().unwrap_or(*id) } else { *id }
     };
     all.iter().map(|id| slot(id, &mut slots)).collect()
@@ -1002,7 +1048,7 @@ pub enum Asked {
     Issue(Repository),
     Ssh(Destination),
     Forget(Destination),
-    Move { on: Machine, order: Reorder },
+    Move { on: Machine, order: Reorder, ticket: u64 },
 }
 
 impl Asked {
@@ -1085,6 +1131,8 @@ pub struct Sidebar {
     news: News,
     agent: Kept,
     shelves: Vec<Shelf>,
+    unheard: Vec<Unheard>,
+    tickets: u64,
     here_key: Option<Key>,
     finished: HashMap<Key, SystemTime>,
     rows: Vec<Row>,
@@ -1257,8 +1305,114 @@ enum Folding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reorder {
+    Projects { seen: Vec<ProjectId>, wanted: Vec<ProjectId> },
+    Workstreams { project: ProjectId, seen: Vec<WorkstreamId>, wanted: Vec<WorkstreamId> },
+}
+
+impl Reorder {
+    fn seen(&self) -> Order {
+        match self {
+            Reorder::Projects { seen, .. } => Order::Projects(seen.clone()),
+            Reorder::Workstreams { project, seen, .. } => {
+                Order::Workstreams { project: *project, workstreams: seen.clone() }
+            },
+        }
+    }
+
+    fn wanted(&self) -> Order {
+        match self {
+            Reorder::Projects { wanted, .. } => Order::Projects(wanted.clone()),
+            Reorder::Workstreams { project, wanted, .. } => {
+                Order::Workstreams { project: *project, workstreams: wanted.clone() }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Order {
     Projects(Vec<ProjectId>),
     Workstreams { project: ProjectId, workstreams: Vec<WorkstreamId> },
+}
+
+impl Order {
+    fn of(&self) -> Ordered {
+        match self {
+            Order::Projects(_) => Ordered::Projects,
+            Order::Workstreams { project, .. } => Ordered::Workstreams(*project),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ordered {
+    Projects,
+    Workstreams(ProjectId),
+}
+
+pub const MOVES_MAX: usize = 64;
+
+#[derive(Debug)]
+struct Unheard {
+    ticket: u64,
+    on: Machine,
+    shown: Order,
+    wait: Wait,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    Answers { asked: NonZeroUsize, landed: Option<api::Version> },
+    Watch(api::Version),
+}
+
+impl Wait {
+    fn asked(self) -> usize {
+        match self {
+            Wait::Answers { asked, .. } => asked.get(),
+            Wait::Watch(_) => 0,
+        }
+    }
+
+    fn again(self) -> Wait {
+        match self {
+            Wait::Answers { asked, landed } => {
+                let asked = asked.checked_add(1).expect("fewer than 2^64 moves are asked");
+                Wait::Answers { asked, landed }
+            },
+            Wait::Watch(landed) => Wait::Answers { asked: NonZeroUsize::MIN, landed: Some(landed) },
+        }
+    }
+
+    fn answered(self, kept: Option<api::Version>) -> Option<Wait> {
+        let Wait::Answers { asked, .. } = self else {
+            unreachable!("lunetad answers each move asked once");
+        };
+        Wait::left(asked, kept)
+    }
+
+    fn unasked(self) -> Option<Wait> {
+        let Wait::Answers { asked, landed } = self else {
+            unreachable!("a move goes unsent right as it is asked");
+        };
+        Wait::left(asked, landed)
+    }
+
+    fn left(asked: NonZeroUsize, landed: Option<api::Version>) -> Option<Wait> {
+        match NonZeroUsize::new(asked.get() - 1) {
+            Some(asked) => Some(Wait::Answers { asked, landed }),
+            None => landed.map(Wait::Watch),
+        }
+    }
+
+    fn holds(self, heard: Option<&api::Version>) -> bool {
+        match self {
+            Wait::Answers { .. } => true,
+            Wait::Watch(landed) => {
+                heard.is_some_and(|heard| heard.pid == landed.pid && heard.seq < landed.seq)
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1305,7 +1459,7 @@ impl Sidebar {
     }
 
     pub fn heard(&mut self, host: Host) {
-        self.shelves = shelves(&host);
+        self.shelve(&host);
         for shelf in self.shelves.iter().filter(|shelf| shelf.kept && shelf.unlisted == 0) {
             let machine = &shelf.machine;
             let mut live = Vec::new();
@@ -1320,6 +1474,77 @@ impl Sidebar {
         self.away = None;
         self.rebuild();
         self.reran();
+    }
+
+    fn shelve(&mut self, host: &Host) {
+        self.shelves = shelves(host);
+        let shelves = &mut self.shelves;
+        self.unheard.retain(|unheard| {
+            let on = shelves.iter().find(|shelf| shelf.machine == unheard.on);
+            on.is_some_and(|shelf| {
+                shelf.orders(&unheard.shown) && unheard.wait.holds(shelf.version.as_ref())
+            })
+        });
+        for unheard in &self.unheard {
+            let on = shelves.iter_mut().find(|shelf| shelf.machine == unheard.on);
+            on.expect("an unheard order's machine is shelved").reorder(&unheard.shown);
+        }
+    }
+
+    fn reshelve(&mut self) {
+        if let Some(host) = self.host.take() {
+            self.shelve(&host);
+            self.host = Some(host);
+            self.rebuild();
+        }
+    }
+
+    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>) {
+        let Some(at) = self.unheard.iter().position(|unheard| unheard.ticket == ticket) else {
+            return;
+        };
+        match self.unheard[at].wait.answered(kept) {
+            Some(wait @ Wait::Answers { .. }) => self.unheard[at].wait = wait,
+            Some(wait @ Wait::Watch(_)) => {
+                self.unheard[at].wait = wait;
+                self.reshelve();
+            },
+            None => {
+                self.unheard.remove(at);
+                self.reshelve();
+            },
+        }
+    }
+
+    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str) {
+        self.notify(format!("not moved: {why}"));
+        let Some(at) = self.unheard.iter().position(|unheard| unheard.ticket == ticket) else {
+            return;
+        };
+        let unheard = &mut self.unheard[at];
+        assert_eq!(unheard.shown, order.wanted(), "only the move asked last goes unsent");
+        unheard.shown = order.seen();
+        match unheard.wait.unasked() {
+            Some(wait) => unheard.wait = wait,
+            None => {
+                self.unheard.remove(at);
+            },
+        }
+        self.reshelve();
+    }
+
+    pub fn unmoved(&mut self, on: &Machine, ticket: u64, order: &Reorder, note: String) {
+        let of = order.wanted().of();
+        let mut newer = self.unheard.iter().filter(|it| it.on == *on && it.shown.of() == of);
+        if !newer.any(|it| it.ticket > ticket) {
+            self.notify(note);
+        }
+        let before = self.unheard.len();
+        self.unheard.retain(|unheard| unheard.ticket != ticket);
+        assert!(self.unheard.len() + 1 >= before, "no two unheard orders share a ticket");
+        if self.unheard.len() < before {
+            self.reshelve();
+        }
     }
 
     pub fn ticked(&mut self, now: SystemTime, at: Instant, watched: bool) {
@@ -2498,14 +2723,13 @@ impl Sidebar {
         let (on, order) = match spans {
             Spans::Projects(machine, spans) => {
                 let kept = self.shelves.iter().find(|it| it.machine == *machine);
-                let all = kept.map_or(&[][..], |it| it.order.as_slice());
-                let listed: Vec<u64> = spans.iter().map(|(id, _)| id.get()).collect();
-                let wanted = wanted(all, &listed);
-                if wanted == all {
+                let seen = kept.map_or(&[][..], |it| it.order.as_slice());
+                let listed: Vec<ProjectId> = spans.iter().map(|(id, _)| *id).collect();
+                let wanted = wanted(seen, &listed);
+                if wanted == seen {
                     return Asked::Nothing;
                 }
-                let wanted = wanted.into_iter().filter_map(ProjectId::of).collect();
-                (machine.clone(), Reorder::Projects(wanted))
+                (machine.clone(), Reorder::Projects { seen: seen.to_vec(), wanted })
             },
             Spans::Workstreams(machine, project, spans) => {
                 let mut known = shelf(&self.shelves, machine).iter();
@@ -2514,16 +2738,40 @@ impl Sidebar {
                     self.notify(format!("{name} is no longer listed: nothing moved"));
                     return Asked::Nothing;
                 };
-                let listed: Vec<u64> = spans.iter().map(|(id, _)| id.get()).collect();
+                let listed: Vec<WorkstreamId> = spans.iter().map(|(id, _)| *id).collect();
                 let wanted = wanted(&known.order, &listed);
                 if wanted == known.order {
                     return Asked::Nothing;
                 }
-                let workstreams = wanted.into_iter().filter_map(WorkstreamId::of).collect();
-                (machine.clone(), Reorder::Workstreams { project: project.id(), workstreams })
+                let (project, seen) = (project.id(), known.order.clone());
+                (machine.clone(), Reorder::Workstreams { project, seen, wanted })
             },
         };
-        Asked::Move { on, order }
+        let (seen, wanted) = (order.seen(), order.wanted());
+        assert_ne!(seen, wanted, "a move changes the order");
+        let on_its_way = self.unheard.iter().filter(|unheard| unheard.on == on);
+        if on_its_way.map(|unheard| unheard.wait.asked()).sum::<usize>() >= MOVES_MAX {
+            self.notify(format!("not moved: lunetad has not answered the last {MOVES_MAX} moves"));
+            return Asked::Nothing;
+        }
+        let at = self.unheard.iter().position(|it| it.on == on && it.shown.of() == wanted.of());
+        let kept = self.shelves.iter_mut().find(|shelf| shelf.machine == on);
+        kept.expect("the machine moved on is shelved").reorder(&wanted);
+        let ticket = if let Some(at) = at {
+            let unheard = &mut self.unheard[at];
+            assert_eq!(unheard.shown, seen, "the rows show the last order asked");
+            unheard.shown = wanted;
+            unheard.wait = unheard.wait.again();
+            unheard.ticket
+        } else {
+            self.tickets += 1;
+            let wait = Wait::Answers { asked: NonZeroUsize::MIN, landed: None };
+            let ticket = self.tickets;
+            self.unheard.push(Unheard { ticket, on: on.clone(), shown: wanted, wait });
+            ticket
+        };
+        self.rebuild();
+        Asked::Move { on, order, ticket }
     }
 
     fn landed(&self, spans: &[Range<usize>]) -> Vec<usize> {
@@ -4759,8 +5007,9 @@ mod tests {
         ProjectRow::of(listed(name, id)).unwrap()
     }
 
-    fn projects(ids: &[u64]) -> Reorder {
-        Reorder::Projects(ids.iter().map(|id| ProjectId::of(*id).unwrap()).collect())
+    fn projects(seen: &[u64], wanted: &[u64]) -> Reorder {
+        let ids = |ids: &[u64]| ids.iter().map(|id| ProjectId::of(*id).unwrap()).collect();
+        Reorder::Projects { seen: ids(seen), wanted: ids(wanted) }
     }
 
     fn project_named(sidebar: &Sidebar, name: &str) -> ProjectId {
@@ -4896,7 +5145,7 @@ mod tests {
             }
         };
         let projects = sessions.iter().map(project).collect();
-        let kept = api::projects::Kept { projects };
+        let kept = api::projects::Kept { projects, version: None };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 
@@ -5057,7 +5306,7 @@ mod tests {
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
-        let kept = api::projects::Kept { projects };
+        let kept = api::projects::Kept { projects, version: None };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 
@@ -5332,10 +5581,7 @@ mod tests {
         let at = |glyph: char| rule.chars().position(|c| c == glyph).expect("on the rule") as u16;
         let dim = |x: u16| buffer[(x, 1)].modifier.contains(Modifier::DIM);
         let (spinner, dollar) = (at('⠋'), at('$'));
-        assert_eq!(
-            [spinner, spinner + 1, dollar, dollar + 1].map(dim),
-            [false, false, true, true]
-        );
+        assert_eq!([spinner, spinner + 1, dollar, dollar + 1].map(dim), [false, false, true, true]);
     }
 
     #[test]
@@ -8721,15 +8967,16 @@ mod tests {
         assert_eq!(lit, [1, 2, 3, 4]);
         sidebar.mouse(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
-        let workstreams = vec![tab_of(10, 2), tab_of(10, 0), tab_of(10, 1)];
-        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), workstreams };
-        let asked = Asked::Move { on: Machine::Local, order };
+        let seen = vec![tab_of(10, 0), tab_of(10, 1), tab_of(10, 2)];
+        let wanted = vec![tab_of(10, 2), tab_of(10, 0), tab_of(10, 1)];
+        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), seen, wanted };
+        let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
         assert_eq!(sidebar.key(&shifted('J'), moment(160_000)), asked);
-        assert_eq!(drawn_rows(&mut sidebar).1, [1, 2, 3, 4], "rows move once lunetad says so");
+        assert_eq!(drawn_rows(&mut sidebar).1, [3, 4, 5, 6], "the rows move as asked");
 
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Nothing);
-        assert_eq!(drawn_rows(&mut sidebar).1, [3, 4]);
+        assert_eq!(drawn_rows(&mut sidebar).1, [5, 6]);
         assert_eq!(sidebar.key(&shifted('K'), moment(160_000)), Asked::Nothing);
         assert_eq!(sidebar.key(&esc, moment(160_000)), Asked::Leave);
     }
@@ -8740,7 +8987,8 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "Ghhv");
         let asked = sidebar.key(&char('K'), moment(160_000));
-        assert_eq!(asked, Asked::Move { on: Machine::Local, order: projects(&[10, 30, 20]) });
+        let order = projects(&[10, 20, 30], &[10, 30, 20]);
+        assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let zed = Place::Session(listed("zed", 30));
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(zed));
@@ -8763,12 +9011,17 @@ mod tests {
         let (rows, lit) = drawn_rows(&mut sidebar);
         assert_eq!(rows[14], " ▾ notes", "{rows:#?}");
         assert_eq!(lit, [14, 15, 16]);
-        let asked = Asked::Move { on: Machine::Local, order: projects(&[10, 30, 20]) };
+        let order = projects(&[10, 20, 30], &[10, 30, 20]);
+        let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 20), area), asked);
 
+        let lines = screen(&mut sidebar, true, area.width, area.height);
+        let notes = lines.iter().position(|line| line.starts_with(" ▾ notes")).unwrap();
+        let notes = u16::try_from(notes).unwrap();
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, notes), area);
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, bipa), area);
-        let asked = Asked::Move { on: Machine::Local, order: projects(&[20, 10, 30]) };
+        let order = projects(&[10, 30, 20], &[20, 10, 30]);
+        let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, bipa), area), asked);
     }
 
@@ -8811,7 +9064,8 @@ mod tests {
         type_in(&mut sidebar, "vn");
         sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, 3), area);
         let asked = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, 3), area);
-        assert_eq!(asked, Asked::Move { on: Machine::Local, order: projects(&[20, 10, 30]) });
+        let order = projects(&[10, 20, 30], &[20, 10, 30]);
+        assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
         assert!(sidebar.menu.is_none());
 
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, 5), area);
@@ -9628,17 +9882,21 @@ mod tests {
         let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
         sidebar.cursor = Some(Spot::Local(Place::Session(listed("main", 10))));
         type_in(&mut sidebar, "v");
-        let asked = |on: Machine, ids: &[u64]| Asked::Move { on, order: projects(ids) };
-        assert_eq!(shift(&mut sidebar, 'J'), asked(Machine::Local, &[30, 10]));
+        let asked = |on: Machine, seen: &[u64], ids: &[u64], ticket| {
+            Asked::Move { on, order: projects(seen, ids), ticket }
+        };
         assert_eq!(shift(&mut sidebar, 'K'), Asked::Nothing, "the first stays the first");
+        assert_eq!(shift(&mut sidebar, 'J'), asked(Machine::Local, &[10, 30], &[30, 10], 1));
+        assert_eq!(shift(&mut sidebar, 'J'), Asked::Nothing, "the last stays the last");
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         sidebar.key(&esc, moment(160_000));
 
         let far = |name: &str, id| Spot::Remote(nixos(), Place::Session(listed(name, id)));
         sidebar.cursor = Some(far("dev", 40));
         type_in(&mut sidebar, "v");
-        assert_eq!(shift(&mut sidebar, 'K'), asked(Machine::Remote(nixos()), &[40, 20]));
-        assert_eq!(shift(&mut sidebar, 'J'), Asked::Nothing, "the last stays the last");
+        let nixos_moved = asked(Machine::Remote(nixos()), &[20, 40], &[40, 20], 2);
+        assert_eq!(shift(&mut sidebar, 'K'), nixos_moved);
+        assert_eq!(shift(&mut sidebar, 'K'), Asked::Nothing, "the first stays the first");
     }
 
     #[test]
@@ -9652,10 +9910,198 @@ mod tests {
         type_in(&mut sidebar, "v");
         assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Workstream(first))));
         let asked = sidebar.key(&char('J'), moment(160_000));
-        let workstream = tab_of(10, 0);
-        let workstreams = vec![tab_of(10, 1), workstream];
-        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), workstreams };
-        assert_eq!(asked, Asked::Move { on: Machine::Local, order });
+        let (first, second) = (tab_of(10, 0), tab_of(10, 1));
+        let (seen, wanted) = (vec![first, second], vec![second, first]);
+        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), seen, wanted };
+        assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
+    }
+
+    fn version(seq: u64) -> api::Version {
+        api::Version { pid: 7, seq }
+    }
+
+    fn kept_of(host: &mut Host) -> &mut api::projects::Kept {
+        let held = host.projects.as_mut().and_then(|projects| projects.held.as_mut());
+        let Some(api::projects::Held::Kept(kept)) = held else {
+            panic!("the projects are kept");
+        };
+        kept
+    }
+
+    fn in_order(host: &Host, ids: &[u64], seq: u64) -> Host {
+        let mut host = host.clone();
+        host.sessions.clear();
+        let kept = kept_of(&mut host);
+        kept.projects.retain(|it| ids.contains(&it.id));
+        kept.projects.sort_by_key(|it| ids.iter().position(|id| *id == it.id));
+        kept.version = Some(version(seq));
+        host
+    }
+
+    fn projects_shown(sidebar: &mut Sidebar) -> Vec<String> {
+        let rows = rows_shown(sidebar).into_iter();
+        let names = rows.filter_map(|row| Some(row.strip_prefix(" ▾ ")?.to_owned()));
+        names.collect()
+    }
+
+    fn bipa_selected() -> (Sidebar, Host) {
+        let mut sidebar = searched();
+        let heard = sidebar.host.clone().expect("heard");
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 1));
+        sidebar.focus(Keys::Sidebar);
+        sidebar.cursor = Some(Spot::Local(Place::Session(listed("bipa", 10))));
+        type_in(&mut sidebar, "v");
+        (sidebar, heard)
+    }
+
+    fn moved(seen: &[u64], wanted: &[u64], ticket: u64) -> Asked {
+        Asked::Move { on: Machine::Local, order: projects(seen, wanted), ticket }
+    }
+
+    #[test]
+    fn quick_presses_build_on_the_order_asked_until_watch_shows_the_version_answered() {
+        let (mut sidebar, heard) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
+        assert_eq!(shift(&mut sidebar, 'J'), moved(&[10, 20, 30], &[20, 10, 30], 1));
+        assert_eq!(shift(&mut sidebar, 'J'), moved(&[20, 10, 30], &[20, 30, 10], 1));
+        assert_eq!(shift(&mut sidebar, 'J'), Asked::Nothing, "the last stays the last");
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "zed", "bipa"]);
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 1));
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "zed", "bipa"], "on its way still");
+
+        sidebar.moved(1, Some(version(2)));
+        sidebar.moved(1, Some(version(3)));
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "zed", "bipa"], "answered, not shown");
+        sidebar.hear(in_order(&heard, &[20, 30, 10], 3));
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 4));
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"], "moved back elsewhere");
+
+        assert_eq!(shift(&mut sidebar, 'J'), moved(&[10, 20, 30], &[20, 10, 30], 2));
+        sidebar.moved(2, Some(version(5)));
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 6));
+        let back = "moved back elsewhere before Watch showed it";
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"], "{back}");
+        assert_eq!(shift(&mut sidebar, 'J'), moved(&[10, 20, 30], &[20, 10, 30], 3));
+        sidebar.hear(in_order(&heard, &[10, 20], 7));
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes"], "forgotten elsewhere");
+    }
+
+    #[test]
+    fn an_order_asked_again_shows_until_watch_shows_the_last_version_answered() {
+        let (mut sidebar, heard) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
+        shift(&mut sidebar, 'J');
+        shift(&mut sidebar, 'J');
+        assert_eq!(shift(&mut sidebar, 'K'), moved(&[20, 30, 10], &[20, 10, 30], 1));
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
+        sidebar.hear(in_order(&heard, &[20, 30, 10], 3));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "on its way still");
+        assert_eq!(shift(&mut sidebar, 'K'), moved(&[20, 10, 30], &[10, 20, 30], 1));
+
+        for seq in 2..6 {
+            sidebar.moved(1, Some(version(seq)));
+        }
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 4));
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"], "an older version");
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 5));
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 6));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "landed, lunetad says");
+    }
+
+    #[test]
+    fn a_version_from_another_lunetad_or_none_shows_lunetad_s_order() {
+        let (mut sidebar, heard) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar| sidebar.key(&char('J'), moment(160_000));
+        shift(&mut sidebar);
+        sidebar.moved(1, Some(version(9)));
+        let mut restarted = in_order(&heard, &[10, 20, 30], 1);
+        kept_of(&mut restarted).version = Some(api::Version { pid: 8, seq: 1 });
+        sidebar.hear(restarted);
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"], "lunetad started again");
+
+        assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 2));
+        sidebar.moved(2, None);
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"], "it says no version");
+    }
+
+    #[test]
+    fn a_move_lunetad_turns_down_puts_the_rows_back_as_it_keeps_them() {
+        let (mut sidebar, _) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar| sidebar.key(&char('J'), moment(160_000));
+        assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 1));
+        assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 1));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "zed", "bipa"]);
+        let stale = format!("not moved: {}", "they changed since");
+        let refused = |sidebar: &mut Sidebar, ticket| {
+            let order = projects(&[10, 20, 30], &[20, 10, 30]);
+            sidebar.unmoved(&Machine::Local, ticket, &order, stale.clone());
+        };
+        refused(&mut sidebar, 1);
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
+        assert_eq!(sidebar.notice, Some(stale.clone()));
+
+        sidebar.notice = None;
+        assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 2));
+        refused(&mut sidebar, 1);
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "an older refusal");
+        assert_eq!(sidebar.notice, None, "a refusal a newer move replaced says nothing");
+        let elsewhere = Machine::Remote(nixos());
+        let order = projects(&[20, 40], &[40, 20]);
+        sidebar.unmoved(&elsewhere, 1, &order, stale.clone());
+        assert_eq!(sidebar.notice, Some(stale.clone()), "another machine's refusal says so");
+
+        sidebar.notice = None;
+        refused(&mut sidebar, 2);
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
+        assert_eq!(sidebar.notice, Some(stale));
+    }
+
+    #[test]
+    fn a_move_never_sent_takes_back_that_press_alone() {
+        let (mut sidebar, heard) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar| sidebar.key(&char('J'), moment(160_000));
+        shift(&mut sidebar);
+        sidebar.moved(1, Some(version(2)));
+        assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 1));
+        sidebar.unsent(1, &projects(&[20, 10, 30], &[20, 30, 10]), "full");
+        assert_eq!(sidebar.notice, Some("not moved: full".to_owned()));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "the first still");
+        sidebar.hear(in_order(&heard, &[10, 20, 30], 1));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "not shown yet");
+        sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
+
+        assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 2));
+        sidebar.unsent(2, &projects(&[20, 10, 30], &[20, 30, 10]), "full");
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"]);
+        assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 3), "nothing waits");
+    }
+
+    #[test]
+    fn moves_lunetad_has_not_answered_stop_at_the_most_the_way_holds() {
+        let (mut sidebar, heard) = bipa_selected();
+        let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
+        for at in 0..MOVES_MAX {
+            let press = if at % 2 == 0 { 'J' } else { 'K' };
+            let asked = shift(&mut sidebar, press);
+            assert!(matches!(asked, Asked::Move { ticket: 1, .. }), "{at}: {asked:?}");
+        }
+        assert_eq!(shift(&mut sidebar, 'J'), Asked::Nothing);
+        let held = format!("not moved: lunetad has not answered the last {MOVES_MAX} moves");
+        assert_eq!(sidebar.notice, Some(held));
+        assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
+
+        sidebar.moved(1, Some(version(1)));
+        assert!(matches!(shift(&mut sidebar, 'J'), Asked::Move { ticket: 1, .. }));
+        let last = u64::try_from(MOVES_MAX).unwrap() + 1;
+        for seq in 2..=last {
+            sidebar.moved(1, Some(version(seq)));
+        }
+        sidebar.hear(in_order(&heard, &[20, 10, 30], last - 1));
+        assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"], "not the last yet");
+        sidebar.hear(in_order(&heard, &[20, 10, 30], last));
+        assert_eq!(shift(&mut sidebar, 'J'), moved(&[20, 10, 30], &[20, 30, 10], 2));
     }
 
     #[test]
@@ -9679,7 +10125,8 @@ mod tests {
         let left = MouseButton::Left;
         sidebar.mouse(mouse(MouseEventKind::Down(left), 10, dev), area);
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, first), area), Asked::Take);
-        let asked = Asked::Move { on: Machine::Remote(nixos()), order: projects(&[40, 20]) };
+        let order = projects(&[20, 40], &[40, 20]);
+        let asked = Asked::Move { on: Machine::Remote(nixos()), order, ticket: 1 };
         assert_eq!(sidebar.mouse(mouse(MouseEventKind::Up(left), 10, first), area), asked);
     }
 
