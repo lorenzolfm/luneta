@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc as answers, oneshot};
 use tonic::Status;
@@ -16,11 +16,11 @@ use crate::api::{self, show_request, show_response};
 use crate::core::{self, Command as Core, Located, Shown};
 use crate::mux::own::server::{self, Is, Terminals, TerminalsListed, Word};
 use crate::mux::own::TerminalKey;
-use crate::mux::Runs as Opened;
+use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
-use crate::projects::layout::{self, Direction, Order, Rect, Towards, SIDE_MAX};
+use crate::projects::layout::{self, Direction, Order, Rect, Sides, Towards, SIDE_MAX};
 use crate::projects::{Change, Dir, Failed, Id, Line, Placed, Projects, Ran, Runs, Session};
-use crate::projects::{Size, Store, Terminal, TerminalId, View, Workstream, WorkstreamId};
+use crate::projects::{Size, Store, Terminal, TerminalId, Used, View, Workstream, WorkstreamId};
 use crate::projects::{FRAME_CELLS, LINE_BYTES_MAX, TERMINALS_MAX};
 use crate::shells::Doing;
 use crate::watch::Troubles;
@@ -93,7 +93,7 @@ pub enum Asked {
     Open { beside: Beside, argv: Vec<String> },
     Close,
     Focus(Focus),
-    Resize { direction: Direction, change: layout::Change },
+    Resize { sides: Sides, change: layout::Change },
     Move(Step),
     Fullscreen,
 }
@@ -156,7 +156,11 @@ impl Asked {
             },
             Event::Resize(show_request::Resize { direction, grow }) => {
                 let change = if grow { layout::Change::Grow } else { layout::Change::Shrink };
-                Asked::Resize { direction: direction_of(direction)?, change }
+                let sides = match direction {
+                    None => Sides::Every,
+                    Some(direction) => Sides::One(direction_of(direction)?),
+                };
+                Asked::Resize { sides, change }
             },
             Event::Move(show_request::Move { to }) => {
                 use show_request::r#move::To;
@@ -387,7 +391,11 @@ impl Views {
     fn heard(&mut self, command: Command) {
         match command {
             Command::Change { change, answer } => {
-                let _ = answer.send(self.store.change(change));
+                let changed = match change {
+                    Change::CloseWorkstream { workstream } => self.close_workstream(workstream),
+                    change => self.store.change(change),
+                };
+                let _ = answer.send(changed);
             },
             Command::Came { workstream, size, runs_in, out, answer } => {
                 let _ = answer.send(self.came(workstream, size, runs_in, out));
@@ -454,7 +462,42 @@ impl Views {
         let id = ClientId(self.arrivals);
         let client = Client { workstream, size, runs_in, focus, out, said: None };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
+        self.went(workstream);
         Ok(id)
+    }
+
+    fn went(&mut self, workstream: WorkstreamId) {
+        let went = Change::Went { workstream, at: Used::at(SystemTime::now()) };
+        if let Err(why) = self.changed(went) {
+            self.troubles.say(format!("workstream {workstream}'s use is not kept: {why}"));
+        }
+    }
+
+    fn close_workstream(&mut self, workstream: WorkstreamId) -> Result<Option<Id>, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let unknown = || Failed::Refused(format!("no workstream has the id {workstream}"));
+        let (_, shown) = projects.find(workstream).ok_or_else(unknown)?;
+        let terminals: Vec<TerminalId> = shown.view().terminals().map(layout::Leaf::id).collect();
+        let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
+        let unseen = terminals.iter().any(|terminal| !self.known.contains_key(terminal));
+        let tags = if unseen { self.mux.tags().map_err(unclosed)? } else { Vec::new() };
+        for terminal in &terminals {
+            let known = self.known.get(terminal).map(|known| known.key);
+            let found = || {
+                let found = tags.iter().find(|(tag, _)| tagged(tag) == Some(*terminal));
+                found.map(|(_, key)| *key)
+            };
+            if let Some(key) = known.or_else(found) {
+                self.mux.closed(key).map_err(unclosed)?;
+            }
+        }
+        let made = self.store.change(Change::CloseWorkstream { workstream })?;
+        for terminal in &terminals {
+            self.known.remove(terminal);
+        }
+        self.last_focus.remove(&workstream);
+        assert!(self.store.projects().is_some_and(|it| it.find(workstream).is_none()));
+        Ok(made)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -488,6 +531,7 @@ impl Views {
                 let moved = self.client(client);
                 moved.workstream = to;
                 moved.focus = focus;
+                self.went(to);
             },
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
             Asked::Close => self.close(focused()?)?,
@@ -502,9 +546,9 @@ impl Views {
                 let to = self.stepped(workstream, from, step, size)?;
                 self.focus(client, to)?;
             },
-            Asked::Resize { direction, change } => {
+            Asked::Resize { sides, change } => {
                 let terminal = focused()?;
-                self.changed(Change::Resize { terminal, direction, change, size })?;
+                self.changed(Change::Resize { terminal, sides, change, size })?;
             },
             Asked::Move(step) => {
                 let one = focused()?;
@@ -1226,7 +1270,8 @@ fn said(failed: Failed) -> String {
         Failed::NotKept(why)
         | Failed::Nests(why)
         | Failed::Refused(why)
-        | Failed::Unwritten(why) => why,
+        | Failed::Unwritten(why)
+        | Failed::Unclosed(why) => why,
         Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
     }
 }
@@ -1630,7 +1675,7 @@ mod tests {
         let refused = [
             Event::Go(0),
             Event::Focus(show_request::Focus { to: None }),
-            Event::Resize(show_request::Resize { direction: 0, grow: true }),
+            Event::Resize(show_request::Resize { direction: Some(0), grow: true }),
             Event::Size(show_request::Size { columns: 0, rows: 24 }),
             Event::Open(show_request::Open { beside: None, argv: vec![] }),
             Event::Open(show_request::Open { beside: largest(), argv: vec![String::new()] }),

@@ -1,7 +1,7 @@
 use crate::agent::Harness;
 
-use super::layout::{self, Direction, Leaf, Preordered, Removed, Towards, Tree, PANES_MAX};
-use super::{Dir, Size, TerminalId};
+use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX};
+use super::{Dir, Name, Size, TerminalId};
 
 pub const LINE_BYTES_MAX: usize = 1024;
 
@@ -12,12 +12,23 @@ pub struct Terminal {
     id: TerminalId,
     folder: Dir,
     runs: Runs,
+    name: Option<Name>,
 }
 
 impl Terminal {
     #[must_use]
     pub fn new(id: TerminalId, folder: Dir, runs: Runs) -> Terminal {
-        Terminal { id, folder, runs }
+        Terminal { id, folder, runs, name: None }
+    }
+
+    #[must_use]
+    pub fn named(self, name: Option<Name>) -> Terminal {
+        Terminal { name, ..self }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&Name> {
+        self.name.as_ref()
     }
 
     #[must_use]
@@ -33,6 +44,10 @@ impl Terminal {
     pub(super) fn ran(&mut self, folder: Dir, runs: Runs) {
         self.folder = folder;
         self.runs = runs;
+    }
+
+    pub(super) fn renamed(&mut self, name: Option<Name>) {
+        self.name = name;
     }
 }
 
@@ -232,7 +247,7 @@ impl View {
     pub(super) fn resized(
         &mut self,
         terminal: TerminalId,
-        direction: Direction,
+        sides: Sides,
         change: layout::Change,
         size: Size,
     ) -> Result<(), String> {
@@ -240,7 +255,7 @@ impl View {
         if laid.full.is_some() {
             return Err("a view one terminal fills is resized by none".to_owned());
         }
-        if !laid.tree.resize(terminal, direction, change, size) {
+        if !laid.tree.resize(terminal, sides, change, size) {
             return Err(format!("no border of terminal {terminal} moves that way"));
         }
         Ok(())

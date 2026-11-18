@@ -11,15 +11,18 @@ use tonic::{Code, Status};
 use crate::host::{eventually, folder_in, start, Host};
 use crate::worktree::cloned_as_wt;
 
-fn changed(host: &Host, change: Change) -> Result<u64, Status> {
+pub fn asked(host: &Host, change: Change) -> Result<Option<u64>, Status> {
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let asked = ChangeProjectsRequest { on: None, change: Some(change) };
-        let made = daemon.change_projects(asked).await?.into_inner().made;
-        Ok(made.expect("an addition says what it made"))
+        Ok(daemon.change_projects(asked).await?.into_inner().made)
     })
+}
+
+fn changed(host: &Host, change: Change) -> Result<u64, Status> {
+    Ok(asked(host, change)?.expect("an addition says what it made"))
 }
 
 pub fn project(host: &Host, dir: &Path, name: Option<&str>) -> u64 {
@@ -75,6 +78,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                     folder: text(&clone.join("main")),
                     seen: Some(Seen::Stage(Stage::Working.into())),
                     terminals: Vec::new(),
+                    used_at: None,
                 }],
             },
             api::Project {
@@ -89,6 +93,7 @@ fn projects_and_workstreams_are_watched_and_come_back_when_lunetad_starts_again(
                     folder: text(&vault),
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
+                    used_at: None,
                 }],
             },
         ],
@@ -149,12 +154,12 @@ fn a_projects_file_lunetad_cannot_read_is_left_as_it_is_and_no_change_is_kept() 
     let host = Host::new();
     let file = kept(&host);
     fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let newer = "{\"version\": 4, \"projects\": [], \"views\": []}\n";
+    let newer = "{\"version\": 5, \"projects\": [], \"views\": []}\n";
     fs::write(&file, newer).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let mut daemon = start(host.vars()).unwrap();
     let said = daemon.said_after(Duration::ZERO).join("\n");
-    assert!(said.contains("of version 4, and this lunetad reads only 1 to 3"), "{said}");
+    assert!(said.contains("of version 5, and this lunetad reads only 1 to 4"), "{said}");
 
     let add = AddProject { dir: text(scratch.path()), name: None };
     let refused = changed(&host, Change::AddProject(add)).unwrap_err();

@@ -7,7 +7,7 @@ use std::path::{Component, Path};
 use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use luneta_protocol::github::{PullRequest, State, Verdict};
 
@@ -155,6 +155,36 @@ impl Name {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Used(u64);
+
+impl Used {
+    #[must_use]
+    pub fn at(time: SystemTime) -> Used {
+        let since = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+        Used(u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    #[must_use]
+    pub fn of_millis(millis: u64) -> Used {
+        Used(millis)
+    }
+
+    #[must_use]
+    pub fn millis(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn time(self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_millis(self.0)
+    }
+
+    fn after(self) -> Used {
+        Used(self.0.saturating_add(1))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Dir(String);
 
@@ -293,6 +323,7 @@ pub struct Workstream {
     renamed: Option<Name>,
     below: Below,
     view: View,
+    used: Option<Used>,
 }
 
 impl Workstream {
@@ -315,6 +346,11 @@ impl Workstream {
     pub fn view(&self) -> &View {
         &self.view
     }
+
+    #[must_use]
+    pub fn used(&self) -> Option<Used> {
+        self.used
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -333,11 +369,14 @@ pub enum Change {
     MoveWorkstream { workstream: WorkstreamId, to: usize },
     ForgetProject { project: ProjectId },
     ForgetWorkstream { workstream: WorkstreamId },
+    CloseWorkstream { workstream: WorkstreamId },
+    Went { workstream: WorkstreamId, at: Used },
+    RenameTerminal { terminal: TerminalId, to: Option<Name> },
     Open { workstream: WorkstreamId, terminal: Terminal, placed: Placed, size: Size },
     Close { terminal: TerminalId },
     Resize {
         terminal: TerminalId,
-        direction: layout::Direction,
+        sides: layout::Sides,
         change: layout::Change,
         size: Size,
     },
@@ -403,6 +442,16 @@ impl Change {
                 let workstream = id("workstream", workstream).map(WorkstreamId)?;
                 Change::ForgetWorkstream { workstream }
             },
+            Asked::CloseWorkstream(asked::CloseWorkstream { workstream }) => {
+                let workstream = id("workstream", workstream).map(WorkstreamId)?;
+                Change::CloseWorkstream { workstream }
+            },
+            Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
+                Change::RenameTerminal {
+                    terminal: id("terminal", terminal).map(TerminalId)?,
+                    to: name(to).map_err(field("to"))?,
+                }
+            },
         })
     }
 
@@ -418,11 +467,15 @@ impl Change {
             | Change::MoveWorkstream { .. }
             | Change::ForgetProject { .. }
             | Change::ForgetWorkstream { .. }
+            | Change::CloseWorkstream { .. }
+            | Change::RenameTerminal { .. }
             | Change::Open { .. }
             | Change::Close { .. } => true,
-            Change::Resize { .. } | Change::Swap { .. } | Change::Fill { .. } | Change::Ran(_) => {
-                false
-            },
+            Change::Went { .. }
+            | Change::Resize { .. }
+            | Change::Swap { .. }
+            | Change::Fill { .. }
+            | Change::Ran(_) => false,
         }
     }
 }
@@ -577,8 +630,9 @@ impl Projects {
                     format!("{} is not in {}, the project's folder", folder.0, project.dir.0)
                 })?;
                 let id = self.fresh(&mut draw)?;
-                let view = View::default();
-                let workstream = Workstream { id: WorkstreamId(id), renamed: name, below, view };
+                let (view, used) = (View::default(), None);
+                let made = WorkstreamId(id);
+                let workstream = Workstream { id: made, renamed: name, below, view, used };
                 project.workstreams.push(workstream);
                 Some(id)
             },
@@ -628,6 +682,29 @@ impl Projects {
                 project.workstreams.remove(at);
                 None
             },
+            Change::CloseWorkstream { workstream } => {
+                let (project, at) = changed.workstream(workstream)?;
+                project.workstreams.remove(at);
+                None
+            },
+            Change::Went { workstream, at } => {
+                let others = self.workstreams().filter(|(_, it)| it.id != workstream);
+                let newest = others.filter_map(|(_, it)| it.used).max();
+                let at = newest.map_or(at, |newest| at.max(newest.after()));
+                let (project, place) = changed.workstream(workstream)?;
+                let went = &mut project.workstreams[place];
+                if went.used.is_none_or(|used| used < at) {
+                    went.used = Some(at);
+                }
+                let last = went.used.is_some_and(|used| newest.is_none_or(|newest| used > newest));
+                assert!(last, "workstream {workstream}, gone to last, is the one used last");
+                None
+            },
+            Change::RenameTerminal { terminal, to } => {
+                let view = changed.view_of(terminal)?;
+                view.terminal_mut(terminal).expect("its view holds it").renamed(to);
+                None
+            },
             Change::Open { workstream, terminal, placed, size } => {
                 let id = layout::Leaf::id(&terminal);
                 if self.holds(id.0) {
@@ -645,8 +722,8 @@ impl Projects {
                 changed.view_of(terminal)?.closed(terminal);
                 None
             },
-            Change::Resize { terminal, direction, change, size } => {
-                changed.view_of(terminal)?.resized(terminal, direction, change, size)?;
+            Change::Resize { terminal, sides, change, size } => {
+                changed.view_of(terminal)?.resized(terminal, sides, change, size)?;
                 None
             },
             Change::Swap { one, other } => {
@@ -1136,9 +1213,9 @@ mod tests {
         assert_eq!(view(&projects, main).full(), Some(two));
         let swap = change(&projects, Change::Swap { one, other: two });
         assert!(swap.unwrap_err().contains("moves none"), "a full view moves no terminal");
-        let (direction, grow) = (layout::Direction::Left, layout::Change::Grow);
+        let (sides, grow) = (layout::Sides::One(layout::Direction::Left), layout::Change::Grow);
         let size = Size::of(80, 24).unwrap();
-        let resize = Change::Resize { terminal: one, direction, change: grow, size };
+        let resize = Change::Resize { terminal: one, sides, change: grow, size };
         assert!(change(&projects, resize).unwrap_err().contains("resized by none"));
         let gone = TerminalId::of(7).unwrap();
         assert!(change(&projects, fill(Some(gone))).unwrap_err().contains("holds no terminal"));
@@ -1152,6 +1229,70 @@ mod tests {
         assert!(view(&projects, main).is_empty());
         (projects, _) = change(&projects, Change::ForgetWorkstream { workstream: main }).unwrap();
         assert_eq!(projects.all()[0].workstreams(), []);
+    }
+
+    #[test]
+    fn a_workstream_closes_with_its_terminals_where_a_forget_is_refused() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let kept = workstream(&mut projects, luneta, "/w/luneta");
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        opened(&mut projects, main, 101, right);
+        let forget = change(&projects, Change::ForgetWorkstream { workstream: main });
+        assert!(forget.unwrap_err().contains("holds 2 terminals still"));
+        (projects, _) = change(&projects, Change::CloseWorkstream { workstream: main }).unwrap();
+        let left = projects.all()[0].workstreams().iter().map(|it| it.id);
+        assert_eq!(left.collect::<Vec<_>>(), [kept]);
+        assert_eq!(projects.terminals().count(), 0);
+        let gone = change(&projects, Change::CloseWorkstream { workstream: main });
+        assert!(gone.unwrap_err().contains("no workstream has the id"));
+    }
+
+    #[test]
+    fn the_workstream_gone_to_last_is_the_one_used_last_whatever_the_clock_says() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let one = workstream(&mut projects, luneta, "/w/luneta/one");
+        let two = workstream(&mut projects, luneta, "/w/luneta/two");
+        let used = |projects: &Projects, workstream| projects.find(workstream).unwrap().1.used();
+        assert_eq!(used(&projects, one), None, "a workstream never gone to is used never");
+        let went = |workstream, millis| Change::Went { workstream, at: Used::of_millis(millis) };
+        (projects, _) = change(&projects, went(one, 5_000)).unwrap();
+        assert_eq!(used(&projects, one), Some(Used::of_millis(5_000)));
+        (projects, _) = change(&projects, went(two, 4_000)).unwrap();
+        assert_eq!(used(&projects, two), Some(Used::of_millis(5_001)), "a clock set back");
+        (projects, _) = change(&projects, went(one, 9_000)).unwrap();
+        assert_eq!(used(&projects, one), Some(Used::of_millis(9_000)));
+        let (same, _) = change(&projects, went(one, 8_000)).unwrap();
+        assert_eq!(same, projects, "a go to the workstream used last changes nothing");
+        let unknown = went(WorkstreamId::of(7).unwrap(), 1);
+        assert!(change(&projects, unknown).unwrap_err().contains("no workstream has the id"));
+        let at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_234);
+        assert_eq!((Used::at(at).millis(), Used::of_millis(1_234).time()), (1_234, at));
+    }
+
+    #[test]
+    fn a_terminal_keeps_the_name_it_is_given_until_taken_back() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let main = workstream(&mut projects, luneta, "/w/luneta");
+        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let name = |projects: &Projects| projects.holding(one).unwrap().1.name().cloned();
+        assert_eq!(name(&projects), None);
+        let to = Some(Name::parse("tests").unwrap());
+        (projects, _) = change(&projects, Change::RenameTerminal { terminal: one, to }).unwrap();
+        assert_eq!(name(&projects).as_ref().map(Name::as_str), Some("tests"));
+        let ran = Ran { terminal: one, folder: dir("/w/luneta/src"), runs: Runs::Shell };
+        (projects, _) = change(&projects, Change::Ran(vec![ran])).unwrap();
+        assert!(name(&projects).is_some(), "a terminal keeps its name whatever it runs");
+        let back = Change::RenameTerminal { terminal: one, to: None };
+        (projects, _) = change(&projects, back).unwrap();
+        assert_eq!(name(&projects), None);
+        let other = TerminalId::of(7).unwrap();
+        let unknown = Change::RenameTerminal { terminal: other, to: None };
+        assert!(change(&projects, unknown).unwrap_err().contains("no terminal has the id"));
     }
 
     #[test]

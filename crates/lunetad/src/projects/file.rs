@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Dir, Id, Line, Name, Project, Projects, Refused, Runs, Session};
-use super::{Terminal, TerminalId, WorkstreamId};
+use super::{Terminal, TerminalId, Used, WorkstreamId};
 use super::{View, Workstream};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{TERMINALS_MAX, WORKSTREAMS_MAX};
@@ -26,11 +26,13 @@ const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 const WITHOUT_VIEWS: u32 = 1;
 
 const WITHOUT_UNRUN: u32 = 2;
+
+const WITHOUT_NAMES_OR_USE: u32 = 3;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -40,8 +42,9 @@ const NAME_BYTES_MAX: usize = CHAR_BYTES_MAX * NAME_CHARS_MAX;
 
 const ENTRY_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + NAME_BYTES_MAX) + 256;
 
-const TERMINAL_BYTES_MAX: usize =
-    ESCAPED_BYTES_PER_BYTE * (PATH_BYTES_MAX + LINE_BYTES_MAX + SESSION_BYTES_MAX) + 256;
+const TERMINAL_BYTES_MAX: usize = ESCAPED_BYTES_PER_BYTE
+    * (PATH_BYTES_MAX + LINE_BYTES_MAX + SESSION_BYTES_MAX + NAME_BYTES_MAX)
+    + 256;
 
 const SPLIT_BYTES_MAX: usize = 128;
 
@@ -86,6 +89,8 @@ struct KeptWorkstream {
     below: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<KeptView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +126,8 @@ enum KeptTowards {
 #[serde(deny_unknown_fields)]
 struct KeptTerminal {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     folder: String,
     runs: KeptRuns,
 }
@@ -164,6 +171,7 @@ pub enum Failed {
     Nests(String),
     Refused(String),
     Unwritten(String),
+    Unclosed(String),
     KeptUntold,
 }
 
@@ -343,12 +351,20 @@ fn parse(text: &str) -> Result<Projects, String> {
     if version == WITHOUT_VIEWS && workstreams().any(|it| it.view.is_some()) {
         return Err(format!("it is of version {WITHOUT_VIEWS}, which holds no views"));
     }
-    let nodes = workstreams().filter_map(|it| it.view.as_ref()).flat_map(|view| &view.tree);
+    let mut nodes = workstreams().filter_map(|it| it.view.as_ref()).flat_map(|view| &view.tree);
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
-    if version <= WITHOUT_UNRUN && nodes.into_iter().any(unrun) {
+    if version <= WITHOUT_UNRUN && nodes.clone().any(unrun) {
         return Err(format!("it is of version {version}, which holds no line left unrun"));
+    }
+    let named = |node: &KeptNode| {
+        matches!(node, KeptNode::Terminal(KeptTerminal { name: Some(_), .. }))
+    };
+    let used = workstreams().any(|it| it.used.is_some());
+    if version <= WITHOUT_NAMES_OR_USE && (used || nodes.any(named)) {
+        let without = "which holds no terminal's name and no workstream's use";
+        return Err(format!("it is of version {version}, {without}"));
     }
     let projects = kept.projects.into_iter().map(KeptProject::read);
     Projects::checked(projects.collect::<Result<_, _>>()?)
@@ -387,6 +403,7 @@ impl KeptWorkstream {
             renamed: self.name.as_deref().map(Name::parse).transpose()?,
             below: Below::parse(&self.below)?,
             view,
+            used: self.used.map(Used::of_millis),
         })
     }
 
@@ -396,6 +413,7 @@ impl KeptWorkstream {
             name: workstream.renamed.as_ref().map(|name| name.0.clone()),
             below: workstream.below.0.clone(),
             view: KeptView::of(&workstream.view),
+            used: workstream.used.map(Used::millis),
         }
     }
 }
@@ -444,6 +462,7 @@ impl KeptTerminal {
         let id: TerminalId = self.id.parse()?;
         let why = |why: String| format!("terminal {id}: {why}");
         let folder = Dir::parse(&self.folder).map_err(why)?;
+        let name = self.name.as_deref().map(Name::parse).transpose().map_err(why)?;
         let runs = match self.runs {
             KeptRuns::Shell => Runs::Shell,
             KeptRuns::Command(line) => Runs::Command(Line::parse(&line).map_err(why)?),
@@ -453,7 +472,7 @@ impl KeptTerminal {
                 session: Session::parse(&session).map_err(why)?,
             },
         };
-        Ok(Terminal::new(id, folder, runs))
+        Ok(Terminal::new(id, folder, runs).named(name))
     }
 
     fn of(terminal: &Terminal) -> KeptTerminal {
@@ -468,6 +487,7 @@ impl KeptTerminal {
         };
         KeptTerminal {
             id: terminal.id().to_string(),
+            name: terminal.name().map(|name| name.as_str().to_owned()),
             folder: terminal.folder().as_str().to_owned(),
             runs,
         }
@@ -596,7 +616,7 @@ mod tests {
         let main = Change::AddWorkstream { project, folder, name: named };
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let want = r#"{
-  "version": 3,
+  "version": 4,
   "projects": [
     {
       "id": "0000000000000001",
@@ -618,8 +638,8 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [1, 2] {
-            let before = want.replace(r#""version": 3"#, &format!(r#""version": {before}"#));
+        for before in [1, 2, 3] {
+            let before = want.replace(r#""version": 4"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
     }
@@ -661,7 +681,7 @@ mod tests {
         let fill = Change::Fill { workstream, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 3,
+  "version": 4,
   "projects": [
     {
       "id": "0000000000000001",
@@ -723,7 +743,7 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects));
-        let before = want.replace(r#""version": 3"#, r#""version": 1"#);
+        let before = want.replace(r#""version": 4"#, r#""version": 1"#);
         assert_eq!(parse(&before), Err("it is of version 1, which holds no views".to_owned()));
     }
 
@@ -748,11 +768,37 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_s_name_and_a_workstream_s_use_are_kept_only_from_version_4() {
+        let text = |version: u32, name: &str, used: &str| {
+            format!(
+                r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
+                "dir": "/a", "workstreams": [{{"id": "0000000000000002", "view": {{"tree": [
+                {{"terminal": {{"id": "0000000000000003", {name} "folder": "/a", "runs": "shell"}}}}
+                ]}} {used}}}]}}]}}"#
+            )
+        };
+        let (name, used) = (r#""name": "tests","#, r#", "used": 1763460000123"#);
+        let kept = parse(&text(4, name, used)).unwrap();
+        let (workstream, held) = kept.holding(TerminalId::of(3).unwrap()).unwrap();
+        assert_eq!(held.name().map(Name::as_str), Some("tests"));
+        assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
+        let again = written(&kept);
+        assert!(again.contains(r#""name": "tests""#) && again.contains(r#""used": 1763460000123"#));
+        assert_eq!(parse(&again), Ok(kept));
+        let without = "which holds no terminal's name and no workstream's use";
+        for (name, used) in [(name, ""), ("", used)] {
+            let refused = parse(&text(3, name, used));
+            assert_eq!(refused, Err(format!("it is of version 3, {without}")));
+        }
+        assert!(parse(&text(4, r#""name": "","#, "")).unwrap_err().contains("a name is empty"));
+    }
+
+    #[test]
     fn a_file_it_cannot_read_is_never_written_over() {
         let project = r#"{"id": "0000000000000001", "name": "a", "dir": "/a"}"#;
         let refused = [
             ("{", "EOF"),
-            (r#"{"version": 4, "projects": []}"#, "version 4, and this lunetad reads only 1 to 3"),
+            (r#"{"version": 5, "projects": []}"#, "version 5, and this lunetad reads only 1 to 4"),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (

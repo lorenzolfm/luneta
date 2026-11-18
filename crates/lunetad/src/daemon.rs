@@ -1084,6 +1084,7 @@ impl Daemon for Host {
                 Failed::Nests(why) => Status::already_exists(why),
                 Failed::Refused(why) => Status::invalid_argument(why),
                 Failed::Unwritten(why) => Status::internal(why),
+                Failed::Unclosed(why) => Status::unavailable(why),
                 Failed::KeptUntold => Status::unavailable(stopped),
             })
         });

@@ -919,6 +919,7 @@ message Workstream {
     google.protobuf.Empty unread = 7;
   }
   repeated Terminal terminals = 8;
+  google.protobuf.Timestamp used_at = 9;
 }
 
 message Terminal {
@@ -933,6 +934,7 @@ message Terminal {
   Titled titled = 7;
   Shell shell = 8;
   bool held = 9;
+  optional string name = 10;
 }
 
 enum Stage {
@@ -956,6 +958,8 @@ message ChangeProjectsRequest {
     ForgetProject forget_project = 8;
     ForgetWorkstream forget_workstream = 9;
     WorkstreamAt workstream_at = 10;
+    RenameTerminal rename_terminal = 11;
+    CloseWorkstream close_workstream = 12;
   }
 
   message AddProject {
@@ -1000,6 +1004,15 @@ message ChangeProjectsRequest {
   message WorkstreamAt {
     fixed64 project = 1;
     string folder = 2;
+  }
+
+  message RenameTerminal {
+    fixed64 terminal = 1;
+    optional string to = 2;
+  }
+
+  message CloseWorkstream {
+    fixed64 workstream = 1;
   }
 }
 
@@ -1050,7 +1063,7 @@ message ShowRequest {
   }
 
   message Resize {
-    Direction direction = 1;
+    optional Direction direction = 1;
     bool grow = 2;
   }
 

@@ -4,8 +4,11 @@ use std::time::{Duration, Instant};
 
 use lunetad::api::show_request::{self, focus, open, r#move, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
+use lunetad::api::change_projects_request::{
+    Change, CloseWorkstream, ForgetWorkstream, RenameTerminal,
+};
 use lunetad::api::projects::Held;
-use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey};
+use lunetad::api::{agent, terminal, ShowRequest, ShowResponse, Terminal, TerminalKey, Workstream};
 use lunetad::mux::own::api::{self as mux_api, typed, Listing};
 use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{view, Greeting, Seen, FRAMES_MAX};
@@ -13,12 +16,12 @@ use lunetad::projects::{Size, WorkstreamId};
 use lunetad::{Asked, Beside, Heard};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::Streaming;
+use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
 use crate::host::{eventually, folder_in, script};
 use crate::own::Owned;
-use crate::projects::{kept, project, workstream};
+use crate::projects::{asked, kept, project, workstream};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -130,6 +133,17 @@ impl<'a> Shown<'a> {
         self.owned.block_on(async { tokio::time::timeout(HEARD_IN, heard.message()).await })
     }
 
+    fn until_ended(&mut self) -> Status {
+        loop {
+            let heard = self.heard_in_time().expect("the view ends in time");
+            match heard {
+                Ok(Some(_)) => {},
+                Ok(None) => panic!("the view ends with no word of why"),
+                Err(status) => return status,
+            }
+        }
+    }
+
     fn until_refused(&mut self) -> String {
         loop {
             if let Some(why) = self.refused.pop() {
@@ -179,14 +193,18 @@ fn sized(owned: &Owned, terminal: u64) -> Option<(u32, u32)> {
     Some((size.columns, size.rows))
 }
 
-fn watched(owned: &Owned, workstream: u64) -> Vec<Terminal> {
+fn watched_workstream(owned: &Owned, workstream: u64) -> Option<Workstream> {
     let host = owned.host.host();
     let Some(Held::Kept(kept)) = host.projects.and_then(|projects| projects.held) else {
         panic!("lunetad keeps no projects");
     };
     let workstreams = kept.projects.into_iter().flat_map(|project| project.workstreams);
     let mut workstreams = workstreams.filter(|it| it.id == workstream);
-    workstreams.next().expect("lunetad watches the workstream").terminals
+    workstreams.next()
+}
+
+fn watched(owned: &Owned, workstream: u64) -> Vec<Terminal> {
+    watched_workstream(owned, workstream).expect("lunetad watches the workstream").terminals
 }
 
 fn root_of(owned: &Owned, terminal: u64) -> u32 {
@@ -364,7 +382,7 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 3,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 4,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -442,8 +460,9 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let mut shown = Shown::new(&owned, workstream, 80, 24);
     let left = shown.open();
     let right = shown.open();
-    let towards_left = show_request::Direction::Left.into();
-    shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
+    let towards_left: i32 = show_request::Direction::Left.into();
+    let resize = |grow| show_request::Resize { direction: Some(towards_left), grow };
+    shown.ask(Event::Resize(resize(true)));
     let laid = shown.until("the border moved", |laid| {
         laid.panes[0].rect == Some(rect(0, 0, 36, 24))
     });
@@ -457,11 +476,97 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     assert_eq!((laid.panes[1].terminal, focused_of(&laid)), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
     shown.until("the view full", |laid| full_of(laid) == Some(right));
-    shown.ask(Event::Resize(show_request::Resize { direction: towards_left, grow: true }));
+    shown.ask(Event::Resize(resize(true)));
     assert!(shown.until_refused().contains("resized by none"));
     let to = Some(r#move::To::Direction(show_request::Direction::Right.into()));
     shown.ask(Event::Move(show_request::Move { to }));
     assert!(shown.until_refused().contains("moves none"));
+}
+
+#[test]
+fn a_resize_that_names_no_direction_moves_every_border_of_the_focused_terminal() {
+    let owned = Owned::new();
+    let workstream = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, workstream, 80, 24);
+    shown.open();
+    shown.open();
+    let around = |grow| Event::Resize(show_request::Resize { direction: None, grow });
+    shown.ask(around(true));
+    let laid = shown.until("the border moved", |laid| {
+        laid.panes[1].rect == Some(rect(36, 0, 44, 24))
+    });
+    assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 36, 24)));
+    shown.ask(around(false));
+    shown.until("the border back", |laid| laid.panes[1].rect == Some(rect(40, 0, 40, 24)));
+    let unknown = Event::Resize(show_request::Resize { direction: Some(0), grow: true });
+    shown.ask(unknown);
+    assert!(shown.until_refused().contains("no direction it knows"));
+}
+
+#[test]
+fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let made = project(&owned.host, &home, None);
+    let add = || workstream(&owned.host, made, &home);
+    let (closing, other) = (add(), add());
+    let mut shown = Shown::new(&owned, closing, 80, 24);
+    let terminals = [shown.open(), shown.open()];
+    let mut beside = Shown::new(&owned, other, 80, 24);
+    let stays = beside.open();
+    let forget = Change::ForgetWorkstream(ForgetWorkstream { workstream: closing });
+    let refused = asked(&owned.host, forget).unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    assert!(refused.message().contains("holds 2 terminals still"), "{}", refused.message());
+
+    let close = || Change::CloseWorkstream(CloseWorkstream { workstream: closing });
+    assert_eq!(asked(&owned.host, close()).unwrap(), None);
+    eventually("the workstream's terminals leave the mux", || {
+        let listing = owned.listing();
+        terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
+    });
+    assert!(tagged(&owned.listing(), stays).is_some(), "another workstream's terminal stays");
+    let ended = shown.until_ended();
+    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
+    assert_eq!(watched_workstream(&owned, closing), None);
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    assert!(!file.contains(&format!("{closing:016x}")), "{file}");
+    let again = asked(&owned.host, close()).unwrap_err();
+    assert_eq!(again.code(), Code::InvalidArgument);
+    assert!(again.message().contains("no workstream has the id"), "{}", again.message());
+}
+
+#[test]
+fn a_terminal_s_name_and_the_last_use_of_a_workstream_reach_watch_and_the_file() {
+    let owned = Owned::new();
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let made = project(&owned.host, &home, None);
+    let [first, second] = [(); 2].map(|()| workstream(&owned.host, made, &home));
+    let used = |workstream| watched_workstream(&owned, workstream).unwrap().used_at;
+    assert_eq!((used(first), used(second)), (None, None));
+    let mut shown = Shown::new(&owned, first, 80, 24);
+    let first_used = eventually("a client's arrival is a use", || used(first));
+    assert_eq!(used(second), None);
+    let terminal = shown.open();
+    let to = Some("tests".to_owned());
+    let rename = Change::RenameTerminal(RenameTerminal { terminal, to });
+    assert_eq!(asked(&owned.host, rename).unwrap(), None);
+    let named = watched(&owned, first).into_iter().find(|it| it.id == terminal).unwrap().name;
+    assert_eq!(named.as_deref(), Some("tests"));
+    let blank = RenameTerminal { terminal, to: Some(String::new()) };
+    let refused = asked(&owned.host, Change::RenameTerminal(blank)).unwrap_err();
+    assert_eq!(refused.code(), Code::InvalidArgument);
+
+    shown.ask(Event::Go(second));
+    shown.until("the second workstream", |laid| laid.workstream == second);
+    let second_used = eventually("a go is a use", || used(second));
+    let millis = |at: prost_types::Timestamp| at.seconds * 1000 + i64::from(at.nanos) / 1_000_000;
+    assert!(millis(second_used) > millis(first_used), "{second_used:?} {first_used:?}");
+    eventually("the uses reach the file within a sweep", || {
+        let file = fs::read_to_string(kept(&owned.host)).ok()?;
+        let named = file.contains(r#""name": "tests""#);
+        (named && file.matches(r#""used": "#).count() == 2).then_some(())
+    });
 }
 
 fn mux_key(key: TerminalKey) -> mux_api::TerminalKey {
