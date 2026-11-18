@@ -496,8 +496,8 @@ reversed, as a selection, and the pointer over one underlines it first. A URL
 runs from its scheme, as `https://`, to a blank or a quote, less a stop or a
 bracket it did not open; a path is a word with a `/` in it, as
 `crates/a.rs:12`, between blanks, brackets and quotes. Either goes on into the
-next row where it fills its own to the edge. A click on any other word copies
-nothing. When the own session luneta is in ends, the newest session of this
+next row where the program's text wraps into it, and neither is longer than
+4096 cells. A click on any other word copies nothing. When the own session luneta is in ends, the newest session of this
 machine takes its place, of either kind, and so it does when zellij's ends.
 
 A project's terminals outlive lunetad, as `luneta-mux` holds them. When

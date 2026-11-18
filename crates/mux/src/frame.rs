@@ -50,6 +50,7 @@ fn line_said(line: &Line) -> api::Line {
     api::Line {
         glyphs: line.cells().iter().map(glyph_said).collect(),
         wraps_wide: line.wraps_wide(),
+        wraps: line.wraps(),
     }
 }
 

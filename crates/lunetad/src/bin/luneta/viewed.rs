@@ -290,10 +290,9 @@ impl View {
             if selection.from == selection.to {
                 link(screen, selection.from)
             } else {
-                Some((selection, text(screen, selection)))
+                Some((selection, text(screen, selection))).filter(|(_, text)| !text.is_empty())
             }
         });
-        let chosen = chosen.filter(|(_, text)| !text.is_empty());
         self.pointer = chosen.as_ref().map_or(Pointer::Free, |(lit, _)| Pointer::Shown(*lit));
         chosen.map(|(_, text)| text)
     }
@@ -320,7 +319,7 @@ impl View {
         draw_tab_spans(buffer, bar, &tab_spans(self.named_tabs(), bar.width), self.workstream);
         let focused = self.focused();
         let selection = self.pointer.selection();
-        let link = hover.and_then(|at| self.pointed(at));
+        let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
         for (pane, placed) in self.drawn() {
             let mine = Some(pane.terminal) == focused;
@@ -336,8 +335,8 @@ impl View {
                 Found::Key(key) if Some(key) == self.runs_in => HERE,
                 Found::Key(key) => {
                     if let Some(screen) = self.screens.get(&key) {
-                        let (selection, link) = if mine { (selection, link) } else { (None, None) };
-                        let drawn = draw_screen(buffer, seen, screen, selection, link);
+                        let lit = |span: Option<Selection>| span.filter(|_| mine);
+                        let drawn = draw_screen(buffer, seen, screen, lit(selection), lit(pointed));
                         if mine {
                             cursor = drawn;
                         }
@@ -722,7 +721,7 @@ mod tests {
 
     use crossterm::event::{KeyModifiers, MouseButton};
     use lunetad::api::{show_request, show_response};
-    use lunetad::mux::own::frames::{Cursor, Glyph, Grapheme, Line, Shows};
+    use lunetad::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Shows};
     use lunetad::mux::own::OwnMade;
     use ratatui::style::Modifier;
 
@@ -740,7 +739,7 @@ mod tests {
     fn lines(rows: &[&str]) -> Vec<Line> {
         let line = |row: &str| {
             let glyphs: Vec<Glyph> = row.chars().map(|it| narrow(&it.to_string())).collect();
-            Line::new(glyphs, false, side(u16::try_from(row.len()).unwrap())).unwrap()
+            Line::new(glyphs, Ending::Here, side(u16::try_from(row.len()).unwrap())).unwrap()
         };
         rows.iter().map(|row| line(row)).collect()
     }

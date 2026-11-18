@@ -74,6 +74,7 @@ pub struct Cell {
 pub struct Line {
     cells: Vec<Cell>,
     wraps_wide: bool,
+    wraps: bool,
 }
 
 impl Line {
@@ -85,6 +86,11 @@ impl Line {
     #[must_use]
     pub fn wraps_wide(&self) -> bool {
         self.wraps_wide
+    }
+
+    #[must_use]
+    pub fn wraps(&self) -> bool {
+        self.wraps
     }
 }
 
@@ -312,7 +318,8 @@ impl Screen {
         let mut lines = Vec::with_capacity(row_count);
         while let Some(row) = rows.next() {
             assert!(lines.len() < row_count, "more lines than the screen's {row_count}");
-            lines.push(line(&mut self.cells.update(row)?, column_count)?);
+            let wraps = row.raw_row()?.is_wrapped()?;
+            lines.push(line(&mut self.cells.update(row)?, column_count, wraps)?);
         }
         assert_eq!(lines.len(), row_count);
         Ok(View { size: self.size, lines, cursor })
@@ -378,8 +385,12 @@ impl ScrollbackEnd {
     }
 }
 
-fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<Line, Error> {
-    let mut line = Line { cells: Vec::with_capacity(column_count), wraps_wide: false };
+fn line(
+    cells: &mut CellIteration<'static, '_>,
+    column_count: usize,
+    wraps: bool,
+) -> Result<Line, Error> {
+    let mut line = Line { cells: Vec::with_capacity(column_count), wraps_wide: false, wraps };
     let mut column = 0;
     let mut spacer_owed = false;
     while let Some(cell) = cells.next() {
@@ -422,6 +433,9 @@ fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<L
         column += 1;
     }
     assert_eq!(column, column_count);
+    if line.wraps_wide {
+        assert!(line.wraps, "a wide glyph wraps early only out of a row that wraps");
+    }
     assert_eq!(
         line.cells.iter().map(|cell| cell.glyph.columns()).sum::<usize>()
             + usize::from(line.wraps_wide),
@@ -498,8 +512,20 @@ mod tests {
     fn a_wide_glyph_too_long_for_its_line_wraps() {
         let lines = read("123456789👍");
         assert!(lines[0].wraps_wide());
+        assert!(lines[0].wraps());
+        assert!(!lines[1].wraps());
         assert_eq!(lines[0].cells().len(), 9);
         assert_eq!(lines[1].cells()[0].glyph, wide("👍"));
+    }
+
+    #[test]
+    fn a_row_wraps_where_its_text_goes_on_and_not_where_a_newline_ends_it() {
+        let lines = read("0123456789ab");
+        assert!(lines[0].wraps());
+        assert!(!lines[0].wraps_wide());
+        assert!(!lines[1].wraps());
+        let lines = read("0123456789\r\nab");
+        assert!(!lines[0].wraps(), "text that fills its row and then ends does not wrap");
     }
 
     #[test]

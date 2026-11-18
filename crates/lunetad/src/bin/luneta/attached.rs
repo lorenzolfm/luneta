@@ -291,144 +291,252 @@ pub(crate) fn text(screen: &Screen, selection: Selection) -> String {
     rows.join("\n")
 }
 
+const LINK_CELLS_MAX: usize = 4096;
+
 const URL_ENDS: &str = "<>\"'`";
 
 const PATH_ENDS: &str = "()[]{}<>\"'`,;|=*";
 
+const URL_TRAILS: &str = ".,;:!?";
+
+const PATH_TRAILS: &str = ".:!?";
+
+const PATH_LEADS: &str = ":!?";
+
+const PAIRS: [(&str, &str); 3] = [("(", ")"), ("[", "]"), ("{", "}")];
+
 pub(crate) fn link(screen: &Screen, at: Spot) -> Option<(Selection, String)> {
-    let (cells, clicked) = word(screen, at)?;
-    let shown: Vec<&str> = cells.iter().map(|(_, shown)| *shown).collect();
-    let (first, end) = url(&shown, clicked).or_else(|| path(&shown, clicked))?;
-    assert!(first <= clicked && clicked < end, "a link holds the cell clicked");
-    let selection = Selection { from: cells[first].0, to: cells[end - 1].0 };
-    Some((selection, shown[first..end].concat()))
+    let (word, clicked) = word(screen, at)?;
+    let (first, end) = url(&word, clicked).or_else(|| path(&word, clicked))?;
+    assert!(first <= clicked, "a link starts at or before the cell clicked");
+    assert!(clicked < end, "a link ends after the cell clicked");
+    let selection = Selection { from: word[first].spot, to: word[end - 1].spot };
+    let text: String = word[first..end].iter().map(|letter| letter.text).collect();
+    assert!(!text.is_empty(), "a link shows something");
+    Some((selection, text))
 }
 
 #[derive(Clone, Copy)]
-struct Cell<'a> {
+struct Letter<'a> {
     spot: Spot,
-    columns: u16,
-    shown: Option<&'a str>,
+    text: &'a str,
 }
 
-fn word(screen: &Screen, at: Spot) -> Option<(Vec<(Spot, &str)>, usize)> {
-    let lines = &screen.lines;
-    let row = usize::from(at.row);
-    lines.get(row)?;
-    let shows = |cell: Option<&Cell>| cell.is_some_and(|cell| cell.shown.is_some());
-    let joins = |above: usize| {
-        let ends = lines[above].wraps_wide() || shows(cells(&lines[above], 0).last());
-        ends && shows(cells(&lines[above + 1], 0).first())
-    };
-    let (mut top, mut bottom) = (row, row);
-    while top > 0 && joins(top - 1) {
-        top -= 1;
-    }
-    while bottom + 1 < lines.len() && joins(bottom) {
-        bottom += 1;
-    }
-    let mut run = Vec::new();
-    for (index, line) in lines.iter().enumerate().take(bottom + 1).skip(top) {
-        run.extend(cells(line, u16::try_from(index).expect("a screen's rows fit a u16")));
-    }
-    let covers = |cell: &Cell| {
-        let Cell { spot, columns, .. } = *cell;
-        spot.row == at.row && spot.column <= at.column && at.column < spot.column + columns
-    };
-    let clicked = run.iter().position(covers)?;
-    run[clicked].shown?;
-    let blank = |cell: &Cell| cell.shown.is_none();
-    let first = run[..clicked].iter().rposition(blank).map_or(0, |at| at + 1);
-    let end = run[clicked..].iter().position(blank).map_or(run.len(), |at| clicked + at);
-    let word = run[first..end].iter().filter_map(|cell| Some((cell.spot, cell.shown?)));
-    Some((word.collect(), clicked - first))
+#[derive(Clone, Copy)]
+struct Place {
+    row: u16,
+    index: usize,
+    column: u16,
 }
 
-fn cells(line: &Line, row: u16) -> Vec<Cell<'_>> {
+fn word(screen: &Screen, at: Spot) -> Option<(Vec<Letter<'_>>, usize)> {
+    let line = screen.lines.get(usize::from(at.row))?;
+    let place = under(line, at)?;
+    let own = letter(screen, place)?;
+    let before = letters(screen, place, left, LINK_CELLS_MAX - 1)?;
+    let after = letters(screen, place, right, LINK_CELLS_MAX - 1 - before.len())?;
+    let clicked = before.len();
+    let mut word: Vec<Letter> = before.into_iter().rev().collect();
+    word.push(own);
+    word.extend(after);
+    assert!(word.len() <= LINK_CELLS_MAX, "a word is cut at {LINK_CELLS_MAX} cells");
+    assert!(word.windows(2).all(|pair| pair[0].spot < pair[1].spot), "a word reads forward");
+    Some((word, clicked))
+}
+
+fn under(line: &Line, at: Spot) -> Option<Place> {
     let mut column = 0;
-    let mut cells = Vec::new();
-    for glyph in line.glyphs() {
-        let shown = match &glyph.shows {
-            Shows::Blank => None,
-            Shows::Narrow(grapheme) | Shows::Wide(grapheme) => {
-                Some(grapheme.as_str()).filter(|shown| !shown.chars().all(char::is_whitespace))
-            },
-        };
+    for (index, glyph) in line.glyphs().iter().enumerate() {
         let columns = glyph.shows.columns();
-        cells.push(Cell { spot: Spot { row, column }, columns, shown });
+        if at.column < column + columns {
+            assert!(column <= at.column, "the glyph under a spot starts at or before it");
+            return Some(Place { row: at.row, index, column });
+        }
         column += columns;
     }
-    cells
+    None
 }
 
-fn one_of(cell: &str, set: &str) -> bool {
-    let mut characters = cell.chars();
+fn letter(screen: &Screen, place: Place) -> Option<Letter<'_>> {
+    let glyph = &screen.lines[usize::from(place.row)].glyphs()[place.index];
+    let text = match &glyph.shows {
+        Shows::Blank => return None,
+        Shows::Narrow(grapheme) | Shows::Wide(grapheme) => grapheme.as_str(),
+    };
+    if text.chars().all(char::is_whitespace) {
+        return None;
+    }
+    Some(Letter { spot: Spot { row: place.row, column: place.column }, text })
+}
+
+fn letters(
+    screen: &Screen,
+    mut place: Place,
+    step: fn(&Screen, Place) -> Option<Place>,
+    count_max: usize,
+) -> Option<Vec<Letter<'_>>> {
+    let mut letters = Vec::new();
+    for _ in 0..=count_max {
+        let Some(next) = step(screen, place) else {
+            return Some(letters);
+        };
+        let Some(found) = letter(screen, next) else {
+            return Some(letters);
+        };
+        if letters.len() == count_max {
+            return None;
+        }
+        letters.push(found);
+        place = next;
+    }
+    unreachable!("a walk ends within {count_max} letters")
+}
+
+fn left(screen: &Screen, place: Place) -> Option<Place> {
+    if place.index > 0 {
+        let glyphs = screen.lines[usize::from(place.row)].glyphs();
+        let index = place.index - 1;
+        let column = place.column.checked_sub(glyphs[index].shows.columns());
+        let column = column.expect("a glyph starts after the glyphs before it");
+        return Some(Place { row: place.row, index, column });
+    }
+    let row = place.row.checked_sub(1)?;
+    let line = &screen.lines[usize::from(row)];
+    if line.wraps() {
+        let index = line.glyphs().len().checked_sub(1)?;
+        let column = line.glyphs()[..index].iter().map(|glyph| glyph.shows.columns()).sum();
+        Some(Place { row, index, column })
+    } else {
+        None
+    }
+}
+
+fn right(screen: &Screen, place: Place) -> Option<Place> {
+    let line = &screen.lines[usize::from(place.row)];
+    let index = place.index + 1;
+    if index < line.glyphs().len() {
+        let column = place.column + line.glyphs()[place.index].shows.columns();
+        return Some(Place { row: place.row, index, column });
+    }
+    if line.wraps() {
+        let row = place.row.checked_add(1)?;
+        let below = screen.lines.get(usize::from(row))?;
+        below.glyphs().first()?;
+        Some(Place { row, index: 0, column: 0 })
+    } else {
+        None
+    }
+}
+
+fn one_of(text: &str, set: &str) -> bool {
+    let mut characters = text.chars();
     characters.next().is_some_and(|first| set.contains(first)) && characters.next().is_none()
 }
 
-fn url(word: &[&str], clicked: usize) -> Option<(usize, usize)> {
-    let scheme = |cell: &str| {
-        cell.len() == 1 && cell.chars().all(|it| it.is_ascii_alphanumeric() || "+.-".contains(it))
+fn url(word: &[Letter], clicked: usize) -> Option<(usize, usize)> {
+    assert!(clicked < word.len(), "the cell clicked is in its word");
+    let text = |at: usize| word[at].text;
+    let scheme = |at: usize| {
+        let text = text(at);
+        text.len() == 1 && text.chars().all(|it| it.is_ascii_alphanumeric() || "+.-".contains(it))
     };
-    let marks = (0..word.len()).filter(|at| word.get(*at..at + 3) == Some(&[":", "/", "/"][..]));
-    for marks in marks {
-        let mut first = marks;
-        while first > 0 && scheme(word[first - 1]) {
+    let marked = |at: usize| {
+        let three = word.get(at..at + 3).map(|three| three.iter().map(|letter| letter.text));
+        three.is_some_and(|three| three.eq([":", "/", "/"]))
+    };
+    let mut scanned = 0;
+    for mark in 0..word.len() {
+        if mark < scanned {
+            continue;
+        }
+        if !marked(mark) {
+            continue;
+        }
+        let mut first = mark;
+        while first > 0 && scheme(first - 1) {
             first -= 1;
         }
-        while first < marks && !word[first].chars().all(|it| it.is_ascii_alphabetic()) {
+        while first < mark && !text(first).chars().all(|it| it.is_ascii_alphabetic()) {
             first += 1;
         }
-        let after = marks + 3;
+        if first == mark {
+            continue;
+        }
+        if clicked < first {
+            return None;
+        }
+        let after = mark + 3;
         let mut end = after;
-        while end < word.len() && !one_of(word[end], URL_ENDS) {
+        while end < word.len() && !one_of(text(end), URL_ENDS) {
             end += 1;
         }
+        scanned = end;
         let end = untrailed(word, after, end);
-        if first < marks && after < end && (first..end).contains(&clicked) {
+        if after == end {
+            continue;
+        }
+        if clicked < end {
             return Some((first, end));
         }
     }
     None
 }
 
-fn untrailed(word: &[&str], from: usize, mut end: usize) -> usize {
-    while end > from {
-        let last = word[end - 1];
-        let count = |it: &str| word[from..end].iter().filter(|cell| **cell == it).count();
-        let pairs = [("(", ")"), ("[", "]"), ("{", "}")];
-        let unopened = |&(open, close): &(&str, &str)| last == close && count(open) < count(close);
-        let unopened = pairs.iter().any(unopened);
-        if !one_of(last, ".,;:!?") && !unopened {
+fn untrailed(word: &[Letter], from: usize, end: usize) -> usize {
+    assert!(from <= end, "a url's tail starts before it ends");
+    assert!(end <= word.len(), "a url ends within its word");
+    let mut opens = [0_usize; PAIRS.len()];
+    let mut closes = [0_usize; PAIRS.len()];
+    for letter in &word[from..end] {
+        for (pair, (open, close)) in PAIRS.iter().enumerate() {
+            opens[pair] += usize::from(letter.text == *open);
+            closes[pair] += usize::from(letter.text == *close);
+        }
+    }
+    let mut kept = end;
+    while kept > from {
+        let last = word[kept - 1].text;
+        let closing = PAIRS.iter().position(|(_, close)| last == *close);
+        let unopened = closing.is_some_and(|pair| opens[pair] < closes[pair]);
+        if one_of(last, URL_TRAILS) || unopened {
+            if let Some(pair) = closing {
+                closes[pair] -= 1;
+            }
+            kept -= 1;
+        } else {
             break;
         }
-        end -= 1;
     }
-    end
+    assert!(from <= kept, "a url keeps what follows its scheme, or none of it");
+    assert!(kept <= end, "a url only loses its tail");
+    kept
 }
 
-fn path(word: &[&str], clicked: usize) -> Option<(usize, usize)> {
-    if one_of(word[clicked], PATH_ENDS) {
+fn path(word: &[Letter], clicked: usize) -> Option<(usize, usize)> {
+    assert!(clicked < word.len(), "the cell clicked is in its word");
+    let ends = |at: usize| one_of(word[at].text, PATH_ENDS);
+    if ends(clicked) {
         return None;
     }
     let mut first = clicked;
-    while first > 0 && !one_of(word[first - 1], PATH_ENDS) {
+    while first > 0 && !ends(first - 1) {
         first -= 1;
     }
     let mut end = clicked + 1;
-    while end < word.len() && !one_of(word[end], PATH_ENDS) {
+    while end < word.len() && !ends(end) {
         end += 1;
     }
-    while first < end && one_of(word[first], ":!?") {
+    while first < end && one_of(word[first].text, PATH_LEADS) {
         first += 1;
     }
-    while end > first && one_of(word[end - 1], ".:!?") {
+    while end > first && one_of(word[end - 1].text, PATH_TRAILS) {
         end -= 1;
     }
     let held = &word[first..end];
-    let named = held.iter().any(|cell| cell.chars().any(char::is_alphanumeric));
-    let path = held.contains(&"/") && named;
-    (path && (first..end).contains(&clicked)).then_some((first, end))
+    let holds_click = (first..end).contains(&clicked);
+    let folders = held.iter().any(|letter| letter.text == "/");
+    let named = held.iter().any(|letter| letter.text.chars().any(char::is_alphanumeric));
+    (holds_click && folders && named).then_some((first, end))
 }
 
 fn styled(style: &frames::Style) -> Style {
@@ -583,7 +691,7 @@ pub(crate) fn mouse_said(mouse: MouseEvent, at: Spot) -> Option<api::Mouse> {
 
 #[cfg(test)]
 mod tests {
-    use lunetad::mux::own::frames::Grapheme;
+    use lunetad::mux::own::frames::{Ending, Grapheme};
 
     use super::*;
 
@@ -603,9 +711,14 @@ mod tests {
         NonZeroU16::new(count).unwrap()
     }
 
+    fn ended(glyphs: Vec<Glyph>, ending: Ending) -> Line {
+        let columns: u16 = glyphs.iter().map(|glyph| glyph.shows.columns()).sum();
+        let columns = columns + u16::from(ending == Ending::WrapsWide);
+        Line::new(glyphs, ending, side(columns)).unwrap()
+    }
+
     fn line(glyphs: Vec<Glyph>) -> Line {
-        let columns = glyphs.iter().map(|glyph| glyph.shows.columns()).sum();
-        Line::new(glyphs, false, side(columns)).unwrap()
+        ended(glyphs, Ending::Here)
     }
 
     fn spot(row: u16, column: u16) -> Spot {
@@ -628,12 +741,22 @@ mod tests {
         assert_eq!(text(&screen, selection(spot(0, 0), spot(0, 1))), "ab");
     }
 
-    fn typed(rows: &[&str]) -> Screen {
+    fn typed_ending(rows: &[&str], ending: impl Fn(usize) -> Ending) -> Screen {
         let cell = |it: char| if it == ' ' { glyph(Shows::Blank) } else { narrow(&it.to_string()) };
-        let lines = rows.iter().map(|row| line(row.chars().map(cell).collect())).collect();
+        let lines = rows.iter().enumerate();
+        let lines = lines.map(|(index, row)| ended(row.chars().map(cell).collect(), ending(index)));
         let columns = side(u16::try_from(rows[0].chars().count()).unwrap());
         let size = Size { columns, rows: side(u16::try_from(rows.len()).unwrap()) };
-        Screen { size, lines, cursor: None, tracks_mouse: false }
+        Screen { size, lines: lines.collect(), cursor: None, tracks_mouse: false }
+    }
+
+    fn typed(rows: &[&str]) -> Screen {
+        typed_ending(rows, |_| Ending::Here)
+    }
+
+    fn wrapping(rows: &[&str]) -> Screen {
+        let last = rows.len() - 1;
+        typed_ending(rows, |index| if index < last { Ending::Wraps } else { Ending::Here })
     }
 
     fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(Spot, Spot, String)> {
@@ -655,6 +778,9 @@ mod tests {
         let quoted = r#"at "git+ssh://h/r.git"."#;
         assert_eq!(clicked(&[quoted], 0, 9).unwrap().2, "git+ssh://h/r.git");
         assert_eq!(clicked(&["[doc](http://x.y/z)"], 0, 8).unwrap().2, "http://x.y/z");
+        let nested = "https://a.io/?u=http://b";
+        assert_eq!(clicked(&[nested], 0, 20).unwrap().2, nested, "a url in a url is the outer one");
+        assert_eq!(clicked(&["://x"], 0, 2).unwrap().2, "//x", "with no scheme it is a path");
     }
 
     #[test]
@@ -672,12 +798,18 @@ mod tests {
     }
 
     #[test]
-    fn a_link_cut_at_the_edge_goes_on_in_the_next_row() {
+    fn a_link_the_program_wraps_goes_on_in_the_next_row() {
         let rows = ["go https://e.", "io/a/b now   ", "x            "];
         let url = Some((spot(0, 3), spot(1, 5), "https://e.io/a/b".to_owned()));
-        assert_eq!(clicked(&rows, 0, 4), url);
-        assert_eq!(clicked(&rows, 1, 1), url);
-        assert_eq!(clicked(&rows, 1, 8), None, "a row that ends in a blank ends its word");
+        let wrapped = |row, column| {
+            let (span, text) = link(&wrapping(&rows), spot(row, column))?;
+            Some((span.from, span.to, text))
+        };
+        assert_eq!(wrapped(0, 4), url);
+        assert_eq!(wrapped(1, 1), url);
+        assert_eq!(wrapped(1, 8), None, "a row that ends in a blank ends its word");
+        let cut = clicked(&rows[..2], 0, 4).unwrap().2;
+        assert_eq!(cut, "https://e", "a row the program ended at the edge ends its word");
         let wide = || glyph(Shows::Wide(grapheme("日")));
         let blank = || glyph(Shows::Blank);
         let screen = |columns: u16, lines: Vec<Line>| {
@@ -687,15 +819,37 @@ mod tests {
         let ends_wide = screen(
             5,
             vec![
-                line(vec![narrow("a"), narrow("b"), narrow("/"), wide()]),
+                ended(vec![narrow("a"), narrow("b"), narrow("/"), wide()], Ending::Wraps),
                 line(vec![narrow("x"), narrow("/"), narrow("y"), blank(), blank()]),
             ],
         );
         assert_eq!(link(&ends_wide, spot(0, 4)).unwrap().1, "ab/日x/y", "either half of it");
-        let early = Line::new(vec![narrow("a"), narrow("b"), narrow("/")], true, side(4)).unwrap();
+        assert_eq!(link(&ends_wide, spot(1, 0)).unwrap().1, "ab/日x/y", "from either row");
+        let early = ended(vec![narrow("a"), narrow("b"), narrow("/")], Ending::WrapsWide);
         let wrapped = screen(4, vec![early, line(vec![wide(), narrow("y"), blank()])]);
         let (span, text) = link(&wrapped, spot(0, 0)).unwrap();
         assert_eq!((span.to, text.as_str()), (spot(1, 2), "ab/日y"), "a wide glyph wrapped early");
+        assert_eq!(link(&wrapped, spot(0, 3)), None, "the padding it left shows nothing");
+    }
+
+    #[test]
+    fn a_word_longer_than_any_link_is_none() {
+        let row = "a/".repeat(32);
+        let full = vec![row.as_str(); LINK_CELLS_MAX / row.len()];
+        let longest = link(&wrapping(&full), spot(10, 3)).unwrap().1;
+        assert_eq!(longest.len(), LINK_CELLS_MAX);
+        let mut longer = full.clone();
+        let last = format!("a{}", " ".repeat(63));
+        longer.push(last.as_str());
+        assert_eq!(link(&wrapping(&longer), spot(10, 3)), None);
+        let marks = "://".repeat(21) + "/";
+        let marks = wrapping(&vec![marks.as_str(); 64]);
+        assert_eq!(link(&marks, spot(63, 63)), None, "marks with no scheme and no name");
+        let closers = format!("a://{}", ")".repeat(60));
+        let mut rows = vec![closers.as_str()];
+        let tail = ")".repeat(64);
+        rows.extend(vec![tail.as_str(); 62]);
+        assert_eq!(link(&wrapping(&rows), spot(30, 5)), None, "a scheme and only closers after it");
     }
 
     #[test]

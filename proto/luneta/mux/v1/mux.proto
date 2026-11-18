@@ -365,6 +365,7 @@ message Row {
 message Line {
   repeated Glyph glyphs = 1;
   bool wraps_wide = 2;
+  bool wraps = 3;
 }
 
 message Glyph {

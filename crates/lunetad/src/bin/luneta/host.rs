@@ -2195,9 +2195,9 @@ impl App {
                 self.sidebar.draw(buffer, sidebar, now)
             };
             self.settling.drawn(self.sidebar.aloud_buttons(), Instant::now());
-            let shown = |at: &Position| self.focus.over.is_none() && right.contains(*at);
+            let uncovered = |at: &Position| self.focus.over.is_none() && right.contains(*at);
             let spot = |at: Position| attached::Spot { row: at.y - right.y, column: at.x - right.x };
-            let hover = self.pointer.filter(shown).map(spot);
+            let hover = self.pointer.filter(uncovered).map(spot);
             let cursor = self.right.draw(buffer, right, hover);
             let drawn = match &self.focus.over {
                 Some(Over::Brief(briefing)) => {
