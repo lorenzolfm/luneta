@@ -1828,7 +1828,7 @@ impl Sidebar {
                 }
             }
         }
-        listing.shown = self.here_workstream().map(|place| (Machine::Local, place));
+        listing.shown = self.here_workstream().map(|place| (self.on().clone(), place));
         listing.here = here;
         listing
     }
@@ -9917,6 +9917,18 @@ mod tests {
         assert_eq!(sidebar.on_header(), Some(Machine::Remote(nixos())));
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Session(listed("main", 20))));
         assert_eq!(sidebar.on_header(), None);
+    }
+
+    #[test]
+    fn the_picker_is_told_the_workstream_luneta_shows_on_the_machine_it_sits_on() {
+        let mut sidebar = fresh();
+        sidebar.hear(machines());
+        let there = listed("main", 20);
+        sidebar.attaching(Machine::Remote(nixos()), there.own_key().unwrap());
+        sidebar.showing(tab_of(20, 0));
+        let project = ProjectRow::of(there).unwrap();
+        let place = WorkstreamPlace { project, workstream: tab_of(20, 0) };
+        assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));
     }
 
     #[test]
