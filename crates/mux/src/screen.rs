@@ -70,10 +70,17 @@ pub struct Cell {
     pub style: Style,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Here,
+    Wraps,
+    WrapsWide,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     cells: Vec<Cell>,
-    wraps_wide: bool,
+    ending: Ending,
 }
 
 impl Line {
@@ -83,8 +90,8 @@ impl Line {
     }
 
     #[must_use]
-    pub fn wraps_wide(&self) -> bool {
-        self.wraps_wide
+    pub fn ending(&self) -> Ending {
+        self.ending
     }
 }
 
@@ -312,7 +319,8 @@ impl Screen {
         let mut lines = Vec::with_capacity(row_count);
         while let Some(row) = rows.next() {
             assert!(lines.len() < row_count, "more lines than the screen's {row_count}");
-            lines.push(line(&mut self.cells.update(row)?, column_count)?);
+            let wraps = row.raw_row()?.is_wrapped()?;
+            lines.push(line(&mut self.cells.update(row)?, column_count, wraps)?);
         }
         assert_eq!(lines.len(), row_count);
         Ok(View { size: self.size, lines, cursor })
@@ -378,10 +386,15 @@ impl ScrollbackEnd {
     }
 }
 
-fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<Line, Error> {
-    let mut line = Line { cells: Vec::with_capacity(column_count), wraps_wide: false };
+fn line(
+    cells: &mut CellIteration<'static, '_>,
+    column_count: usize,
+    wraps: bool,
+) -> Result<Line, Error> {
+    let mut kept = Vec::with_capacity(column_count);
     let mut column = 0;
     let mut spacer_owed = false;
+    let mut padded = false;
     while let Some(cell) = cells.next() {
         assert!(column < column_count, "more cells than {column_count}");
         let mut text = String::new();
@@ -403,7 +416,7 @@ fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<L
             CellWide::SpacerHead => {
                 assert_eq!(column + 1, column_count, "padding in column {column}");
                 assert!(text.is_empty(), "padding that shows {text:?}");
-                line.wraps_wide = true;
+                padded = true;
                 None
             },
         };
@@ -417,17 +430,23 @@ fn line(cells: &mut CellIteration<'static, '_>, column_count: usize) -> Result<L
                 CellContentTag::BgColorRgb => style.bg_color = StyleColor::Rgb(raw.bg_color_rgb()?),
                 CellContentTag::Codepoint | CellContentTag::CodepointGrapheme => {},
             }
-            line.cells.push(Cell { glyph, style });
+            kept.push(Cell { glyph, style });
         }
         column += 1;
     }
     assert_eq!(column, column_count);
+    assert!(wraps || !padded, "a wide glyph wraps early only out of a row that wraps");
+    let ending = match (padded, wraps) {
+        (true, _) => Ending::WrapsWide,
+        (false, true) => Ending::Wraps,
+        (false, false) => Ending::Here,
+    };
     assert_eq!(
-        line.cells.iter().map(|cell| cell.glyph.columns()).sum::<usize>()
-            + usize::from(line.wraps_wide),
+        kept.iter().map(|cell| cell.glyph.columns()).sum::<usize>()
+            + usize::from(ending == Ending::WrapsWide),
         column_count,
     );
-    Ok(line)
+    Ok(Line { cells: kept, ending })
 }
 
 #[cfg(test)]
@@ -497,9 +516,20 @@ mod tests {
     #[test]
     fn a_wide_glyph_too_long_for_its_line_wraps() {
         let lines = read("123456789👍");
-        assert!(lines[0].wraps_wide());
+        assert_eq!(lines[0].ending(), Ending::WrapsWide);
+        assert_eq!(lines[1].ending(), Ending::Here);
         assert_eq!(lines[0].cells().len(), 9);
         assert_eq!(lines[1].cells()[0].glyph, wide("👍"));
+    }
+
+    #[test]
+    fn a_row_wraps_where_its_text_goes_on_and_not_where_a_newline_ends_it() {
+        let lines = read("0123456789ab");
+        assert_eq!(lines[0].ending(), Ending::Wraps);
+        assert_eq!(lines[1].ending(), Ending::Here);
+        let lines = read("0123456789\r\nab");
+        let ended = lines[0].ending();
+        assert_eq!(ended, Ending::Here, "text that fills its row and then ends does not wrap");
     }
 
     #[test]
