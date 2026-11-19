@@ -402,6 +402,19 @@ fn a_named_luneta_refuses_a_name_two_projects_share() {
 }
 
 #[test]
+fn a_luneta_whose_terminal_variables_name_no_terminal_opens_nothing() {
+    let owned = Owned::new();
+    let main = work_in(&owned, "named");
+    let mut luneta = luneta(owned.host.vars(), &main.path);
+    let output = luneta.env("LUNETA_MUX_TERMINAL", "7").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let refusal = String::from_utf8(output.stderr).unwrap();
+    assert!(refusal.contains("name no terminal: LUNETA_MUX_TERMINAL_MADE is unset"), "{refusal}");
+    let projects = projects_of(&owned);
+    assert_eq!(projects[0].worktrees().unwrap(), [], "luneta opened its folder's worktree");
+}
+
+#[test]
 fn a_named_luneta_says_why_lunetad_keeps_no_more_projects_rather_than_go_to_another() {
     let owned = Owned::new();
     let kept = directory("kept");
