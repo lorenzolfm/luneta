@@ -104,7 +104,7 @@ impl TryFrom<String> for Key {
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        Key::read(&name).ok_or_else(|| format!("no pane is named {name:?}"))
+        Key::read(&name).ok_or_else(|| format!("no view is named {name:?}"))
     }
 }
 

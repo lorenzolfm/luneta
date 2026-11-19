@@ -220,7 +220,7 @@ impl Brief {
                 Over::Session(on, session) => {
                     format!("brief: no agents in {}", session_on(on, session))
                 },
-                Over::Agent(..) => "brief: no agent in this pane".to_owned(),
+                Over::Agent(..) => "brief: no agent in this view".to_owned(),
             });
         };
         if notes.iter().all(|note| note.transcript == Transcript::NotRead) {

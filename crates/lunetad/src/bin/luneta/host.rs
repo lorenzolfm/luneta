@@ -1739,7 +1739,7 @@ impl App {
                 let pane = OwnPane::new(project.key, *beside);
                 let held = pane.and_then(|it| self.projected.of_pane(on, it));
                 let Some((workstream, terminal)) = held else {
-                    return self.sidebar.notify(format!("menu: lunetad lists no terminal {beside}"));
+                    return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
                 };
                 self.go_workstream(on, workstream, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
@@ -2040,9 +2040,9 @@ impl App {
             self.go_workstream(machine, first.id, None);
             return Ok(());
         };
-        let pane = OwnPane::new(key, pane).ok_or("a pane of id 0")?;
+        let pane = OwnPane::new(key, pane).ok_or("a view of id 0")?;
         let (workstream, terminal) = self.projected.of_pane(machine, pane).ok_or_else(|| {
-            format!("lunetad lists no terminal {} in {session}", pane.id)
+            format!("lunetad lists no view {} in {session}", pane.id)
         })?;
         self.go_workstream(machine, workstream, Some(terminal));
         Ok(())

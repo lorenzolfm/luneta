@@ -149,7 +149,7 @@ impl Act {
 
     fn what(&self) -> String {
         match self {
-            Act::Pane { .. } => "Close the pane".to_owned(),
+            Act::Pane { .. } => "Close the view".to_owned(),
             Act::Tab { .. } => "Close its tab".to_owned(),
             Act::Workstream { .. } => "Close the workstream".to_owned(),
             Act::Project { session, .. } => format!("Delete project {session}"),
@@ -426,6 +426,6 @@ mod tests {
             Some("Delete session luneta? 4 agents, 1 busy, 1 waiting, 1 unknown".to_owned())
         );
         let unknown = Deletes::Pane { pane: PaneKey::Zellij(7), closes: Closes::Pane };
-        assert_eq!(question(unknown), Some("Close the pane? 1 agent, 1 unknown".to_owned()));
+        assert_eq!(question(unknown), Some("Close the view? 1 agent, 1 unknown".to_owned()));
     }
 }

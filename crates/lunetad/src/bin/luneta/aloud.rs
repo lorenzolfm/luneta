@@ -376,7 +376,7 @@ impl Aloud {
             return Ok(());
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
-        let text = selected.ok_or("nothing to read aloud: select some text in a pane first")?;
+        let text = selected.ok_or("nothing to read aloud: select some text in a view first")?;
         let came = Some(SystemTime::now());
         self.queue.after(Waiting { whose: Whose::Selection, text, came });
         self.go_on();

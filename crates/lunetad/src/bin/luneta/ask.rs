@@ -279,7 +279,7 @@ fn highlighted(target: &Target) -> String {
         Target::Workstream(_, row) => {
             format!("workstream {} of project {}", row.name, row.place.project.listed().name())
         },
-        Target::Pane(_, PaneRow { session, pane, .. }) => format!("pane {}:{pane}", session.name()),
+        Target::Pane(_, PaneRow { session, pane, .. }) => format!("view {}:{pane}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
     let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
@@ -498,7 +498,7 @@ mod tests {
         let pane = Ask::new(1, &pane_row(), Path::new("/w"));
         assert_eq!(pane.works, Works::Here(PathBuf::from("/w/luneta/main")));
         assert_eq!(pane.machine(), Machine::Local);
-        let row = "is pane luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
+        let row = "is view luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
         assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
         assert_eq!(top(&pane), "┌─ Ask ────────────────── luneta/main ─┐");
         let session = Ask::new(2, &project_on(Machine::Local), Path::new("/w"));

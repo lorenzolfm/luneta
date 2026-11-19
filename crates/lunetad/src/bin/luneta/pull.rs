@@ -124,7 +124,7 @@ fn naming(machine: &Machine, why: String) -> String {
     }
 }
 
-const UNASKED: &str = "lunetad says the key goes to a pane luneta did not ask of";
+const UNASKED: &str = "lunetad says the key goes to a view luneta did not ask of";
 
 pub fn make(repo: &str, of: &Of) -> ExitCode {
     match links::made(repo, of) {

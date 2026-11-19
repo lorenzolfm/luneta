@@ -45,15 +45,15 @@ pub const ROW_GROUPS: [(char, &str); 1] = [(YANK, "Yank")];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Noun {
-    Pane,
+    View,
     Workstream,
     Project,
     Machine,
 }
 
-const EVERY: &[Noun] = &[Noun::Pane, Noun::Workstream, Noun::Project, Noun::Machine];
+const EVERY: &[Noun] = &[Noun::View, Noun::Workstream, Noun::Project, Noun::Machine];
 
-const PANE: &[Noun] = &[Noun::Pane];
+const VIEW: &[Noun] = &[Noun::View];
 
 const WORKSTREAM: &[Noun] = &[Noun::Workstream];
 
@@ -61,9 +61,9 @@ const PROJECT: &[Noun] = &[Noun::Project];
 
 const MACHINE: &[Noun] = &[Noun::Machine];
 
-const CHECKED_OUT: &[Noun] = &[Noun::Pane, Noun::Workstream];
+const CHECKED_OUT: &[Noun] = &[Noun::View, Noun::Workstream];
 
-const IN_A_PROJECT: &[Noun] = &[Noun::Pane, Noun::Workstream, Noun::Project];
+const IN_A_PROJECT: &[Noun] = &[Noun::View, Noun::Workstream, Noun::Project];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
@@ -111,14 +111,14 @@ actions! {
     FixLast,
     ExplainLast,
     FixChecks,
-    NewPane,
+    NewView,
     NewWorkstream,
     NewProject,
     NewMachine,
-    RenameTerminal,
+    RenameView,
     RenameWorkstream,
     RenameProject,
-    ClosePane,
+    CloseView,
     CloseWorkstream,
     DeleteProject,
     ForgetMachine,
@@ -135,10 +135,10 @@ actions! {
     PastedReview,
     PastedTackle,
     Swap,
-    PaneLeft,
-    PaneDown,
-    PaneUp,
-    PaneRight,
+    ViewLeft,
+    ViewDown,
+    ViewUp,
+    ViewRight,
     Grow,
     Shrink,
     Collapse,
@@ -172,7 +172,7 @@ impl Action {
         let menu = Key::Menu;
         match self {
             Action::SearchSkills => {
-                spec("Search skills", &["slash command", "find"], menu(&['/']), PANE, Any)
+                spec("Search skills", &["slash command", "find"], menu(&['/']), VIEW, Any)
             },
             Action::Ask => spec("Ask", &["question", "chat"], menu(&['a']), EVERY, Any),
             Action::FileIssue => {
@@ -182,47 +182,49 @@ impl Action {
                 "/thermo-nuclear-review",
                 &["critique", "audit"],
                 menu(&['c', 't']),
-                PANE,
+                VIEW,
                 Any,
             ),
             Action::IllegalStates => spec(
                 "/make-illegal-states-unrepresentable",
                 &["types", "model"],
                 menu(&['c', 'm']),
-                PANE,
+                VIEW,
                 Any,
             ),
             Action::TigerStyle => {
-                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), PANE, Any)
+                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), VIEW, Any)
             },
             Action::FixLast => {
-                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), PANE, Any)
+                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), VIEW, Any)
             },
             Action::ExplainLast => spec(
                 "explain the last command",
                 &["error", "shell", "why"],
                 menu(&['c', 'e']),
-                PANE,
+                VIEW,
                 Any,
             ),
             Action::FixChecks => {
                 let checks = menu(&['c', 'c']);
-                spec("fix the failing checks", &["ci", "pull request"], checks, PANE, Any)
+                spec("fix the failing checks", &["ci", "pull request"], checks, VIEW, Any)
             },
-            Action::NewPane => {
-                spec("new pane", &["split", "terminal", "shell"], menu(&['n', 'p']), PANE, Any)
+            Action::NewView => {
+                let new = menu(&['n', 'v']);
+                spec("new view", &["pane", "split", "terminal", "shell"], new, VIEW, Any)
             },
             Action::NewWorkstream => {
                 spec("new workstream", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)
             },
             Action::NewProject => {
-                spec("new project", &["folder", "directory", "add"], menu(&['n', 'P']), EVERY, Any)
+                spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY, Any)
             },
             Action::NewMachine => {
                 spec("new machine", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY, Any)
             },
-            Action::RenameTerminal => {
-                spec("Rename the terminal", &["name", "pane", "title"], menu(&['r']), PANE, Any)
+            Action::RenameView => {
+                let keywords = &["name", "pane", "terminal", "title"];
+                spec("Rename the view", keywords, menu(&['r']), VIEW, Any)
             },
             Action::RenameWorkstream => {
                 spec("Rename the workstream", &["name", "title"], menu(&['r']), WORKSTREAM, Any)
@@ -230,8 +232,9 @@ impl Action {
             Action::RenameProject => {
                 spec("Rename the project", &["name", "title"], menu(&['r']), PROJECT, Any)
             },
-            Action::ClosePane => {
-                spec("close the pane", &["kill", "exit", "terminal"], menu(&['d', 'd']), PANE, Here)
+            Action::CloseView => {
+                let keywords = &["pane", "kill", "exit", "terminal"];
+                spec("close the view", keywords, menu(&['d', 'd']), VIEW, Here)
             },
             Action::CloseWorkstream => spec(
                 "close the workstream",
@@ -268,7 +271,7 @@ impl Action {
                 spec("Highlighted", &["summary", "row", "agent"], menu(&['b', 'h']), EVERY, Any)
             },
             Action::Search => spec("Search", &["find", "filter"], Key::Row(&['/']), EVERY, Any),
-            Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), PANE, Any),
+            Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), VIEW, Any),
             Action::Reorder => {
                 spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT, Any)
             },
@@ -288,19 +291,19 @@ impl Action {
             Action::PastedTackle => {
                 spec("tackle", &["issue", "work"], Key::Pasted('t'), EVERY, Any)
             },
-            Action::Swap => anywhere("Sidebar or panes", &["focus", "switch"], SWAP),
-            Action::PaneLeft => {
-                anywhere("Pane left, or the workstream before", &["focus", "move"], LEFT)
+            Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
+            Action::ViewLeft => {
+                anywhere("View left, or the workstream before", &["focus", "move"], LEFT)
             },
-            Action::PaneDown => anywhere("Pane below", &["focus", "move"], DOWN),
-            Action::PaneUp => anywhere("Pane above", &["focus", "move"], UP),
-            Action::PaneRight => {
-                anywhere("Pane right, or the workstream after", &["focus", "move"], RIGHT)
+            Action::ViewDown => anywhere("View below", &["focus", "move"], DOWN),
+            Action::ViewUp => anywhere("View above", &["focus", "move"], UP),
+            Action::ViewRight => {
+                anywhere("View right, or the workstream after", &["focus", "move"], RIGHT)
             },
-            Action::Grow => anywhere("Grow the pane", &["resize", "bigger"], GROW),
-            Action::Shrink => anywhere("Shrink the pane", &["resize", "smaller"], SHRINK),
+            Action::Grow => anywhere("Grow the view", &["resize", "bigger"], GROW),
+            Action::Shrink => anywhere("Shrink the view", &["resize", "smaller"], SHRINK),
             Action::Collapse => anywhere("Collapse sidebar", &["hide", "fold"], COLLAPSE),
-            Action::Menu => anywhere("Menu over panes", &["which-key", "actions"], MENU),
+            Action::Menu => anywhere("Menu over views", &["which-key", "actions"], MENU),
             Action::Workstreams => {
                 anywhere("Pick a workstream", &["finder", "switch"], WORKSTREAMS)
             },
@@ -478,9 +481,9 @@ mod tests {
     #[test]
     fn an_action_here_alone_is_kept_from_another_machine_s_rows() {
         let vps = Machine::Remote("me@vps".parse().unwrap());
-        assert!(Action::ClosePane.fits(Noun::Pane, &Machine::Local));
-        assert!(!Action::ClosePane.fits(Noun::Pane, &vps));
-        assert!(!Action::ClosePane.fits(Noun::Workstream, &Machine::Local));
+        assert!(Action::CloseView.fits(Noun::View, &Machine::Local));
+        assert!(!Action::CloseView.fits(Noun::View, &vps));
+        assert!(!Action::CloseView.fits(Noun::Workstream, &Machine::Local));
         assert!(Action::CloseWorkstream.fits(Noun::Workstream, &vps));
     }
 }
