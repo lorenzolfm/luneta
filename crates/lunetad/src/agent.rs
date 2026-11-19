@@ -221,11 +221,11 @@ pub fn nonempty<'de, D: serde::Deserializer<'de>>(text: D) -> Result<Said, D::Er
 
 pub fn terminal_or_trouble(
     pid: u32,
-    read: &Result<Option<TerminalKey>, String>,
+    read: Result<Option<TerminalKey>, String>,
     troubles: &mut Troubles,
 ) -> Option<TerminalKey> {
     match read {
-        Ok(terminal) => *terminal,
+        Ok(terminal) => terminal,
         Err(why) => {
             troubles.say(format!("agent {pid} shows in no view, as {why}"));
             None

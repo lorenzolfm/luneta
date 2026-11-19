@@ -93,7 +93,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    terminals: HashMap<(u32, String), Result<Option<TerminalKey>, String>>,
+    terminals: HashMap<(u32, String), Option<TerminalKey>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -148,9 +148,10 @@ impl SessionFiles {
         let mut terminals = HashMap::with_capacity(self.seen.len());
         let mut terminal_of = |pid: u32, start: String| {
             let key = (pid, start);
-            let read = self.terminals.remove(&key).unwrap_or_else(|| mux::terminal_of(pid));
-            let terminal = terminal_or_trouble(pid, &read, &mut self.troubles);
-            terminals.insert(key, read);
+            let terminal = self.terminals.remove(&key).unwrap_or_else(|| {
+                terminal_or_trouble(pid, mux::terminal_of(pid), &mut self.troubles)
+            });
+            terminals.insert(key, terminal);
             terminal
         };
         let mut agents = Vec::with_capacity(self.seen.len());
