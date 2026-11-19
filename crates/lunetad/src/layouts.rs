@@ -450,6 +450,7 @@ impl Layouts {
                         self.close_project(project, &worktrees, &seen)
                     },
                     Ask::Bring { worktree, from } => self.bring(worktree, from),
+                    Ask::CloseView(terminal) => self.close_view(terminal),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -736,6 +737,17 @@ impl Layouts {
         Ok(None)
     }
 
+    fn close_view(&mut self, key: TerminalKey) -> Result<Option<Made>, Failed> {
+        let held = self.known.iter().find(|(_, known)| known.key == key);
+        let Some((&terminal, _)) = held else {
+            let id = key.id;
+            return Err(Failed::Gone(format!("no view holds terminal {id} made then")));
+        };
+        self.close(terminal.view())?;
+        assert!(!self.known.contains_key(&terminal), "terminal {terminal} is known no more");
+        Ok(None)
+    }
+
     fn close_terminals(&mut self, terminals: &[TerminalViewId]) -> Result<(), Failed> {
         assert!(terminals.len() <= VIEWS_MAX, "at most {VIEWS_MAX} views are kept");
         let unclosed = |failure: Failure| Failed::Unclosed(failure.to_string());
@@ -752,7 +764,8 @@ impl Layouts {
                 && let Err(failure) = self.mux.closed(key)
             {
                 for closed in done {
-                    if let Err(why) = self.closed(closed.view()) {
+                    if let Err(failed) = self.closed(closed.view()) {
+                        let why = said(failed);
                         self.troubles.say(format!("terminal {closed} closed, and stays: {why}"));
                     }
                 }
@@ -871,7 +884,7 @@ impl Layouts {
                 if !self.layout(worktree)?.holds(view) {
                     return Ok(Done::Quiet);
                 }
-                self.close(view)?;
+                self.close(view).map_err(said)?;
             },
             Asked::Focus(Focus::View(view)) => {
                 if !self.layout(worktree)?.holds(view) {
@@ -1233,32 +1246,37 @@ impl Layouts {
         }
     }
 
-    fn close(&mut self, view: ViewId) -> Result<(), String> {
-        let projects = self.kept()?;
-        let (_, held) = projects.holding_view(view).ok_or("no layout holds the view")?;
+    fn close(&mut self, view: ViewId) -> Result<(), Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let unheld = || Failed::Refused(format!("no layout holds the view {view}"));
+        let (_, held) = projects.holding_view(view).ok_or_else(unheld)?;
         let View::Terminal(terminal) = held else {
             return self.closed(view);
         };
         let key = match self.known.get(&terminal.id()) {
             Some(known) => Some(known.key),
             None => self.mux.tagged(&tag(view)).map_err(|failure| {
-                format!("terminal {view} is not looked for in luneta-mux: {failure}")
+                let unlooked = format!("terminal {view} is not looked for in luneta-mux");
+                Failed::Unclosed(format!("{unlooked}: {failure}"))
             })?,
         };
         if let Some(key) = key {
-            self.mux.closed(key).map_err(|failure| failure.to_string())?;
+            self.mux.closed(key).map_err(|failure| Failed::Unclosed(failure.to_string()))?;
         }
         self.closed(view)
     }
 
-    fn closed(&mut self, view: ViewId) -> Result<(), String> {
-        let projects = self.kept()?;
-        let (held_in, _) = projects.holding_view(view).ok_or("no layout holds the view")?;
+    fn closed(&mut self, view: ViewId) -> Result<(), Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let unheld = || Failed::Refused(format!("no layout holds the view {view}"));
+        let (held_in, _) = projects.holding_view(view).ok_or_else(unheld)?;
         let worktree = held_in.id();
         let tree = held_in.layout().tree().expect("a layout that holds a view is laid");
         let heir = tree.heir(view);
         let terminal = projects.holding_terminal(view).map(|(_, it)| it.id());
-        self.followed(Change::Close { view })?;
+        if let Some(why) = self.store.followed(Change::Close { view })? {
+            self.unwritten(&why);
+        }
         if let Some(terminal) = terminal {
             self.known.remove(&terminal);
         }
@@ -1271,7 +1289,7 @@ impl Layouts {
                 None => self.last_focus.remove(&worktree),
             };
         }
-        let projects = self.kept()?;
+        let projects = self.kept().map_err(Failed::NotKept)?;
         assert!(projects.holding_view(view).is_none(), "view {view} left its layout");
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
@@ -1348,9 +1366,9 @@ impl Layouts {
         assert_eq!(keys.len(), self.known.len(), "no two terminals share a key of luneta-mux");
         self.listed = by_key(terminals);
         for terminal in ended {
-            if let Err(why) = self.closed(terminal.view()) {
+            if let Err(failed) = self.closed(terminal.view()) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
-                self.troubles.say(format!("{stays}: {why}"));
+                self.troubles.say(format!("{stays}: {}", said(failed)));
             }
         }
         self.read_runs();
@@ -1737,7 +1755,8 @@ fn said(failed: Failed) -> String {
         | Failed::Refused(why)
         | Failed::Unwritten(why)
         | Failed::Unclosed(why)
-        | Failed::Unopened(why) => why,
+        | Failed::Unopened(why)
+        | Failed::Gone(why) => why,
         Failed::KeptUntold => "it is kept, but the daemon's core has stopped".to_owned(),
     }
 }

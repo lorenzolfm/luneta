@@ -2,7 +2,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::aloud;
 use crate::dictation;
-use crate::machines::Machine;
 
 pub type Chord = (KeyCode, KeyModifiers);
 
@@ -70,12 +69,6 @@ const CHECKED_OUT: &[Noun] = &[Noun::View, Noun::Worktree];
 const IN_A_PROJECT: &[Noun] = &[Noun::View, Noun::Worktree, Noun::Project];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reach {
-    Any,
-    Here,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Menu(&'static [char]),
     Row(&'static [char]),
@@ -90,7 +83,6 @@ pub struct Spec {
     pub keywords: &'static [&'static str],
     pub key: Key,
     pub nouns: &'static [Noun],
-    pub reach: Reach,
 }
 
 macro_rules! actions {
@@ -185,153 +177,145 @@ const fn spec(
     keywords: &'static [&'static str],
     key: Key,
     nouns: &'static [Noun],
-    reach: Reach,
 ) -> Spec {
-    Spec { name, keywords, key, nouns, reach }
+    Spec { name, keywords, key, nouns }
 }
 
 const fn anywhere(name: &'static str, keywords: &'static [&'static str], chord: Chord) -> Spec {
-    spec(name, keywords, Key::Chord(chord), EVERY, Reach::Any)
+    spec(name, keywords, Key::Chord(chord), EVERY)
 }
 
 impl Action {
     #[must_use]
     pub const fn spec(self) -> Spec {
-        use Reach::{Any, Here};
         let menu = Key::Menu;
         match self {
             Action::SearchSkills => {
-                spec("Search skills", &["slash command", "find"], menu(&['/']), VIEW, Any)
+                spec("Search skills", &["slash command", "find"], menu(&['/']), VIEW)
             },
-            Action::Ask => spec("Ask", &["question", "chat"], menu(&['a']), EVERY, Any),
+            Action::Ask => spec("Ask", &["question", "chat"], menu(&['a']), EVERY),
             Action::FileIssue => {
-                spec("File issue", &["bug", "report", "github"], menu(&['i']), CHECKED_OUT, Any)
+                spec("File issue", &["bug", "report", "github"], menu(&['i']), CHECKED_OUT)
             },
             Action::Review => spec(
                 "/thermo-nuclear-review",
                 &["critique", "audit"],
                 menu(&['c', 't']),
                 VIEW,
-                Any,
             ),
             Action::IllegalStates => spec(
                 "/make-illegal-states-unrepresentable",
                 &["types", "model"],
                 menu(&['c', 'm']),
                 VIEW,
-                Any,
             ),
             Action::TigerStyle => {
-                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), VIEW, Any)
+                spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), VIEW)
             },
             Action::FixLast => {
-                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), VIEW, Any)
+                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), VIEW)
             },
             Action::ExplainLast => spec(
                 "explain the last command",
                 &["error", "shell", "why"],
                 menu(&['c', 'e']),
                 VIEW,
-                Any,
             ),
             Action::FixChecks => {
                 let checks = menu(&['c', 'c']);
-                spec("fix the failing checks", &["ci", "pull request"], checks, VIEW, Any)
+                spec("fix the failing checks", &["ci", "pull request"], checks, VIEW)
             },
             Action::NewView => {
                 let new = menu(&['n', 'v']);
-                spec("new view", &["pane", "split", "terminal", "shell"], new, VIEW, Any)
+                spec("new view", &["pane", "split", "terminal", "shell"], new, VIEW)
             },
             Action::NewWelcome => {
                 let new = menu(&['n', 'h']);
-                spec("new welcome view", &["home", "start", "greeting"], new, VIEW, Any)
+                spec("new welcome view", &["home", "start", "greeting"], new, VIEW)
             },
             Action::NewWorktree => {
                 let keywords = &["branch", "tab", "task"];
-                spec("new worktree", keywords, menu(&['n', 'w']), IN_A_PROJECT, Any)
+                spec("new worktree", keywords, menu(&['n', 'w']), IN_A_PROJECT)
             },
             Action::NewProject => {
-                spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY, Any)
+                spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY)
             },
             Action::NewMachine => {
-                spec("new machine", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY, Any)
+                spec("new machine", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY)
             },
             Action::RenameView => {
                 let keywords = &["name", "pane", "terminal", "title"];
-                spec("Rename the view", keywords, menu(&['r']), VIEW, Any)
+                spec("Rename the view", keywords, menu(&['r']), VIEW)
             },
             Action::RenameWorktree => {
-                spec("Rename the worktree", &["name", "title"], menu(&['r']), WORKTREE, Any)
+                spec("Rename the worktree", &["name", "title"], menu(&['r']), WORKTREE)
             },
             Action::RenameProject => {
-                spec("Rename the project", &["name", "title"], menu(&['r']), PROJECT, Any)
+                spec("Rename the project", &["name", "title"], menu(&['r']), PROJECT)
             },
             Action::CloseView => {
                 let keywords = &["pane", "kill", "exit", "terminal"];
-                spec("close the view", keywords, menu(&['d', 'd']), VIEW, Here)
+                spec("close the view", keywords, menu(&['d', 'd']), VIEW)
             },
             Action::CloseWorktree => spec(
                 "close the worktree",
                 &["kill", "end", "terminals"],
                 menu(&['d', 'd']),
                 WORKTREE,
-                Any,
             ),
             Action::DeleteProject => spec(
                 "delete the project",
                 &["remove", "forget", "close", "worktrees"],
                 menu(&['d', 'd']),
                 PROJECT,
-                Any,
             ),
             Action::ForgetMachine => {
                 let forget = menu(&['d', 'd']);
-                spec("forget the machine", &["remove", "ssh", "host"], forget, MACHINE, Any)
+                spec("forget the machine", &["remove", "ssh", "host"], forget, MACHINE)
             },
             Action::DeleteMerged => spec(
                 "delete merged worktrees",
                 &["prune", "clean", "branches"],
                 menu(&['d', 'm']),
                 CHECKED_OUT,
-                Any,
             ),
             Action::BriefEvery => {
-                spec("Every session", &["summary", "all"], menu(&['b', 'z']), EVERY, Any)
+                spec("Every session", &["summary", "all"], menu(&['b', 'z']), EVERY)
             },
             Action::BriefThis => {
-                spec("This session", &["summary", "project"], menu(&['b', 's']), EVERY, Any)
+                spec("This session", &["summary", "project"], menu(&['b', 's']), EVERY)
             },
             Action::BriefHighlighted => {
-                spec("Highlighted", &["summary", "row", "agent"], menu(&['b', 'h']), EVERY, Any)
+                spec("Highlighted", &["summary", "row", "agent"], menu(&['b', 'h']), EVERY)
             },
-            Action::Search => spec("Search", &["find", "filter"], Key::Row(&['/']), EVERY, Any),
-            Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), VIEW, Any),
+            Action::Search => spec("Search", &["find", "filter"], Key::Row(&['/']), EVERY),
+            Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), VIEW),
             Action::Reorder => {
-                spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT, Any)
+                spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT)
             },
             Action::OpenPull => {
-                spec("PR", &["browser", "pull request"], Key::Row(&[OPEN, 'p']), CHECKED_OUT, Any)
+                spec("PR", &["browser", "pull request"], Key::Row(&[OPEN, 'p']), CHECKED_OUT)
             },
             Action::OpenWorktree => {
                 let keywords = &["checkout", "branch", "unopened"];
-                spec("Worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT, Any)
+                spec("Worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT)
             },
             Action::YankPull => {
-                spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT, Any)
+                spec("PR link", &["copy", "url"], Key::Row(&[YANK, YANK_PULL]), CHECKED_OUT)
             },
             Action::Quit => {
                 let quit = Key::RowAndMenu(&[QUIT]);
-                spec("Quit luneta", &["detach", "exit", "leave"], quit, EVERY, Any)
+                spec("Quit luneta", &["detach", "exit", "leave"], quit, EVERY)
             },
             Action::PastedWorktree => {
-                spec("worktree", &["checkout", "branch"], Key::Pasted('w'), EVERY, Any)
+                spec("worktree", &["checkout", "branch"], Key::Pasted('w'), EVERY)
             },
             Action::PastedReview => {
                 let review = Key::Pasted('r');
-                spec("/thermo-nuclear-review", &["critique", "pull request"], review, EVERY, Any)
+                spec("/thermo-nuclear-review", &["critique", "pull request"], review, EVERY)
             },
             Action::PastedTackle => {
-                spec("tackle", &["issue", "work"], Key::Pasted('t'), EVERY, Any)
+                spec("tackle", &["issue", "work"], Key::Pasted('t'), EVERY)
             },
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {
@@ -368,15 +352,8 @@ impl Action {
     }
 
     #[must_use]
-    pub fn fits(self, noun: Noun, on: &Machine) -> bool {
-        let Spec { nouns, reach, .. } = self.spec();
-        if !nouns.contains(&noun) {
-            return false;
-        }
-        match (on, reach) {
-            (Machine::Local, Reach::Any | Reach::Here) | (Machine::Remote(_), Reach::Any) => true,
-            (Machine::Remote(_), Reach::Here) => false,
-        }
+    pub fn fits(self, noun: Noun) -> bool {
+        self.spec().nouns.contains(&noun)
     }
 
     #[must_use]
@@ -534,14 +511,5 @@ mod tests {
                 assert!(!named.contains(&(*keyword).to_owned()), "{action:?} has {keyword}");
             }
         }
-    }
-
-    #[test]
-    fn an_action_here_alone_is_kept_from_another_machine_s_rows() {
-        let vps = Machine::Remote("me@vps".parse().unwrap());
-        assert!(Action::CloseView.fits(Noun::View, &Machine::Local));
-        assert!(!Action::CloseView.fits(Noun::View, &vps));
-        assert!(!Action::CloseView.fits(Noun::Worktree, &Machine::Local));
-        assert!(Action::CloseWorktree.fits(Noun::Worktree, &vps));
     }
 }

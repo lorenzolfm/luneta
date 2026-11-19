@@ -50,7 +50,7 @@ use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
-use crate::close::Act;
+use crate::close::{Act, Whose};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::folds::{self, Folds};
@@ -71,7 +71,7 @@ use crate::sidebar::{self, Asked, HereAgent, Keys, Listed, PaneKey, Place, Reord
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
-use crate::projected::{self, Projected, Route};
+use crate::projected::{self, Projected};
 use crate::viewed::{self, Heeded, Viewed};
 use crate::worktrees::{self, Landed, Landing, Unmoved};
 use crate::width::Width;
@@ -90,6 +90,7 @@ pub struct Pulled {
 
 #[derive(Debug)]
 enum Doomed {
+    View(TerminalKey),
     Worktree { worktree: WorktreeId, seen: Vec<ViewId> },
     Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
 }
@@ -1612,20 +1613,12 @@ impl App {
                 self.go(&on, &place);
                 self.leave();
             },
-            Asked::Closes { menu, on, session, pane } => {
-                match projected::route(&on, &session, pane) {
-                    Ok(Route::Zellij { on, session, pane }) => {
-                        zellij::closes(menu, &on, session, pane, &self.events);
-                    },
-                    Ok(Route::Terminal(_)) => {
-                        let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
-                        self.follow(asked);
-                    },
-                    Err(why) => {
-                        let asked = self.sidebar.closes(menu, Err(why));
-                        self.follow(asked);
-                    },
-                }
+            Asked::Closes { menu, on, session, pane: PaneKey::Zellij(pane) } => {
+                zellij::closes(menu, &on, session.name().clone(), pane, &self.events);
+            },
+            Asked::Closes { menu, pane: PaneKey::Terminal(_), .. } => {
+                let asked = self.sidebar.closes(menu, Ok(Closes::Pane));
+                self.follow(asked);
             },
             Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
@@ -1800,24 +1793,21 @@ impl App {
     }
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
-        match (on, act) {
-            (_, Act::Worktree { worktree, seen, .. }) => {
+        match act {
+            Act::Worktree { worktree, seen, .. } => {
                 let (worktree, seen) = (*worktree, seen.clone());
                 self.project_act_delete(on, Doomed::Worktree { worktree, seen });
             },
-            (_, Act::Project { project, worktrees, seen, .. }) => {
+            Act::Project { project, worktrees, seen, .. } => {
                 let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
                 self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
             },
-            (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
-                let (terminal, events) = (*terminal, self.events.clone());
-                self.keep_change(thread::spawn(move || {
-                    if let Err(failure) = lunetad::mux::own::server::Terminals.closed(terminal) {
-                        let _ = events.send(Event::Notice(format!("menu: not closed: {failure}")));
-                    }
-                }));
+            Act::Pane { whose: Whose::Own(_), pane: PaneKey::Terminal(key), .. } => {
+                self.project_act_delete(on, Doomed::View(*key));
             },
-            _ => self.sidebar.notify(format!("menu: {NOT_YET}")),
+            Act::Pane { .. } | Act::Tab { .. } | Act::Kill { .. } | Act::Leave { .. } => {
+                self.sidebar.notify(format!("menu: {NOT_YET}"));
+            },
         }
     }
 
@@ -1825,6 +1815,7 @@ impl App {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
         self.keep_change(thread::spawn(move || {
             let closed = caught(|| match &doomed {
+                Doomed::View(key) => worktrees::closed_view(&lunetad, &on, *key),
                 Doomed::Worktree { worktree, seen } => {
                     worktrees::closed(&lunetad, &on, *worktree, seen)
                 },

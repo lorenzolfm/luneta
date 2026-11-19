@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
 use lunetad::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseWorktree, RenameTerminal,
+    Bring, Change, CloseProject, CloseView, CloseWorktree, RenameTerminal,
 };
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::projects::Held;
@@ -780,6 +780,60 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     assert!(!file.contains(&format!("{closing:016x}")), "{file}");
     let again = asked(&owned.host, closed(&[])).unwrap_err();
     assert!(again.message().contains("no worktree has the id"), "{}", again.message());
+}
+
+#[test]
+fn a_view_closes_by_its_terminal_s_whole_key_and_the_last_takes_its_worktree() {
+    let owned = Owned::new();
+    let (_, closing, other) = two_in_a_clone(&owned, "clone");
+    let mut shown = Shown::new(&owned, closing, 80, 24);
+    let [first] = shown.terminals()[..] else { panic!("a worktree is made with one terminal") };
+    let second = shown.open();
+    shown.until("both terminals found", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    let (first_key, second_key) = (shown.key_of(first), shown.key_of(second));
+    let beside = Shown::new(&owned, other, 80, 24);
+    let [stays] = beside.terminals()[..] else { panic!("the other holds its first alone") };
+    let close = |terminal| Change::CloseView(CloseView { terminal });
+
+    let mut before = second_key;
+    before.made_at.as_mut().expect("a key says when its terminal was made").seconds -= 1;
+    let stale = asked(&owned.host, close(Some(before))).unwrap_err();
+    assert_eq!(stale.code(), Code::NotFound, "{stale:?}");
+    assert!(stale.message().contains("made then"), "{}", stale.message());
+    assert_eq!(watched(&owned, closing).len(), 2, "a key made before closes nothing");
+
+    let stalled = owned.stall_mux();
+    let unclosed = asked(&owned.host, close(Some(second_key))).unwrap_err();
+    assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
+    assert!(unclosed.message().contains("may close still"), "{}", unclosed.message());
+    assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
+    drop(stalled);
+    match asked(&owned.host, close(Some(second_key))) {
+        Ok(None) => {},
+        Err(gone) if gone.code() == Code::NotFound => {},
+        again => panic!("a view closed again once the mux answers: {again:?}"),
+    }
+    assert_eq!(watched(&owned, closing).len(), 1, "the view closed leaves its layout");
+    let gone = asked(&owned.host, close(Some(second_key))).unwrap_err();
+    assert_eq!(gone.code(), Code::NotFound, "{gone:?}");
+    let unnamed = asked(&owned.host, close(None)).unwrap_err();
+    assert_eq!(unnamed.code(), Code::InvalidArgument, "{unnamed:?}");
+    let zero = TerminalKey { id: 0, made_at: second_key.made_at };
+    let unnumbered = asked(&owned.host, close(Some(zero))).unwrap_err();
+    assert_eq!(unnumbered.code(), Code::InvalidArgument, "{unnumbered:?}");
+
+    assert_eq!(asked(&owned.host, close(Some(first_key))).unwrap(), None);
+    eventually("the closed terminal leaves the mux", || {
+        tagged(&owned.listing(), first).is_none().then_some(())
+    });
+    assert_eq!(shown.until_left(), closing, "its client hears it gone");
+    eventually("a worktree's last view closed takes it", || {
+        watched_worktree(&owned, closing).is_none().then_some(())
+    });
+    assert!(tagged(&owned.listing(), stays).is_some(), "another worktree's terminal stays");
+    assert_eq!(watched(&owned, other).len(), 1, "the other stays, with its terminal");
+    let file = fs::read_to_string(kept(&owned.host)).unwrap();
+    assert!(!file.contains(&format!("{closing:016x}")), "{file}");
 }
 
 #[test]

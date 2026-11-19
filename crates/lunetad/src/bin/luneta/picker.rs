@@ -283,23 +283,18 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
                 Heard::Peek { on, session, asked, peek }
             })
         },
-        Ask::Closes { on, place } => {
-            let route = projected::route(&on, &place.session, place.pane);
-            Box::new(move || {
-                let closes = match route {
-                    Err(why) => Err(why),
-                    Ok(Route::Terminal(_)) => Ok(Closes::Pane),
-                    Ok(Route::Zellij { on: Machine::Local, session: name, pane }) => {
-                        zellij::closes_now(&name, pane)
-                    },
-                    Ok(Route::Zellij { on: Machine::Remote(destination), session: name, pane }) => {
-                        Away::reach(&destination, away::ANSWER)
-                            .and_then(|mut away| away.closes(&name, pane))
-                    },
-                };
-                Heard::Closes { on, place, closes }
-            })
-        },
+        Ask::Closes { on, place } => Box::new(move || {
+            let name = place.session.name();
+            let closes = match (&on, place.pane) {
+                (_, PaneKey::Terminal(_)) => Ok(Closes::Pane),
+                (Machine::Local, PaneKey::Zellij(pane)) => zellij::closes_now(name, pane),
+                (Machine::Remote(destination), PaneKey::Zellij(pane)) => {
+                    Away::reach(destination, away::ANSWER)
+                        .and_then(|mut away| away.closes(name, pane))
+                },
+            };
+            Heard::Closes { on, place, closes }
+        }),
         Ask::Rename { on, renames, to } => Box::new(move || {
             let renamed = match &renames {
                 Renames::Worktree { place, .. } => {
@@ -3390,6 +3385,12 @@ mod tests {
         };
         assert_eq!(closes, Ok(Closes::Pane));
         let far = Machine::Remote("far".parse().unwrap());
+        let there = PanePlace { session: session.clone(), pane: PaneKey::terminal(4) };
+        let close = Ask::Closes { on: far.clone(), place: there };
+        let Heard::Closes { closes, .. } = asked(close, &projected) else {
+            panic!("a close on another machine is answered with its plan");
+        };
+        assert_eq!(closes, Ok(Closes::Pane), "lunetad there closes it");
         let peek = Ask::Peek { on: far, session, asked: Some(PaneKey::terminal(4)) };
         let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {

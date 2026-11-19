@@ -976,6 +976,7 @@ message ChangeProjectsRequest {
     CloseProject close_project = 13;
     CloseWorktree close_worktree = 14;
     Bring bring = 15;
+    CloseView close_view = 16;
   }
 
   message AddProject {
@@ -1052,6 +1053,10 @@ message ChangeProjectsRequest {
   message Bring {
     fixed64 worktree = 1;
     TerminalKey from = 2;
+  }
+
+  message CloseView {
+    TerminalKey terminal = 1;
   }
 }
 

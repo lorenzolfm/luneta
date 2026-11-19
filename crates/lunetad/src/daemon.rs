@@ -1415,6 +1415,7 @@ fn change_made(
         Failed::Refused(why) => Status::invalid_argument(why),
         Failed::Unwritten(why) => Status::internal(why),
         Failed::Unclosed(why) | Failed::Unopened(why) => Status::unavailable(why),
+        Failed::Gone(why) => Status::not_found(why),
         Failed::KeptUntold => Status::unavailable(stopped),
     })
 }

@@ -728,7 +728,7 @@ impl Target {
     }
 
     fn offer(&self, action: Action) -> Option<Offer<'_>> {
-        if !action.fits(self.noun(), self.machine()) {
+        if !action.fits(self.noun()) {
             return None;
         }
         let offer = match (action, self) {
@@ -3370,10 +3370,14 @@ mod tests {
             " m  new machine",
         ]);
         let (menu, _) = stays(opened(pane.clone(), Some('d')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [
+        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
+            " d  close the view",
             " m  delete merged worktrees",
             " <BS> - Back, <ESC> - Close",
         ]);
+        let (_, wants) = stays(menu.key(&char('d')));
+        let (session, scope) = (project().listed().clone(), Scope::Pane(PaneKey::terminal(4)));
+        assert_eq!(wants, Wants::Plan { session, scope });
 
         let (menu, _) = stays(opened(worktree_on(vps()), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
