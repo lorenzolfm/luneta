@@ -1004,6 +1004,16 @@ impl Projects {
         self.projects.iter().find_map(|project| Some((project.id, project.within(spot)?)))
     }
 
+    fn swallower(&self, spot: &Spot) -> Option<Plain> {
+        if spot.is_clone() {
+            let (project, _) = self.inside(spot)?;
+            let holding = self.project_of(project).expect("the project a spot is inside is held");
+            holding.plain().filter(|plain| plain.dir != spot.place())
+        } else {
+            None
+        }
+    }
+
     fn stale(&self, change: &Change) -> Option<String> {
         match change {
             Change::ReorderProjects { seen, .. } => {
@@ -1065,6 +1075,9 @@ impl Projects {
                 Some(self.landed(&mut changed, made, &opens, &mut draw)?)
             },
             Change::Join { spot, opens } => {
+                if let Some(plain) = self.swallower(&spot) {
+                    return Err(held_by_folder(&spot.place(), &plain));
+                }
                 let (project, within) = match self.inside(&spot) {
                     Some(found) => found,
                     None => changed.made_inside(&spot, None, &mut draw)?,
@@ -1072,6 +1085,10 @@ impl Projects {
                 let joined = changed.worktree_in(project, within, None, &mut draw)?;
                 let held = changed.project_of(project).ok_or_else(|| unknown("project", project))?;
                 let joined = joined.ok_or_else(|| held.unplaced(&spot))?;
+                if spot.is_clone() {
+                    let at = held.folder(joined);
+                    assert_eq!(at, Some(spot.place()), "a clone's worktree is joined at its folder");
+                }
                 Some(self.landed(&mut changed, joined, &opens, &mut draw)?)
             },
             Change::Listed { root, subfolders, seen } => {
@@ -2217,6 +2234,24 @@ mod tests {
         assert_eq!(said, format!("/n/cdk/fix is in /n, project n's folder; {one}"));
         assert_eq!(projects, before, "the folder's worktree is neither renamed nor opened");
         assert_eq!(projects.project_of(notes).unwrap().worktrees().count(), 1);
+    }
+
+    #[test]
+    fn a_join_of_a_clone_inside_a_folder_s_project_is_refused_and_a_folder_in_it_found() {
+        let mut projects = Projects::default();
+        let notes = project(&mut projects, "/n");
+        let said = change(&projects, joining(spot_at("/n/cdk", "fix"))).unwrap_err();
+        let one = "n is a folder, and its own is its one worktree";
+        assert_eq!(said, format!("/n/cdk/fix is in /n, project n's folder; {one}"));
+        let said = change(&projects, joining(clone_of("/n/cdk", &["fix"]))).unwrap_err();
+        assert_eq!(said, format!("/n/cdk is in /n, project n's folder; {one}"));
+        let own = projects.project_of(notes).unwrap().worktrees().next().unwrap().id();
+        let (same, found) = change(&projects, joining(folder("/n/drafts"))).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Found(own))));
+        let fix = project(&mut projects, "/m/cdk/fix");
+        let own = projects.project_of(fix).unwrap().worktrees().next().unwrap().id();
+        let (_, found) = change(&projects, joining(spot_at("/m/cdk", "fix"))).unwrap();
+        assert_eq!(found, Some(Made::Found(own)), "a folder's project at the worktree holds it");
     }
 
     #[test]
