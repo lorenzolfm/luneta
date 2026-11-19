@@ -13,6 +13,7 @@
     home="''${CARGO_HOME:-$HOME/.cargo}"
     bin="$home/bin"
     builds="$home/luneta-dev"
+    report="$home/luneta-dev.log"
     left=()
 
     usage() {
@@ -128,6 +129,30 @@
         awk -v folder="$folder" '$2 ~ /(^|\/)luneta-mux$/ && NF == 3 && $3 == folder { print $1 }'
     }
 
+    descends() {
+      local at="$$" parent of
+      while [ "$at" -gt 1 ]; do
+        for of in "$@"; do
+          [ "$at" != "$of" ] || return 0
+        done
+        parent="$(ps -o ppid= -p "$at")" || return 1
+        at="''${parent//[[:space:]]/}"
+      done
+      return 1
+    }
+
+    outlive_terminal() {
+      local running
+      mapfile -t running < <(muxes)
+      wait "$!"
+      descends "''${running[@]}" || return 0
+      echo "dev ${name}: --mux ends this terminal with luneta-mux (pid ''${running[*]}), so all dev ${name} says from here goes to $report too" >&2
+      mkdir -p "$home"
+      : >"$report"
+      trap "" HUP
+      exec > >(tee "$report") 2>&1
+    }
+
     end_mux() {
       local running ending
       mapfile -t running < <(muxes)
@@ -141,5 +166,9 @@
       echo "dev ${name}: ending luneta-mux (pid ''${running[*]}) and what runs in its terminals; the next lunetad starts the one beside it and restores them" >&2
       stop "''${ending[@]}"
     }
+
+    if [ -n "$mux" ]; then
+      outlive_terminal
+    fi
   '';
 }

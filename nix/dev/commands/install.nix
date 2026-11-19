@@ -11,7 +11,7 @@ in
 {
   inherit name;
   usage = "[--mux]";
-  help = "build this checkout into ~/.cargo/bin, and end the running lunetad for a luneta to start yours; --mux luneta-mux too";
+  help = "build this checkout into ~/.cargo/bin, and end the running lunetad for a luneta to start yours; --mux luneta-mux too, saying it all in ~/.cargo/luneta-dev.log too when that ends this terminal";
   tools = buildTools ++ installed.tools ++ [ pkgs.jq ];
   inheritPath = true;
   text = ''

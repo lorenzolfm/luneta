@@ -6,7 +6,7 @@ in
 {
   inherit name;
   usage = "[--mux]";
-  help = "take dev install's build out of ~/.cargo/bin and end the lunetad that runs; --mux luneta-mux too";
+  help = "take dev install's build out of ~/.cargo/bin and end the lunetad that runs; --mux luneta-mux too, saying it all in ~/.cargo/luneta-dev.log too when that ends this terminal";
   inherit (installed) tools;
   inheritPath = true;
   text = ''
