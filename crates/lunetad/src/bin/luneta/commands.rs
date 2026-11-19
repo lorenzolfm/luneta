@@ -297,6 +297,10 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
             }
             ExitCode::FAILURE
         },
+        Ok(Some(Reached::Here(()))) => {
+            eprintln!("luneta: {destination}: {}", lunetad::THIS_MACHINE);
+            ExitCode::FAILURE
+        },
         Ok(Some(Reached::Reaching(())) | None) => {
             println!("{destination}: lunetad reaches it still; the sidebar says how it went");
             ExitCode::SUCCESS

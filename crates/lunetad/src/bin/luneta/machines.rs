@@ -62,10 +62,10 @@ fn file() -> Result<std::path::PathBuf, String> {
 fn add_to(file: &Path, destination: &Destination) -> Result<Added, String> {
     changed(file, |text| {
         let named = lunetad::hosts_named(text, |_| {});
-        if named.machines.contains(destination) {
+        if named.lines.iter().any(|line| line.destination() == destination) {
             return Ok((Added::Already, None));
         }
-        if named.machines.len() >= HOSTS_MAX {
+        if named.lines.len() >= HOSTS_MAX {
             return Err(format!(
                 "{} names {HOSTS_MAX} machines, as many as lunetad watches",
                 file.display()
@@ -185,7 +185,7 @@ mod tests {
             }
         });
         let named = lunetad::hosts_named(&fs::read_to_string(&file).unwrap(), |_| {});
-        assert_eq!(named.machines.len(), HOSTS_MAX);
+        assert_eq!(named.lines.len(), HOSTS_MAX);
     }
 
     #[test]

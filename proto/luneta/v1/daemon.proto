@@ -241,6 +241,7 @@ message Remote {
     google.protobuf.Empty reaching = 2;
     Host host = 3;
     Unreached unreached = 4;
+    google.protobuf.Empty here = 5;
   }
 
   message Host {
@@ -264,10 +265,9 @@ message Remote {
       google.protobuf.Empty lost = 7;
       google.protobuf.Empty unwatched = 8;
       google.protobuf.Empty unmatched = 10;
-      google.protobuf.Empty here = 11;
     }
     Projects projects = 9;
-    optional string ssh_said = 12;
+    optional string ssh_said = 11;
 
     message Ended {
       optional int32 code = 1;

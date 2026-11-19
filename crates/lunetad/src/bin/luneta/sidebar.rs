@@ -709,6 +709,7 @@ enum Under {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Away {
     Reaching,
+    Here,
     Unreached {
         since: Option<SystemTime>,
         word: &'static str,
@@ -732,7 +733,6 @@ impl Away {
             Some(Stopped::Lost(())) => "lost",
             Some(Stopped::Unwatched(())) => "not watched",
             Some(Stopped::Unmatched(())) => "another build",
-            Some(Stopped::Here(())) => "this machine",
             None => "unreached",
         };
         let since = unreached.since.and_then(|at| SystemTime::try_from(at).ok());
@@ -743,6 +743,7 @@ impl Away {
     fn said(&self) -> (&'static str, Option<SystemTime>) {
         match self {
             Away::Reaching => ("reaching…", None),
+            Away::Here => ("this machine", None),
             Away::Unreached { since, word, .. } => (word, *since),
         }
     }
@@ -952,7 +953,7 @@ fn shelves(host: &Host) -> Vec<Shelf> {
         let projects = match &remote.reached {
             Some(Reached::Host(host)) => host.projects.as_ref(),
             Some(Reached::Unreached(unreached)) => unreached.projects.as_ref(),
-            Some(Reached::Reaching(())) | None => None,
+            Some(Reached::Reaching(()) | Reached::Here(())) | None => None,
         };
         shelves.push(shelved(Machine::Remote(destination), projects));
     }
@@ -1041,6 +1042,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
                 sayings: &host.sayings,
             }),
             Some(Reached::Reaching(())) => Err(Away::Reaching),
+            Some(Reached::Here(())) => Err(Away::Here),
             Some(Reached::Unreached(unreached)) => Err(Away::of(unreached)),
             None => Err(Away::Unreached {
                 since: None,
@@ -4511,6 +4513,7 @@ impl Sidebar {
             (name, Some(Away::Unreached { why, ssh_said: None, .. }), _) => {
                 Some(format!("{name}: {why}"))
             },
+            (name, Some(Away::Here), _) => Some(format!("{name}: {}", lunetad::THIS_MACHINE)),
             (_, None | Some(Away::Reaching), _) => None,
         }
     }
@@ -10444,14 +10447,7 @@ mod tests {
     fn a_machine_named_as_another_that_is_this_one_says_so_on_its_header() {
         let mut sidebar = fresh();
         let mut host = machines();
-        let here = Reached::Unreached(remote::Unreached {
-            since: None,
-            why: lunetad::THIS_MACHINE.to_owned(),
-            stopped: Some(remote::unreached::Stopped::Here(())),
-            projects: None,
-            ssh_said: None,
-        });
-        host.remotes[1] = remote("me@mac", here);
+        host.remotes[1] = remote("me@mac", Reached::Here(()));
         sidebar.hear(host);
         let lines = screen(&mut sidebar, false, 32, 14);
         assert_eq!(lines[11], " ▸ \u{f108} me@mac · this machine", "{lines:?}");

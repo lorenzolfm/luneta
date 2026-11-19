@@ -111,7 +111,7 @@ exec "$to/$destination"
         fs::remove_file(self.to.join(destination)).unwrap();
     }
 
-    fn runs(&self, destination: &str) -> usize {
+    pub fn runs(&self, destination: &str) -> usize {
         let runs = fs::read_to_string(self.to.join(format!("{destination}.runs")));
         runs.unwrap_or_default().lines().count()
     }
@@ -265,7 +265,7 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
 #[test]
 fn a_hosts_file_line_that_names_this_machine_says_so_and_runs_no_ssh() {
     let here = Host::new();
-    let ssh = FakeSsh::new(here.zellij.bin());
+    let ssh = FakeSsh::new(here.bin());
     let node = rustix::system::uname().nodename().to_string_lossy().into_owned();
     let named = format!("me@{node}");
     hosts(&here, &format!("{named}\nlocalhost\nnowhere\n"));
@@ -275,20 +275,15 @@ fn a_hosts_file_line_that_names_this_machine_says_so_and_runs_no_ssh() {
         (ssh.runs("nowhere") >= 2).then_some(())
     });
 
+    let remotes = here.host().remotes;
     for destination in [named.as_str(), "localhost"] {
-        let unreached = unreached(&here, destination);
-        assert_eq!(unreached.stopped, Some(Stopped::Here(())), "{}", unreached.why);
-        assert_eq!(unreached.why, lunetad::THIS_MACHINE);
-        assert_eq!(unreached.ssh_said, None);
-        assert_eq!(unreached.since, None, "this machine has no time it went unreached");
+        let remote = remotes.iter().find(|remote| remote.destination == destination);
+        let reached = remote.and_then(|remote| remote.reached.clone());
+        assert_eq!(reached, Some(Reached::Here(())), "{remotes:?}");
         assert_eq!(ssh.runs(destination), 0, "no ssh runs to {destination}");
     }
-    let output = here.vars().command(LUNETA).arg("sessions").output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let said = String::from_utf8(output.stdout).unwrap();
-    let lines: Vec<&str> = said.lines().collect();
-    let line = |machine: &str| format!("{machine}/  (unreached: {})", lunetad::THIS_MACHINE);
-    assert_eq!(lines[..2], [line(&named), line("localhost")], "{said}");
+    let order: Vec<&str> = remotes.iter().map(|remote| remote.destination.as_str()).collect();
+    assert_eq!(order, [named.as_str(), "localhost", "nowhere"], "{remotes:?}");
 }
 
 #[test]

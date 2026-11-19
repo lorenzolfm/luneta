@@ -14,7 +14,7 @@ use lunetad::asks::Turn;
 use lunetad::program::{self, Ran};
 use lunetad::projects::{self, Forgotten, Projects};
 use lunetad::terminate::{self, Folders, Id, Running, Unended};
-use lunetad::{Destination, HostsParsed};
+use lunetad::{Destination, HostsLine, HostsParsed};
 use signal_hook::consts::SIGHUP;
 
 use crate::close::Doing;
@@ -342,6 +342,7 @@ fn hold_on_through_hangups() {
 enum Far {
     Ends { key: Key, says: String },
     Skipped(Skip),
+    Here,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -363,7 +364,7 @@ impl Planned {
         let remotes = self.remotes.iter().map(|(destination, far)| {
             let key = match far {
                 Far::Ends { key, .. } => Some(*key),
-                Far::Skipped(_) => None,
+                Far::Skipped(_) | Far::Here => None,
             };
             (Machine::Remote(destination.clone()), key)
         });
@@ -372,10 +373,8 @@ impl Planned {
 
     fn lines(&self) -> Vec<String> {
         let here = format!("{} (this machine): {}", self.local, self.here.says());
-        let remotes = self.remotes.iter().map(|(destination, far)| match far {
-            Far::Ends { says, .. } => format!("{destination}: {says}"),
-            Far::Skipped(skip) => format!("{destination}: {}", skipped_said(skip)),
-        });
+        let remotes = self.remotes.iter();
+        let remotes = remotes.map(|(destination, far)| format!("{destination}: {}", far_said(far)));
         let unread = self.unread.iter().map(|why| unread_said(why));
         std::iter::once(here).chain(remotes).chain(unread).collect()
     }
@@ -386,6 +385,14 @@ fn unread_said(why: &str) -> String {
         "hosts file: skipped a line, as it names no machine ssh could be asked of, and so any \
          luneta it meant runs on there and keeps its projects: {why}"
     )
+}
+
+fn far_said(far: &Far) -> String {
+    match far {
+        Far::Ends { says, .. } => says.clone(),
+        Far::Skipped(skip) => skipped_said(skip),
+        Far::Here => format!("skipped, as {}", lunetad::THIS_MACHINE),
+    }
 }
 
 fn skipped_said(skip: &Skip) -> String {
@@ -402,17 +409,20 @@ fn skipped_said(skip: &Skip) -> String {
 }
 
 fn plan(hosts: HostsParsed, folders: &Folders) -> Planned {
-    let HostsParsed { machines: destinations, unread } = hosts;
+    let HostsParsed { lines, unread } = hosts;
     let (here, remotes) = thread::scope(|scope| {
-        let asked: Vec<_> = destinations
+        let asked: Vec<_> = lines
             .iter()
-            .map(|destination| scope.spawn(move || asked(destination)))
+            .map(|line| match line {
+                HostsLine::Far(destination) => Some(scope.spawn(move || asked(destination))),
+                HostsLine::Here(_) => None,
+            })
             .collect();
         let here = Here::now(folders);
-        let remotes = destinations.iter().zip(asked).map(|(destination, asked)| {
+        let remotes = lines.iter().zip(asked).map(|(line, asked)| {
             let panicked = || Far::Skipped(Skip::Unsaid("asking it panicked".to_owned()));
-            let far = asked.join().unwrap_or_else(|_| panicked());
-            (destination.clone(), far)
+            let far = asked.map_or(Far::Here, |asked| asked.join().unwrap_or_else(|_| panicked()));
+            (line.destination().clone(), far)
         });
         (here, remotes.collect())
     });
@@ -482,7 +492,7 @@ fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
                         let key = *key;
                         Ok(scope.spawn(move || ended_far(destination, key)))
                     },
-                    Far::Skipped(skip) => Err(skip),
+                    Far::Skipped(_) | Far::Here => Err(far_said(far)),
                 };
                 (destination, ending)
             })
@@ -491,7 +501,7 @@ fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
             .into_iter()
             .map(|(destination, ending)| {
                 let came = match ending {
-                    Err(skip) => Ok(format!("{destination}: {}", skipped_said(skip))),
+                    Err(said) => Ok(format!("{destination}: {said}")),
                     Ok(ending) => ending
                         .join()
                         .unwrap_or_else(|_| Err("ending it panicked".to_owned()))
