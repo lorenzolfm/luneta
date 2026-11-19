@@ -246,15 +246,13 @@ impl<'a> Holder<'a> {
         }
         match (holding, focus.side) {
             (holding @ Holding::Afloat, _) | (holding, Side::Sidebar) => Holder::Sidebar(holding),
+            (Holding::Nothing | Holding::Press, Side::Session | Side::Collapsed) => {
+                Holder::Terminal
+            },
             (
-                Holding::Nothing
-                | Holding::Chord
-                | Holding::Search
-                | Holding::Reorder
-                | Holding::Menu
-                | Holding::Press,
+                Holding::Chord | Holding::Search | Holding::Reorder | Holding::Menu,
                 Side::Session | Side::Collapsed,
-            ) => Holder::Terminal,
+            ) => unreachable!("the sidebar's own modes end as its keys go"),
         }
     }
 
