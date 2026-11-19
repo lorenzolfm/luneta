@@ -19,8 +19,8 @@ pub struct News {
     been: Ledger<Session>,
     unread: Ledger<Key>,
     dwelling: Option<(Key, SystemTime, Instant)>,
-    projects: Missing<Session>,
-    views: Missing<Key>,
+    projects_missing: Missing<Session>,
+    views_missing: Missing<Key>,
 }
 
 impl News {
@@ -127,10 +127,10 @@ impl News {
 
     pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
         let kept: BTreeSet<Session> = self.been.kept().collect();
-        let gone = self.projects.gone(&kept, live, at);
+        let gone = self.projects_missing.gone(&kept, live, at);
         self.been.forget(&gone);
         let kept: BTreeSet<Key> = self.seen.kept().chain(self.unread.kept()).collect();
-        let gone = self.views.gone(&kept, live, at);
+        let gone = self.views_missing.gone(&kept, live, at);
         self.seen.forget(&gone);
         self.unread.forget(&gone);
     }

@@ -225,6 +225,7 @@ impl<M: Mark> Ledger<M> {
             }
         }
         self.leftovers.retain(|mark| !gone.contains(mark));
+        assert!(self.kept().all(|mark| !gone.contains(&mark)), "a ledger keeps no mark it forgot");
         let Shared::Through(dir) = &self.shared else {
             return;
         };

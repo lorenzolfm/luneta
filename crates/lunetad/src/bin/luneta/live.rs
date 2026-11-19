@@ -10,8 +10,7 @@ pub const GONE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 pub struct Lists {
-    running: HashMap<Session, Machine>,
-    views: HashMap<Key, Machine>,
+    projects: HashMap<Session, (Machine, HashSet<ViewId>)>,
     unsure: HashSet<Machine>,
 }
 
@@ -23,9 +22,7 @@ impl Lists {
         whole: bool,
     ) {
         for (session, views) in sessions {
-            self.running.insert(session, machine.clone());
-            let views = views.into_iter().map(|view| (Key { session, view }, machine.clone()));
-            self.views.extend(views);
+            self.projects.insert(session, (machine.clone(), views.into_iter().collect()));
         }
         if !whole {
             self.unsure.insert(machine.clone());
@@ -43,13 +40,14 @@ pub trait Runs: Mark {
 
 impl Runs for Session {
     fn on(self, live: &Lists) -> Option<&Machine> {
-        live.running.get(&self)
+        live.projects.get(&self).map(|(machine, _)| machine)
     }
 }
 
 impl Runs for Key {
     fn on(self, live: &Lists) -> Option<&Machine> {
-        live.views.get(&self)
+        let (machine, views) = live.projects.get(&self.session)?;
+        views.contains(&self.view).then_some(machine)
     }
 }
 
