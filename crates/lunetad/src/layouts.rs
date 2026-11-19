@@ -450,6 +450,7 @@ impl Layouts {
                         self.close_project(project, &worktrees, &seen)
                     },
                     Ask::Bring { worktree, from } => self.bring(worktree, from),
+                    Ask::CloseView(view) => self.close_view(view),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|made| Changed { made, kept }));
@@ -733,6 +734,17 @@ impl Layouts {
             self.unwritten(&why);
         }
         self.forget_closed(&[worktree], &terminals);
+        Ok(None)
+    }
+
+    fn close_view(&mut self, view: ViewId) -> Result<Option<Made>, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        if projects.holding_view(view).is_none() {
+            return Err(Failed::Refused(format!("no layout holds the view {view}")));
+        }
+        self.close(view).map_err(Failed::Unclosed)?;
+        let projects = self.store.projects().expect("projects just changed are kept");
+        assert!(projects.holding_view(view).is_none(), "view {view} left its layout");
         Ok(None)
     }
 

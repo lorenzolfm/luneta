@@ -10230,7 +10230,7 @@ mod tests {
     }
 
     #[test]
-    fn another_machine_s_worktree_closes_there_by_its_agents_and_its_pane_stays() {
+    fn another_machine_s_view_and_worktree_close_there_by_their_agents() {
         let mut sidebar = fresh();
         let mut host = machines();
         let panes = vec![pane(1, 0, "/w/b", "claude"), pane(2, 0, "/w/b", "fish")];
@@ -10240,7 +10240,12 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Remote(nixos(), pane_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
-        assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
+        let closes = sidebar.key(&char('d'), moment(160_000));
+        let (session, pane) = (listed("main", 20), PaneKey::terminal(1));
+        let there = Asked::Closes { menu: 1, on: Machine::Remote(nixos()), session, pane };
+        assert_eq!(closes, there);
+        assert_eq!(sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)), Asked::Nothing);
+        assert!(sidebar.menu.is_none());
         let place = WorktreePlace { project: project_row("main", 20), worktree: tab_of(20, 0) };
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(place.clone())));
         type_in(&mut sidebar, "d");

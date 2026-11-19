@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use lunetad::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
-use lunetad::api::change_projects_request::{CloseWorktree, Pull, Start};
+use lunetad::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
 use lunetad::api::change_projects_request::RenameProject;
 use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
@@ -219,6 +219,11 @@ pub fn closed(
     seen: &[ViewId],
 ) -> Result<(), String> {
     changed_on(path, on(machine), close(worktree, seen)).map(drop).map_err(Unmade::said)
+}
+
+pub fn closed_view(path: &Path, machine: &Machine, view: ViewId) -> Result<(), String> {
+    let change = Change::CloseView(CloseView { view: view.get() });
+    changed_on(path, on(machine), change).map(drop).map_err(Unmade::said)
 }
 
 fn close(worktree: WorktreeId, seen: &[ViewId]) -> Change {
