@@ -1363,7 +1363,7 @@ pub struct Sidebar {
 #[derive(Debug)]
 enum Lit {
     On(Spot),
-    Closing { gone: Spot, after: Option<Spot> },
+    Closing { gone: Spot, act: Act, after: Option<Spot> },
 }
 
 impl Lit {
@@ -2710,7 +2710,7 @@ impl Sidebar {
         if lifted_gone {
             self.moving = Moving::Still;
         }
-        if let Some(Lit::Closing { gone, after }) = &self.lit
+        if let Some(Lit::Closing { gone, after, .. }) = &self.lit
             && self.row_of(gone).is_none()
         {
             self.lit = after.clone().map(Lit::On);
@@ -4065,14 +4065,15 @@ impl Sidebar {
             let stays = |index: &usize| self.stops(*index) && !takes(&self.rows[*index].spot());
             let after = (at..self.rows.len()).chain((0..at).rev()).find(stays);
             let after = after.map(|index| self.rows[index].spot());
-            self.lit = Some(Lit::Closing { gone, after });
+            self.lit = Some(Lit::Closing { gone, act: act.clone(), after });
         }
         Asked::Delete { on, act }
     }
 
     pub fn unclosed(&mut self, on: &Machine, act: &Act, notice: String) {
-        if let Some(Lit::Closing { gone, .. }) = &self.lit
-            && closed_by(act, on, gone)
+        if let Some(Lit::Closing { gone, act: closing, .. }) = &self.lit
+            && gone.machine() == *on
+            && closing == act
         {
             let listed = "a closing row stays listed: rebuild lands past it once it goes";
             assert!(self.row_of(gone).is_some(), "{listed}");
@@ -10123,8 +10124,11 @@ mod tests {
     fn a_refused_close_drops_the_landing_of_its_own_delete_only() {
         let left = where_nvim_going_by_itself_leaves_it();
         let fish = Act::View { session: session_name("newer"), view: view_key(20, 1) };
+        let session = session_name("older");
+        let worktree = Act::Worktree { session, worktree: tab_of(10, 1), views: vec![2], seen: vec![] };
         for (on, refused, lands) in [
             (Machine::Local, fish, Some(past_nvim())),
+            (Machine::Local, worktree, Some(past_nvim())),
             (Machine::Remote(nixos()), closes_nvim(), Some(past_nvim())),
             (Machine::Local, closes_nvim(), left),
         ] {
