@@ -29,7 +29,6 @@ use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
-use lunetad::links::Unready;
 use lunetad::{Destination, Direction, Directory, Growth, SessionName};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
@@ -118,7 +117,7 @@ impl Opener {
 
 const NAMING: &str = "menu: luneta names a session already: try again once it has made it";
 
-const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
+const NAMING_PANICKED: &str = "luneta could not name the session: naming it panicked";
 
 pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 
@@ -1920,7 +1919,7 @@ impl App {
                         let added = worktrees::add_worktree(&lunetad, &on, at, named, first);
                         added.map(Landing::Worktree)
                     });
-                    let made = made.map_err(|why| format!("menu: no worktree made: {why}"));
+                    let made = made.map_err(|why| format!("menu: {why}"));
                     Made::Worktree { on, made, argv }
                 });
             },
@@ -1948,14 +1947,13 @@ impl App {
                     let named = name.as_ref().map(Name::as_str);
                     let at = (project, folder.as_str());
                     let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
-                    added.map(Landing::Worktree).map_err(Unready::Failed)
+                    added.map(Landing::Worktree)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Make { on, session, cwd } => {
                 self.make_worktree(on, move |lunetad, on| {
                     worktrees::made_at(lunetad, on, &cwd, Some(session.as_str()))
-                        .map_err(Unready::Failed)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2336,19 +2334,14 @@ impl App {
     fn make_worktree(
         &mut self,
         on: Machine,
-        made: impl FnOnce(&Path, &Machine) -> Result<Landing, Unready> + Send + 'static,
+        made: impl FnOnce(&Path, &Machine) -> Result<Landing, String> + Send + 'static,
     ) {
         if self.refuse_naming(None) {
             return;
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| Ok(made(&lunetad, &on)));
-            let made = made.unwrap_or_else(|panicked| Err(Unready::Failed(panicked)));
-            let made = made.map_err(|why| match why {
-                Unready::Nowhere(why) | Unready::Failed(why) => format!("no worktree made: {why}"),
-                Unready::InDoubt(why) => why,
-            });
+            let made = caught(|| made(&lunetad, &on));
             Made::Worktree { on, made, argv: Vec::new() }
         });
     }
@@ -2401,7 +2394,7 @@ impl App {
         let opener = self.sidebar.made_for(menu).map_or(Opener::LetGo, Opener::of);
         let made = match made {
             Ok(made) => made,
-            Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
+            Err(why) => return self.sidebar.notify(format!("menu: {why}")),
         };
         let Pulled { on, worktree, argv } = made;
         self.go_opening(&on, worktree, argv);
