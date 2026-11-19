@@ -2302,17 +2302,18 @@ impl App {
 
     fn give_opened(&mut self, asking: Option<sidebar::Held>) {
         assert!(self.right.is_some(), "luneta shows the view it opened");
-        match (asking, &self.focus.over) {
+        let held = self.focus.over.is_some() || self.sidebar.holds_input();
+        match (asking, held) {
             (Some(sidebar::Held::Open), _) => {
                 self.leave();
                 let menu = matches!(self.focus.over, Some(Over::Menu));
                 assert!(!menu, "the menu that opened the view holds the keys no longer");
             },
-            (Some(sidebar::Held::Kept) | None, None) => {
+            (Some(sidebar::Held::Kept) | None, false) => {
                 self.give(Focus::on(self.focus.side.session()));
                 assert!(self.focus.session(), "the opened view takes the keys");
             },
-            (Some(sidebar::Held::Kept) | None, Some(_)) => {},
+            (Some(sidebar::Held::Kept) | None, true) => {},
         }
     }
 

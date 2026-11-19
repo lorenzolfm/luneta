@@ -3126,6 +3126,14 @@ impl Sidebar {
         self.menu.as_ref().filter(|_| self.floats())
     }
 
+    pub fn holds_input(&self) -> bool {
+        let chord = match self.pending {
+            Pending::Nothing | Pending::Legend | Pending::AllKeys(_) => false,
+            Pending::First { .. } | Pending::Group { .. } => true,
+        };
+        self.menu.is_some() || self.search.is_some() || chord
+    }
+
     pub fn chose(&mut self, menu: u64, choice: Choice, now: SystemTime) -> Asked {
         if self.menu.as_ref().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;

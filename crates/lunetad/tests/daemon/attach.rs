@@ -201,6 +201,24 @@ fn a_worktree_opened_or_made_while_luneta_shows_none_takes_the_keys() {
 }
 
 #[test]
+fn a_menu_opened_while_a_project_is_made_keeps_the_keys() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    let other = directory("other");
+    let erased = "\x7f".repeat(dir.path.display().to_string().chars().count());
+    window.send(&format!("{SIDEBAR}np{erased}{}\r\r{SIDEBAR}n", other.path.display()));
+    eventually(&format!("luneta shows {}", other.path.display()), || {
+        let terminals = shown(&owned, &other.path)?.terminals;
+        let found = terminals.iter().filter(|it| matches!(it.found, Some(Found::Key(_))));
+        (found.count() == 1 && tops(&window).len() == 1).then_some(())
+    });
+    eventually("the menu opened meanwhile stays open", || window.shows("─ New ─").then_some(()));
+}
+
+#[test]
 fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focused_one() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
