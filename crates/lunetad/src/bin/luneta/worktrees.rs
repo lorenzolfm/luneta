@@ -526,6 +526,7 @@ pub fn opened(path: &Path, worktree: WorktreeId, argv: Vec<String>) -> Result<()
             },
             Heard::Laid(_) => return Ok(()),
             Heard::Edged { .. } | Heard::Sent(_) => {},
+            Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),
             Heard::Refused(why) => return Err(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
         }

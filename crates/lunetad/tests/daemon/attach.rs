@@ -162,6 +162,32 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_proj
     eventually("Ctrl h goes back", || (used(first) > used(second)).then_some(()));
 }
 
+#[test]
+fn a_worktree_s_last_pane_closed_takes_luneta_to_the_one_used_before_with_no_note() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    window.send(TYPED);
+    eventually("main's shell prints", || window.shows(PRINTED).then_some(()));
+    let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
+    let root = dir.path.parent().unwrap();
+    worktree_added(root, "docs");
+    let docs = root.join("docs");
+    let gone = worktree(&owned.host, project, &docs);
+    window.send(RIGHT);
+    eventually("Ctrl l goes to docs, where a shell opens", || shown(&owned, &docs));
+    window.send(CLOSE);
+    eventually("docs goes with its last pane, and luneta goes back to main", || {
+        let projects = projects_of(&owned);
+        let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+        (worktrees.all(|it| it.id != gone) && window.shows(PRINTED)).then_some(())
+    });
+    thread::sleep(Duration::from_secs(1));
+    assert!(window.shows(PRINTED), "luneta stays on main: {:?}", window.screen());
+    assert!(!window.shows("lunetad's layout"), "luneta leaves docs with no note");
+}
+
 fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     eventually(&format!("both lunetas show {name}"), || {
         for window in &mut windows {

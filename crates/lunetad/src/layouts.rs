@@ -263,6 +263,7 @@ pub fn start(
         follower,
         mux: Terminals,
         clients: BTreeMap::new(),
+        stranded: BTreeMap::new(),
         arrivals: 0,
         known: BTreeMap::new(),
         listed: BTreeMap::new(),
@@ -287,6 +288,7 @@ struct Layouts {
     follower: SyncSender<()>,
     mux: Terminals,
     clients: BTreeMap<ClientId, Client>,
+    stranded: BTreeMap<ClientId, Stranded>,
     arrivals: u64,
     known: BTreeMap<TerminalViewId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
@@ -308,6 +310,13 @@ struct Client {
     focus: Option<ViewId>,
     out: Out,
     said: Option<api::ShowResponse>,
+}
+
+struct Stranded {
+    left: WorktreeId,
+    size: Size,
+    runs_in: Option<TerminalKey>,
+    out: Out,
 }
 
 struct Known {
@@ -440,6 +449,9 @@ impl Layouts {
             Command::Came { worktree, size, runs_in, again, out, answer } => {
                 let _ = answer.send(self.came(worktree, size, runs_in, again, out));
             },
+            Command::Asked { client, asked } if self.stranded.contains_key(&client) => {
+                self.asked_stranded(client, asked);
+            },
             Command::Asked { client, asked } => {
                 if !self.clients.contains_key(&client) {
                     return;
@@ -461,6 +473,7 @@ impl Layouts {
             },
             Command::Left(client) => {
                 self.clients.remove(&client);
+                self.stranded.remove(&client);
             },
             Command::Listed(listed) => self.heard_listed(listed),
             Command::Emptied { since } => {
@@ -520,7 +533,7 @@ impl Layouts {
         again: bool,
         out: Out,
     ) -> Result<ClientId, Status> {
-        if self.clients.len() >= CLIENTS_MAX {
+        if self.clients.len() + self.stranded.len() >= CLIENTS_MAX {
             let many = format!("{CLIENTS_MAX} clients show layouts, as many as may");
             return Err(Status::resource_exhausted(many));
         }
@@ -537,6 +550,39 @@ impl Layouts {
             self.went(worktree);
         }
         Ok(id)
+    }
+
+    fn asked_stranded(&mut self, client: ClientId, asked: Result<Asked, String>) {
+        let left = self.stranded[&client].left;
+        let refused = match asked {
+            Ok(Asked::Size(size)) => {
+                self.stranded.get_mut(&client).expect("a stranded client asked").size = size;
+                return;
+            },
+            Ok(Asked::Go(to)) => {
+                let shown = self.store.projects().and_then(|it| it.find(to));
+                let Some((_, shown)) = shown else {
+                    return self.refuse_stranded(client, format!("no worktree {to}"));
+                };
+                let focus = arrival(shown, self.last_focus.get(&to).copied());
+                let stranded = self.stranded.remove(&client).expect("a stranded client asked");
+                let Stranded { size, runs_in, out, .. } = stranded;
+                let arrived = Client { worktree: to, size, runs_in, focus, out, said: None };
+                assert!(self.clients.insert(client, arrived).is_none(), "a client is held once");
+                self.went(to);
+                return;
+            },
+            Ok(_) => format!("worktree {left} is gone: go to another"),
+            Err(why) => why,
+        };
+        self.refuse_stranded(client, refused);
+    }
+
+    fn refuse_stranded(&mut self, client: ClientId, refused: String) {
+        let word = api::ShowResponse { event: Some(show_response::Event::Refused(refused)) };
+        if !told(&self.stranded[&client].out, word) {
+            self.stranded.remove(&client);
+        }
     }
 
     fn went(&mut self, worktree: WorktreeId) {
@@ -1397,18 +1443,18 @@ impl Layouts {
     }
 
     fn settle(&mut self) {
-        let Layouts { store, clients, known, looked, last_focus, mux, troubles, .. } = self;
+        let Layouts { store, clients, stranded, known, looked, last_focus, mux, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
-            for (_, client) in std::mem::take(clients) {
-                let _ = client.out.try_send(Err(Status::failed_precondition(why.clone())));
+            let outs = std::mem::take(clients).into_values().map(|it| it.out);
+            for out in outs.chain(std::mem::take(stranded).into_values().map(|it| it.out)) {
+                let _ = out.try_send(Err(Status::failed_precondition(why.clone())));
             }
             return;
         };
         let mut gone = Vec::new();
         for (id, client) in clients.iter_mut() {
             let Some((_, shown)) = projects.find(client.worktree) else {
-                forgotten(&client.out, client.said.as_ref(), client.worktree);
                 gone.push(*id);
                 continue;
             };
@@ -1420,7 +1466,13 @@ impl Layouts {
             }
         }
         for id in gone {
-            clients.remove(&id);
+            let Client { worktree: left, size, runs_in, out, .. } =
+                clients.remove(&id).expect("a client whose worktree went is held");
+            let word = api::ShowResponse { event: Some(show_response::Event::Left(left.get())) };
+            if told(&out, word) {
+                let strands = Stranded { left, size, runs_in, out };
+                assert!(stranded.insert(id, strands).is_none(), "a client is stranded once");
+            }
         }
         last_focus.retain(|worktree, terminal| {
             projects.find(*worktree).is_some_and(|(_, it)| it.layout().holds(*terminal))
@@ -1483,7 +1535,9 @@ impl Layouts {
         for id in slow {
             clients.remove(&id);
         }
-        assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
+        let held = clients.len() + stranded.len();
+        assert!(held <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
+        assert!(clients.keys().all(|it| !stranded.contains_key(it)), "a client shows or is stranded");
     }
 }
 
@@ -1587,17 +1641,6 @@ fn is_folder(folder: &Dir) -> Result<bool, String> {
     }
 }
 
-fn emptied(said: &api::ShowResponse) -> Option<api::ShowResponse> {
-    let Some(show_response::Event::Laid(laid)) = &said.event else {
-        return None;
-    };
-    if laid.panes.is_empty() {
-        return None;
-    }
-    let empty = show_response::Laid { panes: Vec::new(), shown: None, ..laid.clone() };
-    Some(api::ShowResponse { event: Some(show_response::Event::Laid(empty)) })
-}
-
 fn left_by_all(projects: &Projects, worktree: WorktreeId) {
     let Some((project, stays)) = projects.find(worktree) else {
         return;
@@ -1605,26 +1648,6 @@ fn left_by_all(projects: &Projects, worktree: WorktreeId) {
     let own = matches!(project.holds(), Holds::Folder(_));
     assert!(own, "worktree {worktree} stays with no view only as its folder's own");
     assert!(stays.layout().is_empty(), "worktree {worktree} stays empty");
-}
-
-fn forgotten(out: &Out, said: Option<&api::ShowResponse>, worktree: WorktreeId) {
-    assert!(out.capacity() >= 1, "a client held keeps an answer free for its last word");
-    if out.capacity() >= 2
-        && let Some(emptied) = said.and_then(emptied)
-    {
-        forgotten_said(out, Ok(emptied));
-    }
-    let forgotten = format!("worktree {worktree} is forgotten");
-    forgotten_said(out, Err(Status::not_found(forgotten)));
-}
-
-fn forgotten_said(out: &Out, word: Result<api::ShowResponse, Status>) {
-    match out.try_send(word) {
-        Ok(()) | Err(answers::error::TrySendError::Closed(_)) => {},
-        Err(answers::error::TrySendError::Full(_)) => {
-            unreachable!("the layouts alone answer a client, and saw room for this")
-        },
-    }
 }
 
 fn told(out: &Out, word: api::ShowResponse) -> bool {
@@ -1844,46 +1867,6 @@ mod tests {
     use crate::agent::{Harness, Status};
     use crate::mux::own::server::Foreground;
     use crate::mux::own::OwnMade;
-
-    fn word_of(word: Result<api::ShowResponse, tonic::Status>) -> Result<usize, tonic::Code> {
-        match word {
-            Ok(api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }) => {
-                Ok(laid.panes.len())
-            },
-            Ok(other) => panic!("a forgotten worktree's client hears only layouts: {other:?}"),
-            Err(status) => Err(status.code()),
-        }
-    }
-
-    #[test]
-    fn a_forgotten_worktree_s_client_hears_it_emptied_only_with_room_left_for_the_end() {
-        let worktree = WorktreeId::of(7).unwrap();
-        let panes = vec![show_response::Pane::default()];
-        let laid = show_response::Laid { panes, ..show_response::Laid::default() };
-        let said = api::ShowResponse { event: Some(show_response::Event::Laid(laid)) };
-        let heard = |said: Option<&api::ShowResponse>, room: usize| {
-            let (out, mut answers) = answers::channel(ANSWERS_MAX);
-            for _ in room..ANSWERS_MAX {
-                out.try_send(Ok(api::ShowResponse::default())).unwrap();
-            }
-            forgotten(&out, said, worktree);
-            let mut words = Vec::new();
-            while let Ok(word) = answers.try_recv() {
-                words.push(word);
-            }
-            let last = words.split_off(ANSWERS_MAX - room);
-            last.into_iter().map(word_of).collect::<Vec<_>>()
-        };
-        let end = Err(tonic::Code::NotFound);
-        assert_eq!(heard(Some(&said), ANSWERS_MAX), [Ok(0), end]);
-        assert_eq!(heard(Some(&said), 2), [Ok(0), end]);
-        assert_eq!(heard(Some(&said), 1), [end], "the end takes the last room");
-        assert_eq!(heard(None, ANSWERS_MAX), [end], "a client told nothing hears the end alone");
-
-        let (out, answers) = answers::channel(ANSWERS_MAX);
-        drop(answers);
-        forgotten(&out, Some(&said), worktree);
-    }
 
     fn listed(is: Is) -> server::Terminal {
         let key = TerminalKey { id: 1.try_into().unwrap(), made: OwnMade::from_nanos(5) };

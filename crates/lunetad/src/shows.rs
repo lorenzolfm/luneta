@@ -215,6 +215,7 @@ pub enum Heard {
     Laid(Laid),
     Edged { worktree: WorktreeId, direction: Direction },
     Sent(WorktreeId),
+    Left(WorktreeId),
     Refused(String),
     Forgotten(String),
     Lost(String),
@@ -418,6 +419,12 @@ async fn stream(
                 Some(worktree) => told(Heard::Sent(worktree)),
                 None => {
                     return Heard::Lost("lunetad sent luneta's layout to worktree 0".to_owned());
+                },
+            },
+            Some(show_response::Event::Left(worktree)) => match WorktreeId::of(worktree) {
+                Some(worktree) => told(Heard::Left(worktree)),
+                None => {
+                    return Heard::Lost("lunetad said luneta's worktree 0 is gone".to_owned());
                 },
             },
             Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),

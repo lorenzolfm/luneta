@@ -1163,6 +1163,7 @@ message ShowResponse {
     string refused = 2;
     Edged edged = 3;
     fixed64 sent = 4;
+    fixed64 left = 5;
   }
 
   message Edged {
