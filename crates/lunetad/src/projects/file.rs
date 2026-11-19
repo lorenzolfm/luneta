@@ -429,7 +429,7 @@ impl Store {
 
     pub fn closed(&mut self, closing: Closing) -> Result<Option<String>, Failed> {
         let changed = self.kept()?.closed(closing).map_err(Failed::Refused)?;
-        self.follows(changed, true)
+        self.follows(changed, closing.listing_shows())
     }
 
     fn follows(&mut self, changed: Projects, listed: bool) -> Result<Option<String>, Failed> {
@@ -464,10 +464,13 @@ impl Store {
         let Keeping::Kept { projects, .. } = &mut self.keeping else {
             unreachable!("projects changed are kept");
         };
-        *projects = changed;
         if listed {
             self.revision = self.revision.next();
+        } else {
+            let laid_out = projects.alike_but_laid_out(&changed);
+            assert!(laid_out, "a change no listing shows changes only how views are laid out");
         }
+        *projects = changed;
         self.tell()
     }
 

@@ -445,6 +445,22 @@ impl Project {
         self.placed().find(|(_, it)| it.id == worktree).map(|(folder, _)| folder)
     }
 
+    fn alike_but_laid_out(&self, other: &Project) -> bool {
+        let Project { id, name, dir, holds } = self;
+        let holds_alike = match (holds, &other.holds) {
+            (Holds::Folder(one), Holds::Folder(two)) => one.alike_but_laid_out(two),
+            (Holds::Clone(one), Holds::Clone(two)) => {
+                let mut rows = one.iter().zip(two);
+                one.len() == two.len()
+                    && rows.all(|((at, one), (other_at, two))| {
+                        at == other_at && one.alike_but_laid_out(two)
+                    })
+            },
+            (Holds::Folder(_), Holds::Clone(_)) | (Holds::Clone(_), Holds::Folder(_)) => false,
+        };
+        *id == other.id && *name == other.name && *dir == other.dir && holds_alike
+    }
+
     fn worktrees_mut(&mut self) -> impl Iterator<Item = &mut Worktree> {
         let (own, rows): (_, &mut [(Subfolder, Worktree)]) = match &mut self.holds {
             Holds::Folder(own) => (Some(own), Default::default()),
@@ -512,6 +528,14 @@ pub struct Worktree {
 impl Worktree {
     fn new(id: WorktreeId, renamed: Option<Name>) -> Worktree {
         Worktree { id, renamed, layout: Layout::default(), used: None }
+    }
+
+    fn alike_but_laid_out(&self, other: &Worktree) -> bool {
+        let Worktree { id, renamed, layout, used } = self;
+        *id == other.id
+            && *renamed == other.renamed
+            && *used == other.used
+            && layout.views().eq(other.layout.views())
     }
 
     #[must_use]
@@ -601,6 +625,15 @@ pub struct Ran {
 pub enum Closing {
     Worktree(WorktreeId),
     Project(ProjectId),
+}
+
+impl Closing {
+    #[must_use]
+    pub fn listing_shows(self) -> bool {
+        match self {
+            Closing::Worktree(_) | Closing::Project(_) => true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -933,6 +966,13 @@ impl Projects {
 
     pub fn worktree_folders(&self) -> impl Iterator<Item = Dir> + '_ {
         self.projects.iter().flat_map(|project| project.placed().map(|(folder, _)| folder))
+    }
+
+    #[must_use]
+    pub fn alike_but_laid_out(&self, other: &Projects) -> bool {
+        let Projects { projects } = self;
+        let mut pairs = projects.iter().zip(&other.projects);
+        projects.len() == other.projects.len() && pairs.all(|(one, two)| one.alike_but_laid_out(two))
     }
 
     pub fn changed(
@@ -2379,6 +2419,39 @@ mod tests {
         assert!(change(&projects, fill(Some(one))).unwrap_err().contains("whole already"));
         (projects, _) = change(&projects, Change::Close { view: one }).unwrap();
         assert!(projects.find(main).is_none(), "a worktree goes with its last terminal");
+    }
+
+    #[test]
+    fn only_a_change_no_listing_shows_leaves_the_projects_alike_but_laid_out() {
+        let mut projects = Projects::default();
+        let luneta = clone(&mut projects, "/w/luneta", &[]);
+        let main = worktree(&mut projects, luneta, "/w/luneta/main");
+        let one = first(&projects, main);
+        let right = Placed::Beside { at: one, towards: layout::Towards::Right };
+        let two = opened(&mut projects, main, 101, right);
+        let (sides, growth) = (layout::Sides::One(layout::Direction::Left), layout::Growth::Grow);
+        let size = Size::of(80, 24).unwrap();
+        let name = |name: &str| Some(Name::parse(name).unwrap());
+        let asks = [
+            Change::Focus { view: one },
+            Change::Resize { view: two, sides, growth, size },
+            Change::Fill { worktree: main, full: Some(two) },
+            Change::Swap { one, other: two },
+            Change::RenameTerminal { terminal: two, to: name("vim") },
+            Change::RenameWorktree { worktree: main, to: name("trunk") },
+            Change::Went { worktree: main, at: Used::of_millis(5) },
+            Change::Close { view: two },
+        ];
+        for asked in asks {
+            let said = format!("{asked:?}");
+            let shows = asked.listing_shows();
+            let (changed, _) = change(&projects, asked).unwrap();
+            assert_ne!(changed, projects, "{said} changes the projects");
+            assert_eq!(projects.alike_but_laid_out(&changed), !shows, "{said}");
+        }
+        let closing = Closing::Worktree(main);
+        let closed = projects.closed(closing).unwrap();
+        assert_eq!(projects.alike_but_laid_out(&closed), !closing.listing_shows(), "{closing:?}");
     }
 
     #[test]
