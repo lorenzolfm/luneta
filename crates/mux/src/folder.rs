@@ -47,6 +47,10 @@ impl Claim {
     pub fn socket(&self) -> &Path {
         &self.socket
     }
+
+    pub fn bound(&self) -> io::Result<Bound> {
+        Bound::of(&self.socket)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +68,8 @@ pub enum Found {
 }
 
 impl Bound {
-    pub fn of(socket: &Path) -> io::Result<Bound> {
+    fn of(socket: &Path) -> io::Result<Bound> {
+        assert!(socket.is_absolute(), "{} is looked at from any folder", socket.display());
         let found = fs::symlink_metadata(socket)?;
         if !found.file_type().is_socket() {
             let what = format!("{} is no socket just after it was bound", socket.display());

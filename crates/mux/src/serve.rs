@@ -27,6 +27,8 @@ const DRAIN: Duration = Duration::from_secs(5);
 
 const SOCKET_LOOK: Duration = Duration::from_secs(1);
 
+const _: () = assert!(!SOCKET_LOOK.is_zero(), "a look at the socket waits between looks");
+
 const STREAMS_MAX: u32 = 256;
 
 const HELLO_WAIT: Duration = Duration::from_secs(5);
@@ -224,6 +226,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
             },
         };
         let closed = mux.end();
+        assert!(watched.borrow().is_none(), "the listing ends with the server");
         let terminals = if closed == 1 { "terminal" } else { "terminals" };
         eprintln!(
             "luneta-mux: {} {why}, so nothing reaches this server again: it closed its {closed} \
@@ -239,7 +242,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
     }
     let listener = UnixListener::bind(claim.socket())?;
-    let bound = Bound::of(claim.socket())?;
+    let bound = claim.bound()?;
     let mux = Mux::new();
     let mut watched = mux.watched();
     eprintln!("luneta-mux: listening on {}", bound.socket().display());
