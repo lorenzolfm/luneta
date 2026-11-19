@@ -3799,17 +3799,19 @@ impl Sidebar {
         let Some(spot) = self.cursor.clone() else {
             return Asked::Nothing;
         };
-        let on = spot.machine();
         match spot {
             Spot::Machine(_) => {
                 self.toggle();
                 Asked::Nothing
             },
-            Spot::Local(place) | Spot::Remote(_, place) => {
-                self.close_search();
-                Asked::Go { on, place }
-            },
+            Spot::Local(place) => self.go_to(Machine::Local, place),
+            Spot::Remote(destination, place) => self.go_to(Machine::Remote(destination), place),
         }
+    }
+
+    fn go_to(&mut self, on: Machine, place: Place) -> Asked {
+        self.close_search();
+        Asked::Go { on, place }
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
@@ -3939,7 +3941,11 @@ impl Sidebar {
                 return Asked::Take;
             }
             if !row.stops() {
-                return Asked::Take;
+                let Row::Worktree { machine, place, .. } = row else {
+                    return Asked::Take;
+                };
+                let (on, place) = (machine.clone(), Place::Worktree(place.clone()));
+                return self.go_to(on, place);
             }
         }
         self.cursor = Some(spot);
@@ -5664,6 +5670,31 @@ mod tests {
         assert_eq!(folded(&sidebar), [false, true, true]);
         type_in(&mut sidebar, "h");
         assert_eq!(folded(&sidebar), [true, true, true]);
+    }
+
+    #[test]
+    fn a_click_on_a_worktree_with_views_goes_to_it_and_on_its_triangle_folds_it() {
+        let mut sidebar = fresh();
+        let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
+        let main = worktree_of(32, "main", "/w/main", &[3]);
+        let projects = vec![a_project(7, "luneta", vec![fix, main])];
+        sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
+        let area = Rect::new(0, 0, 32, 12);
+        let lines = screen(&mut sidebar, false, area.width, area.height);
+        let fix = ["  ▾ fix", " ╭   \u{e795} w/fix", " ╰   \u{e795} w/fix"];
+        assert_eq!(lines[5..10], [&fix[..], &["  ▾ main", "     \u{e795} w/main"]].concat());
+        let project = project_row("luneta", 7);
+        let worktree = |id| {
+            let worktree = WorktreeId::of(id).unwrap();
+            go_here(Place::Worktree(WorktreePlace { project: project.clone(), worktree }))
+        };
+        assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
+        assert_eq!(click(&mut sidebar, 10, 5, area), worktree(31));
+        assert_eq!(click(&mut sidebar, 2, 8, area), Asked::Take);
+        let main = Fold::Worktree(&Machine::Local, WorktreeId::of(32).unwrap());
+        assert!(sidebar.folds.contains(main));
+        screen(&mut sidebar, false, area.width, area.height);
+        assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
     }
 
     #[test]
