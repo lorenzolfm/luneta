@@ -1,4 +1,5 @@
 [advisories]
+unused-ignored-advisory = "deny"
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc-macro, not a vulnerability" },
 ]
