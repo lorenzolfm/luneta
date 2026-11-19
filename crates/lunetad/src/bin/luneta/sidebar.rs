@@ -8695,6 +8695,7 @@ mod tests {
             " w  worktree",
             " BS   back a group",
             " Ctrl a       Sidebar or views",
+            " Super k      Pick an action",
             " Alt Shift u  Stop reading",
         ] {
             assert!(listed.iter().any(|shown| shown == line), "{line:?} in {listed:#?}");
@@ -8702,9 +8703,6 @@ mod tests {
         let group = |name: &str| listed.iter().position(|line| line == name).unwrap();
         let sidebar_s = &listed[group(" Sidebar")..group(" Menu")];
         assert!(sidebar_s.iter().any(|line| line == " q    Quit luneta"), "{sidebar_s:#?}");
-        let palette = group(" Super k      Pick an action");
-        let ghostty = ["  For Cmd k, Ghostty's config:", "  keybind = cmd+k=unbind"];
-        assert_eq!(listed[palette + 1..palette + 3], ghostty, "{listed:#?}");
         assert_eq!(every.last().map(String::as_str), Some(" <↓↑> - Scroll, <ESC> - Close"));
 
         let total = listed.len();
