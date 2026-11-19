@@ -14,10 +14,10 @@ use lunetad::api::checkout::Head;
 use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
-use lunetad::api::work_tree::Stands;
+use lunetad::api::git_status::Stands;
 use lunetad::api::{
-    Agent, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status, UnreadFile,
-    Version, WatchRequest, WorkTree, Zellij,
+    Agent, GitStatus, ListAgentsResponse, PullRequest, Say, SayRequest, Session, Status,
+    UnreadFile, Version, WatchRequest, Zellij,
 };
 use lunetad::asks::User;
 use lunetad::folder::SOCKET;
@@ -45,8 +45,8 @@ pub enum Command {
     #[command(about = "List the agents that run, and the pane each is in")]
     Agents,
     #[command(
-        about = "List the zellij sessions that run, their panes, and how the work tree each pane \
-                 works in stands"
+        about = "List the zellij sessions that run, their panes, and the git status of the folder \
+                 each pane works in"
     )]
     Sessions,
     #[command(
@@ -92,12 +92,12 @@ pub enum Command {
     )]
     Here,
     #[command(
-        about = "Start a workstream, and say its folder. A folder opens a workstream there, in \
+        about = "Start a worktree, and say its folder. A folder opens a worktree there, in \
                  the project it is in, or in a project made of it, named after it. A branch has \
                  a worktree made of it, as `wt add` does, in the clone wt made that this runs \
                  in. An issue has a branch and a worktree made for it, as a pasted link has, and \
                  an agent started there on it. A pull request has a worktree made of it. Run in \
-                 a terminal of luneta's, it takes the luneta on that terminal to the workstream"
+                 a terminal of luneta's, it takes the luneta on that terminal to the worktree"
     )]
     Start {
         #[arg(
@@ -177,7 +177,7 @@ pub enum Command {
     #[command(
         about = "Reset luneta: end every luneta, lunetad and luneta-mux, on this machine and on \
                  each machine of luneta's hosts file, and the shells and agents in luneta-mux's \
-                 terminals with them, and forget every project and workstream, so that the next \
+                 terminals with them, and forget every project and worktree, so that the next \
                  `luneta` starts with none. luneta's hosts file, its logs and the rest of its \
                  state stay. A machine ssh does not reach is skipped, and keeps its own. Without \
                  `--yes`, say what would end on each machine, and the plan to tell `--yes`, and \
@@ -550,14 +550,14 @@ async fn sessions(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error
     let asked = WatchRequest { after: None, kept: None, shown: false };
     let host = daemon.watch(asked).await?.into_inner();
     let here = as_rows(&host.sessions);
-    sessions_of(&here, &host.work_trees, &host.pull_requests, "");
+    sessions_of(&here, &host.git_statuses, &host.pull_requests, "");
     for remote in &host.remotes {
         let machine = &remote.destination;
         match &remote.reached {
             Some(Reached::Host(host)) => {
                 println!("{machine}/");
                 let far = as_rows(&host.sessions);
-                sessions_of(&far, &host.work_trees, &host.pull_requests, "  ");
+                sessions_of(&far, &host.git_statuses, &host.pull_requests, "  ");
             },
             Some(Reached::Reaching(())) => println!("{machine}/  (reaching it)"),
             Some(Reached::Unreached(unreached)) => {
@@ -587,7 +587,7 @@ fn as_rows(sessions: &[Session]) -> Vec<&Session> {
 
 fn sessions_of(
     sessions: &[&Session],
-    work_trees: &[WorkTree],
+    git_statuses: &[GitStatus],
     pull_requests: &[PullRequest],
     indent: &str,
 ) {
@@ -603,17 +603,17 @@ fn sessions_of(
                 println!("{indent}  {at}  -");
                 continue;
             };
-            let Some(tree) = work_trees.iter().find(|tree| tree.dir == cwd) else {
+            let Some(status) = git_statuses.iter().find(|status| status.dir == cwd) else {
                 println!("{indent}  {at}  {cwd}");
                 continue;
             };
-            let stands = stands(tree).unwrap_or_else(|| "(does not read)".to_owned());
+            let stands = stands(status).unwrap_or_else(|| "(does not read)".to_owned());
             let pull_request = pull_requests.iter().find(|it| it.dir == cwd);
             let pulled = pull_request.map(|it| {
                 format!("  {}", pulled(it).unwrap_or_else(|| "(does not read)".to_owned()))
             });
             let pulled = pulled.unwrap_or_default();
-            let repo = match tree.stands.as_ref() {
+            let repo = match status.stands.as_ref() {
                 Some(Stands::Checkout(checkout)) => checkout.repository.as_ref(),
                 Some(Stands::NoCheckout(it)) => Some(&it.repository),
                 Some(Stands::Outside(())) | None => None,
@@ -624,8 +624,8 @@ fn sessions_of(
     }
 }
 
-fn stands(tree: &WorkTree) -> Option<String> {
-    let checkout = match tree.stands.as_ref()? {
+fn stands(status: &GitStatus) -> Option<String> {
+    let checkout = match status.stands.as_ref()? {
         Stands::NoCheckout(_) => return Some("no checkout".to_owned()),
         Stands::Outside(()) => return Some("no repository".to_owned()),
         Stands::Checkout(checkout) => checkout,

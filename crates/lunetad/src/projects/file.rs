@@ -15,9 +15,9 @@ use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
 use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalViewId, Used};
 use super::{View, ViewId};
-use super::{Layout, Workstream, WorkstreamId, Worktree};
+use super::{Layout, Subfolder, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
-use super::{SPOT_LOOK, VIEWS_MAX, WORKSTREAMS_MAX};
+use super::{SPOT_LOOK, VIEWS_MAX, WORKTREES_MAX};
 use crate::agent::Harness;
 use crate::api;
 use crate::core::Command;
@@ -67,9 +67,9 @@ const SPLIT_BYTES_MAX: usize = 128;
 const FILE_BYTES_MAX: usize = 32 * 1024 * 1024;
 
 const _: () = assert!(
-    (PROJECTS_MAX + WORKSTREAMS_MAX) * ENTRY_BYTES_MAX
+    (PROJECTS_MAX + WORKTREES_MAX) * ENTRY_BYTES_MAX
         + VIEWS_MAX * TERMINAL_BYTES_MAX
-        + WORKSTREAMS_MAX * NODES_MAX * SPLIT_BYTES_MAX
+        + WORKTREES_MAX * NODES_MAX * SPLIT_BYTES_MAX
         <= FILE_BYTES_MAX
 );
 
@@ -97,13 +97,13 @@ struct KeptProject {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum KeptHolds {
-    Folder(KeptWorkstream),
-    Clone(Vec<KeptWorktree>),
+    Folder(KeptFolderWorktree),
+    Clone(Vec<KeptCloneWorktree>),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptWorkstream {
+struct KeptFolderWorktree {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -117,11 +117,12 @@ struct KeptWorkstream {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptWorktree {
+struct KeptCloneWorktree {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    worktree: String,
+    #[serde(rename = "worktree")]
+    subfolder: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<KeptLayout>,
     #[serde(default, skip_serializing)]
@@ -143,13 +144,13 @@ struct UnrootedProject {
     id: String,
     name: String,
     dir: String,
-    #[serde(default)]
-    workstreams: Vec<UnrootedWorkstream>,
+    #[serde(default, rename = "workstreams")]
+    worktrees: Vec<UnrootedWorktree>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UnrootedWorkstream {
+struct UnrootedWorktree {
     id: String,
     #[serde(default)]
     name: Option<String>,
@@ -656,8 +657,8 @@ fn parse(
     }
     let kept: KeptUnrooted = serde_json::from_str(text).map_err(|error| error.to_string())?;
     assert_eq!(kept.version, version, "a file says one version");
-    let workstreams = || kept.projects.iter().flat_map(|project| &project.workstreams);
-    bounded(version, kept.projects.len(), || workstreams().map(UnrootedWorkstream::counted))?;
+    let worktrees = || kept.projects.iter().flat_map(|project| &project.worktrees);
+    bounded(version, kept.projects.len(), || worktrees().map(UnrootedWorktree::counted))?;
     let unrooted = kept.projects.into_iter().map(UnrootedProject::read);
     let unrooted: Vec<Unrooted> = unrooted.collect::<Result<_, _>>()?;
     let projects = root_projects(unrooted, root, draw)?;
@@ -667,23 +668,23 @@ fn parse(
 fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     version: u32,
     projects: usize,
-    workstreams: impl Fn() -> I,
+    worktrees: impl Fn() -> I,
 ) -> Result<(), String> {
-    let laid = || workstreams().filter_map(|it| it.layout.or(it.view));
+    let laid = || worktrees().filter_map(|it| it.layout.or(it.view));
     let nodes = || laid().flat_map(|layout| &layout.tree);
     if projects > PROJECTS_MAX {
         return Err(format!("it holds over {PROJECTS_MAX} projects"));
     }
-    if workstreams().count() > WORKSTREAMS_MAX {
-        return Err(format!("it holds over {WORKSTREAMS_MAX} workstreams"));
+    if worktrees().count() > WORKTREES_MAX {
+        return Err(format!("it holds over {WORKTREES_MAX} worktrees"));
     }
     if nodes().filter(|node| !matches!(node, KeptNode::Split(_))).count() > VIEWS_MAX {
         return Err(format!("it holds over {VIEWS_MAX} views"));
     }
-    if version <= LAID_AS_VIEW && workstreams().any(|it| it.layout.is_some()) {
+    if version <= LAID_AS_VIEW && worktrees().any(|it| it.layout.is_some()) {
         return Err(format!("it is of version {version}, which keeps layouts as \"view\""));
     }
-    if version > LAID_AS_VIEW && workstreams().any(|it| it.view.is_some()) {
+    if version > LAID_AS_VIEW && worktrees().any(|it| it.view.is_some()) {
         return Err(format!("it is of version {version}, which keeps layouts as \"layout\""));
     }
     if version == WITHOUT_LAYOUTS && laid().next().is_some() {
@@ -705,8 +706,8 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
         if nodes().any(named) {
             return Err(format!("it is of version {version}, which holds no terminal's name"));
         }
-        if workstreams().any(|it| it.used_millis.is_some()) {
-            return Err(format!("it is of version {version}, which holds no workstream's use"));
+        if worktrees().any(|it| it.used_millis.is_some()) {
+            return Err(format!("it is of version {version}, which holds no worktree's use"));
         }
     }
     Ok(())
@@ -716,7 +717,7 @@ struct Unrooted {
     id: ProjectId,
     name: Name,
     dir: Dir,
-    workstreams: Vec<(Below, Workstream)>,
+    worktrees: Vec<(Below, Worktree)>,
 }
 
 struct Gathered {
@@ -727,11 +728,11 @@ struct Gathered {
 }
 
 enum Gathering {
-    Folder(Vec<Workstream>),
+    Folder(Vec<Worktree>),
     Clone {
-        own: Vec<Workstream>,
-        rows: Vec<(Worktree, Workstream)>,
-        worktrees: BTreeSet<Worktree>,
+        own: Vec<Worktree>,
+        rows: Vec<(Subfolder, Worktree)>,
+        subfolders: BTreeSet<Subfolder>,
     },
 }
 
@@ -740,28 +741,28 @@ fn root_projects(
     root: &mut impl FnMut(&Dir) -> Result<Option<Spot>, String>,
     draw: &mut impl FnMut() -> io::Result<Id>,
 ) -> Result<Vec<Project>, String> {
-    let view_count = |workstreams: &mut dyn Iterator<Item = &Workstream>| -> usize {
-        workstreams.map(|it| it.layout.len()).sum()
+    let view_count = |worktrees: &mut dyn Iterator<Item = &Worktree>| -> usize {
+        worktrees.map(|it| it.layout.len()).sum()
     };
     let views: usize =
-        unrooted.iter().map(|it| view_count(&mut it.workstreams.iter().map(|(_, it)| it))).sum();
+        unrooted.iter().map(|it| view_count(&mut it.worktrees.iter().map(|(_, it)| it))).sum();
     let mut taken: BTreeSet<Id> = BTreeSet::new();
     for project in &unrooted {
-        let workstreams = project.workstreams.iter().map(|(_, it)| it);
-        let layouts = workstreams.clone().map(|it| &it.layout);
+        let worktrees = project.worktrees.iter().map(|(_, it)| it);
+        let layouts = worktrees.clone().map(|it| &it.layout);
         let views = layouts.flat_map(|layout| layout.views().map(|it| it.id().id()));
-        let ids = std::iter::once(project.id.id()).chain(workstreams.map(|it| it.id.id()));
+        let ids = std::iter::once(project.id.id()).chain(worktrees.map(|it| it.id.id()));
         for id in ids.chain(views) {
             if !taken.insert(id) {
                 return Err(format!("the id {id} comes twice"));
             }
         }
     }
-    let mut fresh = || -> Result<WorkstreamId, String> {
+    let mut fresh = || -> Result<WorktreeId, String> {
         for _ in 0..super::FRESH_TRIES {
             let id = draw().map_err(|error| format!("no id is drawn: {error}"))?;
             if taken.insert(id) {
-                return Ok(WorkstreamId::new(id));
+                return Ok(WorktreeId::new(id));
             }
         }
         Err(format!("{} ids drawn were all taken", super::FRESH_TRIES))
@@ -780,7 +781,7 @@ fn root_projects(
                     None => gathered.push(Gathered { id, name, dir, holds: Gathering::Folder(more) }),
                 }
             },
-            Gathering::Clone { own: more_own, rows: more_rows, worktrees } => {
+            Gathering::Clone { own: more_own, rows: more_rows, subfolders } => {
                 let held = gathered.iter_mut().find_map(|it| match &mut it.holds {
                     Gathering::Clone { own, rows, .. } if it.dir == dir => Some((own, rows)),
                     Gathering::Folder(_) | Gathering::Clone { .. } => None,
@@ -789,7 +790,7 @@ fn root_projects(
                     own.extend(more_own);
                     rows.extend(more_rows);
                 } else {
-                    let holds = Gathering::Clone { own: more_own, rows: more_rows, worktrees };
+                    let holds = Gathering::Clone { own: more_own, rows: more_rows, subfolders };
                     gathered.push(Gathered { id, name, dir, holds });
                 }
             },
@@ -797,7 +798,7 @@ fn root_projects(
     }
     let shaped = gathered.into_iter().map(|it| shape(it, &mut fresh));
     let projects: Vec<Project> = shaped.collect::<Result<_, _>>()?;
-    let rooted: usize = projects.iter().map(|it| view_count(&mut it.workstreams())).sum();
+    let rooted: usize = projects.iter().map(|it| view_count(&mut it.worktrees())).sum();
     assert_eq!(rooted, views, "rooting keeps every view");
     Ok(projects)
 }
@@ -816,71 +817,76 @@ fn root_project(
         format!("project {name} in {dir}: {unsaid}: {why}")
     };
     let Some(spot) = root(&project.dir).map_err(unread)? else {
-        let Unrooted { id, name, dir, workstreams } = project;
-        let all = workstreams.into_iter().map(|(_, it)| it).collect();
+        let Unrooted { id, name, dir, worktrees } = project;
+        let all = worktrees.into_iter().map(|(_, it)| it).collect();
         return Ok(Gathered { id, name, dir, holds: Gathering::Folder(all) });
     };
     let name = named(spot.dir());
-    let Unrooted { id, dir, workstreams, .. } = project;
-    let Some(worktrees) = spot.worktrees() else {
-        let all = workstreams.into_iter().map(|(_, it)| it).collect();
+    let Unrooted { id, dir, worktrees, .. } = project;
+    let Some(subfolders) = spot.subfolders() else {
+        let all = worktrees.into_iter().map(|(_, it)| it).collect();
         let dir = spot.dir().clone();
         return Ok(Gathered { id, name, dir, holds: Gathering::Folder(all) });
     };
     let root = spot.dir().clone();
     let (mut own, mut rows) = (Vec::new(), Vec::new());
-    for (below, workstream) in workstreams {
-        match worktree_holding(&root, worktrees, &dir.join(&below)) {
-            Some(worktree) => rows.push((worktree, workstream)),
-            None => own.push(workstream),
+    for (below, worktree) in worktrees {
+        match subfolder_holding(&root, subfolders, &dir.join(&below)) {
+            Some(subfolder) => rows.push((subfolder, worktree)),
+            None => own.push(worktree),
         }
     }
-    let holds = Gathering::Clone { own, rows, worktrees: worktrees.clone() };
+    let holds = Gathering::Clone { own, rows, subfolders: subfolders.clone() };
     Ok(Gathered { id, name, dir: root, holds })
 }
 
-fn worktree_holding(root: &Dir, worktrees: &BTreeSet<Worktree>, folder: &Dir) -> Option<Worktree> {
-    let holding = worktrees.iter().filter(|it| root.at(it).below(folder).is_some());
+fn subfolder_holding(
+    root: &Dir,
+    subfolders: &BTreeSet<Subfolder>,
+    folder: &Dir,
+) -> Option<Subfolder> {
+    let holding = subfolders.iter().filter(|it| root.at(it).below(folder).is_some());
     let listed = holding.max_by_key(|it| it.as_str().len()).cloned();
     listed.or_else(|| {
         let below = root.below(folder)?;
         let first = below.as_str().split('/').next().expect("a split yields at least once");
-        Worktree::parse(first).ok()
+        Subfolder::parse(first).ok()
     })
 }
 
 fn shape(
     gathered: Gathered,
-    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
+    fresh: &mut impl FnMut() -> Result<WorktreeId, String>,
 ) -> Result<Project, String> {
     let Gathered { id, name, dir, holds } = gathered;
     let holds = match holds {
         Gathering::Folder(all) => Holds::Folder(one_of(all, fresh)?),
-        Gathering::Clone { own, rows, worktrees } => shape_clone(own, rows, &worktrees, fresh)?,
+        Gathering::Clone { own, rows, subfolders } => shape_clone(own, rows, &subfolders, fresh)?,
     };
     Ok(Project { id, name, dir, holds })
 }
 
 fn shape_clone(
-    own: Vec<Workstream>,
-    rows: Vec<(Worktree, Workstream)>,
-    worktrees: &BTreeSet<Worktree>,
-    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
+    own: Vec<Worktree>,
+    rows: Vec<(Subfolder, Worktree)>,
+    subfolders: &BTreeSet<Subfolder>,
+    fresh: &mut impl FnMut() -> Result<WorktreeId, String>,
 ) -> Result<Holds, String> {
-    let mut merged: Vec<(Worktree, Workstream)> = Vec::with_capacity(rows.len());
-    for (worktree, workstream) in rows {
-        let held = merged.iter_mut().find(|(it, _)| *it == worktree);
+    let mut merged: Vec<(Subfolder, Worktree)> = Vec::with_capacity(rows.len());
+    for (subfolder, worktree) in rows {
+        let held = merged.iter_mut().find(|(it, _)| *it == subfolder);
         match held {
-            Some((_, held)) => join(held, workstream)?,
-            None => merged.push((worktree, workstream)),
+            Some((_, held)) => join(held, worktree)?,
+            None => merged.push((subfolder, worktree)),
         }
     }
-    for worktree in worktrees {
-        if !merged.iter().any(|(it, _)| it == worktree) {
-            merged.push((worktree.clone(), Workstream::new(fresh()?, None)));
+    for subfolder in subfolders {
+        if !merged.iter().any(|(it, _)| it == subfolder) {
+            merged.push((subfolder.clone(), Worktree::new(fresh()?, None)));
         }
     }
-    let used_last = |(at, (_, it)): &(usize, &(Worktree, Workstream))| (it.used, std::cmp::Reverse(*at));
+    let used_last =
+        |(at, (_, it)): &(usize, &(Subfolder, Worktree))| (it.used, std::cmp::Reverse(*at));
     let last = merged.iter().enumerate().max_by_key(used_last).map(|(at, _)| at);
     let Some(last) = last else {
         if own.iter().all(|it| it.layout.is_empty()) {
@@ -889,19 +895,19 @@ fn shape_clone(
         return one_of(own, fresh).map(Holds::Folder);
     };
     let (_, into) = &mut merged[last];
-    for workstream in own {
-        into.layout = std::mem::take(&mut into.layout).joined(workstream.layout)?;
+    for worktree in own {
+        into.layout = std::mem::take(&mut into.layout).joined(worktree.layout)?;
     }
     Ok(Holds::Clone(merged))
 }
 
 fn one_of(
-    all: Vec<Workstream>,
-    fresh: &mut impl FnMut() -> Result<WorkstreamId, String>,
-) -> Result<Workstream, String> {
+    all: Vec<Worktree>,
+    fresh: &mut impl FnMut() -> Result<WorktreeId, String>,
+) -> Result<Worktree, String> {
     let mut all = all.into_iter();
     let Some(mut one) = all.next() else {
-        return Ok(Workstream::new(fresh()?, None));
+        return Ok(Worktree::new(fresh()?, None));
     };
     for other in all {
         join(&mut one, other)?;
@@ -909,15 +915,15 @@ fn one_of(
     Ok(one)
 }
 
-fn join(held: &mut Workstream, other: Workstream) -> Result<(), String> {
+fn join(held: &mut Worktree, other: Worktree) -> Result<(), String> {
     let views = held.layout.len() + other.layout.len();
     let layout = std::mem::take(&mut held.layout).joined(other.layout)?;
     if other.used > held.used {
-        *held = Workstream { layout, ..other };
+        *held = Worktree { layout, ..other };
     } else {
         held.layout = layout;
     }
-    assert_eq!(held.layout.len(), views, "workstreams joined keep every view");
+    assert_eq!(held.layout.len(), views, "worktrees joined keep every view");
     Ok(())
 }
 
@@ -927,7 +933,7 @@ impl KeptProject {
         let holds = match self.holds {
             KeptHolds::Folder(own) => Holds::Folder(own.read()?),
             KeptHolds::Clone(rows) => {
-                let rows = rows.into_iter().map(KeptWorktree::read);
+                let rows = rows.into_iter().map(KeptCloneWorktree::read);
                 Holds::Clone(rows.collect::<Result<_, _>>()?)
             },
         };
@@ -936,9 +942,9 @@ impl KeptProject {
 
     fn of(project: &Project) -> KeptProject {
         let holds = match &project.holds {
-            Holds::Folder(own) => KeptHolds::Folder(KeptWorkstream::of(own)),
+            Holds::Folder(own) => KeptHolds::Folder(KeptFolderWorktree::of(own)),
             Holds::Clone(rows) => {
-                let rows = rows.iter().map(|(worktree, it)| KeptWorktree::of(worktree, it));
+                let rows = rows.iter().map(|(subfolder, it)| KeptCloneWorktree::of(subfolder, it));
                 KeptHolds::Clone(rows.collect())
             },
         };
@@ -951,50 +957,50 @@ impl KeptProject {
     }
 
     fn counted(&self) -> impl Iterator<Item = Counted<'_>> {
-        let (own, rows): (_, &[KeptWorktree]) = match &self.holds {
+        let (own, rows): (_, &[KeptCloneWorktree]) = match &self.holds {
             KeptHolds::Folder(own) => (Some(own.counted()), &[]),
             KeptHolds::Clone(rows) => (None, rows),
         };
-        own.into_iter().chain(rows.iter().map(KeptWorktree::counted))
+        own.into_iter().chain(rows.iter().map(KeptCloneWorktree::counted))
     }
 }
 
-fn read_workstream(
+fn read_worktree(
     id: &str,
     name: Option<&str>,
     layout: Option<KeptLayout>,
     used_millis: Option<u64>,
-) -> Result<Workstream, String> {
-    let id: WorkstreamId = id.parse()?;
+) -> Result<Worktree, String> {
+    let id: WorktreeId = id.parse()?;
     let layout = match layout {
         None => Layout::default(),
         Some(layout) => {
-            layout.read().map_err(|why| format!("workstream {id}'s layout: {why}"))?
+            layout.read().map_err(|why| format!("worktree {id}'s layout: {why}"))?
         },
     };
-    Ok(Workstream {
+    Ok(Worktree {
         id,
         renamed: name.map(Name::parse).transpose()?,
         layout,
         used: used_millis.map(Used::read).transpose().map_err(|why| {
-            format!("workstream {id}: {why}")
+            format!("worktree {id}: {why}")
         })?,
     })
 }
 
-impl KeptWorkstream {
-    fn read(self) -> Result<Workstream, String> {
+impl KeptFolderWorktree {
+    fn read(self) -> Result<Worktree, String> {
         let layout = self.layout.or(self.view);
-        read_workstream(&self.id, self.name.as_deref(), layout, self.used_millis)
+        read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)
     }
 
-    fn of(workstream: &Workstream) -> KeptWorkstream {
-        KeptWorkstream {
-            id: workstream.id.to_string(),
-            name: workstream.renamed.as_ref().map(|name| name.0.clone()),
-            layout: KeptLayout::of(&workstream.layout),
+    fn of(worktree: &Worktree) -> KeptFolderWorktree {
+        KeptFolderWorktree {
+            id: worktree.id.to_string(),
+            name: worktree.renamed.as_ref().map(|name| name.0.clone()),
+            layout: KeptLayout::of(&worktree.layout),
             view: None,
-            used_millis: workstream.used.map(Used::millis),
+            used_millis: worktree.used.map(Used::millis),
         }
     }
 
@@ -1004,18 +1010,19 @@ impl KeptWorkstream {
     }
 }
 
-impl KeptWorktree {
-    fn read(self) -> Result<(Worktree, Workstream), String> {
+impl KeptCloneWorktree {
+    fn read(self) -> Result<(Subfolder, Worktree), String> {
         let layout = self.layout.or(self.view);
-        let workstream = read_workstream(&self.id, self.name.as_deref(), layout, self.used_millis)?;
-        let at = |why: String| format!("workstream {}: {why}", workstream.id);
-        Ok((Worktree::parse(&self.worktree).map_err(at)?, workstream))
+        let worktree = read_worktree(&self.id, self.name.as_deref(), layout, self.used_millis)?;
+        let at = |why: String| format!("worktree {}: {why}", worktree.id);
+        Ok((Subfolder::parse(&self.subfolder).map_err(at)?, worktree))
     }
 
-    fn of(worktree: &Worktree, workstream: &Workstream) -> KeptWorktree {
-        let KeptWorkstream { id, name, layout, view, used_millis } = KeptWorkstream::of(workstream);
-        let worktree = worktree.as_str().to_owned();
-        KeptWorktree { id, name, worktree, layout, view, used_millis }
+    fn of(subfolder: &Subfolder, worktree: &Worktree) -> KeptCloneWorktree {
+        let KeptFolderWorktree { id, name, layout, view, used_millis } =
+            KeptFolderWorktree::of(worktree);
+        let subfolder = subfolder.as_str().to_owned();
+        KeptCloneWorktree { id, name, subfolder, layout, view, used_millis }
     }
 
     fn counted(&self) -> Counted<'_> {
@@ -1027,15 +1034,15 @@ impl KeptWorktree {
 impl UnrootedProject {
     fn read(self) -> Result<Unrooted, String> {
         let (id, name, dir) = (self.id.parse()?, Name::parse(&self.name)?, Dir::parse(&self.dir)?);
-        let workstreams = self.workstreams.into_iter().map(UnrootedWorkstream::read);
-        Ok(Unrooted { id, name, dir, workstreams: workstreams.collect::<Result<_, _>>()? })
+        let worktrees = self.worktrees.into_iter().map(UnrootedWorktree::read);
+        Ok(Unrooted { id, name, dir, worktrees: worktrees.collect::<Result<_, _>>()? })
     }
 }
 
-impl UnrootedWorkstream {
-    fn read(self) -> Result<(Below, Workstream), String> {
-        let workstream = read_workstream(&self.id, self.name.as_deref(), self.view, self.used_millis)?;
-        Ok((Below::parse(&self.below)?, workstream))
+impl UnrootedWorktree {
+    fn read(self) -> Result<(Below, Worktree), String> {
+        let worktree = read_worktree(&self.id, self.name.as_deref(), self.view, self.used_millis)?;
+        Ok((Below::parse(&self.below)?, worktree))
     }
 
     fn counted(&self) -> Counted<'_> {
@@ -1181,11 +1188,11 @@ mod tests {
     use super::*;
 
     fn add_in(project: ProjectId, spot: Spot) -> Change {
-        Change::AddWorkstream { project, spot, name: None }
+        Change::AddWorktree { project, spot, name: None }
     }
 
     fn add_named(project: ProjectId, spot: Spot, name: Option<Name>) -> Change {
-        Change::AddWorkstream { project, spot, name }
+        Change::AddWorktree { project, spot, name }
     }
 
     fn dir(text: &str) -> Dir {
@@ -1196,15 +1203,15 @@ mod tests {
         Spot::in_folder(dir(at), dir(at))
     }
 
-    fn tree(at: &str) -> Worktree {
-        Worktree::parse(at).unwrap()
+    fn tree(at: &str) -> Subfolder {
+        Subfolder::parse(at).unwrap()
     }
 
-    fn clone_of(root: &str, worktrees: &[&str]) -> Spot {
-        Spot::in_clone(dir(root), None, worktrees.iter().copied().map(tree).collect())
+    fn clone_of(root: &str, subfolders: &[&str]) -> Spot {
+        Spot::in_clone(dir(root), None, subfolders.iter().copied().map(tree).collect())
     }
 
-    fn worktree(root: &str, at: &str) -> Spot {
+    fn spot_at(root: &str, at: &str) -> Spot {
         Spot::in_clone(dir(root), Some(tree(at)), BTreeSet::from([tree(at)]))
     }
 
@@ -1212,12 +1219,12 @@ mod tests {
         matches!(project.holds(), Holds::Clone(_))
     }
 
-    fn rows(project: &Project) -> &[(Worktree, Workstream)] {
+    fn rows(project: &Project) -> &[(Subfolder, Worktree)] {
         let Holds::Clone(rows) = project.holds() else { panic!("{project:?} is a clone") };
         rows
     }
 
-    fn row<'a>(project: &'a Project, at: &str) -> &'a Workstream {
+    fn row<'a>(project: &'a Project, at: &str) -> &'a Worktree {
         let found = rows(project).iter().find(|(it, _)| *it == tree(at));
         &found.unwrap_or_else(|| panic!("{at} is a worktree of {project:?}")).1
     }
@@ -1283,14 +1290,14 @@ mod tests {
         let made = store.change(luneta);
         let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
         let named = Some(Name::parse("release").unwrap());
-        let fix = add_named(luneta, worktree("/w/luneta", "fix"), named);
+        let fix = add_named(luneta, spot_at("/w/luneta", "fix"), named);
         store.change(fix).unwrap();
 
         let mut told = heard(&commands);
         assert_eq!(told.len(), 4);
         assert_eq!(told[0], Ok(Projects::default()));
         let kept = told.pop().unwrap();
-        assert_eq!(kept.as_ref().map(|kept| kept.workstreams().count()), Ok(3));
+        assert_eq!(kept.as_ref().map(|kept| kept.worktrees().count()), Ok(3));
 
         drop(store);
         let again = store_at(Ok(file.clone()), core);
@@ -1316,7 +1323,7 @@ mod tests {
         let luneta = Change::AddProject { spot: clone_of("/w/luneta", &[]), name: None };
         let made = store.change(luneta);
         let Some(Made::Project(luneta)) = made.unwrap() else { panic!("luneta is made") };
-        let spot = worktree("/w/luneta", "main");
+        let spot = spot_at("/w/luneta", "main");
         store.change(add_in(luneta, spot)).unwrap();
         let held = store.projects().unwrap().clone();
         let refused = forget_at(&file).unwrap_err();
@@ -1345,7 +1352,7 @@ mod tests {
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let project = ProjectId::new(ids[0]);
         let named = Some(Name::parse("release").unwrap());
-        let main = add_named(project, worktree("/w/luneta", "main"), named);
+        let main = add_named(project, spot_at("/w/luneta", "main"), named);
         (projects, _) = projects.changed(main, &mut draw).unwrap();
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
@@ -1401,7 +1408,7 @@ mod tests {
         let mut draw = || Ok(drawn.next().unwrap());
         let change = Change::AddProject { spot: clone_of("/w/luneta", &["top"]), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
-        let workstream = WorkstreamId::new(ids[1]);
+        let worktree = WorktreeId::new(ids[1]);
         let size = super::super::Size::of(80, 24).unwrap();
         let [shell, vim, agent] = [4, 5, 6].map(|id| ViewId::of(id).unwrap());
         let runs = [
@@ -1421,10 +1428,10 @@ mod tests {
         ];
         for (id, runs, placed) in runs {
             let terminal = Terminal::new(TerminalViewId::new(id), dir("/w/luneta/top"), runs);
-            let open = Change::Open { workstream, view: View::Terminal(terminal), placed, size };
+            let open = Change::Open { worktree, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
-        let fill = Change::Fill { workstream, full: Some(vim) };
+        let fill = Change::Fill { worktree, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
   "version": 8,
@@ -1522,8 +1529,8 @@ mod tests {
             )
         };
         let projects = parse(&text(8)).unwrap();
-        let (_, workstream) = projects.find(WorkstreamId::of(2).unwrap()).unwrap();
-        let views: Vec<&View> = workstream.layout().views().collect();
+        let (_, worktree) = projects.find(WorktreeId::of(2).unwrap()).unwrap();
+        let views: Vec<&View> = worktree.layout().views().collect();
         assert!(matches!(views[..], [View::Terminal(_), View::Welcome(id)] if id.get() == 4));
         assert_eq!(parse(&written(&projects)), Ok(projects.clone()));
         assert!(written(&projects).contains(r#""welcome": {"#));
@@ -1532,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_file_s_folder_holds_its_workstreams_as_one_in_its_own_folder() {
+    fn an_old_file_s_folder_holds_its_worktrees_as_one_in_its_own_folder() {
         let text = r#"{"version": 4, "projects": [{"id": "0000000000000001", "name": "a",
             "dir": "/a", "workstreams": [{"id": "0000000000000002"},
             {"id": "0000000000000003", "below": "b", "used_millis": 7}]}, {"id": "0000000000000004",
@@ -1543,14 +1550,14 @@ mod tests {
         let kept = read.projects;
         let [a, c] = kept.all() else { panic!("both projects are kept") };
         assert_eq!((is_clone(a), a.dir()), (false, &dir("/a")));
-        let ids: Vec<u64> = a.workstreams().map(|it| it.id().get()).collect();
+        let ids: Vec<u64> = a.worktrees().map(|it| it.id().get()).collect();
         assert_eq!(ids, [3], "the one used last stands for both");
-        assert_eq!(c.workstreams().count(), 1, "a folder with none is given one");
+        assert_eq!(c.worktrees().count(), 1, "a folder with none is given one");
         assert_eq!(parse(&written(&kept)), Ok(kept));
     }
 
     #[test]
-    fn an_old_file_s_projects_of_one_clone_are_one_at_its_root_with_a_workstream_per_worktree() {
+    fn an_old_file_s_projects_of_one_clone_are_one_at_its_root_holding_every_worktree() {
         let terminal = |id: u64, folder: &str| {
             let at = format!(r#""id": "{id:016x}", "folder": "{folder}""#);
             format!(r#"{{"terminal": {{{at}, "runs": "shell"}}}}"#)
@@ -1595,7 +1602,7 @@ mod tests {
         let fix = row(luneta, "fix");
         assert!(fix.layout().is_empty() && fix.id().get() > 100, "a worktree listed is given one");
         assert_eq!(rows(luneta).len(), 4);
-        let held = (is_clone(vault), vault.workstreams().count());
+        let held = (is_clone(vault), vault.worktrees().count());
         assert_eq!(held, (false, 1), "a folder gone stays");
         let again = parse(&written(&read.projects)).unwrap();
         assert_eq!(again, read.projects);
@@ -1615,7 +1622,7 @@ mod tests {
             "dir": "/w/bare", "workstreams": [{"id": "0000000000000002"}]}]}"#;
         let read = rooted_as(text, |_: &Dir| Ok(Some(clone_of("/w/bare", &[])))).unwrap();
         let [bare] = read.projects.all() else { panic!("the clone is kept") };
-        let held = (is_clone(bare), bare.workstreams().count());
+        let held = (is_clone(bare), bare.worktrees().count());
         assert_eq!(held, (true, 0), "a clone with no worktree and no terminal stays one");
     }
 
@@ -1671,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_s_name_and_a_workstream_s_use_are_kept_only_from_version_4() {
+    fn a_terminal_s_name_and_a_worktree_s_use_are_kept_only_from_version_4() {
         let text = |version: u32, name: &str, used: &str| {
             format!(
                 r#"{{"version": {version}, "projects": [{{"id": "0000000000000001", "name": "a",
@@ -1683,14 +1690,14 @@ mod tests {
         };
         let (name, used) = (r#""name": "tests","#, r#", "used_millis": 1763460000123"#);
         let kept = parse(&text(4, name, used)).unwrap();
-        let (workstream, held) = kept.holding_terminal(ViewId::of(3).unwrap()).unwrap();
+        let (worktree, held) = kept.holding_terminal(ViewId::of(3).unwrap()).unwrap();
         assert_eq!(held.name().map(Name::as_str), Some("tests"));
-        assert_eq!(workstream.used(), Some(Used::of_millis(1_763_460_000_123)));
+        assert_eq!(worktree.used(), Some(Used::of_millis(1_763_460_000_123)));
         let again = written(&kept);
         assert!(again.contains(r#""name": "tests""#));
         assert!(again.contains(r#""used_millis": 1763460000123"#));
         assert_eq!(parse(&again), Ok(kept));
-        let refusals = [(name, "", "terminal's name"), ("", used, "workstream's use")];
+        let refusals = [(name, "", "terminal's name"), ("", used, "worktree's use")];
         for (name, used, without) in refusals {
             let refused = parse(&text(3, name, used));
             assert_eq!(refused, Err(format!("it is of version 3, which holds no {without}")));
@@ -1698,7 +1705,7 @@ mod tests {
         assert!(parse(&text(4, r#""name": "","#, "")).unwrap_err().contains("a name is empty"));
         let past = format!(r#", "used_millis": {}"#, u64::MAX);
         let refused = parse(&text(4, "", &past)).unwrap_err();
-        assert!(refused.contains("workstream 0000000000000002: a use at"), "{refused}");
+        assert!(refused.contains("worktree 0000000000000002: a use at"), "{refused}");
     }
 
     #[test]
@@ -1719,12 +1726,12 @@ mod tests {
                 r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "holds": {"clone": [{"id": "0000000000000002", "worktree": "b"},
                 {"id": "0000000000000003", "worktree": "b"}]}}]}"#,
-                "/a/b holds two of project a's workstreams",
+                "/a/b holds two of project a's worktrees",
             ),
             (
                 r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "holds": {"clone": [{"id": "0000000000000002", "worktree": ""}]}}]}"#,
-                "workstream 0000000000000002: a worktree is below its clone's root",
+                "worktree 0000000000000002: a worktree is below its clone's root",
             ),
             (
                 r#"{"version": 6, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
@@ -1760,7 +1767,7 @@ mod tests {
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
                 "workstreams": [{"id": "0000000000000002", "below": "b",
                 "view": {"tree": []}}]}]}"#,
-                "workstream 0000000000000002's layout: a layout holds no view",
+                "worktree 0000000000000002's layout: a layout holds no view",
             ),
             (
                 r#"{"version": 2, "projects": [{"id": "0000000000000001", "name": "a", "dir": "/a",
@@ -1875,34 +1882,34 @@ mod tests {
         let made = store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
         let Some(Made::Project(project)) = made else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));
-        let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
-            panic!("/a/b is made");
+        let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
+            panic!("/a/b is in /a's own worktree");
         };
         let terminal = TerminalViewId::new(ViewId::of(7).unwrap());
         let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, super::super::Size::of(80, 24).unwrap());
         let view = View::Terminal(terminal);
-        store.change(Change::Open { workstream, view, placed, size }).unwrap();
+        store.change(Change::Open { worktree, view, placed, size }).unwrap();
         let written = fs::read_to_string(&file).unwrap();
         heard(&commands);
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
-        let unwritten = store.closed(Closing::Workstream(workstream));
+        let unwritten = store.closed(Closing::Worktree(worktree));
         let flushed = store.flush();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
         let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
         assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
         assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
-        let emptied = |projects: &Projects| projects.find(workstream).unwrap().1.layout().is_empty();
+        let emptied = |projects: &Projects| projects.find(worktree).unwrap().1.layout().is_empty();
         let [told] = heard(&commands).try_into().unwrap();
         assert!(emptied(&told.unwrap()), "the core hears of the close");
         assert!(emptied(store.projects().unwrap()));
 
         store.flush().unwrap();
         assert!(emptied(&parse(&fs::read_to_string(&file).unwrap()).unwrap()), "a flush writes it");
-        assert_eq!(store.closed(Closing::Workstream(workstream)), Ok(None), "closed, it stays");
+        assert_eq!(store.closed(Closing::Worktree(worktree)), Ok(None), "closed, it stays");
     }
 
     #[test]
@@ -1987,22 +1994,22 @@ mod tests {
         let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
         let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
         let add = add_in(project, alone("/a/b"));
-        let Some(Made::Workstream(workstream)) = store.change(add).unwrap() else {
-            panic!("/a/b is made");
+        let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
+            panic!("/a/b is in /a's own worktree");
         };
         let size = super::super::Size::of(80, 24).unwrap();
         let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
         let opened = |id, placed| {
             let terminal = Terminal::new(TerminalViewId::new(id), dir("/a"), Runs::Shell);
-            Change::Open { workstream, view: View::Terminal(terminal), placed, size }
+            Change::Open { worktree, view: View::Terminal(terminal), placed, size }
         };
         store.change(opened(one, Placed::Alone)).unwrap();
         let beside = Placed::Beside { at: one, towards: Towards::Right };
         store.change(opened(two, beside)).unwrap();
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
-        let full = |projects: &Projects| projects.find(workstream).unwrap().1.layout().full();
+        let full = |projects: &Projects| projects.find(worktree).unwrap().1.layout().full();
 
-        store.change(Change::Fill { workstream, full: Some(two) }).unwrap();
+        store.change(Change::Fill { worktree, full: Some(two) }).unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));
         assert_eq!(full(&read()), None, "a fill waits for the flush");
         let told = heard(&commands).pop().unwrap().unwrap();
@@ -2010,7 +2017,7 @@ mod tests {
         store.flush().unwrap();
         assert_eq!(full(&read()), Some(two));
 
-        store.change(Change::Fill { workstream, full: None }).unwrap();
+        store.change(Change::Fill { worktree, full: None }).unwrap();
         store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
         let kept = *store.projects().unwrap() == read();
         assert!(kept, "a change kept at once takes the rest along");

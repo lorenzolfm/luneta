@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::{SkimMatcherV2, SkimScoreConfig};
-use luneta_protocol::git::{Changed, Changes, Head, Upstream, WorkTree};
+use luneta_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use luneta_protocol::github::{PullRequest, State, Verdict};
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
@@ -22,7 +22,7 @@ use lunetad::issues::{Filed, Unfiled};
 use lunetad::links;
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{self, Dir, ProjectId, ViewId, WorkstreamId};
+use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::seats::{self, seated, Where};
 use lunetad::transcripts::SessionId;
@@ -50,10 +50,10 @@ use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
     self, AllKeys, Briefed, Choice, Did, Done, Hint, Label, Menu, Opens, PaneRow, ProjectTarget,
-    Ran, Rename, Target, Top, Wants, WorkstreamRow,
+    Ran, Rename, Target, Top, Wants, WorktreeRow,
 };
 use crate::news::News;
-use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Streamed};
+use crate::picker::{Here, Housed, Listing, Runs, Seated, Shelved, Worktree};
 use crate::printed::Printed;
 use crate::projected;
 use crate::prune;
@@ -110,7 +110,7 @@ const MARK: usize = 1;
 
 const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
-const WORKSTREAM: usize = 4;
+const WORKTREE: usize = 4;
 
 const LONG: Duration = Duration::from_secs(1);
 
@@ -213,7 +213,7 @@ impl Listed {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Place {
     Session(Listed),
-    Workstream(WorkstreamPlace),
+    Worktree(WorktreePlace),
     Pane(PanePlace),
 }
 
@@ -224,7 +224,7 @@ impl Place {
 
     pub fn pane(&self) -> Option<u32> {
         match self {
-            Place::Session(_) | Place::Workstream(_) => None,
+            Place::Session(_) | Place::Worktree(_) => None,
             Place::Pane(place) => Some(place.pane.id()),
         }
     }
@@ -232,15 +232,15 @@ impl Place {
     pub fn listed(&self) -> &Listed {
         match self {
             Place::Session(session) | Place::Pane(PanePlace { session, .. }) => session,
-            Place::Workstream(WorkstreamPlace { project, .. }) => project.listed(),
+            Place::Worktree(WorktreePlace { project, .. }) => project.listed(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WorkstreamPlace {
+pub struct WorktreePlace {
     pub project: ProjectRow,
-    pub workstream: WorkstreamId,
+    pub worktree: WorktreeId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -328,7 +328,7 @@ impl OwnSeat {
 struct Sitting {
     on: Machine,
     own: OwnSeat,
-    shown: Option<WorkstreamId>,
+    shown: Option<WorktreeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -585,9 +585,9 @@ enum Row {
         dot: bool,
         busy: bool,
     },
-    Workstream {
+    Worktree {
         machine: Machine,
-        place: WorkstreamPlace,
+        place: WorktreePlace,
         name: String,
         missing: bool,
         hits: Vec<usize>,
@@ -705,8 +705,8 @@ impl Row {
             Row::Project { machine, project, .. } => {
                 Spot::on(machine, Place::Session(project.listed().clone()))
             },
-            Row::Workstream { machine, place, .. } => {
-                Spot::on(machine, Place::Workstream(place.clone()))
+            Row::Worktree { machine, place, .. } => {
+                Spot::on(machine, Place::Worktree(place.clone()))
             },
             Row::Pane { machine, session, pane, .. } => {
                 Spot::on(machine, Place::Pane(PanePlace { session: session.clone(), pane: *pane }))
@@ -716,14 +716,14 @@ impl Row {
 
     fn height(&self) -> usize {
         match self {
-            Row::Workstream { checkout: Some(_), .. } => 2,
+            Row::Worktree { checkout: Some(_), .. } => 2,
             _ => 1,
         }
     }
 
     fn stops(&self) -> bool {
         match self {
-            Row::Project { under, .. } | Row::Workstream { under, .. } => *under != Under::Rows,
+            Row::Project { under, .. } | Row::Worktree { under, .. } => *under != Under::Rows,
             Row::Machine { .. } | Row::Pane { .. } => true,
         }
     }
@@ -774,13 +774,13 @@ impl Away {
 struct Known {
     project: ProjectRow,
     dir: Dir,
-    workstreams: Vec<Stream>,
-    order: Vec<WorkstreamId>,
+    worktrees: Vec<KnownWorktree>,
+    order: Vec<WorktreeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Stream {
-    place: WorkstreamPlace,
+struct KnownWorktree {
+    place: WorktreePlace,
     name: String,
     folder: Dir,
     seen: projects::Seen,
@@ -793,34 +793,35 @@ struct Stream {
 impl Known {
     fn of(said: &api::Project) -> Option<Known> {
         let project = ProjectRow::of_api(said)?;
-        let streams = said.workstreams.iter().zip(0..).filter_map(|(workstream, tab)| {
-            let id = WorkstreamId::of(workstream.id)?;
-            let place = WorkstreamPlace { project: project.clone(), workstream: id };
-            let terminals = workstream.terminals.iter().map(|terminal| {
+        let rows = said.worktrees()?;
+        let worktrees = rows.iter().zip(0..).filter_map(|(worktree, tab)| {
+            let id = WorktreeId::of(worktree.id)?;
+            let place = WorktreePlace { project: project.clone(), worktree: id };
+            let terminals = worktree.terminals.iter().map(|terminal| {
                 ViewId::of(terminal.id).expect("lunetad says a terminal's id, and no id is 0")
             });
             let terminals: Vec<ViewId> = terminals.collect();
-            let found = workstream.terminals.iter().zip(&terminals);
+            let found = worktree.terminals.iter().zip(&terminals);
             let held = found.filter_map(|(it, id)| {
-                Some((*id, pane_of(it, workstream, tab)?))
+                Some((*id, pane_of(it, worktree, tab)?))
             });
             let held: Vec<(ViewId, Pane)> = held.collect();
             let in_panes = held.iter().map(|(id, pane)| (pane.id, *id)).collect();
             let panes = held.into_iter().map(|(_, pane)| pane).collect();
-            let seen = workstream.seen.and_then(projects::Seen::of_api);
-            let seen = seen.expect("lunetad says a workstream's stage luneta knows");
-            let used = workstream.used_at.map(|at| {
-                SystemTime::try_from(at).expect("lunetad says a workstream's last use as a time")
+            let seen = worktree.seen.and_then(projects::Seen::of_api);
+            let seen = seen.expect("lunetad says a worktree's stage luneta knows");
+            let used = worktree.used_at.map(|at| {
+                SystemTime::try_from(at).expect("lunetad says a worktree's last use as a time")
             });
-            let folder = Dir::parse(&workstream.folder);
-            let folder = folder.expect("lunetad says a workstream's folder as a folder it keeps");
-            let name = workstream.name.clone();
-            Some(Stream { place, name, folder, seen, used, panes, terminals, in_panes })
+            let folder = Dir::parse(&worktree.folder);
+            let folder = folder.expect("lunetad says a worktree's folder as a folder it keeps");
+            let name = worktree.name.clone();
+            Some(KnownWorktree { place, name, folder, seen, used, panes, terminals, in_panes })
         });
-        let workstreams = streams.collect();
-        let order = said.workstreams.iter().filter_map(|it| WorkstreamId::of(it.id)).collect();
+        let worktrees = worktrees.collect();
+        let order = rows.iter().filter_map(|it| WorktreeId::of(it.id)).collect();
         let dir = Dir::parse(&said.dir).expect("lunetad says a project's folder as one it keeps");
-        Some(Known { project, dir, workstreams, order })
+        Some(Known { project, dir, worktrees, order })
     }
 
     fn listed(&self) -> &Listed {
@@ -828,7 +829,7 @@ impl Known {
     }
 
     fn panes(&self) -> impl Iterator<Item = &Pane> {
-        self.workstreams.iter().flat_map(|stream| &stream.panes)
+        self.worktrees.iter().flat_map(|worktree| &worktree.panes)
     }
 
     fn pane(&self, id: u32) -> Option<&Pane> {
@@ -841,7 +842,7 @@ fn project_of(spot: &Spot) -> Option<Spot> {
     Some(Spot::on(&spot.machine(), Place::Session(listed)))
 }
 
-fn pane_of(terminal: &api::Terminal, workstream: &api::Workstream, tab: u32) -> Option<Pane> {
+fn pane_of(terminal: &api::Terminal, worktree: &api::Worktree, tab: u32) -> Option<Pane> {
     let Some(api::terminal::Found::Key(key)) = &terminal.found else {
         return None;
     };
@@ -849,7 +850,7 @@ fn pane_of(terminal: &api::Terminal, workstream: &api::Workstream, tab: u32) -> 
     Some(Pane {
         id,
         tab,
-        tab_name: workstream.name.clone(),
+        tab_name: worktree.name.clone(),
         cwd: Some(terminal.folder.clone()).filter(|folder| !folder.is_empty()),
         command: terminal.command.clone(),
         titled: terminal.titled.clone(),
@@ -878,8 +879,8 @@ impl Shelf {
     fn orders(&self, order: &Order) -> bool {
         match order {
             Order::Projects(order) => permutes(&self.order, order),
-            Order::Workstreams { project, workstreams } => {
-                self.known(*project).is_some_and(|known| permutes(&known.order, workstreams))
+            Order::Worktrees { project, worktrees } => {
+                self.known(*project).is_some_and(|known| permutes(&known.order, worktrees))
             },
         }
     }
@@ -891,13 +892,13 @@ impl Shelf {
                 order.clone_into(&mut self.order);
                 self.projects.sort_by_key(|known| position(order, known.project.id()));
             },
-            Order::Workstreams { project, workstreams } => {
+            Order::Worktrees { project, worktrees } => {
                 let mut known = self.projects.iter_mut();
                 let known = known.find(|known| known.project.id() == *project);
                 let known = known.expect("the project reordered is shelved");
-                workstreams.clone_into(&mut known.order);
-                let at = |stream: &Stream| position(workstreams, stream.place.workstream);
-                known.workstreams.sort_by_key(at);
+                worktrees.clone_into(&mut known.order);
+                let at = |worktree: &KnownWorktree| position(worktrees, worktree.place.worktree);
+                known.worktrees.sort_by_key(at);
             },
         }
     }
@@ -958,7 +959,7 @@ fn shelf<'a>(shelves: &'a [Shelf], machine: &Machine) -> &'a [Known] {
 struct Seen<'a> {
     projects: &'a [Known],
     agents: &'a [Agent],
-    work_trees: &'a [lunetad::api::WorkTree],
+    git_statuses: &'a [lunetad::api::GitStatus],
     pull_requests: &'a [lunetad::api::PullRequest],
     unread: u32,
     unread_files: &'a [UnreadFile],
@@ -998,7 +999,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
     let here = Seen {
         projects: shelf(shelves, &Machine::Local),
         agents: &host.agents,
-        work_trees: &host.work_trees,
+        git_statuses: &host.git_statuses,
         pull_requests: &host.pull_requests,
         unread: host.unread,
         unread_files: &host.unread_files,
@@ -1020,7 +1021,7 @@ fn machines<'a>(host: &'a Host, shelves: &'a [Shelf]) -> Machines<'a> {
             Some(Reached::Host(host)) => Ok(Seen {
                 projects: shelf(shelves, &machine),
                 agents: &host.agents,
-                work_trees: &host.work_trees,
+                git_statuses: &host.git_statuses,
                 pull_requests: &host.pull_requests,
                         unread: host.unread,
                 unread_files: &host.unread_files,
@@ -1055,7 +1056,7 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    NewWorkstream { on: Machine, project: ProjectId, folder: Directory },
+    NewWorktree { on: Machine, project: ProjectId, folder: Directory },
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
@@ -1100,7 +1101,7 @@ impl Asked {
             | Asked::Browse(_)
             | Asked::Leave
             | Asked::Delete { .. }
-            | Asked::NewWorkstream { .. }
+            | Asked::NewWorktree { .. }
             | Asked::Welcome { .. }
             | Asked::AddProject { .. }
             | Asked::Rename { .. }
@@ -1260,7 +1261,7 @@ struct Layout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Movable {
     Project(Machine, ProjectRow),
-    Workstream(Machine, WorkstreamPlace),
+    Worktree(Machine, WorktreePlace),
 }
 
 impl Movable {
@@ -1272,7 +1273,7 @@ impl Movable {
                 Place::Session(session) => {
                     Some(Movable::Project(machine, ProjectRow::of(session)?))
                 },
-                Place::Workstream(place) => Some(Movable::Workstream(machine, place)),
+                Place::Worktree(place) => Some(Movable::Worktree(machine, place)),
                 Place::Pane(_) => None,
             },
         }
@@ -1283,8 +1284,8 @@ impl Movable {
             Movable::Project(machine, project) => {
                 Spot::on(machine, Place::Session(project.listed().clone()))
             },
-            Movable::Workstream(machine, place) => {
-                Spot::on(machine, Place::Workstream(place.clone()))
+            Movable::Worktree(machine, place) => {
+                Spot::on(machine, Place::Worktree(place.clone()))
             },
         }
     }
@@ -1293,21 +1294,21 @@ impl Movable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Spans {
     Projects(Machine, Vec<(ProjectId, Range<usize>)>),
-    Workstreams(Machine, ProjectRow, Vec<(WorkstreamId, Range<usize>)>),
+    Worktrees(Machine, ProjectRow, Vec<(WorktreeId, Range<usize>)>),
 }
 
 impl Spans {
     fn len(&self) -> usize {
         match self {
             Spans::Projects(_, projects) => projects.len(),
-            Spans::Workstreams(_, _, workstreams) => workstreams.len(),
+            Spans::Worktrees(_, _, worktrees) => worktrees.len(),
         }
     }
 
     fn rows(&self) -> Vec<Range<usize>> {
         match self {
             Spans::Projects(_, projects) => spanned_rows(projects),
-            Spans::Workstreams(_, _, workstreams) => spanned_rows(workstreams),
+            Spans::Worktrees(_, _, worktrees) => spanned_rows(worktrees),
         }
     }
 
@@ -1316,8 +1317,8 @@ impl Spans {
             Spans::Projects(machine, projects) => {
                 Spans::Projects(machine.clone(), moved(projects, taken, to))
             },
-            Spans::Workstreams(machine, project, workstreams) => {
-                Spans::Workstreams(machine.clone(), project.clone(), moved(workstreams, taken, to))
+            Spans::Worktrees(machine, project, worktrees) => {
+                Spans::Worktrees(machine.clone(), project.clone(), moved(worktrees, taken, to))
             },
         }
     }
@@ -1330,21 +1331,21 @@ fn spanned_rows<T>(spans: &[(T, Range<usize>)]) -> Vec<Range<usize>> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Folding {
     Project(ProjectId),
-    Workstream(WorkstreamId),
+    Worktree(WorktreeId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reorder {
     Projects { seen: Vec<ProjectId>, wanted: Vec<ProjectId> },
-    Workstreams { project: ProjectId, seen: Vec<WorkstreamId>, wanted: Vec<WorkstreamId> },
+    Worktrees { project: ProjectId, seen: Vec<WorktreeId>, wanted: Vec<WorktreeId> },
 }
 
 impl Reorder {
     fn seen(&self) -> Order {
         match self {
             Reorder::Projects { seen, .. } => Order::Projects(seen.clone()),
-            Reorder::Workstreams { project, seen, .. } => {
-                Order::Workstreams { project: *project, workstreams: seen.clone() }
+            Reorder::Worktrees { project, seen, .. } => {
+                Order::Worktrees { project: *project, worktrees: seen.clone() }
             },
         }
     }
@@ -1352,8 +1353,8 @@ impl Reorder {
     fn wanted(&self) -> Order {
         match self {
             Reorder::Projects { wanted, .. } => Order::Projects(wanted.clone()),
-            Reorder::Workstreams { project, wanted, .. } => {
-                Order::Workstreams { project: *project, workstreams: wanted.clone() }
+            Reorder::Worktrees { project, wanted, .. } => {
+                Order::Worktrees { project: *project, worktrees: wanted.clone() }
             },
         }
     }
@@ -1362,14 +1363,14 @@ impl Reorder {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Order {
     Projects(Vec<ProjectId>),
-    Workstreams { project: ProjectId, workstreams: Vec<WorkstreamId> },
+    Worktrees { project: ProjectId, worktrees: Vec<WorktreeId> },
 }
 
 impl Order {
     fn of(&self) -> Ordered {
         match self {
             Order::Projects(_) => Ordered::Projects,
-            Order::Workstreams { project, .. } => Ordered::Workstreams(*project),
+            Order::Worktrees { project, .. } => Ordered::Worktrees(*project),
         }
     }
 }
@@ -1377,7 +1378,7 @@ impl Order {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ordered {
     Projects,
-    Workstreams(ProjectId),
+    Worktrees(ProjectId),
 }
 
 pub const MOVES_MAX: usize = 64;
@@ -1495,8 +1496,8 @@ impl Sidebar {
             let mut live = Vec::new();
             for known in &shelf.projects {
                 live.push(Fold::Project(machine, known.project.id()));
-                let streams = known.workstreams.iter();
-                live.extend(streams.map(|it| Fold::Workstream(machine, it.place.workstream)));
+                let worktrees = known.worktrees.iter();
+                live.extend(worktrees.map(|it| Fold::Worktree(machine, it.place.worktree)));
             }
             self.folds.listed(machine, &live);
         }
@@ -1704,7 +1705,7 @@ impl Sidebar {
         if self.seat.take().is_some() {
             self.rebuild();
         }
-        assert!(self.seat.is_none(), "luneta sits nowhere when it shows no workstream");
+        assert!(self.seat.is_none(), "luneta sits nowhere when it shows no worktree");
     }
 
     pub fn went_own(&mut self, pane: OwnPane, client: OwnClientId) {
@@ -1717,18 +1718,18 @@ impl Sidebar {
         if let Some(place) = self.own_place(pane) {
             let on = self.on().clone();
             let spot = Spot::on(&on, Place::Pane(place));
-            if let Some(Place::Workstream(home)) = self.homes.get(&spot).and_then(Spot::place) {
-                self.folds.set(Fold::Workstream(&on, home.workstream), false);
+            if let Some(Place::Worktree(home)) = self.homes.get(&spot).and_then(Spot::place) {
+                self.folds.set(Fold::Worktree(&on, home.worktree), false);
             }
         }
         self.rebuild();
     }
 
-    pub fn showing(&mut self, workstream: WorkstreamId) {
-        let seat = self.seat.as_mut().expect("luneta shows a workstream where it sits");
-        if seat.shown != Some(workstream) {
-            seat.shown = Some(workstream);
-            self.folds.set(Fold::Workstream(&seat.on, workstream), false);
+    pub fn showing(&mut self, worktree: WorktreeId) {
+        let seat = self.seat.as_mut().expect("luneta shows a worktree where it sits");
+        if seat.shown != Some(worktree) {
+            seat.shown = Some(worktree);
+            self.folds.set(Fold::Worktree(&seat.on, worktree), false);
             self.rebuild();
         }
     }
@@ -1759,11 +1760,11 @@ impl Sidebar {
         PanePlace::of(known.listed().clone(), known.pane(pane.id.get())?)
     }
 
-    fn here_workstream(&self) -> Option<WorkstreamPlace> {
+    fn here_worktree(&self) -> Option<WorktreePlace> {
         let known = self.own_known(self.own_seat()?.session())?;
         let shown = self.seat.as_ref()?.shown?;
-        let stream = known.workstreams.iter().find(|stream| stream.place.workstream == shown)?;
-        Some(stream.place.clone())
+        let worktree = known.worktrees.iter().find(|worktree| worktree.place.worktree == shown)?;
+        Some(worktree.place.clone())
     }
 
     fn unfold_own(&mut self, key: OwnKey) {
@@ -1833,7 +1834,7 @@ impl Sidebar {
                 }
             }
         }
-        listing.shown = self.here_workstream().map(|place| (self.on().clone(), place));
+        listing.shown = self.here_worktree().map(|place| (self.on().clone(), place));
         listing.here = here;
         listing
     }
@@ -1849,18 +1850,18 @@ impl Sidebar {
         let heard = seen.ok();
         let seated = heard.map_or_default(|seen| seen.seated());
         let unread = heard.filter(|_| self.away.is_none()).map(|seen| seen.unread_seats());
-        let trees: HashMap<&str, &lunetad::api::WorkTree> = heard
+        let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
             .iter()
-            .flat_map(|seen| seen.work_trees)
-            .map(|tree| (tree.dir.as_str(), tree))
+            .flat_map(|seen| seen.git_statuses)
+            .map(|status| (status.dir.as_str(), status))
             .collect();
         let mut projects = Vec::new();
         for known in shelf(&self.shelves, machine) {
             let listed = known.listed();
-            let mut workstreams = Vec::with_capacity(known.workstreams.len());
-            for stream in &known.workstreams {
-                let held = |pane: u32| stream.panes.iter().any(|it| it.id == pane);
-                let agents = stream.panes.iter().filter_map(|pane| {
+            let mut worktrees = Vec::with_capacity(known.worktrees.len());
+            for worktree in &known.worktrees {
+                let held = |pane: u32| worktree.panes.iter().any(|it| it.id == pane);
+                let agents = worktree.panes.iter().filter_map(|pane| {
                     Some((listed.key(pane.id), *seated.get(&(listed.at(), pane.id))?))
                 });
                 let waiting = agents.clone().filter(|(key, agent)| {
@@ -1877,27 +1878,27 @@ impl Sidebar {
                     Some(Err(unplaced)) => Err(Untold::Unplaced(*unplaced)),
                     None => Err(Untold::Away),
                 };
-                let branch = trees.get(stream.folder.as_str()).and_then(|tree| {
-                    Some(checkout(&WorkTree::of_api(tree)?, None)?.branch)
+                let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
+                    Some(checkout(&GitStatus::of_api(status)?, None)?.branch)
                 });
-                let terminals = stream.panes.iter().filter_map(|pane| {
+                let terminals = worktree.panes.iter().filter_map(|pane| {
                     PanePlace::of(listed.clone(), pane).map(|place| place.pane)
                 });
-                workstreams.push(Streamed {
-                    place: stream.place.clone(),
-                    name: stream.name.clone(),
-                    folder: stream.folder.clone(),
+                worktrees.push(Worktree {
+                    place: worktree.place.clone(),
+                    name: worktree.name.clone(),
+                    folder: worktree.folder.clone(),
                     branch,
-                    seen: stream.seen,
-                    used: stream.used,
+                    seen: worktree.seen,
+                    used: worktree.used,
                     terminals: terminals.collect(),
-                    held: stream.terminals.clone(),
+                    held: worktree.terminals.clone(),
                     waiting: waiting.count(),
                     ending,
                 });
             }
             let (project, dir) = (known.project.clone(), known.dir.clone());
-            projects.push(Housed { project, dir, workstreams });
+            projects.push(Housed { project, dir, worktrees });
         }
         let away = seen.err().map(|away| away.said().0);
         Shelved { on: machine.clone(), away, projects }
@@ -2055,7 +2056,7 @@ impl Sidebar {
             self.seat_name = Some(listed.name.to_string());
         }
         let here_pane = self.here_place().ok();
-        let here_workstream = self.here_workstream();
+        let here_worktree = self.here_worktree();
         let aloud = self.aloud.as_ref().and_then(aloud::Shown::from);
         let Some(host) = &self.host else {
             return;
@@ -2106,10 +2107,10 @@ impl Sidebar {
             }
             let tag = tagged.then(|| Tag { name: name.clone(), away: lost.clone() });
             let agents = heard.as_ref().map_or_default(Seen::seated);
-            let trees: HashMap<&str, &lunetad::api::WorkTree> = heard
+            let statuses: HashMap<&str, &lunetad::api::GitStatus> = heard
                 .iter()
-                .flat_map(|heard| heard.work_trees)
-                .map(|tree| (tree.dir.as_str(), tree))
+                .flat_map(|heard| heard.git_statuses)
+                .map(|status| (status.dir.as_str(), status))
                 .collect();
             let pull_requests = pull_requests(heard.as_ref().map_or(&[], |it| it.pull_requests));
             counts.projects += projects.len();
@@ -2119,16 +2120,16 @@ impl Sidebar {
                 let folded = self.folds.contains(Fold::Project(&machine, project));
                 let colour = colour_of(project);
                 let agent = |pane: &Pane| agents.get(&(listed.at(), pane.id)).copied();
-                let mut streams = Vec::with_capacity(known.workstreams.len());
-                for stream in &known.workstreams {
-                    let mut by_pane: Vec<Shows> = Vec::with_capacity(stream.panes.len());
-                    for pane in &stream.panes {
+                let mut worktrees = Vec::with_capacity(known.worktrees.len());
+                for worktree in &known.worktrees {
+                    let mut by_pane: Vec<Shows> = Vec::with_capacity(worktree.panes.len());
+                    for pane in &worktree.panes {
                         counts.panes += 1;
                         let key = listed.key(pane.id);
                         let here = on && here_key == Some(key);
                         let unread = self.news.is_unread(key);
                         let place = PanePlace::of(listed.clone(), pane);
-                        let home = Place::Workstream(stream.place.clone());
+                        let home = Place::Worktree(worktree.place.clone());
                         if let Some(place) = place {
                             let pane = Spot::on(&machine, Place::Pane(place));
                             homes.insert(pane, Spot::on(&machine, home));
@@ -2164,9 +2165,9 @@ impl Sidebar {
                     counts.new += tally.dots;
                     counts.busy += tally.busy;
                     counts.shell += tally.shell;
-                    streams.push((stream, by_pane, tally));
+                    worktrees.push((worktree, by_pane, tally));
                 }
-                let tally = Tally::sum(streams.iter().map(|(_, _, tally)| *tally));
+                let tally = Tally::sum(worktrees.iter().map(|(_, _, tally)| *tally));
                 let project_here = on && Self::seats_here(own_seat, listed);
                 let (named, name_hits) = finder
                     .as_ref()
@@ -2193,21 +2194,21 @@ impl Sidebar {
                     }
                 };
                 if finder.is_some() || !folded {
-                    for (stream, by_pane, tally) in streams {
-                        let workstream = stream.place.workstream;
-                        let stream_folded = finder.is_none()
-                            && self.folds.contains(Fold::Workstream(&machine, workstream));
-                        let dir = stream.folder.as_str();
-                        let checkout = trees.get(dir).and_then(|tree| {
-                            checkout(&WorkTree::of_api(tree)?, pull_requests.get(dir))
+                    for (worktree, by_pane, tally) in worktrees {
+                        let fold = Fold::Worktree(&machine, worktree.place.worktree);
+                        let worktree_folded = finder.is_none() && self.folds.contains(fold);
+                        let dir = worktree.folder.as_str();
+                        let checkout = statuses.get(dir).and_then(|status| {
+                            checkout(&GitStatus::of_api(status)?, pull_requests.get(dir))
                         });
                         let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
-                        let (stream_found, stream_hits) = finder
+                        let (worktree_found, worktree_hits) = finder
                             .as_ref()
-                            .and_then(|finder| finder.workstream(&stream.name, branch, dir))
+                            .and_then(|finder| finder.worktree(&worktree.name, branch, dir))
                             .unzip();
-                        let mut shown = Vec::with_capacity(stream.panes.len());
-                        let listing = if stream_folded { &[][..] } else { stream.panes.as_slice() };
+                        let mut shown = Vec::with_capacity(worktree.panes.len());
+                        let listing =
+                            if worktree_folded { &[][..] } else { worktree.panes.as_slice() };
                         for (pane, Shows { marked, ran, unread }) in listing.iter().zip(by_pane) {
                             let cwd = pane.cwd.as_deref();
                             let command = pane.command.as_deref();
@@ -2225,7 +2226,7 @@ impl Sidebar {
                                 .unzip();
                             if finder.is_some()
                                 && found.is_none()
-                                && stream_found.is_none()
+                                && worktree_found.is_none()
                                 && named.is_none()
                             {
                                 continue;
@@ -2257,26 +2258,26 @@ impl Sidebar {
                         }
                         if finder.is_some()
                             && named.is_none()
-                            && stream_found.is_none()
+                            && worktree_found.is_none()
                             && shown.is_empty()
                         {
                             continue;
                         }
                         let under = if !shown.is_empty() {
                             Under::Rows
-                        } else if stream_folded {
+                        } else if worktree_folded {
                             Under::Folded
                         } else {
                             Under::Empty
                         };
-                        let stream_at = rows.len();
-                        let here = on && here_workstream.as_ref() == Some(&stream.place);
-                        rows.push(Row::Workstream {
+                        let worktree_at = rows.len();
+                        let here = on && here_worktree.as_ref() == Some(&worktree.place);
+                        rows.push(Row::Worktree {
                             machine: machine.clone(),
-                            place: stream.place.clone(),
-                            name: stream.name.clone(),
-                            missing: stream.seen == projects::Seen::Missing,
-                            hits: stream_hits.unwrap_or_default(),
+                            place: worktree.place.clone(),
+                            name: worktree.name.clone(),
+                            missing: worktree.seen == projects::Seen::Missing,
+                            hits: worktree_hits.unwrap_or_default(),
                             under,
                             here,
                             colour,
@@ -2285,8 +2286,8 @@ impl Sidebar {
                             busy: tally.busy > 0,
                             checkout,
                         });
-                        if let Some(found) = stream_found {
-                            found_at(stream_at, found, &mut weigh);
+                        if let Some(found) = worktree_found {
+                            found_at(worktree_at, found, &mut weigh);
                         }
                         let count = shown.len();
                         for (at, (row, found)) in shown.into_iter().enumerate() {
@@ -2350,7 +2351,7 @@ impl Sidebar {
     fn row_for(&self, spot: &Spot) -> Option<Spot> {
         let rows = [
             Some(spot.clone()),
-            self.workstream_of(spot),
+            self.worktree_of(spot),
             project_of(spot),
             Some(Spot::Machine(spot.machine())),
         ];
@@ -2358,10 +2359,10 @@ impl Sidebar {
         rows.into_iter().flatten().find(listed)
     }
 
-    fn workstream_of(&self, spot: &Spot) -> Option<Spot> {
+    fn worktree_of(&self, spot: &Spot) -> Option<Spot> {
         match spot.place()? {
             Place::Session(_) => None,
-            Place::Workstream(_) => Some(spot.clone()),
+            Place::Worktree(_) => Some(spot.clone()),
             Place::Pane(_) => self.homes.get(spot).cloned(),
         }
     }
@@ -2370,9 +2371,9 @@ impl Sidebar {
     fn folding(&self, spot: &Spot) -> Option<Folding> {
         match spot.place()? {
             Place::Session(session) => Some(Folding::Project(session.project()?)),
-            Place::Workstream(place) => Some(Folding::Workstream(place.workstream)),
+            Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
             Place::Pane(_) => match self.homes.get(spot)?.place()? {
-                Place::Workstream(place) => Some(Folding::Workstream(place.workstream)),
+                Place::Worktree(place) => Some(Folding::Worktree(place.worktree)),
                 Place::Session(_) | Place::Pane(_) => None,
             },
         }
@@ -2381,8 +2382,8 @@ impl Sidebar {
     fn folded(&self, machine: &Machine, folding: Folding) -> bool {
         match folding {
             Folding::Project(project) => self.folds.contains(Fold::Project(machine, project)),
-            Folding::Workstream(workstream) => {
-                self.folds.contains(Fold::Workstream(machine, workstream))
+            Folding::Worktree(worktree) => {
+                self.folds.contains(Fold::Worktree(machine, worktree))
             },
         }
     }
@@ -2397,7 +2398,7 @@ impl Sidebar {
             return None;
         }
         let home = self.row_of(self.homes.get(&row.spot())?)?;
-        assert!(home < at, "a workstream's row sits above its panes");
+        assert!(home < at, "a worktree's row sits above its panes");
         Some(home)
     }
 
@@ -2415,9 +2416,9 @@ impl Sidebar {
             Moving::Selected(Movable::Project(of, _)) => {
                 matches!(row, Row::Project { machine, .. } if machine == of)
             },
-            Moving::Selected(Movable::Workstream(of, held)) => matches!(
+            Moving::Selected(Movable::Worktree(of, held)) => matches!(
                 row,
-                Row::Workstream { machine, place, .. }
+                Row::Worktree { machine, place, .. }
                     if machine == of && place.project == held.project
             ),
             Moving::Still
@@ -2476,7 +2477,7 @@ impl Sidebar {
         };
         let machine = spot.machine();
         let bare = |row: &Row| {
-            matches!(row, Row::Workstream { under, .. } if *under != Under::Rows)
+            matches!(row, Row::Worktree { under, .. } if *under != Under::Rows)
         };
         if folded && self.row_of(&spot).is_some_and(|at| bare(&self.rows[at])) {
             let project = spot.place().and_then(|place| place.listed().project());
@@ -2484,8 +2485,8 @@ impl Sidebar {
         }
         let (fold, row) = match folding {
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(&spot)),
-            Folding::Workstream(workstream) => {
-                (Fold::Workstream(&machine, workstream), self.workstream_of(&spot))
+            Folding::Worktree(worktree) => {
+                (Fold::Worktree(&machine, worktree), self.worktree_of(&spot))
             },
         };
         if !self.folds.set(fold, folded) {
@@ -2637,14 +2638,14 @@ impl Sidebar {
     fn highlighted_link(&self) -> Result<Link, String> {
         let row = self.cursor.as_ref().and_then(|spot| self.row_of(spot));
         let checked_out = |row: &Row| match row {
-            Row::Workstream { checkout: Some(checkout), .. } => Some(checkout.clone()),
-            Row::Pane { .. } => self.row_of(&self.workstream_of(&row.spot())?).and_then(|at| {
-                let Row::Workstream { checkout, .. } = &self.rows[at] else {
+            Row::Worktree { checkout: Some(checkout), .. } => Some(checkout.clone()),
+            Row::Pane { .. } => self.row_of(&self.worktree_of(&row.spot())?).and_then(|at| {
+                let Row::Worktree { checkout, .. } = &self.rows[at] else {
                     return None;
                 };
                 checkout.clone()
             }),
-            Row::Machine { .. } | Row::Project { .. } | Row::Workstream { .. } => None,
+            Row::Machine { .. } | Row::Project { .. } | Row::Worktree { .. } => None,
         };
         let checkout = row.and_then(|at| checked_out(&self.rows[at]));
         let Some(Checkout { pull_request: Some(numbered), .. }) = checkout else {
@@ -2712,7 +2713,7 @@ impl Sidebar {
         let Some(spot) = self.cursor.clone() else {
             return;
         };
-        let Some(movable) = Movable::of(self.workstream_of(&spot).unwrap_or(spot)) else {
+        let Some(movable) = Movable::of(self.worktree_of(&spot).unwrap_or(spot)) else {
             return;
         };
         self.cursor = Some(movable.spot());
@@ -2720,7 +2721,7 @@ impl Sidebar {
     }
 
     fn widen(&mut self) {
-        let Moving::Selected(Movable::Workstream(machine, place)) = &self.moving else {
+        let Moving::Selected(Movable::Worktree(machine, place)) = &self.moving else {
             self.unselect();
             return;
         };
@@ -2772,33 +2773,33 @@ impl Sidebar {
                     let after = self.rows.iter().enumerate().skip(start + 1);
                     let mut after = after.filter(|(_, row)| match row {
                         Row::Machine { .. } | Row::Project { .. } => true,
-                        Row::Workstream { .. } | Row::Pane { .. } => false,
+                        Row::Worktree { .. } | Row::Pane { .. } => false,
                     });
                     after.next().map_or(self.rows.len(), |(at, _)| at)
                 };
                 let spans = starts.into_iter().map(|(start, id)| (id, start..end(start)));
                 Spans::Projects(machine.clone(), spans.collect())
             },
-            Movable::Workstream(machine, held) => {
+            Movable::Worktree(machine, held) => {
                 let project = Spot::on(machine, Place::Session(held.project.listed().clone()));
                 let first = self.row_of(&project).map_or(self.rows.len(), |at| at + 1);
                 let rows = self.rows.iter().enumerate().skip(first);
                 let rows = rows.take_while(|(_, row)| match row {
-                    Row::Workstream { .. } | Row::Pane { .. } => true,
+                    Row::Worktree { .. } | Row::Pane { .. } => true,
                     Row::Machine { .. } | Row::Project { .. } => false,
                 });
                 let rows: Vec<(usize, &Row)> = rows.collect();
                 let end = rows.last().map_or(first, |(at, _)| at + 1);
-                let starts: Vec<(usize, WorkstreamId)> = rows
+                let starts: Vec<(usize, WorktreeId)> = rows
                     .iter()
                     .filter_map(|(at, row)| match row {
-                        Row::Workstream { place, .. } => Some((*at, place.workstream)),
+                        Row::Worktree { place, .. } => Some((*at, place.worktree)),
                         _ => None,
                     })
                     .collect();
                 let ends = starts.iter().skip(1).map(|(at, _)| *at).chain([end]);
                 let spans = starts.iter().zip(ends).map(|((start, id), end)| (*id, *start..end));
-                Spans::Workstreams(machine.clone(), held.project.clone(), spans.collect())
+                Spans::Worktrees(machine.clone(), held.project.clone(), spans.collect())
             },
         }
     }
@@ -2815,20 +2816,20 @@ impl Sidebar {
                 }
                 (machine.clone(), Reorder::Projects { seen: seen.to_vec(), wanted })
             },
-            Spans::Workstreams(machine, project, spans) => {
+            Spans::Worktrees(machine, project, spans) => {
                 let mut known = shelf(&self.shelves, machine).iter();
                 let Some(known) = known.find(|known| known.project.id() == project.id()) else {
                     let name = project.listed().name();
                     self.notify(format!("{name} is no longer listed: nothing moved"));
                     return Asked::Nothing;
                 };
-                let listed: Vec<WorkstreamId> = spans.iter().map(|(id, _)| *id).collect();
+                let listed: Vec<WorktreeId> = spans.iter().map(|(id, _)| *id).collect();
                 let wanted = wanted(&known.order, &listed);
                 if wanted == known.order {
                     return Asked::Nothing;
                 }
                 let (project, seen) = (project.id(), known.order.clone());
-                (machine.clone(), Reorder::Workstreams { project, seen, wanted })
+                (machine.clone(), Reorder::Worktrees { project, seen, wanted })
             },
         };
         let (seen, wanted) = (order.seen(), order.wanted());
@@ -2950,7 +2951,7 @@ impl Sidebar {
     fn target_at(&self, machine: &Machine, place: Place) -> Option<Target> {
         let (session, pane) = match place {
             Place::Session(session) => return self.project_target(machine, &session),
-            Place::Workstream(place) => return self.workstream_target(machine, place),
+            Place::Worktree(place) => return self.worktree_target(machine, place),
             Place::Pane(PanePlace { session, pane }) => (session, pane),
         };
         let seen = self.seen(machine);
@@ -2962,12 +2963,13 @@ impl Sidebar {
                 None => shown.cwd.clone(),
             }
         });
-        let trees = seen.iter().flat_map(|seen| seen.work_trees);
-        let tree = cwd.as_deref().and_then(|cwd| trees.into_iter().find(|tree| tree.dir == cwd));
-        let tree = tree.and_then(WorkTree::of_api);
-        let checkout = tree.as_ref().and_then(|tree| checkout(tree, None));
+        let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
+        let status =
+            cwd.as_deref().and_then(|cwd| statuses.into_iter().find(|status| status.dir == cwd));
+        let status = status.and_then(GitStatus::of_api);
+        let checkout = status.as_ref().and_then(|status| checkout(status, None));
         let branch = checkout.map(|checkout| checkout.branch);
-        let repository = tree.as_ref().and_then(repository_of);
+        let repository = status.as_ref().and_then(repository_of);
         let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
         let pull_request =
             cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
@@ -2990,24 +2992,24 @@ impl Sidebar {
             return None;
         };
         let mut known = shelf(&self.shelves, machine).iter();
-        let streams = &known.find(|it| it.listed() == listed)?.workstreams;
-        let mut held = streams.iter().flat_map(|stream| &stream.in_panes);
+        let worktrees = &known.find(|it| it.listed() == listed)?.worktrees;
+        let mut held = worktrees.iter().flat_map(|worktree| &worktree.in_panes);
         held.find(|(id, _)| *id == key.id.get()).map(|(_, terminal)| *terminal)
     }
 
-    fn workstream_target(&self, machine: &Machine, place: WorkstreamPlace) -> Option<Target> {
+    fn worktree_target(&self, machine: &Machine, place: WorktreePlace) -> Option<Target> {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
-        let stream = known.workstreams.iter().find(|stream| stream.place == place)?;
-        let (name, folder) = (stream.name.clone(), stream.folder.as_str().to_owned());
+        let worktree = known.worktrees.iter().find(|worktree| worktree.place == place)?;
+        let (name, folder) = (worktree.name.clone(), worktree.folder.as_str().to_owned());
         let seen = self.seen(machine);
-        let trees = seen.iter().flat_map(|seen| seen.work_trees);
-        let tree = trees.into_iter().find(|tree| tree.dir == folder);
-        let tree = tree.and_then(WorkTree::of_api);
-        let branch = tree.as_ref().and_then(|tree| checkout(tree, None)).map(|it| it.branch);
-        let repository = tree.as_ref().and_then(repository_of);
-        let row = WorkstreamRow { place, name, folder, branch, repository };
-        Some(Target::Workstream(machine.clone(), row))
+        let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
+        let status = statuses.into_iter().find(|status| status.dir == folder);
+        let status = status.and_then(GitStatus::of_api);
+        let branch = status.as_ref().and_then(|status| checkout(status, None)).map(|it| it.branch);
+        let repository = status.as_ref().and_then(repository_of);
+        let row = WorktreeRow { place, name, folder, branch, repository };
+        Some(Target::Worktree(machine.clone(), row))
     }
 
     fn ran_in(&self, machine: &Machine, session: &Listed, pane: u32) -> Ran {
@@ -3149,8 +3151,8 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Workstream(on, project, folder) => {
-                        Asked::NewWorkstream { on, project, folder }
+                    Done::Worktree(on, project, folder) => {
+                        Asked::NewWorktree { on, project, folder }
                     },
                     Done::Welcome { on, session, pane } => Asked::Welcome { on, session, pane },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
@@ -3237,8 +3239,8 @@ impl Sidebar {
             Wants::Plan { session, scope: Scope::Pane(pane) } => {
                 Asked::Closes { menu: number, on, session, pane }
             },
-            Wants::Plan { session, scope: Scope::Workstream(workstream) } => {
-                let plan = self.deletes_of(&on, workstream).and_then(|deletes| {
+            Wants::Plan { session, scope: Scope::Worktree(worktree) } => {
+                let plan = self.deletes_of(&on, worktree).and_then(|deletes| {
                     self.plan(&on, &session, deletes)
                 });
                 self.planned(plan)
@@ -3370,22 +3372,22 @@ impl Sidebar {
         let (project, key) = listed.project().zip(listed.own_key()).ok_or_else(unlisted)?;
         let known = shelf(&self.shelves, on).iter().find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
-        let workstreams = known.workstreams.iter().map(|stream| stream.place.workstream).collect();
-        let seen = known.workstreams.iter().flat_map(|stream| stream.terminals.iter().copied());
-        Ok(Deletes::Project { key, project, workstreams, seen: seen.collect() })
+        let worktrees = known.worktrees.iter().map(|worktree| worktree.place.worktree).collect();
+        let seen = known.worktrees.iter().flat_map(|worktree| worktree.terminals.iter().copied());
+        Ok(Deletes::Project { key, project, worktrees, seen: seen.collect() })
     }
 
-    fn deletes_of(&self, on: &Machine, workstream: WorkstreamId) -> Result<Deletes, String> {
+    fn deletes_of(&self, on: &Machine, worktree: WorktreeId) -> Result<Deletes, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
-        let streams = shelf(&self.shelves, on).iter().flat_map(|known| &known.workstreams);
-        let mut held = streams.filter(|stream| stream.place.workstream == workstream);
-        let Some(stream) = held.next() else {
-            return Err(format!("workstream {workstream} is no longer listed"));
+        let worktrees = shelf(&self.shelves, on).iter().flat_map(|known| &known.worktrees);
+        let mut held = worktrees.filter(|it| it.place.worktree == worktree);
+        let Some(found) = held.next() else {
+            return Err(format!("worktree {worktree} is no longer listed"));
         };
-        let panes = stream.panes.iter().map(|pane| pane.id).collect();
-        Ok(Deletes::Workstream { workstream, panes, seen: stream.terminals.clone() })
+        let panes = found.panes.iter().map(|pane| pane.id).collect();
+        Ok(Deletes::Worktree { worktree, panes, seen: found.terminals.clone() })
     }
 
     fn out_of_reach(&self, on: &Machine) -> Option<String> {
@@ -3439,8 +3441,8 @@ impl Sidebar {
         let mut notes = Vec::new();
         for (machine, seen) in &reached {
             let agents = seen.seated();
-            let trees: HashMap<&str, &lunetad::api::WorkTree> =
-                seen.work_trees.iter().map(|tree| (tree.dir.as_str(), tree)).collect();
+            let statuses: HashMap<&str, &lunetad::api::GitStatus> =
+                seen.git_statuses.iter().map(|status| (status.dir.as_str(), status)).collect();
             for known in seen.projects {
                 let listed = known.listed();
                 every.push((machine.clone(), listed.name.clone()));
@@ -3449,8 +3451,8 @@ impl Sidebar {
                         continue;
                     };
                     let cwd = agent_dir(agent, pane);
-                    let branch = trees.get(cwd).and_then(|tree| {
-                        checkout(&WorkTree::of_api(tree)?, None).map(|checkout| checkout.branch)
+                    let branch = statuses.get(cwd).and_then(|status| {
+                        checkout(&GitStatus::of_api(status)?, None).map(|checkout| checkout.branch)
                     });
                     notes.push(Note {
                         on: machine.clone(),
@@ -3501,11 +3503,11 @@ impl Sidebar {
                 place.session() == session.as_str() && at == pane.id()
             },
             (
-                Act::Tab { session, panes, .. } | Act::Workstream { session, panes, .. },
+                Act::Tab { session, panes, .. } | Act::Worktree { session, panes, .. },
                 Some(at),
             ) => place.session() == session.as_str() && panes.contains(&at),
-            (Act::Workstream { workstream, .. }, None) => {
-                matches!(place, Place::Workstream(at) if at.workstream == *workstream)
+            (Act::Worktree { worktree, .. }, None) => {
+                matches!(place, Place::Worktree(at) if at.worktree == *worktree)
             },
             (Act::Pane { .. } | Act::Tab { .. }, None) => false,
             (
@@ -3775,7 +3777,7 @@ impl Sidebar {
         }
         let triangle = match row {
             Row::Project { .. } => Some(2),
-            Row::Workstream { .. } => Some(3),
+            Row::Worktree { .. } => Some(3),
             Row::Machine { .. } | Row::Pane { .. } => None,
         };
         if let Some(triangle) = triangle {
@@ -4252,7 +4254,7 @@ impl Sidebar {
             } => Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME)),
             Row::Machine { .. }
             | Row::Project { .. }
-            | Row::Workstream { .. }
+            | Row::Worktree { .. }
             | Row::Pane { .. } => None,
         }
     }
@@ -4433,7 +4435,7 @@ impl<'a> Finder<'a> {
         self.find(name, &[])
     }
 
-    fn workstream(
+    fn worktree(
         &self,
         name: &str,
         branch: Option<&str>,
@@ -4475,27 +4477,27 @@ impl<'a> Finder<'a> {
 
 fn log_unasked(plan: &prunes::Plan) {
     for unasked in &plan.unasked {
-        log::say(&format!("{}: {}", unasked.worktree, unasked.why));
+        log::say(&format!("{}: {}", unasked.folder, unasked.why));
     }
 }
 
-fn repository_of(tree: &WorkTree) -> Option<String> {
-    match tree {
-        WorkTree::NoCheckout { repository }
-        | WorkTree::Checkout { repository: Some(repository), .. } => {
+fn repository_of(status: &GitStatus) -> Option<String> {
+    match status {
+        GitStatus::NoCheckout { repository }
+        | GitStatus::Checkout { repository: Some(repository), .. } => {
             Some(repository.as_str().to_owned())
         },
-        WorkTree::Outside | WorkTree::Checkout { repository: None, .. } => None,
+        GitStatus::Outside | GitStatus::Checkout { repository: None, .. } => None,
     }
 }
 
-fn checkout(tree: &WorkTree, pull_request: Option<&PullRequest>) -> Option<Checkout> {
-    let WorkTree::Checkout {
+fn checkout(status: &GitStatus, pull_request: Option<&PullRequest>) -> Option<Checkout> {
+    let GitStatus::Checkout {
         head: Head::Branch { name, upstream, changed },
         changes,
         stashes,
         ..
-    } = tree
+    } = status
     else {
         return None;
     };
@@ -4665,19 +4667,19 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             }
             RowLines { lines: vec![Line::from(spans)], number: None, cuts }
         },
-        Row::Workstream {
+        Row::Worktree {
             name, missing, hits, under, here, colour, waiting, dot, busy, checkout, ..
         } => {
             let folded = *under == Under::Folded;
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let gone = if *missing { MISSING } else { "" };
-            let fixed = WORKSTREAM + gone.width() + reserve + 1;
+            let fixed = WORKTREE + gone.width() + reserve + 1;
             let room = width.saturating_sub(fixed);
             let style = Style::new().fg(*colour).add_modifier(Modifier::BOLD);
             let (shown, wide) = lit(name, room, Keep::Start, hits, style);
-            let mut cuts: Vec<CutAt> = cut_at(0, WORKSTREAM, name, room).into_iter().collect();
-            let gap = width.saturating_sub(WORKSTREAM + wide + gone.width() + reserve + 1);
+            let mut cuts: Vec<CutAt> = cut_at(0, WORKTREE, name, room).into_iter().collect();
+            let gap = width.saturating_sub(WORKTREE + wide + gone.width() + reserve + 1);
             let mut spans = vec![
                 margin(*here),
                 Span::raw(" "),
@@ -5071,12 +5073,12 @@ mod tests {
         Asked::Delete { on: Machine::Local, act }
     }
 
-    fn project_deleted(name: &str, id: u64, workstreams: &[u64], seen: &[u64]) -> Act {
+    fn project_deleted(name: &str, id: u64, worktrees: &[u64], seen: &[u64]) -> Act {
         let key = OwnKey { id: OwnId::new(id).unwrap(), made: OwnMade::from_nanos(0) };
-        let (project, workstreams) = (ProjectId::of(id).unwrap(), workstreams.iter());
-        let workstreams = workstreams.map(|it| WorkstreamId::of(*it).unwrap()).collect();
+        let (project, worktrees) = (ProjectId::of(id).unwrap(), worktrees.iter());
+        let worktrees = worktrees.map(|it| WorktreeId::of(*it).unwrap()).collect();
         let seen = seen.iter().map(|it| ViewId::of(*it).unwrap()).collect();
-        Act::Project { session: session_name(name), key, project, workstreams, seen }
+        Act::Project { session: session_name(name), key, project, worktrees, seen }
     }
 
     fn go_here(place: Place) -> Asked {
@@ -5161,8 +5163,8 @@ mod tests {
         }
     }
 
-    fn tab_of(project: u64, tab: u32) -> WorkstreamId {
-        WorkstreamId::of(project * 1000 + u64::from(tab)).unwrap()
+    fn tab_of(project: u64, tab: u32) -> WorktreeId {
+        WorktreeId::of(project * 1000 + u64::from(tab)).unwrap()
     }
 
     fn project_id(session: &Session) -> u64 {
@@ -5206,7 +5208,7 @@ mod tests {
             agent.pane = Some(api::agent::Pane::Own(own));
         }
         let project = |session: &&Session| {
-            let mut workstreams: Vec<api::Workstream> = Vec::new();
+            let mut worktrees: Vec<api::Worktree> = Vec::new();
             let panes = session.panes.iter().flat_map(|panes| &panes.panes);
             let mut panes: Vec<&Pane> = panes.collect();
             panes.sort_by_key(|pane| (pane.tab, pane.id));
@@ -5225,15 +5227,15 @@ mod tests {
                     name: None,
                 };
                 let id = tab_of(project_id(session), pane.tab).get();
-                match workstreams.iter_mut().find(|it| it.id == id) {
-                    Some(workstream) => workstream.terminals.push(terminal),
-                    None => workstreams.push(api::Workstream {
+                match worktrees.iter_mut().find(|it| it.id == id) {
+                    Some(worktree) => worktree.terminals.push(terminal),
+                    None => worktrees.push(api::Worktree {
                         id,
                         name: pane.tab_name.clone(),
                         folder: kept_folder(pane.cwd.as_deref()),
-                        seen: Some(api::workstream::Seen::Unread(())),
+                        seen: Some(api::worktree::Seen::Unread(())),
                         terminals: vec![terminal],
-                        ..api::Workstream::default()
+                        ..api::Worktree::default()
                     }),
                 }
             }
@@ -5242,7 +5244,7 @@ mod tests {
                 name: session.name.clone(),
                 dir: "/w".to_owned(),
                 missing: false,
-                workstreams,
+                holds: Some(api::project::Holds::Clone(api::project::Clone { worktrees })),
             }
         };
         let projects = sessions.iter().map(project).collect();
@@ -5254,7 +5256,7 @@ mod tests {
         Host {
             version: Some(Version { pid: 1, seq: 1 }),
             sessions,
-            work_trees: Vec::new(),
+            git_statuses: Vec::new(),
             agents,
             unread: 0,
             pull_requests: Vec::new(),
@@ -5411,7 +5413,7 @@ mod tests {
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 
-    fn workstream_of(id: u64, name: &str, folder: &str, panes: &[u32]) -> api::Workstream {
+    fn worktree_of(id: u64, name: &str, folder: &str, panes: &[u32]) -> api::Worktree {
         let made_at = Some(Timestamp::default());
         let terminal = |id: &u32| api::Terminal {
             id: u64::from(*id),
@@ -5420,13 +5422,13 @@ mod tests {
             command: Some("fish".to_owned()),
             ..api::Terminal::default()
         };
-        api::Workstream {
+        api::Worktree {
             id,
             name: name.to_owned(),
             folder: folder.to_owned(),
-            seen: Some(api::workstream::Seen::Unread(())),
+            seen: Some(api::worktree::Seen::Unread(())),
             terminals: panes.iter().map(terminal).collect(),
-            ..api::Workstream::default()
+            ..api::Worktree::default()
         }
     }
 
@@ -5435,15 +5437,16 @@ mod tests {
         kept.unwrap_or("/w").to_owned()
     }
 
-    fn a_project(id: u64, name: &str, workstreams: Vec<api::Workstream>) -> api::Project {
+    fn a_project(id: u64, name: &str, worktrees: Vec<api::Worktree>) -> api::Project {
         let (name, dir) = (name.to_owned(), "/w".to_owned());
-        api::Project { id, name, dir, missing: false, workstreams }
+        let holds = Some(api::project::Holds::Clone(api::project::Clone { worktrees }));
+        api::Project { id, name, dir, missing: false, holds }
     }
 
     #[test]
-    fn an_empty_project_is_one_row_and_an_empty_workstream_is_one_to_go_to() {
+    fn an_empty_project_is_one_row_and_an_empty_worktree_is_one_to_go_to() {
         let mut sidebar = fresh();
-        let fresh_one = workstream_of(31, "fresh", "/w/solo", &[]);
+        let fresh_one = worktree_of(31, "fresh", "/w/solo", &[]);
         let projects =
             vec![a_project(7, "empty", Vec::new()), a_project(8, "solo", vec![fresh_one])];
         sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
@@ -5454,61 +5457,61 @@ mod tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(empty));
         type_in(&mut sidebar, "j");
-        let workstream = WorkstreamId::of(31).unwrap();
+        let worktree = WorktreeId::of(31).unwrap();
         let solo = project_row("solo", 8);
-        let place = Place::Workstream(WorkstreamPlace { project: solo, workstream });
+        let place = Place::Worktree(WorktreePlace { project: solo, worktree });
         assert_eq!(sidebar.key(&enter, moment(160_000)), go_here(place));
     }
 
     #[test]
-    fn a_workstream_s_row_deletes_the_workstream_with_its_panes() {
+    fn a_worktree_s_row_deletes_the_worktree_with_its_panes() {
         let mut sidebar = fresh();
-        let fix = workstream_of(31, "fix", "/w/fix", &[1, 2]);
-        let main = workstream_of(32, "main", "/w/main", &[3]);
+        let fix = worktree_of(31, "fix", "/w/fix", &[1, 2]);
+        let main = worktree_of(32, "main", "/w/main", &[3]);
         let projects = vec![a_project(7, "luneta", vec![fix, main])];
         sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
         sidebar.focus(Keys::Sidebar);
-        let workstream = WorkstreamId::of(31).unwrap();
+        let worktree = WorktreeId::of(31).unwrap();
         let project = project_row("luneta", 7);
-        let place = Place::Workstream(WorkstreamPlace { project, workstream });
+        let place = Place::Worktree(WorktreePlace { project, worktree });
         sidebar.cursor = Some(Spot::Local(place));
         type_in(&mut sidebar, "d");
         let whose = listed("luneta", 7).whose();
         let session = session_name("luneta");
         let seen = [1, 2].map(|id| ViewId::of(id).unwrap()).to_vec();
-        let act = Act::Workstream { session, whose, workstream, panes: vec![1, 2], seen };
+        let act = Act::Worktree { session, whose, worktree, panes: vec![1, 2], seen };
         let asked = sidebar.key(&char('d'), moment(160_000));
         assert_eq!(asked, Asked::Delete { on: Machine::Local, act });
         let after = sidebar.closing.as_ref().and_then(|closing| closing.after.clone());
-        let past = "the cursor goes past the workstream's panes";
+        let past = "the cursor goes past the worktree's panes";
         assert_eq!(after, Some(Spot::Local(pane_of("luneta", 7, 3))), "{past}");
     }
 
     #[test]
-    fn the_fold_of_a_workstream_lunetad_no_longer_keeps_goes_with_it() {
+    fn the_fold_of_a_worktree_lunetad_no_longer_keeps_goes_with_it() {
         let mut sidebar = two_sessions();
         let (kept, gone) = (tab_of(10, 0), tab_of(10, 1));
         for tab in [kept, gone] {
-            sidebar.folds.set(Fold::Workstream(&Machine::Local, tab), true);
+            sidebar.folds.set(Fold::Worktree(&Machine::Local, tab), true);
         }
         let older = session("older", 10, vec![pane(1, 0, "/w/luneta/main", "claude")]);
         let newer = session("newer", 20, vec![pane(1, 0, "/w/b", "fish")]);
         sidebar.hear(host(vec![newer, older], Vec::new()));
-        assert!(sidebar.folds.contains(Fold::Workstream(&Machine::Local, kept)));
-        assert!(!sidebar.folds.contains(Fold::Workstream(&Machine::Local, gone)));
+        assert!(sidebar.folds.contains(Fold::Worktree(&Machine::Local, kept)));
+        assert!(!sidebar.folds.contains(Fold::Worktree(&Machine::Local, gone)));
         let unkept = api::projects::Held::Unkept("its file does not read".to_owned());
         let projects = Some(api::Projects { held: Some(unkept) });
         sidebar.hear(Host { projects, ..host(Vec::new(), Vec::new()) });
-        let still = sidebar.folds.contains(Fold::Workstream(&Machine::Local, kept));
+        let still = sidebar.folds.contains(Fold::Worktree(&Machine::Local, kept));
         assert!(still, "nor on a list cut short");
     }
 
     #[test]
-    fn a_workstream_whose_folder_is_gone_says_so() {
+    fn a_worktree_whose_folder_is_gone_says_so() {
         let mut sidebar = fresh();
-        let mut gone = workstream_of(31, "fix", "/w/fix", &[1]);
-        gone.seen = Some(api::workstream::Seen::Missing(()));
-        let main = workstream_of(32, "main", "/w", &[2]);
+        let mut gone = worktree_of(31, "fix", "/w/fix", &[1]);
+        gone.seen = Some(api::worktree::Seen::Missing(()));
+        let main = worktree_of(32, "main", "/w", &[2]);
         let projects = vec![a_project(7, "luneta", vec![gone, main])];
         sidebar.heard(Host { projects: Some(kept(projects)), ..host(Vec::new(), Vec::new()) });
         let rows = rows_shown(&mut sidebar);
@@ -5521,7 +5524,7 @@ mod tests {
     #[test]
     fn an_unreached_machine_shows_the_projects_lunetad_last_heard_marked() {
         let mut sidebar = fresh();
-        let main = a_project(20, "main", vec![workstream_of(31, "fix", "/w/b", &[1])]);
+        let main = a_project(20, "main", vec![worktree_of(31, "fix", "/w/b", &[1])]);
         let mut unreached = down(100);
         if let Reached::Unreached(it) = &mut unreached {
             it.projects = Some(kept(vec![main]));
@@ -5553,7 +5556,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_hold_their_workstreams_and_those_their_panes() {
+    fn projects_hold_their_worktrees_and_those_their_panes() {
         let mut sidebar = two_sessions();
         assert_eq!(
             screen(&mut sidebar, false, 32, 9),
@@ -5572,7 +5575,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bracket_joins_the_panes_of_a_workstream() {
+    fn a_bracket_joins_the_panes_of_a_worktree() {
         let panes = vec![
             pane(1, 0, "/w/a", "less a"),
             pane(2, 1, "/w/b", "less b"),
@@ -5584,8 +5587,8 @@ mod tests {
         let name = Said::new("main".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
-        host.work_trees.push(tree.to_api("/w/b"));
+        let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+        host.git_statuses.push(status.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.hear(host);
 
@@ -5839,9 +5842,9 @@ mod tests {
         let changes = Some(api::Changes::default());
         let head = Some(api::checkout::Head::Branch(api::Branch { name: "main".to_owned(), upstream: None, changed: None }));
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
-        host.work_trees = vec![api::WorkTree {
+        host.git_statuses = vec![api::GitStatus {
             dir: "/w/c".to_owned(),
-            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
         sit(&mut sidebar, &own_pane_of("older", 2, 2));
@@ -5947,7 +5950,7 @@ mod tests {
     }
 
     #[test]
-    fn folding_a_pane_s_workstream_then_its_project_stops_the_highlight_on_its_row() {
+    fn folding_a_pane_s_worktree_then_its_project_stops_the_highlight_on_its_row() {
         let mut sidebar = two_sessions();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         type_in(&mut sidebar, "hh");
@@ -5958,7 +5961,7 @@ mod tests {
         assert!(lines[3].starts_with(" ▸ older"), "{lines:?}");
         assert!(lines[4].starts_with(" ▾ newer"), "{lines:?}");
         sidebar.key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), moment(160_000));
-        assert_eq!(sidebar.rows.len(), 7, "the workstream folded first stays folded");
+        assert_eq!(sidebar.rows.len(), 7, "the worktree folded first stays folded");
     }
 
     #[test]
@@ -6692,7 +6695,7 @@ mod tests {
     }
 
     #[test]
-    fn the_work_tree_shows_what_starship_shows() {
+    fn the_git_status_shows_what_starship_shows() {
         let changes =
             Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 1, staged: 1, untracked: 1 };
         let both = Some(Upstream { ahead: 1, behind: 2 });
@@ -6716,8 +6719,8 @@ mod tests {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes { modified, ..Changes::default() };
-            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
-            host.work_trees.push(tree.to_api(dir));
+            let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+            host.git_statuses.push(status.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let pull_request = PullRequest { number, state, url: None, checks: None, stale: false };
             host.pull_requests.push(pull_request.to_api(dir));
@@ -6764,13 +6767,13 @@ mod tests {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let changed = changed.and_then(|(added, deleted)| Changed::new(added, deleted));
             let head = Head::Branch { name, upstream: None, changed };
-            let tree = WorkTree::Checkout {
+            let status = GitStatus::Checkout {
                 repository: None,
                 head,
                 changes: Changes::default(),
                 stashes: 0,
             };
-            host.work_trees.push(tree.to_api(dir));
+            host.git_statuses.push(status.to_api(dir));
             if number > 0 {
                 let number = NonZeroU32::new(number).expect("a pull request's number");
                 let (state, url) = (State::Open, None);
@@ -6830,8 +6833,8 @@ mod tests {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let head = Head::Branch { name, upstream: None, changed: None };
             let changes = Changes::default();
-            let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
-            host.work_trees.push(tree.to_api(dir));
+            let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+            host.git_statuses.push(status.to_api(dir));
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = Some(format!("https://github.com/owner/repo/pull/{number}"));
             let stale = dir == "/w/g";
@@ -7006,7 +7009,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_is_found_by_its_workstream_s_name_branch_and_folder() {
+    fn a_pane_is_found_by_its_worktree_s_name_branch_and_folder() {
         let mut notes = pane(1, 0, "/w/a", "nvim a");
         notes.tab_name = "notes".to_owned();
         let deep = pane(2, 1, "/home/lorenzo/Projects/misc/luneta", "nvim b");
@@ -7023,8 +7026,8 @@ mod tests {
         let name = Said::new("feature/sidebar".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
-        host.work_trees.push(tree.to_api("/w/c"));
+        let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+        host.git_statuses.push(status.to_api("/w/c"));
         let found = |typed: &str| {
             let mut sidebar = fresh();
             sidebar.hear(host.clone());
@@ -7195,7 +7198,7 @@ mod tests {
     }
 
     fn checked_out(
-        work_trees: &mut Vec<api::WorkTree>,
+        git_statuses: &mut Vec<api::GitStatus>,
         pull_requests: &mut Vec<api::PullRequest>,
         dir: &str,
         branch: &str,
@@ -7204,8 +7207,8 @@ mod tests {
         let name = Said::new(branch.to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let changes = Changes::default();
-        let tree = WorkTree::Checkout { repository: None, head, changes, stashes: 0 };
-        work_trees.push(tree.to_api(dir));
+        let status = GitStatus::Checkout { repository: None, head, changes, stashes: 0 };
+        git_statuses.push(status.to_api(dir));
         if let Some((number, state, url)) = pull {
             let number = NonZeroU32::new(number).expect("a pull request's number");
             let url = url.map(str::to_owned);
@@ -7218,12 +7221,12 @@ mod tests {
         let dirs = ["/w/a", "/w/b", "/w/c", "/w/d"];
         let panes = dirs.iter().zip(1..).map(|(cwd, id)| pane(id, id, cwd, "fish")).collect();
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
-        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let closed = "https://github.com/owner/repo/pull/9";
-        checked_out(trees, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
-        checked_out(trees, pulls, "/w/b", "old", Some((7, State::Open, None)));
-        checked_out(trees, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
-        checked_out(trees, pulls, "/w/d", "none", None);
+        checked_out(statuses, pulls, "/w/a", "fix", Some((246, State::Open, Some(LINK))));
+        checked_out(statuses, pulls, "/w/b", "old", Some((7, State::Open, None)));
+        checked_out(statuses, pulls, "/w/c", "gone", Some((9, State::Closed, Some(closed))));
+        checked_out(statuses, pulls, "/w/d", "none", None);
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -7382,8 +7385,8 @@ mod tests {
     fn pull_said(said: &str) -> Sidebar {
         let panes = vec![pane(1, 1, "/w/a", "fish")];
         let mut host = host(vec![session("s", 10, panes)], Vec::new());
-        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
-        checked_out(trees, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
+        let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
+        checked_out(statuses, pulls, "/w/a", "fix", Some((5, State::Open, Some(said))));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -7443,8 +7446,8 @@ mod tests {
         let Reached::Host(there) = host.remotes[0].reached.as_mut().unwrap() else {
             panic!("nixos is reached");
         };
-        let (trees, pulls) = (&mut there.work_trees, &mut there.pull_requests);
-        checked_out(trees, pulls, "/w/b", "fix", Some((8, State::Open, Some(far))));
+        let (statuses, pulls) = (&mut there.git_statuses, &mut there.pull_requests);
+        checked_out(statuses, pulls, "/w/b", "fix", Some((8, State::Open, Some(far))));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -7462,11 +7465,11 @@ mod tests {
         let host = sidebar.host.as_mut().unwrap();
         let panes = ["/w/e", "/w/f"].iter().zip(5..).map(|(cwd, id)| pane(id, id, cwd, "fish"));
         host.sessions[0].panes.as_mut().unwrap().panes.extend(panes);
-        let (trees, pulls) = (&mut host.work_trees, &mut host.pull_requests);
+        let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
-        checked_out(trees, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
-        checked_out(trees, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
+        checked_out(statuses, pulls, "/w/e", long, Some((4321, State::Merged, Some(&merged))));
+        checked_out(statuses, pulls, "/w/f", "日本語の枝の名前が長い", Some((12, State::Draft, Some(&draft))));
         let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
@@ -7600,7 +7603,7 @@ mod tests {
             ("─ New ─────────── luneta/main ─", None),
             (" v  new view", Some(on_menu(KeyCode::Char('v')))),
             (" h  new welcome view", Some(on_menu(KeyCode::Char('h')))),
-            (" w  new workstream", Some(on_menu(KeyCode::Char('w')))),
+            (" w  new worktree", Some(on_menu(KeyCode::Char('w')))),
             (" p  new project", Some(on_menu(KeyCode::Char('p')))),
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
@@ -7728,7 +7731,7 @@ mod tests {
             " y p  Yank PR link",
             " n v  new view",
             " d d  close the view",
-            " d d  close the workstream",
+            " d d  close the worktree",
             " r    Rename the project",
             " w  worktree",
             " BS   back a group",
@@ -7917,14 +7920,14 @@ mod tests {
             "─ New ─────────── luneta/main ─",
             " v  new view",
             " h  new welcome view",
-            " w  new workstream",
+            " w  new worktree",
             " p  new project",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
         let project = ProjectId::of(1).unwrap();
         let (on, folder) = (Machine::Local, directory("/w/luneta/main"));
-        let made = Asked::NewWorkstream { on, project, folder };
+        let made = Asked::NewWorktree { on, project, folder };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         assert!(sidebar.menu.is_none());
 
@@ -7932,7 +7935,7 @@ mod tests {
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(2).unwrap();
         let (on, folder) = (Machine::Local, directory("/w/b"));
-        let made = Asked::NewWorkstream { on, project, folder };
+        let made = Asked::NewWorktree { on, project, folder };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
@@ -8045,8 +8048,8 @@ mod tests {
 
         let at = At::Clone { cwd: directory("/w/n"), name: session_name("newer-2") };
         let work = Readied::Link(link);
-        let worktree = "/w/n/feat".to_owned();
-        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+        let folder = "/w/n/feat".to_owned();
+        let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let asked = Asked::Make {
             menu: 1,
             on: Machine::Local,
@@ -8080,8 +8083,8 @@ mod tests {
         let ready = || {
             let work = Readied::Link(link());
             let at = At::Session((own_listed("older", 1), PaneKey::terminal(1)));
-            let worktree = "/w/luneta/feat".to_owned();
-            Ready { at, worktree, branch: None, moved_off: false, work }
+            let folder = "/w/luneta/feat".to_owned();
+            Ready { at, folder, branch: None, moved_off: false, work }
         };
 
         let mut sidebar = pulling();
@@ -8114,7 +8117,7 @@ mod tests {
             let at = At::There((own_listed("older", 1), PaneKey::terminal(4)));
             Ready {
                 at,
-                worktree: "/w/luneta/feat".to_owned(),
+                folder: "/w/luneta/feat".to_owned(),
                 branch: None,
                 moved_off: false,
                 work,
@@ -8137,9 +8140,9 @@ mod tests {
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let work = Readied::Link(link);
         let at = At::Session((own_listed("older", 1), PaneKey::terminal(1)));
-        let worktree = "/w/luneta/feat".to_owned();
-        let ready = Ready { at, worktree: worktree.clone(), branch: None, moved_off: false, work };
-        let (cwd, name) = (directory(&worktree), Some("#5".to_owned()));
+        let folder = "/w/luneta/feat".to_owned();
+        let ready = Ready { at, folder: folder.clone(), branch: None, moved_off: false, work };
+        let (cwd, name) = (directory(&folder), Some("#5".to_owned()));
         let tab = Tab { cwd, name, command: Vec::new() };
         let open = Open::Tab { session: session_name("older"), tab, alone_since: None };
         assert_eq!(sidebar.pulled(number, Ok(Found { on: Machine::Local, ready })), Asked::Open {
@@ -8254,8 +8257,8 @@ mod tests {
         assert_eq!(sidebar.menu.as_ref().map(Menu::number), Some(2));
         let work = Readied::Link(Link::parse(page).unwrap());
         let at = At::Session((own_listed("older", 1), PaneKey::terminal(1)));
-        let worktree = "/w/luneta/issue-6".to_owned();
-        let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+        let folder = "/w/luneta/issue-6".to_owned();
+        let ready = Ready { at, folder, branch: None, moved_off: false, work };
         let asked = sidebar.pulled(2, Ok(Found { on: Machine::Local, ready }));
         assert!(matches!(asked, Asked::Open { menu: 2, .. }), "{asked:?}");
     }
@@ -8316,9 +8319,9 @@ mod tests {
             };
             assert_eq!(wanted, Wanted::AsItIs);
             let at = At::Session((own_listed("older", 1), PaneKey::terminal(1)));
-            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
             let branch = branch.map(str::to_owned);
-            let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off, work };
+            let ready = Ready { at, folder: folder.to_owned(), branch, moved_off, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
             (matches!(asked, Asked::Open { .. }), sidebar.notice)
         };
@@ -8348,8 +8351,8 @@ mod tests {
             };
             let at = At::Session((listed("older", 10), PaneKey::terminal(1)));
             let branch = Some("dev-docs".to_owned());
-            let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
-            let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off: true, work };
+            let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+            let ready = Ready { at, folder: folder.to_owned(), branch, moved_off: true, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
             assert_eq!(asked, Asked::Nothing);
             assert_eq!(sidebar.floating().is_some(), matches!(keys, Keys::Menu { .. }));
@@ -8486,8 +8489,8 @@ mod tests {
             };
             sidebar.focus(Keys::Zellij);
             let work = Readied::Link(Link::parse(page).unwrap());
-            let worktree = "/w/luneta/feat".to_owned();
-            let ready = Ready { at, worktree, branch: None, moved_off: false, work };
+            let folder = "/w/luneta/feat".to_owned();
+            let ready = Ready { at, folder, branch: None, moved_off: false, work };
             let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
             (sidebar, number, asked)
         };
@@ -8511,8 +8514,8 @@ mod tests {
         sidebar.focus(Keys::Zellij);
         let at = At::Session((listed("older", 10), PaneKey::terminal(1)));
         let branch = Some("dev-docs".to_owned());
-        let (worktree, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
-        let ready = Ready { at, worktree: worktree.to_owned(), branch, moved_off: true, work };
+        let (folder, work) = ("/w/luneta/issue-5", Readied::Link(Link::parse(page).unwrap()));
+        let ready = Ready { at, folder: folder.to_owned(), branch, moved_off: true, work };
         let asked = sidebar.pulled(number, Ok(Found { on: Machine::Local, ready }));
         assert_eq!(asked, Asked::Nothing);
         assert!(sidebar.working.is_empty());
@@ -8539,9 +8542,9 @@ mod tests {
         }));
         let changes = Some(api::Changes::default());
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
-        host.work_trees = vec![api::WorkTree {
+        host.git_statuses = vec![api::GitStatus {
             dir: "/w/luneta/main".to_owned(),
-            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
         let made = OwnMade::from_nanos(0);
@@ -8582,7 +8585,7 @@ mod tests {
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(1).unwrap();
-        let made = Asked::NewWorkstream { on: Machine::Local, project, folder: cwd.clone() };
+        let made = Asked::NewWorktree { on: Machine::Local, project, folder: cwd.clone() };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
         assert!(sidebar.floating().is_none());
         sidebar.focus(Keys::Zellij);
@@ -8683,9 +8686,9 @@ mod tests {
         }));
         let changes = Some(api::Changes::default());
         let checkout = api::Checkout { head, changes, stashes: 0, repository: None };
-        host.work_trees = vec![api::WorkTree {
+        host.git_statuses = vec![api::GitStatus {
             dir: "/w/luneta/main".to_owned(),
-            stands: Some(api::work_tree::Stands::Checkout(checkout)),
+            stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -8722,8 +8725,8 @@ mod tests {
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents in newer"));
         sidebar.step(-2);
         type_in(&mut sidebar, "h");
-        let tab = WorkstreamPlace { project: project_row("older", 10), workstream: tab_of(10, 0) };
-        assert_eq!(cursor(&sidebar), Some(Place::Workstream(tab)));
+        let tab = WorktreePlace { project: project_row("older", 10), worktree: tab_of(10, 0) };
+        assert_eq!(cursor(&sidebar), Some(Place::Worktree(tab)));
         type_in(&mut sidebar, "b");
         assert_eq!(sidebar.key(&char('h'), moment(160_000)), brief(session()));
         type_in(&mut sidebar, "b");
@@ -8938,7 +8941,7 @@ mod tests {
     }
 
     #[test]
-    fn a_close_of_a_workstream_asks_first_where_a_file_in_it_does_not_read() {
+    fn a_close_of_a_worktree_asks_first_where_a_file_in_it_does_not_read() {
         let made_at = Some(Timestamp::default());
         let own = Some(api::OwnSession { id: 1, made_at });
         let own = Some(api::Own { session: own, pane: 1 });
@@ -8947,23 +8950,23 @@ mod tests {
         let in_zellij = UnreadFile { pid: 200, zellij: Some(zellij), own: None, terminal: None };
         let made = OwnMade::from_nanos(0);
         let whose = Whose::Own(OwnKey { id: OwnId::new(1).unwrap(), made });
-        let workstream = tab_of(1, 0);
+        let worktree = tab_of(1, 0);
         let (twin, panes) = (session_name("twin"), vec![1]);
         let seen = vec![ViewId::of(1).unwrap()];
-        let close = Act::Workstream { session: twin, whose, workstream, panes, seen };
+        let close = Act::Worktree { session: twin, whose, worktree, panes, seen };
         for (file, asks) in [(in_own, true), (in_zellij, false)] {
             let mut sidebar = fresh();
             let panes = || vec![pane(1, 0, "/w/luneta/main", "fish")];
             let sessions = vec![session("twin", 10, panes()), own_session("twin", 1, panes())];
             let unread_files = vec![file];
             sidebar.hear(Host { unread: 1, unread_files, ..host(sessions, Vec::new()) });
-            let place = WorkstreamPlace { project: project_row("twin", 1), workstream };
+            let place = WorktreePlace { project: project_row("twin", 1), worktree };
             sidebar.focus(Keys::Sidebar);
-            sidebar.cursor = Some(Spot::Local(Place::Workstream(place)));
+            sidebar.cursor = Some(Spot::Local(Place::Worktree(place)));
             type_in(&mut sidebar, "d");
             let went = sidebar.key(&char('d'), moment(160_000));
             let lines = screen(&mut sidebar, true, 60, 16);
-            let question = " Close the workstream? 1 agent, 1 unknown";
+            let question = " Close the worktree? 1 agent, 1 unknown";
             let asked = lines.iter().any(|line| line.trim_end() == question);
             assert_eq!((went == delete_here(close.clone()), asked), (!asks, asks), "{lines:#?}");
         }
@@ -9078,7 +9081,7 @@ mod tests {
     }
 
     #[test]
-    fn v_selects_workstreams_that_shifted_j_and_k_move() {
+    fn v_selects_worktrees_that_shifted_j_and_k_move() {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar);
         type_in(&mut sidebar, "vjjk");
@@ -9088,7 +9091,7 @@ mod tests {
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         let seen = vec![tab_of(10, 0), tab_of(10, 1), tab_of(10, 2)];
         let wanted = vec![tab_of(10, 2), tab_of(10, 0), tab_of(10, 1)];
-        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), seen, wanted };
+        let order = Reorder::Worktrees { project: ProjectId::of(10).unwrap(), seen, wanted };
         let asked = Asked::Move { on: Machine::Local, order, ticket: 1 };
         assert_eq!(sidebar.key(&shifted('J'), moment(160_000)), asked);
         assert_eq!(drawn_rows(&mut sidebar).1, [3, 4, 5, 6], "the rows move as asked");
@@ -9331,8 +9334,8 @@ mod tests {
         };
         let branch_too = || {
             let mut listed = searched().host.unwrap();
-            let (trees, pulls) = (&mut listed.work_trees, &mut listed.pull_requests);
-            checked_out(trees, pulls, "/w/a", "main", None);
+            let (statuses, pulls) = (&mut listed.git_statuses, &mut listed.pull_requests);
+            checked_out(statuses, pulls, "/w/a", "main", None);
             listed
         };
         let moves: [&dyn Fn(&mut Sidebar); 8] = [
@@ -9418,8 +9421,8 @@ mod tests {
         let long = "a-text-too-long-for-the-sidebar";
         let panes = vec![pane(1, 1, "/w/a", long)];
         let mut local = host(vec![session(long, 10, panes)], Vec::new());
-        let (trees, pulls) = (&mut local.work_trees, &mut local.pull_requests);
-        checked_out(trees, pulls, "/w/a", long, Some((246, State::Open, Some(LINK))));
+        let (statuses, pulls) = (&mut local.git_statuses, &mut local.pull_requests);
+        checked_out(statuses, pulls, "/w/a", long, Some((246, State::Open, Some(LINK))));
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
         sidebar.this = long.to_owned();
@@ -9499,7 +9502,7 @@ mod tests {
     fn up(sessions: Vec<Session>, agents: Vec<Agent>) -> Reached {
         Reached::Host(remote::Host {
             sessions,
-            work_trees: Vec::new(),
+            git_statuses: Vec::new(),
             agents,
             unread: 0,
             pull_requests: Vec::new(),
@@ -9567,7 +9570,7 @@ mod tests {
     }
 
     #[test]
-    fn h_folds_a_pane_s_workstream_then_its_project_and_l_unfolds() {
+    fn h_folds_a_pane_s_worktree_then_its_project_and_l_unfolds() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
@@ -9576,10 +9579,10 @@ mod tests {
         let fix = pane_of("main", 20, 1);
         sidebar.cursor = Some(Spot::Remote(nixos(), fix));
         type_in(&mut sidebar, "h");
-        assert!(sidebar.folds.contains(Fold::Workstream(&machine, tab)));
+        assert!(sidebar.folds.contains(Fold::Worktree(&machine, tab)));
         assert!(!sidebar.folds.contains(Fold::Project(&machine, main)));
-        let place = WorkstreamPlace { project: project_row("main", 20), workstream: tab };
-        assert_eq!(sidebar.cursor, Some(Spot::Remote(nixos(), Place::Workstream(place))));
+        let place = WorktreePlace { project: project_row("main", 20), worktree: tab };
+        assert_eq!(sidebar.cursor, Some(Spot::Remote(nixos(), Place::Worktree(place))));
         type_in(&mut sidebar, "h");
         assert!(sidebar.folds.contains(Fold::Project(&machine, main)));
         let project = Spot::Remote(nixos(), Place::Session(listed("main", 20)));
@@ -9587,7 +9590,7 @@ mod tests {
         assert!(!folded(&sidebar, "main"), "this machine's main folds apart");
         type_in(&mut sidebar, "l");
         assert!(!sidebar.folds.contains(Fold::Project(&machine, main)));
-        assert!(sidebar.folds.contains(Fold::Workstream(&machine, tab)));
+        assert!(sidebar.folds.contains(Fold::Worktree(&machine, tab)));
     }
 
     #[test]
@@ -9599,8 +9602,9 @@ mod tests {
         let name = Said::new("fix".to_owned()).expect("a branch's name");
         let head = Head::Branch { name, upstream: None, changed: None };
         let repository = Said::new("/w".to_owned());
-        let tree = WorkTree::Checkout { repository, head, changes: Changes::default(), stashes: 0 };
-        there.work_trees.push(tree.to_api("/w/b"));
+        let stashes = 0;
+        let status = GitStatus::Checkout { repository, head, changes: Changes::default(), stashes };
+        there.git_statuses.push(status.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar);
@@ -9615,7 +9619,7 @@ mod tests {
         let asks = Asked::Prunes { menu: number, on: on.clone(), dir: dir.clone() };
         assert_eq!(sidebar.key(&char('m'), now), asks);
         let goes = prunes::Goes {
-            worktree: "/w/one".to_owned(),
+            folder: "/w/one".to_owned(),
             branch: "one".to_owned(),
             head: "abc".to_owned(),
             number: 1,
@@ -9647,7 +9651,7 @@ mod tests {
         sidebar.prunes(number, Ok(plan.clone()));
         sidebar.key(&char('y'), now);
         let came = prunes::Came::Stays("it has a pane".to_owned());
-        let stays = prunes::Outcome { worktree: goes.worktree, came };
+        let stays = prunes::Outcome { folder: goes.folder, came };
         assert_eq!(sidebar.pruned(number, Ok(prunes::Pruned::Went(vec![stays]))), Asked::Nothing);
         assert!(sidebar.menu.is_none());
         let note = "menu: deleted 0 of 1 worktrees; one stays: it has a pane";
@@ -9741,9 +9745,9 @@ mod tests {
         let pull = Asked::Pull { menu: number, on: on.clone(), work: asked, wanted, worked, others };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), pull);
         let at = At::Clone { cwd: directory("/w/n"), name: session_name("main") };
-        let worktree = "/w/n/feat".to_owned();
+        let folder = "/w/n/feat".to_owned();
         let of_link = Readied::Link(link);
-        let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };
+        let ready = Ready { at, folder, branch: None, moved_off: false, work: of_link };
         let asked = sidebar.pulled(number, Ok(Found { on: on.clone(), ready }));
         assert!(matches!(&asked, Asked::Make { on: there, .. } if *there == on), "{asked:?}");
         assert_eq!(sidebar.made_for(number), Some(Held::Open));
@@ -9759,8 +9763,8 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         sidebar.cursor = Some(Spot::Local(pane_of("main", 10, 1)));
         sidebar.key(&char('h'), moment(160_000));
-        let place = WorkstreamPlace { project: project_row("main", 10), workstream: tab_of(10, 0) };
-        assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Workstream(place))));
+        let place = WorktreePlace { project: project_row("main", 10), worktree: tab_of(10, 0) };
+        assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Worktree(place))));
 
         let nixos = Machine::Remote(nixos());
         let vps = Machine::Remote("me@vps".parse().unwrap());
@@ -9784,9 +9788,9 @@ mod tests {
 
         let link = Link::parse("https://github.com/lorenzolfm/luneta/pull/5").unwrap();
         let at = At::Session((own_listed("work", 1), PaneKey::terminal(3)));
-        let worktree = "/w/b/feat".to_owned();
+        let folder = "/w/b/feat".to_owned();
         let of_link = Readied::Link(link);
-        let ready = Ready { at, worktree, branch: None, moved_off: false, work: of_link };
+        let ready = Ready { at, folder, branch: None, moved_off: false, work: of_link };
         let asked = sidebar.pulled(number, Ok(Found { on: nixos.clone(), ready }));
         let there = |asked: &Asked| matches!(asked, Asked::Open { on, .. } if *on == nixos);
         assert!(there(&asked), "{asked:?}");
@@ -9810,7 +9814,7 @@ mod tests {
     }
 
     #[test]
-    fn another_machine_s_workstream_closes_there_by_its_agents_and_its_pane_stays() {
+    fn another_machine_s_worktree_closes_there_by_its_agents_and_its_pane_stays() {
         let mut sidebar = fresh();
         let mut host = machines();
         let panes = vec![pane(1, 0, "/w/b", "claude"), pane(2, 0, "/w/b", "fish")];
@@ -9821,17 +9825,17 @@ mod tests {
         sidebar.cursor = Some(Spot::Remote(nixos(), pane_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
-        let place = WorkstreamPlace { project: project_row("main", 20), workstream: tab_of(20, 0) };
-        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(place.clone())));
+        let place = WorktreePlace { project: project_row("main", 20), worktree: tab_of(20, 0) };
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(place.clone())));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         let lines = screen(&mut sidebar, true, 120, 16);
         let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
-        assert!(lines.contains(&"Close the workstream? 1 agent, 1 waiting"), "{lines:#?}");
-        let act = Act::Workstream {
+        assert!(lines.contains(&"Close the worktree? 1 agent, 1 waiting"), "{lines:#?}");
+        let act = Act::Worktree {
             session: session_name("main"),
             whose: listed("main", 20).whose(),
-            workstream: place.workstream,
+            worktree: place.worktree,
             panes: vec![1, 2],
             seen: vec![ViewId::of(1).unwrap(), ViewId::of(2).unwrap()],
         };
@@ -9847,9 +9851,9 @@ mod tests {
             let mut host = machines();
             sidebar.hear(host.clone());
             sidebar.focus(Keys::Sidebar);
-            let (project, workstream) = (project_row("main", 20), tab_of(20, 0));
-            let place = WorkstreamPlace { project, workstream };
-            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(place)));
+            let (project, worktree) = (project_row("main", 20), tab_of(20, 0));
+            let place = WorktreePlace { project, worktree };
+            sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(place)));
             type_in(&mut sidebar, "d");
             assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
             host.remotes[0] = remote("nixos", down(100));
@@ -9892,35 +9896,35 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_is_told_the_workstream_luneta_shows_on_the_machine_it_sits_on() {
+    fn the_picker_is_told_the_worktree_luneta_shows_on_the_machine_it_sits_on() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let there = listed("main", 20);
         sidebar.attaching(Machine::Remote(nixos()), there.own_key().unwrap());
         sidebar.showing(tab_of(20, 0));
         let project = ProjectRow::of(there).unwrap();
-        let place = WorkstreamPlace { project, workstream: tab_of(20, 0) };
+        let place = WorktreePlace { project, worktree: tab_of(20, 0) };
         assert_eq!(sidebar.listing().shown, Some((Machine::Remote(nixos()), place)));
     }
 
     #[test]
-    fn n_w_on_a_workstream_makes_one_in_its_folder_on_its_machine() {
+    fn n_w_on_a_worktree_makes_one_in_its_folder_on_its_machine() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
-        let tab = |id| WorkstreamPlace { project: project_row("main", id),
-            workstream: tab_of(id, 0),
+        let tab = |id| WorktreePlace { project: project_row("main", id),
+            worktree: tab_of(id, 0),
         };
-        sidebar.cursor = Some(Spot::Local(Place::Workstream(tab(10))));
+        sidebar.cursor = Some(Spot::Local(Place::Worktree(tab(10))));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(10).unwrap();
-        let made = Asked::NewWorkstream { on: Machine::Local, project, folder: directory("/w/a") };
+        let made = Asked::NewWorktree { on: Machine::Local, project, folder: directory("/w/a") };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
-        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Workstream(tab(20))));
+        sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(tab(20))));
         type_in(&mut sidebar, "n");
         let project = ProjectId::of(20).unwrap();
         let on = Machine::Remote(nixos());
-        let far = Asked::NewWorkstream { on, project, folder: directory("/w/b") };
+        let far = Asked::NewWorktree { on, project, folder: directory("/w/b") };
         assert_eq!(sidebar.key(&char('w'), moment(160_000)), far);
     }
 
@@ -10038,19 +10042,19 @@ mod tests {
     }
 
     #[test]
-    fn j_and_k_move_a_workstream_among_its_project_s_by_lunetad() {
+    fn j_and_k_move_a_worktree_among_its_project_s_by_lunetad() {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
-        let first = WorkstreamPlace { project: project_row("older", 10),
-            workstream: tab_of(10, 0),
+        let first = WorktreePlace { project: project_row("older", 10),
+            worktree: tab_of(10, 0),
         };
         sidebar.cursor = Some(Spot::Local(pane_of("older", 10, 1)));
         type_in(&mut sidebar, "v");
-        assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Workstream(first))));
+        assert_eq!(sidebar.cursor, Some(Spot::Local(Place::Worktree(first))));
         let asked = sidebar.key(&char('J'), moment(160_000));
         let (first, second) = (tab_of(10, 0), tab_of(10, 1));
         let (seen, wanted) = (vec![first, second], vec![second, first]);
-        let order = Reorder::Workstreams { project: ProjectId::of(10).unwrap(), seen, wanted };
+        let order = Reorder::Worktrees { project: ProjectId::of(10).unwrap(), seen, wanted };
         assert_eq!(asked, Asked::Move { on: Machine::Local, order, ticket: 1 });
     }
 

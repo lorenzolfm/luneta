@@ -756,7 +756,7 @@ fn session_of(act: &Act) -> &str {
     match act {
         Act::Pane { session, .. }
         | Act::Tab { session, .. }
-        | Act::Workstream { session, .. }
+        | Act::Worktree { session, .. }
         | Act::Project { session, .. }
         | Act::Kill { session, .. }
         | Act::Leave { session, .. } => session.as_str(),
@@ -770,8 +770,8 @@ fn says(act: &Act) -> String {
             let panes: Vec<String> = panes.iter().map(|pane| format!("{session}:{pane}")).collect();
             format!("close the tab of {}", panes.join(", "))
         },
-        Act::Workstream { session, workstream, .. } => {
-            format!("close workstream {workstream} of {session}")
+        Act::Worktree { session, worktree, .. } => {
+            format!("close worktree {worktree} of {session}")
         },
         Act::Project { session, .. } => format!("delete project {session}"),
         Act::Kill { session, .. } | Act::Leave { session, .. } => {
@@ -894,8 +894,8 @@ fn act(act: &Act) -> Result<(), String> {
             let close = Close::Tab { id: *tab, panes: panes.clone() };
             closes::closed(session, whose.started(session)?, &close)
         },
-        Act::Workstream { .. } => {
-            unreachable!("only the sidebar plans a workstream's delete, and lunetad acts on it")
+        Act::Worktree { .. } => {
+            unreachable!("only the sidebar plans a worktree's delete, and lunetad acts on it")
         },
         Act::Project { .. } => {
             unreachable!("only the sidebar plans a project's delete, and lunetad acts on it")

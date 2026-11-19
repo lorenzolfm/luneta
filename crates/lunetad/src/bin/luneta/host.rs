@@ -27,7 +27,7 @@ use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
 use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
-use lunetad::projects::{Name, ProjectId, ViewId, WorkstreamId};
+use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
 use lunetad::{Destination, Direction, Directory, Growth};
 use ratatui::backend::CrosstermBackend;
@@ -37,7 +37,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Terminal};
 
 use crate::actions::{
-    Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, RIGHT, WORKSTREAMS, SHRINK, SWAP, UP,
+    Chord, AGENTS, COLLAPSE, DIRS, DOWN, GROW, LEFT, MENU, RIGHT, WORKTREES, SHRINK, SWAP, UP,
 };
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
@@ -71,25 +71,25 @@ use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, Hit, Settling};
 use crate::projected::{self, Projected, Route};
 use crate::viewed::{self, Heeded, Viewed};
-use crate::workstreams::{self, Unmoved};
+use crate::worktrees::{self, Unmoved};
 use crate::width::Width;
 use crate::zellij::{self, Close, Closes, Open, SessionName};
 
 pub enum Made {
-    Workstream { on: Machine, made: Result<Option<WorkstreamId>, String>, argv: Vec<String> },
+    Worktree { on: Machine, made: Result<Option<WorktreeId>, String>, argv: Vec<String> },
     Pulled { menu: u64, made: Result<Pulled, String> },
 }
 
 pub struct Pulled {
     on: Machine,
-    workstream: WorkstreamId,
+    worktree: WorktreeId,
     argv: Vec<String>,
 }
 
 #[derive(Debug)]
 enum Doomed {
-    Workstream { workstream: WorkstreamId, seen: Vec<ViewId> },
-    Project { project: ProjectId, workstreams: Vec<WorkstreamId>, seen: Vec<ViewId> },
+    Worktree { worktree: WorktreeId, seen: Vec<ViewId> },
+    Project { project: ProjectId, worktrees: Vec<WorktreeId>, seen: Vec<ViewId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,12 +102,12 @@ const NAMING: &str = "menu: luneta names a session already: try again once it ha
 
 const NAMING_PANICKED: &str = "menu: luneta could not name the session: naming it panicked";
 
-pub const NOT_YET: &str = "luneta does not do that to a workstream yet";
+pub const NOT_YET: &str = "luneta does not do that to a worktree yet";
 
 const WELCOME_MENU: &str = "the menu is for terminals: d d closes this welcome view";
 
 const UNSHOWN: [&str; 2] =
-    ["No workstream to show yet.", "The menu on a project's row makes one."];
+    ["No worktree to show yet.", "The menu on a project's row makes one."];
 
 const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
 
@@ -376,7 +376,7 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
         Ok(lunetad) => lunetad.clone(),
         Err(why) => return did_not_start(why),
     };
-    let cwd = match workstreams::real(&dir) {
+    let cwd = match worktrees::real(&dir) {
         Ok(cwd) => cwd,
         Err(why) => return did_not_start(&format!("no directory to start in: {why}")),
     };
@@ -384,9 +384,9 @@ pub fn run(session: Option<&SessionName>, folder: Result<PathBuf, String>) -> Ex
     let seen = |project| {
         news.last_seen(crate::ledger::Session::Project(project))
     };
-    let start = match workstreams::start(&lunetad, named, &cwd, seen) {
+    let start = match worktrees::start(&lunetad, named, &cwd, seen) {
         Ok(start) => start,
-        Err(refusal) => return did_not_start(&format!("no workstream to show: {refusal}")),
+        Err(refusal) => return did_not_start(&format!("no worktree to show: {refusal}")),
     };
     let runs_in = lunetad::mux::own::terminal_here();
     let mut terminal = match ratatui::try_init() {
@@ -480,7 +480,7 @@ fn put_back(terminal: &mut impl io::Write) -> io::Result<()> {
 
 fn run_in(
     terminal: &mut DefaultTerminal,
-    (start, runs_in): (Option<WorkstreamId>, Option<TerminalKey>),
+    (start, runs_in): (Option<WorktreeId>, Option<TerminalKey>),
     news: News,
     folder: Result<PathBuf, String>,
     unkept: Option<String>,
@@ -632,7 +632,7 @@ fn moves_on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> SyncSender<
             if stopped.holds(ticket) {
                 continue;
             }
-            let asked = AssertUnwindSafe(|| workstreams::reordered(&lunetad, &on, &order));
+            let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
             let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
             let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
                 Ok(kept) => Event::Moved { ticket, kept },
@@ -750,7 +750,7 @@ impl App {
                     Projected::default()
                 });
                 if let Some(right) = &mut self.right {
-                    let (tabs, titles) = self.projected.tabs(right.machine(), right.workstream());
+                    let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     right.tabs(tabs, titles);
                 }
                 self.sidebar.heard(host);
@@ -1152,7 +1152,7 @@ impl App {
             return;
         }
         let list = match chord {
-            WORKSTREAMS => Some(List::Workstreams),
+            WORKTREES => Some(List::Worktrees),
             AGENTS => Some(List::Agents),
             DIRS => Some(List::Dirs),
             _ => None,
@@ -1443,9 +1443,9 @@ impl App {
         let Some(right) = &mut self.right else {
             return;
         };
-        if let Some(workstream) = right.mouse(mouse, at, width) {
+        if let Some(worktree) = right.mouse(mouse, at, width) {
             let on = right.machine().clone();
-            self.go_workstream(&on, workstream, None);
+            self.go_worktree(&on, worktree, None);
         }
     }
 
@@ -1550,7 +1550,7 @@ impl App {
             },
             Asked::Delete { on, act } if act.own() => self.project_act(&on, &act),
             Asked::Delete { on, act } => match act {
-                Act::Workstream { .. } | Act::Project { .. } => self.project_act(&on, &act),
+                Act::Worktree { .. } | Act::Project { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
                     zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
                 },
@@ -1573,10 +1573,10 @@ impl App {
                 zellij::open(menu, &on, open, &self.events);
             },
             Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
-            Asked::NewWorkstream { on, project, folder } => {
-                self.make_workstream(on, folder, move |lunetad, on, folder| {
+            Asked::NewWorktree { on, project, folder } => {
+                self.make_worktree(on, folder, move |lunetad, on, folder| {
                     let folder = folder.as_str();
-                    workstreams::add_workstream(lunetad, on, project, folder, None).map(Some)
+                    worktrees::add_worktree(lunetad, on, project, folder, None).map(Some)
                 });
                 self.leave();
             },
@@ -1585,9 +1585,9 @@ impl App {
                     return;
                 }
                 self.naming_on(move || {
-                    let made = || workstreams::project_made(&on, &folder, name.as_ref());
+                    let made = || worktrees::project_made(&on, &folder, name.as_ref());
                     let made = caught(made).map(Some).map_err(|why| format!("menu: {why}"));
-                    Made::Workstream { on, made, argv: Vec::new() }
+                    Made::Worktree { on, made, argv: Vec::new() }
                 });
                 self.leave();
             },
@@ -1595,13 +1595,13 @@ impl App {
                 self.change(on, move |on| {
                     let renamed = match &rename {
                         Rename::Terminal(terminal, to) => {
-                            workstreams::renamed_terminal(on, *terminal, to.as_ref())
+                            worktrees::renamed_terminal(on, *terminal, to.as_ref())
                         },
-                        Rename::Workstream(workstream, to) => {
-                            workstreams::renamed_workstream(on, *workstream, to.as_ref())
+                        Rename::Worktree(worktree, to) => {
+                            worktrees::renamed_worktree(on, *worktree, to.as_ref())
                         },
                         Rename::Project(project, to) => {
-                            workstreams::renamed_project(on, *project, to)
+                            worktrees::renamed_project(on, *project, to)
                         },
                     };
                     renamed.map_err(|why| format!("not renamed: {why}"))
@@ -1615,8 +1615,8 @@ impl App {
                 self.naming_on(move || {
                     let made = caught(|| {
                         let (session, at) = (session.as_str(), (&holder, &cwd));
-                        let made = workstreams::pulled(&lunetad, &on, session, at, &name)?;
-                        Ok(Pulled { on, workstream: made, argv: command })
+                        let made = worktrees::pulled(&lunetad, &on, session, at, &name)?;
+                        Ok(Pulled { on, worktree: made, argv: command })
                     });
                     Made::Pulled { menu, made }
                 });
@@ -1710,13 +1710,13 @@ impl App {
 
     fn project_act(&mut self, on: &Machine, act: &Act) {
         match (on, act) {
-            (_, Act::Workstream { workstream, seen, .. }) => {
-                let (workstream, seen) = (*workstream, seen.clone());
-                self.project_act_delete(on, Doomed::Workstream { workstream, seen });
+            (_, Act::Worktree { worktree, seen, .. }) => {
+                let (worktree, seen) = (*worktree, seen.clone());
+                self.project_act_delete(on, Doomed::Worktree { worktree, seen });
             },
-            (_, Act::Project { project, workstreams, seen, .. }) => {
-                let (project, workstreams, seen) = (*project, workstreams.clone(), seen.clone());
-                self.project_act_delete(on, Doomed::Project { project, workstreams, seen });
+            (_, Act::Project { project, worktrees, seen, .. }) => {
+                let (project, worktrees, seen) = (*project, worktrees.clone(), seen.clone());
+                self.project_act_delete(on, Doomed::Project { project, worktrees, seen });
             },
             (Machine::Local, Act::Pane { pane: PaneKey::Terminal(terminal), .. }) => {
                 let (terminal, events) = (*terminal, self.events.clone());
@@ -1734,11 +1734,11 @@ impl App {
         let (lunetad, events, on) = (self.lunetad.clone(), self.events.clone(), on.clone());
         self.keep_change(thread::spawn(move || {
             let closed = caught(|| match &doomed {
-                Doomed::Workstream { workstream, seen } => {
-                    workstreams::closed(&lunetad, &on, *workstream, seen)
+                Doomed::Worktree { worktree, seen } => {
+                    worktrees::closed(&lunetad, &on, *worktree, seen)
                 },
-                Doomed::Project { project, workstreams, seen } => {
-                    workstreams::closed_project(&lunetad, &on, *project, workstreams, seen)
+                Doomed::Project { project, worktrees, seen } => {
+                    worktrees::closed_project(&lunetad, &on, *project, worktrees, seen)
                 },
             });
             if let Err(why) = closed {
@@ -1755,10 +1755,10 @@ impl App {
             let pane = OwnPane::new(project.key, pane.id())?;
             self.projected.of_pane(on, pane)
         });
-        let Some((workstream, terminal)) = held else {
+        let Some((worktree, terminal)) = held else {
             return self.sidebar.notify(format!("menu: lunetad lists no view {}", pane.id()));
         };
-        self.go_workstream(on, workstream, Some(terminal));
+        self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
     }
 
@@ -1771,10 +1771,10 @@ impl App {
             Open::Pane { beside, command, .. } => {
                 let pane = OwnPane::new(project.key, *beside);
                 let held = pane.and_then(|it| self.projected.of_pane(on, it));
-                let Some((workstream, terminal)) = held else {
+                let Some((worktree, terminal)) = held else {
                     return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
                 };
-                self.go_workstream(on, workstream, Some(terminal));
+                self.go_worktree(on, worktree, Some(terminal));
                 self.shown().open_beside_focused(command.clone());
             },
             Open::Tab { tab, .. } => {
@@ -1787,10 +1787,10 @@ impl App {
                     let made = caught(|| {
                         let named = name.as_deref();
                         let folder = cwd.as_str();
-                        workstreams::add_workstream(&lunetad, &on, id, folder, named).map(Some)
+                        worktrees::add_worktree(&lunetad, &on, id, folder, named).map(Some)
                     });
-                    let made = made.map_err(|why| format!("menu: no workstream made: {why}"));
-                    Made::Workstream { on, made, argv }
+                    let made = made.map_err(|why| format!("menu: no worktree made: {why}"));
+                    Made::Worktree { on, made, argv }
                 });
             },
         }
@@ -1806,16 +1806,16 @@ impl App {
             },
             Picked::Add { on, project, folder, name } => {
                 let project = project.id();
-                self.make_workstream(on, folder, move |lunetad, on, folder| {
+                self.make_worktree(on, folder, move |lunetad, on, folder| {
                     let named = name.as_ref().map(Name::as_str);
                     let folder = folder.as_str();
-                    workstreams::add_workstream(lunetad, on, project, folder, named).map(Some)
+                    worktrees::add_worktree(lunetad, on, project, folder, named).map(Some)
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Make { on, session, cwd } => {
-                self.make_workstream(on, cwd, move |lunetad, on, cwd| {
-                    workstreams::made_at(lunetad, on, cwd, Some(session.as_str()))
+                self.make_worktree(on, cwd, move |lunetad, on, cwd| {
+                    worktrees::made_at(lunetad, on, cwd, Some(session.as_str()))
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2016,14 +2016,14 @@ impl App {
             return;
         };
         let on = right.machine().clone();
-        let (before, after) = self.projected.tabs_beside(&on, right.workstream());
+        let (before, after) = self.projected.tabs_beside(&on, right.worktree());
         let beside = match direction {
             Direction::Left => before,
             Direction::Right => after,
             Direction::Up | Direction::Down => None,
         };
         if let Some(beside) = beside {
-            self.go_workstream(&on, beside, None);
+            self.go_worktree(&on, beside, None);
         }
     }
 
@@ -2049,59 +2049,59 @@ impl App {
             }
             return Err(format!("{session} is no project lunetad keeps"));
         };
-        let shows = |workstream| {
+        let shows = |worktree| {
             self.right.as_ref().is_some_and(|right| {
-                right.machine() == machine && right.workstream() == workstream
+                right.machine() == machine && right.worktree() == worktree
             })
         };
-        if let Place::Workstream(place) = place {
-            let held = project.workstreams.iter().any(|it| it.id == place.workstream);
+        if let Place::Worktree(place) = place {
+            let held = project.worktrees().iter().any(|it| it.id == place.worktree);
             if !held {
-                return Err(format!("{session} holds no such workstream"));
+                return Err(format!("{session} holds no such worktree"));
             }
-            if !shows(place.workstream) {
-                self.go_workstream(machine, place.workstream, None);
+            if !shows(place.worktree) {
+                self.go_worktree(machine, place.worktree, None);
             }
             return Ok(());
         }
         let Some(pane) = place.pane() else {
-            if project.workstreams.iter().any(|it| shows(it.id)) {
+            if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
-            let first = project.workstreams.first();
-            let first = first.ok_or_else(|| format!("{session} holds no workstream"))?;
-            self.go_workstream(machine, first.id, None);
+            let first = project.worktrees().first();
+            let first = first.ok_or_else(|| format!("{session} holds no worktree"))?;
+            self.go_worktree(machine, first.id, None);
             return Ok(());
         };
         let pane = OwnPane::new(key, pane).ok_or("a view of id 0")?;
-        let (workstream, terminal) = self.projected.of_pane(machine, pane).ok_or_else(|| {
+        let (worktree, terminal) = self.projected.of_pane(machine, pane).ok_or_else(|| {
             format!("lunetad lists no view {} in {session}", pane.id)
         })?;
-        self.go_workstream(machine, workstream, Some(terminal));
+        self.go_worktree(machine, worktree, Some(terminal));
         Ok(())
     }
 
-    fn go_workstream(
+    fn go_worktree(
         &mut self,
         on: &Machine,
-        workstream: WorkstreamId,
+        worktree: WorktreeId,
         terminal: Option<ViewId>,
     ) {
         if let Some(right) = &mut self.right {
-            right.go(on, workstream);
+            right.go(on, worktree);
         } else {
             let (size, greeting) = (layout_size(self.areas.1), greeting(self.colours));
             let (folder, events) = (self.lunetad.clone(), &self.events);
             let (number, on) = (self.shown_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
             let started =
-                Viewed::start(number, folder, on, workstream, size, greeting, runs_in, events);
+                Viewed::start(number, folder, on, worktree, size, greeting, runs_in, events);
             self.right = Some(started);
         }
         let right = self.shown();
         assert_eq!(right.machine(), on, "luneta shows the machine it went to");
-        assert_eq!(right.workstream(), workstream, "luneta shows the workstream it went to");
-        let (tabs, titles) = self.projected.tabs(on, workstream);
+        assert_eq!(right.worktree(), worktree, "luneta shows the worktree it went to");
+        let (tabs, titles) = self.projected.tabs(on, worktree);
         let right = self.shown();
         right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
@@ -2111,25 +2111,25 @@ impl App {
     }
 
     fn shown(&mut self) -> &mut Viewed {
-        self.right.as_mut().expect("luneta went to a workstream")
+        self.right.as_mut().expect("luneta went to a worktree")
     }
 
     fn leave_view(&mut self) {
         let Some(right) = &self.right else {
             return;
         };
-        let (on, left) = (right.machine().clone(), right.workstream());
+        let (on, left) = (right.machine().clone(), right.worktree());
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
-            let workstreams = projects.flat_map(|it| &it.workstreams);
-            let open = workstreams.filter(|it| !it.terminals.is_empty());
+            let worktrees = projects.flat_map(projected::Project::worktrees);
+            let open = worktrees.filter(|it| !it.terminals.is_empty());
             let others = open.filter(|it| *machine != on || it.id != left);
             others.max_by_key(|it| it.used).map(|it| it.id)
         };
         let other = held(&on).map(|id| (on.clone(), id));
         let other = other.or_else(|| held(&Machine::Local).map(|id| (Machine::Local, id)));
         match other {
-            Some((machine, other)) => self.go_workstream(&machine, other, None),
+            Some((machine, other)) => self.go_worktree(&machine, other, None),
             None => self.unview(),
         }
     }
@@ -2144,15 +2144,15 @@ impl App {
         self.sidebar.unseat();
         self.seated = None;
         self.give(Focus::on(Side::Sidebar));
-        assert_eq!(self.focus.side, Side::Sidebar, "with no workstream shown, no keys go to it");
+        assert_eq!(self.focus.side, Side::Sidebar, "with no worktree shown, no keys go to it");
     }
 
     fn seat(&mut self) {
         let Some(right) = &self.right else {
             return;
         };
-        let (on, workstream) = (right.machine().clone(), right.workstream());
-        let Some((project, _)) = self.projected.holding(&on, workstream) else {
+        let (on, worktree) = (right.machine().clone(), right.worktree());
+        let Some((project, _)) = self.projected.holding(&on, worktree) else {
             return;
         };
         let key = project.key;
@@ -2163,7 +2163,7 @@ impl App {
             self.seated = None;
         }
         assert_eq!(seated(&self.sidebar), Some(key), "the sidebar sits where luneta shows");
-        self.sidebar.showing(workstream);
+        self.sidebar.showing(worktree);
         if let Some(pane) = pane
             && self.seated != Some(pane)
         {
@@ -2178,17 +2178,17 @@ impl App {
             Heeded::Quiet => {},
             Heeded::Followed => {
                 let right = self.shown();
-                let (on, workstream) = (right.machine().clone(), right.workstream());
-                let (tabs, titles) = self.projected.tabs(&on, workstream);
+                let (on, worktree) = (right.machine().clone(), right.worktree());
+                let (tabs, titles) = self.projected.tabs(&on, worktree);
                 self.shown().tabs(tabs, titles);
             },
             Heeded::Edged(direction) => self.cross(direction),
-            Heeded::Sent(workstream) => {
+            Heeded::Sent(worktree) => {
                 let Some(right) = &self.right else {
                     return;
                 };
                 let on = right.machine().clone();
-                self.go_workstream(&on, workstream, None);
+                self.go_worktree(&on, worktree, None);
             },
             Heeded::Note(note) => self.sidebar.notify(note),
             Heeded::Emptied => self.leave_view(),
@@ -2201,11 +2201,11 @@ impl App {
         self.seat();
     }
 
-    fn make_workstream(
+    fn make_worktree(
         &mut self,
         on: Machine,
         cwd: Directory,
-        made: impl FnOnce(&Path, &Machine, &Directory) -> Result<Option<WorkstreamId>, String>
+        made: impl FnOnce(&Path, &Machine, &Directory) -> Result<Option<WorktreeId>, String>
             + Send
             + 'static,
     ) {
@@ -2215,8 +2215,8 @@ impl App {
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
             let made = caught(|| made(&lunetad, &on, &cwd));
-            let made = made.map_err(|why| format!("no workstream made: {why}"));
-            Made::Workstream { on, made, argv: Vec::new() }
+            let made = made.map_err(|why| format!("no worktree made: {why}"));
+            Made::Worktree { on, made, argv: Vec::new() }
         });
     }
 
@@ -2241,21 +2241,21 @@ impl App {
         assert_eq!(self.naming, Naming::Busy, "a session was named that `name` did not name");
         self.naming = Naming::Idle;
         match made {
-            Made::Workstream { on, made: Ok(Some(made)), argv } => {
+            Made::Worktree { on, made: Ok(Some(made)), argv } => {
                 self.go_opening(&on, made, argv);
             },
-            Made::Workstream { made: Ok(None), .. } => {
+            Made::Worktree { made: Ok(None), .. } => {
                 self.sidebar.notify(format!("menu: {}", UNSHOWN.join(" ")));
             },
-            Made::Workstream { made: Err(why), .. } => self.sidebar.notify(why),
+            Made::Worktree { made: Err(why), .. } => self.sidebar.notify(why),
             Made::Pulled { menu, made } => self.pulled_made(menu, made),
         }
     }
 
-    fn go_opening(&mut self, on: &Machine, workstream: WorkstreamId, argv: Vec<String>) {
-        self.go_workstream(on, workstream, None);
+    fn go_opening(&mut self, on: &Machine, worktree: WorktreeId, argv: Vec<String>) {
+        self.go_worktree(on, worktree, None);
         if !argv.is_empty() {
-            self.shown().open_in(workstream, argv);
+            self.shown().open_in(worktree, argv);
         }
     }
 
@@ -2265,8 +2265,8 @@ impl App {
             Ok(made) => made,
             Err(why) => return self.sidebar.notify(format!("menu: no session made: {why}")),
         };
-        let Pulled { on, workstream, argv } = made;
-        self.go_opening(&on, workstream, argv);
+        let Pulled { on, worktree, argv } = made;
+        self.go_opening(&on, worktree, argv);
     }
 
     fn give(&mut self, focus: Focus) {

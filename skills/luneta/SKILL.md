@@ -1,6 +1,6 @@
 ---
 name: luneta
-description: Drive luneta and zellij for the user with the `luneta` CLI - start a workstream in a folder, a branch, an issue or a PR, open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
+description: Drive luneta and zellij for the user with the `luneta` CLI - start a worktree in a folder, a branch, an issue or a PR, open a session, a tab or a pane, start coding agents (Claude Code or pi) on work (one per issue, in parallel), take the user to a session or pane, turn a pane into a tab or a tab into panes, close panes or delete sessions, delete the worktrees of merged pull requests, and reset luneta on every machine. Use when the user asks in words to make a session to work on something, spawn an agent or a skill on a PR or issue, tackle several issues at once, go somewhere, move a pane to a tab of its own or a tab's panes into another tab, close sessions, tabs or panes, clean up merged worktrees, or reset luneta and start from scratch, and `luneta` is on the PATH.
 ---
 
 # Drive luneta
@@ -91,8 +91,8 @@ luneta start <folder|branch|'#issue'|issue or PR link>
   [Merged worktrees](#merged-worktrees).
 - `terminate` ends luneta on every machine and forgets every project: see
   [Reset luneta](#reset-luneta).
-- `start` starts a workstream of one of luneta's projects: see
-  [Start a workstream](#start-a-workstream).
+- `start` starts a worktree of one of luneta's projects: see
+  [Start a worktree](#start-a-worktree).
 
 ## Which session a tab opens in
 
@@ -178,10 +178,10 @@ beside it. If no pane has the branch, make a worktree for the PR (`luneta
 worktree --repo <dir> <PR link>` takes a link), then open a tab there, in the
 session [Which session a tab opens in](#which-session-a-tab-opens-in) picks.
 
-## Start a workstream
+## Start a worktree
 
 `luneta start` starts work in one of luneta's own projects, and prints the
-workstream's folder. It works from a pane of zellij too, as it asks lunetad,
+worktree's folder. It works from a pane of zellij too, as it asks lunetad,
 not zellij.
 
 ```sh
@@ -194,20 +194,20 @@ luneta start https://github.com/o/app/pull/7   # a pull request, checked out in 
 - Run it in the repository the branch, issue or pull request is of, or from
   anywhere for a link: luneta finds a clone of the link's repository. Quote
   `'#42'`, or the shell drops it as a comment.
-- A project is the root of a clone `wt clone` made, with one workstream for
-  each of its worktrees, or a plain folder, with one workstream: the folder
-  itself. A folder inside a project starts that project's workstream there.
+- A project is the root of a clone `wt clone` made, holding each of its
+  worktrees, or a plain folder, whose one worktree is the folder itself. A
+  folder inside a project starts the worktree it is in.
 - A branch needs a clone `wt clone` made: in a plain clone it makes nothing
   and says why. Tell the user. An issue or a pull request goes to a clone
   `wt clone` made of its repository: the one it runs in, else one of
   luneta's projects, else one zoxide knows.
 - The issue's agent starts in the harness the user picked last in luneta's
   menu. Don't open another agent for it: `start` already has. Started again
-  while its workstream has terminals, it goes there and starts no second
-  agent. If the workstream has no terminal, the agent starts in it.
+  while its worktree has terminals, it goes there and starts no second
+  agent. If the worktree has no terminal, the agent starts in it.
 - A folder of the name goes before a branch of it. `~` is the user's home,
   quoted or not.
-- It exits 4 when the workstream started but its agent did not, or taking
+- It exits 4 when the worktree started but its agent did not, or taking
   the user there failed: the folder is printed all the same, and stderr says
   what failed. Tell the user. Starting it again is safe: it starts the agent
   only where no terminal is.
@@ -317,7 +317,7 @@ terminate`. It ends nothing, prints what would end on each machine, and exits 3.
 Its last line, on stderr, names the plan:
 
 ```text
-mac (this machine): ends 1 luneta, lunetad and luneta-mux, and 3 agents with them, 1 busy; forgets 4 projects and 9 workstreams
+mac (this machine): ends 1 luneta, lunetad and luneta-mux, and 3 agents with them, 1 busy; forgets 4 projects and 9 worktrees
 pi: skipped, as ssh does not reach it, and so luneta runs on there and keeps its projects: ssh: connect to host pi port 22: Operation timed out
 luneta: ended nothing; run it again with --yes 5f0c2a9e81d4b37a to end what it says
 ```

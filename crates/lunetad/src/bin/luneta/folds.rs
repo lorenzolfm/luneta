@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use lunetad::projects::{ProjectId, WorkstreamId};
+use lunetad::projects::{ProjectId, WorktreeId};
 use lunetad::Destination;
 use notify::RecommendedWatcher;
 
@@ -16,15 +16,15 @@ use crate::state;
 #[derive(Clone, Copy, Debug)]
 pub enum Fold<'a> {
     Project(&'a Machine, ProjectId),
-    Workstream(&'a Machine, WorkstreamId),
+    Worktree(&'a Machine, WorktreeId),
 }
 
 impl Fold<'_> {
     fn file(self) -> (Kept, String) {
         let (machine, name) = match self {
             Fold::Project(machine, project) => (machine, format!("project-{:016x}", project.get())),
-            Fold::Workstream(machine, workstream) => {
-                (machine, format!("workstream-{:016x}", workstream.get()))
+            Fold::Worktree(machine, worktree) => {
+                (machine, format!("worktree-{:016x}", worktree.get()))
             },
         };
         match machine {
@@ -197,8 +197,8 @@ mod tests {
         Fold::Project(&Machine::Local, ProjectId::of(id).unwrap())
     }
 
-    fn workstream(id: u64) -> Fold<'static> {
-        Fold::Workstream(&Machine::Local, WorkstreamId::of(id).unwrap())
+    fn worktree(id: u64) -> Fold<'static> {
+        Fold::Worktree(&Machine::Local, WorktreeId::of(id).unwrap())
     }
 
     fn within(root: &Path) -> Folds {
@@ -213,14 +213,14 @@ mod tests {
         let mut there = within(&root);
 
         assert!(here.set(project(1), true));
-        assert!(here.set(workstream(2), true));
+        assert!(here.set(worktree(2), true));
         assert!(there.reload());
-        assert!(there.contains(project(1)) && there.contains(workstream(2)));
+        assert!(there.contains(project(1)) && there.contains(worktree(2)));
         assert!(within(&root).contains(project(1)));
 
         assert!(there.set(project(1), false));
         assert!(here.reload());
-        assert!(!here.contains(project(1)) && here.contains(workstream(2)));
+        assert!(!here.contains(project(1)) && here.contains(worktree(2)));
         assert!(!here.reload());
 
         assert!(!here.set(project(1), false));
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_and_a_workstream_of_one_id_and_another_machine_s_fold_apart() {
+    fn a_project_and_a_worktree_of_one_id_and_another_machine_s_fold_apart() {
         let scratch = tempfile::tempdir().unwrap();
         let mut here = within(scratch.path());
         let odd: Destination = "ssh://me@vps:22".parse().unwrap();
@@ -239,13 +239,13 @@ mod tests {
         let seven = ProjectId::of(7).unwrap();
 
         assert!(here.set(Fold::Project(&vps, seven), true));
-        assert!(here.set(Fold::Workstream(&dot, WorkstreamId::of(7).unwrap()), true));
+        assert!(here.set(Fold::Worktree(&dot, WorktreeId::of(7).unwrap()), true));
         let next = within(scratch.path());
         assert!(next.contains(Fold::Project(&vps, seven)));
         assert!(!next.contains(project(7)));
-        assert!(!next.contains(workstream(7)));
+        assert!(!next.contains(worktree(7)));
         assert!(!next.contains(Fold::Project(&dot, seven)));
-        assert!(next.contains(Fold::Workstream(&dot, WorkstreamId::of(7).unwrap())));
+        assert!(next.contains(Fold::Worktree(&dot, WorktreeId::of(7).unwrap())));
         assert_eq!(next.lost(), None);
     }
 
@@ -255,14 +255,14 @@ mod tests {
         let mut here = within(scratch.path());
         let vps = Machine::Remote("vps".parse().unwrap());
         let far = Fold::Project(&vps, ProjectId::of(5).unwrap());
-        for fold in [project(1), workstream(2), project(3), far] {
+        for fold in [project(1), worktree(2), project(3), far] {
             here.set(fold, true);
         }
-        assert!(!here.listed(&Machine::Local, &[project(1), workstream(2)]));
+        assert!(!here.listed(&Machine::Local, &[project(1), worktree(2)]));
         assert!(here.contains(project(3)), "a fold this luneta never heard of stays");
         assert!(here.listed(&Machine::Local, &[project(1)]));
-        assert!(!here.contains(workstream(2)));
-        assert!(!within(scratch.path()).contains(workstream(2)), "its file goes too");
+        assert!(!here.contains(worktree(2)));
+        assert!(!within(scratch.path()).contains(worktree(2)), "its file goes too");
         assert!(here.contains(project(1)) && here.contains(far));
         assert!(!here.listed(&Machine::Local, &[project(1)]));
     }
@@ -292,9 +292,9 @@ mod tests {
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
         assert!(here.reload() && here.contains(project(1)));
         let vps = Machine::Remote("vps".parse().unwrap());
-        within(scratch.path()).set(Fold::Workstream(&vps, WorkstreamId::of(2).unwrap()), true);
+        within(scratch.path()).set(Fold::Worktree(&vps, WorktreeId::of(2).unwrap()), true);
         assert!(matches!(heard.recv_timeout(Duration::from_secs(5)), Ok(Event::Folds)));
-        let two = WorkstreamId::of(2).unwrap();
-        assert!(here.reload() && here.contains(Fold::Workstream(&vps, two)));
+        let two = WorktreeId::of(2).unwrap();
+        assert!(here.reload() && here.contains(Fold::Worktree(&vps, two)));
     }
 }

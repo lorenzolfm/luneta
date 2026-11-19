@@ -606,7 +606,7 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
         let mut daemon: DaemonClient<_> = lunetad::connect(&folder).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let deleting = |name: &str, head: &str, remote: Option<&str>| Deleting {
-            worktree: repository.at(name).display().to_string(),
+            folder: repository.at(name).display().to_string(),
             branch: name.to_owned(),
             head: head.to_owned(),
             number: 1,

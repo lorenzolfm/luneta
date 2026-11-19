@@ -5,7 +5,7 @@ use lunetad::api::terminal::Found;
 
 use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
-use crate::projects::workstream;
+use crate::projects::worktree;
 use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, SPLIT, UNSHOWN};
 use crate::worktree::worktree_added;
 
@@ -36,7 +36,7 @@ fn seam(window: &Window) -> Option<usize> {
 }
 
 #[test]
-fn luneta_shows_its_workstream_and_what_its_shell_prints() {
+fn luneta_shows_its_worktree_and_what_its_shell_prints() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -76,14 +76,14 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
     });
     window.send(CLOSE);
     let id = eventually("the pane luneta is on closes", || {
-        let workstream = shown(&owned, &dir.path)?;
-        (workstream.terminals.len() == 1).then_some(workstream.id)
+        let worktree = shown(&owned, &dir.path)?;
+        (worktree.terminals.len() == 1).then_some(worktree.id)
     });
     window.send(CLOSE);
-    eventually("the workstream stays, with no pane, and luneta leaves it", || {
+    eventually("the worktree stays, with no pane, and luneta leaves it", || {
         let projects = projects_of(&owned);
-        let mut workstreams = projects.iter().flat_map(|it| &it.workstreams);
-        let emptied = workstreams.any(|it| it.id == id && it.terminals.is_empty());
+        let mut worktrees = projects.iter().flat_map(|it| it.worktrees().unwrap());
+        let emptied = worktrees.any(|it| it.id == id && it.terminals.is_empty());
         (emptied && window.shows(UNSHOWN)).then_some(())
     });
 }
@@ -101,7 +101,7 @@ fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
         (frames(&window) == Some(2) && window.shows("runs no terminal")).then_some(())
     });
     let ids = || -> Vec<u64> {
-        shown(&owned, &dir.path).expect("the workstream").terminals.iter().map(|it| it.id).collect()
+        shown(&owned, &dir.path).expect("the worktree").terminals.iter().map(|it| it.id).collect()
     };
     let terminals = ids();
     assert_eq!(terminals.len(), 1, "a welcome view runs no terminal");
@@ -136,7 +136,7 @@ fn ctrl_h_and_ctrl_l_move_between_panes_and_alt_equals_and_minus_resize_the_focu
 }
 
 #[test]
-fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_workstream_beside_but_not_past_the_project() {
+fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_worktree_beside_but_not_past_the_project() {
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
@@ -144,16 +144,16 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_workstream_beside_but_not_past_the_pr
     let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let docs = dir.path.parent().unwrap().join("docs");
     worktree_added(dir.path.parent().unwrap(), "docs");
-    let second = workstream(&owned.host, project, &docs);
+    let second = worktree(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
     let used = |id: u64| {
         let projects = projects_of(&owned);
-        let found = projects.iter().flat_map(|it| &it.workstreams).find(|it| it.id == id);
+        let found = projects.iter().flat_map(|it| it.worktrees().unwrap()).find(|it| it.id == id);
         found.and_then(|it| it.used_at).map(|at| (at.seconds, at.nanos))
     };
     window.send(LEFT);
     thread::sleep(Duration::from_secs(1));
-    assert_eq!(shown(&owned, &docs), None, "Ctrl h stops at the project's first workstream");
+    assert_eq!(shown(&owned, &docs), None, "Ctrl h stops at the project's first worktree");
     window.send(RIGHT);
     eventually("Ctrl l goes to docs, where a shell opens", || shown(&owned, &docs));
     assert!(used(second) > used(first), "{:?}", projects_of(&owned));
@@ -173,7 +173,7 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
     let projects = projects_of(owned);
     let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
     assert_eq!(made.len(), 1, "{projects:?}");
-    assert_eq!(made[0].workstreams.len(), 1, "{projects:?}");
+    assert_eq!(made[0].worktrees().unwrap().len(), 1, "{projects:?}");
 }
 
 #[test]

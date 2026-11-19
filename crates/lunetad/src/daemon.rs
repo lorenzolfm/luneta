@@ -60,7 +60,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Failed, Lock, Made, Store, WorkstreamId};
+use crate::projects::{Ask, Changed, Failed, Lock, Made, Store, WorktreeId};
 use crate::layouts;
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -91,7 +91,7 @@ const SWEEP: Duration = Duration::from_secs(2);
 
 const TERMINAL_SWEEP: Duration = Duration::from_secs(1);
 
-const WORK_TREE_SWEEP: Duration = Duration::from_secs(5);
+const GIT_STATUS_SWEEP: Duration = Duration::from_secs(5);
 
 const FETCH_SWEEP: Duration = Duration::from_mins(5);
 
@@ -193,7 +193,7 @@ pub async fn serve(
     follow(&core, &claim.folder, folders, (watchers.clone(), owns.clone()), end)?;
     panes::follow(core.clone(), wake_panes, panes_woken, Zellij::cache_folder(), SWEEP)?;
     owns::follow(layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
-    git::follow(core.clone(), wake_git, git_woken, WORK_TREE_SWEEP)?;
+    git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
     github::follow(core.clone(), wake_github, github_woken, rests)?;
@@ -1047,20 +1047,20 @@ impl Daemon for Host {
         let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let Hello { workstream, size, runs_in, again, on } = hello;
+        let Hello { worktree, size, runs_in, again, on } = hello;
         if on.is_some() && runs_in.is_some() {
             return Err(Status::invalid_argument(RUNS_IN_ON));
         }
         if let Some((mut daemon, permit)) = self.bridged_held(on)? {
-            let hello = Hello { workstream, size, runs_in: None, again, on: None };
+            let hello = Hello { worktree, size, runs_in: None, again, on: None };
             let first = ShowRequest { event: Some(Event::Hello(hello)) };
             let rest = heard.map_while(Result::ok);
             let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
             let held = Held { stream: answer.into_inner(), _permit: permit };
             return Ok(Response::new(Box::pin(held)));
         }
-        let workstream = layouts::id("workstream", workstream).map(WorkstreamId::new);
-        let workstream = workstream.map_err(Status::invalid_argument)?;
+        let worktree = layouts::id("worktree", worktree).map(WorktreeId::new);
+        let worktree = worktree.map_err(Status::invalid_argument)?;
         let size = layouts::size_of(size).map_err(Status::invalid_argument)?;
         let runs_in = runs_in.as_ref().map(TerminalKey::of).transpose();
         let runs_in = runs_in.map_err(|why| Status::invalid_argument(format!("runs_in: {why}")))?;
@@ -1068,7 +1068,7 @@ impl Daemon for Host {
         let layouts = self.layouts.clone();
         let came = task::spawn_blocking(move || {
             let came =
-                |answer| layouts::Command::Came { workstream, size, runs_in, again, out, answer };
+                |answer| layouts::Command::Came { worktree, size, runs_in, again, out, answer };
             layouts::ask(&layouts, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;
@@ -1168,11 +1168,11 @@ impl Daemon for Host {
         let Changed { made, kept } = changed.await.map_err(|error| unfinished(&error))??;
         let made = made.map(|made| match made {
             Made::Project(project) => change_projects_response::Made::Project(project.get()),
-            Made::Workstream(workstream) => {
-                change_projects_response::Made::Workstream(workstream.get())
+            Made::Worktree(worktree) => {
+                change_projects_response::Made::Worktree(worktree.get())
             },
-            Made::Found(workstream) => change_projects_response::Made::Found(workstream.get()),
-            Made::Taken(workstream) => change_projects_response::Made::Taken(workstream.get()),
+            Made::Found(worktree) => change_projects_response::Made::Found(worktree.get()),
+            Made::Taken(worktree) => change_projects_response::Made::Taken(worktree.get()),
         });
         Ok(Response::new(ChangeProjectsResponse { made, kept: Some(kept.to_api()) }))
     }

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::checkout::Head;
-use lunetad::api::work_tree::{NoCheckout, Stands};
+use lunetad::api::git_status::{NoCheckout, Stands};
 use lunetad::api::refuge_response::{Ended, Went};
 use lunetad::api::{
     self, Branch, Changes, Checkout, ListClientsRequest, PullRequestState, RefugeRequest,
@@ -521,7 +521,7 @@ fn changed_every_way(dir: &Path, origin: &Path) {
 }
 
 #[test]
-fn git_says_how_the_work_tree_stands_where_each_pane_works() {
+fn git_says_how_the_folder_stands_where_each_pane_works() {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
     let (tree, plain, detached) =
@@ -541,11 +541,12 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
 
-    let trees = eventually("git says how all three stand", || {
-        let trees = host.host().work_trees;
-        (trees.len() == 3).then_some(trees)
+    let statuses = eventually("git says how all three stand", || {
+        let statuses = host.host().git_statuses;
+        (statuses.len() == 3).then_some(statuses)
     });
-    let stands = |dir: &str| trees.iter().find(|tree| tree.dir == dir).unwrap().stands.clone();
+    let stands =
+        |dir: &str| statuses.iter().find(|status| status.dir == dir).unwrap().stands.clone();
     let every =
         Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
     let main = Branch {
@@ -569,8 +570,8 @@ fn git_says_how_the_work_tree_stands_where_each_pane_works() {
 
     host.zellij.list("work", &json!([in_dir(1, &tree), in_dir(3, &detached)]));
     eventually("what git said of plain goes", || {
-        let trees = host.host().work_trees;
-        trees.iter().all(|tree| tree.dir != plain).then_some(())
+        let statuses = host.host().git_statuses;
+        statuses.iter().all(|status| status.dir != plain).then_some(())
     });
 }
 
@@ -613,8 +614,8 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     let mut daemon = start(host.vars()).unwrap();
 
     let changed = |dir: &str| {
-        host.host().work_trees.iter().find(|tree| tree.dir == dir).and_then(|tree| {
-            match tree.stands.as_ref()? {
+        host.host().git_statuses.iter().find(|status| status.dir == dir).and_then(|status| {
+            match status.stands.as_ref()? {
                 Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. }) => {
                     let changed = branch.changed.as_ref()?;
                     Some((changed.added, changed.deleted))
@@ -672,7 +673,7 @@ fn luneta_sessions_names_the_repository_each_pane_works_in() {
     host.zellij.list("work", &json!(panes));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    eventually("git says of all five", || (host.host().work_trees.len() == 5).then_some(()));
+    eventually("git says of all five", || (host.host().git_statuses.len() == 5).then_some(()));
 
     let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
     let said = String::from_utf8(said.stdout).unwrap();
@@ -733,7 +734,7 @@ fn luneta_sessions_says_nothing_of_a_directory_git_will_not_read() {
     host.zellij.list("work", &json!(panes));
     let _work = host.serve("work");
     let mut daemon = start(host.vars()).unwrap();
-    eventually("git says of the last", || (!host.host().work_trees.is_empty()).then_some(()));
+    eventually("git says of the last", || (!host.host().git_statuses.is_empty()).then_some(()));
 
     let said = host.vars().command(LUNETA).arg("sessions").output().unwrap();
     let said = String::from_utf8(said.stdout).unwrap();
@@ -782,17 +783,17 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
 }
 
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
-    let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
-    match tree.stands? {
+    let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+    match status.stands? {
         Stands::Checkout(checkout) => Some(checkout),
         Stands::Outside(()) | Stands::NoCheckout(_) => None,
     }
 }
 
-fn in_no_work_tree(host: &Host, cwd: &str) {
-    eventually("git says the directory is in no work tree", || {
-        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
-        (tree.stands == Some(Stands::Outside(()))).then_some(())
+fn in_no_repository(host: &Host, cwd: &str) {
+    eventually("git says the directory is in no repository", || {
+        let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+        (status.stands == Some(Stands::Outside(()))).then_some(())
     });
 }
 
@@ -813,7 +814,7 @@ fn shows_at_once(
     assert!(started.elapsed() < Duration::from_secs(4), "{what}: {:?}", started.elapsed());
 }
 
-fn says_at_once_as_a_work_tree_changes(format: &str) {
+fn says_at_once_as_a_checkout_changes(format: &str) {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
     let path = |name: &str| dirs.path().join(name);
@@ -891,17 +892,17 @@ fn says_at_once_as_a_work_tree_changes(format: &str) {
 }
 
 #[test]
-fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_files() {
-    says_at_once_as_a_work_tree_changes("files");
+fn git_says_at_once_as_a_checkout_changes_that_keeps_its_refs_in_files() {
+    says_at_once_as_a_checkout_changes("files");
 }
 
 #[test]
-fn git_says_at_once_as_a_work_tree_changes_that_keeps_its_refs_in_a_reftable() {
-    says_at_once_as_a_work_tree_changes("reftable");
+fn git_says_at_once_as_a_checkout_changes_that_keeps_its_refs_in_a_reftable() {
+    says_at_once_as_a_checkout_changes("reftable");
 }
 
 #[test]
-fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
+fn git_says_at_once_as_a_repository_made_in_another_changes() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
     let (top, src) = (tree.path(), tree.path().join("src"));
@@ -921,7 +922,7 @@ fn git_says_at_once_as_a_work_tree_made_in_another_changes() {
 }
 
 #[test]
-fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
+fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
     let host = Host::new();
     let tree = tempfile::tempdir().unwrap();
     let (top, src) = (tree.path(), tree.path().join("src"));
@@ -945,14 +946,14 @@ fn a_git_folder_that_does_not_read_leaves_the_work_tree_it_is_in_watched() {
 }
 
 #[test]
-fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
+fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
     let host = Host::new();
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    in_no_work_tree(&host, &cwd);
+    in_no_repository(&host, &cwd);
 
     let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
     let first = on_branch("first");
@@ -962,7 +963,7 @@ fn git_says_at_once_as_a_work_tree_begins_where_there_was_none() {
 }
 
 #[test]
-fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
+fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     let host = Host::new();
     let noted = host.note_git();
     let dir = tempfile::tempdir().unwrap();
@@ -972,7 +973,7 @@ fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
     host.zellij.list("work", &json!([listed(1, "~", (0, "Tab #1"), Some(&cwd))]));
     let _work = host.serve("work");
     let _daemon = start(host.vars()).unwrap();
-    in_no_work_tree(&host, &cwd);
+    in_no_repository(&host, &cwd);
 
     let (asked, started) = (noted.statuses(), Instant::now());
     fs::remove_dir(&work).unwrap();
@@ -984,7 +985,7 @@ fn git_says_at_once_as_a_work_tree_begins_in_a_directory_made_again() {
 }
 
 #[test]
-fn a_checkout_taken_away_is_in_no_work_tree() {
+fn a_checkout_taken_away_is_in_no_repository() {
     let host = Host::new();
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
@@ -998,7 +999,7 @@ fn a_checkout_taken_away_is_in_no_work_tree() {
     eventually("git says it is a checkout", || checkout(&host, &cwd));
 
     fs::remove_dir_all(&work).unwrap();
-    in_no_work_tree(&host, &cwd);
+    in_no_repository(&host, &cwd);
 }
 
 #[test]
@@ -1015,8 +1016,8 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let repository = fs::canonicalize(top).unwrap().display().to_string();
     let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
     eventually("git says it is no checkout of its clone", || {
-        let tree = host.host().work_trees.into_iter().find(|tree| tree.dir == cwd)?;
-        (tree.stands == of_its_clone).then_some(())
+        let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+        (status.stands == of_its_clone).then_some(())
     });
 
     let asked = noted.statuses();
@@ -1028,7 +1029,7 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
 }
 
 #[test]
-fn git_says_at_once_as_a_directory_moved_into_a_work_tree_changes() {
+fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
     let host = Host::new();
     let dirs = tempfile::tempdir().unwrap();
     let path = |name: &str| dirs.path().join(name);
@@ -1803,8 +1804,8 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     let mut daemon = start(host.vars()).unwrap();
     let seen = || {
         let host = host.host();
-        let tree = host.work_trees.iter().find(|tree| tree.dir == cwd);
-        let branch = match tree.and_then(|tree| tree.stands.as_ref()) {
+        let status = host.git_statuses.iter().find(|status| status.dir == cwd);
+        let branch = match status.and_then(|status| status.stands.as_ref()) {
             Some(Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. })) => {
                 Some(branch.name.clone())
             },

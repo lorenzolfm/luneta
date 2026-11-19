@@ -9,7 +9,7 @@ use rustix::process::{test_kill_process, Pid};
 
 use crate::host::{answered, eventually, start, Host, Running, Vars, LUNETA, LUNETAD};
 use crate::own::{built_server, Owned};
-use crate::projects::{kept, project, workstream};
+use crate::projects::{kept, project, worktree};
 use crate::remote::{hosts, FakeSsh};
 
 const ENDS: Duration = Duration::from_secs(5);
@@ -53,7 +53,7 @@ fn kept_in_home(host: &Host) {
     let home = fs::canonicalize(host.home.path()).unwrap();
     let work = home.join("work");
     fs::create_dir_all(&work).unwrap();
-    workstream(host, project(host, &home, None), &work);
+    worktree(host, project(host, &home, None), &work);
 }
 
 #[test]
@@ -81,14 +81,14 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
 
     let planned = terminate(owned.host.vars(), None);
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);
-    let says = "ends 1 luneta command, lunetad and luneta-mux; forgets 1 project and 1 workstream";
+    let says = "ends 1 luneta command, lunetad and luneta-mux; forgets 1 project and 1 worktree";
     assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     assert!(mux.ended_within(Duration::ZERO).is_none(), "a plan ends nothing");
     assert!(kept(&owned.host).exists());
 
     let ended = terminate(owned.host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
-    let says = "ended 1 luneta command, lunetad and luneta-mux; forgot 1 project and 1 workstream";
+    let says = "ended 1 luneta command, lunetad and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     assert!(owned.daemon_ended_within(ENDS).is_some(), "lunetad runs on");
     assert!(mux.ended_within(ENDS).is_some(), "luneta-mux runs on");
@@ -125,12 +125,12 @@ fn luneta_terminate_ends_the_lunetad_that_keeps_the_projects_and_its_mux_from_an
 
     let planned = terminate(there, None);
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);
-    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 workstream";
+    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 worktree";
     assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
 
     let ended = terminate(there, Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
-    let says = "ended lunetad and luneta-mux; forgot 1 project and 1 workstream";
+    let says = "ended lunetad and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     let keeps = "the lunetad that keeps the projects runs on";
     assert!(owned.daemon_ended_within(ENDS).is_some(), "{keeps}");
@@ -154,7 +154,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
         panic!("a line for each machine: {:?}", planned.lines);
     };
     assert_eq!(here(local), "nothing of luneta runs; keeps no project to forget");
-    assert_eq!(far_line, "far: ends lunetad; forgets 1 project and 1 workstream");
+    assert_eq!(far_line, "far: ends lunetad; forgets 1 project and 1 worktree");
     let skipped = "gone: skipped, as ssh does not reach it, and so luneta runs on there and keeps \
                    its projects: ssh: Could not resolve hostname gone";
     assert!(gone_line.starts_with(skipped), "{gone_line}");
@@ -166,7 +166,7 @@ fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others
         panic!("a line for each machine: {:?}", ended.lines);
     };
     assert_eq!(here(local), "nothing of luneta ran; kept no project to forget");
-    assert_eq!(far_line, "far: ended lunetad; forgot 1 project and 1 workstream");
+    assert_eq!(far_line, "far: ended lunetad; forgot 1 project and 1 worktree");
     assert_eq!(gone_again, gone_line);
     assert!(far_daemon.ended_within(ENDS).is_some(), "far's lunetad runs on");
     assert!(!kept(&far).exists());
@@ -205,12 +205,12 @@ fn luneta_terminate_forgets_again_what_a_lunetad_started_meanwhile_kept() {
 
     let planned = terminate(host.vars(), None);
     assert_eq!(planned.code, Some(3), "{}", planned.stderr);
-    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 workstream";
+    let says = "ends lunetad and luneta-mux; forgets 1 project and 1 worktree";
     assert_eq!(planned.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
 
     let ended = terminate(host.vars(), Some(&plan_in(&planned)));
     assert_eq!(ended.code, Some(0), "{}", ended.stderr);
-    let says = "ended 2 lunetads and luneta-mux; forgot 1 project and 1 workstream";
+    let says = "ended 2 lunetads and luneta-mux; forgot 1 project and 1 worktree";
     assert_eq!(ended.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     assert!(daemon.ended_within(ENDS).is_some(), "lunetad runs on");
     assert!(writer.ended_within(ENDS).is_some(), "luneta-mux runs on");
@@ -299,7 +299,7 @@ fn luneta_terminate_ends_nothing_on_a_plan_that_changed_since_it_was_said() {
 
     let refused = terminate(host.vars(), Some(&plan));
     assert_eq!(refused.code, Some(3), "{}", refused.stderr);
-    let says = "ends lunetad; forgets 1 project and 1 workstream";
+    let says = "ends lunetad; forgets 1 project and 1 worktree";
     assert_eq!(refused.lines.iter().map(|line| here(line)).collect::<Vec<_>>(), [says]);
     assert!(refused.stderr.contains("told yes to another plan than this"), "{}", refused.stderr);
     assert_ne!(plan_in(&refused), plan);

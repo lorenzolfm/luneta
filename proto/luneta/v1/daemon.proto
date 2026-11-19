@@ -424,7 +424,7 @@ message PasteResponse {
     uint32 session = 2;
     Clone clone = 3;
   }
-  string worktree = 4;
+  string folder = 4;
   optional string branch = 5;
   optional string file = 6;
   bool at_head = 7;
@@ -455,7 +455,7 @@ message Version {
 message Host {
   Version version = 1;
   repeated Session sessions = 2;
-  repeated WorkTree work_trees = 3;
+  repeated GitStatus git_statuses = 3;
   repeated Agent agents = 4;
   uint32 unread = 5;
   repeated PullRequest pull_requests = 6;
@@ -500,7 +500,7 @@ message Remote {
 
   message Host {
     repeated Session sessions = 1;
-    repeated WorkTree work_trees = 2;
+    repeated GitStatus git_statuses = 2;
     repeated Agent agents = 3;
     uint32 unread = 4;
     repeated PullRequest pull_requests = 5;
@@ -618,7 +618,7 @@ enum Front {
   FRONT_INTERACTIVE = 3;
 }
 
-message WorkTree {
+message GitStatus {
   string dir = 1;
   oneof stands {
     google.protobuf.Empty outside = 2;
@@ -796,7 +796,7 @@ message PrunesResponse {
   repeated Unasked unasked = 4;
 
   message Goes {
-    string worktree = 1;
+    string folder = 1;
     string branch = 2;
     string head = 3;
     uint32 number = 4;
@@ -813,13 +813,13 @@ message PrunesResponse {
   }
 
   message Kept {
-    string worktree = 1;
+    string folder = 1;
     uint32 number = 2;
     string why = 3;
   }
 
   message Unasked {
-    string worktree = 1;
+    string folder = 1;
     string why = 2;
   }
 }
@@ -830,7 +830,7 @@ message PruneRequest {
   repeated Deleting agreed = 3;
 
   message Deleting {
-    string worktree = 1;
+    string folder = 1;
     string branch = 2;
     string head = 3;
     uint32 number = 4;
@@ -849,7 +849,7 @@ message PruneResponse {
   }
 
   message Outcome {
-    string worktree = 1;
+    string folder = 1;
     oneof came {
       google.protobuf.Empty gone = 2;
       string went_but = 3;
@@ -901,10 +901,17 @@ message Project {
   string name = 2;
   string dir = 3;
   bool missing = 4;
-  repeated Workstream workstreams = 5;
+  oneof holds {
+    Worktree folder = 5;
+    Clone clone = 6;
+  }
+
+  message Clone {
+    repeated Worktree worktrees = 1;
+  }
 }
 
-message Workstream {
+message Worktree {
   fixed64 id = 1;
   string name = 2;
   bool renamed = 3;
@@ -946,21 +953,20 @@ message ChangeProjectsRequest {
   On on = 1;
   oneof change {
     AddProject add_project = 2;
-    AddWorkstream add_workstream = 3;
-    WorkstreamAt workstream_at = 4;
-    Start start = 5;
-    Join join = 6;
-    Pull pull = 7;
-    RenameProject rename_project = 8;
-    RenameWorkstream rename_workstream = 9;
-    RenameTerminal rename_terminal = 10;
-    ReorderProjects reorder_projects = 11;
-    ReorderWorkstreams reorder_workstreams = 12;
-    ForgetProject forget_project = 13;
-    ForgetWorkstream forget_workstream = 14;
-    CloseProject close_project = 15;
-    CloseWorkstream close_workstream = 16;
-    Bring bring = 17;
+    AddWorktree add_worktree = 3;
+    Start start = 4;
+    Join join = 5;
+    Pull pull = 6;
+    RenameProject rename_project = 7;
+    RenameWorktree rename_worktree = 8;
+    RenameTerminal rename_terminal = 9;
+    ReorderProjects reorder_projects = 10;
+    ReorderWorktrees reorder_worktrees = 11;
+    ForgetProject forget_project = 12;
+    ForgetWorktree forget_worktree = 13;
+    CloseProject close_project = 14;
+    CloseWorktree close_worktree = 15;
+    Bring bring = 16;
   }
 
   message AddProject {
@@ -968,15 +974,10 @@ message ChangeProjectsRequest {
     optional string name = 2;
   }
 
-  message AddWorkstream {
+  message AddWorktree {
     fixed64 project = 1;
     string folder = 2;
     optional string name = 3;
-  }
-
-  message WorkstreamAt {
-    fixed64 project = 1;
-    string folder = 2;
   }
 
   message Start {
@@ -1000,8 +1001,8 @@ message ChangeProjectsRequest {
     string to = 2;
   }
 
-  message RenameWorkstream {
-    fixed64 workstream = 1;
+  message RenameWorktree {
+    fixed64 worktree = 1;
     optional string to = 2;
   }
 
@@ -1015,9 +1016,9 @@ message ChangeProjectsRequest {
     repeated fixed64 seen = 2;
   }
 
-  message ReorderWorkstreams {
+  message ReorderWorktrees {
     fixed64 project = 1;
-    repeated fixed64 workstreams = 2;
+    repeated fixed64 worktrees = 2;
     repeated fixed64 seen = 3;
   }
 
@@ -1025,23 +1026,23 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
   }
 
-  message ForgetWorkstream {
-    fixed64 workstream = 1;
+  message ForgetWorktree {
+    fixed64 worktree = 1;
   }
 
   message CloseProject {
     fixed64 project = 1;
-    repeated fixed64 workstreams = 2;
+    repeated fixed64 worktrees = 2;
     repeated fixed64 seen = 3;
   }
 
-  message CloseWorkstream {
-    fixed64 workstream = 1;
+  message CloseWorktree {
+    fixed64 worktree = 1;
     repeated fixed64 seen = 2;
   }
 
   message Bring {
-    fixed64 workstream = 1;
+    fixed64 worktree = 1;
     TerminalKey from = 2;
   }
 }
@@ -1049,7 +1050,7 @@ message ChangeProjectsRequest {
 message ChangeProjectsResponse {
   oneof made {
     fixed64 project = 1;
-    fixed64 workstream = 2;
+    fixed64 worktree = 2;
     fixed64 found = 3;
     fixed64 taken = 4;
   }
@@ -1071,7 +1072,7 @@ message ShowRequest {
   }
 
   message Hello {
-    fixed64 workstream = 1;
+    fixed64 worktree = 1;
     Size size = 2;
     TerminalKey runs_in = 3;
     bool again = 4;
@@ -1164,12 +1165,12 @@ message ShowResponse {
   }
 
   message Edged {
-    fixed64 workstream = 1;
+    fixed64 worktree = 1;
     ShowRequest.Direction direction = 2;
   }
 
   message Laid {
-    fixed64 workstream = 1;
+    fixed64 worktree = 1;
     ShowRequest.Size size = 2;
     repeated Pane panes = 3;
     oneof shown {

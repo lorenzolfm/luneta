@@ -12,7 +12,7 @@ pub const COLLAPSE: Chord = (KeyCode::Char('q'), KeyModifiers::CONTROL);
 
 pub const MENU: Chord = (KeyCode::Char('a'), KeyModifiers::ALT);
 
-pub const WORKSTREAMS: Chord = (KeyCode::Char('j'), KeyModifiers::SUPER);
+pub const WORKTREES: Chord = (KeyCode::Char('j'), KeyModifiers::SUPER);
 
 pub const LEFT: Chord = (KeyCode::Char('h'), KeyModifiers::CONTROL);
 
@@ -46,24 +46,24 @@ pub const ROW_GROUPS: [(char, &str); 1] = [(YANK, "Yank")];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Noun {
     View,
-    Workstream,
+    Worktree,
     Project,
     Machine,
 }
 
-const EVERY: &[Noun] = &[Noun::View, Noun::Workstream, Noun::Project, Noun::Machine];
+const EVERY: &[Noun] = &[Noun::View, Noun::Worktree, Noun::Project, Noun::Machine];
 
 const VIEW: &[Noun] = &[Noun::View];
 
-const WORKSTREAM: &[Noun] = &[Noun::Workstream];
+const WORKTREE: &[Noun] = &[Noun::Worktree];
 
 const PROJECT: &[Noun] = &[Noun::Project];
 
 const MACHINE: &[Noun] = &[Noun::Machine];
 
-const CHECKED_OUT: &[Noun] = &[Noun::View, Noun::Workstream];
+const CHECKED_OUT: &[Noun] = &[Noun::View, Noun::Worktree];
 
-const IN_A_PROJECT: &[Noun] = &[Noun::View, Noun::Workstream, Noun::Project];
+const IN_A_PROJECT: &[Noun] = &[Noun::View, Noun::Worktree, Noun::Project];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
@@ -113,14 +113,14 @@ actions! {
     FixChecks,
     NewView,
     NewWelcome,
-    NewWorkstream,
+    NewWorktree,
     NewProject,
     NewMachine,
     RenameView,
-    RenameWorkstream,
+    RenameWorktree,
     RenameProject,
     CloseView,
-    CloseWorkstream,
+    CloseWorktree,
     DeleteProject,
     ForgetMachine,
     DeleteMerged,
@@ -144,7 +144,7 @@ actions! {
     Shrink,
     Collapse,
     Menu,
-    Workstreams,
+    Worktrees,
     Agents,
     Dirs,
     Dictate,
@@ -218,8 +218,8 @@ impl Action {
                 let new = menu(&['n', 'h']);
                 spec("new welcome view", &["home", "start", "greeting"], new, VIEW, Any)
             },
-            Action::NewWorkstream => {
-                spec("new workstream", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)
+            Action::NewWorktree => {
+                spec("new worktree", &["tab", "task"], menu(&['n', 'w']), IN_A_PROJECT, Any)
             },
             Action::NewProject => {
                 spec("new project", &["folder", "directory", "add"], menu(&['n', 'p']), EVERY, Any)
@@ -231,8 +231,8 @@ impl Action {
                 let keywords = &["name", "pane", "terminal", "title"];
                 spec("Rename the view", keywords, menu(&['r']), VIEW, Any)
             },
-            Action::RenameWorkstream => {
-                spec("Rename the workstream", &["name", "title"], menu(&['r']), WORKSTREAM, Any)
+            Action::RenameWorktree => {
+                spec("Rename the worktree", &["name", "title"], menu(&['r']), WORKTREE, Any)
             },
             Action::RenameProject => {
                 spec("Rename the project", &["name", "title"], menu(&['r']), PROJECT, Any)
@@ -241,16 +241,16 @@ impl Action {
                 let keywords = &["pane", "kill", "exit", "terminal"];
                 spec("close the view", keywords, menu(&['d', 'd']), VIEW, Here)
             },
-            Action::CloseWorkstream => spec(
-                "close the workstream",
+            Action::CloseWorktree => spec(
+                "close the worktree",
                 &["kill", "end", "terminals"],
                 menu(&['d', 'd']),
-                WORKSTREAM,
+                WORKTREE,
                 Any,
             ),
             Action::DeleteProject => spec(
                 "delete the project",
-                &["remove", "forget", "close", "workstreams"],
+                &["remove", "forget", "close", "worktrees"],
                 menu(&['d', 'd']),
                 PROJECT,
                 Any,
@@ -298,19 +298,19 @@ impl Action {
             },
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {
-                anywhere("View left, or the workstream before", &["focus", "move"], LEFT)
+                anywhere("View left, or the worktree before", &["focus", "move"], LEFT)
             },
             Action::ViewDown => anywhere("View below", &["focus", "move"], DOWN),
             Action::ViewUp => anywhere("View above", &["focus", "move"], UP),
             Action::ViewRight => {
-                anywhere("View right, or the workstream after", &["focus", "move"], RIGHT)
+                anywhere("View right, or the worktree after", &["focus", "move"], RIGHT)
             },
             Action::Grow => anywhere("Grow the view", &["resize", "bigger"], GROW),
             Action::Shrink => anywhere("Shrink the view", &["resize", "smaller"], SHRINK),
             Action::Collapse => anywhere("Collapse sidebar", &["hide", "fold"], COLLAPSE),
             Action::Menu => anywhere("Menu over views", &["which-key", "actions"], MENU),
-            Action::Workstreams => {
-                anywhere("Pick a workstream", &["finder", "switch"], WORKSTREAMS)
+            Action::Worktrees => {
+                anywhere("Pick a worktree", &["finder", "switch"], WORKTREES)
             },
             Action::Agents => anywhere("Pick an agent", &["finder", "claude"], AGENTS),
             Action::Dirs => anywhere("Pick a directory", &["finder", "folder"], DIRS),
@@ -488,7 +488,7 @@ mod tests {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         assert!(Action::CloseView.fits(Noun::View, &Machine::Local));
         assert!(!Action::CloseView.fits(Noun::View, &vps));
-        assert!(!Action::CloseView.fits(Noun::Workstream, &Machine::Local));
-        assert!(Action::CloseWorkstream.fits(Noun::Workstream, &vps));
+        assert!(!Action::CloseView.fits(Noun::Worktree, &Machine::Local));
+        assert!(Action::CloseWorktree.fits(Noun::Worktree, &vps));
     }
 }

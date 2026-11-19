@@ -54,7 +54,7 @@ mod viewed;
 mod voice;
 mod watch;
 mod width;
-mod workstreams;
+mod worktrees;
 mod zellij;
 
 use std::path::PathBuf;

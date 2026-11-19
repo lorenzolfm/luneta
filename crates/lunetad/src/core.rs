@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use luneta_protocol::git::{Head, WorkTree};
+use luneta_protocol::git::{GitStatus, Head};
 use luneta_protocol::said::Said;
 use tokio::sync::oneshot;
 
@@ -15,8 +15,8 @@ use crate::claude::Scan;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
-use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, ViewId, Workstream};
-use crate::projects::WorkstreamId;
+use crate::projects::{Dir, Holds, Name, Project, Projects, Revision, Seen, Stage, ViewId};
+use crate::projects::{Worktree, WorktreeId};
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -56,7 +56,7 @@ pub enum Command {
     Panes { asked: Asked, panes: Vec<Pane> },
     Clients { asked: Asked, clients: Listed },
     Terminals(BTreeMap<ViewId, Located>),
-    WorkTree { dir: String, tree: WorkTree },
+    GitStatus { dir: String, status: GitStatus },
     PullRequests(BTreeMap<String, Found>),
     Shells(Vec<Shell>),
     Topics(HashMap<SessionId, Said>),
@@ -68,7 +68,7 @@ pub enum Command {
     Sessions(oneshot::Sender<Vec<Addressed>>),
     Dirs(oneshot::Sender<BTreeSet<String>>),
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
-    Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorkstreamId>>>),
+    Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorktreeId>>>),
     Plain(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
@@ -118,7 +118,7 @@ struct Known {
     terminals: BTreeMap<ViewId, Located>,
     panes: HashMap<Id, Vec<Pane>>,
     clients: HashMap<Id, Listed>,
-    trees: BTreeMap<String, WorkTree>,
+    statuses: BTreeMap<String, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
     shells: Vec<Shell>,
     topics: HashMap<SessionId, Said>,
@@ -144,7 +144,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
         terminals: BTreeMap::new(),
         panes: HashMap::new(),
         clients: HashMap::new(),
-        trees: BTreeMap::new(),
+        statuses: BTreeMap::new(),
         pull_requests: BTreeMap::new(),
         shells: Vec::new(),
         topics: HashMap::new(),
@@ -200,12 +200,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                     wake(&wakes.git);
                 }
             },
-            Command::WorkTree { dir, tree } => {
+            Command::GitStatus { dir, status } => {
                 if !known.dirs().contains(&dir) {
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
-                known.trees.insert(dir.clone(), tree);
+                known.statuses.insert(dir.clone(), status);
                 if known.branch(&dir).is_some_and(|now| before.as_deref() != Some(now)) {
                     wake(&wakes.github);
                 }
@@ -392,43 +392,43 @@ impl Known {
         });
         let cwds = cwds.chain(listed.map(|cwd| cwd.as_str().to_owned()));
         let present = |folder: &Dir| !self.missing.contains(folder);
-        let folders = self.projects.iter().flat_map(Projects::workstream_folders).filter(present);
+        let folders = self.projects.iter().flat_map(Projects::worktree_folders).filter(present);
         cwds.chain(folders.map(|folder| folder.as_str().to_owned())).collect()
     }
 
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
-        self.trees.retain(|dir, _| dirs.contains(dir));
+        self.statuses.retain(|dir, _| dirs.contains(dir));
         self.pull_requests.retain(|dir, _| dirs.contains(dir));
     }
 
     fn branch(&self, dir: &str) -> Option<&str> {
-        match self.trees.get(dir)? {
-            WorkTree::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
-            WorkTree::Checkout { head: Head::Detached, .. }
-            | WorkTree::NoCheckout { .. }
-            | WorkTree::Outside => None,
+        match self.statuses.get(dir)? {
+            GitStatus::Checkout { head: Head::Branch { name, .. }, .. } => Some(name.as_str()),
+            GitStatus::Checkout { head: Head::Detached, .. }
+            | GitStatus::NoCheckout { .. }
+            | GitStatus::Outside => None,
         }
     }
 
     fn branches(&self) -> BTreeMap<String, String> {
         let branch = |dir: &String| Some((dir.clone(), self.branch(dir)?.to_owned()));
-        self.trees.keys().filter_map(branch).collect()
+        self.statuses.keys().filter_map(branch).collect()
     }
 
     fn tracking(&self) -> BTreeMap<String, Branch> {
-        let tracking = |(dir, tree): (&String, &WorkTree)| {
-            let WorkTree::Checkout {
+        let tracking = |(dir, status): (&String, &GitStatus)| {
+            let GitStatus::Checkout {
                 repository: Some(repository),
                 head: Head::Branch { name, upstream: Some(_), .. },
                 ..
-            } = tree
+            } = status
             else {
                 return None;
             };
             Some((dir.clone(), Branch { repository: repository.clone(), name: name.clone() }))
         };
-        self.trees.iter().filter_map(tracking).collect()
+        self.statuses.iter().filter_map(tracking).collect()
     }
 
     fn agents(&self) -> Vec<api::Agent> {
@@ -493,7 +493,7 @@ impl Known {
         api::Host {
             version: None,
             sessions,
-            work_trees: self.trees.iter().map(|(dir, tree)| tree.to_api(dir)).collect(),
+            git_statuses: self.statuses.iter().map(|(dir, status)| status.to_api(dir)).collect(),
             agents,
             unread,
             pull_requests,
@@ -514,37 +514,43 @@ impl Known {
                 return api::Projects { held: Some(unkept) };
             },
         };
-        let workstreams = |project: &Project| {
-            let built = project.placed().map(|(folder, workstream)| {
-                let branch = self.branch(folder.as_str());
-                let renamed = workstream.renamed().map(Name::as_str);
-                api::Workstream {
-                    id: workstream.id().get(),
-                    name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
-                    renamed: renamed.is_some(),
-                    seen: Some(self.seen(&folder).to_api()),
-                    folder: folder.as_str().to_owned(),
-                    terminals: self.built_terminals(workstream),
-                    used_at: workstream.used().map(|used| used.time().into()),
-                }
-            });
-            built.collect()
+        let worktree = |folder: Dir, worktree: &Worktree| {
+            let branch = self.branch(folder.as_str());
+            let renamed = worktree.renamed().map(Name::as_str);
+            api::Worktree {
+                id: worktree.id().get(),
+                name: renamed.or(branch).unwrap_or_else(|| folder.last()).to_owned(),
+                renamed: renamed.is_some(),
+                seen: Some(self.seen(&folder).to_api()),
+                folder: folder.as_str().to_owned(),
+                terminals: self.built_terminals(worktree),
+                used_at: worktree.used().map(|used| used.time().into()),
+            }
+        };
+        let holds = |project: &Project| match project.holds() {
+            Holds::Folder(own) => api::project::Holds::Folder(worktree(project.dir().clone(), own)),
+            Holds::Clone(rows) => {
+                let rows = rows.iter().map(|(subfolder, it)| {
+                    worktree(project.dir().at(subfolder), it)
+                });
+                api::project::Holds::Clone(api::project::Clone { worktrees: rows.collect() })
+            },
         };
         let project = |project: &Project| api::Project {
             id: project.id().get(),
             name: project.name().as_str().to_owned(),
             dir: project.dir().as_str().to_owned(),
             missing: self.missing.contains(project.dir()),
-            workstreams: workstreams(project),
+            holds: Some(holds(project)),
         };
         let projects = projects.all().iter().map(project).collect();
         let kept = api::projects::Kept { projects, version: Some(self.revision.to_api()) };
         api::Projects { held: Some(api::projects::Held::Kept(kept)) }
     }
 
-    fn built_terminals(&self, workstream: &Workstream) -> Vec<api::Terminal> {
+    fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {
         use api::terminal::Found as Told;
-        let built = workstream.layout().terminals().map(|terminal| {
+        let built = worktree.layout().terminals().map(|terminal| {
             let id = terminal.id().view();
             let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
             let (told, listed) = match found {
@@ -583,7 +589,7 @@ impl Known {
         if self.missing.contains(folder) {
             return Seen::Missing;
         }
-        if !self.trees.contains_key(folder.as_str()) {
+        if !self.statuses.contains_key(folder.as_str()) {
             return Seen::Unread;
         }
         let branch = self.branch(folder.as_str());
