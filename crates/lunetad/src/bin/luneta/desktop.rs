@@ -393,7 +393,7 @@ mod freedesktop {
             Kind::Done => 1,
             Kind::Asked | Kind::Plan | Kind::Permission | Kind::Wants => 2,
         };
-        post(proxy, &alert.title, &alert.body, "Go to the pane", urgency).await
+        post(proxy, &alert.title, &alert.body, "Go to the view", urgency).await
     }
 
     async fn tell(proxy: &Proxy<'_>, told: &Told) -> zbus::Result<Posted> {

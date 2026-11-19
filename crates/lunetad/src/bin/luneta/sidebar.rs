@@ -115,7 +115,7 @@ const WORKSTREAM: usize = 4;
 const LONG: Duration = Duration::from_secs(1);
 
 const NO_HERE_PANE: &str =
-    "menu: luneta does not know yet which pane its client is on; try again in a moment";
+    "menu: luneta does not know yet which view its client is on; try again in a moment";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Listed {
@@ -3541,7 +3541,7 @@ impl Sidebar {
         let session = opening;
         let named = session.name().clone();
         let Some(place) = PanePlace::new(session, pane) else {
-            self.say(format!("menu: {named} and pane {pane} are of different muxes"));
+            self.say(format!("menu: {named} and view {pane} are of different muxes"));
             return Asked::Nothing;
         };
         let place = Place::Pane(place);
@@ -4371,7 +4371,7 @@ fn label(agent: Option<&Agent>, pane: &Pane) -> String {
         Some(program) if !icons::SHELLS.contains(&program) => {
             [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
         },
-        _ => pane.cwd.as_deref().map_or_else(|| format!("pane {}", pane.id), short_cwd),
+        _ => pane.cwd.as_deref().map_or_else(|| format!("view {}", pane.id), short_cwd),
     }
 }
 
@@ -6097,10 +6097,10 @@ mod tests {
         assert_eq!(named("cargo test"), "cargo test");
         assert_eq!(named("/nix/store/a1p5-neovim/bin/nvim --clean"), "nvim --clean");
         let unsaid = Pane { cwd: None, command: None, ..pane(3, 0, "", "") };
-        assert_eq!(label(None, &unsaid), "pane 3");
+        assert_eq!(label(None, &unsaid), "view 3");
         let tabbed = |pane: Pane| label(None, &Pane { tab_name: "review".to_owned(), ..pane });
         assert_eq!(tabbed(pane(3, 0, "/w/luneta/main", "-fish")), "luneta/main", "its row says it");
-        assert_eq!(tabbed(unsaid), "pane 3");
+        assert_eq!(tabbed(unsaid), "view 3");
     }
 
     #[test]
@@ -7585,7 +7585,7 @@ mod tests {
             (" a  Ask", Some(on_legend('a'))),
             (" c  Skills ▸", Some(on_legend('c'))),
             (" n  New ▸", Some(on_legend('n'))),
-            (" r  Rename the terminal", Some(on_legend('r'))),
+            (" r  Rename the view", Some(on_legend('r'))),
             (" d  Delete ▸", Some(on_legend('d'))),
             (" b  Brief ▸", Some(on_legend('b'))),
         ]);
@@ -7595,9 +7595,9 @@ mod tests {
             clicked.iter().map(|(text, hit)| (text.as_str(), hit.clone())).collect();
         assert_eq!(menu[1..], [
             ("─ New ─────────── luneta/main ─", None),
-            (" p  new pane", Some(on_menu(KeyCode::Char('p')))),
+            (" v  new view", Some(on_menu(KeyCode::Char('v')))),
             (" w  new workstream", Some(on_menu(KeyCode::Char('w')))),
-            (" P  new project", Some(on_menu(KeyCode::Char('P')))),
+            (" p  new project", Some(on_menu(KeyCode::Char('p')))),
             (" m  new machine", Some(on_menu(KeyCode::Char('m')))),
             (" <BS> - Back, <ESC> - Close", Some(on_menu(KeyCode::Backspace))),
         ]);
@@ -7722,13 +7722,13 @@ mod tests {
             " g g    First row",
             " ?      All keys",
             " y p  Yank PR link",
-            " n p  new pane",
-            " d d  close the pane",
+            " n v  new view",
+            " d d  close the view",
             " d d  close the workstream",
             " r    Rename the project",
             " w  worktree",
             " BS   back a group",
-            " Ctrl a       Sidebar or panes",
+            " Ctrl a       Sidebar or views",
             " Alt Shift u  Stop reading",
         ] {
             assert!(listed.iter().any(|shown| shown == line), "{line:?} in {listed:#?}");
@@ -7849,7 +7849,7 @@ mod tests {
             (" _", None),
             (" /code-review", on("code-review")),
             (" /tigerstyle", on("tigerstyle")),
-            (" \u{ec82} claude, the pane's  <TAB>", tab),
+            (" \u{ec82} claude, the view's  <TAB>", tab),
         ]);
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(sidebar.chose(2, tigerstyle(), moment(160_000)), Asked::Nothing);
@@ -7911,9 +7911,9 @@ mod tests {
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
         assert_eq!(lines[11..], [
             "─ New ─────────── luneta/main ─",
-            " p  new pane",
+            " v  new view",
             " w  new workstream",
-            " P  new project",
+            " p  new project",
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
@@ -8388,7 +8388,7 @@ mod tests {
         let (session, cwd) = (session_name("s"), directory("/w/luneta/main"));
         let pane = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
         let pane = Asked::Open { menu: 1, on: Machine::Local, whose: listed("s", 10).whose(), open: pane };
-        assert_eq!(sidebar.key(&char('p'), moment(160_000)), pane);
+        assert_eq!(sidebar.key(&char('v'), moment(160_000)), pane);
     }
 
     #[test]
@@ -8422,7 +8422,7 @@ mod tests {
 
         type_in(&mut sidebar, "jcf");
         assert!(sidebar.menu.is_none());
-        let why = "menu: pane 2 runs `make` still, and what it prints is not over";
+        let why = "menu: view 2 runs `make` still, and what it prints is not over";
         assert_eq!(sidebar.notice.as_deref(), Some(why));
 
         type_in(&mut sidebar, "c");
@@ -8440,7 +8440,7 @@ mod tests {
         sidebar.hear(shells(going("make", 200, Front::Working)));
         assert_eq!(sidebar.printed(3, nothing()), Asked::Nothing);
         assert!(sidebar.menu.is_none());
-        let why = "menu: pane 2's shell went on as luneta read what `make` printed; ask again";
+        let why = "menu: view 2's shell went on as luneta read what `make` printed; ask again";
         assert_eq!(sidebar.notice.as_deref(), Some(why));
     }
 
@@ -8642,11 +8642,11 @@ mod tests {
         let unknown = Pane { cwd: None, ..pane(1, 0, "/w/b", "fish") };
         sidebar.hear(host(vec![own_session("only", 1, vec![unknown])], Vec::new()));
         sit(&mut sidebar, &own_pane_of("only", 1, 1));
-        let wrong = "menu: luneta does not know yet where pane 1 works; try again in a moment";
+        let wrong = "menu: luneta does not know yet where view 1 works; try again in a moment";
 
         assert_eq!(sidebar.float_menu(), Ok(()));
         sidebar.focus(Keys::Menu { lent: false });
-        type_in(&mut sidebar, "np");
+        type_in(&mut sidebar, "nv");
         assert!(sidebar.floating().is_none());
         assert_eq!(sidebar.said().as_deref(), Some(wrong));
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, None));
@@ -8654,12 +8654,12 @@ mod tests {
 
         assert_eq!(sidebar.float_menu(), Ok(()));
         sidebar.focus(Keys::Menu { lent: false });
-        type_in(&mut sidebar, "np");
+        type_in(&mut sidebar, "nv");
         sidebar.focus(Keys::Zellij);
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
 
         sidebar.focus(Keys::Sidebar);
-        type_in(&mut sidebar, "np");
+        type_in(&mut sidebar, "nv");
         assert_eq!((sidebar.said(), sidebar.notice.as_deref()), (None, Some(wrong)));
         assert_eq!(sidebar.float_menu(), Ok(()));
         assert!(sidebar.notice.is_none());
@@ -8711,7 +8711,7 @@ mod tests {
         }
         sidebar.step(1);
         type_in(&mut sidebar, "bh");
-        assert_eq!(sidebar.notice.as_deref(), Some("brief: no agent in this pane"));
+        assert_eq!(sidebar.notice.as_deref(), Some("brief: no agent in this view"));
         sidebar.step(1);
         type_in(&mut sidebar, "bs");
         assert_eq!(sidebar.notice.as_deref(), Some("brief: no agents in newer"));
@@ -8889,7 +8889,7 @@ mod tests {
             assert_eq!(sidebar.closes(1, Ok(Closes::Pane)), Asked::Nothing);
             let lines = screen(&mut sidebar, true, 160, 16);
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
-            let asks = format!("Close the pane? luneta cannot tell which agents it ends: {why}");
+            let asks = format!("Close the view? luneta cannot tell which agents it ends: {why}");
             assert!(lines.contains(&note), "{lines:#?}");
             assert!(lines.contains(&asks.as_str()), "{lines:#?}");
             assert_eq!(sidebar.key(&char('y'), moment(160_000)), closes());
@@ -8927,7 +8927,7 @@ mod tests {
             let lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
             let note = "lunetad cannot read 1 of Claude Code's session files";
             assert!(lines.contains(&note), "{lines:#?}");
-            let asked = lines.contains(&"Close the pane? 1 agent, 1 unknown");
+            let asked = lines.contains(&"Close the view? 1 agent, 1 unknown");
             assert_eq!((went == delete_here(act), asked), (!asks, asks), "pane {pane}");
         }
     }
@@ -9690,7 +9690,7 @@ mod tests {
         let open = Open::Pane { session, beside: 1, cwd, command: Vec::new() };
         let whose = listed("main", 20).whose();
         let asked = Asked::Open { menu: number, on: on.clone(), whose, open };
-        assert_eq!(sidebar.key(&char('p'), moment(160_000)), asked);
+        assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
         sidebar.close_menu();
 
         let area = Rect::new(0, 0, 32, 26);

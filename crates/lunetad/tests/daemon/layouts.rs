@@ -1408,8 +1408,8 @@ fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_be
     };
     window.send("\x1ba");
     window.spot_of("New");
-    window.send("np");
-    eventually("n p opens a terminal beside it, there", || (far_terminals() == 2).then_some(()));
+    window.send("nv");
+    eventually("n v opens a terminal beside it, there", || (far_terminals() == 2).then_some(()));
 }
 
 fn seen_and_typed_into(

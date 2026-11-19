@@ -301,7 +301,7 @@ fn it_deletes_nothing_while_no_lunetad_says_where_the_panes_are() {
     let said = prune(&host, &scratch, &repository.at("main"), &["--yes", "0"]);
     let why = String::from_utf8_lossy(&said.stderr);
     assert_eq!(said.status.code(), Some(1), "{why}");
-    assert!(why.contains("cannot tell where the panes are, so it deletes nothing"), "{why}");
+    assert!(why.contains("cannot tell where the views are, so it deletes nothing"), "{why}");
     assert_eq!(host.gh.asked(), [] as [String; 0]);
     assert!(repository.at("one").exists());
 }

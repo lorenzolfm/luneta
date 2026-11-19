@@ -37,7 +37,7 @@ const RUNS: Duration = Duration::from_secs(5);
 
 pub const UNSHOWN: &str = "No workstream to show yet.";
 
-pub const SPLIT: &str = "\x1b[97;3unp";
+pub const SPLIT: &str = "\x1b[97;3unv";
 
 const CD_FEAT: &str = "cd ../feat && printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 

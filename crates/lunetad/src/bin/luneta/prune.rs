@@ -84,7 +84,7 @@ fn failed(why: &str) -> ExitCode {
 }
 
 fn untold(why: &str) -> String {
-    format!("luneta cannot tell where the panes are, so it deletes nothing: {why}")
+    format!("luneta cannot tell where the views are, so it deletes nothing: {why}")
 }
 
 fn said_of(outcomes: &[Outcome]) -> ExitCode {
