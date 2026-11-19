@@ -6,7 +6,7 @@ use crate::process;
 
 pub mod own;
 
-pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnTerminal, TerminalKey};
+pub use own::{OwnMade, TerminalKey};
 
 #[derive(Debug)]
 pub enum Failure {

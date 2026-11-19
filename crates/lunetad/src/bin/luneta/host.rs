@@ -26,7 +26,6 @@ use lunetad::api::{Host, Version};
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
-use lunetad::mux::own::{OwnClientId, OwnKey, OwnTerminal};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
@@ -67,8 +66,8 @@ use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
 use crate::pull::{self, Found, Link};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Sidebar, ViewKey,
-    ViewPlace,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
+    ViewKey, ViewPlace,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -129,8 +128,6 @@ const UNSHOWN: [&str; 2] =
     ["No worktree to show yet.", "o w on a project's row opens one."];
 
 const UNSHOWN_CURSOR: (CursorShape, bool) = (CursorShape::HollowBlock, false);
-
-const CLIENT: u64 = 1;
 
 const ASKED_TO_QUIT: &str = "asked to quit";
 
@@ -396,7 +393,6 @@ struct App {
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
-    seated: Option<OwnTerminal>,
     lunetad: PathBuf,
     movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
@@ -668,7 +664,6 @@ fn run_in(
         shown_number_dropped: 0,
         runs_in,
         projected: Projected::default(),
-        seated: None,
         lunetad,
         movers: HashMap::new(),
         sidebar,
@@ -1695,8 +1690,8 @@ impl App {
                 self.leave();
             },
             Asked::Delete { on, act } => self.project_act(&on, &act),
-            Asked::Open { asking, on, key, cwd, opens } => {
-                self.project_open(asking, &on, key, &cwd, &opens);
+            Asked::Open { asking, on, project, cwd, opens } => {
+                self.project_open(asking, &on, project, &cwd, &opens);
             },
             Asked::Welcome { asking, on, session, view } => {
                 self.welcome(asking, &on, &session, view);
@@ -1881,10 +1876,8 @@ impl App {
     }
 
     fn welcome(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, view: ViewKey) {
-        let held = self.projected.project(on, session.own_key()).and_then(|project| {
-            let own = OwnTerminal::new(project.key, view.terminal_id())?;
-            self.projected.of_own(on, own)
-        });
+        let project = self.projected.project(on, session.project());
+        let held = project.and_then(|project| project.view_of(view.key()));
         let Some((worktree, terminal)) = held else {
             return self.sidebar.notify(format!("menu: lunetad lists no view {view}"));
         };
@@ -1897,18 +1890,16 @@ impl App {
         &mut self,
         asking: sidebar::Held,
         on: &Machine,
-        key: OwnKey,
+        project: ProjectId,
         cwd: &Directory,
         opens: &Opens,
     ) {
-        let Some(project) = self.projected.project(on, key) else {
+        let Some(project) = self.projected.project(on, project) else {
             return self.sidebar.notify("menu: lunetad keeps no such project".to_owned());
         };
         match opens {
             Opens::View { beside, command } => {
-                let own = OwnTerminal::new(project.key, *beside);
-                let held = own.and_then(|it| self.projected.of_own(on, it));
-                let Some((worktree, terminal)) = held else {
+                let Some((worktree, terminal)) = project.view_of(beside.key()) else {
                     return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
                 };
                 self.go_worktree(on, worktree, Some(terminal));
@@ -2196,7 +2187,7 @@ impl App {
     fn go_project(&mut self, machine: &Machine, place: &Place) -> Result<(), String> {
         let listed = place.listed();
         let session = listed.name();
-        let Some(project) = self.projected.project(machine, listed.own_key()) else {
+        let Some(project) = self.projected.project(machine, listed.project()) else {
             if let Machine::Remote(destination) = machine
                 && !self.projected.reaches(machine)
             {
@@ -2228,9 +2219,8 @@ impl App {
                 }
             },
             Place::View(ViewPlace { view: ViewKey::Terminal(terminal_key), .. }) => {
-                let own = OwnTerminal { session: listed.own_key(), id: terminal_key.id };
-                let (worktree, terminal) = self.projected.of_own(machine, own).ok_or_else(|| {
-                    format!("lunetad lists no view {} in {session}", own.id)
+                let (worktree, terminal) = project.view_of(*terminal_key).ok_or_else(|| {
+                    format!("lunetad lists no view {} in {session}", terminal_key.id)
                 })?;
                 self.go_worktree(machine, worktree, Some(terminal));
             },
@@ -2299,7 +2289,6 @@ impl App {
             self.shown_number_dropped = number;
         }
         self.sidebar.unseat();
-        self.seated = None;
         self.give(Focus::on(Side::Sidebar));
         assert_eq!(self.focus.side, Side::Sidebar, "with no worktree shown, no keys go to it");
     }
@@ -2312,22 +2301,8 @@ impl App {
         let Some((project, _)) = self.projected.holding(&on, worktree) else {
             return;
         };
-        let key = project.key;
-        let own = right.focused().and_then(|focused| project.own_of(focused));
-        let seated = |sidebar: &Sidebar| sidebar.own_seat_on(&on).map(sidebar::OwnSeat::session);
-        if seated(&self.sidebar) != Some(key) {
-            self.sidebar.attaching(on.clone(), key);
-            self.seated = None;
-        }
-        assert_eq!(seated(&self.sidebar), Some(key), "the sidebar sits where luneta shows");
-        self.sidebar.showing(worktree);
-        if let Some(own) = own
-            && self.seated != Some(own)
-        {
-            let client = OwnClientId::new(CLIENT).expect("the client's id is not 0");
-            self.sidebar.went_own(own, client);
-            self.seated = Some(own);
-        }
+        let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
+        self.sidebar.sit(Seat { on, project: project.id, worktree, terminal });
     }
 
     fn heeded(&mut self, heeded: Heeded) {
