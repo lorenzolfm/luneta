@@ -74,7 +74,7 @@ pub fn unread_in<'a>(
     unread: &'a [Unread],
     held: &'a [TerminalKey],
 ) -> impl Iterator<Item = (u32, Doing)> + 'a {
-    let placed = unread.iter().filter_map(|file| file.view);
+    let placed = unread.iter().filter_map(|file| file.terminal);
     let held = placed.filter(move |key| held.contains(key));
     held.map(|key| (key.id.get(), Doing::Unknown))
 }
@@ -110,7 +110,7 @@ impl Act {
 
     pub fn takes(&self, view: u32) -> bool {
         match self {
-            Act::View { view: closed, .. } => view == closed.id(),
+            Act::View { view: closed, .. } => view == closed.terminal_id(),
             Act::Worktree { views, .. } => views.contains(&view),
             Act::Project { .. } => true,
         }

@@ -6,7 +6,7 @@ use crate::process;
 
 pub mod own;
 
-pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnView, TerminalKey};
+pub use own::{OwnClientId, OwnId, OwnKey, OwnMade, OwnTerminal, TerminalKey};
 
 #[derive(Debug)]
 pub enum Failure {
@@ -36,7 +36,7 @@ pub enum Runs<'a> {
 }
 
 #[must_use]
-pub fn view_of(pid: u32) -> Option<TerminalKey> {
+pub fn terminal_of(pid: u32) -> Option<TerminalKey> {
     own::terminal_in(&process::environ(pid)?)
 }
 

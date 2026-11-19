@@ -48,7 +48,7 @@ pub enum Found {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct View {
-    pub view: ViewId,
+    pub id: ViewId,
     pub rect: Rect,
     pub found: Found,
 }
@@ -139,10 +139,11 @@ impl Laid {
         let size = laid.size.ok_or("a layout of no size")?;
         let size = Size::of(size.columns, size.rows).map_err(|why| format!("a layout's {why}"))?;
         if laid.views.len() > LAYOUT_VIEWS_MAX {
-            let (views, most) = (laid.views.len(), LAYOUT_VIEWS_MAX);
-            return Err(format!("a layout of {views} terminals, over {most}"));
+            let count = laid.views.len();
+            return Err(format!("a layout of {count} views, over {LAYOUT_VIEWS_MAX}"));
         }
-        let mut others = laid.views.into_iter().map(view).collect::<Result<Vec<View>, String>>()?;
+        let mut others =
+            laid.views.into_iter().map(heard_view).collect::<Result<Vec<View>, String>>()?;
         tiles(&others, size)?;
         let (focused, full) = match laid.shown {
             None if others.is_empty() => return Ok(Laid { worktree, size, shown: None }),
@@ -153,53 +154,53 @@ impl Laid {
             },
             Some(Said::Full(full)) => (full, true),
         };
-        let at = others.iter().position(|view| view.view.get() == focused);
+        let at = others.iter().position(|view| view.id.get() == focused);
         let unheld = || format!("a layout focuses terminal {focused:016x}, which it lays out not");
         let focused = others.remove(at.ok_or_else(unheld)?);
         Ok(Laid { worktree, size, shown: Some(Showing { focused, others, full }) })
     }
 }
 
-fn view(shown: show_response::View) -> Result<View, String> {
+fn heard_view(view: show_response::View) -> Result<View, String> {
     use show_response::view::Found as Said;
-    let view = ViewId::of(shown.view).ok_or("a layout lays out view 0")?;
-    let rect = shown.rect.ok_or_else(|| format!("view {view} has no place"))?;
+    let id = ViewId::of(view.id).ok_or("a layout lays out view 0")?;
+    let rect = view.rect.ok_or_else(|| format!("view {id} has no place"))?;
     let side = |cells: u32| u16::try_from(cells).ok();
     let sides = (side(rect.column), side(rect.row), side(rect.columns), side(rect.rows));
     let (Some(column), Some(row), Some(columns), Some(rows)) = sides else {
-        return Err(format!("view {view} is placed off any screen"));
+        return Err(format!("view {id} is placed off any screen"));
     };
     let rect = Rect { column, row, columns, rows };
     if columns <= 2 * FRAME_CELLS || rows <= 2 * FRAME_CELLS {
-        return Err(format!("view {view} has no room inside its frame"));
+        return Err(format!("view {id} has no room inside its frame"));
     }
-    let found = match shown.found.ok_or_else(|| format!("view {view} is found nowhere"))? {
+    let found = match view.found.ok_or_else(|| format!("view {id} is found nowhere"))? {
         Said::Key(key) => Found::Key(TerminalKey::of(&key)?),
         Said::Lost(()) => Found::Lost,
         Said::Looking(()) => Found::Looking,
         Said::Welcome(()) => Found::Welcome,
     };
-    Ok(View { view, rect, found })
+    Ok(View { id, rect, found })
 }
 
 fn tiles(views: &[View], size: Size) -> Result<(), String> {
     let (columns, rows) = size.get();
     for (at, one) in views.iter().enumerate() {
         if right(one.rect) > u32::from(columns) || bottom(one.rect) > u32::from(rows) {
-            return Err(format!("view {} is placed off its layout", one.view));
+            return Err(format!("view {} is placed off its layout", one.id));
         }
         for other in &views[at + 1..] {
-            if one.view == other.view {
-                return Err(format!("a layout lays out view {} twice", one.view));
+            if one.id == other.id {
+                return Err(format!("a layout lays out view {} twice", one.id));
             }
             if let Some(key) = one.key()
                 && other.key() == Some(key)
             {
-                let (one, other, id) = (one.view, other.view, key.id);
+                let (one, other, id) = (one.id, other.id, key.id);
                 return Err(format!("terminals {one} and {other} share luneta-mux's terminal {id}"));
             }
             if overlaps(one.rect, other.rect) {
-                return Err(format!("view {} is laid over {}", other.view, one.view));
+                return Err(format!("view {} is laid over {}", other.id, one.id));
             }
         }
     }
@@ -465,7 +466,7 @@ mod tests {
             None => Said::Lost(()),
         };
         show_response::View {
-            view: terminal,
+            id: terminal,
             rect: Some(show_response::Rect { column, row, columns, rows }),
             found: Some(found),
         }
@@ -495,17 +496,17 @@ mod tests {
     #[test]
     fn a_layout_reads_where_its_terminals_tile_it_and_one_is_focused() {
         let read = Laid::heard(laid(halves(), Some(tiled(2)))).unwrap();
-        let terminals: Vec<u64> = read.views().map(|view| view.view.get()).collect();
+        let terminals: Vec<u64> = read.views().map(|view| view.id.get()).collect();
         assert_eq!(terminals, [2, 1], "the focused terminal first");
-        let focused = read.focused().map(|view| (view.view.get(), view.found));
+        let focused = read.focused().map(|view| (view.id.get(), view.found));
         assert_eq!(focused, Some((2, Found::Lost)));
         assert_eq!(read.keys().len(), 1);
         let drawn: Vec<(u64, u16)> =
-            read.drawn().iter().map(|(view, rect)| (view.view.get(), rect.columns)).collect();
+            read.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();
         assert_eq!((read.full(), drawn), (false, vec![(2, 40), (1, 40)]));
         let full = Laid::heard(laid(halves(), Some(full(1)))).unwrap();
         let drawn: Vec<(u64, u16)> =
-            full.drawn().iter().map(|(view, rect)| (view.view.get(), rect.columns)).collect();
+            full.drawn().iter().map(|(view, rect)| (view.id.get(), rect.columns)).collect();
         assert_eq!((full.full(), drawn), (true, vec![(1, 80)]));
         let empty = Laid::heard(laid(Vec::new(), None)).unwrap();
         assert!(empty.is_empty() && empty.focused().is_none() && empty.drawn().is_empty());

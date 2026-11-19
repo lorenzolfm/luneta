@@ -841,7 +841,7 @@ impl Target {
                 Briefed::Machine(machine.clone())
             },
             (Target::View(machine, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(machine.clone(), row.session.name().clone(), row.view.id())
+                Briefed::Agent(machine.clone(), row.session.name().clone(), row.view.terminal_id())
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
@@ -861,7 +861,7 @@ impl Target {
 fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
     let Beside { session, view, cwd } = row.beside()?;
     let command = agents::on_skill(keys.agent.harness(), skill, None);
-    let opens = Opens::View { beside: view.id(), command };
+    let opens = Opens::View { beside: view.terminal_id(), command };
     Ok(Wants::Open { session, view, cwd, opens })
 }
 
@@ -1258,7 +1258,7 @@ impl Menu {
             },
             Offer::NewView(row) => match row.beside() {
                 Ok(Beside { session, view, cwd }) => {
-                    let opens = Opens::View { beside: view.id(), command: Vec::new() };
+                    let opens = Opens::View { beside: view.terminal_id(), command: Vec::new() };
                     let stage = Stage::Opening { keys };
                     stays(stage, Wants::Open { session, view, cwd, opens })
                 },
@@ -1512,7 +1512,7 @@ impl Menu {
                 Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
             (At::There((session, view)), Pull::Agent) => {
-                let opens = Opens::View { beside: view.id(), command };
+                let opens = Opens::View { beside: view.terminal_id(), command };
                 opening(session, view, opens)
             },
             (At::Session((session, view)), _) => {
@@ -1568,7 +1568,7 @@ impl Menu {
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::View { beside: view.id(), command };
+        let opens = Opens::View { beside: view.terminal_id(), command };
         let stage = Stage::Opening { keys };
         let wants = Wants::Open { session, view, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
@@ -1598,7 +1598,7 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::View { beside: view.id(), command };
+        let opens = Opens::View { beside: view.terminal_id(), command };
         let stage = Stage::Opening { keys };
         let wants = Wants::Open { session, view, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)

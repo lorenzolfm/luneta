@@ -117,15 +117,15 @@ impl<'a> Shown<'a> {
         let argv = words.iter().map(|word| (*word).to_owned()).collect();
         self.ask(Event::Open(show_request::Open { beside: Some(beside), argv }));
         let laid = self.until("a terminal more", |laid| laid.views.len() == before.len() + 1);
-        let new = laid.views.iter().find(|view| !before.contains(&view.view));
-        let new = new.expect("the layout holds a new terminal").view;
+        let new = laid.views.iter().find(|view| !before.contains(&view.id));
+        let new = new.expect("the layout holds a new terminal").id;
         assert_eq!(focused_of(&laid), Some(new), "a client focuses the terminal it opens");
         new
     }
 
     fn terminals(&self) -> Vec<u64> {
         let laid = self.laid.as_ref().expect("a layout was heard");
-        laid.views.iter().map(|view| view.view).collect()
+        laid.views.iter().map(|view| view.id).collect()
     }
 
     fn until(&mut self, what: &str, mut done: impl FnMut(&Laid) -> bool) -> Laid {
@@ -233,7 +233,7 @@ impl<'a> Shown<'a> {
 
     fn key_of(&self, terminal: u64) -> TerminalKey {
         let laid = self.laid.as_ref().expect("a layout was heard");
-        let view = laid.views.iter().find(|view| view.view == terminal);
+        let view = laid.views.iter().find(|view| view.id == terminal);
         view.and_then(key).expect("the layout lays out the terminal, found")
     }
 }
@@ -340,7 +340,7 @@ fn a_layout_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
 
     let second = shown.open();
     let laid = shown.laid.clone().unwrap();
-    let rects: Vec<_> = laid.views.iter().map(|view| (view.view, view.rect)).collect();
+    let rects: Vec<_> = laid.views.iter().map(|view| (view.id, view.rect)).collect();
     assert_eq!(rects, [(first, Some(rect(0, 0, 40, 24))), (second, Some(rect(40, 0, 40, 24)))]);
     eventually("both terminals take the size of their place", || {
         (sized(&owned, first) == Some((38, 22)) && sized(&owned, second) == Some((38, 22)))
@@ -388,7 +388,7 @@ fn a_client_that_runs_in_a_terminal_of_the_layout_it_shows_sizes_none_of_it() {
     });
     drop(outer);
     let laid = inner.until("the inner size, alone", |laid| laid.size == Some(size(50, 16)));
-    let view = laid.views.iter().find(|view| view.view == other).unwrap();
+    let view = laid.views.iter().find(|view| view.id == other).unwrap();
     let rect = view.rect.unwrap();
     eventually("the other terminal fits the inner client", || {
         (sized(&owned, other) == Some((rect.columns - 2, rect.rows - 2))).then_some(())
@@ -492,7 +492,7 @@ fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_worktree() 
 }
 
 fn closed_outside(owned: &Owned, laid: &Laid, terminal: u64) {
-    let view = laid.views.iter().find(|view| view.view == terminal).unwrap();
+    let view = laid.views.iter().find(|view| view.id == terminal).unwrap();
     let key = key(view).unwrap();
     let mux_key = mux_api::TerminalKey { id: key.id, made_at: key.made_at };
     owned.close_terminal(mux_api::CloseTerminalRequest { terminal: Some(mux_key) });
@@ -508,7 +508,7 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
     let third = shown.open();
     shown.ask(Event::Close(third));
     let laid = shown.until("two terminals left", |laid| laid.views.len() == 2);
-    let left: Vec<u64> = laid.views.iter().map(|view| view.view).collect();
+    let left: Vec<u64> = laid.views.iter().map(|view| view.id).collect();
     assert_eq!(left, [first, second]);
     let took = "the terminal the closed one split takes the focus";
     assert_eq!(focused_of(&laid), Some(first), "{took}");
@@ -518,7 +518,7 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
 
     closed_outside(&owned, &laid, second);
     let laid = shown.until("the terminal closed outside gone", |laid| laid.views.len() == 1);
-    assert_eq!((laid.views[0].view, focused_of(&laid)), (first, Some(first)));
+    assert_eq!((laid.views[0].id, focused_of(&laid)), (first, Some(first)));
     closed_outside(&owned, &laid, first);
     shown.until("the view emptied", |laid| laid.views.is_empty());
     assert_eq!(watched(&owned, worktree), [], "a worktree stays with its last terminal gone");
@@ -535,7 +535,7 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
     shown.ask(Event::Welcome(()));
     let welcomes = |view: &View| matches!(view.found, Some(Found::Welcome(())));
     let laid = shown.until("a welcome view", |laid| laid.views.len() == 2);
-    let welcome = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").view;
+    let welcome = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").id;
     assert_eq!(focused_of(&laid), Some(welcome), "the welcome view opened takes the focus");
     let listed = watched_worktree(&owned, worktree).expect("the worktree is watched");
     let ids: Vec<u64> = listed.terminals.iter().map(|it| it.id).collect();
@@ -547,16 +547,16 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
 
     shown.ask(Event::Close(welcome));
     let laid = shown.until("the welcome view closed", |laid| laid.views.len() == 1);
-    assert_eq!((laid.views[0].view, focused_of(&laid)), (terminal, Some(terminal)));
+    assert_eq!((laid.views[0].id, focused_of(&laid)), (terminal, Some(terminal)));
     assert!(tagged(&owned.listing(), terminal).is_some(), "the terminal beside it stays");
     shown.ask(Event::Close(welcome));
 
     shown.ask(Event::Welcome(()));
     let laid = shown.until("a welcome view again", |laid| laid.views.len() == 2);
     let stayed = "a close of a view gone closes nothing, not the view focused since";
-    assert!(laid.views.iter().any(|view| view.view == terminal), "{stayed}");
+    assert!(laid.views.iter().any(|view| view.id == terminal), "{stayed}");
     assert!(tagged(&owned.listing(), terminal).is_some(), "{stayed}");
-    let again = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").view;
+    let again = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").id;
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(terminal)) }));
     shown.until("the terminal focused", |it| focused_of(it) == Some(terminal));
     shown.ask(Event::Close(terminal));
@@ -646,7 +646,7 @@ fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     shown.until("the first terminal focused", |laid| focused_of(laid) == Some(first));
     let new = shown.open_beside(open::Beside::Focused(()), &WAITS);
     let laid = shown.laid.clone().unwrap();
-    let rect_of = |terminal| laid.views.iter().find(|view| view.view == terminal).unwrap().rect;
+    let rect_of = |terminal| laid.views.iter().find(|view| view.id == terminal).unwrap().rect;
     assert_eq!(rect_of(first), Some(rect(0, 0, 20, 12)));
     assert_eq!(rect_of(new), Some(rect(20, 0, 20, 12)));
     assert_eq!(rect_of(second), Some(rect(40, 0, 40, 24)), "the largest terminal stays whole");
@@ -690,8 +690,8 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     });
     let to = Some(r#move::To::Direction(towards_left));
     shown.ask(Event::Move(show_request::Move { to }));
-    let laid = shown.until("the terminals traded", |laid| laid.views[0].view == right);
-    assert_eq!((laid.views[1].view, focused_of(&laid)), (left, Some(right)));
+    let laid = shown.until("the terminals traded", |laid| laid.views[0].id == right);
+    assert_eq!((laid.views[1].id, focused_of(&laid)), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
     shown.until("the layout full", |laid| full_of(laid) == Some(right));
     shown.ask(Event::Resize(resize(grow)));
@@ -774,7 +774,7 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     assert!(shown.until_refused().contains("is gone"), "a client left behind opens nothing");
     shown.ask(Event::Go(other));
     let there = shown.until("the client goes on to another", |laid| laid.worktree == other);
-    assert_eq!(there.views.iter().map(|it| it.view).collect::<Vec<_>>(), [stays]);
+    assert_eq!(there.views.iter().map(|it| it.id).collect::<Vec<_>>(), [stays]);
     assert_eq!(watched(&owned, other).len(), 1, "the other stays, with its terminal");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(!file.contains(&format!("{closing:016x}")), "{file}");
@@ -960,18 +960,18 @@ fn a_layout_restores_its_terminals_when_the_mux_dies() {
         heard_in_below(&owned, &mut shown, "sleep 606"),
     ];
     let laid = restored_after_kill(&owned, &mut shown);
-    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), terminals);
+    assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), terminals);
     assert_eq!(shown.refused, Vec::<String>::new());
     let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
     let listing = owned.listing();
     for (view, command) in laid.views.iter().zip(["sleep 602", "sleep 606"]) {
-        let listed = tagged(&listing, view.view).expect("the new mux holds the terminal");
+        let listed = tagged(&listing, view.id).expect("the new mux holds the terminal");
         assert_eq!(listed.cwd, below.to_str().unwrap(), "a terminal comes back in its folder");
         let restored = mux_key(key(view).unwrap());
         eventually("its last command is typed at the prompt", || {
             owned.dumped(restored).contains(command).then_some(())
         });
-        let front = front_of(&owned, view.view).expect("a shell runs in the terminal");
+        let front = front_of(&owned, view.id).expect("a shell runs in the terminal");
         assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
     }
     let log = logged(&owned);
@@ -998,7 +998,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(closes)) }));
     shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
     shown.ask(Event::Close(closes));
-    let terminals = |laid: &Laid| laid.views.iter().map(|view| view.view).collect::<Vec<_>>();
+    let terminals = |laid: &Laid| laid.views.iter().map(|view| view.id).collect::<Vec<_>>();
     shown.until("the restored terminal closed", |laid| terminals(laid) == [stays]);
     eventually("the closed terminal leaves the mux", || {
         tagged(&owned.listing(), closes).is_none().then_some(())
@@ -1066,7 +1066,7 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.contains(unrun), "the line is still kept, left unrun: {file}");
     let laid = restored_after_kill(&owned, &mut again);
-    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
+    assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
     let typed = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed again", || {
         owned.dumped(typed).contains("sleep 602").then_some(())
@@ -1152,7 +1152,7 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
     let mut again = Shown::new(&owned, worktree, 80, 24);
     let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
     let laid = again.until("the terminal restored", restored);
-    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
+    assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
     let restored = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed at the prompt", || {
         owned.dumped(restored).contains("sleep 602").then_some(())
@@ -1200,7 +1200,7 @@ fn lunetad_leaves_a_newer_luneta_mux_be_and_restores_its_terminals_once_it_ends(
     let mut again = Shown::new(&owned, worktree, 80, 24);
     let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
     let laid = again.until("the terminal restored", restored);
-    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
+    assert_eq!(laid.views.iter().map(|view| view.id).collect::<Vec<_>>(), [terminal]);
     let log = logged(&owned);
     assert!(!log.contains(&format!("{said}, and is stopped")), "{log}");
     let tried = |line: &str| line.contains("is not restored") && line.contains(&said);
@@ -1257,7 +1257,7 @@ fn a_terminal_gone_to_another_worktree_moves_there_and_its_client_follows() {
 
     let went = "the layout of the worktree it went to";
     let laid = shown.until(went, |laid| laid.worktree != main);
-    let terminals: Vec<u64> = laid.views.iter().map(|view| view.view).collect();
+    let terminals: Vec<u64> = laid.views.iter().map(|view| view.id).collect();
     assert_eq!((terminals, focused_of(&laid)), (vec![goes], Some(goes)));
     let went = watched_worktree(&owned, laid.worktree).expect("its worktree is watched");
     assert_eq!(went.folder, clone.join("feat").to_str().unwrap(), "made at the worktree's top");

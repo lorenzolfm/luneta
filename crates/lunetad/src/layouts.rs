@@ -1851,7 +1851,7 @@ fn laid(
                     },
                 };
                 show_response::View {
-                    view: id.get(),
+                    id: id.get(),
                     rect: Some(show_response::Rect {
                         column: rect.column.into(),
                         row: rect.row.into(),
@@ -1973,7 +1973,7 @@ mod tests {
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,
-            view: None,
+            terminal: None,
         }
     }
 

@@ -173,12 +173,12 @@ impl Occupied {
         let unread = seats::unread(host.unread, &host.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
         let terminals = terminals(host)?;
-        for seats::Unread { pid, view } in unread {
-            match view {
+        for seats::Unread { pid, terminal } in unread {
+            match terminal {
                 None => {
                     return Err(format!(
                         "lunetad cannot read the session file of agent {pid}, which runs in no \
-                         view"
+                         terminal"
                     ));
                 },
                 Some(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
@@ -1074,10 +1074,8 @@ mod tests {
         let zero = api::TerminalKey { id: 0, made_at: Some(prost_types::Timestamp::default()) };
         let unkeyed = api::UnreadFile { terminal: Some(zero), ..file() };
         assert_eq!(Occupied::of(&files(1, vec![unkeyed])), Err(unplaced.to_owned()));
-        assert_eq!(
-            Occupied::of(&files(1, vec![file()])),
-            Err("lunetad cannot read the session file of agent 9, which runs in no view".to_owned())
-        );
+        let unseated = "lunetad cannot read the session file of agent 9, which runs in no terminal";
+        assert_eq!(Occupied::of(&files(1, vec![file()])), Err(unseated.to_owned()));
     }
 
     fn pulled(author: Option<&str>, head: &str) -> Pulled {

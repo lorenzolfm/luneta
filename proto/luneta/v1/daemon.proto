@@ -896,7 +896,7 @@ message ShowResponse {
   }
 
   message View {
-    fixed64 view = 1;
+    fixed64 id = 1;
     Rect rect = 2;
     oneof found {
       TerminalKey key = 3;

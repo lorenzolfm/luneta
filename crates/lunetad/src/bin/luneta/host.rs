@@ -26,7 +26,7 @@ use lunetad::api::{Host, Version};
 use lunetad::issues::{Filed, OnGitHub, Remote, Unfiled};
 use lunetad::log::{self, Process};
 use lunetad::mux::own::viewer::{Greeting, Seen};
-use lunetad::mux::own::{OwnClientId, OwnKey, OwnView};
+use lunetad::mux::own::{OwnClientId, OwnKey, OwnTerminal};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
@@ -396,7 +396,7 @@ struct App {
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
-    seated: Option<OwnView>,
+    seated: Option<OwnTerminal>,
     lunetad: PathBuf,
     movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
@@ -1861,11 +1861,11 @@ impl App {
 
     fn welcome(&mut self, asking: sidebar::Held, on: &Machine, session: &Listed, view: ViewKey) {
         let held = self.projected.project(on, session.own_key()).and_then(|project| {
-            let view = OwnView::new(project.key, view.id())?;
-            self.projected.of_view(on, view)
+            let own = OwnTerminal::new(project.key, view.terminal_id())?;
+            self.projected.of_own(on, own)
         });
         let Some((worktree, terminal)) = held else {
-            return self.sidebar.notify(format!("menu: lunetad lists no view {}", view.id()));
+            return self.sidebar.notify(format!("menu: lunetad lists no view {view}"));
         };
         self.go_worktree(on, worktree, Some(terminal));
         self.shown().welcome();
@@ -1885,8 +1885,8 @@ impl App {
         };
         match opens {
             Opens::View { beside, command } => {
-                let view = OwnView::new(project.key, *beside);
-                let held = view.and_then(|it| self.projected.of_view(on, it));
+                let own = OwnTerminal::new(project.key, *beside);
+                let held = own.and_then(|it| self.projected.of_own(on, it));
                 let Some((worktree, terminal)) = held else {
                     return self.sidebar.notify(format!("menu: lunetad lists no view {beside}"));
                 };
@@ -2177,7 +2177,7 @@ impl App {
             }
             return Ok(());
         }
-        let Some(view) = place.view() else {
+        let Some(id) = place.terminal_id() else {
             if project.worktrees().iter().any(|it| shows(it.id)) {
                 return Ok(());
             }
@@ -2186,9 +2186,9 @@ impl App {
             self.go_worktree(machine, last, None);
             return Ok(());
         };
-        let view = OwnView::new(listed.own_key(), view).ok_or("a view of id 0")?;
-        let (worktree, terminal) = self.projected.of_view(machine, view).ok_or_else(|| {
-            format!("lunetad lists no view {} in {session}", view.id)
+        let own = OwnTerminal::new(listed.own_key(), id).ok_or("a view of id 0")?;
+        let (worktree, terminal) = self.projected.of_own(machine, own).ok_or_else(|| {
+            format!("lunetad lists no view {} in {session}", own.id)
         })?;
         self.go_worktree(machine, worktree, Some(terminal));
         Ok(())
@@ -2269,7 +2269,7 @@ impl App {
             return;
         };
         let key = project.key;
-        let view = right.focused().and_then(|focused| project.view_of(focused));
+        let own = right.focused().and_then(|focused| project.own_of(focused));
         let seated = |sidebar: &Sidebar| sidebar.own_seat_on(&on).map(sidebar::OwnSeat::session);
         if seated(&self.sidebar) != Some(key) {
             self.sidebar.attaching(on.clone(), key);
@@ -2277,12 +2277,12 @@ impl App {
         }
         assert_eq!(seated(&self.sidebar), Some(key), "the sidebar sits where luneta shows");
         self.sidebar.showing(worktree);
-        if let Some(view) = view
-            && self.seated != Some(view)
+        if let Some(own) = own
+            && self.seated != Some(own)
         {
             let client = OwnClientId::new(CLIENT).expect("the client's id is not 0");
-            self.sidebar.went_own(view, client);
-            self.seated = Some(view);
+            self.sidebar.went_own(own, client);
+            self.seated = Some(own);
         }
     }
 

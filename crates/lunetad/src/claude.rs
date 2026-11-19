@@ -22,7 +22,7 @@ pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Comman
     let mut claude = Command::new("claude");
     claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
     claude.args(["--no-session-persistence", "--system-prompt", system]);
-    mux::own::in_no_view(&mut claude);
+    mux::own::in_no_terminal(&mut claude);
     Ok((claude, program::saying(prompt)?))
 }
 
@@ -92,7 +92,7 @@ pub struct SessionFiles {
     dir: PathBuf,
     domain: process::Domain,
     seen: HashMap<u32, Seen>,
-    views: HashMap<(u32, String), Option<TerminalKey>>,
+    terminals: HashMap<(u32, String), Option<TerminalKey>>,
     troubles: Troubles,
     scanned: bool,
 }
@@ -104,7 +104,7 @@ impl SessionFiles {
             dir: claude.join("sessions"),
             domain: process::Domain::here(),
             seen: HashMap::new(),
-            views: HashMap::new(),
+            terminals: HashMap::new(),
             troubles: Troubles::default(),
             scanned: false,
         }
@@ -144,12 +144,12 @@ impl SessionFiles {
         }
         self.seen = seen;
 
-        let mut views = HashMap::with_capacity(self.seen.len());
-        let mut view = |pid: u32, start: String| {
+        let mut terminals = HashMap::with_capacity(self.seen.len());
+        let mut terminal_of = |pid: u32, start: String| {
             let key = (pid, start);
-            let view = self.views.remove(&key).unwrap_or_else(|| mux::view_of(pid));
-            views.insert(key, view);
-            view
+            let terminal = self.terminals.remove(&key).unwrap_or_else(|| mux::terminal_of(pid));
+            terminals.insert(key, terminal);
+            terminal
         };
         let mut agents = Vec::with_capacity(self.seen.len());
         let mut unread = Vec::new();
@@ -159,7 +159,7 @@ impl SessionFiles {
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid) {
-                        unread.push(Unread { pid, view: view(pid, start) });
+                        unread.push(Unread { pid, terminal: terminal_of(pid, start) });
                     }
                     continue;
                 },
@@ -171,9 +171,9 @@ impl SessionFiles {
             if process::start(pid).as_ref() != Some(&start) {
                 continue;
             }
-            agents.push(agent(pid, file, view(pid, start)));
+            agents.push(agent(pid, file, terminal_of(pid, start)));
         }
-        self.views = views;
+        self.terminals = terminals;
         assert!(agents.len() + unread.len() <= self.seen.len());
         Scan { agents, unread }
     }
@@ -200,7 +200,7 @@ fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) 
     }
 }
 
-fn agent(pid: u32, file: &File, view: Option<TerminalKey>) -> Agent {
+fn agent(pid: u32, file: &File, terminal: Option<TerminalKey>) -> Agent {
     let word = |text: &Option<String>| Said::new(text.as_deref()?.trim().to_owned());
     let name = file.name.clone().and_then(Said::new);
     let source = word(&file.name_source).map(|word| Source::of(word.as_str()));
@@ -214,7 +214,7 @@ fn agent(pid: u32, file: &File, view: Option<TerminalKey>) -> Agent {
         started_at: file.started_at.map(moment),
         name: name.map(|text| Name { text, source }),
         entrypoint: word(&file.entrypoint),
-        view,
+        terminal,
     }
 }
 
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_answer_runs_in_no_view_with_no_tools() {
+    fn one_answer_runs_in_no_terminal_with_no_tools() {
         let (claude, told) = one_answer("haiku", "be brief", "the prompt").unwrap();
         let args: Vec<&OsStr> = claude.get_args().collect();
         let said = [

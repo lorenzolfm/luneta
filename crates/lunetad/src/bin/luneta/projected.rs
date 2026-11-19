@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use lunetad::api::projects::Held;
 use lunetad::api::{self, remote, terminal, Host};
-use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnView};
+use lunetad::mux::own::{OwnId, OwnKey, OwnMade, OwnTerminal};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{ProjectId, ViewId, WorktreeId};
 use lunetad::Destination;
@@ -73,10 +73,10 @@ impl Project {
     }
 
     #[must_use]
-    pub fn view_of(&self, terminal: ViewId) -> Option<OwnView> {
+    pub fn own_of(&self, terminal: ViewId) -> Option<OwnTerminal> {
         let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
         let (_, key) = held.find(|(id, _)| *id == terminal)?;
-        Some(OwnView { session: self.key, id: key.as_ref()?.id })
+        Some(OwnTerminal { session: self.key, id: key.as_ref()?.id })
     }
 
     fn first_keyed(&self) -> Option<TerminalKey> {
@@ -167,8 +167,8 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn of_view(&self, on: &Machine, view: OwnView) -> Option<(WorktreeId, ViewId)> {
-        let (worktree, terminal, _) = self.project(on, view.session)?.holding(view.id)?;
+    pub fn of_own(&self, on: &Machine, own: OwnTerminal) -> Option<(WorktreeId, ViewId)> {
+        let (worktree, terminal, _) = self.project(on, own.session)?.holding(own.id)?;
         Some((worktree, terminal))
     }
 
@@ -319,9 +319,9 @@ mod tests {
         let projected = Projected::adapted(&host).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
         let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));
-        let view = OwnView { session: project_key, id: NonZeroU32::new(5).unwrap() };
+        let five = OwnTerminal { session: project_key, id: NonZeroU32::new(5).unwrap() };
         let held = Some((worktree(12), ViewId::of(23).unwrap()));
-        assert_eq!((projected.of_view(&here, view), projected.of_view(&nixos, view)), (held, held));
+        assert_eq!((projected.of_own(&here, five), projected.of_own(&nixos, five)), (held, held));
         let names = |on| -> Vec<&str> {
             projected.projects(on).iter().map(|it| it.name.as_str()).collect()
         };
@@ -338,12 +338,12 @@ mod tests {
     fn a_view_or_tab_of_a_project_row_leads_back_to_its_worktree_and_terminal() {
         let projected = Projected::adapted(&host()).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
-        let view = OwnView { session: project_key, id: NonZeroU32::new(4).unwrap() };
+        let own = OwnTerminal { session: project_key, id: NonZeroU32::new(4).unwrap() };
         let terminal = ViewId::of(21).unwrap();
-        assert_eq!(projected.of_view(&Machine::Local, view), Some((worktree(11), terminal)));
+        assert_eq!(projected.of_own(&Machine::Local, own), Some((worktree(11), terminal)));
         let project = &projected.projects(&Machine::Local)[0];
-        assert_eq!(project.view_of(terminal), Some(view));
-        assert_eq!(project.view_of(ViewId::of(22).unwrap()), None, "a lost one is no view");
+        assert_eq!(project.own_of(terminal), Some(own));
+        assert_eq!(project.own_of(ViewId::of(22).unwrap()), None, "a lost one is no view");
         let (tabs, titles) = projected.tabs(&Machine::Local, worktree(11));
         let names: Vec<&str> = tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
@@ -388,11 +388,11 @@ mod tests {
         rows(kept(&mut host))[1].terminals.push(again);
         let projected = Projected::adapted(&host).unwrap();
         let project_key = key_of(ProjectId::of(7).unwrap());
-        let view = OwnView { session: project_key, id: NonZeroU32::new(4).unwrap() };
-        assert_eq!(projected.of_view(&Machine::Local, view), None);
-        let five = OwnView { session: project_key, id: NonZeroU32::new(5).unwrap() };
+        let four = OwnTerminal { session: project_key, id: NonZeroU32::new(4).unwrap() };
+        assert_eq!(projected.of_own(&Machine::Local, four), None);
+        let five = OwnTerminal { session: project_key, id: NonZeroU32::new(5).unwrap() };
         let held = Some((worktree(12), ViewId::of(23).unwrap()));
-        assert_eq!(projected.of_view(&Machine::Local, five), held);
+        assert_eq!(projected.of_own(&Machine::Local, five), held);
     }
 
     #[test]

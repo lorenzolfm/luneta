@@ -19,7 +19,7 @@ use lunetad::api::shell::Doing;
 use lunetad::api::{self, Agent, Front, Harness, Host, View, Saying, Shell, Status, UnreadFile};
 use lunetad::issues::{Filed, Unfiled};
 use lunetad::links::{self, Branch};
-use lunetad::mux::own::{OwnClientId, OwnKey, OwnView};
+use lunetad::mux::own::{OwnClientId, OwnKey, OwnTerminal};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{self, Dir, ProjectId, ViewId, WorktreeId, CLONE_WORKTREES_MAX};
 use lunetad::prunes;
@@ -196,10 +196,10 @@ impl Place {
         self.listed().name.as_str()
     }
 
-    pub fn view(&self) -> Option<u32> {
+    pub fn terminal_id(&self) -> Option<u32> {
         match self {
             Place::Session(_) | Place::Worktree(_) => None,
-            Place::View(place) => Some(place.view.id()),
+            Place::View(place) => Some(place.view.terminal_id()),
         }
     }
 
@@ -242,7 +242,7 @@ pub enum ViewKey {
 
 impl ViewKey {
     #[must_use]
-    pub fn id(self) -> u32 {
+    pub fn terminal_id(self) -> u32 {
         self.key().id.get()
     }
 
@@ -264,14 +264,14 @@ impl ViewKey {
 
 impl fmt::Display for ViewKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.id().fmt(f)
+        self.terminal_id().fmt(f)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnSeat {
     Coming(OwnKey),
-    On { view: OwnView, client: OwnClientId },
+    On { terminal: OwnTerminal, client: OwnClientId },
 }
 
 impl OwnSeat {
@@ -279,15 +279,15 @@ impl OwnSeat {
     pub fn session(self) -> OwnKey {
         match self {
             OwnSeat::Coming(session) => session,
-            OwnSeat::On { view, .. } => view.session,
+            OwnSeat::On { terminal, .. } => terminal.session,
         }
     }
 
     #[must_use]
-    pub fn on(self) -> Option<OwnView> {
+    pub fn on(self) -> Option<OwnTerminal> {
         match self {
             OwnSeat::Coming(_) => None,
-            OwnSeat::On { view, .. } => Some(view),
+            OwnSeat::On { terminal, .. } => Some(terminal),
         }
     }
 }
@@ -1861,7 +1861,7 @@ impl Sidebar {
 
     fn went_said(place: &Place) -> String {
         let session = place.session();
-        match place.view() {
+        match place.terminal_id() {
             Some(view) => format!("menu: {session}:{view} has it; nobody went"),
             None => format!("menu: {session} has it; nobody went"),
         }
@@ -1904,14 +1904,14 @@ impl Sidebar {
         assert!(self.seat.is_none(), "luneta sits nowhere when it shows no worktree");
     }
 
-    pub fn went_own(&mut self, view: OwnView, client: OwnClientId) {
+    pub fn went_own(&mut self, terminal: OwnTerminal, client: OwnClientId) {
         let seat = self.seat.as_mut().expect("only a client of an own session goes among them");
         let was = seat.own.session();
-        seat.own = OwnSeat::On { view, client };
-        if was != view.session {
-            self.unfold_own(view.session);
+        seat.own = OwnSeat::On { terminal, client };
+        if was != terminal.session {
+            self.unfold_own(terminal.session);
         }
-        if let Some(place) = self.own_place(view) {
+        if let Some(place) = self.own_place(terminal) {
             let on = self.on().clone();
             let spot = Spot::on(&on, Place::View(place));
             if let Some(Place::Worktree(home)) = self.homes.get(&spot).and_then(Spot::place) {
@@ -1951,9 +1951,9 @@ impl Sidebar {
         known.find(|known| known.listed().own_key() == key)
     }
 
-    fn own_place(&self, view: OwnView) -> Option<ViewPlace> {
-        let known = self.own_known(view.session)?;
-        ViewPlace::of(known.listed().clone(), known.view(view.id.get())?)
+    fn own_place(&self, terminal: OwnTerminal) -> Option<ViewPlace> {
+        let known = self.own_known(terminal.session)?;
+        ViewPlace::of(known.listed().clone(), known.view(terminal.id.get())?)
     }
 
     fn here_worktree(&self) -> Option<WorktreePlace> {
@@ -1989,12 +1989,12 @@ impl Sidebar {
         let seen = self.seen(self.on())?;
         let seated = seen.seated();
         let agent = seated.get(&place.view.key())?;
-        let view = self.view_of(self.on(), &place.session, place.view.id())?;
+        let view = self.view_of(self.on(), &place.session, place.view.terminal_id())?;
         let harness = agents::of(agent).filter(|_| agent.at_a_prompt())?;
         Some(HereAgent {
             on: self.on().clone(),
             session: place.session.name().clone(),
-            view: place.view.id(),
+            view: place.view.terminal_id(),
             dir: agent_dir(agent, view).to_owned(),
             harness,
         })
@@ -2036,7 +2036,8 @@ impl Sidebar {
         here: Option<&Here>,
     ) -> Shelved {
         let here = here.filter(|here| here.on() == machine);
-        let here_key = here.and_then(Here::view).map(|place| place.session.key(place.view.id()));
+        let placed = here.and_then(Here::view);
+        let here_key = placed.map(|place| place.session.key(place.view.terminal_id()));
         let heard = seen.ok();
         let seated = heard.map_or_default(|seen| seen.seated());
         let unread = heard.filter(|_| self.away.is_none()).map(Seen::unread_seats);
@@ -2132,7 +2133,8 @@ impl Sidebar {
 
     fn runs(&self, machine: &Machine, seen: &Seen<'_>, here: Option<&Here>) -> Runs {
         let here = here.filter(|here| here.on() == machine);
-        let here_key = here.and_then(Here::view).map(|place| place.session.key(place.view.id()));
+        let placed = here.and_then(Here::view);
+        let here_key = placed.map(|place| place.session.key(place.view.terminal_id()));
         let seated = seen.seated();
         let mut runs = Runs::default();
         for known in seen.projects.iter().rev() {
@@ -2283,7 +2285,7 @@ impl Sidebar {
             | Mode::AfloatNote(_) => (None, false),
         };
         let finder = term.map(Finder::new);
-        let here_key = here_view.as_ref().map(|place| place.session.key(place.view.id()));
+        let here_key = here_view.as_ref().map(|place| place.session.key(place.view.terminal_id()));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
@@ -3222,7 +3224,7 @@ impl Sidebar {
             return None;
         };
         let seen = self.seen(machine)?;
-        let shown = self.view_of(machine, &row.session, row.view.id())?;
+        let shown = self.view_of(machine, &row.session, row.view.terminal_id())?;
         let seats = seen.seated();
         seats.get(&keyed(shown)?).and_then(|agent| agents::of(agent))
     }
@@ -3246,7 +3248,7 @@ impl Sidebar {
             Place::View(ViewPlace { session, view }) => (session, view),
         };
         let seen = self.seen(machine);
-        let shown = self.view_of(machine, &session, view.id());
+        let shown = self.view_of(machine, &session, view.terminal_id());
         let agents = seen.as_ref().map(Seen::seated);
         let cwd = shown.and_then(|shown| {
             let agents = agents.as_ref()?;
@@ -3266,7 +3268,7 @@ impl Sidebar {
         let pull_request =
             cwd.as_deref().and_then(|cwd| pulls.into_iter().find(|pull| pull.dir == cwd));
         let pull_request = pull_request.and_then(PullRequest::of_api);
-        let ran = self.ran_in(machine, &session, view.id());
+        let ran = self.ran_in(machine, &session, view.terminal_id());
         let terminal = self.terminal_of(machine, &session, view);
         let row = ViewRow { session, view, terminal, cwd, branch, repository, pull_request, ran };
         Some(Target::View(machine.clone(), row))
@@ -3311,7 +3313,7 @@ impl Sidebar {
         let Some(Target::View(machine, row)) = self.open().map(Menu::target) else {
             return;
         };
-        let ran = self.ran_in(machine, &row.session, row.view.id());
+        let ran = self.ran_in(machine, &row.session, row.view.terminal_id());
         if let Some(menu) = self.open_mut() {
             menu.reran(ran);
         }
@@ -3789,9 +3791,9 @@ impl Sidebar {
     }
 
     fn delete(&mut self, on: Machine, act: Act) -> Asked {
-        let takes_place = |place: &Place| match (&act, place.view()) {
+        let takes_place = |place: &Place| match (&act, place.terminal_id()) {
             (Act::View { session, view, .. }, Some(at)) => {
-                place.session() == session.as_str() && at == view.id()
+                place.session() == session.as_str() && at == view.terminal_id()
             },
             (Act::Worktree { session, views, .. }, Some(at)) => {
                 place.session() == session.as_str() && views.contains(&at)
@@ -3838,7 +3840,7 @@ impl Sidebar {
         else {
             return;
         };
-        let key = session.key(view.id());
+        let key = session.key(view.terminal_id());
         if dotted(*unread, marked.as_ref()) {
             self.news.read(key, self.finished.get(&key).copied(), now);
         } else {
@@ -5626,11 +5628,11 @@ mod tests {
 
     fn sit(sidebar: &mut Sidebar, place: &Place) {
         let key = place.listed().own_key();
-        let view = OwnView::new(key, place.view().expect("a view")).expect("a view");
+        let terminal = OwnTerminal::new(key, place.terminal_id().expect("a view")).expect("a view");
         if sidebar.own_seat().is_none() {
             sidebar.attaching(Machine::Local, key);
         }
-        sidebar.went_own(view, OwnClientId::new(1).unwrap());
+        sidebar.went_own(terminal, OwnClientId::new(1).unwrap());
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
@@ -8321,7 +8323,7 @@ mod tests {
         sidebar.attaching(Machine::Local, key);
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
         let client = OwnClientId::new(4).unwrap();
-        sidebar.went_own(OwnView::new(key, 1).unwrap(), client);
+        sidebar.went_own(OwnTerminal::new(key, 1).unwrap(), client);
         let twin = Listed::new_project("twin", 1);
         let here = ViewPlace { session: twin.clone(), view: view_key(1, 1) };
         assert_eq!(sidebar.here_place(), Ok(here));
@@ -8340,7 +8342,7 @@ mod tests {
         sidebar.hear(host(sessions, Vec::new()));
         let key = OwnKey { id: OwnId::new(1).unwrap(), made: OwnMade::from_nanos(0) };
         sidebar.attaching(Machine::Local, key);
-        sidebar.went_own(OwnView::new(key, 1).unwrap(), OwnClientId::new(4).unwrap());
+        sidebar.went_own(OwnTerminal::new(key, 1).unwrap(), OwnClientId::new(4).unwrap());
         sidebar.unseat();
         assert_eq!(sidebar.own_seat(), None);
         let (twin, view) = (Listed::new_project("twin", 1), view_key(1, 1));

@@ -216,7 +216,7 @@ impl Asked {
             claude.args(["--resume", session.as_str()]);
         }
         claude.arg("--allowedTools").args(ALLOWED);
-        mux::own::in_no_view(&mut claude);
+        mux::own::in_no_terminal(&mut claude);
         git::local(&mut claude);
         self.turn.name_in(&mut claude);
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {

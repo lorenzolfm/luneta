@@ -307,7 +307,7 @@ impl<L: Leaf> Tree<L> {
 
     pub fn of_preorder(preorder: Vec<Preordered<L>>) -> Result<Tree<L>, String> {
         if preorder.len() > NODES_MAX {
-            return Err(format!("a layout holds at most {LAYOUT_VIEWS_MAX} terminals"));
+            return Err(format!("a layout holds at most {LAYOUT_VIEWS_MAX} views"));
         }
         let mut nodes: Vec<Option<Node<L>>> = Vec::with_capacity(preorder.len());
         nodes.push(None);
@@ -1170,6 +1170,6 @@ mod tests {
             assert!(read.as_ref().unwrap_err().contains(why), "{preorder:?}: {read:?}");
         }
         let many = (0..=NODES_MAX).map(|_| split).collect();
-        assert!(Tree::of_preorder(many).unwrap_err().contains("at most 64 terminals"));
+        assert!(Tree::of_preorder(many).unwrap_err().contains("at most 64 views"));
     }
 }

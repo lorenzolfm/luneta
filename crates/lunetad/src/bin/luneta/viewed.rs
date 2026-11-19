@@ -112,7 +112,7 @@ impl Layout {
     }
 
     fn focused(&self) -> Option<ViewId> {
-        self.laid()?.focused().map(|view| view.view)
+        self.laid()?.focused().map(|view| view.id)
     }
 
     fn welcomes(&self) -> bool {
@@ -183,7 +183,7 @@ impl Layout {
         if laid.worktree() != self.worktree {
             return false;
         }
-        if self.focused() != laid.focused().map(|view| view.view) {
+        if self.focused() != laid.focused().map(|view| view.id) {
             self.pointer = Pointer::Free;
             if matches!(self.closing, Closing::Armed { .. }) {
                 self.closing = Closing::Unarmed;
@@ -285,7 +285,7 @@ impl Layout {
             .drawn()
             .into_iter()
             .find(|(_, placed)| view_rect(Rect::default(), *placed).contains(spot))
-            .map(|(view, _)| view.view);
+            .map(|(view, _)| view.id);
         if down
             && let Some(under) = under
             && Some(under) != self.focused()
@@ -405,10 +405,10 @@ impl Layout {
         let pointed = hover.and_then(|at| self.pointed(at));
         let mut cursor = None;
         for (view, placed) in self.drawn() {
-            let mine = Some(view.view) == focused;
+            let mine = Some(view.id) == focused;
             let outer = view_rect(views, placed);
             let colour = if mine { gruvbox::GREEN } else { gruvbox::GREY };
-            let title = self.titles.get(&view.view).map_or("", String::as_str);
+            let title = self.titles.get(&view.id).map_or("", String::as_str);
             border(buffer, views, outer, title, Style::new().fg(colour));
             let seen = screen_rect(outer).intersection(views);
             if seen.is_empty() {
@@ -903,7 +903,7 @@ mod tests {
             None => Said::Lost(()),
         };
         show_response::View {
-            view: terminal,
+            id: terminal,
             rect: Some(show_response::Rect { column, row, columns, rows }),
             found: Some(found),
         }
@@ -1107,7 +1107,7 @@ mod tests {
 
     fn laid_in(id: u64, views: Vec<show_response::View>) -> Heard {
         use show_response::laid::Shown as Said;
-        let shown = views.first().map(|view| Said::Tiled(view.view));
+        let shown = views.first().map(|view| Said::Tiled(view.id));
         let size = Some(show_request::Size { columns: 20, rows: 4 });
         let said = show_response::Laid { worktree: id, size, views, shown };
         Heard::Laid(Laid::heard(said).unwrap())
