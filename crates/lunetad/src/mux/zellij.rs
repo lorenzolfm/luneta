@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -98,19 +98,34 @@ impl fmt::Display for SessionName {
     }
 }
 
+pub const SOCKET_DIR: &str = "ZELLIJ_SOCKET_DIR";
+
 #[must_use]
 pub fn folder() -> SocketFolder {
-    let set = |name| std::env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(dir) = set("ZELLIJ_SOCKET_DIR") {
+    folder_by(|name| std::env::var_os(name))
+}
+
+fn folder_by(var: impl Fn(&str) -> Option<OsString>) -> SocketFolder {
+    if let Some(dir) = var(SOCKET_DIR).filter(|dir| !dir.is_empty()) {
         return SocketFolder(PathBuf::from(dir));
     }
     if cfg!(target_os = "linux")
-        && let Some(runtime) = set("XDG_RUNTIME_DIR")
+        && let Some(runtime) = var("XDG_RUNTIME_DIR").filter(|root| Path::new(root).is_absolute())
     {
         return SocketFolder(PathBuf::from(runtime).join("zellij"));
     }
     let uid = rustix::process::getuid().as_raw();
-    SocketFolder(std::env::temp_dir().join(format!("zellij-{uid}")))
+    SocketFolder(user_temp().join(format!("zellij-{uid}")))
+}
+
+#[cfg(target_os = "macos")]
+fn user_temp() -> PathBuf {
+    crate::folder::user_temp().map_or_else(|_| std::env::temp_dir(), PathBuf::from)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn user_temp() -> PathBuf {
+    PathBuf::from("/tmp")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,9 +358,34 @@ mod tests {
 
     use std::time::{Duration, SystemTime};
 
-    use super::{newborn, running, scan, SessionName, SocketFolder, CONTRACT, NAME_BYTES_MAX};
-    use super::{NEWBORN, WEB_SERVER};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{folder_by, newborn, running, scan, user_temp, SessionName, SocketFolder};
+    use super::{CONTRACT, NAME_BYTES_MAX, NEWBORN, SOCKET_DIR, WEB_SERVER};
     use crate::watch::Troubles;
+
+    #[test]
+    fn zellij_s_folder_is_one_for_every_shell_whatever_tmpdir_says() {
+        let folder_in = |set: &[(&str, &str)]| {
+            let set: Vec<(String, OsString)> =
+                set.iter().map(|&(name, value)| (name.to_owned(), value.into())).collect();
+            folder_by(|name| set.iter().find(|(set, _)| set == name).map(|(_, value)| value.clone()))
+        };
+        let uid = rustix::process::getuid().as_raw();
+        let user_s = SocketFolder(user_temp().join(format!("zellij-{uid}")));
+        assert_eq!(folder_in(&[]), user_s);
+        assert_eq!(folder_in(&[("TMPDIR", "/var/T/nix-shell.a")]), user_s);
+        assert_eq!(folder_in(&[("XDG_RUNTIME_DIR", "run"), ("TMPDIR", "/tmp/a")]), user_s);
+        let given = folder_in(&[(SOCKET_DIR, "/tmp/z"), ("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        assert_eq!(given, SocketFolder(PathBuf::from("/tmp/z")));
+        let runtime = folder_in(&[("XDG_RUNTIME_DIR", "/run/user/1000"), ("TMPDIR", "/tmp/a")]);
+        if cfg!(target_os = "linux") {
+            assert_eq!(runtime, SocketFolder(PathBuf::from("/run/user/1000/zellij")));
+        } else {
+            assert_eq!(runtime, user_s);
+        }
+    }
 
     #[test]
     fn zellij_is_not_alone_where_its_folder_cannot_be_read() {

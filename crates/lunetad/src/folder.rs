@@ -84,7 +84,7 @@ const PATH_BYTES_MAX: usize = libc::PATH_MAX as usize;
 const _: () = assert!(PATH_BYTES_MAX >= 2, "a path has room for `/` and its NUL");
 
 #[cfg(target_os = "macos")]
-fn user_temp() -> Result<OsString, io::Error> {
+pub(crate) fn user_temp() -> Result<OsString, io::Error> {
     let mut buffer = [0_u8; PATH_BYTES_MAX];
     #[expect(
         unsafe_code,
