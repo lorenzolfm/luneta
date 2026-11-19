@@ -1,5 +1,4 @@
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -16,7 +15,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::api::{self, mux_server};
 use crate::asked::{self, Dumped, Opens, Size, Tag, TerminalKey, ViewerHeard};
-use crate::folder::Claim;
+use crate::folder::{Bound, Claim, Found};
 use crate::id::ClientId;
 use crate::mux::Mux;
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, UNREAD_BYTES_MAX, ViewerOut};
@@ -25,6 +24,8 @@ use crate::pty;
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
 
 const DRAIN: Duration = Duration::from_secs(5);
+
+const SOCKET_LOOK: Duration = Duration::from_secs(1);
 
 const STREAMS_MAX: u32 = 256;
 
@@ -198,31 +199,65 @@ impl Stream for Viewed {
     }
 }
 
+async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
+    let watched = mux.watched();
+    let mut unsure = false;
+    loop {
+        tokio::time::sleep(SOCKET_LOOK).await;
+        if watched.borrow().is_none() {
+            return;
+        }
+        let why = match bound.found() {
+            Ok(Found::Ours) => {
+                unsure = false;
+                continue;
+            },
+            Ok(Found::Gone) => "is gone",
+            Ok(Found::Another) => "is another's now",
+            Err(error) => {
+                if !unsure {
+                    let socket = bound.socket().display();
+                    eprintln!("luneta-mux: {socket} could not be looked at, so it runs on: {error}");
+                }
+                unsure = true;
+                continue;
+            },
+        };
+        let closed = mux.end();
+        let terminals = if closed == 1 { "terminal" } else { "terminals" };
+        eprintln!(
+            "luneta-mux: {} {why}, so nothing reaches this server again: it closed its {closed} \
+             {terminals} and ends",
+            bound.socket().display()
+        );
+        return;
+    }
+}
+
 pub async fn serve(claim: Claim) -> io::Result<()> {
     if let Err(error) = pty::raise_files_limit() {
         eprintln!("luneta-mux: the limit of open files stays as it was: {error}");
     }
     let listener = UnixListener::bind(claim.socket())?;
+    let bound = Bound::of(claim.socket())?;
     let mux = Mux::new();
     let mut watched = mux.watched();
-    let socket = claim.socket().to_owned();
-    eprintln!("luneta-mux: listening on {}", socket.display());
+    eprintln!("luneta-mux: listening on {}", bound.socket().display());
     let (begun, mut beginning) = watch::channel(false);
     let unused = Arc::clone(&mux);
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_TERMINAL).await;
         unused.end_if_unused();
     });
+    tokio::spawn(end_once_unreached(Arc::clone(&mux), bound.clone()));
     let ended = async move {
         while watched.borrow_and_update().is_some() {
             if watched.changed().await.is_err() {
                 break;
             }
         }
-        match fs::remove_file(&socket) {
-            Ok(()) => {},
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
-            Err(error) => eprintln!("luneta-mux: {}: {error}", socket.display()),
+        if let Err(error) = bound.unbind() {
+            eprintln!("luneta-mux: {}: {error}", bound.socket().display());
         }
         let _ = begun.send(true);
     };

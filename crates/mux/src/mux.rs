@@ -75,6 +75,10 @@ impl Mux {
         self.change(Model::end_if_empty);
     }
 
+    pub fn end(&self) -> usize {
+        self.change(Model::end)
+    }
+
     fn lock(&self) -> MutexGuard<'_, Model> {
         self.model.lock().expect("a thread panicked while it held the model")
     }
@@ -244,6 +248,16 @@ impl Model {
             self.ended = true;
             self.viewing.clear();
         }
+    }
+
+    fn end(&mut self) -> usize {
+        let closed = self.terminals.len();
+        for terminal in self.terminals.drain(..) {
+            terminal.handle.close();
+        }
+        self.end_if_empty();
+        assert!(self.ended, "the server ends once it holds no terminal");
+        closed
     }
 
     fn index_of(&self, terminal: TerminalId) -> Option<usize> {

@@ -1,7 +1,9 @@
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _,
+};
 use std::path::{Path, PathBuf};
 
 pub const SOCKET: &str = "mux.sock";
@@ -44,6 +46,65 @@ impl Claim {
     #[must_use]
     pub fn socket(&self) -> &Path {
         &self.socket
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Bound {
+    socket: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    Ours,
+    Gone,
+    Another,
+}
+
+impl Bound {
+    pub fn of(socket: &Path) -> io::Result<Bound> {
+        let found = fs::symlink_metadata(socket)?;
+        if !found.file_type().is_socket() {
+            let what = format!("{} is no socket just after it was bound", socket.display());
+            return Err(io::Error::other(what));
+        }
+        Ok(Bound { socket: socket.to_owned(), device: found.dev(), inode: found.ino() })
+    }
+
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    pub fn found(&self) -> io::Result<Found> {
+        match fs::symlink_metadata(&self.socket) {
+            Ok(found)
+                if found.file_type().is_socket()
+                    && (found.dev(), found.ino()) == (self.device, self.inode) =>
+            {
+                Ok(Found::Ours)
+            },
+            Ok(_) => Ok(Found::Another),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                Ok(Found::Gone)
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn unbind(&self) -> io::Result<()> {
+        if self.found()? != Found::Ours {
+            return Ok(());
+        }
+        match fs::remove_file(&self.socket) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
