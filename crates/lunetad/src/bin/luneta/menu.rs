@@ -2391,7 +2391,8 @@ impl KeysRow {
 const SETUP_INDENT: &str = "  ";
 
 const _: () = {
-    let room = sidebar::COLUMNS as usize - 1 - SETUP_INDENT.len();
+    let (edge, margin) = (1, 1);
+    let room = sidebar::COLUMNS as usize - edge - margin - SETUP_INDENT.len();
     let mut at = 0;
     while at < Action::ALL.len() {
         let setup = Action::ALL[at].setup();

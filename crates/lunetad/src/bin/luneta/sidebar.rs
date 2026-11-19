@@ -8626,7 +8626,7 @@ mod tests {
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
         assert!(!shows_at(&mut sidebar, now, "─ All keys ─"));
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
-        let every = screen(&mut sidebar, true, 32, 80);
+        let every = screen(&mut sidebar, true, 32, 120);
         let start = every.iter().position(|line| line.starts_with("─ All keys ─")).unwrap();
         let listed = &every[start + 1..every.len() - 1];
         let names: Vec<&str> =
