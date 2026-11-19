@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(said(&nests), "no project made: /a/b is inside /a");
         let doubt = Status::unavailable("it dropped");
         assert_eq!(said(&doubt), "it dropped, so the project may be made");
-        let timed_out = Status::cancelled("lunetad did not answer in 5s");
+        let timed_out = Status::deadline_exceeded("lunetad did not answer in 5s");
         let late = "lunetad did not answer in 5s, so the project may be made";
         assert_eq!(said(&timed_out), late);
 

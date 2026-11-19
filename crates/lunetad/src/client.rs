@@ -70,7 +70,7 @@ where
         Box::pin(async move {
             match tokio::time::timeout(answer, asked).await {
                 Ok(answered) => answered.map_err(Into::into),
-                Err(_) => Err(Status::cancelled(unanswered(answer)).into()),
+                Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
             }
         })
     }
@@ -246,6 +246,6 @@ mod tests {
         let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1)));
         let late = runtime.block_on(daemon.info(())).unwrap_err();
         let said = (late.code(), late.message());
-        assert_eq!(said, (Code::Cancelled, "lunetad did not answer in 1s"));
+        assert_eq!(said, (Code::DeadlineExceeded, "lunetad did not answer in 1s"));
     }
 }
