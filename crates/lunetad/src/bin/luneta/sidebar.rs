@@ -371,6 +371,14 @@ impl Spot {
             Spot::Local(place) | Spot::Remote(_, place) => Some(place),
         }
     }
+
+    fn placed(self) -> Option<(Machine, Place)> {
+        match self {
+            Spot::Machine(_) => None,
+            Spot::Local(place) => Some((Machine::Local, place)),
+            Spot::Remote(destination, place) => Some((Machine::Remote(destination), place)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3799,14 +3807,11 @@ impl Sidebar {
         let Some(spot) = self.cursor.clone() else {
             return Asked::Nothing;
         };
-        match spot {
-            Spot::Machine(_) => {
-                self.toggle();
-                Asked::Nothing
-            },
-            Spot::Local(place) => self.go_to(Machine::Local, place),
-            Spot::Remote(destination, place) => self.go_to(Machine::Remote(destination), place),
-        }
+        let Some((on, place)) = spot.placed() else {
+            self.toggle();
+            return Asked::Nothing;
+        };
+        self.go_to(on, place)
     }
 
     fn go_to(&mut self, on: Machine, place: Place) -> Asked {
@@ -3941,10 +3946,9 @@ impl Sidebar {
                 return Asked::Take;
             }
             if !row.stops() {
-                let Row::Worktree { machine, place, .. } = row else {
+                let Some((on, place)) = spot.placed() else {
                     return Asked::Take;
                 };
-                let (on, place) = (machine.clone(), Place::Worktree(place.clone()));
                 return self.go_to(on, place);
             }
         }
@@ -6301,11 +6305,11 @@ mod tests {
         screen(&mut sidebar, false, area.width, area.height);
         let pane = pane_of("older", 10, 2);
         assert_eq!(click(&mut sidebar, 10, 8, area), go_here(pane));
-        assert_eq!(click(&mut sidebar, 10, 4, area), Asked::Take);
+        let older = Place::Session(listed("older", 10));
+        assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older.clone()));
         assert!(!folded(&sidebar, "older"));
         assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
         assert!(folded(&sidebar, "older"));
-        let older = Place::Session(listed("older", 10));
         assert_eq!(click(&mut sidebar, 10, 4, area), go_here(older));
     }
 
@@ -6322,7 +6326,8 @@ mod tests {
         assert!(sidebar.search.is_some());
         type_in(&mut sidebar, "older");
         screen(&mut sidebar, true, area.width, area.height);
-        assert_eq!(click(&mut sidebar, 1, 4, area), Asked::Take);
+        let older = go_here(Place::Session(listed("older", 10)));
+        assert_eq!(click(&mut sidebar, 1, 4, area), older, "a typed search folds nothing");
         assert!(!folded(&sidebar, "older"));
     }
 
