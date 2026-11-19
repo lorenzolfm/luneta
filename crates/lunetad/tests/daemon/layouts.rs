@@ -598,7 +598,7 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 9,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 10,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -610,6 +610,65 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
     });
     assert_eq!(after, before);
     assert_eq!(fs::read_to_string(kept(&owned.host)).unwrap(), file);
+}
+
+#[test]
+fn a_worktree_s_last_focus_comes_back_when_lunetad_starts_again() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    shown.open();
+    let middle = shown.open();
+    shown.open();
+    shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(middle)) }));
+    shown.until("the middle terminal focused", |laid| focused_of(laid) == Some(middle));
+    drop(shown);
+    let kept_focus = format!(r#""last_focus": "{middle:016x}""#);
+    eventually("the focus is kept within a sweep", || {
+        fs::read_to_string(kept(&owned.host)).unwrap().contains(&kept_focus).then_some(())
+    });
+
+    owned.stop_daemon();
+    owned.start_daemon();
+    let again = Shown::new(&owned, worktree, 80, 24);
+    let focused = again.laid.as_ref().and_then(focused_of);
+    assert_eq!(focused, Some(middle), "a client lands where the focus was, not on the first");
+}
+
+#[test]
+fn a_terminal_one_client_filled_is_the_last_focus_of_both_when_lunetad_starts_again() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut one = Shown::new(&owned, worktree, 80, 24);
+    let left = one.open();
+    let right = one.open();
+    let mut other = Shown::new(&owned, worktree, 80, 24);
+    other.until("the layout where the last client was", |laid| focused_of(laid) == Some(right));
+    let towards_left = focus::To::Direction(show_request::Direction::Left.into());
+    other.ask(Event::Focus(show_request::Focus { to: Some(towards_left) }));
+    other.until("the other client on the left", |laid| focused_of(laid) == Some(left));
+    let file = || fs::read_to_string(kept(&owned.host)).unwrap();
+    one.ask(Event::Fullscreen(()));
+    other.until("the other client on the full terminal", |laid| full_of(laid) == Some(right));
+    let full = format!(r#""full": "{right:016x}""#);
+    eventually("the full terminal is kept within a sweep", || file().contains(&full).then_some(()));
+    one.ask(Event::Fullscreen(()));
+    let tiled = |laid: &Laid| full_of(laid).is_none() && focused_of(laid) == Some(right);
+    one.until("the layout tiled again", tiled);
+    other.until("the other client still on the right", tiled);
+    eventually("the layout tiled is kept within a sweep", || {
+        (!file().contains(r#""full""#)).then_some(())
+    });
+    let file = file();
+    let kept_focus = format!(r#""last_focus": "{right:016x}""#);
+    assert!(file.contains(&kept_focus), "the terminal filled is kept as the last focus: {file}");
+    drop((one, other));
+
+    owned.stop_daemon();
+    owned.start_daemon();
+    let again = Shown::new(&owned, worktree, 80, 24);
+    let focused = again.laid.as_ref().and_then(focused_of);
+    assert_eq!(focused, Some(right), "a client lands where both clients were");
 }
 
 #[test]

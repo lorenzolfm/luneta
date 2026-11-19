@@ -36,7 +36,7 @@ const SAID_TRIES: u32 = 20;
 
 const SAID_PAUSE: Duration = Duration::from_millis(10);
 
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 const WITHOUT_LAYOUTS: u32 = 1;
 
@@ -51,6 +51,8 @@ const LAID_AS_VIEW: u32 = 6;
 const WITHOUT_WELCOMES: u32 = 7;
 
 const ROWS_UNOPENED: u32 = 8;
+
+const WITHOUT_LAST_FOCUS: u32 = 9;
 
 const CHAR_BYTES_MAX: usize = 4;
 
@@ -175,6 +177,8 @@ struct Counted<'a> {
 struct KeptLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     full: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_focus: Option<String>,
     tree: Vec<KeptNode>,
 }
 
@@ -712,6 +716,9 @@ fn bounded<'a, I: Iterator<Item = Counted<'a>>>(
     let unrun = |node: &KeptNode| {
         matches!(node, KeptNode::Terminal(KeptTerminal { runs: KeptRuns::Unrun(_), .. }))
     };
+    if version <= WITHOUT_LAST_FOCUS && laid().any(|it| it.last_focus.is_some()) {
+        return Err(format!("it is of version {version}, which keeps no last focus"));
+    }
     if version <= WITHOUT_WELCOMES && nodes().any(|it| matches!(it, KeptNode::Welcome(_))) {
         return Err(format!("it is of version {version}, which holds no welcome"));
     }
@@ -1071,6 +1078,7 @@ impl UnrootedWorktree {
 impl KeptLayout {
     fn read(self) -> Result<Layout, String> {
         let full = self.full.as_deref().map(str::parse).transpose()?;
+        let last_focus = self.last_focus.as_deref().map(str::parse).transpose()?;
         let tree = self.tree.into_iter().map(|node| match node {
             KeptNode::Split(KeptSplit { towards, share }) => {
                 Ok(Preordered::Split { towards: towards.read(), share })
@@ -1082,7 +1090,7 @@ impl KeptLayout {
                 id.parse().map(|id| Preordered::View(View::Welcome(id)))
             },
         });
-        Layout::read(tree.collect::<Result<_, String>>()?, full)
+        Layout::read(tree.collect::<Result<_, String>>()?, full, last_focus)
     }
 
     fn of(layout: &Layout) -> Option<KeptLayout> {
@@ -1097,8 +1105,11 @@ impl KeptLayout {
                 KeptNode::Welcome(KeptWelcome { id: id.to_string() })
             },
         });
-        let full = layout.full().map(|full| full.to_string());
-        Some(KeptLayout { full, tree: tree.collect() })
+        let (full, last_focus) = match layout.full() {
+            Some(full) => (Some(full.to_string()), None),
+            None => (None, layout.last_focus().map(|focus| focus.to_string())),
+        };
+        Some(KeptLayout { full, last_focus, tree: tree.collect() })
     }
 }
 
@@ -1383,7 +1394,7 @@ mod tests {
         let change = Change::AddProject { spot: alone("/home/me/Vault"), name: None };
         (projects, _) = projects.changed(change, &mut draw).unwrap();
         let want = r#"{
-  "version": 9,
+  "version": 10,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1440,13 +1451,13 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [7, 8] {
-            let before = want.replace(r#""version": 9"#, &format!(r#""version": {before}"#));
+        for before in [7, 8, 9] {
+            let before = want.replace(r#""version": 10"#, &format!(r#""version": {before}"#));
             assert_eq!(parse(&before), Ok(projects.clone()));
         }
-        let viewed = want.replace(r#""version": 9"#, r#""version": 6"#);
+        let viewed = want.replace(r#""version": 10"#, r#""version": 6"#);
         assert_eq!(parse(&viewed.replace(r#""layout": {"#, r#""view": {"#)), Ok(projects.clone()));
-        let before = want.replace(r#""version": 9"#, r#""version": 5"#);
+        let before = want.replace(r#""version": 10"#, r#""version": 5"#);
         assert!(parse(&before).unwrap_err().contains("unknown field `holds`"));
 
         let unopened = r#""clone": [
@@ -1458,7 +1469,7 @@ mod tests {
         let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), dir.clone())));
         for before in [7, 8] {
             let version = format!(r#""version": {before}"#);
-            let before = with_unopened.replace(r#""version": 9"#, &version);
+            let before = with_unopened.replace(r#""version": 10"#, &version);
             let read = rooted_as(&before, alone).unwrap();
             assert_eq!(read.projects, projects, "a worktree an old file kept with no view goes");
             assert!(read.migrated, "and the file is written again at once");
@@ -1499,10 +1510,11 @@ mod tests {
             let open = Change::Open { worktree, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
+        (projects, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
         let fill = Change::Fill { worktree, full: Some(vim) };
         (projects, _) = projects.changed(fill, &mut draw).unwrap();
         let want = r#"{
-  "version": 9,
+  "version": 10,
   "projects": [
     {
       "id": "0000000000000001",
@@ -1567,18 +1579,37 @@ mod tests {
 "#;
         assert_eq!(written(&projects), want);
         assert_eq!(parse(want), Ok(projects.clone()));
-        for before in [7, 8] {
-            let before = want.replace(r#""version": 9"#, &format!(r#""version": {before}"#));
-            assert_eq!(parse(&before), Ok(projects.clone()));
+        let (_, top) = projects.find(worktree).unwrap();
+        assert_eq!(top.layout().last_focus(), Some(vim), "a full view is the last focus");
+        for before in [7, 8, 9] {
+            let before = want.replace(r#""version": 10"#, &format!(r#""version": {before}"#));
+            assert_eq!(parse(&before), Ok(projects.clone()), "and is read so from older files");
         }
-        let viewed = want.replace(r#""version": 9"#, r#""version": 6"#);
+        let vim_full = r#""full": "0000000000000005""#;
+        let shell_focused = r#""last_focus": "0000000000000003""#;
+        let (tiled, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
+        let on_shell = want.replace(vim_full, shell_focused);
+        assert_eq!(written(&tiled), on_shell, "a focus on another view tiles the layout");
+        assert_eq!(parse(&on_shell), Ok(tiled));
+        let astray = r#""last_focus": "0000000000000009""#;
+        let refused = parse(&want.replace(vim_full, astray)).unwrap_err();
+        assert!(refused.contains("holds no view 0000000000000009 to focus"), "{refused}");
+        let both = want.replace(vim_full, &format!("{vim_full},\n              {shell_focused}"));
+        let refused = parse(&both).unwrap_err();
+        assert!(refused.contains("and so is focused on no other view"), "{refused}");
+        for before in [7, 8, 9] {
+            let version = format!(r#""version": {before}"#);
+            let refused = format!("it is of version {before}, which keeps no last focus");
+            assert_eq!(parse(&on_shell.replace(r#""version": 10"#, &version)), Err(refused));
+        }
+        let viewed = want.replace(r#""version": 10"#, r#""version": 6"#);
         let viewed = viewed.replace(r#""layout": {"#, r#""view": {"#);
         assert_eq!(parse(&viewed), Ok(projects));
-        let unviewed = want.replace(r#""version": 9"#, r#""version": 6"#);
+        let unviewed = want.replace(r#""version": 10"#, r#""version": 6"#);
         let refused = "it is of version 6, which keeps layouts as \"view\"";
         assert_eq!(parse(&unviewed), Err(refused.to_owned()));
         let relaid = want.replace(r#""layout": {"#, r#""view": {"#);
-        let refused = "it is of version 9, which keeps layouts as \"layout\"";
+        let refused = "it is of version 10, which keeps layouts as \"layout\"";
         assert_eq!(parse(&relaid), Err(refused.to_owned()));
         let before = r#"{"version": 1, "projects": [{"id": "0000000000000001", "name": "luneta",
             "dir": "/w/luneta", "workstreams": [{"id": "0000000000000002", "below": "top",
@@ -1784,8 +1815,8 @@ mod tests {
         let refused = [
             ("{", "EOF"),
             (
-                r#"{"version": 10, "projects": []}"#,
-                "version 10, and this lunetad reads only 1 to 9",
+                r#"{"version": 11, "projects": []}"#,
+                "version 11, and this lunetad reads only 1 to 10",
             ),
             (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
             (r#"{"version": 1}"#, "missing field `projects`"),
