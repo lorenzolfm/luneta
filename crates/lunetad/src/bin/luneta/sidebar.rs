@@ -114,6 +114,8 @@ const LABEL: usize = 3 + MARK + 1 + icons::WIDTH + 1;
 
 const WORKTREE: usize = 4;
 
+const NAME_KEPT: usize = 12;
+
 const LONG: Duration = Duration::from_secs(1);
 
 const NO_HERE_VIEW: &str =
@@ -4369,6 +4371,7 @@ impl Sidebar {
             let background = on.map(|(_, _, background)| *background);
             let RowLines { lines: row_drawn, number, cuts: row_cuts } =
                 row_lines(row, width, frame, now);
+            assert_eq!(row_drawn.len(), row.height(), "a row draws the lines it takes");
             if !lifted
                 && let Some(number) = number
             {
@@ -5103,17 +5106,16 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
             let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
             let gone = if *missing { MISSING } else { "" };
+            let name = named.name();
+            let line_room = width.saturating_sub(WORKTREE + gone.width() + reserve + 1);
             let beside = match named {
-                Named::Branch(checkout) => Some(Beside::of(checkout)),
+                Named::Branch(checkout) => Some(Beside::fitting(checkout, name, line_room)),
                 Named::Unbranched(_) | Named::Apart { .. } => None,
             };
             let held = beside.as_ref().map_or(0, Beside::width);
             let status = beside.as_ref().map_or("", |beside| beside.status.as_str());
-            let after = if status.is_empty() { 0 } else { status.width() + 1 };
-            let fixed = WORKTREE + gone.width() + held + after + reserve + 1;
-            let room = width.saturating_sub(fixed);
+            let room = line_room.saturating_sub(beside.as_ref().map_or(0, Beside::taken));
             let style = Style::new().fg(*colour).add_modifier(Modifier::BOLD);
-            let name = named.name();
             let (shown, wide) = lit(name, room, Keep::Start, hits, style);
             let mut cuts: Vec<CutAt> = cut_at(0, WORKTREE, name, room).into_iter().collect();
             let taken = WORKTREE + wide + gone.width() + held + status.width() + reserve + 1;
@@ -5149,7 +5151,6 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 cuts.extend(cut_at(at, LABEL, &checkout.branch, branch_room));
                 number = numbered;
             }
-            assert_eq!(lines.len(), named.height(), "a worktree draws the lines it takes");
             RowLines { lines, number, cuts }
         },
         Row::View { here, unread, marked, icon, label, hits, bracket, .. } => {
@@ -5297,6 +5298,40 @@ fn gutter(bracket: Option<(Bracket, Color)>) -> Span<'static> {
     Span::styled(glyph, Style::new().fg(colour))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keeps {
+    All,
+    NumberAndStatus,
+    Number,
+    Nothing,
+}
+
+impl Keeps {
+    const WIDEST_FIRST: [Keeps; 4] =
+        [Keeps::All, Keeps::NumberAndStatus, Keeps::Number, Keeps::Nothing];
+
+    fn changed(self) -> bool {
+        match self {
+            Keeps::All => true,
+            Keeps::NumberAndStatus | Keeps::Number | Keeps::Nothing => false,
+        }
+    }
+
+    fn number(self) -> bool {
+        match self {
+            Keeps::All | Keeps::NumberAndStatus | Keeps::Number => true,
+            Keeps::Nothing => false,
+        }
+    }
+
+    fn status(self) -> bool {
+        match self {
+            Keeps::All | Keeps::NumberAndStatus => true,
+            Keeps::Number | Keeps::Nothing => false,
+        }
+    }
+}
+
 struct Beside<'a> {
     spans: Vec<Span<'static>>,
     number: Option<(Range<usize>, &'a Link)>,
@@ -5304,14 +5339,14 @@ struct Beside<'a> {
 }
 
 impl<'a> Beside<'a> {
-    fn of(checkout: &'a Checkout) -> Beside<'a> {
+    fn of(checkout: &'a Checkout, keeps: Keeps) -> Beside<'a> {
         let mut spans = Vec::new();
-        if let Some(changed) = checkout.changed {
+        if let Some(changed) = checkout.changed.filter(|_| keeps.changed()) {
             spans.push(Span::raw(" "));
             spans.extend(changed_shown(changed).0);
         }
         let mut number = None;
-        if let Some(numbered) = &checkout.pull_request {
+        if let Some(numbered) = checkout.pull_request.as_ref().filter(|_| keeps.number()) {
             spans.push(Span::raw(" "));
             let start: usize = spans.iter().map(Span::width).sum();
             let shown = Span::styled(numbered.shown(), Style::new().fg(numbered.colour));
@@ -5320,11 +5355,24 @@ impl<'a> Beside<'a> {
             spans.push(shown);
             spans.extend(numbered.checks.map(|checks| verdict_mark(checks, numbered.stale)));
         }
-        Beside { spans, number, status: checkout.status.clone() }
+        let status = if keeps.status() { checkout.status.clone() } else { String::new() };
+        Beside { spans, number, status }
+    }
+
+    fn fitting(checkout: &'a Checkout, name: &str, room: usize) -> Beside<'a> {
+        let kept = name.width().min(NAME_KEPT);
+        let mut widest_first = Keeps::WIDEST_FIRST.into_iter();
+        let keeps = widest_first.find(|keeps| Beside::of(checkout, *keeps).taken() + kept <= room);
+        Beside::of(checkout, keeps.unwrap_or(Keeps::Nothing))
     }
 
     fn width(&self) -> usize {
         self.spans.iter().map(Span::width).sum()
+    }
+
+    fn taken(&self) -> usize {
+        let status = if self.status.is_empty() { 0 } else { self.status.width() + 1 };
+        self.width() + status
     }
 
     fn number_at(&self, at: usize, start: usize) -> Option<NumberAt<'a>> {
@@ -5340,11 +5388,10 @@ fn checkout_line(
     at: usize,
     width: usize,
 ) -> (Line<'static>, Option<NumberAt<'_>>, usize) {
-    let beside = Beside::of(checkout);
+    let beside = Beside::of(checkout, Keeps::All);
     let held = beside.width();
     let status = &checkout.status;
-    let after = if status.is_empty() { 0 } else { status.width() + 1 };
-    let room = width.saturating_sub(LABEL + held + after + 1);
+    let room = width.saturating_sub(LABEL + beside.taken() + 1);
     let branch = cut(&checkout.branch, room);
     let gap = width.saturating_sub(LABEL + cells(&branch) + held + status.width() + 1);
     let mut spans = vec![
@@ -7475,6 +7522,9 @@ mod tests {
         let lines = screen(&mut sidebar, false, 32, 12);
         let folded = ["  ▸ issue-489 +120 -34 #538  !", "  ▸ tidy", "       fix #246", ""];
         assert_eq!(lines[5..9], folded);
+        assert_eq!(screen(&mut sidebar, false, 22, 12)[5], "  ▸ issue-489 #538 !");
+        assert_eq!(screen(&mut sidebar, false, 20, 12)[5], "  ▸ issue-489 #538");
+        assert_eq!(screen(&mut sidebar, false, 16, 12)[5], "  ▸ issue-489");
     }
 
     #[test]
