@@ -229,6 +229,33 @@ impl Focus {
     fn on(side: Side) -> Focus {
         Focus { side, over: None }
     }
+
+    fn keys(&self) -> Keys {
+        match (&self.over, self.side) {
+            (None, Side::Sidebar) => Keys::Sidebar,
+            (
+                Some(
+                    Over::Brief(_)
+                    | Over::Ask(_)
+                    | Over::Issue(_)
+                    | Over::Picker(_)
+                    | Over::Dictation(..),
+                ),
+                Side::Sidebar,
+            ) => Keys::Lent,
+            (
+                None
+                | Some(
+                    Over::Brief(_)
+                    | Over::Ask(_)
+                    | Over::Issue(_)
+                    | Over::Picker(_)
+                    | Over::Dictation(..),
+                ),
+                Side::Session | Side::Collapsed,
+            ) => Keys::Zellij,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -632,6 +659,7 @@ fn run_in(
         Viewed::start(1, lunetad.clone(), here, start, size, greeting, runs_in, &events)
     });
     let focus = Focus::on(if right.is_some() { Side::Session } else { Side::Sidebar });
+    sidebar.focus(focus.keys());
     let reported = Holder::of(&focus, sidebar.holding()).reported();
     let desktop = Desktop::start(&events);
     let focused = true;
@@ -2480,30 +2508,7 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
         }
-        self.sidebar.focus(match (&focus.over, focus.side) {
-            (None, Side::Sidebar) => Keys::Sidebar,
-            (
-                Some(
-                    Over::Brief(_)
-                    | Over::Ask(_)
-                    | Over::Issue(_)
-                    | Over::Picker(_)
-                    | Over::Dictation(..),
-                ),
-                Side::Sidebar,
-            ) => Keys::Lent,
-            (
-                None
-                | Some(
-                    Over::Brief(_)
-                    | Over::Ask(_)
-                    | Over::Issue(_)
-                    | Over::Picker(_)
-                    | Over::Dictation(..),
-                ),
-                Side::Session | Side::Collapsed,
-            ) => Keys::Zellij,
-        });
+        self.sidebar.focus(focus.keys());
         assert!(self.sidebar.floating().is_none(), "a focus change closes what floats");
         self.focus = focus;
         self.hold_aloud();

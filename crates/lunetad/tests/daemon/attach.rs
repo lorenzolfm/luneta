@@ -34,6 +34,8 @@ const MENU_SHOWS: &str = "n  New ▸";
 
 const FOR_TERMINALS: &str = "the menu is for terminals";
 
+const LEGEND: &str = " /  Search";
+
 const WELCOMES: &str = "d d  close it";
 
 
@@ -161,6 +163,17 @@ fn the_menu_and_its_note_over_the_view_give_the_keys_back_as_they_close() {
     eventually("the welcome view has the keys again", || {
         (!window.shows(WELCOMES)).then_some(())
     });
+}
+
+#[test]
+fn luneta_started_with_no_worktree_gives_the_sidebar_the_keys() {
+    let owned = Owned::new();
+    let dir = directory("empty");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows no worktree", || window.shows(UNSHOWN).then_some(()));
+    assert!(!window.shows(LEGEND), "no legend shows yet");
+    window.send("?");
+    eventually("? in the sidebar shows its legend", || window.shows(LEGEND).then_some(()));
 }
 
 #[test]
