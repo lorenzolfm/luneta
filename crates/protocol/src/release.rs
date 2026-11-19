@@ -159,4 +159,34 @@ mod tests {
         assert!(other("999.0.0", BUILT).is_newer());
         assert!(!other("0.0.0", BUILT).is_newer());
     }
+
+    #[test]
+    fn any_two_builds_read_each_other_s_info() {
+        use prost::Message as _;
+        use prost::encoding::{bytes, string, uint32, uint64};
+
+        use crate::v1::InfoResponse;
+
+        let said = |zellij_folder: Option<&[u8]>| {
+            let mut said = Vec::new();
+            string::encode(1, &"0.3.0".to_owned(), &mut said);
+            uint32::encode(2, &7, &mut said);
+            if let Some(folder) = zellij_folder {
+                bytes::encode(4, &folder.to_vec(), &mut said);
+            }
+            bytes::encode(5, &b"/home/you/.claude".to_vec(), &mut said);
+            uint64::encode(6, &1_793_301_121, &mut said);
+            said
+        };
+        let info = InfoResponse {
+            version: "0.3.0".to_owned(),
+            pid: 7,
+            started_at: None,
+            claude_folder: Some(b"/home/you/.claude".to_vec()),
+            built: Some(1_793_301_121),
+        };
+        assert_eq!(info.encode_to_vec(), said(None), "an older luneta reads this lunetad's");
+        let older = InfoResponse::decode(said(Some(b"/tmp/zellij-1000")).as_slice());
+        assert_eq!(older.unwrap(), info, "and this luneta reads an older lunetad's");
+    }
 }

@@ -402,8 +402,8 @@ message InfoResponse {
   string version = 1;
   uint32 pid = 2;
   google.protobuf.Timestamp started_at = 3;
-  optional bytes claude_folder = 4;
-  optional uint64 built = 5;
+  optional bytes claude_folder = 5;
+  optional uint64 built = 6;
 }
 
 message ListAgentsResponse {
