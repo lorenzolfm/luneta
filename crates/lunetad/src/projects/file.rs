@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::{Leaf as _, Preordered, Towards, NODES_MAX};
 use super::{Below, Change, Closing, Dir, Holds, Id, Line, Name, Project, Projects};
-use super::{Made, ProjectId, Refused, Runs, Session, Spot, Terminal, TerminalViewId, Used};
-use super::{View, ViewId};
+use super::{Made, ProjectId, Refused, Relaid, Runs, Session, Spot, Terminal, TerminalViewId};
+use super::{Used, View, ViewId};
 use super::{Layout, Subfolder, Worktree, WorktreeId};
 use super::{LINE_BYTES_MAX, NAME_CHARS_MAX, PATH_BYTES_MAX, PROJECTS_MAX, SESSION_BYTES_MAX};
 use super::{SPOT_LOOK, VIEWS_MAX, WORKTREES_MAX};
@@ -417,6 +417,18 @@ impl Store {
         }
         self.took(changed)?;
         Ok(made)
+    }
+
+    pub fn relaid(&mut self, relaid: Relaid) -> Result<(), Failed> {
+        let changed = self.kept()?.relaid(relaid).map_err(Failed::Refused)?;
+        let Keeping::Kept { projects, .. } = &mut self.keeping else {
+            unreachable!("projects relaid are kept");
+        };
+        if *projects == changed {
+            return Ok(());
+        }
+        *projects = changed;
+        self.tell()
     }
 
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
@@ -1510,9 +1522,8 @@ mod tests {
             let open = Change::Open { worktree, view: View::Terminal(terminal), placed, size };
             (projects, _) = projects.changed(open, &mut draw).unwrap();
         }
-        (projects, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
-        let fill = Change::Fill { worktree, full: Some(vim) };
-        (projects, _) = projects.changed(fill, &mut draw).unwrap();
+        projects = projects.relaid(Relaid::Focus { view: shell }).unwrap();
+        projects = projects.relaid(Relaid::Fill { worktree, full: Some(vim) }).unwrap();
         let want = r#"{
   "version": 10,
   "projects": [
@@ -1587,7 +1598,7 @@ mod tests {
         }
         let vim_full = r#""full": "0000000000000005""#;
         let shell_focused = r#""last_focus": "0000000000000003""#;
-        let (tiled, _) = projects.changed(Change::Focus { view: shell }, &mut draw).unwrap();
+        let tiled = projects.relaid(Relaid::Focus { view: shell }).unwrap();
         let on_shell = want.replace(vim_full, shell_focused);
         assert_eq!(written(&tiled), on_shell, "a focus on another view tiles the layout");
         assert_eq!(parse(&on_shell), Ok(tiled));
@@ -2158,7 +2169,7 @@ mod tests {
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
         let full = |projects: &Projects| projects.find(worktree).unwrap().1.layout().full();
 
-        store.change(Change::Fill { worktree, full: Some(two) }).unwrap();
+        store.relaid(Relaid::Fill { worktree, full: Some(two) }).unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));
         assert_eq!(full(&read()), None, "a fill waits for the flush");
         let told = heard(&commands).pop().unwrap().unwrap();
@@ -2166,11 +2177,62 @@ mod tests {
         store.flush().unwrap();
         assert_eq!(full(&read()), Some(two));
 
-        store.change(Change::Fill { worktree, full: None }).unwrap();
+        store.relaid(Relaid::Fill { worktree, full: None }).unwrap();
         store.change(Change::RenameProject { project, to: Name::parse("b").unwrap() }).unwrap();
         let kept = *store.projects().unwrap() == read();
         assert!(kept, "a change kept at once takes the rest along");
         store.flush().unwrap();
         assert_eq!(read(), *store.projects().unwrap());
+    }
+
+    #[test]
+    fn a_layout_relaid_sends_watchers_no_new_listing() {
+        use super::super::layout::{Direction, Growth, Sides};
+        use crate::core::{self, Wakes};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let (git, _git) = mpsc::sync_channel(1);
+        let (github, _github) = mpsc::sync_channel(1);
+        let core = core::start(Wakes { git, github }).unwrap();
+        let mut store = store_at(Ok(file_in(&scratch)), core.clone());
+        let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
+        let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
+        let Some(Made::Found(worktree)) = store.change(add_in(project, alone("/a/b"))).unwrap()
+        else {
+            panic!("/a/b is in /a's own worktree");
+        };
+        let size = super::super::Size::of(80, 24).unwrap();
+        let [one, two] = [store.fresh().unwrap(), ViewId::of(u64::MAX).unwrap()];
+        let opened = |id, placed| {
+            let terminal = Terminal::new(TerminalViewId::new(id), dir("/a"), Runs::Shell);
+            Change::Open { worktree, view: View::Terminal(terminal), placed, size }
+        };
+        store.change(opened(one, Placed::Alone)).unwrap();
+        store.change(opened(two, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
+        let listing = || {
+            let watched = core::ask(&core, |answer| Command::Watch { after: None, answer });
+            watched.flatten().expect("the core answers a watch at once").version
+        };
+        let before = (listing(), store.revision());
+
+        let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);
+        let relaid = [
+            Relaid::Focus { view: one },
+            Relaid::Resize { view: two, sides, growth, size },
+            Relaid::Fill { worktree, full: Some(two) },
+            Relaid::Fill { worktree, full: None },
+        ];
+        for relaid in relaid {
+            let said = format!("{relaid:?}");
+            let was = store.projects().unwrap().clone();
+            store.relaid(relaid).unwrap();
+            assert_ne!(store.projects(), Some(&was), "{said} changes the projects");
+            assert_eq!((listing(), store.revision()), before, "{said} sends no new listing");
+        }
+
+        store.change(Change::Swap { one, other: two }).unwrap();
+        let (version, revision) = (listing(), store.revision());
+        assert_ne!(version, before.0, "a swap sends watchers a new listing");
+        assert_eq!(revision, before.1.next(), "a swap is a revision of the projects");
     }
 }
