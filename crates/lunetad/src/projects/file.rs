@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, ErrorKind, Read as _, Write as _};
+use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
@@ -30,6 +30,10 @@ const LOCK: &str = "projects.lock";
 const HELD_TRIES: u32 = 40;
 
 const HELD_PAUSE: Duration = Duration::from_millis(50);
+
+const SAID_TRIES: u32 = 20;
+
+const SAID_PAUSE: Duration = Duration::from_millis(10);
 
 const VERSION: u32 = 6;
 
@@ -219,6 +223,7 @@ pub struct Store {
     keeping: Keeping,
     revision: Revision,
     core: SyncSender<Command>,
+    _held: Option<File>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -242,7 +247,7 @@ pub struct Changed {
 }
 
 enum Keeping {
-    Kept { file: PathBuf, projects: Projects, written: Projects, _lock: File },
+    Kept { file: PathBuf, projects: Projects, written: Projects },
     Unkept(String),
 }
 
@@ -304,11 +309,23 @@ pub fn holder() -> Option<PathBuf> {
 }
 
 fn said_by(lock: &File) -> Option<PathBuf> {
+    for _ in 0..SAID_TRIES {
+        let said = said_now(lock)?;
+        if !said.is_empty() {
+            let holder = PathBuf::from(OsStr::from_bytes(&said));
+            return (said.len() <= PATH_BYTES_MAX && holder.is_absolute()).then_some(holder);
+        }
+        thread::sleep(SAID_PAUSE);
+    }
+    None
+}
+
+fn said_now(mut lock: &File) -> Option<Vec<u8>> {
     let mut said = Vec::new();
     let limit = u64::try_from(PATH_BYTES_MAX).expect("a path's bytes fit a u64");
+    lock.seek(SeekFrom::Start(0)).ok()?;
     lock.take(limit + 1).read_to_end(&mut said).ok()?;
-    let holder = PathBuf::from(OsStr::from_bytes(&said));
-    (said.len() <= PATH_BYTES_MAX && holder.is_absolute()).then_some(holder)
+    Some(said)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -324,11 +341,11 @@ pub enum Failed {
 
 impl Store {
     pub fn open(kept: Result<Lock, String>, core: SyncSender<Command>) -> io::Result<Store> {
-        let keeping = match kept {
-            Ok(lock) => Keeping::of(lock),
-            Err(why) => Keeping::Unkept(why),
+        let (keeping, held) = match kept {
+            Ok(Lock { file, lock }) => (Keeping::of(file), Some(lock)),
+            Err(why) => (Keeping::Unkept(why), None),
         };
-        let store = Store { keeping, revision: Revision::default(), core };
+        let store = Store { keeping, revision: Revision::default(), core, _held: held };
         store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
         Ok(store)
     }
@@ -463,11 +480,11 @@ impl Store {
 }
 
 impl Keeping {
-    fn of(Lock { file, lock }: Lock) -> Keeping {
+    fn of(file: PathBuf) -> Keeping {
         match read(&file) {
             Ok(Read { projects, rooted: false }) => {
                 let written = projects.clone();
-                Keeping::Kept { file, projects, written, _lock: lock }
+                Keeping::Kept { file, projects, written }
             },
             Ok(Read { projects, rooted: true }) => match write(&file, &projects) {
                 Ok(()) => {
@@ -1673,13 +1690,15 @@ mod tests {
     }
 
     #[test]
-    fn a_file_too_big_is_not_read_whole() {
+    fn a_file_too_big_is_not_read_whole_and_its_lock_stays_held() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, " ".repeat(FILE_BYTES_MAX + 1)).unwrap();
-        let store = store_at(Ok(file), channel().0);
+        let store = store_at(Ok(file.clone()), channel().0);
         assert!(store.unkept().unwrap().contains("over 33554432 bytes"));
+        let second = take_at(Ok(file), Path::new("/tmp/b"));
+        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
     }
 
     #[test]
@@ -1821,7 +1840,21 @@ mod tests {
     }
 
     #[test]
-    fn a_file_changed_behind_its_back_is_never_written_over() {
+    fn a_holder_s_folder_written_a_moment_after_its_lock_is_read() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join(LOCK);
+        fs::write(&path, "").unwrap();
+        let lock = File::open(&path).unwrap();
+        let writing = thread::spawn(move || {
+            thread::sleep(SAID_PAUSE);
+            fs::write(path, LISTENS_IN).unwrap();
+        });
+        assert_eq!(said_by(&lock), Some(PathBuf::from(LISTENS_IN)));
+        writing.join().unwrap();
+    }
+
+    #[test]
+    fn a_file_changed_behind_its_back_is_never_written_over_and_its_lock_stays_held() {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         let (core, commands) = channel();
@@ -1840,6 +1873,8 @@ mod tests {
         assert_eq!(store.unkept(), Some(why.as_str()));
         assert_eq!(heard(&commands).last(), Some(&Err(why)));
         assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+        let second = take_at(Ok(file), Path::new("/tmp/b"));
+        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
     }
 
     #[test]
