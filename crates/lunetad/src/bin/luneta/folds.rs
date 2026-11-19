@@ -26,7 +26,12 @@ impl Fold<'_> {
     fn file(self) -> (Kept, String) {
         match self {
             Fold::Machine(Machine::Local) => (Kept::Machines, LOCAL.to_owned()),
-            Fold::Machine(Machine::Remote(destination)) => (Kept::Machines, spelled(destination)),
+            Fold::Machine(Machine::Remote(destination)) => {
+                let name = spelled(destination);
+                assert!(!name.contains(':'), "a machine's file is apart from its projects'");
+                assert_ne!(name, LOCAL, "another machine's file is apart from this one's");
+                (Kept::Machines, name)
+            },
             Fold::Project(machine, project) => {
                 kept_on(machine, format!("project-{:016x}", project.get()))
             },

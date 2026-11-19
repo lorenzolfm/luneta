@@ -89,6 +89,7 @@ const UNFOLDED: &str = "▾";
 const FOLDED: &str = "▸";
 const RULE: &str = "─";
 const MACHINE_RULE: &str = "═";
+const MACHINE_LEAD: usize = 5;
 const MISSING: &str = " missing";
 const NO_PROJECTS: &str = "no projects";
 const COMPUTER: &str = "\u{f108}";
@@ -1541,6 +1542,9 @@ impl Sidebar {
         for shelf in self.shelves.iter().filter(|shelf| shelf.kept && shelf.unlisted == 0) {
             let machine = &shelf.machine;
             let mut live = Vec::new();
+            if !shelf.projects.is_empty() {
+                live.push(Fold::Machine(machine));
+            }
             for known in &shelf.projects {
                 live.push(Fold::Project(machine, known.project.id()));
                 let worktrees = known.worktrees.iter();
@@ -2148,7 +2152,7 @@ impl Sidebar {
                 }
                 continue;
             }
-            let listing = finder.is_some() || !self.folds.contains(Fold::Machine(&machine));
+            let machine_folded = finder.is_none() && self.folds.contains(Fold::Machine(&machine));
             let machine_at = rows.len();
             let heads = Heads::Nothing;
             rows.push(Row::Machine { machine: machine.clone(), name, away, heads });
@@ -2218,7 +2222,7 @@ impl Sidebar {
                 let project_here = on && Self::seats_here(own_seat, listed);
                 machine_tally = Tally::sum([machine_tally, tally].into_iter());
                 machine_here |= project_here;
-                if !listing {
+                if machine_folded {
                     continue;
                 }
                 let (named, name_hits) = finder
@@ -2372,15 +2376,20 @@ impl Sidebar {
                 rows.truncate(machine_at);
                 continue;
             }
-            if let Row::Machine { heads, .. } = &mut rows[machine_at] {
-                *heads = Heads::Projects {
-                    folded: !listing,
-                    here: machine_here,
-                    waiting: machine_tally.waiting,
-                    dot: machine_tally.dots > 0,
-                    busy: machine_tally.busy > 0,
-                };
-            }
+            let Row::Machine { heads, .. } = &mut rows[machine_at] else {
+                unreachable!("row {machine_at} is this machine's");
+            };
+            assert_eq!(*heads, Heads::Nothing, "a machine's heads are set once");
+            *heads = Heads::Projects {
+                folded: machine_folded,
+                here: machine_here,
+                waiting: machine_tally.waiting,
+                dot: machine_tally.dots > 0,
+                busy: machine_tally.busy > 0,
+            };
+        }
+        if finder.is_none() {
+            assert!(!rows.is_empty(), "this machine always has a row");
         }
         self.rows = rows;
         self.homes = homes;
@@ -2552,15 +2561,16 @@ impl Sidebar {
                     let project = spot.place().and_then(|place| place.listed().project());
                     project.map_or(folding, Folding::Project)
                 },
-                Folding::Project(_) | Folding::Machine => Folding::Machine,
+                Folding::Project(_) => Folding::Machine,
+                Folding::Machine => unreachable!("a machine's row is never bare"),
             };
         }
         let header = Spot::Machine(machine.clone());
-        let heads_nothing = |row: &Row| matches!(row, Row::Machine { heads: Heads::Nothing, .. });
-        if folding == Folding::Machine
-            && self.row_of(&header).is_none_or(|at| heads_nothing(&self.rows[at]))
-        {
-            return;
+        if folding == Folding::Machine {
+            let at = self.row_of(&header).expect("a machine's rows sit under its own");
+            if matches!(self.rows[at], Row::Machine { heads: Heads::Nothing, .. }) {
+                return;
+            }
         }
         let (fold, row) = match folding {
             Folding::Machine => (Fold::Machine(&machine), Some(header)),
@@ -4372,14 +4382,15 @@ impl Sidebar {
             return None;
         }
         let header = Spot::Machine(self.cursor.as_ref()?.machine());
-        match &self.rows[self.row_of(&header)?] {
+        let at = self.row_of(&header).expect("a machine's rows sit under its own");
+        match &self.rows[at] {
             Row::Machine { name, away: Some(Away::Unreached { why, .. }), .. } => {
                 Some(format!("{name}: {why}; what ssh said is in {}", lunetad::log::NAME))
             },
-            Row::Machine { away: None | Some(Away::Reaching), .. }
-            | Row::Project { .. }
-            | Row::Worktree { .. }
-            | Row::Pane { .. } => None,
+            Row::Machine { away: None | Some(Away::Reaching), .. } => None,
+            Row::Project { .. } | Row::Worktree { .. } | Row::Pane { .. } => {
+                unreachable!("a machine's spot is its own row")
+            },
         }
     }
 
@@ -4733,9 +4744,9 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let age = since.map_or_default(|since| age(since, now));
             let reserve = if age.is_empty() { 0 } else { age.width() + 1 };
             let whole = format!("{name} · {word}");
-            let room = width.saturating_sub(5 + reserve + 1);
+            let room = width.saturating_sub(MACHINE_LEAD + reserve + 1);
             let said = cut(&whole, room);
-            let gap = width.saturating_sub(5 + said.width() + age.width() + 1);
+            let gap = width.saturating_sub(MACHINE_LEAD + said.width() + age.width() + 1);
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
@@ -4746,7 +4757,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Span::raw(" ".repeat(gap)),
                 Span::styled(age, dim),
             ]);
-            let cuts = cut_at(0, 5, &whole, room).into_iter().collect();
+            let cuts = cut_at(0, MACHINE_LEAD, &whole, room).into_iter().collect();
             RowLines { lines: vec![line], number: None, cuts }
         },
         Row::Machine {
@@ -4758,13 +4769,14 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let word = word.map_or_default(|word| format!(" · {word}"));
             let age = since.flatten().map_or_default(|since| age(since, now));
             let aged = if age.is_empty() { 0 } else { age.width() + 1 };
-            let room = width.saturating_sub(6 + aged + reserve + 1);
-            let cuts = cut_at(0, 5, name, room).into_iter().collect();
+            let room = width.saturating_sub(MACHINE_LEAD + 1 + aged + reserve + 1);
+            let cuts = cut_at(0, MACHINE_LEAD, name, room).into_iter().collect();
             let bold = Style::new().add_modifier(Modifier::BOLD);
             let shown = cut(name, room);
             let word = cut(&word, room.saturating_sub(shown.width()));
             let said = shown.width() + word.width();
-            let rule = width.saturating_sub(5 + said + 1 + aged + reserve + 1);
+            assert!(said <= room, "a machine's name and word fit their room");
+            let rule = room - said;
             let rule_style = if *here && *folded { Style::new().fg(ACCENT) } else { dim };
             let mut spans = vec![
                 Span::raw(" "),
@@ -9849,6 +9861,27 @@ mod tests {
         sidebar.key(&enter, moment(160_000));
         assert!(!sidebar.folds.contains(Fold::Machine(&vps)));
         assert_eq!(sidebar.cursor, Some(Spot::Machine(vps)), "it has no projects to fold");
+    }
+
+    #[test]
+    fn a_machine_s_fold_goes_once_it_lists_no_projects() {
+        let mut sidebar = fresh();
+        let folded = |sidebar: &Sidebar| {
+            [Machine::Local, Machine::Remote(nixos())]
+                .map(|machine| sidebar.folds.contains(Fold::Machine(&machine)))
+        };
+        sidebar.hear(machines());
+        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.folds.set(Fold::Machine(&Machine::Remote(nixos())), true);
+        sidebar.hear(machines());
+        assert_eq!(folded(&sidebar), [true, true]);
+        let none = up(Vec::new(), Vec::new());
+        sidebar.hear(Host { remotes: vec![remote("nixos", none)], ..host(Vec::new(), Vec::new()) });
+        assert_eq!(folded(&sidebar), [false, false]);
+        sidebar.hear(machines());
+        let lines = screen(&mut sidebar, false, 32, 14);
+        assert_eq!(lines[3], " ▾ \u{f108} mac ═════════════════════");
+        assert_eq!(lines[7], " ▾ \u{f108} nixos ════════════════ ●1");
     }
 
     #[test]
