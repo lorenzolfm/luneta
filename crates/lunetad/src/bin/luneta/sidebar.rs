@@ -4875,12 +4875,12 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Machine::Local => (name.clone(), word),
                 Machine::Remote(_) => (format!("{name}{word}"), String::new()),
             };
-            let named = room.saturating_sub(word.width()).max(room.min(1));
+            let named = room.saturating_sub(cells(&word)).max(room.min(1));
             let shown = cut(&name, named);
-            let worded = room - shown.width();
+            let worded = room - cells(&shown);
             let said = format!("{shown}{}", cut(&word, worded));
-            assert!(said.width() <= room, "a machine's name and word fit their room");
-            let gap = width.saturating_sub(MACHINE_LEAD + said.width() + age.width() + 1);
+            assert!(cells(&said) <= room, "a machine's name and word fit their room");
+            let gap = width.saturating_sub(MACHINE_LEAD + cells(&said) + age.width() + 1);
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled(FOLDED, dim),
@@ -4911,8 +4911,8 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let cuts = cut_at(0, MACHINE_LEAD, name, room).into_iter().collect();
             let bold = Style::new().add_modifier(Modifier::BOLD);
             let shown = cut(name, room);
-            let word = cut(&word, room.saturating_sub(shown.width()));
-            let said = shown.width() + word.width();
+            let word = cut(&word, room.saturating_sub(cells(&shown)));
+            let said = cells(&shown) + cells(&word);
             assert!(said <= room, "a machine's name and word fit their room");
             let rule = room - said;
             let rule_style = if *here && *folded { Style::new().fg(ACCENT) } else { dim };
@@ -5079,7 +5079,7 @@ pub fn lit(
             _ => spans.push(Span::styled(c.to_string(), style)),
         }
     }
-    (spans, shown.width())
+    (spans, cells(&shown))
 }
 
 fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<Span<'static>> {
@@ -5169,7 +5169,7 @@ fn checkout_line(
     let reserve = if status.is_empty() { 0 } else { status.width() + 1 };
     let room = width.saturating_sub(LABEL + held + reserve + 1);
     let branch = cut(&checkout.branch, room);
-    let gap = width.saturating_sub(LABEL + branch.width() + held + status.width() + 1);
+    let gap = width.saturating_sub(LABEL + cells(&branch) + held + status.width() + 1);
     let mut spans = vec![
         margin(here),
         gutter,
@@ -5194,13 +5194,13 @@ fn checkout_line(
 }
 
 pub fn cut(text: &str, room: usize) -> String {
-    if text.width() <= room {
+    if cells(text) <= room {
         return text.to_owned();
     }
     let mut kept = String::new();
     let mut taken = 0;
     for shown in text.graphemes(true) {
-        let width = shown.width();
+        let width = cells(shown);
         if taken + width + 1 > room {
             break;
         }
@@ -5214,13 +5214,13 @@ pub fn cut(text: &str, room: usize) -> String {
 }
 
 pub fn tail(text: &str, room: usize) -> String {
-    if text.width() <= room {
+    if cells(text) <= room {
         return text.to_owned();
     }
     let mut start = text.len();
     let mut taken = 0;
     for (at, shown) in text.grapheme_indices(true).rev() {
-        let width = shown.width();
+        let width = cells(shown);
         if taken + width + 1 > room {
             break;
         }
@@ -5258,12 +5258,16 @@ pub fn wrapped(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = note_room(width);
     let mut lines = Vec::new();
     let mut line = String::new();
+    let mut taken = 0;
     for shown in text.graphemes(true) {
-        if line.width() + shown.width() > room {
+        let width = cells(shown);
+        if taken + width > room {
             lines.push(Line::styled(format!(" {line}"), style));
             line.clear();
+            taken = 0;
         }
         line.push_str(shown);
+        taken += width;
     }
     if !line.is_empty() {
         lines.push(Line::styled(format!(" {line}"), style));
@@ -7200,6 +7204,25 @@ mod tests {
         assert_eq!(tail("handoff-eng-11259", 8), "…g-11259");
         assert_eq!(tail("short", 8), "short");
         assert_eq!(tail("日本語", 4), "…語");
+    }
+
+    #[test]
+    fn a_cut_a_tail_and_a_wrap_draw_within_the_cells_of_their_room() {
+        let drawn = |text: &str| {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 1));
+            let (x, _) = buffer.set_line(0, 0, &Line::raw(text.to_owned()), 40);
+            usize::from(x)
+        };
+        assert_eq!(cut("لا لا لا لا", 8), "لا لا ل…");
+        assert_eq!(cut("ｶﾞｷﾞｸﾞｹﾞｺﾞ", 8), "ｶﾞｷﾞｸﾞ…");
+        for text in ["لا لا لا لا", "ｶﾞｷﾞｸﾞｹﾞｺﾞ"] {
+            assert!(drawn(&cut(text, 8)) <= 8, "a cut of {text:?} draws past 8 cells");
+            assert!(drawn(&tail(text, 8)) <= 8, "a tail of {text:?} draws past 8 cells");
+            for line in wrapped(text, 10, Style::new()) {
+                let line = line.to_string();
+                assert!(drawn(&line) <= 9, "{line:?} of {text:?} draws past its room");
+            }
+        }
     }
 
     #[test]

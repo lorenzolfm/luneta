@@ -1,8 +1,7 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::sidebar::cut;
+use crate::sweep::cells;
 
 const SHOWN_CHARS_MAX: usize = 512;
 
@@ -56,13 +55,13 @@ impl Text {
             _ => format!("copied {lines} lines"),
         };
         let quoted = |kept: &str| format!("{counted} \"{kept}\"");
-        let Some(left) = room.checked_sub(quoted("").width()) else {
+        let Some(left) = room.checked_sub(cells(&quoted(""))) else {
             return counted;
         };
         let kept = cut(first, left);
         if quotes_some(&kept, first) {
             let said = quoted(&kept);
-            assert!(said.width() <= room, "a quote is cut to the room it has");
+            assert!(cells(&said) <= room, "a quote is cut to the cells it has");
             said
         } else {
             counted
@@ -84,7 +83,10 @@ fn shown(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Style;
+
     use super::*;
+    use crate::sidebar::wrapped;
 
     #[test]
     fn a_pull_request_link_is_said_by_its_number() {
@@ -98,7 +100,7 @@ mod tests {
         assert_eq!(copied.said(30), "copied \"cargo nextest run\"");
         assert_eq!(copied.said(26), "copied \"cargo nextest run\"");
         assert_eq!(copied.said(25), "copied \"cargo nextest r…\"");
-        assert_eq!(copied.said(25).width(), 25);
+        assert_eq!(cells(&copied.said(25)), 25);
         assert_eq!(copied.said(11), "copied \"c…\"");
         assert_eq!(copied.said(10), "copied");
         assert_eq!(copied.said(0), "copied");
@@ -147,7 +149,7 @@ mod tests {
     fn a_wide_line_is_cut_by_the_columns_it_takes() {
         let copied = Copied::text("日本語のテキスト");
         assert_eq!(copied.said(20), "copied \"日本語のテ…\"");
-        assert!(copied.said(20).width() <= 20);
+        assert!(cells(&copied.said(20)) <= 20);
     }
 
     #[test]
@@ -168,13 +170,18 @@ mod tests {
             "لا لا لا",
             "ｶﾞｶﾞｶﾞ",
             "日本語のテキスト",
+            "🏻\u{200d}🧑",
+            "🇦🇦\u{200d}🏴\u{ad}",
+            "ᨀ……🏴\u{200d}#\u{fe0f}",
         ];
         for line in lines {
             let copied = Copied::text(line);
             for room in 0..40 {
                 let said = copied.said(room);
                 if said.contains('"') {
-                    assert!(said.width() <= room, "{said:?} is past {room}");
+                    assert!(cells(&said) <= room, "{said:?} is past {room}");
+                    let drawn = wrapped(&said, room + 2, Style::new());
+                    assert_eq!(drawn.len(), 1, "{said:?} wraps in {room}");
                 }
             }
         }
