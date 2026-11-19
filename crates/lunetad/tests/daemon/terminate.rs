@@ -111,6 +111,23 @@ fn luneta_terminate_ends_lunetad_the_mux_its_terminals_and_lunetas_and_forgets_t
 }
 
 #[test]
+fn luneta_terminate_ends_the_lunetad_that_keeps_the_projects_from_another_folder() {
+    let host = Host::new();
+    let mut first = start(host.vars()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let there = Vars { runtime: Some(other.path()), ..host.vars() };
+
+    let planned = terminate(there, None);
+    assert_eq!(planned.code, Some(3), "{}", planned.stderr);
+    let [line] = &planned.lines[..] else { panic!("one machine: {:?}", planned.lines) };
+    assert!(here(line).starts_with("ends lunetad"), "{line}");
+
+    let ended = terminate(there, Some(&plan_in(&planned)));
+    assert_eq!(ended.code, Some(0), "{}", ended.stderr);
+    assert!(first.ended_within(ENDS).is_some(), "the lunetad that keeps the projects runs on");
+}
+
+#[test]
 fn luneta_terminate_ends_luneta_on_each_machine_ssh_reaches_and_skips_the_others() {
     let (here_host, far) = (Host::new(), Host::new());
     let ssh = FakeSsh::new(here_host.zellij.bin());

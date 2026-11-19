@@ -60,7 +60,7 @@ use crate::asks::{Asked, Step};
 use crate::closes::{Close, Closes};
 use crate::core::{self, Command, Wakes};
 use crate::directory::Directory;
-use crate::projects::{Ask, Changed, Failed, Made, Store, WorkstreamId};
+use crate::projects::{Ask, Changed, Failed, Lock, Made, Store, WorkstreamId};
 use crate::views;
 use crate::mux::own::api::{FromViewer, ToViewer};
 use crate::mux::own::viewer;
@@ -154,12 +154,21 @@ impl Claim {
     }
 
     #[must_use]
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
+    #[must_use]
     pub fn socket(&self) -> &Path {
         &self.socket
     }
 }
 
-pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
+pub async fn serve(
+    claim: Claim,
+    projects: Result<Lock, String>,
+    unkept: Option<String>,
+) -> io::Result<()> {
     let listener = UnixListener::bind(&claim.socket)?;
     let started = SystemTime::now();
     let (wake_panes, panes_woken) = mpsc::sync_channel(1);
@@ -168,7 +177,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     let github = wake_github.clone();
     let wakes = Wakes { panes: wake_panes.clone(), git: wake_git.clone(), github };
     let core = core::start(wakes)?;
-    let store = Store::open(core.clone())?;
+    let store = Store::open(projects, core.clone())?;
     if let Some(why) = store.unkept() {
         log::say(why);
     }

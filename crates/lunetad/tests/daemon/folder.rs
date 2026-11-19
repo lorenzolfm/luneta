@@ -2,7 +2,7 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use crate::host::{info, start, Vars, LUNETA, SOCKET};
+use crate::host::{info, start, Host, Vars, LUNETA, SOCKET};
 
 type Case = for<'p> fn(&'p Path, &'p Path) -> (Vars<'p>, &'p Path);
 
@@ -45,6 +45,19 @@ fn one_daemon_holds_the_folder_until_it_dies() {
     let next = start(vars).unwrap();
     let said = info(vars);
     assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
+}
+
+#[test]
+fn a_second_lunetad_of_one_home_names_the_first_and_does_not_start() {
+    let host = Host::new();
+    let _first = start(host.vars()).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (ended, said) = start(Vars { runtime: Some(other.path()), ..host.vars() }).err().unwrap();
+    assert!(!ended.success());
+    let first = host.runtime.path().join("luneta");
+    let names = format!("and listens in {}: `luneta terminate` ends it", first.display());
+    assert!(said.contains(&names), "{said}");
+    assert!(!other.path().join(SOCKET).exists(), "a second lunetad of one home listens");
 }
 
 #[test]

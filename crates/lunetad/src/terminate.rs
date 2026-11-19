@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rustix::process::Signal;
 
-use crate::{folder, process};
+use crate::{folder, process, projects};
 
 pub use crate::process::{Id, Unended};
 
@@ -48,10 +48,12 @@ impl Running {
 
 #[must_use]
 pub fn running(folder: &Path) -> Running {
-    running_of(process::mine(&[LUNETA, LUNETAD, MUX]), folder, std::process::id())
+    let holder = projects::holder();
+    let folders: Vec<&Path> = std::iter::once(folder).chain(holder.as_deref()).collect();
+    running_of(process::mine(&[LUNETA, LUNETAD, MUX]), &folders, std::process::id())
 }
 
-fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
+fn running_of(found: Vec<process::Found>, folders: &[&Path], me: u32) -> Running {
     let mut running = Running::default();
     for found in found {
         if found.id.pid == me {
@@ -60,7 +62,7 @@ fn running_of(found: Vec<process::Found>, folder: &Path, me: u32) -> Running {
         let Some(theirs) = listened_in(&found) else {
             continue;
         };
-        if same(&theirs, folder) {
+        if folders.iter().any(|folder| same(&theirs, folder)) {
             match found.name.as_str() {
                 LUNETA => running.lunetas.push(Luneta { id: found.id, argv: found.argv }),
                 LUNETAD => running.lunetads.push(found.id),
@@ -163,7 +165,7 @@ mod tests {
             given(2, MUX, &["/tmp/test/luneta"], &ours),
             given(3, MUX, &[], &ours),
         ];
-        let running = running_of(listed, folder, 0);
+        let running = running_of(listed, &[folder], 0);
         let muxes: Vec<u32> = running.muxes.into_iter().map(|id| id.pid).collect();
         assert_eq!(muxes, [1, 3]);
     }
@@ -181,7 +183,7 @@ mod tests {
             found(7, LUNETA, &["XDG_RUNTIME_DIR=/run/user/1000"]),
             found(8, LUNETAD, &["XDG_RUNTIME_DIR=/run/user/1000", "XDG_RUNTIME_DIR=/tmp"]),
         ];
-        let running = running_of(listed, folder, 7);
+        let running = running_of(listed, &[folder], 7);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let front_ends = pids(running.luneta_ids());
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
@@ -199,9 +201,25 @@ mod tests {
             found(2, MUX, &[]),
             found(3, LUNETA, &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/var/T/nix-shell.b"]),
         ];
-        let running = running_of(listed, &folder, 0);
+        let running = running_of(listed, &[&folder], 0);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
         let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
         assert_eq!((running.lunetas, daemons, muxes), (vec![], vec![1], vec![2]));
+    }
+
+    #[test]
+    fn a_process_in_the_folder_of_the_projects_holder_is_luneta_s_too() {
+        let (folder, holder) = (Path::new("/run/user/1000/luneta"), Path::new("/tmp/test/luneta"));
+        let listed = vec![
+            found(1, LUNETAD, &["XDG_RUNTIME_DIR=/tmp/test"]),
+            given(2, MUX, &["/tmp/test/luneta"], &[]),
+            found(3, LUNETA, &["XDG_RUNTIME_DIR=/run/user/1000"]),
+            found(4, LUNETAD, &["XDG_RUNTIME_DIR=/tmp/other"]),
+        ];
+        let running = running_of(listed, &[folder, holder], 0);
+        let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
+        let front_ends = pids(running.luneta_ids());
+        let (daemons, muxes) = (pids(running.lunetads), pids(running.muxes));
+        assert_eq!((front_ends, daemons, muxes), (vec![3], vec![1], vec![2]));
     }
 }

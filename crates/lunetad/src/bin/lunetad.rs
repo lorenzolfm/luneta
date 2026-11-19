@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use lunetad::log::{self, Process};
+use lunetad::projects::{self, Unheld};
 use lunetad::{folder, release, Claim, Refusal};
 use rustix::io::FdFlags;
 
@@ -59,6 +60,14 @@ fn main() -> ExitCode {
             };
         },
     };
+    let kept = match projects::take(claim.folder()) {
+        Ok(lock) => Ok(lock),
+        Err(Unheld::Unkept(why)) => Err(why),
+        Err(Unheld::Elsewhere(elsewhere)) => {
+            log::say(&elsewhere.to_string());
+            return ExitCode::FAILURE;
+        },
+    };
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -67,7 +76,7 @@ fn main() -> ExitCode {
         },
     };
     let socket = claim.socket().to_owned();
-    if let Err(error) = runtime.block_on(lunetad::serve(claim, unkept)) {
+    if let Err(error) = runtime.block_on(lunetad::serve(claim, kept, unkept)) {
         log::say(&format!("{}: {error}", socket.display()));
         return ExitCode::FAILURE;
     }
