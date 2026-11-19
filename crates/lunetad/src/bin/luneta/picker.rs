@@ -488,7 +488,13 @@ enum Stage {
     Planning { on: Machine, place: ViewPlace, agreed: Option<Plan> },
     Asking { on: Machine, place: ViewPlace, plan: Plan, asks: String },
     Closing { on: Machine, place: WorktreePlace, name: String, ends: Ends, asks: String },
-    Chain { chain: Chain, on: Machine, aimed: String },
+    Chain { chain: Chain, on: Machine, aimed: Aimed },
+}
+
+#[derive(Debug)]
+enum Aimed {
+    Palette,
+    Project(ProjectRow),
 }
 
 struct Shot {
@@ -954,8 +960,15 @@ impl Picker {
             let spots = self.draw_rename(buffer, &layout, on, renames, input);
             return Drawn::Picker { number: self.number, area, spots };
         }
-        if let Stage::Chain { chain, aimed, .. } = &self.stage {
-            let spots = self.draw_chain(buffer, &layout, chain, aimed);
+        if let Stage::Chain { chain, on, aimed } = &self.stage {
+            let aimed = match aimed {
+                Aimed::Palette => self.aimed_at(),
+                Aimed::Project(project) => {
+                    let named = self.housed(on, project).map_or(project, |it| &it.project);
+                    there(named.listed().name().as_str(), on)
+                },
+            };
+            let spots = self.draw_chain(buffer, &layout, chain, &aimed);
             return Drawn::Picker { number: self.number, area, spots };
         }
         let mut spots = Spots::default();
@@ -1095,7 +1108,7 @@ impl Picker {
                 },
                 Lone::Clone => {
                     let (chain, on) = (Chain::branch(project.id()), on.clone());
-                    let aimed = there(project.listed().name().as_str(), &on);
+                    let aimed = Aimed::Project(project.clone());
                     self.stage = Stage::Chain { chain, on, aimed };
                     Picked::Nothing
                 },
@@ -1139,8 +1152,8 @@ impl Picker {
                     return Picked::Nothing;
                 }
                 if let Some(chain) = Chain::of(&target, action) {
-                    let (on, aimed) = (target.machine().clone(), self.aimed_at());
-                    self.stage = Stage::Chain { chain, on, aimed };
+                    let on = target.machine().clone();
+                    self.stage = Stage::Chain { chain, on, aimed: Aimed::Palette };
                     return Picked::Nothing;
                 }
                 Picked::Menu { target: Target::clone(&target), origin: self.palette.origin, action }
@@ -2826,8 +2839,13 @@ mod tests {
         let asked = said(&clone);
         assert!(asked.contains("─ New worktree ─"), "{asked}");
         assert!(asked.contains("─ notes ─"), "the clone is named over the input: {asked}");
+        let mut renamed = works();
+        renamed.shelves[0].projects[1] = housed("jots", 2, Vec::new());
+        clone.listed(renamed);
+        let asked = said(&clone);
+        assert!(asked.contains("─ jots ─"), "its name follows the listing: {asked}");
         assert_eq!(press(&mut clone, KeyCode::Esc), Picked::Nothing);
-        assert_eq!(lit(&clone), "notes", "Esc goes back to the row");
+        assert_eq!(lit(&clone), "jots", "Esc goes back to the row");
         press(&mut clone, KeyCode::Enter);
         typed(&mut clone, "fix/notes");
         let branch = Branch::parse("fix/notes").unwrap();
@@ -3897,6 +3915,11 @@ mod tests {
         assert!(asked.contains("its new name; with none, it goes back"), "{asked}");
         let target = "luneta › fix · view 3";
         assert!(asked.contains(target), "the target is named over the input: {asked}");
+        let mut renamed = works();
+        renamed.shelves[0].projects[0].worktrees[1].name = "fixed".to_owned();
+        picker.listed(renamed);
+        let asked = said(&picker);
+        assert!(asked.contains("luneta › fixed · view 3"), "it follows the listing: {asked}");
         assert_eq!(press(&mut picker, KeyCode::Backspace), Picked::Nothing);
         assert_eq!(keyed_action(&picker).0, "Rename the view…", "back on the list, as typed");
         press(&mut picker, KeyCode::Enter);
