@@ -34,7 +34,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::actions::Action;
+use crate::actions::{Action, Command};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Reach};
 use crate::aloud;
@@ -2693,13 +2693,10 @@ impl Sidebar {
                 Some(Top::Fold(Some(folded))) => self.fold(folded),
                 Some(Top::Fold(None)) => self.toggle(),
                 Some(Top::Menu) => return self.open_menu(None),
-                Some(Top::Command(Action::Search)) => self.find(String::new()),
-                Some(Top::Command(Action::Unread)) => self.toggle_unread(now),
-                Some(Top::Command(Action::Reorder)) => self.select(),
-                Some(Top::Command(Action::Quit)) => return Asked::Quit,
-                Some(Top::Command(other)) => {
-                    unreachable!("{other:?} is a key of the sidebar with no handler")
-                },
+                Some(Top::Command(Command::Search)) => self.find(String::new()),
+                Some(Top::Command(Command::Unread)) => self.toggle_unread(now),
+                Some(Top::Command(Command::Reorder)) => self.select(),
+                Some(Top::Command(Command::Quit)) => return Asked::Quit,
                 Some(Top::Shift(_)) => {},
                 None => {
                     let asked = self.open_menu(Some(c));
@@ -2822,7 +2819,7 @@ impl Sidebar {
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
                 Some(Top::Shift(by)) => return Some(self.shift(by)),
-                Some(Top::Command(Action::Reorder)) => self.widen(),
+                Some(Top::Command(Command::Reorder)) => self.widen(),
                 _ => {
                     self.unselect();
                     return None;
@@ -7708,17 +7705,6 @@ mod tests {
             let asked = sidebar.key(&char(path[1]), now);
             let said = asked != Asked::Nothing || sidebar.notice.is_some();
             assert!(said, "{action:?} on {path:?} does nothing");
-        }
-    }
-
-    #[test]
-    fn every_key_of_the_sidebar_s_own_has_a_handler() {
-        let now = moment(160_000);
-        let own = Action::row().filter(|(_, path)| path.len() == 1);
-        for (_, path) in own {
-            let mut sidebar = pulls();
-            sidebar.cursor = Some(Spot::Local(pane_of("s", 10, 1)));
-            sidebar.key(&char(path[0]), now);
         }
     }
 

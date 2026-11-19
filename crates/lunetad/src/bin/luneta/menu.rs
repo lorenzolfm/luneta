@@ -17,7 +17,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::actions::{self, Action, Key, Noun, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK};
+use crate::actions::{
+    self, Action, Command, Key, Noun, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
+};
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
 use crate::checks::{self, Failing, PullPage};
@@ -142,7 +144,7 @@ pub enum Top {
     Menu,
     Group(char),
     AllKeys,
-    Command(Action),
+    Command(Command),
 }
 
 impl Top {
@@ -167,7 +169,8 @@ impl Top {
 
     pub fn of(key: char) -> Option<Top> {
         let command = Action::row().find(|(_, path)| *path == [key]);
-        Top::moves(key).or_else(|| command.map(|(action, _)| Top::Command(action)))
+        let command = command.and_then(|(action, _)| Command::of(action));
+        Top::moves(key).or_else(|| command.map(Top::Command))
     }
 }
 
@@ -2787,8 +2790,8 @@ mod tests {
         ]);
         assert_eq!(text(&legend(None, 31, 15).0).len(), 7);
         assert_eq!(Top::of('m'), Some(Top::Menu));
-        assert_eq!(Top::of('/'), Some(Top::Command(Action::Search)));
-        assert_eq!(Top::of('u'), Some(Top::Command(Action::Unread)));
+        assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
+        assert_eq!(Top::of('u'), Some(Top::Command(Command::Unread)));
         assert_eq!(Top::of('o'), Some(Top::Group(OPEN)));
         assert_eq!(in_group(OPEN, 'p'), Some(Action::OpenPull));
         assert_eq!(in_group(OPEN, 'w'), Some(Action::OpenWorktree));

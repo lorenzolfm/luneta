@@ -159,6 +159,27 @@ actions! {
     StopAloud,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Search,
+    Unread,
+    Reorder,
+    Quit,
+}
+
+impl Command {
+    #[must_use]
+    pub const fn of(action: Action) -> Option<Command> {
+        match action {
+            Action::Search => Some(Command::Search),
+            Action::Unread => Some(Command::Unread),
+            Action::Reorder => Some(Command::Reorder),
+            Action::Quit => Some(Command::Quit),
+            _ => None,
+        }
+    }
+}
+
 const fn spec(
     name: &'static str,
     keywords: &'static [&'static str],
@@ -429,7 +450,11 @@ const fn grouped(path: &[char], groups: &[(char, &str)]) -> bool {
 const _: () = {
     let mut at = 0;
     while at < Action::ALL.len() {
-        match Action::ALL[at].key() {
+        let action = Action::ALL[at];
+        let alone = matches!(action.key(), Key::Row([_]) | Key::RowAndMenu(_));
+        let command = "a key of the sidebar's own is a command's key, and a command's is its own";
+        assert!(alone == Command::of(action).is_some(), "{}", command);
+        match action.key() {
             Key::Menu(path) => {
                 let menu = "a menu path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &MENU_GROUPS), "{}", menu);

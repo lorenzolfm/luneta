@@ -163,12 +163,12 @@ pub fn stays(session: &SessionName, events: &Sender<Event>) {
     let _ = events.send(Event::Notice(format!("luneta cannot tell {when}")));
 }
 
-pub fn open(menu: u64, on: &Machine, open: Open, events: &Sender<Event>) {
+pub fn open(menu: u64, on: &Machine, open: Open, events: &Sender<Event>) -> JoinHandle<()> {
     let (owed, on, events) = (owed(menu, events), on.clone(), events.clone());
     thread::spawn(move || {
         let opened = There::on(&on).and_then(|mut there| there.open(&open));
         owed.pay(opened.map(|opened| told(opened, &events)));
-    });
+    })
 }
 
 fn told(opened: Opened, events: &Sender<Event>) -> u32 {
@@ -197,14 +197,14 @@ pub fn close(
     whose: Whose,
     close: Close,
     events: &Sender<Event>,
-) {
+) -> JoinHandle<()> {
     let (on, events) = (on.clone(), events.clone());
     thread::spawn(move || {
         let closed = There::on(&on).and_then(|mut there| there.close(&session, whose, &close));
         if let Err(why) = closed {
             let _ = events.send(Event::Notice(why));
         }
-    });
+    })
 }
 
 pub fn kill(

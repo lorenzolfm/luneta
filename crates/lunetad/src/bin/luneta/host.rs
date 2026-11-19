@@ -337,7 +337,7 @@ struct App {
     projected: Projected,
     seated: Option<OwnPane>,
     lunetad: PathBuf,
-    movers: HashMap<Machine, SyncSender<Move>>,
+    movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
     areas: (Rect, Rect),
     width: Width,
@@ -649,34 +649,42 @@ struct Move {
 
 const MOVE_PANICKED: &str = "luneta could not ask lunetad for the move: asking panicked";
 
-fn moves_on(
-    lunetad: &Path,
-    on: &Machine,
-    events: &Sender<Event>,
-) -> (SyncSender<Move>, JoinHandle<()>) {
-    let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
-    let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
-    let moving = thread::spawn(move || {
-        let mut stopped = Stopped::default();
-        for Move { ticket, order } in asked {
-            if stopped.holds(ticket) {
-                continue;
+struct Mover {
+    moves: SyncSender<Move>,
+    moving: JoinHandle<()>,
+}
+
+impl Mover {
+    fn on(lunetad: &Path, on: &Machine, events: &Sender<Event>) -> Mover {
+        let (moves, asked) = mpsc::sync_channel::<Move>(sidebar::MOVES_MAX);
+        let (lunetad, on, events) = (lunetad.to_owned(), on.clone(), events.clone());
+        let moving = thread::spawn(move || {
+            let mut stopped = Stopped::default();
+            for Move { ticket, order } in asked {
+                if stopped.holds(ticket) {
+                    continue;
+                }
+                let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
+                let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
+                let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
+                    Ok(kept) => Event::Moved { ticket, kept },
+                    Err(unmoved) => {
+                        stopped.stop(ticket);
+                        Event::Unmoved { on: on.clone(), ticket, order, unmoved }
+                    },
+                };
+                if events.send(event).is_err() {
+                    return;
+                }
             }
-            let asked = AssertUnwindSafe(|| worktrees::reordered(&lunetad, &on, &order));
-            let unsure = |_| Err(Unmoved::Unsure(MOVE_PANICKED.to_owned()));
-            let event = match panic::catch_unwind(asked).unwrap_or_else(unsure) {
-                Ok(kept) => Event::Moved { ticket, kept },
-                Err(unmoved) => {
-                    stopped.stop(ticket);
-                    Event::Unmoved { on: on.clone(), ticket, order, unmoved }
-                },
-            };
-            if events.send(event).is_err() {
-                return;
-            }
-        }
-    });
-    (moves, moving)
+        });
+        Mover { moves, moving }
+    }
+
+    fn stopped(self) -> JoinHandle<()> {
+        drop(self.moves);
+        self.moving
+    }
 }
 
 #[derive(Default)]
@@ -1590,11 +1598,12 @@ impl App {
             Asked::Delete { on, act } => match act {
                 Act::Worktree { .. } | Act::Project { .. } => self.project_act(&on, &act),
                 Act::Pane { session, whose, pane } => {
-                    zellij::close(&on, session, whose, Close::Pane(pane.id()), &self.events);
+                    let close = Close::Pane(pane.id());
+                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
                 },
                 Act::Tab { session, whose, tab, panes } => {
                     let close = Close::Tab { id: tab, panes };
-                    zellij::close(&on, session, whose, close, &self.events);
+                    self.keep_change(zellij::close(&on, session, whose, close, &self.events));
                 },
                 Act::Kill { session, whose } => {
                     self.keep_change(zellij::kill(&on, session, whose, &self.events));
@@ -1605,7 +1614,9 @@ impl App {
                 },
             },
             Asked::Open { asking, on, key, open } => self.project_open(asking, &on, key, &open),
-            Asked::OpenZellij { menu, on, open } => zellij::open(menu, &on, open, &self.events),
+            Asked::OpenZellij { menu, on, open } => {
+                self.keep_change(zellij::open(menu, &on, open, &self.events));
+            },
             Asked::Welcome { asking, on, session, pane } => {
                 self.welcome(asking, &on, &session, pane);
             },
@@ -1707,20 +1718,19 @@ impl App {
                 }
             },
             Asked::Move { on, order, ticket } => {
-                if !self.movers.contains_key(&on) {
-                    let (moves, moving) = moves_on(&self.lunetad, &on, &self.events);
-                    self.keep_change(moving);
-                    self.movers.insert(on.clone(), moves);
-                }
-                let mover = self.movers.get(&on).expect("a machine's mover was just made");
-                match mover.try_send(Move { ticket, order }) {
+                let (lunetad, events) = (&self.lunetad, &self.events);
+                let mover = self.movers.entry(on.clone());
+                let mover = mover.or_insert_with(|| Mover::on(lunetad, &on, events));
+                match mover.moves.try_send(Move { ticket, order }) {
                     Ok(()) => {},
                     Err(TrySendError::Full(Move { ticket, order })) => {
                         let why = format!("{} moves are on their way already", sidebar::MOVES_MAX);
                         self.sidebar.unsent(ticket, &order, &why);
                     },
                     Err(TrySendError::Disconnected(Move { ticket, order })) => {
-                        self.movers.remove(&on);
+                        if let Some(mover) = self.movers.remove(&on) {
+                            self.keep_change(mover.stopped());
+                        }
                         let why = "the moves have stopped: move it again";
                         self.sidebar.unsent(ticket, &order, why);
                     },
@@ -1752,8 +1762,8 @@ impl App {
     }
 
     fn wait_for_changes(&mut self) {
-        self.movers.clear();
-        for change in self.changes.drain(..) {
+        let movers = self.movers.drain().map(|(_, mover)| mover.stopped());
+        for change in movers.chain(self.changes.drain(..)) {
             if change.join().is_err() {
                 log::say("a change luneta sent panicked");
             }
