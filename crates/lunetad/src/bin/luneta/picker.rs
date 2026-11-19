@@ -1563,13 +1563,13 @@ impl Picker {
                 let streamed = self.row_streamed(on, place);
                 let count = streamed.terminals.len();
                 let right =
-                    if count == 1 { "1 view".to_owned() } else { format!("{count} views") };
+                    if count == 1 { "1 terminal".to_owned() } else { format!("{count} terminals") };
                 let mut caption = vec![Span::raw(" ")];
                 caption.extend(machined(on, inner));
                 let room = inner.saturating_sub(1 + caption.iter().map(Span::width).sum::<usize>());
                 caption.push(Span::styled(sidebar::tail(streamed.folder.as_str(), room), grey));
                 let Some(focus) = self.focus(on, streamed) else {
-                    let lines = said(caption, "it holds no view to look at");
+                    let lines = said(caption, "it holds no terminal to look at");
                     framed(buffer, area, &row.name, &right, lines);
                     return;
                 };
@@ -2675,7 +2675,7 @@ mod tests {
         assert_eq!(picker.due(), None);
         let (_, preview) = parts();
         let shown = text(&drawn(&picker), preview);
-        assert_eq!(shown[..3], ["/home/you/docs", "", "it holds no view to look at"]);
+        assert_eq!(shown[..3], ["/home/you/docs", "", "it holds no terminal to look at"]);
     }
 
     #[test]
@@ -2694,7 +2694,7 @@ mod tests {
         let lines = text(&buffer, preview);
         assert_eq!(lines[0], "/home/you/api");
         let rule = text(&buffer, Rect { y: preview.y - 1, height: 1, ..preview });
-        assert!(rule[0].starts_with("─ web › api ─") && rule[0].ends_with(" 1 view ─"));
+        assert!(rule[0].starts_with("─ web › api ─") && rule[0].ends_with(" 1 terminal ─"));
         assert_eq!(lines.last().map(String::as_str), Some("line 40"));
         assert_eq!(lines[2], format!("line {}", 40 - (lines.len() - 3)));
         for y in preview.y..preview.bottom() {
