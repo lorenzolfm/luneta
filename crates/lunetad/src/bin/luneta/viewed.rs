@@ -24,6 +24,7 @@ use crate::attached::{
     screen_rect, selects, span_under, spot_in, tab_spans, text, within, Pointer, Screen,
     Selection, Spot, TAB_BAR_ROWS,
 };
+use crate::copied::Excerpt;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -362,13 +363,12 @@ impl Layout {
         };
     }
 
-    fn selected(&mut self) -> Option<String> {
+    fn selected(&mut self) -> Option<Excerpt> {
         let screen = self.focused_screen().map(|(_, _, screen)| screen);
         let chosen = match self.pointer {
             Pointer::Pressed(at) => screen.and_then(|screen| link(screen, at)),
             Pointer::Selecting(selection) if selection.from != selection.to => screen
-                .map(|screen| (selection, text(screen, selection)))
-                .filter(|(_, text)| !text.is_empty()),
+                .and_then(|screen| Some((selection, Excerpt::of(text(screen, selection))?))),
             Pointer::Selecting(_) => None,
             Pointer::Free | Pointer::Sending | Pointer::Shown(_) => return None,
         };
@@ -827,7 +827,7 @@ impl Viewed {
         self.layout.select_to(at);
     }
 
-    pub fn selected(&mut self) -> Option<String> {
+    pub fn selected(&mut self) -> Option<Excerpt> {
         self.layout.selected()
     }
 

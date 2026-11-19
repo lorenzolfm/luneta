@@ -10,9 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryS
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use alacritty_terminal::term::ClipboardType;
 use alacritty_terminal::vte::ansi::CursorShape;
-use base64::Engine as _;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -48,7 +46,7 @@ use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
 use crate::checks;
 use crate::close::Act;
-use crate::copied::Copied;
+use crate::copied::{Clip, Copies};
 use crate::desktop::{self, Desktop, Reader, Told};
 use crate::dictation::{self, Dictated, Dictation};
 use crate::folds::{self, Folds};
@@ -65,7 +63,7 @@ use crate::rebase;
 use crate::peers;
 use crate::picker::{self, List, Palette, Picked, Picker};
 use crate::printed::{self, Printed};
-use crate::pull::{self, Found, Link};
+use crate::pull::{self, Found};
 use crate::sidebar::{
     self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
     ViewKey, ViewPlace,
@@ -147,8 +145,7 @@ pub enum Event {
     Notice(String),
     Moved { ticket: u64, kept: Option<Version> },
     Unmoved { on: Machine, ticket: u64, order: Reorder, unmoved: Unmoved },
-    Copy(Link),
-    CopyText(String),
+    Copy(Clip),
     Image(Went),
     ImageSlow(Destination),
     Named(Made),
@@ -423,7 +420,7 @@ struct App {
     repeats: dictation::Repeats,
     aloud_repeats: dictation::Repeats,
     aloud: Aloud,
-    copied: Option<String>,
+    copies: Copies,
     browser: Browser,
     speech: Option<Speech>,
     fetching: Option<Fetch>,
@@ -693,7 +690,7 @@ fn run_in(
         repeats: dictation::Repeats::of(dictation::KEY),
         aloud_repeats: dictation::Repeats::of(aloud::KEY),
         aloud: Aloud::new(events.clone()),
-        copied: None,
+        copies: Copies::default(),
         browser: Browser::default(),
         speech: None,
         fetching: None,
@@ -910,15 +907,7 @@ impl App {
                 };
                 self.sidebar.unmoved(&on, ticket, &order, note);
             },
-            Event::Copy(link) => {
-                clip(terminal, ClipboardType::Clipboard, &link.url())?;
-                self.sidebar.copied(Copied::Pull(link.number()), SystemTime::now());
-            },
-            Event::CopyText(text) => {
-                clip(terminal, ClipboardType::Clipboard, &text)?;
-                self.sidebar.copied(Copied::text(&text), SystemTime::now());
-                self.copied = Some(text);
-            },
+            Event::Copy(clip) => self.clip(terminal, clip)?,
             Event::Image(went) => self.image_went(went),
             Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
             Event::Folds => self.sidebar.refold(),
@@ -999,11 +988,7 @@ impl App {
                 self.sidebar.filed(number, &to.to_string(), &filed);
                 self.desktop.tell(Told::issue(&to.to_string(), &filed));
                 match filed {
-                    Ok(filed) => {
-                        let url = filed.link().url();
-                        clip(terminal, ClipboardType::Clipboard, &url)?;
-                        self.copied = Some(url);
-                    },
+                    Ok(filed) => self.clip(terminal, Clip::Filed(filed))?,
                     Err(_) => self.unfiled.keep(number, repository, to, words),
                 }
             },
@@ -1390,6 +1375,13 @@ impl App {
         true
     }
 
+    fn clip(&mut self, terminal: &mut DefaultTerminal, clip: Clip) -> io::Result<()> {
+        if let Some(copied) = self.copies.clip(terminal.backend_mut(), clip)? {
+            self.sidebar.copied(copied, SystemTime::now());
+        }
+        Ok(())
+    }
+
     fn image_went(&mut self, went: Went) {
         self.image.heard();
         self.sidebar.image_going(None);
@@ -1639,8 +1631,8 @@ impl App {
             },
             (MouseEventKind::Up(_), Held::Selecting) => {
                 self.held = Held::Nothing;
-                if let Some(text) = own.selected() {
-                    let _ = self.events.send(Event::CopyText(text));
+                if let Some(excerpt) = own.selected() {
+                    let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
                 }
                 true
             },
@@ -1680,10 +1672,10 @@ impl App {
             Asked::Take => self.give(Focus::on(Side::Sidebar)),
             Asked::Leave => self.leave(),
             Asked::Copy(link) => {
-                let _ = self.events.send(Event::Copy(link));
+                let _ = self.events.send(Event::Copy(Clip::Pull(link)));
             },
-            Asked::CopyText(text) => {
-                let _ = self.events.send(Event::CopyText(text));
+            Asked::CopyText(excerpt) => {
+                let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
             },
             Asked::Browse(link) => {
                 if let Err(why) = self.browser.open(&link, &self.events, Instant::now()) {
@@ -2059,11 +2051,11 @@ impl App {
         self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => {
-                if let Err(nothing) = self.aloud.key(self.copied.as_deref()) {
+                if let Err(nothing) = self.aloud.key(self.copies.excerpt()) {
                     self.sidebar.notify(nothing.to_string());
                 }
             },
-            Reader::Another(holder) => holder.selected(self.copied.as_deref().unwrap_or_default()),
+            Reader::Another(holder) => holder.selected(self.copies.excerpt().unwrap_or_default()),
             Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
         }
     }
@@ -2607,21 +2599,6 @@ impl App {
     }
 }
 
-fn clip(terminal: &mut DefaultTerminal, clipboard: ClipboardType, text: &str) -> io::Result<()> {
-    let backend = terminal.backend_mut();
-    write!(backend, "{}", osc52(clipboard, text))?;
-    backend.flush()
-}
-
-fn osc52(clipboard: ClipboardType, text: &str) -> String {
-    let which = match clipboard {
-        ClipboardType::Clipboard => 'c',
-        ClipboardType::Selection => 'p',
-    };
-    let text = base64::engine::general_purpose::STANDARD.encode(text);
-    format!("\x1b]52;{which};{text}\x07")
-}
-
 fn whole<W: io::Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<()>,
@@ -2714,14 +2691,6 @@ mod tests {
         for (key, modifiers) in none {
             assert_eq!(resized((KeyCode::Char(key), modifiers)), None, "{key} {modifiers:?}");
         }
-    }
-
-    #[test]
-    fn what_to_copy_goes_out_as_osc_52() {
-        let url = "https://github.com/o/r/pull/1";
-        let spelled = "aHR0cHM6Ly9naXRodWIuY29tL28vci9wdWxsLzE=";
-        assert_eq!(osc52(ClipboardType::Clipboard, url), format!("\x1b]52;c;{spelled}\x07"));
-        assert_eq!(osc52(ClipboardType::Selection, url), format!("\x1b]52;p;{spelled}\x07"));
     }
 
     #[derive(Default)]

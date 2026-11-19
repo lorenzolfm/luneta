@@ -12,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::copied::Excerpt;
 use crate::gruvbox;
 
 pub(crate) struct Screen {
@@ -313,15 +314,14 @@ const PATH_LEADS: &str = ":!?";
 
 const PAIRS: [(&str, &str); 3] = [("(", ")"), ("[", "]"), ("{", "}")];
 
-pub(crate) fn link(screen: &Screen, at: At) -> Option<(Selection, String)> {
+pub(crate) fn link(screen: &Screen, at: At) -> Option<(Selection, Excerpt)> {
     let (word, clicked) = word(screen, at)?;
     let (first, end) = url(&word, clicked).or_else(|| path(&word, clicked))?;
     assert!(first <= clicked, "a link starts at or before the cell clicked");
     assert!(clicked < end, "a link ends after the cell clicked");
     let selection = Selection { from: word[first].at, to: word[end - 1].at };
     let text: String = word[first..end].iter().map(|letter| letter.text).collect();
-    assert!(!text.is_empty(), "a link shows something");
-    Some((selection, text))
+    Some((selection, Excerpt::of(text).expect("a link shows something")))
 }
 
 #[derive(Clone, Copy)]
@@ -769,7 +769,7 @@ mod tests {
 
     fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(At, At, String)> {
         let (span, text) = link(&typed(rows), spot(row, column))?;
-        Some((span.from, span.to, text))
+        Some((span.from, span.to, text.to_string()))
     }
 
     #[test]
@@ -811,7 +811,7 @@ mod tests {
         let url = Some((spot(0, 3), spot(1, 5), "https://e.io/a/b".to_owned()));
         let wrapped = |row, column| {
             let (span, text) = link(&wrapping(&rows), spot(row, column))?;
-            Some((span.from, span.to, text))
+            Some((span.from, span.to, text.to_string()))
         };
         assert_eq!(wrapped(0, 4), url);
         assert_eq!(wrapped(1, 1), url);
@@ -831,12 +831,12 @@ mod tests {
                 line(vec![narrow("x"), narrow("/"), narrow("y"), blank(), blank()]),
             ],
         );
-        assert_eq!(link(&ends_wide, spot(0, 4)).unwrap().1, "ab/日x/y", "either half of it");
-        assert_eq!(link(&ends_wide, spot(1, 0)).unwrap().1, "ab/日x/y", "from either row");
+        assert_eq!(&*link(&ends_wide, spot(0, 4)).unwrap().1, "ab/日x/y", "either half of it");
+        assert_eq!(&*link(&ends_wide, spot(1, 0)).unwrap().1, "ab/日x/y", "from either row");
         let early = ended(vec![narrow("a"), narrow("b"), narrow("/")], Ending::WrapsWide);
         let wrapped = screen(4, vec![early, line(vec![wide(), narrow("y"), blank()])]);
         let (span, text) = link(&wrapped, spot(0, 0)).unwrap();
-        assert_eq!((span.to, text.as_str()), (spot(1, 2), "ab/日y"), "a wide glyph wrapped early");
+        assert_eq!((span.to, &*text), (spot(1, 2), "ab/日y"), "a wide glyph wrapped early");
         assert_eq!(link(&wrapped, spot(0, 3)), None, "the padding it left shows nothing");
     }
 

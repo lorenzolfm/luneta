@@ -42,7 +42,7 @@ use crate::aloud;
 use crate::brief::{Brief, Note, Over, Transcript};
 use crate::checks;
 use crate::close::{self, Act, Deletes, Plan, Scope, Subject, Untold};
-use crate::copied::Copied;
+use crate::copied::{Copied, Excerpt};
 use crate::folds::{Fold, Folds};
 use crate::gruvbox;
 use crate::icons;
@@ -1116,7 +1116,7 @@ pub enum Asked {
     Go { on: Machine, place: Place },
     Take,
     Copy(Link),
-    CopyText(String),
+    CopyText(Excerpt),
     Browse(Link),
     Leave,
     Delete { on: Machine, act: Act },
@@ -4218,12 +4218,11 @@ impl Sidebar {
             },
             Moving::Sweeping(mut sweep) => {
                 sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
-                let text = sweep.text(&self.page, inside(area));
-                if text.is_empty() {
+                let Some(excerpt) = Excerpt::of(sweep.text(&self.page, inside(area))) else {
                     return Asked::Nothing;
-                }
+                };
                 self.moving = Moving::Swept(sweep, self.laid.clone());
-                Asked::CopyText(text)
+                Asked::CopyText(excerpt)
             },
             kept @ Moving::Swept(..) => {
                 self.moving = kept;
@@ -6424,7 +6423,7 @@ mod tests {
             (cell.fg, cell.modifier.contains(Modifier::DIM))
         };
         let resting = rule(&mut sidebar, now);
-        sidebar.copied(Copied::text("cargo"), now);
+        sidebar.copied(Copied::text(&excerpt("cargo")), now);
         assert_eq!(rule(&mut sidebar, now), (NAME, false));
         let gone = now + COPIED_SHOWS;
         sidebar.ticked(gone, steady(gone), true);
@@ -8185,7 +8184,7 @@ mod tests {
         assert!(shown(&mut sidebar, 162_999));
         assert!(!shown(&mut sidebar, 163_000));
 
-        sidebar.copied(Copied::text("cargo nextest run --workspace\nmore"), now);
+        sidebar.copied(Copied::text(&excerpt("cargo nextest run --workspace\nmore")), now);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now);
         let said = " copied 2 lines \"cargo nexte…\"";
         assert!(lines.iter().any(|line| line == said), "the note fits on one line: {lines:#?}");
@@ -10255,8 +10254,12 @@ mod tests {
         sidebar.mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1), area)
     }
 
+    fn excerpt(text: &str) -> Excerpt {
+        Excerpt::of(text.to_owned()).expect("a test excerpts some text")
+    }
+
     fn copied(text: &str) -> Asked {
-        Asked::CopyText(text.to_owned())
+        Asked::CopyText(excerpt(text))
     }
 
     #[test]
@@ -10403,7 +10406,7 @@ mod tests {
         assert_eq!(swept(&mut sidebar, area, (7, 6), (9, 6)), copied("a-p"));
         let cells = [(7, 6), (8, 6), (9, 6)];
         let now = moment(160_000);
-        sidebar.copied(Copied::text("a-p"), now);
+        sidebar.copied(Copied::text(&excerpt("a-p")), now);
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.notify("other word".to_owned());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
@@ -10423,7 +10426,7 @@ mod tests {
         framed(&mut sidebar, area);
         assert_eq!(swept(&mut sidebar, area, (1, 25), (5, 25)), copied("first"));
         assert_eq!(reversed(&framed(&mut sidebar, area)).len(), 5);
-        sidebar.copied(Copied::text("first"), moment(160_000));
+        sidebar.copied(Copied::text(&excerpt("first")), moment(160_000));
         assert_eq!(reversed(&framed(&mut sidebar, area)), []);
     }
 
