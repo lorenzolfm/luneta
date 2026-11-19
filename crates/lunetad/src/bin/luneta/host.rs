@@ -29,7 +29,7 @@ use lunetad::mux::own::{OwnClientId, OwnKey, OwnPane};
 use lunetad::mux::TerminalKey;
 use lunetad::projects::{Name, ProjectId, ViewId, WorktreeId};
 use lunetad::prunes;
-use lunetad::{Destination, Direction, Directory, Growth};
+use lunetad::{Destination, Direction, Growth};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -1588,11 +1588,9 @@ impl App {
                 zellij::open(menu, &on, open, &self.events);
             },
             Asked::Welcome { on, session, pane } => self.welcome(&on, &session, pane),
-            Asked::NewWorktree { on, project, folder } => {
-                self.make_worktree(on, folder, Asker::Menu, move |lunetad, on, folder| {
-                    let at = (project, folder.as_str());
-                    let added = worktrees::add_worktree(lunetad, on, at, None, Vec::new());
-                    added.map(Landing::Worktree)
+            Asked::NewWorktree { on, project, branch } => {
+                self.make_worktree(on, Asker::Menu, move |lunetad, on| {
+                    worktrees::branched(lunetad, on, project, &branch).map(Landing::Worktree)
                 });
                 self.leave();
             },
@@ -1832,7 +1830,7 @@ impl App {
             },
             Picked::Add { on, project, folder, name } => {
                 let project = project.id();
-                self.make_worktree(on, folder, Asker::Picker, move |lunetad, on, folder| {
+                self.make_worktree(on, Asker::Picker, move |lunetad, on| {
                     let named = name.as_ref().map(Name::as_str);
                     let at = (project, folder.as_str());
                     let added = worktrees::add_worktree(lunetad, on, at, named, Vec::new());
@@ -1841,8 +1839,8 @@ impl App {
                 self.give(Focus::on(self.focus.side.session()));
             },
             Picked::Make { on, session, cwd } => {
-                self.make_worktree(on, cwd, Asker::Picker, move |lunetad, on, cwd| {
-                    worktrees::made_at(lunetad, on, cwd, Some(session.as_str()))
+                self.make_worktree(on, Asker::Picker, move |lunetad, on| {
+                    worktrees::made_at(lunetad, on, &cwd, Some(session.as_str()))
                 });
                 self.give(Focus::on(self.focus.side.session()));
             },
@@ -2231,16 +2229,15 @@ impl App {
     fn make_worktree(
         &mut self,
         on: Machine,
-        cwd: Directory,
         asker: Asker,
-        made: impl FnOnce(&Path, &Machine, &Directory) -> Result<Landing, String> + Send + 'static,
+        made: impl FnOnce(&Path, &Machine) -> Result<Landing, String> + Send + 'static,
     ) {
         if self.refuse_naming(None) {
             return;
         }
         let lunetad = self.lunetad.clone();
         self.naming_on(move || {
-            let made = caught(|| made(&lunetad, &on, &cwd));
+            let made = caught(|| made(&lunetad, &on));
             let made = made.map_err(|why| format!("no worktree made: {why}"));
             Made::Worktree { on, made, argv: Vec::new(), asker }
         });

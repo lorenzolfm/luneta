@@ -24,6 +24,7 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::api::change_projects_request::{self, AddWorktree};
 use crate::api::change_projects_response;
 use crate::api::close_request;
 use crate::api::closes_response::{self, Tab as ClosedTab};
@@ -48,7 +49,7 @@ use crate::api::{
     KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, KillRequest, ListAgentsResponse, ListClientsRequest,
     ListClientsResponse, ListContentsRequest, ListContentsResponse, ListDirsRequest,
     ListDirsResponse, ListExitedRequest, ListExitedResponse, ListSkillsRequest, ListSkillsResponse,
-    NameSessionRequest, NameSessionResponse, OpenRequest,
+    MakeWorktreeRequest, NameSessionRequest, NameSessionResponse, OpenRequest,
     OpenResponse, OtherTabsRequest,
     OtherTabsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
     PrunesResponse, RefugeRequest, RefugeResponse, RenameSessionRequest, SayRequest, ShowRequest,
@@ -68,7 +69,7 @@ use crate::prunes::{self, Occupied};
 use crate::folder::{self, Refusal, LOCK, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
-use crate::links::{Pasted, Unready};
+use crate::links::{self, Of, Pasted, Unready};
 use crate::names::Starts;
 use crate::sayings::ToSay;
 use crate::remote::{Bridges, Bridging, Destination, Standing};
@@ -1149,32 +1150,50 @@ impl Daemon for Host {
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let layouts = self.layouts.clone();
-        let changed = task::spawn_blocking(move || -> Result<Changed, Status> {
-            let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
-            let stopped = "it is kept, but the daemon's core has stopped";
-            let asked =
-                layouts::ask(&layouts, |answer| layouts::Command::Change { change, answer });
-            let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
-            changed.map_err(|failed| match failed {
-                Failed::NotKept(why) => Status::failed_precondition(why),
-                Failed::Nests(why) => Status::already_exists(why),
-                Failed::Stale(why) => Status::aborted(why),
-                Failed::Refused(why) => Status::invalid_argument(why),
-                Failed::Unwritten(why) => Status::internal(why),
-                Failed::Unclosed(why) | Failed::Unopened(why) => Status::unavailable(why),
-                Failed::KeptUntold => Status::unavailable(stopped),
-            })
-        });
-        let Changed { made, kept } = changed.await.map_err(|error| unfinished(&error))??;
-        let made = made.map(|made| match made {
-            Made::Project(project) => change_projects_response::Made::Project(project.get()),
-            Made::Worktree(worktree) => {
-                change_projects_response::Made::Worktree(worktree.get())
+        let changed = task::spawn_blocking(move || changed(&layouts, change));
+        Ok(Response::new(changed.await.map_err(|error| unfinished(&error))??))
+    }
+
+    type MakeWorktreeStream =
+        Pin<Box<dyn Stream<Item = Result<ChangeProjectsResponse, Status>> + Send>>;
+
+    async fn make_worktree(
+        &self,
+        request: Request<MakeWorktreeRequest>,
+    ) -> Result<Response<Self::MakeWorktreeStream>, Status> {
+        let MakeWorktreeRequest { on, project, branch } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on)? {
+            let asked = MakeWorktreeRequest { on: None, project, branch };
+            let answer = daemon.make_worktree(asked).await?.into_inner();
+            return Ok(Response::new(Box::pin(answer)));
+        }
+        let branch = branch.trim().to_owned();
+        if branch.is_empty() {
+            return Err(Status::invalid_argument("it names no branch"));
+        }
+        let held = self.watched(None).await?.projects.and_then(|projects| projects.held);
+        let kept = match held {
+            Some(api::projects::Held::Kept(kept)) => kept.projects,
+            Some(api::projects::Held::Unkept(why)) => {
+                return Err(Status::failed_precondition(format!("no projects are kept: {why}")));
             },
-            Made::Found(worktree) => change_projects_response::Made::Found(worktree.get()),
-            Made::Taken(worktree) => change_projects_response::Made::Taken(worktree.get()),
+            None => return Err(Status::unavailable("lunetad says nothing of its projects")),
+        };
+        let kept = kept.into_iter().find(|it| it.id == project);
+        let kept = kept.ok_or_else(|| Status::not_found(format!("no project {project:016x}")))?;
+        if !matches!(kept.holds, Some(api::project::Holds::Clone(_))) {
+            let name = &kept.name;
+            return Err(Status::failed_precondition(format!(
+                "{name} is a folder, and its own is its one worktree"
+            )));
+        }
+        let (root, layouts) = (kept.dir, self.layouts.clone());
+        let answer = late(move || {
+            let folder = links::worktree(&root, &Of::Branch(branch)).map_err(unready)?;
+            let add = AddWorktree { project, folder, name: None, argv: Vec::new() };
+            changed(&layouts, change_projects_request::Change::AddWorktree(add))
         });
-        Ok(Response::new(ChangeProjectsResponse { made, kept: Some(kept.to_api()) }))
+        Ok(Response::new(Box::pin(answer)))
     }
 
     async fn keep_image(
@@ -1351,6 +1370,32 @@ fn asked_open(request: OpenRequest) -> Result<(Option<api::On>, Open), Status> {
         },
     };
     Ok((on, open))
+}
+
+fn changed(
+    layouts: &SyncSender<layouts::Command>,
+    change: change_projects_request::Change,
+) -> Result<ChangeProjectsResponse, Status> {
+    let change = Ask::of_api(change).map_err(Status::invalid_argument)?;
+    let stopped = "it is kept, but the daemon's core has stopped";
+    let asked = layouts::ask(layouts, |answer| layouts::Command::Change { change, answer });
+    let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
+    let Changed { made, kept } = changed.map_err(|failed| match failed {
+        Failed::NotKept(why) => Status::failed_precondition(why),
+        Failed::Nests(why) => Status::already_exists(why),
+        Failed::Stale(why) => Status::aborted(why),
+        Failed::Refused(why) => Status::invalid_argument(why),
+        Failed::Unwritten(why) => Status::internal(why),
+        Failed::Unclosed(why) | Failed::Unopened(why) => Status::unavailable(why),
+        Failed::KeptUntold => Status::unavailable(stopped),
+    })?;
+    let made = made.map(|made| match made {
+        Made::Project(project) => change_projects_response::Made::Project(project.get()),
+        Made::Worktree(worktree) => change_projects_response::Made::Worktree(worktree.get()),
+        Made::Found(worktree) => change_projects_response::Made::Found(worktree.get()),
+        Made::Taken(worktree) => change_projects_response::Made::Taken(worktree.get()),
+    });
+    Ok(ChangeProjectsResponse { made, kept: Some(kept.to_api()) })
 }
 
 fn unfinished(error: &task::JoinError) -> Status {

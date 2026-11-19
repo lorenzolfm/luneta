@@ -12,6 +12,7 @@ use lunetad::api::project::{self, Holds};
 use lunetad::api::projects::{Held, Kept};
 use lunetad::api::worktree::Seen;
 use lunetad::api::{self, ChangeProjectsRequest, ChangeProjectsResponse as Answered, On, Stage};
+use lunetad::api::MakeWorktreeRequest;
 use lunetad::api::Version;
 use tonic::{Code, Status};
 
@@ -42,6 +43,20 @@ fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered
         let on = on.map(|destination| On { destination: destination.to_owned() });
         let asked = ChangeProjectsRequest { on, change: Some(change) };
         Ok(daemon.change_projects(asked).await?.into_inner())
+    })
+}
+
+fn branched_on(host: &Host, on: &str, project: u64, branch: &str) -> Result<Option<Made>, Status> {
+    let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let mut daemon = lunetad::connect(&folder).await.unwrap();
+        let on = Some(On { destination: on.to_owned() });
+        let asked = MakeWorktreeRequest { on, project, branch: branch.to_owned() };
+        let mut answer = daemon.make_worktree(asked).await?.into_inner();
+        let made = answer.message().await?.expect("lunetad answers once");
+        assert!(answer.message().await?.is_none(), "and only once");
+        Ok(made.made)
     })
 }
 
@@ -526,4 +541,56 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let holds = Start { folder: text(&link), name: None };
     let refused = answered_on(&here, Some("far"), Change::Start(holds)).unwrap_err();
     assert_eq!(refused.code(), Code::AlreadyExists, "{refused:?}");
+}
+
+#[test]
+fn a_branch_s_worktree_is_made_in_a_clone_on_its_machine_and_opens_with_a_shell() {
+    let here = Host::new();
+    let far = Host::new();
+    FakeSsh::new(here.zellij.bin()).reaches("far", far.vars());
+    let _far = start(far.vars()).unwrap();
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    reached(&here, "far", |_| true);
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (clone, vault) = (scratch.join("luneta"), scratch.join("Vault"));
+    cloned_as_wt(&scratch, &scratch.join("up"), &clone);
+    git(&clone.join(".bare"), &["update-ref", "refs/remotes/origin/main", "main"]);
+    fs::create_dir_all(&vault).unwrap();
+    let luneta = project(&far, &clone, None);
+    let backup = project(&far, &vault, None);
+    let opened = || {
+        let Held::Kept(kept) = held(&far) else { panic!("far keeps its projects") };
+        let luneta = kept.projects.into_iter().find(|it| it.id == luneta).unwrap();
+        let worktrees = luneta.worktrees().unwrap().iter();
+        let opened = worktrees.map(|it| (it.id, it.folder.clone(), it.terminals.len()));
+        opened.collect::<Vec<_>>()
+    };
+
+    let Some(Made::Worktree(feat)) = branched_on(&here, "far", luneta, "feat").unwrap() else {
+        panic!("a branch of the clone's origin gets a worktree made there");
+    };
+    assert!(clone.join("feat/.git").is_file(), "wt made the worktree on far");
+    assert_eq!(opened(), [(feat, text(&clone.join("feat")), 1)], "with its one shell");
+    let again = branched_on(&here, "far", luneta, " feat ").unwrap();
+    assert_eq!(again, Some(Made::Found(feat)), "the worktree that has the branch, again");
+    let Some(Made::Worktree(fresh)) = branched_on(&here, "far", luneta, "fresh").unwrap() else {
+        panic!("a branch git has nowhere is made");
+    };
+    let fresh_at = text(&clone.join("fresh"));
+    let head = fs::read_to_string(clone.join(".bare/worktrees/fresh/HEAD")).unwrap();
+    assert_eq!(head, "ref: refs/heads/fresh\n", "on its own branch");
+    assert!(opened().contains(&(fresh, fresh_at, 1)));
+
+    let refused = branched_on(&here, "far", backup, "feat").unwrap_err();
+    assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+    assert_eq!(refused.message(), "Vault is a folder, and its own is its one worktree");
+    let refused = branched_on(&here, "far", luneta, "a..b").unwrap_err();
+    assert!(refused.message().contains("a..b is not a valid branch name"), "{refused:?}");
+    let refused = branched_on(&here, "far", luneta, "  ").unwrap_err();
+    assert_eq!((refused.code(), refused.message()), (Code::InvalidArgument, "it names no branch"));
+    let refused = branched_on(&here, "far", u64::MAX, "feat").unwrap_err();
+    assert_eq!(refused.code(), Code::NotFound, "{refused:?}");
+    assert_eq!(opened().len(), 2, "no refusal made a row");
 }

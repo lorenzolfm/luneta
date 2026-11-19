@@ -1083,7 +1083,7 @@ pub enum Asked {
     Closes { menu: u64, on: Machine, session: Listed, pane: PaneKey },
     Delete { on: Machine, act: Act },
     Open { menu: u64, on: Machine, whose: Whose, open: Open },
-    NewWorktree { on: Machine, project: ProjectId, folder: Directory },
+    NewWorktree { on: Machine, project: ProjectId, branch: String },
     Welcome { on: Machine, session: Listed, pane: PaneKey },
     AddProject { on: Machine, folder: String, name: Option<projects::Name> },
     Rename { on: Machine, rename: Rename },
@@ -3201,8 +3201,8 @@ impl Sidebar {
                         self.say(reason);
                         Asked::Nothing
                     },
-                    Done::Worktree(on, project, folder) => {
-                        Asked::NewWorktree { on, project, folder }
+                    Done::Worktree(on, project, branch) => {
+                        Asked::NewWorktree { on, project, branch }
                     },
                     Done::Welcome { on, session, pane } => Asked::Welcome { on, session, pane },
                     Done::Project { on, folder, name } => Asked::AddProject { on, folder, name },
@@ -3242,6 +3242,16 @@ impl Sidebar {
     fn menu_wants(&mut self, number: u64, on: Machine, wants: Wants) -> Asked {
         match wants {
             Wants::Nothing => Asked::Nothing,
+            Wants::Cloned(project) => {
+                let mut known = shelf(&self.shelves, &on).iter();
+                let known = known.find(|it| it.project.id() == project);
+                if let Some(known) = known.filter(|it| it.unopened == Unopened::Folder) {
+                    let name = known.listed().name().to_string();
+                    self.drop_menu(number);
+                    self.say(format!("menu: {name} is a folder, and its own is its one worktree"));
+                }
+                Asked::Nothing
+            },
             Wants::Keep(harness) => {
                 self.keep_agent(harness);
                 Asked::Nothing
@@ -7002,6 +7012,12 @@ mod tests {
         sidebar
     }
 
+    fn branched(sidebar: &mut Sidebar, branch: &str) -> Asked {
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
+        type_in(sidebar, branch);
+        sidebar.key(&KeyEvent::from(KeyCode::Enter), moment(160_000))
+    }
+
     fn type_in(sidebar: &mut Sidebar, text: &str) {
         for c in text.chars() {
             sidebar.key(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), moment(160_000));
@@ -8020,18 +8036,16 @@ mod tests {
             " m  new machine",
             " <BS> - Back, <ESC> - Close",
         ]);
-        let project = ProjectId::of(1).unwrap();
-        let (on, folder) = (Machine::Local, directory("/w/luneta/main"));
-        let made = Asked::NewWorktree { on, project, folder };
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        let (project, branch) = (ProjectId::of(1).unwrap(), "feat".to_owned());
+        let made = Asked::NewWorktree { on: Machine::Local, project, branch };
+        assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.menu.is_none());
 
         sidebar.cursor = Some(Spot::Local(own_pane_of("young", 2, 1)));
         type_in(&mut sidebar, "n");
-        let project = ProjectId::of(2).unwrap();
-        let (on, folder) = (Machine::Local, directory("/w/b"));
-        let made = Asked::NewWorktree { on, project, folder };
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        let (project, branch) = (ProjectId::of(2).unwrap(), "fix".to_owned());
+        let made = Asked::NewWorktree { on: Machine::Local, project, branch };
+        assert_eq!(branched(&mut sidebar, "fix"), made);
         sidebar.focus(Keys::Zellij);
         assert!(sidebar.menu.is_none());
     }
@@ -8679,9 +8693,9 @@ mod tests {
 
         let (older, cwd) = (session_name("older"), directory("/w/luneta/main"));
         type_in(&mut sidebar, "n");
-        let project = ProjectId::of(1).unwrap();
-        let made = Asked::NewWorktree { on: Machine::Local, project, folder: cwd.clone() };
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        let (project, branch) = (ProjectId::of(1).unwrap(), "feat".to_owned());
+        let made = Asked::NewWorktree { on: Machine::Local, project, branch };
+        assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.floating().is_none());
         sidebar.focus(Keys::Zellij);
 
@@ -10003,7 +10017,7 @@ mod tests {
     }
 
     #[test]
-    fn n_w_on_a_worktree_makes_one_in_its_folder_on_its_machine() {
+    fn n_w_on_a_worktree_makes_a_branch_s_in_its_project_on_its_machine() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         sidebar.focus(Keys::Sidebar);
@@ -10012,15 +10026,33 @@ mod tests {
         };
         sidebar.cursor = Some(Spot::Local(Place::Worktree(tab(10))));
         type_in(&mut sidebar, "n");
-        let project = ProjectId::of(10).unwrap();
-        let made = Asked::NewWorktree { on: Machine::Local, project, folder: directory("/w/a") };
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), made);
+        let (project, branch) = (ProjectId::of(10).unwrap(), "feat".to_owned());
+        let made = Asked::NewWorktree { on: Machine::Local, project, branch };
+        assert_eq!(branched(&mut sidebar, "feat"), made);
         sidebar.cursor = Some(Spot::Remote(nixos(), Place::Worktree(tab(20))));
         type_in(&mut sidebar, "n");
-        let project = ProjectId::of(20).unwrap();
-        let on = Machine::Remote(nixos());
-        let far = Asked::NewWorktree { on, project, folder: directory("/w/b") };
-        assert_eq!(sidebar.key(&char('w'), moment(160_000)), far);
+        let (project, branch) = (ProjectId::of(20).unwrap(), "feat".to_owned());
+        let far = Asked::NewWorktree { on: Machine::Remote(nixos()), project, branch };
+        assert_eq!(branched(&mut sidebar, "feat"), far);
+    }
+
+    #[test]
+    fn n_w_in_a_folder_says_its_one_worktree_is_its_own_and_asks_no_branch() {
+        let mut sidebar = fresh();
+        let own = worktree_of(31, "notes", "/w/notes", &[]);
+        let mut notes = a_project(8, "notes", Vec::new());
+        notes.dir = "/w/notes".to_owned();
+        notes.holds = Some(api::project::Holds::Folder(own));
+        sidebar.heard(Host { projects: Some(kept(vec![notes])), ..host(Vec::new(), Vec::new()) });
+        sidebar.focus(Keys::Sidebar);
+        let worktree = WorktreeId::of(31).unwrap();
+        let place = WorktreePlace { project: project_row("notes", 8), worktree };
+        sidebar.cursor = Some(Spot::Local(Place::Worktree(place)));
+        type_in(&mut sidebar, "n");
+        assert_eq!(sidebar.key(&char('w'), moment(160_000)), Asked::Nothing);
+        assert!(sidebar.menu.is_none(), "no box asks for a branch");
+        let said = sidebar.notice.as_deref();
+        assert_eq!(said, Some("menu: notes is a folder, and its own is its one worktree"));
     }
 
     #[test]

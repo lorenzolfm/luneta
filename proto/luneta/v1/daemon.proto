@@ -43,6 +43,7 @@ service Daemon {
   rpc FileIssue(FileIssueRequest) returns (stream FileIssueResponse);
   rpc IssueRepositories(IssueRepositoriesRequest) returns (IssueRepositoriesResponse);
   rpc ChangeProjects(ChangeProjectsRequest) returns (ChangeProjectsResponse);
+  rpc MakeWorktree(MakeWorktreeRequest) returns (stream ChangeProjectsResponse);
   rpc Show(stream ShowRequest) returns (stream ShowResponse);
   rpc Frames(stream FramesRequest) returns (stream luneta.mux.v1.ToViewer);
 }
@@ -1061,6 +1062,12 @@ message ChangeProjectsResponse {
     fixed64 taken = 4;
   }
   Version kept = 5;
+}
+
+message MakeWorktreeRequest {
+  On on = 1;
+  fixed64 project = 2;
+  string branch = 3;
 }
 
 message ShowRequest {

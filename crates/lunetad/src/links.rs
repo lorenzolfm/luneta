@@ -1116,7 +1116,7 @@ fn across(dir: &str, command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     ran.answer().map_err(|why| format!("git {command}: {why}"))
 }
 
-fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
+pub fn worktree(dir: &str, of: &Of) -> Result<String, Unready> {
     let mut luneta = Command::new(luneta()?);
     git::local(luneta.args(["worktree", "--repo", dir, &of.to_string()]));
     let ran = program::run_alone(&mut luneta, MAKING)
