@@ -22,6 +22,8 @@ use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
 
+const STOPPED: &str = "stopped: the agent was ended where it was";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Keyed {
     Nothing,
@@ -233,6 +235,14 @@ impl Ask {
 
     pub fn turning(&self) -> bool {
         self.turn.is_some()
+    }
+
+    pub fn stop(&mut self, number: u64) {
+        assert!(number > self.number, "a stopped talk is numbered past its turn's");
+        if self.turn.take().is_some() {
+            self.talk.push(Said::Wrong(STOPPED.to_owned()));
+        }
+        self.number = number;
     }
 
     pub fn talked(&self, inner: usize, now: SystemTime) -> Vec<Line<'static>> {
@@ -571,6 +581,22 @@ mod tests {
             assert_eq!(unread.works, Works::Unread { why: why.clone() });
             assert_eq!(top(&unread), "┌─ Ask ────────────────────────────────┐");
         }
+    }
+
+    #[test]
+    fn a_stopped_turn_ends_and_its_talk_goes_on_under_a_new_number() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.talk.push(Said::You("tackle these".to_owned()));
+        ask.turn = Some(at_a_turn());
+        let session = SessionId::parse("7c22").unwrap();
+        ask.heard(Heard::Step(Step::Session(session.clone())));
+        ask.stop(2);
+        assert!(!ask.turning());
+        assert_eq!((ask.number(), ask.session.clone()), (2, Some(session)), "the next turn resumes it");
+        let stopped = [Said::You("tackle these".to_owned()), Said::Wrong(STOPPED.to_owned())];
+        assert_eq!(ask.talk, stopped);
+        ask.stop(3);
+        assert_eq!((ask.number(), ask.talk.len()), (3, 2), "a stop with no turn says nothing");
     }
 
     #[test]

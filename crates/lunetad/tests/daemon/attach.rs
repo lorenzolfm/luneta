@@ -6,7 +6,7 @@ use std::time::Duration;
 use lunetad::api::terminal::Found;
 use serde_json::json;
 
-use crate::host::{eventually, LUNETA};
+use crate::host::{eventually, script, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::{cloned, directory, mouse, projects_of, shown, work_in, Window, SPLIT};
@@ -459,6 +459,59 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_luneta_pic
         window.shows(UNHOSTED).then_some(())
     });
     assert_eq!(gone_to(), [two], "and goes to none of named's worktrees");
+}
+
+#[test]
+fn a_home_s_talk_goes_on_while_luneta_shows_a_worktree_and_esc_stops_only_its_turn() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    let home = owned.host.home.path().to_owned();
+    let at = home.display();
+    let claude = format!(
+        r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "{at}/turns"
+echo "$@" > "{at}/args-$n"
+cat > /dev/null
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+case "$n" in
+    1) sleep 2; echo '{{"type":"result","subtype":"success","is_error":false,"result":"Started all three."}}'; touch "{at}/answered" ;;
+    2) sleep 60 ;;
+    *) echo '{{"type":"result","subtype":"success","is_error":false,"result":"Went on."}}' ;;
+esac
+"#
+    );
+    script(&owned.host.bin().join("claude"), &claude);
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows work", || shown(&owned, &dir.path));
+    let row = sidebar_row(&window, "▾ work");
+    click(&mut window, row);
+    eventually("a click on work's row shows its home", || window.shows(UNHOSTED).then_some(()));
+    window.send("tackle these\r");
+    eventually("the agent's turn began", || home.join("turns").exists().then_some(()));
+    let row = sidebar_row(&window, "▾ main");
+    click(&mut window, row);
+    eventually("luneta shows main, out of the home", || (!window.shows(UNHOSTED)).then_some(()));
+    eventually("the agent answered while the home was not shown", || {
+        home.join("answered").exists().then_some(())
+    });
+    let row = sidebar_row(&window, "▾ work");
+    click(&mut window, row);
+    eventually("the home comes back with its talk and the answer", || {
+        (window.shows("tackle these") && window.shows("Started all three.")).then_some(())
+    });
+    window.send("more\r");
+    eventually("the second turn began", || {
+        (fs::read_to_string(home.join("turns")).ok()?.trim() == "2").then_some(())
+    });
+    window.send(ESC);
+    eventually("Esc stops the turn", || window.shows("stopped: the agent was ended").then_some(()));
+    assert!(window.shows("Started all three."), "and the talk stays");
+    window.send("again\r");
+    eventually("the next turn answers", || window.shows("Went on.").then_some(()));
+    let args = fs::read_to_string(home.join("args-3")).unwrap();
+    assert!(args.contains("--resume 7c22"), "it goes on in the same session: {args}");
+    assert!(!window.shows("it ended with no answer"), "the stopped turn's end is heard by none");
 }
 
 fn sidebar_row(window: &Window, text: &str) -> usize {

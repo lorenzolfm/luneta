@@ -42,13 +42,6 @@ pub enum Item {
     Pull(NonZeroU32),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Keyed {
-    Nothing,
-    Send,
-    StartOver,
-}
-
 #[derive(Debug)]
 enum Listing {
     Asking,
@@ -191,7 +184,7 @@ impl Home {
         pulls.chain(work.issues().iter().map(|issue| Item::Issue(issue.number))).collect()
     }
 
-    pub fn key(&mut self, key: &KeyEvent) -> Keyed {
+    pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
         let bare = key.modifiers.is_empty();
         match key.code {
             KeyCode::Up if bare => self.step_up(),
@@ -204,18 +197,27 @@ impl Home {
                 self.mark();
                 self.step_up();
             },
-            _ => {
-                let Named::As { ask, .. } = &mut self.named else {
-                    return Keyed::Nothing;
-                };
-                return match ask.key(key) {
-                    ask::Keyed::Nothing => Keyed::Nothing,
-                    ask::Keyed::Send => Keyed::Send,
-                    ask::Keyed::Close => Keyed::StartOver,
-                };
+            _ => self.prompt(key, asks, events),
+        }
+    }
+
+    fn prompt(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
+        let Named::As { name, dir, ask } = &mut self.named else {
+            return;
+        };
+        match ask.key(key) {
+            ask::Keyed::Nothing => {},
+            ask::Keyed::Send => ask.send(marks(&self.marked), events),
+            ask::Keyed::Close if ask.turning() => {
+                *asks += 1;
+                ask.stop(*asks);
+            },
+            ask::Keyed::Close => {
+                *asks += 1;
+                *ask = Ask::homed(*asks, &self.on, dir, name);
+                self.marked.clear();
             },
         }
-        Keyed::Nothing
     }
 
     fn step_up(&mut self) {
@@ -238,35 +240,6 @@ impl Home {
         if !self.marked.remove(&item) {
             self.marked.insert(item);
         }
-    }
-
-    fn marks(&self) -> Marked {
-        let numbers = |issues: bool| {
-            let each = self.marked.iter().filter_map(move |item| match (item, issues) {
-                (Item::Issue(number), true) | (Item::Pull(number), false) => Some(*number),
-                (Item::Issue(_), false) | (Item::Pull(_), true) => None,
-            });
-            each.collect::<Vec<_>>()
-        };
-        let marked = Marked::new(numbers(true), numbers(false));
-        marked.expect("only what is listed is marked, and gh lists only so many")
-    }
-
-    pub fn send(&mut self, events: &Sender<Event>) {
-        let marked = self.marks();
-        let Named::As { ask, .. } = &mut self.named else {
-            unreachable!("only the prompt of a home that knows its folder says Send");
-        };
-        ask.send(marked, events);
-    }
-
-    pub fn start_over(&mut self, asks: u64) {
-        let Named::As { name, dir, ask } = &mut self.named else {
-            unreachable!("only the prompt of a home that knows its folder says Start over");
-        };
-        assert!(asks > ask.number(), "a new talk is numbered past the one it replaces");
-        *ask = Ask::homed(asks, &self.on, dir, name);
-        self.marked.clear();
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -407,6 +380,18 @@ impl Home {
     }
 }
 
+fn marks(marked: &BTreeSet<Item>) -> Marked {
+    let numbers = |issues: bool| {
+        let each = marked.iter().filter_map(move |item| match (item, issues) {
+            (Item::Issue(number), true) | (Item::Pull(number), false) => Some(*number),
+            (Item::Issue(_), false) | (Item::Pull(_), true) => None,
+        });
+        each.collect::<Vec<_>>()
+    };
+    let marked = Marked::new(numbers(true), numbers(false));
+    marked.expect("only what is listed is marked, and gh lists only so many")
+}
+
 fn row(
     width: usize,
     (here, marked): (bool, bool),
@@ -439,6 +424,8 @@ fn row(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use lunetad::work::{Issue, More, Pull};
 
     use super::*;
@@ -475,8 +462,15 @@ mod tests {
         home
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::from(code)
+    fn press(home: &mut Home, code: KeyCode) {
+        let (events, _heard) = mpsc::channel();
+        let mut asks = 1;
+        home.key(&KeyEvent::from(code), &mut asks, &events);
+    }
+
+    fn start_over(home: &mut Home, asks: &mut u64) {
+        let (events, _heard) = mpsc::channel();
+        home.key(&KeyEvent::from(KeyCode::Esc), asks, &events);
     }
 
     fn shown(home: &Home, width: u16, height: u16) -> Vec<String> {
@@ -498,13 +492,13 @@ mod tests {
         assert!(!home.asks(now), "a new home is asking already");
         assert_eq!(shown(&home, 60, 12)[2], "   asking gh for the open issues and pull requests…");
         home.listed(Ok(listed()), now);
-        assert_eq!(home.key(&key(KeyCode::Tab)), Keyed::Nothing);
-        assert_eq!(home.key(&key(KeyCode::Tab)), Keyed::Nothing);
-        assert_eq!(home.marks(), Marked::new([number(507)], [number(524)]).unwrap());
-        assert_eq!(home.key(&key(KeyCode::Up)), Keyed::Nothing);
-        assert_eq!(home.key(&key(KeyCode::BackTab)), Keyed::Nothing);
-        assert_eq!(home.marks(), Marked::new([], [number(524)]).unwrap(), "a second mark takes it off");
-        assert_eq!(home.key(&key(KeyCode::Down)), Keyed::Nothing);
+        press(&mut home, KeyCode::Tab);
+        press(&mut home, KeyCode::Tab);
+        assert_eq!(marks(&home.marked), Marked::new([number(507)], [number(524)]).unwrap());
+        press(&mut home, KeyCode::Up);
+        press(&mut home, KeyCode::BackTab);
+        assert_eq!(marks(&home.marked), Marked::new([], [number(524)]).unwrap(), "a second mark takes it off");
+        press(&mut home, KeyCode::Down);
         assert_eq!(
             shown(&home, 60, 14)[..9],
             [
@@ -529,9 +523,10 @@ mod tests {
             ]
         );
         for typed in "go".chars() {
-            assert_eq!(home.key(&key(KeyCode::Char(typed))), Keyed::Nothing);
+            press(&mut home, KeyCode::Char(typed));
         }
-        assert_eq!(home.key(&key(KeyCode::Enter)), Keyed::Send, "the rest of the keys are the prompt's");
+        let typed = "│ › go_                                                    │";
+        assert_eq!(shown(&home, 60, 14)[11], typed, "the rest of the keys are the prompt's");
     }
 
     #[test]
@@ -554,9 +549,9 @@ mod tests {
         assert_eq!(shown(&home, 60, 10)[2], " gh lists nothing here: gh is not on the PATH");
         home.asks(now + AGAIN);
         home.listed(Ok(listed()), now + AGAIN);
-        home.key(&key(KeyCode::Tab));
-        home.key(&key(KeyCode::Tab));
-        assert_eq!(home.marks(), Marked::new([number(507)], [number(524)]).unwrap());
+        press(&mut home, KeyCode::Tab);
+        press(&mut home, KeyCode::Tab);
+        assert_eq!(marks(&home.marked), Marked::new([number(507)], [number(524)]).unwrap());
         home.asks(now + AGAIN * 2);
         home.listed(Err("HTTP 502".to_owned()), now + AGAIN * 2);
         let lines = shown(&home, 60, 14);
@@ -565,9 +560,9 @@ mod tests {
         home.asks(now + AGAIN * 3);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &[(524, "Say view", "issue-511", false)])), now + AGAIN * 3);
-        assert_eq!(home.marks(), Marked::new([], [number(524)]).unwrap(), "#507 was closed");
+        assert_eq!(marks(&home.marked), Marked::new([], [number(524)]).unwrap(), "#507 was closed");
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "the cursor stays on its row");
-        home.key(&key(KeyCode::Down));
+        press(&mut home, KeyCode::Down);
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "and no further than the last");
     }
 
@@ -575,22 +570,22 @@ mod tests {
     fn a_new_pull_request_on_top_leaves_the_cursor_on_its_item_and_one_that_closed_gives_its_place() {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Ok(listed()), now);
-        home.key(&key(KeyCode::Down));
+        press(&mut home, KeyCode::Down);
         assert_eq!(home.cursor, Some(Item::Issue(number(507))));
         home.asks(now + AGAIN);
         let pulls = [(545, "Fresh", "issue-544", false), (524, "Say view, not pane", "issue-511", true)];
         let issues: [(u32, &str, &[&str]); 2] = [(507, "Open a project", &[]), (98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN);
         assert_eq!(home.cursor, Some(Item::Issue(number(507))), "a row above came, and the cursor kept #507");
-        home.key(&key(KeyCode::Tab));
-        assert_eq!(home.marks(), Marked::new([number(507)], []).unwrap());
+        press(&mut home, KeyCode::Tab);
+        assert_eq!(marks(&home.marked), Marked::new([number(507)], []).unwrap());
         assert_eq!(home.cursor, Some(Item::Issue(number(98))));
-        home.key(&key(KeyCode::Up));
+        press(&mut home, KeyCode::Up);
         home.asks(now + AGAIN * 2);
         let issues: [(u32, &str, &[&str]); 1] = [(98, "Menu says no", &[])];
         home.listed(Ok(work(&issues, &pulls)), now + AGAIN * 2);
         assert_eq!(home.cursor, Some(Item::Issue(number(98))), "#507 closed, and #98 took its place");
-        assert_eq!(home.marks(), Marked::default());
+        assert_eq!(marks(&home.marked), Marked::default());
     }
 
     #[test]
@@ -608,8 +603,8 @@ mod tests {
         assert_eq!(home.cursor, None, "nothing is listed to be on");
         let lines = shown(&home, 60, 14);
         assert_eq!(lines[2], " no remote on GitHub, so nothing is listed here");
-        assert_eq!(home.key(&key(KeyCode::Tab)), Keyed::Nothing);
-        assert_eq!(home.marks(), Marked::default());
+        press(&mut home, KeyCode::Tab);
+        assert_eq!(marks(&home.marked), Marked::default());
         assert_eq!(home.due(), Some(now + AGAIN * 2), "it asks again, as a remote may be added");
         home.asks(now + AGAIN * 2);
         home.listed(Err("git did not say the remotes".to_owned()), now + AGAIN * 2);
@@ -621,9 +616,9 @@ mod tests {
         let mut home = Home::new(1, 1, Machine::Local, ProjectId::of(3).unwrap());
         assert_eq!((home.known(), home.ask_numbered(1).is_some()), (false, false));
         for typed in "go".chars() {
-            assert_eq!(home.key(&key(KeyCode::Char(typed))), Keyed::Nothing);
+            press(&mut home, KeyCode::Char(typed));
         }
-        assert_eq!(home.key(&key(KeyCode::Enter)), Keyed::Nothing, "with no folder, nothing is sent");
+        press(&mut home, KeyCode::Enter);
         let unnamed = shown(&home, 60, 14);
         assert_eq!(unnamed[..3], [" …", "", "   asking gh for the open issues and pull requests…"]);
         assert!(unnamed[3..].iter().all(String::is_empty), "and no prompt shows: {unnamed:?}");
@@ -638,11 +633,12 @@ mod tests {
     fn esc_starts_the_talk_over_and_forgets_the_marks() {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Ok(listed()), now);
-        home.key(&key(KeyCode::Tab));
-        home.key(&key(KeyCode::Char('x')));
-        assert_eq!(home.key(&key(KeyCode::Esc)), Keyed::StartOver);
-        home.start_over(2);
-        assert_eq!(home.marks(), Marked::default());
+        press(&mut home, KeyCode::Tab);
+        press(&mut home, KeyCode::Char('x'));
+        let mut asks = 1;
+        start_over(&mut home, &mut asks);
+        assert_eq!(asks, 2, "a new talk takes the next number");
+        assert_eq!(marks(&home.marked), Marked::default());
         assert!(home.ask_numbered(1).is_none() && home.ask_numbered(2).is_some());
         assert!(shown(&home, 60, 14).contains(&"│ › _                                                      │".to_owned()));
     }
