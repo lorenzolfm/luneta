@@ -9,16 +9,15 @@ use std::process::Command;
 use std::time::Duration;
 
 use tokio::time::timeout;
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 use wt::cmd::add::{self, Fetch};
 use wt::cmd::follow::Upstream;
 use wt::repo::Repo;
 
-use crate::api::daemon_client::DaemonClient;
 use crate::api::paste_request::{self, File as AskedFile, Worked as AskedWorked};
 use crate::api::paste_response::{self, Clone as MadeClone};
 use crate::api::{On, PasteRequest, PasteResponse};
+use crate::client::Daemon;
 use crate::git::{self, directory_gone, one_line, Common};
 use crate::program::{self, Ran};
 use crate::projects::{self, Dir, Plain};
@@ -684,7 +683,7 @@ impl Pasted {
 
     pub async fn ready_on(
         &self,
-        mut daemon: DaemonClient<Channel>,
+        mut daemon: Daemon,
         on: &Destination,
         patience: Duration,
     ) -> Result<Ready<usize>, Unready> {

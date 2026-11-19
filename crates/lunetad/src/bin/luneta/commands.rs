@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 use clap::Subcommand;
 use luneta_protocol::unread::Unread;
 use lunetad::api::agent::Status as Reported;
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::remote::Reached;
 use lunetad::api::say::Does;
@@ -20,9 +19,8 @@ use lunetad::mux::TerminalKey;
 pub use lunetad::log::causes;
 use lunetad::prunes::Occupied;
 use lunetad::sayings::BYTES_MAX;
-use lunetad::{release, Destination};
+use lunetad::{release, Daemon, Destination};
 use prost::Message as _;
-use tonic::transport::Channel;
 
 use crate::agreed::{self, Agreed};
 use crate::bridge;
@@ -216,8 +214,8 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
 
 fn ask<R, F, Asked>(folder: &Path, reaching: R, asking: F) -> ExitCode
 where
-    R: Future<Output = Result<DaemonClient<Channel>, Unreached>>,
-    F: FnOnce(DaemonClient<Channel>) -> Asked,
+    R: Future<Output = Result<Daemon, Unreached>>,
+    F: FnOnce(Daemon) -> Asked,
     Asked: Future<Output = Result<(), Box<dyn Error>>>,
 {
     let runtime = match runtime() {
@@ -327,7 +325,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
 }
 
 async fn first_reach(
-    mut daemon: DaemonClient<Channel>,
+    mut daemon: Daemon,
     destination: &Destination,
 ) -> Result<Option<Reached>, Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + lunetad::REACH + Duration::from_secs(5);
@@ -374,7 +372,7 @@ pub fn host(folder: &Path) -> Result<lunetad::api::Host, String> {
     })
 }
 
-async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
+async fn info(mut daemon: Daemon) -> Result<(), Box<dyn Error>> {
     let info = daemon.info(()).await?.into_inner();
     let started = info.started_at.and_then(|at| SystemTime::try_from(at).ok());
     let build = release::spelled(&info.version, info.built);
@@ -388,7 +386,7 @@ async fn info(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn agents(mut daemon: DaemonClient<Channel>) -> Result<(), Box<dyn Error>> {
+async fn agents(mut daemon: Daemon) -> Result<(), Box<dyn Error>> {
     let listed = daemon.list_agents(()).await?.into_inner();
     let seated = |agent: &Agent| {
         seat_of(agent).unwrap_or_else(|(seat, why)| {
@@ -443,7 +441,7 @@ pub fn unread(unread: Unread) -> String {
 }
 
 async fn watch(
-    mut daemon: DaemonClient<Channel>,
+    mut daemon: Daemon,
     after: Option<Version>,
 ) -> Result<(), Box<dyn Error>> {
     let host = daemon.watch(WatchRequest { after, kept: None, shown: false }).await?.into_inner();

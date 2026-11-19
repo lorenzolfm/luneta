@@ -20,10 +20,8 @@ use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
 use tokio::sync::watch::{self as latest, Receiver};
 use tokio::sync::Semaphore;
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::api::daemon_client::DaemonClient;
 use crate::api::remote::{self, unreached};
 use crate::api;
 use crate::client::{self, Unbridged};
@@ -194,11 +192,11 @@ struct Bridge {
 enum Kept {
     None,
     Coming,
-    Daemon(DaemonClient<Channel>),
+    Daemon(client::Daemon),
 }
 
 pub struct Bridging {
-    pub daemon: DaemonClient<Channel>,
+    pub daemon: client::Daemon,
     pub held: Arc<Semaphore>,
 }
 
@@ -240,7 +238,7 @@ impl Bridged {
         bridges.get_mut(&self.destination).filter(|bridge| bridge.watch == self.watch)
     }
 
-    fn agree(&self, seen: &Seen, daemon: Option<&DaemonClient<Channel>>) {
+    fn agree(&self, seen: &Seen, daemon: Option<&client::Daemon>) {
         let kept = match (seen, daemon) {
             (Seen::Answered { .. } | Seen::Broke { .. }, Some(daemon)) => {
                 Kept::Daemon(daemon.clone())
@@ -738,7 +736,7 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
 async fn asked(
     bridged: &Bridged,
     seen: &Seen,
-    connected: &mut Option<DaemonClient<Channel>>,
+    connected: &mut Option<client::Daemon>,
     question: api::WatchRequest,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
@@ -769,7 +767,7 @@ async fn matched(
     destination: &Destination,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> Result<DaemonClient<Channel>, Failed> {
+) -> Result<client::Daemon, Failed> {
     let (ssh, last) = ssh(destination, said, folder);
     let mut daemon = match client::through(ssh).await {
         Ok(daemon) => daemon,
@@ -888,7 +886,15 @@ mod tests {
     use std::io::Write as _;
     use std::time::Duration;
 
+    use tonic::transport::Channel;
+
     use super::*;
+    use crate::api::daemon_client::DaemonClient;
+
+    fn unreached_daemon() -> client::Daemon {
+        let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+        DaemonClient::new(client::Within::new(channel, client::ANSWER))
+    }
 
     fn answered() -> Seen {
         answered_with(None)
@@ -1036,7 +1042,7 @@ mod tests {
     fn a_watch_that_ends_leaves_a_later_one_s_bridge() {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let _entered = runtime.enter();
-        let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
+        let daemon = unreached_daemon();
         let bridges = Arc::new(Bridges::default());
         let destination: Destination = "nixos".parse().unwrap();
         let of_watch = |watch| Bridged::new(Arc::clone(&bridges), destination.clone(), watch);
@@ -1074,7 +1080,7 @@ mod tests {
         watch.awake();
         assert!(!woke(&mut watch, Duration::from_millis(100)));
 
-        let daemon = DaemonClient::new(Channel::from_static("http://[::1]:1").connect_lazy());
+        let daemon = unreached_daemon();
         watch.agree(&answered(), Some(&daemon));
         assert!(runtime.block_on(bridges.to(&destination)).is_some());
         assert!(!woke(&mut watch, Duration::from_millis(100)));

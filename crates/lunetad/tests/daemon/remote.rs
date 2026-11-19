@@ -12,7 +12,6 @@ use lunetad::api::remote::{self, Reached};
 use lunetad::api::keep_image_request::{Image, Part};
 use lunetad::api::keep_checks_response::{failed, Failed};
 use lunetad::api::list_skills_response::Skill;
-use lunetad::api::daemon_client::DaemonClient;
 use lunetad::api::projects::Held;
 use lunetad::api::{
     self, AskRequest, FileIssueRequest, IssueRepositoriesRequest, IssueRepository,
@@ -24,10 +23,9 @@ use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{release, Directory};
+use lunetad::{release, Daemon, Directory};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Channel;
 use tonic::{Code, Status};
 
 use crate::demand::{bridged_stand_in, stop, Detached};
@@ -831,7 +829,7 @@ fn told(host: &Host) -> (Vec<String>, String) {
 }
 
 async fn turn(
-    daemon: &mut DaemonClient<Channel>,
+    daemon: &mut Daemon,
     request: AskRequest,
 ) -> (Vec<Step>, Result<(), Status>) {
     let mut steps = match daemon.ask(request).await {
@@ -1174,7 +1172,7 @@ fn bytes_of(bytes: &[u8]) -> KeepImageRequest {
 }
 
 async fn kept_image(
-    daemon: &mut DaemonClient<Channel>,
+    daemon: &mut Daemon,
     parts: Vec<KeepImageRequest>,
 ) -> Result<String, Status> {
     let mut answer = daemon.keep_image(tokio_stream::iter(parts)).await?.into_inner();
@@ -1329,7 +1327,7 @@ fn a_daemon_that_starts_takes_away_the_files_past_their_day() {
 }
 
 async fn pasted_on(
-    daemon: &mut DaemonClient<Channel>,
+    daemon: &mut Daemon,
     on: &str,
     pasted: &Pasted,
 ) -> Result<Ready<usize>, Status> {
@@ -2239,7 +2237,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
     });
 }
 
-async fn refused_there(daemon: &mut DaemonClient<Channel>, pasted: &Pasted) -> String {
+async fn refused_there(daemon: &mut Daemon, pasted: &Pasted) -> String {
     let refused = pasted_on(daemon, "far", pasted).await.unwrap_err();
     assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
     refused.message().to_owned()
