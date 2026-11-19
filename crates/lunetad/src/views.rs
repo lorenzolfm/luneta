@@ -1257,8 +1257,8 @@ impl Views {
             Home::Made { project, folder: at } => {
                 let add = Change::AddWorkstream { project, folder: at.clone(), name: None };
                 match self.store.change(add) {
-                    Ok(Some(made)) => (WorkstreamId::new(made), true),
-                    Ok(None) => unreachable!("a workstream added is made"),
+                    Ok(Some(Made::Workstream(made))) => (made, true),
+                    Ok(_) => unreachable!("a workstream added is made"),
                     Err(failed) => {
                         let unmade = format!("no workstream is made at {}", at.as_str());
                         return self.troubles.say(format!("{stays}: {unmade}: {}", said(failed)));
