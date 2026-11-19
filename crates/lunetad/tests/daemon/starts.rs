@@ -29,6 +29,7 @@ use crate::demand::{answering, moved, stand_in_watched_as, stop, Detached};
 use crate::host::{eventually, script, Host, Running, Vars, LUNETA};
 use crate::own::Owned;
 use crate::projects::{project, workstream};
+use crate::worktree::{cloned_as_wt, git, worktree_added};
 
 const ENDS: Duration = Duration::from_secs(30);
 
@@ -91,11 +92,20 @@ pub fn directory(name: &str) -> Directory {
     Directory { _parent: parent, path }
 }
 
+pub fn cloned(name: &str, worktrees: &[&str]) -> Directory {
+    let made = directory(name);
+    let parent = made.path.parent().unwrap().to_owned();
+    cloned_as_wt(&parent, &parent.join("up"), &made.path);
+    for worktree in worktrees {
+        worktree_added(&made.path, worktree);
+    }
+    made
+}
+
 pub fn work_in(owned: &Owned, name: &str) -> Directory {
-    let mut made = directory(name);
+    let mut made = cloned(name, &[]);
     project(&owned.host, Path::new(&real(&made.path)), None);
     made.path.push("main");
-    fs::create_dir(&made.path).unwrap();
     made
 }
 
@@ -239,17 +249,17 @@ pub fn shown(owned: &Owned, folder: &Path) -> Option<api::Workstream> {
 }
 
 #[test]
-fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_no_workstream_in_it() {
+fn a_bare_luneta_makes_the_project_of_its_directory_and_shows_its_one_workstream() {
     let owned = Owned::new();
     let dir = directory("project");
-    let window = Window::open(&owned.host, &dir, &[]);
-    eventually("luneta shows no workstream", || window.shows(UNSHOWN).then_some(()));
+    let _window = Window::open(&owned.host, &dir, &[]);
+    eventually("luneta shows the project's folder", || shown(&owned, &dir.path));
     let projects = projects_of(&owned);
     let made: Vec<(&str, &str, usize)> = projects
         .iter()
         .map(|project| (project.name.as_str(), project.dir.as_str(), project.workstreams.len()))
         .collect();
-    assert_eq!(made, [("project", real(&dir.path).as_str(), 0)]);
+    assert_eq!(made, [("project", real(&dir.path).as_str(), 1)]);
 }
 
 #[test]
@@ -258,13 +268,9 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_workstream_used_last() {
         return;
     }
     let owned = Owned::new();
-    let dir = directory("project");
-    let made = project(&owned.host, Path::new(&real(&dir.path)), None);
+    let dir = cloned("project", &["one", "two"]);
+    project(&owned.host, Path::new(&real(&dir.path)), None);
     let folders = ["one", "two"].map(|name| dir.path.join(name));
-    for folder in &folders {
-        fs::create_dir(folder).unwrap();
-        workstream(&owned.host, made, Path::new(&real(folder)));
-    }
     let window = Window::running(luneta(owned.host.vars(), &folders[1]));
     eventually("luneta shows two", || shown(&owned, &folders[1]));
     drop(window);
@@ -274,7 +280,7 @@ fn a_bare_luneta_in_a_project_s_own_folder_shows_its_workstream_used_last() {
     assert_eq!(shown.terminals.len(), 1, "{:?}", projects_of(&owned));
     assert!(self::shown(&owned, &folders[0]).is_none(), "one, used never, stays empty");
     let workstreams = projects_of(&owned).iter().map(|it| it.workstreams.len()).sum::<usize>();
-    assert_eq!(workstreams, 2, "no workstream is made in the project's own folder");
+    assert_eq!(workstreams, 3, "no workstream is made at the clone's root");
 }
 
 #[test]
@@ -283,11 +289,8 @@ fn a_bare_luneta_in_a_project_shows_the_workstream_of_its_folder() {
         return;
     }
     let owned = Owned::new();
-    let dir = directory("project");
-    let below = dir.path.join("below");
-    fs::create_dir(&below).unwrap();
-    let other = dir.path.join("other");
-    fs::create_dir(&other).unwrap();
+    let dir = cloned("project", &["below", "other"]);
+    let (below, other) = (dir.path.join("below"), dir.path.join("other"));
     let made = project(&owned.host, Path::new(&real(&dir.path)), None);
     workstream(&owned.host, made, Path::new(&real(&other)));
     let in_below = workstream(&owned.host, made, Path::new(&real(&below)));
@@ -306,7 +309,7 @@ fn a_new_workstream_on_a_pane_in_a_folder_of_a_project_shows_that_folder_in_the_
     let owned = Owned::new();
     let dir = work_in(&owned, "work");
     let feat = dir.path.parent().unwrap().join("feat");
-    fs::create_dir(&feat).unwrap();
+    git(&dir.path.parent().unwrap().join(".bare"), &["worktree", "add", "-q", "../feat", "feat"]);
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("luneta shows work", || shown(&owned, &dir.path));
     eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
@@ -335,10 +338,9 @@ fn a_named_luneta_shows_the_project_of_that_name_wherever_it_starts() {
         return;
     }
     let owned = Owned::new();
-    let named = directory("named");
+    let named = cloned("named", &[]);
     let made = project(&owned.host, Path::new(&real(&named.path)), None);
     let main = named.path.join("main");
-    fs::create_dir(&main).unwrap();
     workstream(&owned.host, made, Path::new(&real(&main)));
     let _window = Window::open(&owned.host, &directory("anywhere"), &["named"]);
     eventually("luneta shows named", || shown(&owned, &main));
@@ -383,9 +385,9 @@ fn a_bare_luneta_where_no_project_may_be_made_shows_the_one_it_saw_last() {
     let outer = directory("outer");
     let inner = outer.path.join("inner");
     fs::create_dir(&inner).unwrap();
+    cloned_as_wt(&outer.path, &outer.path.join("up"), &inner);
     let made = project(&owned.host, Path::new(&real(&inner)), None);
     let main = inner.join("main");
-    fs::create_dir(&main).unwrap();
     workstream(&owned.host, made, Path::new(&real(&main)));
     let _window = Window::open(&owned.host, &outer, &[]);
     eventually("luneta shows inner", || shown(&owned, &main));

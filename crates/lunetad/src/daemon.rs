@@ -174,7 +174,7 @@ pub async fn serve(claim: Claim, unkept: Option<String>) -> io::Result<()> {
     }
     let (wake_owns, owns_woken) = mpsc::sync_channel(1);
     let views = views::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
-    projects::follow(core.clone(), SWEEP)?;
+    projects::follow(core.clone(), views.clone(), SWEEP)?;
     let (end, ending) = oneshot::channel();
     let sockets = Zellij::socket_folder();
     let claude_folder = claude::folder();

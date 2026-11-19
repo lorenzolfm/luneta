@@ -1054,8 +1054,9 @@ message ChangeProjectsRequest {
 
   message Join {
     string folder = 1;
-    string clone = 2;
-    optional fixed64 project = 3;
+
+    reserved 2, 3;
+    reserved "clone", "project";
   }
 }
 

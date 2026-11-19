@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 use lunetad::api::change_projects_request::{AddProject, AddWorkstream, Change, CloseProject};
 use lunetad::api::change_projects_request::{CloseWorkstream, Pull, Start};
 use lunetad::api::change_projects_request::RenameProject;
-use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams, WorkstreamAt};
+use lunetad::api::change_projects_request::{ReorderProjects, ReorderWorkstreams};
 use lunetad::api::change_projects_request::{Bring, Join, RenameTerminal};
 use lunetad::api::change_projects_response::Made;
 use lunetad::api::daemon_client::DaemonClient;
@@ -166,10 +166,12 @@ pub fn add_workstream(
     workstream_made(changed_on(path, on(machine), change).map_err(Unmade::said)?)
 }
 
-fn workstream_at(path: &Path, project: ProjectId, folder: &str) -> Result<WorkstreamId, String> {
-    let (project, folder) = (project.get(), folder.to_owned());
-    let change = Change::WorkstreamAt(WorkstreamAt { project, folder });
-    workstream_made(changed_on(path, None, change).map_err(Unmade::said)?)
+fn started_at(path: &Path, folder: &str) -> Result<Option<WorkstreamId>, String> {
+    let start = Start { folder: folder.to_owned(), name: None };
+    match changed_on(path, None, Change::Start(start)).map_err(Unmade::said)? {
+        Some(Made::Project(_)) => Ok(None),
+        made => workstream_made(made).map(Some),
+    }
 }
 
 pub fn closed(
@@ -264,10 +266,7 @@ fn last_used(project: &Project) -> Option<WorkstreamId> {
 
 fn at_folder(path: &Path, project: &Project, folder: &str) -> Result<Option<WorkstreamId>, Tried> {
     assert!(holds(&project.dir, Path::new(folder)), "{folder} is in {}", project.dir);
-    if project.dir == folder {
-        return Ok(last_used(project));
-    }
-    in_kept(path, project.id, workstream_at(path, project.id, folder)).map(Some)
+    in_kept(path, project.id, started_at(path, folder))
 }
 
 fn chosen(
@@ -325,7 +324,7 @@ fn started(
     }
     let unmade = if name.is_some() || session_for(cwd).is_some() {
         match add_project(path, folder, name) {
-            Ok(_) => return Ok(None),
+            Ok(_) => format!("lunetad made the project of {}, with no workstream", cwd.display()),
             Err(Unmade::Failed(why)) => return Err(Tried::Failed(why)),
             Err(Unmade::Nests(why)) => why,
         }
@@ -427,9 +426,9 @@ pub fn project_made(
         Some(Made::Project(project)) => project,
         made => return Err(unmade(format!("lunetad made no project but {made:?}"))),
     };
-    let empty = |why: String| format!("{folder} is a project now, with no workstream: {why}");
-    let at = WorkstreamAt { project, folder: folder.to_owned() };
-    workstream_made(made_there(machine, Change::WorkstreamAt(at)).map_err(empty)?).map_err(empty)
+    let empty = |why: String| format!("{folder} is project {project}, with no workstream: {why}");
+    let start = Start { folder: folder.to_owned(), name: None };
+    workstream_made(made_there(machine, Change::Start(start)).map_err(empty)?).map_err(empty)
 }
 
 fn spelled(name: &Name) -> String {
@@ -449,32 +448,9 @@ impl Joined {
     }
 }
 
-pub fn worked_in(
-    path: &Path,
-    folder: &Path,
-    clone: &str,
-    of_clone: impl Fn(&str) -> Option<String>,
-) -> Result<Joined, String> {
-    let projects = kept(path)?;
-    let held = projects.iter().any(|it| folder.starts_with(&it.dir));
-    let in_clone = |it: &&Project| it.dir == clone || of_clone(&it.dir).as_deref() == Some(clone);
-    let cloned: Vec<&Project> = projects.iter().filter(in_clone).collect();
-    let project = match cloned.as_slice() {
-        _ if held => None,
-        [] => None,
-        [one] => Some(one.id.get()),
-        many => {
-            let named: Vec<&str> = many.iter().map(|it| it.name.as_str()).collect();
-            return Err(format!(
-                "projects {} are all of the clone in {clone}, and luneta widens one alone to \
-                 hold it: forget all but one",
-                named.join(", ")
-            ));
-        },
-    };
+pub fn worked_in(path: &Path, folder: &Path) -> Result<Joined, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
-    let (folder, clone) = (folder.to_owned(), clone.to_owned());
-    let change = Change::Join(Join { folder, clone, project });
+    let change = Change::Join(Join { folder: folder.to_owned() });
     let id = |id| WorkstreamId::of(id).ok_or_else(|| zero("workstream"));
     match changed_on(path, None, change).map_err(Unmade::said)? {
         Some(Made::Found(found)) => id(found).map(Joined::Found),

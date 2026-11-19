@@ -17,6 +17,7 @@ use crate::mux::own::server::{self, Is};
 use crate::panes::{self, Pane, Titled};
 use crate::projects::layout::Leaf as _;
 use crate::projects::{Dir, Name, Project, Projects, Revision, Seen, Stage, TerminalId, Workstream};
+use crate::projects::WorkstreamId;
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::shells::{Doing, Shell};
@@ -68,6 +69,8 @@ pub enum Command {
     Sessions(oneshot::Sender<Vec<Addressed>>),
     Dirs(oneshot::Sender<BTreeSet<String>>),
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
+    Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorkstreamId>>>),
+    Plain(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     Claudes(oneshot::Sender<Vec<Agent>>),
@@ -257,6 +260,15 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::ProjectFolders(answer) => {
                 let _ = answer.send(known.projects.iter().flat_map(Projects::folders).collect());
+                continue;
+            },
+            Command::Plain(answer) => {
+                let _ = answer.send(known.projects.iter().flat_map(Projects::plain).collect());
+                continue;
+            },
+            Command::Clones(answer) => {
+                let clones = known.projects.iter().flat_map(Projects::clones);
+                let _ = answer.send(clones.collect());
                 continue;
             },
             Command::Branches(answer) => {
@@ -504,8 +516,7 @@ impl Known {
             },
         };
         let workstreams = |project: &Project| {
-            let built = project.workstreams().iter().map(|workstream| {
-                let folder = project.folder(workstream);
+            let built = project.placed().map(|(folder, workstream)| {
                 let branch = self.branch(folder.as_str());
                 let renamed = workstream.renamed().map(Name::as_str);
                 api::Workstream {

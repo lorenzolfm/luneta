@@ -1,6 +1,6 @@
 use crate::agent::Harness;
 
-use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX};
+use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX, SHARES};
 use super::{Dir, Name, Size, TerminalId};
 
 pub const LINE_BYTES_MAX: usize = 1024;
@@ -139,6 +139,22 @@ impl View {
             fills(&tree, full)?;
         }
         Ok(View(Some(Laid { tree, full })))
+    }
+
+    pub fn joined(self, other: View) -> Result<View, String> {
+        let (Some(one), Some(other)) = (self.tree(), other.tree()) else {
+            return Ok(if self.is_empty() { other } else { self });
+        };
+        let owned = |node: Preordered<&Terminal>| match node {
+            Preordered::Split { towards, share } => Preordered::Split { towards, share },
+            Preordered::Pane(terminal) => Preordered::Pane(terminal.clone()),
+        };
+        let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
+        let halves = one.preorder().into_iter().chain(other.preorder()).map(owned);
+        let joined = View::read(std::iter::once(split).chain(halves).collect(), None)?;
+        let both = one.len() + other.len();
+        assert_eq!(joined.len(), both, "a joined view holds both views' terminals");
+        Ok(joined)
     }
 
     #[must_use]

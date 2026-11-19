@@ -30,7 +30,7 @@ use crate::own::Owned;
 use crate::projects::{self, asked, kept, project, workstream};
 use crate::remote::{hosts, reached, FakeSsh};
 use crate::starts::{directory, makes_shells, mouse, projects_of, Window};
-use crate::worktree::{cloned_as_wt, git};
+use crate::worktree::{cloned_as_wt, git, worktree_added};
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -288,8 +288,19 @@ fn work_folder(owned: &Owned) -> PathBuf {
 }
 
 fn project_in_home(owned: &Owned) -> u64 {
+    project(&owned.host, &work_folder(owned), None)
+}
+
+fn two_in_a_clone(owned: &Owned, name: &str) -> (u64, u64, u64) {
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    project(&owned.host, &home, None)
+    let clone = home.join(name);
+    cloned_as_wt(&home, &home.join(format!("{name}-up")), &clone);
+    worktree_added(&clone, "two");
+    let made = project(&owned.host, &clone, None);
+    let main = workstream(&owned.host, made, &clone.join("main"));
+    let two = workstream(&owned.host, made, &clone.join("two"));
+    assert_ne!(main, two, "a worktree each");
+    (made, main, two)
 }
 
 fn workstream_in_home(owned: &Owned) -> u64 {
@@ -435,10 +446,7 @@ fn a_step_with_no_terminal_that_way_says_the_edge_of_the_workstream_it_is_on() {
 #[test]
 fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_workstream() {
     let owned = Owned::new();
-    let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    let made = project(&owned.host, &home, None);
-    let add = || workstream(&owned.host, made, &home);
-    let (here, there) = (add(), add());
+    let (_, here, there) = two_in_a_clone(&owned, "clone");
     let mut on = Shown::new(&owned, here, 80, 24);
     let left = on.open();
     let right = on.open();
@@ -499,30 +507,23 @@ fn a_closed_terminal_leaves_the_mux_and_its_view_to_the_terminal_beside_it() {
     let laid = shown.until("the terminal closed outside gone", |laid| laid.panes.len() == 1);
     assert_eq!((laid.panes[0].terminal, focused_of(&laid)), (first, Some(first)));
     closed_outside(&owned, &laid, first);
-    let ended = shown.until_ended();
-    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
-    assert_eq!(watched_workstream(&owned, workstream), None);
+    shown.until("the view emptied", |laid| laid.panes.is_empty());
+    assert_eq!(watched(&owned, workstream), [], "a workstream stays with its last terminal gone");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    let gone = !file.contains(&format!("{workstream:016x}"));
-    assert!(gone, "a workstream goes with its last terminal: {file}");
+    assert!(file.contains(&format!("{workstream:016x}")), "{file}");
 }
 
 #[test]
-fn a_workstream_goes_with_the_last_terminal_its_view_closes_and_the_mux_takes_the_next() {
+fn a_workstream_stays_when_its_view_s_last_terminal_closes_and_the_mux_takes_the_next() {
     let owned = Owned::new();
-    let project = project_in_home(&owned);
-    let closing = workstream(&owned.host, project, &work_folder(&owned));
-    let mut shown = Shown::new(&owned, closing, 80, 24);
+    let staying = workstream_in_home(&owned);
+    let mut shown = Shown::new(&owned, staying, 80, 24);
     let last = shown.open();
     shown.ask(Event::Close(()));
-    let ended = shown.until_ended();
-    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
-    assert_eq!(watched_workstream(&owned, closing), None);
-    assert!(projects_of(&owned).is_empty(), "the project goes with its last workstream");
-    let project = project_in_home(&owned);
-    let next = workstream(&owned.host, project, &work_folder(&owned));
-    let mut again = Shown::new(&owned, next, 80, 24);
-    let opened = again.open();
+    shown.until("the view emptied", |laid| laid.panes.is_empty());
+    assert_eq!(watched(&owned, staying), [], "the workstream stays, empty");
+    assert_eq!(projects_of(&owned).len(), 1, "and so does its project");
+    let opened = shown.open();
     let listing = owned.listing();
     let made = "the mux that ended with its last terminal gives way to the next";
     assert!(tagged(&listing, last).is_none() && tagged(&listing, opened).is_some(), "{made}");
@@ -543,7 +544,7 @@ fn a_view_comes_back_with_its_terminals_when_lunetad_starts_again() {
         fs::read_to_string(kept(&owned.host)).unwrap().contains(&full).then_some(())
     });
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(file.starts_with("{\n  \"version\": 5,"), "{file}");
+    assert!(file.starts_with("{\n  \"version\": 6,"), "{file}");
     assert!(file.contains(r#""command": "sleep 600""#), "{file}");
 
     owned.stop_daemon();
@@ -681,10 +682,7 @@ fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
 #[test]
 fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
     let owned = Owned::new();
-    let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    let made = project(&owned.host, &home, None);
-    let add = || workstream(&owned.host, made, &work_folder(&owned));
-    let (closing, other) = (add(), add());
+    let (_, closing, other) = two_in_a_clone(&owned, "clone");
     let mut shown = Shown::new(&owned, closing, 80, 24);
     let terminals = [shown.open(), shown.open()];
     let mut beside = Shown::new(&owned, other, 80, 24);
@@ -716,18 +714,15 @@ fn a_workstream_closes_with_its_terminals_and_ends_the_views_of_it() {
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
     });
     assert!(tagged(&owned.listing(), stays).is_some(), "another workstream's terminal stays");
-    let ended = shown.until_ended();
-    assert_eq!(ended.code(), Code::NotFound, "{ended:?}");
-    assert_eq!(watched_workstream(&owned, closing), None);
+    shown.until("the view emptied", |laid| laid.panes.is_empty());
+    assert_eq!(watched(&owned, closing), [], "a workstream closed stays, empty");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
-    assert!(!file.contains(&format!("{closing:016x}")), "{file}");
-    let again = asked(&owned.host, close()).unwrap_err();
-    assert_eq!(again.code(), Code::InvalidArgument);
-    assert!(again.message().contains("no workstream has the id"), "{}", again.message());
+    assert!(file.contains(&format!("{closing:016x}")), "{file}");
+    assert_eq!(asked(&owned.host, closed(&[])).unwrap(), None, "and closes again");
 }
 
 #[test]
-fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgotten() {
+fn a_project_closes_with_each_workstream_s_terminals_and_one_with_none_is_forgotten() {
     let owned = Owned::new();
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let folder = |at: &str| {
@@ -735,9 +730,7 @@ fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgott
         fs::create_dir_all(&folder).unwrap();
         folder
     };
-    let made = project(&owned.host, &folder("closing"), None);
-    let add = || workstream(&owned.host, made, &folder("closing/work"));
-    let (one, two) = (add(), add());
+    let (made, one, two) = two_in_a_clone(&owned, "closing");
     let other = project(&owned.host, &folder("other"), None);
     let stays = workstream(&owned.host, other, &folder("other/work"));
     let mut first = Shown::new(&owned, one, 80, 24);
@@ -781,17 +774,16 @@ fn a_project_closes_with_each_workstream_s_terminals_and_an_empty_one_is_forgott
     assert!(again.message().contains("no project has the id"), "{}", again.message());
 
     let empty = project(&owned.host, &folder("empty"), None);
-    assert_eq!(asked(&owned.host, closed(empty, &[], &[])).unwrap(), None);
+    let own = workstream(&owned.host, empty, &folder("empty"));
+    assert_eq!(asked(&owned.host, closed(empty, &[own], &[])).unwrap(), None);
     let ids: Vec<u64> = projects_of(&owned).iter().map(|it| it.id).collect();
-    assert_eq!(ids, [other], "a project with no workstream is forgotten");
+    assert_eq!(ids, [other], "a project with no terminal is forgotten");
 }
 
 #[test]
 fn a_terminal_s_name_and_the_last_use_of_a_workstream_reach_watch_and_the_file() {
     let owned = Owned::new();
-    let home = fs::canonicalize(owned.host.home.path()).unwrap();
-    let made = project(&owned.host, &home, None);
-    let [first, second] = [(); 2].map(|()| workstream(&owned.host, made, &work_folder(&owned)));
+    let (_, first, second) = two_in_a_clone(&owned, "clone");
     let used = |workstream| watched_workstream(&owned, workstream).unwrap().used_at;
     assert_eq!((used(first), used(second)), (None, None));
     let mut shown = Shown::new(&owned, first, 80, 24);
@@ -968,18 +960,6 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     for trouble in ["panicked", "not typed", "not restored", "not kept"] {
         assert!(!log.contains(trouble), "{log}");
     }
-}
-
-#[test]
-fn a_workstream_whose_only_terminal_went_to_another_folder_goes_there_too() {
-    let owned = Owned::new();
-    let workstream = workstream_in_home(&owned);
-    let mut shown = Shown::new(&owned, workstream, 80, 24);
-    heard_in_below(&owned, &mut shown, "sleep 604");
-    eventually("the workstream is kept in below", || {
-        let file = fs::read_to_string(kept(&owned.host)).ok()?;
-        file.contains(r#""below": "below""#).then_some(())
-    });
 }
 
 #[test]
@@ -1381,9 +1361,9 @@ fn luneta_shows_another_machine_s_workstream_types_there_and_opens_a_terminal_be
     }
     let far = Owned::new();
     let home = fs::canonicalize(far.host.home.path()).unwrap();
-    let made = project(&far.host, &home, Some("faraway"));
     let yonder = home.join("yonder");
     fs::create_dir(&yonder).unwrap();
+    let made = project(&far.host, &yonder, Some("faraway"));
     let workstream = workstream(&far.host, made, &yonder);
     let mut shown = Shown::new(&far, workstream, 400, 200);
     let terminal = shown.open_running(&["sh", "-c", "echo far-is-$((6 * 7)); exec sh"]);

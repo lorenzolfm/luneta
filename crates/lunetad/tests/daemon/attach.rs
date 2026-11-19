@@ -1,4 +1,3 @@
-use std::fs;
 use std::thread;
 use std::time::Duration;
 
@@ -8,6 +7,7 @@ use crate::host::{eventually, LUNETA};
 use crate::own::Owned;
 use crate::projects::workstream;
 use crate::starts::{directory, mouse, projects_of, shown, work_in, Window, SPLIT, UNSHOWN};
+use crate::worktree::worktree_added;
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -78,10 +78,11 @@ fn the_menu_opens_a_pane_beside_the_one_luneta_shows_and_closes_it() {
         (workstream.terminals.len() == 1).then_some(workstream.id)
     });
     window.send(CLOSE);
-    eventually("the workstream goes with its last pane", || {
+    eventually("the workstream stays, with no pane, and luneta leaves it", || {
         let projects = projects_of(&owned);
-        let held = projects.iter().flat_map(|it| &it.workstreams).any(|it| it.id == id);
-        (!held && window.shows(UNSHOWN)).then_some(())
+        let mut workstreams = projects.iter().flat_map(|it| &it.workstreams);
+        let emptied = workstreams.any(|it| it.id == id && it.terminals.is_empty());
+        (emptied && window.shows(UNSHOWN)).then_some(())
     });
 }
 
@@ -116,7 +117,7 @@ fn ctrl_h_and_ctrl_l_at_the_edge_go_to_the_workstream_beside_but_not_past_the_pr
     let first = eventually("luneta shows work", || shown(&owned, &dir.path)).id;
     let project = projects_of(&owned).into_iter().find(|it| it.name == "work").unwrap().id;
     let docs = dir.path.parent().unwrap().join("docs");
-    fs::create_dir(&docs).unwrap();
+    worktree_added(dir.path.parent().unwrap(), "docs");
     let second = workstream(&owned.host, project, &docs);
     eventually("the tab bar lists docs", || window.shows("docs").then_some(()));
     let used = |id: u64| {
@@ -140,13 +141,13 @@ fn both_show(owned: &Owned, name: &str, mut windows: [Window; 2]) {
             let ended = window.luneta.ended_within(Duration::ZERO);
             assert!(ended.is_none(), "a luneta ended, {ended:?}: {:?}", window.screen());
         }
-        let shows = |window: &Window| window.shows(name) && window.shows(UNSHOWN);
+        let shows = |window: &Window| window.shows(name);
         windows.iter().all(shows).then_some(())
     });
     let projects = projects_of(owned);
     let made: Vec<_> = projects.iter().filter(|project| project.name == name).collect();
     assert_eq!(made.len(), 1, "{projects:?}");
-    assert_eq!(made[0].workstreams.len(), 0, "{projects:?}");
+    assert_eq!(made[0].workstreams.len(), 1, "{projects:?}");
 }
 
 #[test]
