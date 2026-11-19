@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lunetad::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
-use lunetad::api::show_response::{self, pane::Found, Laid, Pane};
+use lunetad::api::show_response::{self, view::Found, Laid, View};
 use lunetad::api::change_projects_request::{
     Bring, Change, CloseProject, CloseView, CloseWorktree, RenameTerminal,
 };
@@ -116,8 +116,8 @@ impl<'a> Shown<'a> {
         let before = self.terminals();
         let argv = words.iter().map(|word| (*word).to_owned()).collect();
         self.ask(Event::Open(show_request::Open { beside: Some(beside), argv }));
-        let laid = self.until("a terminal more", |laid| laid.panes.len() == before.len() + 1);
-        let new = laid.panes.iter().find(|pane| !before.contains(&pane.view));
+        let laid = self.until("a terminal more", |laid| laid.views.len() == before.len() + 1);
+        let new = laid.views.iter().find(|view| !before.contains(&view.view));
         let new = new.expect("the layout holds a new terminal").view;
         assert_eq!(focused_of(&laid), Some(new), "a client focuses the terminal it opens");
         new
@@ -125,7 +125,7 @@ impl<'a> Shown<'a> {
 
     fn terminals(&self) -> Vec<u64> {
         let laid = self.laid.as_ref().expect("a layout was heard");
-        laid.panes.iter().map(|pane| pane.view).collect()
+        laid.views.iter().map(|view| view.view).collect()
     }
 
     fn until(&mut self, what: &str, mut done: impl FnMut(&Laid) -> bool) -> Laid {
@@ -233,8 +233,8 @@ impl<'a> Shown<'a> {
 
     fn key_of(&self, terminal: u64) -> TerminalKey {
         let laid = self.laid.as_ref().expect("a layout was heard");
-        let pane = laid.panes.iter().find(|pane| pane.view == terminal);
-        pane.and_then(key).expect("the layout lays out the terminal, found")
+        let view = laid.views.iter().find(|view| view.view == terminal);
+        view.and_then(key).expect("the layout lays out the terminal, found")
     }
 }
 
@@ -251,15 +251,15 @@ fn full_of(laid: &Laid) -> Option<u64> {
     }
 }
 
-fn key(pane: &Pane) -> Option<TerminalKey> {
-    match &pane.found {
+fn key(view: &View) -> Option<TerminalKey> {
+    match &view.found {
         Some(Found::Key(key)) => Some(*key),
         Some(Found::Lost(()) | Found::Looking(()) | Found::Welcome(())) | None => None,
     }
 }
 
-fn lost(pane: &Pane) -> bool {
-    matches!(pane.found, Some(Found::Lost(())))
+fn lost(view: &View) -> bool {
+    matches!(view.found, Some(Found::Lost(())))
 }
 
 fn tagged(listing: &Listing, terminal: u64) -> Option<&mux_api::Terminal> {
@@ -326,13 +326,13 @@ fn a_layout_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     let empty = shown.laid.clone().unwrap();
-    let laid = (empty.worktree, empty.panes.len(), focused_of(&empty));
+    let laid = (empty.worktree, empty.views.len(), focused_of(&empty));
     assert_eq!(laid, (worktree, 0, None));
 
     let first = shown.open();
     let laid = shown.laid.clone().unwrap();
-    assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 80, 24)));
-    let key = key(&laid.panes[0]).expect("an open terminal has its key in the mux");
+    assert_eq!(laid.views[0].rect, Some(rect(0, 0, 80, 24)));
+    let key = key(&laid.views[0]).expect("an open terminal has its key in the mux");
     let listing = owned.listing();
     let listed = tagged(&listing, first).expect("the mux holds the terminal by its tag");
     assert_eq!(listed.key.map(|it| (it.id, it.made_at)), Some((key.id, key.made_at)));
@@ -340,7 +340,7 @@ fn a_layout_opens_terminals_the_mux_holds_tagged_and_sized_to_their_place() {
 
     let second = shown.open();
     let laid = shown.laid.clone().unwrap();
-    let rects: Vec<_> = laid.panes.iter().map(|pane| (pane.view, pane.rect)).collect();
+    let rects: Vec<_> = laid.views.iter().map(|view| (view.view, view.rect)).collect();
     assert_eq!(rects, [(first, Some(rect(0, 0, 40, 24))), (second, Some(rect(40, 0, 40, 24)))]);
     eventually("both terminals take the size of their place", || {
         (sized(&owned, first) == Some((38, 22)) && sized(&owned, second) == Some((38, 22)))
@@ -358,7 +358,7 @@ fn the_smallest_client_sizes_the_terminals_it_shares_with_others() {
         (sized(&owned, terminal) == Some((78, 22))).then_some(())
     });
     let mut narrow = Shown::new(&owned, worktree, 60, 20);
-    narrow.until("the narrow client's layout", |laid| laid.panes.len() == 1);
+    narrow.until("the narrow client's layout", |laid| laid.views.len() == 1);
     wide.until("the narrow size", |laid| laid.size == Some(size(60, 20)));
     eventually("the terminal fits the narrow client", || {
         (sized(&owned, terminal) == Some((58, 18))).then_some(())
@@ -376,11 +376,11 @@ fn a_client_that_runs_in_a_terminal_of_the_layout_it_shows_sizes_none_of_it() {
     let worktree = worktree_in_home(&owned);
     let mut outer = Shown::new(&owned, worktree, 80, 24);
     let terminal = outer.open();
-    let runs_in = key(&outer.laid.clone().unwrap().panes[0]);
+    let runs_in = key(&outer.laid.clone().unwrap().views[0]);
     let mut inner = Shown::running_in(&owned, worktree, (50, 16), runs_in);
     inner.until("the outer client's size", |laid| laid.size == Some(size(80, 24)));
     let other = inner.open();
-    outer.until("the outer size with both", |laid| laid.panes.len() == 2);
+    outer.until("the outer size with both", |laid| laid.views.len() == 2);
     assert_eq!(outer.laid.clone().unwrap().size, Some(size(80, 24)));
     eventually("both terminals fit the outer client", || {
         (sized(&owned, terminal) == Some((38, 22)) && sized(&owned, other) == Some((38, 22)))
@@ -388,8 +388,8 @@ fn a_client_that_runs_in_a_terminal_of_the_layout_it_shows_sizes_none_of_it() {
     });
     drop(outer);
     let laid = inner.until("the inner size, alone", |laid| laid.size == Some(size(50, 16)));
-    let pane = laid.panes.iter().find(|pane| pane.view == other).unwrap();
-    let rect = pane.rect.unwrap();
+    let view = laid.views.iter().find(|view| view.view == other).unwrap();
+    let rect = view.rect.unwrap();
     eventually("the other terminal fits the inner client", || {
         (sized(&owned, other) == Some((rect.columns - 2, rect.rows - 2))).then_some(())
     });
@@ -492,8 +492,8 @@ fn a_bring_sends_the_clients_on_the_terminal_it_is_asked_from_to_the_worktree() 
 }
 
 fn closed_outside(owned: &Owned, laid: &Laid, terminal: u64) {
-    let pane = laid.panes.iter().find(|pane| pane.view == terminal).unwrap();
-    let key = key(pane).unwrap();
+    let view = laid.views.iter().find(|view| view.view == terminal).unwrap();
+    let key = key(view).unwrap();
     let mux_key = mux_api::TerminalKey { id: key.id, made_at: key.made_at };
     owned.close_terminal(mux_api::CloseTerminalRequest { terminal: Some(mux_key) });
 }
@@ -507,8 +507,8 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
     let second = shown.open();
     let third = shown.open();
     shown.ask(Event::Close(third));
-    let laid = shown.until("two terminals left", |laid| laid.panes.len() == 2);
-    let left: Vec<u64> = laid.panes.iter().map(|pane| pane.view).collect();
+    let laid = shown.until("two terminals left", |laid| laid.views.len() == 2);
+    let left: Vec<u64> = laid.views.iter().map(|view| view.view).collect();
     assert_eq!(left, [first, second]);
     let took = "the terminal the closed one split takes the focus";
     assert_eq!(focused_of(&laid), Some(first), "{took}");
@@ -517,10 +517,10 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
     });
 
     closed_outside(&owned, &laid, second);
-    let laid = shown.until("the terminal closed outside gone", |laid| laid.panes.len() == 1);
-    assert_eq!((laid.panes[0].view, focused_of(&laid)), (first, Some(first)));
+    let laid = shown.until("the terminal closed outside gone", |laid| laid.views.len() == 1);
+    assert_eq!((laid.views[0].view, focused_of(&laid)), (first, Some(first)));
     closed_outside(&owned, &laid, first);
-    shown.until("the view emptied", |laid| laid.panes.is_empty());
+    shown.until("the view emptied", |laid| laid.views.is_empty());
     assert_eq!(watched(&owned, worktree), [], "a worktree stays with its last terminal gone");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.contains(&format!("{worktree:016x}")), "{file}");
@@ -533,9 +533,9 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     let terminal = shown.open();
     shown.ask(Event::Welcome(()));
-    let welcomes = |pane: &Pane| matches!(pane.found, Some(Found::Welcome(())));
-    let laid = shown.until("a welcome view", |laid| laid.panes.len() == 2);
-    let welcome = laid.panes.iter().find(|pane| welcomes(pane)).expect("a welcome").view;
+    let welcomes = |view: &View| matches!(view.found, Some(Found::Welcome(())));
+    let laid = shown.until("a welcome view", |laid| laid.views.len() == 2);
+    let welcome = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").view;
     assert_eq!(focused_of(&laid), Some(welcome), "the welcome view opened takes the focus");
     let listed = watched_worktree(&owned, worktree).expect("the worktree is watched");
     let ids: Vec<u64> = listed.terminals.iter().map(|it| it.id).collect();
@@ -546,24 +546,24 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
     assert_eq!(owned.listing().terminals.len(), 1, "the mux holds no welcome view");
 
     shown.ask(Event::Close(welcome));
-    let laid = shown.until("the welcome view closed", |laid| laid.panes.len() == 1);
-    assert_eq!((laid.panes[0].view, focused_of(&laid)), (terminal, Some(terminal)));
+    let laid = shown.until("the welcome view closed", |laid| laid.views.len() == 1);
+    assert_eq!((laid.views[0].view, focused_of(&laid)), (terminal, Some(terminal)));
     assert!(tagged(&owned.listing(), terminal).is_some(), "the terminal beside it stays");
     shown.ask(Event::Close(welcome));
 
     shown.ask(Event::Welcome(()));
-    let laid = shown.until("a welcome view again", |laid| laid.panes.len() == 2);
+    let laid = shown.until("a welcome view again", |laid| laid.views.len() == 2);
     let stayed = "a close of a view gone closes nothing, not the view focused since";
-    assert!(laid.panes.iter().any(|pane| pane.view == terminal), "{stayed}");
+    assert!(laid.views.iter().any(|view| view.view == terminal), "{stayed}");
     assert!(tagged(&owned.listing(), terminal).is_some(), "{stayed}");
-    let again = laid.panes.iter().find(|pane| welcomes(pane)).expect("a welcome").view;
+    let again = laid.views.iter().find(|view| welcomes(view)).expect("a welcome").view;
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(terminal)) }));
     shown.until("the terminal focused", |it| focused_of(it) == Some(terminal));
     shown.ask(Event::Close(terminal));
-    let laid = shown.until("the terminal gone", |laid| laid.panes.len() == 1);
-    assert!(welcomes(&laid.panes[0]), "the welcome view is left alone");
+    let laid = shown.until("the terminal gone", |laid| laid.views.len() == 1);
+    assert!(welcomes(&laid.views[0]), "the welcome view is left alone");
     shown.ask(Event::Close(again));
-    shown.until("the layout emptied", |laid| laid.panes.is_empty());
+    shown.until("the layout emptied", |laid| laid.views.is_empty());
     assert_eq!(watched(&owned, worktree), [], "the worktree stays with its last view gone");
 }
 
@@ -574,7 +574,7 @@ fn a_worktree_stays_when_its_layout_s_last_terminal_closes_and_the_mux_takes_the
     let mut shown = Shown::new(&owned, staying, 80, 24);
     let last = shown.open();
     shown.ask(Event::Close(last));
-    shown.until("the view emptied", |laid| laid.panes.is_empty());
+    shown.until("the view emptied", |laid| laid.views.is_empty());
     assert_eq!(watched(&owned, staying), [], "the worktree stays, empty");
     assert_eq!(projects_of(&owned).len(), 1, "and so does its project");
     let opened = shown.open();
@@ -605,8 +605,8 @@ fn a_layout_comes_back_with_its_terminals_when_lunetad_starts_again() {
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
     let after = again.until("the terminals found again", |laid| {
-        assert!(!laid.panes.iter().any(lost), "no terminal is lost before a look: {laid:?}");
-        laid.panes.iter().all(|pane| key(pane).is_some())
+        assert!(!laid.views.iter().any(lost), "no terminal is lost before a look: {laid:?}");
+        laid.views.iter().all(|view| key(view).is_some())
     });
     assert_eq!(after, before);
     assert_eq!(fs::read_to_string(kept(&owned.host)).unwrap(), file);
@@ -624,11 +624,11 @@ fn two_layouts_that_each_open_a_terminal_alone_in_one_empty_worktree_open_one() 
     };
     one.ask(alone());
     other.ask(alone());
-    let opened = one.until("a terminal alone", |laid| !laid.panes.is_empty());
-    other.until("the other sees it", |laid| !laid.panes.is_empty());
+    let opened = one.until("a terminal alone", |laid| !laid.views.is_empty());
+    other.until("the other sees it", |laid| !laid.views.is_empty());
     one.ask(Event::Size(size(79, 24)));
     let resized = one.until("the layout again", |laid| laid.size != opened.size);
-    assert_eq!(resized.panes.len(), 1, "the second open alone opens nothing");
+    assert_eq!(resized.views.len(), 1, "the second open alone opens nothing");
     assert!(other.refused.is_empty() && one.refused.is_empty(), "{:?}", other.refused);
     assert_eq!(watched(&owned, worktree).len(), 1);
 }
@@ -646,7 +646,7 @@ fn an_open_beside_the_focused_terminal_splits_it_on_its_longer_side() {
     shown.until("the first terminal focused", |laid| focused_of(laid) == Some(first));
     let new = shown.open_beside(open::Beside::Focused(()), &WAITS);
     let laid = shown.laid.clone().unwrap();
-    let rect_of = |terminal| laid.panes.iter().find(|pane| pane.view == terminal).unwrap().rect;
+    let rect_of = |terminal| laid.views.iter().find(|view| view.view == terminal).unwrap().rect;
     assert_eq!(rect_of(first), Some(rect(0, 0, 20, 12)));
     assert_eq!(rect_of(new), Some(rect(20, 0, 20, 12)));
     assert_eq!(rect_of(second), Some(rect(40, 0, 40, 24)), "the largest terminal stays whole");
@@ -666,7 +666,7 @@ fn an_open_the_layout_refuses_makes_no_terminal_in_the_mux() {
     assert_eq!(listing.terminals.len(), opened.len(), "the mux holds only the layouts' terminals");
     assert!(opened.iter().all(|terminal| tagged(&listing, *terminal).is_some()));
     shown.ask(Event::Close(opened[opened.len() - 1]));
-    shown.until("a terminal fewer", |laid| laid.panes.len() == opened.len() - 1);
+    shown.until("a terminal fewer", |laid| laid.views.len() == opened.len() - 1);
 }
 
 #[test]
@@ -682,16 +682,16 @@ fn a_resize_moves_a_border_and_a_move_trades_two_terminals_places() {
     let resize = |growth| show_request::Resize { sides, growth };
     shown.ask(Event::Resize(resize(grow)));
     let laid = shown.until("the border moved", |laid| {
-        laid.panes[0].rect == Some(rect(0, 0, 36, 24))
+        laid.views[0].rect == Some(rect(0, 0, 36, 24))
     });
-    assert_eq!(laid.panes[1].rect, Some(rect(36, 0, 44, 24)));
+    assert_eq!(laid.views[1].rect, Some(rect(36, 0, 44, 24)));
     eventually("the grown terminal takes its place's size", || {
         (sized(&owned, right) == Some((42, 22))).then_some(())
     });
     let to = Some(r#move::To::Direction(towards_left));
     shown.ask(Event::Move(show_request::Move { to }));
-    let laid = shown.until("the terminals traded", |laid| laid.panes[0].view == right);
-    assert_eq!((laid.panes[1].view, focused_of(&laid)), (left, Some(right)));
+    let laid = shown.until("the terminals traded", |laid| laid.views[0].view == right);
+    assert_eq!((laid.views[1].view, focused_of(&laid)), (left, Some(right)));
     shown.ask(Event::Fullscreen(()));
     shown.until("the layout full", |laid| full_of(laid) == Some(right));
     shown.ask(Event::Resize(resize(grow)));
@@ -718,11 +718,11 @@ fn a_resize_on_every_side_moves_every_border_of_the_focused_terminal() {
     assert!(shown.refused.is_empty(), "a resize that moves nothing is quiet: {:?}", shown.refused);
     shown.ask(around(grow));
     let laid = shown.until("the border moved", |laid| {
-        laid.panes[1].rect == Some(rect(36, 0, 44, 24))
+        laid.views[1].rect == Some(rect(36, 0, 44, 24))
     });
-    assert_eq!(laid.panes[0].rect, Some(rect(0, 0, 36, 24)));
+    assert_eq!(laid.views[0].rect, Some(rect(0, 0, 36, 24)));
     shown.ask(around(shrink));
-    shown.until("the border back", |laid| laid.panes[1].rect == Some(rect(40, 0, 40, 24)));
+    shown.until("the border back", |laid| laid.views[1].rect == Some(rect(40, 0, 40, 24)));
     let unknown = Some(resize::Sides::Direction(0));
     let growth = grow.into();
     shown.ask(Event::Resize(show_request::Resize { sides: unknown, growth }));
@@ -774,7 +774,7 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     assert!(shown.until_refused().contains("is gone"), "a client left behind opens nothing");
     shown.ask(Event::Go(other));
     let there = shown.until("the client goes on to another", |laid| laid.worktree == other);
-    assert_eq!(there.panes.iter().map(|it| it.view).collect::<Vec<_>>(), [stays]);
+    assert_eq!(there.views.iter().map(|it| it.view).collect::<Vec<_>>(), [stays]);
     assert_eq!(watched(&owned, other).len(), 1, "the other stays, with its terminal");
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(!file.contains(&format!("{closing:016x}")), "{file}");
@@ -789,7 +789,7 @@ fn a_view_closes_by_its_terminal_s_whole_key_and_the_last_takes_its_worktree() {
     let mut shown = Shown::new(&owned, closing, 80, 24);
     let [first] = shown.terminals()[..] else { panic!("a worktree is made with one terminal") };
     let second = shown.open();
-    shown.until("both terminals found", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    shown.until("both terminals found", |laid| laid.views.iter().all(|view| key(view).is_some()));
     let (first_key, second_key) = (shown.key_of(first), shown.key_of(second));
     let beside = Shown::new(&owned, other, 80, 24);
     let [stays] = beside.terminals()[..] else { panic!("the other holds its first alone") };
@@ -960,18 +960,18 @@ fn a_layout_restores_its_terminals_when_the_mux_dies() {
         heard_in_below(&owned, &mut shown, "sleep 606"),
     ];
     let laid = restored_after_kill(&owned, &mut shown);
-    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), terminals);
+    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), terminals);
     assert_eq!(shown.refused, Vec::<String>::new());
     let below = fs::canonicalize(owned.host.home.path()).unwrap().join("below");
     let listing = owned.listing();
-    for (pane, command) in laid.panes.iter().zip(["sleep 602", "sleep 606"]) {
-        let listed = tagged(&listing, pane.view).expect("the new mux holds the terminal");
+    for (view, command) in laid.views.iter().zip(["sleep 602", "sleep 606"]) {
+        let listed = tagged(&listing, view.view).expect("the new mux holds the terminal");
         assert_eq!(listed.cwd, below.to_str().unwrap(), "a terminal comes back in its folder");
-        let restored = mux_key(key(pane).unwrap());
+        let restored = mux_key(key(view).unwrap());
         eventually("its last command is typed at the prompt", || {
             owned.dumped(restored).contains(command).then_some(())
         });
-        let front = front_of(&owned, pane.view).expect("a shell runs in the terminal");
+        let front = front_of(&owned, view.view).expect("a shell runs in the terminal");
         assert_ne!(front.first().map(String::as_str), Some("sleep"), "the command is not run");
     }
     let log = logged(&owned);
@@ -989,8 +989,8 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     let closes = heard_in_below(&owned, &mut shown, "sleep 606");
     let crashed = Instant::now();
     let laid = restored_after_kill(&owned, &mut shown);
-    for pane in &laid.panes {
-        let restored = mux_key(key(pane).unwrap());
+    for view in &laid.views {
+        let restored = mux_key(key(view).unwrap());
         eventually("its last command is typed at the prompt", || {
             owned.dumped(restored).contains("sleep 60").then_some(())
         });
@@ -998,7 +998,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(closes)) }));
     shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
     shown.ask(Event::Close(closes));
-    let terminals = |laid: &Laid| laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>();
+    let terminals = |laid: &Laid| laid.views.iter().map(|view| view.view).collect::<Vec<_>>();
     shown.until("the restored terminal closed", |laid| terminals(laid) == [stays]);
     eventually("the closed terminal leaves the mux", || {
         tagged(&owned.listing(), closes).is_none().then_some(())
@@ -1006,7 +1006,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()));
     let laid = restored_after_kill(&owned, &mut shown);
     assert_eq!(terminals(&laid), [stays], "a closed terminal stays closed");
-    let again = mux_key(key(&laid.panes[0]).unwrap());
+    let again = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed again", || {
         owned.dumped(again).contains("sleep 602").then_some(())
     });
@@ -1032,14 +1032,14 @@ fn a_terminal_that_luneta_mux_keeps_ending_after_is_given_up_and_left_lost() {
         restored_after_kill(&owned, &mut shown);
     }
     owned.kill_mux();
-    shown.until("the terminal left lost", |laid| lost(&laid.panes[0]));
+    shown.until("the terminal left lost", |laid| lost(&laid.views[0]));
     eventually("the terminal is given up", || {
         logged(&owned).contains("given up after 3 attempts").then_some(())
     });
     thread::sleep(RESTORE_PAUSE.saturating_sub(crashed.elapsed()) + Duration::from_secs(3));
     let unrun = std::os::unix::net::UnixStream::connect(owned.socket()).is_err();
     assert!(unrun, "no luneta-mux is started again for a terminal given up");
-    assert!(lost(&shown.until("the terminal still lost", |_| true).panes[0]));
+    assert!(lost(&shown.until("the terminal still lost", |_| true).views[0]));
 }
 
 #[test]
@@ -1049,7 +1049,7 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
     let laid = restored_after_kill(&owned, &mut shown);
-    let restored = mux_key(key(&laid.panes[0]).unwrap());
+    let restored = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed at the prompt", || {
         owned.dumped(restored).contains("sleep 602").then_some(())
     });
@@ -1061,13 +1061,13 @@ fn a_line_typed_by_a_restore_outlives_a_restart_of_lunetad() {
     owned.stop_daemon();
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
-    again.until("the terminal found", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    again.until("the terminal found", |laid| laid.views.iter().all(|view| key(view).is_some()));
     thread::sleep(READ_RUNS_SWEEPS);
     let file = fs::read_to_string(kept(&owned.host)).unwrap();
     assert!(file.contains(unrun), "the line is still kept, left unrun: {file}");
     let laid = restored_after_kill(&owned, &mut again);
-    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
-    let typed = mux_key(key(&laid.panes[0]).unwrap());
+    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
+    let typed = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed again", || {
         owned.dumped(typed).contains("sleep 602").then_some(())
     });
@@ -1094,7 +1094,7 @@ fn a_command_that_spans_lines_is_kept_untyped_when_its_terminal_is_restored() {
     fs::write(kept(&owned.host), file.replace(r#""command": "sleep 603""#, spans)).unwrap();
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
-    again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    again.until("the terminal restored", |laid| laid.views.iter().all(|view| key(view).is_some()));
     let folder = format!(r#""folder": "{}""#, work_folder(&owned).display());
     let file = eventually("what the terminal restored runs is read", || {
         let file = fs::read_to_string(kept(&owned.host)).ok()?;
@@ -1130,7 +1130,7 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
     owned.kill_mux();
     owned.start_daemon();
     let mut again = Shown::new(&owned, worktree, 80, 24);
-    again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
+    again.until("the terminal restored", |laid| laid.views.iter().all(|view| key(view).is_some()));
     let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
     assert_eq!(said, "--resume resumed-7c22\n");
 }
@@ -1150,10 +1150,10 @@ fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
     let stopped = stopped.expect("lunetad stops the luneta-mux that says no build");
     assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
     let mut again = Shown::new(&owned, worktree, 80, 24);
-    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
     let laid = again.until("the terminal restored", restored);
-    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
-    let restored = mux_key(key(&laid.panes[0]).unwrap());
+    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
+    let restored = mux_key(key(&laid.views[0]).unwrap());
     eventually("its last command is typed at the prompt", || {
         owned.dumped(restored).contains("sleep 602").then_some(())
     });
@@ -1198,9 +1198,9 @@ fn lunetad_leaves_a_newer_luneta_mux_be_and_restores_its_terminals_once_it_ends(
     assert_eq!(newer.ended_within(Duration::from_secs(1)), None, "{}", logged(&owned));
     drop(newer);
     let mut again = Shown::new(&owned, worktree, 80, 24);
-    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let restored = |laid: &Laid| laid.views.iter().all(|view| key(view).is_some());
     let laid = again.until("the terminal restored", restored);
-    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
+    assert_eq!(laid.views.iter().map(|view| view.view).collect::<Vec<_>>(), [terminal]);
     let log = logged(&owned);
     assert!(!log.contains(&format!("{said}, and is stopped")), "{log}");
     let tried = |line: &str| line.contains("is not restored") && line.contains(&said);
@@ -1257,7 +1257,7 @@ fn a_terminal_gone_to_another_worktree_moves_there_and_its_client_follows() {
 
     let went = "the layout of the worktree it went to";
     let laid = shown.until(went, |laid| laid.worktree != main);
-    let terminals: Vec<u64> = laid.panes.iter().map(|pane| pane.view).collect();
+    let terminals: Vec<u64> = laid.views.iter().map(|view| view.view).collect();
     assert_eq!((terminals, focused_of(&laid)), (vec![goes], Some(goes)));
     let went = watched_worktree(&owned, laid.worktree).expect("its worktree is watched");
     assert_eq!(went.folder, clone.join("feat").to_str().unwrap(), "made at the worktree's top");
@@ -1275,10 +1275,10 @@ fn where_a_terminal_is_and_what_it_runs_reach_the_file() {
 
 fn restored_after_kill(owned: &Owned, shown: &mut Shown) -> Laid {
     let laid = shown.laid.clone().expect("a layout was heard");
-    let before: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+    let before: Vec<Option<TerminalKey>> = laid.views.iter().map(key).collect();
     owned.kill_mux();
     shown.until("the terminals restored", |laid| {
-        let found: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+        let found: Vec<Option<TerminalKey>> = laid.views.iter().map(key).collect();
         found.len() == before.len()
             && found.iter().zip(&before).all(|(found, was)| found.is_some() && found != was)
     })
@@ -1308,7 +1308,7 @@ fn a_worktree_lists_its_layout_s_terminals_on_watch_in_their_order() {
     let titled = r"printf '\033]0;\342\234\263 Fixing the tests\007'; exec sleep 604";
     let topical = shown.open_running(&["sh", "-c", titled]);
     let laid = shown.laid.clone().unwrap();
-    let keys: Vec<Option<TerminalKey>> = laid.panes.iter().map(key).collect();
+    let keys: Vec<Option<TerminalKey>> = laid.views.iter().map(key).collect();
     let (plain_key, topical_key) = (keys[0], keys[1]);
     let told = eventually("the terminals and what they run are watched", || {
         let terminals = watched(&owned, worktree);
@@ -1371,7 +1371,7 @@ fn an_agent_in_a_layout_s_terminal_is_there_by_the_terminal_s_key() {
     let mut shown = Shown::new(&owned, worktree, 80, 24);
     let terminal = shown.open();
     let laid = shown.laid.clone().unwrap();
-    let key = key(&laid.panes[0]).unwrap();
+    let key = key(&laid.views[0]).unwrap();
     let pid = root_of(&owned, terminal);
     let sessions = owned.host.home.path().join(".claude/sessions");
     fs::create_dir_all(&sessions).unwrap();
@@ -1642,9 +1642,9 @@ fn seen_and_typed_into(
     assert!(laid().is_empty());
     show.ask(Asked::Open { beside: Beside::Largest, argv: vec!["sh".to_owned()] });
     let opened = laid();
-    let pane = *opened.panes().next().expect("the layout lays out the terminal opened");
-    let key = pane.key().expect("lunetad says the key of a terminal it opened");
-    assert_eq!(opened.focused(), Some(&pane));
+    let view = *opened.views().next().expect("the layout lays out the terminal opened");
+    let key = view.key().expect("lunetad says the key of a terminal it opened");
+    assert_eq!(opened.focused(), Some(&view));
 
     let (seen, seeing) = std::sync::mpsc::channel();
     let greeting = Greeting { foreground: None, background: None };

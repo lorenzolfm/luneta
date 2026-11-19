@@ -935,7 +935,7 @@ fn claude_that_writes_issues(host: &Host) {
     let text = format!(
         r#"words=$(cat)
 printf '%s' "$words" > "{home}/told"
-{{ echo "cwd=$(pwd -P)"; echo "pane=${{LUNETA_MUX_TERMINAL-unset}}"
+{{ echo "cwd=$(pwd -P)"; echo "view=${{LUNETA_MUX_TERMINAL-unset}}"
 for arg; do case "$arg" in --*) echo "$arg";; esac; done
 }} > "{home}/wrote"
 handed=
@@ -1001,7 +1001,7 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
         let wrote = fs::read_to_string(far.home.path().join("wrote")).unwrap();
         let wrote: Vec<&str> = wrote.lines().collect();
         let cwd = format!("cwd={there}");
-        assert_eq!(wrote[..2], [cwd.as_str(), "pane=unset"]);
+        assert_eq!(wrote[..2], [cwd.as_str(), "view=unset"]);
         let told = fs::read_to_string(far.home.path().join("told")).unwrap();
         assert!(told.starts_with("a red button\n\n[luneta: the repository's labels"), "{told}");
         assert!(told.contains(r#"[{"name":"bug"}]"#), "{told}");
@@ -1433,8 +1433,8 @@ fn a_machine_with_none_of_a_link_s_repository_says_so_apart() {
 
         let pull = Link::parse("https://github.com/o/n/pull/8").unwrap();
         let on_it = links::Worked { pull: Some(pull), ..in_dir(Path::new("/nowhere/at/all")) };
-        for panes in [vec![in_dir(&by_wt.join("main"))], vec![on_it]] {
-            let kind = pasted_on(&mut daemon, "far", &Pasted::new(issue(8), panes)).await;
+        for views in [vec![in_dir(&by_wt.join("main"))], vec![on_it]] {
+            let kind = pasted_on(&mut daemon, "far", &Pasted::new(issue(8), views)).await;
             let kind = kind.unwrap_err();
             assert_eq!(kind.code(), Code::FailedPrecondition, "{kind:?}");
             let paste = "it is a pull request on GitHub: paste https://github.com/o/n/pull/8";
@@ -1476,8 +1476,8 @@ fn ssh_says_what_host_a_remote_names_and_is_asked_of_no_option() {
             (&renamed, Code::FailedPrecondition, "that git made"),
         ];
         for (dir, code, says) in answers {
-            let pane = links::Worked { dir: dir.display().to_string(), pull: None, here: false };
-            let asked = Pasted::new(link.clone(), vec![pane]).asked(None);
+            let view = links::Worked { dir: dir.display().to_string(), pull: None, here: false };
+            let asked = Pasted::new(link.clone(), vec![view]).asked(None);
             let mut answer = daemon.paste(asked).await.unwrap().into_inner();
             let why = answer.message().await.unwrap_err();
             assert_eq!(why.code(), code, "{why:?}");
@@ -1548,7 +1548,7 @@ fn pasted_here(host: &Host, pasted: &Pasted) -> Result<Ready<usize>, Status> {
     })
 }
 
-fn pane_in(dir: &Path) -> links::Worked {
+fn view_in(dir: &Path) -> links::Worked {
     links::Worked { dir: dir.display().to_string(), pull: None, here: false }
 }
 
@@ -1561,7 +1561,7 @@ fn r_brings_the_worktree_wt_found_to_the_pull_request_s_head() {
     let (up, bare, main) = (scratch.join("up"), clone.join(".bare"), clone.join("main"));
     let feat = clone.join("feat");
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let pasted = reviewing_pull_7(vec![view_in(&main)]);
     let at_head = |head: &str, how: &str| {
         let ready = pasted_here(&host, &pasted).unwrap();
         assert_eq!(ready.at, At::Session(0), "{how}");
@@ -1594,7 +1594,7 @@ fn w_leaves_the_worktree_where_it_is() {
     let feat = clone.join("feat");
     let _daemon = start(host.vars()).unwrap();
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pasted = Pasted::new(Work::Link(link), vec![pane_in(&clone.join("main"))]);
+    let pasted = Pasted::new(Work::Link(link), vec![view_in(&clone.join("main"))]);
 
     pasted_here(&host, &pasted).unwrap();
     let was = git_said(&feat, &["rev-parse", "HEAD"]);
@@ -1608,7 +1608,7 @@ fn w_leaves_the_worktree_where_it_is() {
 }
 
 #[test]
-fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
+fn r_on_a_far_machine_s_view_syncs_there_or_says_why_it_did_not() {
     let here = Host::new();
     let far = Host::new();
     FakeSsh::new(here.bin()).reaches("far", far.vars());
@@ -1623,8 +1623,8 @@ fn r_on_a_far_machine_s_pane_syncs_there_or_says_why_it_did_not() {
     reached(&here, "far", |_| true);
 
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
-    let pasted = reviewing_pull_7(vec![pane]);
+    let view = links::Worked { pull: Some(link), ..view_in(&feat) };
+    let pasted = reviewing_pull_7(vec![view]);
     let folder = folder_in(here.runtime.path()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -1658,7 +1658,7 @@ fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
     let feat = clone.join("feat");
     git(&clone.join(".bare"), &["worktree", "add", "-q", "--track", "-b", "feat", "../feat", "origin/feat"]);
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let pasted = reviewing_pull_7(vec![view_in(&clone.join("main"))]);
     let head = git_said(&feat, &["rev-parse", "HEAD"]);
 
     fs::write(feat.join("mine"), "mine").unwrap();
@@ -1668,15 +1668,15 @@ fn r_at_the_head_moves_nothing_whatever_is_checked_out() {
     assert_eq!(fs::read_to_string(feat.join("mine")).unwrap(), "mine");
 
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
+    let view = links::Worked { pull: Some(link), ..view_in(&feat) };
     git(&feat, &["switch", "-q", "--detach"]);
-    let ready = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap();
+    let ready = pasted_here(&host, &reviewing_pull_7(vec![view])).unwrap();
     assert_eq!(ready.at, At::There(0));
     assert_eq!(git_said(&feat, &["rev-parse", "HEAD"]), head);
 }
 
 #[test]
-fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
+fn r_on_a_view_gone_to_another_branch_starts_no_review() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
@@ -1685,9 +1685,9 @@ fn r_on_a_pane_gone_to_another_branch_starts_no_review() {
     git(&main, &["branch", "-q", "--set-upstream-to=origin/main", "main"]);
     let _daemon = start(host.vars()).unwrap();
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pane = links::Worked { pull: Some(link), ..pane_in(&main) };
+    let view = links::Worked { pull: Some(link), ..view_in(&main) };
 
-    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![view])).unwrap_err();
     assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
     assert!(refused.message().contains("and the head of o/n#7 is"), "{refused:?}");
     let up_main = git_said(&scratch.join("up"), &["rev-parse", "main"]);
@@ -1715,15 +1715,15 @@ fn r_from_a_directory_the_head_leaves_out_says_so() {
     git(&work, &["commit", "-q", "-m", "sub"]);
     pushed_from_work();
     let _daemon = start(host.vars()).unwrap();
-    pasted_here(&host, &reviewing_pull_7(vec![pane_in(&clone.join("main"))])).unwrap();
+    pasted_here(&host, &reviewing_pull_7(vec![view_in(&clone.join("main"))])).unwrap();
     assert!(feat.join("sub/file").is_file());
 
     git(&work, &["rm", "-rq", "sub"]);
     git(&work, &["commit", "-q", "-m", "no sub"]);
     let head = pushed_from_work();
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pane = links::Worked { pull: Some(link), ..pane_in(&feat.join("sub")) };
-    let refused = pasted_here(&host, &reviewing_pull_7(vec![pane])).unwrap_err();
+    let view = links::Worked { pull: Some(link), ..view_in(&feat.join("sub")) };
+    let refused = pasted_here(&host, &reviewing_pull_7(vec![view])).unwrap_err();
     assert_eq!(refused.code(), Code::Aborted, "{refused:?}");
     let why = "the worktree moved, and where it went has no such directory";
     assert!(refused.message().ends_with(why), "{refused:?}");
@@ -1739,7 +1739,7 @@ fn r_refused_on_a_rewrite_follows_it_once_the_change_is_gone() {
     let clone = clone_with_pull_7(&host, &scratch);
     let (up, feat) = (scratch.join("up"), clone.join("feat"));
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let pasted = reviewing_pull_7(vec![view_in(&clone.join("main"))]);
     pasted_here(&host, &pasted).unwrap();
     let was = git_said(&feat, &["rev-parse", "HEAD"]);
 
@@ -1764,7 +1764,7 @@ fn r_on_a_rewrite_another_fetch_saw_first_says_what_moves_the_branch() {
     let clone = clone_with_pull_7(&host, &scratch);
     let (up, feat) = (scratch.join("up"), clone.join("feat"));
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let pasted = reviewing_pull_7(vec![view_in(&clone.join("main"))]);
     pasted_here(&host, &pasted).unwrap();
     let was = git_said(&feat, &["rev-parse", "HEAD"]);
 
@@ -1788,8 +1788,8 @@ fn r_goes_by_the_head_alone_where_no_remote_names_the_pull_request_s_repository(
     git(&bare, &["remote", "set-url", "origin", "git@github.com:old/n.git"]);
     let _daemon = start(host.vars()).unwrap();
     let link = Link::parse("https://github.com/o/n/pull/7").unwrap();
-    let pane = links::Worked { pull: Some(link), ..pane_in(&feat) };
-    let pasted = reviewing_pull_7(vec![pane]);
+    let view = links::Worked { pull: Some(link), ..view_in(&feat) };
+    let pasted = reviewing_pull_7(vec![view]);
     let tracked_main = git_said(&feat, &["rev-parse", "refs/remotes/origin/main"]);
 
     assert_eq!(pasted_here(&host, &pasted).unwrap().at, At::There(0));
@@ -1825,7 +1825,7 @@ fn r_runs_nothing_a_pull_request_brings() {
     git(&clone.join(".bare"), &["config", "core.fsmonitor", ".githooks/fsmonitor"]);
     git(&up, &["worktree", "add", "-q", "--detach", &work.display().to_string(), "feat"]);
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let pasted = reviewing_pull_7(vec![view_in(&clone.join("main"))]);
     pasted_here(&host, &pasted).unwrap();
 
     let ran = scratch.join("hook-ran");
@@ -1868,7 +1868,7 @@ fn r_keeps_the_git_config_of_the_daemon_s_environment() {
         .env("GIT_CONFIG_KEY_0", "core.sshCommand")
         .env("GIT_CONFIG_VALUE_0", &ssh);
     let _daemon = start_as(lunetad).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&clone.join("main"))]);
+    let pasted = reviewing_pull_7(vec![view_in(&clone.join("main"))]);
     pasted_here(&host, &pasted).unwrap();
 
     let head = pushed(&host, &up, "feat", "one more");
@@ -1895,7 +1895,7 @@ fn r_syncs_a_pull_request_from_a_fork_s_main() {
     };
     host.gh.api("f\thttps://github.com/f/n.git\tgit@github.com:f/n.git\tmain\n");
     let _daemon = start(host.vars()).unwrap();
-    let pasted = reviewing_pull_7(vec![pane_in(&main)]);
+    let pasted = reviewing_pull_7(vec![view_in(&main)]);
     let local_main = git_said(&main, &["rev-parse", "main"]);
     let folder = clone.join("f-main");
 
@@ -1972,8 +1972,8 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
             Work::File(links::File::parse(path, from).unwrap())
         };
         let worked = |dir: &str| links::Worked { dir: dir.to_owned(), pull: None, here: false };
-        let panes = vec![worked("/nowhere/at/all"), worked(&main)];
-        let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), panes.clone());
+        let views = vec![worked("/nowhere/at/all"), worked(&main)];
+        let asked = Pasted::new(file(&plan, Some("/nowhere/at/all")), views.clone());
         let ready = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let folder = clone.join("md-sync-rework").display().to_string();
         let branch = Some("md-sync-rework".to_owned());
@@ -1990,7 +1990,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         assert_eq!(rev_parse(&clone.join("md-sync-rework"), "HEAD"), tip);
         assert_eq!(far.gh.issues(), [] as [String; 0]);
 
-        let mut in_it = panes.clone();
+        let mut in_it = views.clone();
         in_it.push(worked(&folder));
         let asked = Pasted::new(file(&plan, None), in_it);
         let again = pasted_on(&mut daemon, "far", &asked).await.unwrap();
@@ -2004,34 +2004,34 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
 
         let home = far.home.path().canonicalize().unwrap();
         fs::write(home.join("errand.md"), "written down").unwrap();
-        let asked = Pasted::new(file("~/errand.md", Some(&main)), panes.clone());
+        let asked = Pasted::new(file("~/errand.md", Some(&main)), views.clone());
         let errand = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(errand.at, At::Session(1));
         assert_eq!(errand.folder, clone.join("md-errand").display().to_string());
         let real = home.join("errand.md").display().to_string();
         assert_eq!(errand.work, Readied::File { real });
 
-        let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), panes.clone());
+        let asked = Pasted::new(file("docs/plans/Sync Rework.md", Some(&main)), views.clone());
         let relative = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(relative.work, of_plan());
         assert_eq!(relative.folder, folder);
 
         let named = plans.join("main.md");
         fs::write(&named, "written down").unwrap();
-        let asked = Pasted::new(file(&named.display().to_string(), None), panes.clone());
+        let asked = Pasted::new(file(&named.display().to_string(), None), views.clone());
         let of_main = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         assert_eq!(of_main.folder, clone.join("md-main").display().to_string());
         assert_eq!(of_main.branch.as_deref(), Some("md-main"));
 
         let mine = here.home.path().canonicalize().unwrap().join("mine.md");
         fs::write(&mine, "written down").unwrap();
-        let asked = Pasted::new(file("~/mine.md", Some(&main)), panes.clone());
+        let asked = Pasted::new(file("~/mine.md", Some(&main)), views.clone());
         assert_eq!(refused_there(&mut daemon, &asked).await, "no such file");
         assert!(!clone.join("md-mine").exists());
 
         let outside = scratch.join("outside.md");
         fs::write(&outside, "written down").unwrap();
-        let asked = Pasted::new(file(&outside.display().to_string(), None), panes.clone());
+        let asked = Pasted::new(file(&outside.display().to_string(), None), views.clone());
         assert_eq!(
             refused_there(&mut daemon, &asked).await,
             "it is in no repository, and the row highlighted works in no directory to go by"
@@ -2041,7 +2041,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         git(&scratch, &["clone", "-q", &up.display().to_string(), &by_git.display().to_string()]);
         fs::write(by_git.join("plan.md"), "written down").unwrap();
         let in_by_git = by_git.join("plan.md").display().to_string();
-        let asked = Pasted::new(file(&in_by_git, None), panes.clone());
+        let asked = Pasted::new(file(&in_by_git, None), views.clone());
         assert_eq!(
             refused_there(&mut daemon, &asked).await,
             format!(
@@ -2057,7 +2057,7 @@ fn a_file_pasted_on_another_machine_s_row_is_read_and_made_there() {
         git(&unread, &["config", "core.repositoryformatversion", "99"]);
         fs::write(unread.join("in-it.md"), "written down").unwrap();
         let in_it = unread.join("in-it.md").display().to_string();
-        let asked = Pasted::new(file(&in_it, Some(&main)), panes);
+        let asked = Pasted::new(file(&in_it, Some(&main)), views);
         let why = refused_there(&mut daemon, &asked).await;
         assert!(why.starts_with("git did not say what repository it is in: fatal: "), "{why}");
         assert!(!clone.join("md-in-it").exists());
@@ -2089,8 +2089,8 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         let mut daemon = lunetad::connect(&folder).await.unwrap();
         let issue = Link::parse("https://github.com/o/n/issues/7").unwrap();
         let link = Work::Link(issue.clone());
-        let panes = vec![pane_in(&main)];
-        let asked = Pasted::new(link.clone(), panes.clone());
+        let views = vec![view_in(&main)];
+        let asked = Pasted::new(link.clone(), views.clone());
         let folder = moved.display().to_string();
 
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
@@ -2100,7 +2100,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         assert_eq!(opened, answer);
         assert_eq!(rev_parse_verify(&main, "refs/heads/issue-7"), None);
 
-        let in_it = vec![pane_in(&main), pane_in(&moved)];
+        let in_it = vec![view_in(&main), view_in(&moved)];
         let there = pasted_on(&mut daemon, "far", &Pasted::new(link.clone(), in_it)).await;
         assert_eq!(there.unwrap().at, At::There(1));
 
@@ -2128,14 +2128,14 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
 
         fs::create_dir(clone.join("issue-8")).unwrap();
         let eight = Work::Link(Link::parse("https://github.com/o/n/issues/8").unwrap());
-        let why = refused_there(&mut daemon, &Pasted::new(eight, panes.clone())).await;
+        let why = refused_there(&mut daemon, &Pasted::new(eight, views.clone())).await;
         assert!(why.ends_with("issue-8 is already present"), "{why}");
 
         git(&bare, &["worktree", "add", "-q", "-b", "gone", "../issue-10", "main"]);
         fs::remove_dir_all(clone.join("issue-10")).unwrap();
         fs::create_dir(clone.join("issue-10")).unwrap();
         let ten = Work::Link(Link::parse("https://github.com/o/n/issues/10").unwrap());
-        let why = refused_there(&mut daemon, &Pasted::new(ten, panes.clone())).await;
+        let why = refused_there(&mut daemon, &Pasted::new(ten, views.clone())).await;
         assert!(why.ends_with("issue-10 is already present"), "{why}");
 
         let plan = main.join("plan.md");
@@ -2144,7 +2144,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
         git(&bare, &["worktree", "add", "-q", "-b", "other", "../md-plan", "main"]);
         let moved = clone.join("md-plan").display().to_string();
         let file = Work::File(links::File::parse(&plan, None).unwrap());
-        let asked = Pasted::new(file, panes.clone());
+        let asked = Pasted::new(file, views.clone());
         let opened = pasted_on(&mut daemon, "far", &asked).await.unwrap();
         let (at, work) = (At::Session(0), Readied::File { real: plan.clone() });
         let branch = Some("other".to_owned());
@@ -2153,7 +2153,7 @@ fn a_worktree_where_an_issue_s_would_go_is_said_to_have_moved_off_its_branch() {
 
         git(&bare, &["worktree", "add", "-q", "-b", "nine", "../issue-9", "main"]);
         let other = Work::Link(Link::parse("https://github.com/o/n/issues/9").unwrap());
-        let other = Pasted::new(other, panes);
+        let other = Pasted::new(other, views);
         assert!(pasted_on(&mut daemon, "far", &other).await.unwrap().moved_off);
         let on = Some(On { destination: "far".to_owned() });
         let older = PasteRequest { reads_moved_off: false, ..other.asked(on) };

@@ -90,7 +90,7 @@ pub(crate) struct TabSpan<T> {
     pub(crate) name: String,
 }
 
-pub(crate) fn on_panes(at: Spot) -> Option<Position> {
+pub(crate) fn on_views(at: Spot) -> Option<Position> {
     Some(Position::new(at.column, at.row.checked_sub(TAB_BAR_ROWS)?))
 }
 
@@ -167,7 +167,7 @@ pub(crate) fn draw_tab_spans<T: Copy + PartialEq>(
     }
 }
 
-pub(crate) fn border(buffer: &mut Buffer, panes: Rect, outer: Rect, title: &str, style: Style) {
+pub(crate) fn border(buffer: &mut Buffer, views: Rect, outer: Rect, title: &str, style: Style) {
     if outer.is_empty() {
         return;
     }
@@ -175,7 +175,7 @@ pub(crate) fn border(buffer: &mut Buffer, panes: Rect, outer: Rect, title: &str,
     let (left, top) = (outer.left(), outer.top());
     let (right, bottom) = (outer.right() - 1, outer.bottom() - 1);
     let mut put = |x: u16, y: u16, symbol: &str| {
-        if panes.contains(Position::new(x, y))
+        if views.contains(Position::new(x, y))
             && let Some(cell) = buffer.cell_mut((x, y))
         {
             cell.reset();
@@ -195,8 +195,8 @@ pub(crate) fn border(buffer: &mut Buffer, panes: Rect, outer: Rect, title: &str,
     put(left, bottom, set.bottom_left);
     put(right, bottom, set.bottom_right);
     let title = printable(title);
-    let (start, end) = (left + 1, right.min(panes.right()));
-    if !title.is_empty() && start < end && panes.contains(Position::new(start, top)) {
+    let (start, end) = (left + 1, right.min(views.right()));
+    if !title.is_empty() && start < end && views.contains(Position::new(start, top)) {
         buffer.set_stringn(start, top, format!(" {title} "), usize::from(end - start), style);
     }
 }

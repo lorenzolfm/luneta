@@ -23,7 +23,7 @@ use crate::projects::{Ask, Change, Changed, Closing, Dir, Failed, Home, Id, Line
 use crate::projects::{Layout, Made, MoveTo, Project, ProjectId, Projects, Ran, Runs, Spot};
 use crate::projects::{Session, Size, Store, Terminal, TerminalViewId, Used, View, ViewId};
 use crate::projects::{Holds, Name, Worktree};
-use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, PANES_MAX, VIEWS_MAX};
+use crate::projects::{WorktreeId, FRAME_CELLS, LINE_BYTES_MAX, LAYOUT_VIEWS_MAX, VIEWS_MAX};
 use crate::projects::{quoted, Opens, Subfolder, WORKTREES_MAX};
 use crate::shells::Doing;
 use crate::shows::direction_said;
@@ -728,7 +728,8 @@ impl Layouts {
             let changed = format!("worktree {worktree}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
-        assert!(terminals.len() <= PANES_MAX, "a layout holds at most {PANES_MAX} terminals");
+        let most = LAYOUT_VIEWS_MAX;
+        assert!(terminals.len() <= most, "a layout holds at most {most} terminals");
         self.close_terminals(&terminals)?;
         if let Some(why) = self.store.closed(Closing::Worktree(worktree))? {
             self.unwritten(&why);
@@ -1832,11 +1833,11 @@ fn laid(
     if let Some(focus) = focus {
         assert!(layout.holds(focus), "a client focuses view {focus} of the layout it shows");
     }
-    let (fitted, panes) = match layout.tree() {
+    let (fitted, views) = match layout.tree() {
         None => (size, Vec::new()),
         Some(tree) => {
-            let panes = tree.laid(size).into_iter().map(|(view, rect)| {
-                use show_response::pane::Found;
+            let views = tree.laid(size).into_iter().map(|(view, rect)| {
+                use show_response::view::Found;
                 let id = layout::Leaf::id(view);
                 let found = match view {
                     View::Welcome(_) => Found::Welcome(()),
@@ -1849,7 +1850,7 @@ fn laid(
                         None => Found::Looking(()),
                     },
                 };
-                show_response::Pane {
+                show_response::View {
                     view: id.get(),
                     rect: Some(show_response::Rect {
                         column: rect.column.into(),
@@ -1860,15 +1861,15 @@ fn laid(
                     found: Some(found),
                 }
             });
-            (tree.fitted(size), panes.collect::<Vec<_>>())
+            (tree.fitted(size), views.collect::<Vec<_>>())
         },
     };
-    assert_eq!(panes.len(), layout.len(), "a layout lays out each of its terminals");
+    assert_eq!(views.len(), layout.len(), "a layout lays out each of its terminals");
     let (columns, rows) = fitted.get();
     let laid = show_response::Laid {
         worktree: worktree.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
-        panes,
+        views,
         shown: match (layout.full(), focus) {
             (Some(full), _) => {
                 assert_eq!(focus, Some(full), "a client of a full layout focuses its terminal");
@@ -1972,7 +1973,7 @@ mod tests {
             started_at: Some(SystemTime::UNIX_EPOCH),
             name: None,
             entrypoint: None,
-            pane: None,
+            view: None,
         }
     }
 

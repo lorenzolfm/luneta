@@ -17,7 +17,7 @@ use crate::due::Due;
 use crate::gruvbox;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Hint, PaneRow, ProjectTarget, Target};
+use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
 use crate::sidebar::{self, ACCENT};
 
 const TITLE: &str = "Ask";
@@ -271,7 +271,7 @@ fn highlighted(target: &Target) -> String {
         Target::Worktree(_, row) => {
             format!("worktree {} of project {}", row.name, row.place.project.listed().name())
         },
-        Target::Pane(_, PaneRow { session, pane, .. }) => format!("view {}:{pane}", session.name()),
+        Target::View(_, ViewRow { session, view, .. }) => format!("view {}:{view}", session.name()),
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
     let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
@@ -288,8 +288,8 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{PaneRow, Ran};
-    use crate::sidebar::{Listed, PaneKey, ProjectRow};
+    use crate::menu::{ViewRow, Ran};
+    use crate::sidebar::{Listed, ViewKey, ProjectRow};
 
     fn listed() -> Listed {
         Listed::new_project("luneta", 3)
@@ -304,10 +304,10 @@ mod tests {
         Machine::Remote("nixos".parse().unwrap())
     }
 
-    fn pane_row_on(machine: Machine) -> Target {
-        let row = PaneRow {
+    fn view_row_on(machine: Machine) -> Target {
+        let row = ViewRow {
             session: listed(),
-            pane: PaneKey::terminal(4),
+            view: ViewKey::terminal(4),
             terminal: None,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/ask".to_owned()),
@@ -315,11 +315,11 @@ mod tests {
             pull_request: None,
             ran: Ran::Unhooked,
         };
-        Target::Pane(machine, row)
+        Target::View(machine, row)
     }
 
-    fn pane_row() -> Target {
-        pane_row_on(Machine::Local)
+    fn view_row() -> Target {
+        view_row_on(Machine::Local)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn what_you_dictate_goes_on_the_line_after_what_you_typed() {
-        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.dictated("Open a tab.");
         assert_eq!(ask.typed, "Open a tab.");
         ask.dictated("Then\nrun the tests.");
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn the_box_shows_the_talk_and_takes_what_you_type_between_turns() {
-        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Nothing);
         typed(&mut ask, "close bipa x");
         assert_eq!(ask.key(&key(KeyCode::Backspace)), Keyed::Nothing);
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn a_talk_too_long_for_the_box_loses_its_start() {
-        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.talk.push(Said::You("tackle these".to_owned()));
         ask.talk.extend((1..=6).map(|n| Said::Ran {
             id: format!("toolu_{n}"),
@@ -486,11 +486,11 @@ mod tests {
     #[test]
     fn the_agent_works_on_the_row_s_machine_where_the_row_is() {
         let top = |ask: &Ask| shown(ask, 40, 7)[1].clone();
-        let pane = Ask::new(1, &pane_row(), Path::new("/w"));
-        assert_eq!(pane.works, Works::Here(PathBuf::from("/w/luneta/main")));
+        let view = Ask::new(1, &view_row(), Path::new("/w"));
+        assert_eq!(view.works, Works::Here(PathBuf::from("/w/luneta/main")));
         let row = "is view luneta:4, in /w/luneta/main, on branch feat/ask: \"this\"";
-        assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
-        assert_eq!(top(&pane), "┌─ Ask ────────────────── luneta/main ─┐");
+        assert!(view.highlighted.contains(row), "{}", view.highlighted);
+        assert_eq!(top(&view), "┌─ Ask ────────────────── luneta/main ─┐");
         let session = Ask::new(2, &project_on(Machine::Local), Path::new("/w"));
         assert_eq!(session.works, Works::Here(PathBuf::from("/w")));
         let session_row = "is project luneta: \"this\"";
@@ -499,10 +499,10 @@ mod tests {
         let there = |cwd: Option<&str>| {
             Works::There { on: "nixos".parse().unwrap(), cwd: cwd.map(str::to_owned) }
         };
-        let pane = Ask::new(3, &pane_row_on(nixos()), Path::new("/w"));
-        assert_eq!(pane.works, there(Some("/w/luneta/main")));
-        assert!(pane.highlighted.contains(row), "{}", pane.highlighted);
-        assert_eq!(top(&pane), "┌─ Ask ───────── luneta/main on nixos ─┐");
+        let view = Ask::new(3, &view_row_on(nixos()), Path::new("/w"));
+        assert_eq!(view.works, there(Some("/w/luneta/main")));
+        assert!(view.highlighted.contains(row), "{}", view.highlighted);
+        assert_eq!(top(&view), "┌─ Ask ───────── luneta/main on nixos ─┐");
         let session = Ask::new(4, &project_on(nixos()), Path::new("/w"));
         assert_eq!(session.works, there(None));
         assert_eq!(top(&session), "┌─ Ask ─────────────────── ~ on nixos ─┐");
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_is_none_says_why() {
-        let mut ask = Ask::new(1, &pane_row(), Path::new("/w"));
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.works = Works::There { on: "nixos".parse().unwrap(), cwd: Some("w".to_owned()) };
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();

@@ -1076,10 +1076,10 @@ impl KeptLayout {
                 Ok(Preordered::Split { towards: towards.read(), share })
             },
             KeptNode::Terminal(terminal) => {
-                terminal.read().map(|terminal| Preordered::Pane(View::Terminal(terminal)))
+                terminal.read().map(|terminal| Preordered::View(View::Terminal(terminal)))
             },
             KeptNode::Welcome(KeptWelcome { id }) => {
-                id.parse().map(|id| Preordered::Pane(View::Welcome(id)))
+                id.parse().map(|id| Preordered::View(View::Welcome(id)))
             },
         });
         Layout::read(tree.collect::<Result<_, String>>()?, full)
@@ -1090,10 +1090,10 @@ impl KeptLayout {
             Preordered::Split { towards, share } => {
                 KeptNode::Split(KeptSplit { towards: KeptTowards::of(towards), share })
             },
-            Preordered::Pane(View::Terminal(terminal)) => {
+            Preordered::View(View::Terminal(terminal)) => {
                 KeptNode::Terminal(KeptTerminal::of(terminal))
             },
-            Preordered::Pane(View::Welcome(id)) => {
+            Preordered::View(View::Welcome(id)) => {
                 KeptNode::Welcome(KeptWelcome { id: id.to_string() })
             },
         });

@@ -2,7 +2,9 @@ use std::fmt;
 
 use crate::agent::Harness;
 
-use super::layout::{self, Leaf, Preordered, Removed, Sides, Towards, Tree, PANES_MAX, SHARES};
+use super::layout::{
+    self, Leaf, Preordered, Removed, Sides, Towards, Tree, LAYOUT_VIEWS_MAX, SHARES,
+};
 use super::{Dir, Name, Size, ViewId};
 
 pub const LINE_BYTES_MAX: usize = 1024;
@@ -252,7 +254,7 @@ impl Layout {
         };
         let owned = |node: Preordered<&View>| match node {
             Preordered::Split { towards, share } => Preordered::Split { towards, share },
-            Preordered::Pane(view) => Preordered::Pane(view.clone()),
+            Preordered::View(view) => Preordered::View(view.clone()),
         };
         let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
         let halves = one.preorder().into_iter().chain(other.preorder()).map(owned);
@@ -329,9 +331,9 @@ impl Layout {
                 if !laid.tree.holds(at) {
                     return Err(format!("the layout holds no view {at}"));
                 }
-                if laid.tree.len() >= PANES_MAX {
-                    let most = format!("the layout holds {PANES_MAX} views, as many as it may");
-                    return Err(most);
+                if laid.tree.len() >= LAYOUT_VIEWS_MAX {
+                    let most = LAYOUT_VIEWS_MAX;
+                    return Err(format!("the layout holds {most} views, as many as it may"));
                 }
                 if laid.tree.room(at, towards, id, size).is_none() {
                     return Err(format!("view {at} has no room for another beside it"));

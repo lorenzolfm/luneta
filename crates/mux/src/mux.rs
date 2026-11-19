@@ -8,7 +8,7 @@ use tonic::Status;
 use crate::api;
 use crate::asked::{Colours, Ends, Greeting, Opens, SHOWN_MAX, Size, Tag, TerminalKey};
 use crate::id::{ClientId, TerminalId};
-use crate::pane::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
+use crate::terminal::{self, Exit, Handle, Viewer, ViewerOut, Wanted};
 use crate::pty::{self, Pty};
 
 pub const TERMINALS_MAX: usize = 1024;
@@ -386,7 +386,7 @@ fn spawned(
     let child = pty.spawned(opens, &vars).map_err(|error| {
         Status::failed_precondition(format!("opens did not start: {error}"))
     })?;
-    let started = pane::start(Arc::clone(mux), key, pty, child, size)
+    let started = terminal::start(Arc::clone(mux), key, pty, child, size)
         .map_err(|error| failed("the terminal did not start", error))?;
     Ok(Terminal {
         key,

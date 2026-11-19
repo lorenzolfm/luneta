@@ -48,7 +48,7 @@ struct File {
 #[derive(Clone, Copy)]
 struct Process {
     started: SystemTime,
-    pane: Option<TerminalKey>,
+    view: Option<TerminalKey>,
 }
 
 pub struct AgentFiles {
@@ -106,7 +106,7 @@ impl AgentFiles {
             };
             let key = (pid, start);
             let found = self.processes.remove(&key).or_else(|| {
-                Some(Process { started: process::started(pid)?, pane: mux::pane_of(pid) })
+                Some(Process { started: process::started(pid)?, view: mux::view_of(pid) })
             });
             let Some(found) = found else {
                 continue;
@@ -172,6 +172,6 @@ fn agent(pid: u32, file: File, process: Process) -> Agent {
         started_at: Some(process.started),
         name: None,
         entrypoint: file.mode.and_then(|mode| Said::new(mode.trim().to_owned())),
-        pane: process.pane,
+        view: process.view,
     }
 }

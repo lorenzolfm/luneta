@@ -24,7 +24,7 @@ pub struct Agent {
     pub started_at: Option<SystemTime>,
     pub name: Option<Name>,
     pub entrypoint: Option<Said>,
-    pub pane: Option<TerminalKey>,
+    pub view: Option<TerminalKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +187,7 @@ impl Source {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unread {
     pub pid: u32,
-    pub pane: Option<TerminalKey>,
+    pub view: Option<TerminalKey>,
 }
 
 pub fn named_pid(path: &Path) -> Option<u32> {
@@ -249,7 +249,7 @@ impl Agent {
             name: self.name.as_ref().map(Name::to_api),
             entrypoint: self.entrypoint.clone().map(String::from),
             waiting_for,
-            terminal: self.pane.map(Into::into),
+            terminal: self.view.map(Into::into),
             topic: topic.map(String::from),
         }
     }
@@ -259,7 +259,7 @@ impl Unread {
     #[must_use]
     pub fn to_api(&self) -> api::UnreadFile {
         assert!(self.pid > 1);
-        api::UnreadFile { pid: self.pid, terminal: self.pane.map(Into::into) }
+        api::UnreadFile { pid: self.pid, terminal: self.view.map(Into::into) }
     }
 }
 

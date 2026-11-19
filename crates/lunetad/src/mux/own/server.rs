@@ -23,7 +23,7 @@ use tower::service_fn;
 
 use super::api::{self, mux_client::MuxClient};
 use super::frames::colours;
-use super::{in_no_pane, TerminalKey};
+use super::{in_no_view, TerminalKey};
 use crate::mux::{Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
@@ -695,7 +695,7 @@ impl Started {
         let program = program();
         let mut command = Command::new(&program);
         command.arg(&folder);
-        in_no_pane(&mut command);
+        in_no_view(&mut command);
         command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::null());
         let spawned = command.spawn();
         let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));

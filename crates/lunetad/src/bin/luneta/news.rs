@@ -171,12 +171,12 @@ mod tests {
         Session::Project(lunetad::projects::ProjectId::of(project).unwrap())
     }
 
-    fn pane(pane: u32) -> Key {
-        Key { session: session(10), pane }
+    fn view(view: u32) -> Key {
+        Key { session: session(10), view }
     }
 
     fn finished(key: Key) -> Option<SystemTime> {
-        match key.pane {
+        match key.view {
             1 => Some(at(100)),
             2 => Some(ms(101_999)),
             _ => None,
@@ -184,30 +184,30 @@ mod tests {
     }
 
     fn new(news: &News) -> [bool; 2] {
-        [1, 2].map(|id| news.is_new(pane(id), finished(pane(id))))
+        [1, 2].map(|id| news.is_new(view(id), finished(view(id))))
     }
 
     #[test]
-    fn what_finished_is_new_until_you_stay_in_its_pane() {
+    fn what_finished_is_new_until_you_stay_in_its_view() {
         let mut news = News::default();
-        dwell(&mut news, Some(pane(1)), ms(100_000));
-        dwell(&mut news, Some(pane(2)), ms(100_500));
-        assert!(!dwell(&mut news, Some(pane(2)), ms(101_000)));
-        assert!(dwell(&mut news, Some(pane(2)), ms(101_500)));
+        dwell(&mut news, Some(view(1)), ms(100_000));
+        dwell(&mut news, Some(view(2)), ms(100_500));
+        assert!(!dwell(&mut news, Some(view(2)), ms(101_000)));
+        assert!(dwell(&mut news, Some(view(2)), ms(101_500)));
         dwell(&mut news, None, ms(101_600));
         assert_eq!(new(&news), [true, false]);
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
-        assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
+        assert!([1, 2].iter().all(|id| news.is_new(view(*id), later(view(*id)))));
     }
 
     #[test]
     fn a_stay_dates_the_session_with_nothing_new_in_it() {
-        let other = |pane: u32| Key { session: session(20), pane };
+        let other = |view: u32| Key { session: session(20), view };
         let nothing = |_: Key| None;
         let mut news = News::default();
 
-        news.dwell(Some(pane(3)), nothing, at(200), steady(at(200)));
+        news.dwell(Some(view(3)), nothing, at(200), steady(at(200)));
         news.dwell(Some(other(3)), nothing, ms(200_500), steady(ms(200_500)));
         news.dwell(Some(other(3)), nothing, ms(201_500), steady(ms(201_500)));
         assert_eq!(news.last_seen(session(10)), None);
@@ -216,67 +216,67 @@ mod tests {
         news.dwell(Some(other(3)), nothing, at(900), steady(at(900)));
         assert_eq!(news.last_seen(session(20)), Some(ms(201_500)));
 
-        news.dwell(Some(pane(3)), nothing, at(1_000), steady(at(1_000)));
-        news.dwell(Some(pane(3)), nothing, at(1_001), steady(at(1_001)));
+        news.dwell(Some(view(3)), nothing, at(1_000), steady(at(1_000)));
+        news.dwell(Some(view(3)), nothing, at(1_001), steady(at(1_001)));
         assert_eq!(news.last_seen(session(10)), Some(at(1_001)));
-        assert!(news.is_new(pane(3), Some(at(1_002))));
+        assert!(news.is_new(view(3), Some(at(1_002))));
     }
 
     #[test]
-    fn a_pane_passed_through_as_the_clock_jumps_keeps_its_dot() {
+    fn a_view_passed_through_as_the_clock_jumps_keeps_its_dot() {
         let mut news = News::default();
-        news.dwell(Some(pane(1)), finished, at(200), steady(at(200)));
+        news.dwell(Some(view(1)), finished, at(200), steady(at(200)));
         news.dwell(None, finished, at(3_800), steady(ms(200_500)));
         assert_eq!(new(&news), [true, true]);
     }
 
     #[test]
-    fn a_pane_marked_unread_stays_so_until_you_come_back_to_it() {
+    fn a_view_marked_unread_stays_so_until_you_come_back_to_it() {
         let mut news = News::default();
-        dwell(&mut news, Some(pane(1)), at(200));
-        news.mark_unread(pane(1), at(201));
-        news.mark_unread(pane(3), at(201));
-        dwell(&mut news, Some(pane(1)), at(205));
-        assert!(news.is_unread(pane(1)));
+        dwell(&mut news, Some(view(1)), at(200));
+        news.mark_unread(view(1), at(201));
+        news.mark_unread(view(3), at(201));
+        dwell(&mut news, Some(view(1)), at(205));
+        assert!(news.is_unread(view(1)));
 
-        dwell(&mut news, Some(pane(3)), at(206));
-        dwell(&mut news, Some(pane(1)), ms(206_500));
+        dwell(&mut news, Some(view(3)), at(206));
+        dwell(&mut news, Some(view(1)), ms(206_500));
         dwell(&mut news, None, at(207));
-        assert!(news.is_unread(pane(1)) && news.is_unread(pane(3)));
-        dwell(&mut news, Some(pane(1)), at(208));
-        dwell(&mut news, Some(pane(1)), at(209));
-        assert!(!news.is_unread(pane(1)) && news.is_unread(pane(3)));
+        assert!(news.is_unread(view(1)) && news.is_unread(view(3)));
+        dwell(&mut news, Some(view(1)), at(208));
+        dwell(&mut news, Some(view(1)), at(209));
+        assert!(!news.is_unread(view(1)) && news.is_unread(view(3)));
 
-        news.read(pane(3), None, at(210));
-        assert!(!news.is_unread(pane(3)));
+        news.read(view(3), None, at(210));
+        assert!(!news.is_unread(view(3)));
     }
 
     #[test]
-    fn a_pane_marked_read_loses_its_dot_until_something_new_finishes() {
+    fn a_view_marked_read_loses_its_dot_until_something_new_finishes() {
         let mut news = News::default();
-        news.mark_unread(pane(2), at(101));
-        news.read(pane(1), finished(pane(1)), ms(101_500));
-        news.read(pane(2), finished(pane(2)), ms(101_500));
+        news.mark_unread(view(2), at(101));
+        news.read(view(1), finished(view(1)), ms(101_500));
+        news.read(view(2), finished(view(2)), ms(101_500));
         assert_eq!(new(&news), [false, false]);
-        assert!(!news.is_unread(pane(2)));
+        assert!(!news.is_unread(view(2)));
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
-        assert!([1, 2].iter().all(|id| news.is_new(pane(*id), later(pane(*id)))));
+        assert!([1, 2].iter().all(|id| news.is_new(view(*id), later(view(*id)))));
     }
 
     #[test]
-    fn marking_a_pane_read_does_not_say_you_were_in_it() {
+    fn marking_a_view_read_does_not_say_you_were_in_it() {
         let mut news = News::default();
-        news.read(pane(1), finished(pane(1)), at(200));
+        news.read(view(1), finished(view(1)), at(200));
         assert_eq!(news.last_seen(session(10)), None);
     }
 
     #[test]
     fn a_session_gone_takes_its_news_with_it() {
         let mut news = News::default();
-        dwell(&mut news, Some(pane(1)), at(200));
-        dwell(&mut news, Some(pane(1)), at(201));
-        news.mark_unread(pane(2), at(201));
+        dwell(&mut news, Some(view(1)), at(200));
+        dwell(&mut news, Some(view(1)), at(201));
+        news.mark_unread(view(2), at(201));
         let listing = |session: Session| {
             let mut live = Lists::default();
             live.lists(&Machine::Local, [session], true);
@@ -289,13 +289,13 @@ mod tests {
         news.listed(None, steady(at(225)));
         news.listed(Some(&other), steady(at(231)));
         assert_eq!(new(&news), [false, true]);
-        assert!(news.is_unread(pane(2)));
+        assert!(news.is_unread(view(2)));
         assert_eq!(news.last_seen(session(10)), Some(at(201)));
 
         news.listed(Some(&other), steady(at(240)));
         news.listed(Some(&other), steady(at(241)));
         assert_eq!(new(&news), [true, true]);
-        assert!(!news.is_unread(pane(2)));
+        assert!(!news.is_unread(view(2)));
         assert_eq!(news.last_seen(session(10)), None);
     }
 

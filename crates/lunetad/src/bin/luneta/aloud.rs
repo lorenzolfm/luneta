@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_s_frames_and_marks_are_not_read() {
+    fn a_view_s_frames_and_marks_are_not_read() {
         let selected = "⏺ The fix is in. The daemon keeps what\n  was said.\n\n  ⎿  ok\n";
         assert_eq!(plain(selected), "The fix is in. The daemon keeps what was said. ok");
         assert_eq!(plain("✳ Thinking… (esc to interrupt)"), "Thinking… (esc to interrupt)");

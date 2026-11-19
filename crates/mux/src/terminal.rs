@@ -138,21 +138,21 @@ enum Held {
     LetGo,
 }
 
-pub enum ToPane {
+pub enum ToTerminal {
     Input(ClientId, Input),
     Dump(Dumped, oneshot::Sender<Result<String, Status>>),
 }
 
 #[derive(Clone)]
 pub struct Handle {
-    to: mpsc::Sender<ToPane>,
+    to: mpsc::Sender<ToTerminal>,
     closed: Arc<AtomicBool>,
     wake: Wake,
     wanted: Arc<watch::Sender<Wanted>>,
 }
 
 impl Handle {
-    pub async fn send(&self, message: ToPane) {
+    pub async fn send(&self, message: ToTerminal) {
         if self.to.send(message).await.is_ok() {
             self.wake.wake();
         }
@@ -185,7 +185,7 @@ impl Wake {
         match (&*self.0).write(&[0]) {
             Ok(written) => assert_eq!(written, 1),
             Err(error) if error.kind() == ErrorKind::WouldBlock => {},
-            Err(error) => eprintln!("luneta-mux: a pane's wake failed: {error}"),
+            Err(error) => eprintln!("luneta-mux: a terminal's wake failed: {error}"),
         }
     }
 }
@@ -309,7 +309,7 @@ impl Program {
 struct Thread {
     key: TerminalKey,
     mux: Arc<Mux>,
-    inbox: mpsc::Receiver<ToPane>,
+    inbox: mpsc::Receiver<ToTerminal>,
     wants: watch::Receiver<Wanted>,
     exits: Receiver<Exit>,
     closed: Arc<AtomicBool>,
@@ -427,7 +427,7 @@ impl Thread {
         if self.shell.going()
             && let Some(group) = group
         {
-            self.shell.saw(group, self.pid, Front::of_pane(pty, self.pid, group));
+            self.shell.saw(group, self.pid, Front::of_terminal(pty, self.pid, group));
         }
         self.looks.looked(now, self.shell.going());
         self.tell(foreground);
@@ -529,13 +529,13 @@ impl Thread {
         Ok(Held::Still)
     }
 
-    fn take(&mut self, message: ToPane) -> io::Result<()> {
+    fn take(&mut self, message: ToTerminal) -> io::Result<()> {
         match message {
-            ToPane::Input(client, input) => match self.want()? {
+            ToTerminal::Input(client, input) => match self.want()? {
                 Held::Still => self.input(client, input)?,
                 Held::LetGo => {},
             },
-            ToPane::Dump(dumped, answer) => {
+            ToTerminal::Dump(dumped, answer) => {
                 let text = match dumped {
                     Dumped::Screen => self.screen.dumped_screen(),
                     Dumped::Text => self.screen.dumped_text(),

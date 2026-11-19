@@ -150,8 +150,8 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     host.gh.open("changed", &merged(5, &changed, "me"));
     fs::write(repository.at("changed").join("new"), "not yet added").unwrap();
 
-    let paned = repository.pushed("paned");
-    host.gh.open("paned", &merged(6, &paned, "me"));
+    let viewed = repository.pushed("viewed");
+    host.gh.open("viewed", &merged(6, &viewed, "me"));
 
     let based = repository.pushed("based");
     host.gh.open("based", &merged(7, &based, "me"));
@@ -180,7 +180,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
 
     repository.pushed("no-pull");
 
-    let _serving = serving(&host, &repository.at("paned"));
+    let _serving = serving(&host, &repository.at("viewed"));
 
     let asked = prune(&host, &repository.at("from"), &repository.at("main"), &[]);
     let (said, plan) = planned(&asked);
@@ -190,7 +190,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
         "keep from #8: this runs from it",
         "keep locked #9: it is locked",
         "keep main #10: it is the default branch",
-        "keep paned #6: it has a pane",
+        "keep viewed #6: it has a view",
         "keep renamed #4: its HEAD is not its pull request's head",
         "keep based #7: #70 is based on it",
     ];
@@ -243,7 +243,7 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
         "it deleted a branch origin moved on from"
     );
     for name in
-        ["changed", "from", "locked", "main", "paned", "renamed", "based", "open", "no-pull"]
+        ["changed", "from", "locked", "main", "viewed", "renamed", "based", "open", "no-pull"]
     {
         assert!(repository.at(name).join(".git").is_file(), "{name} went");
         assert!(repository.on_clone(name), "{name}'s branch went");
@@ -274,7 +274,7 @@ fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
     let (said, now) = planned(&told);
     assert_ne!(now, plan);
-    assert!(said.contains("keep one #1: it has a pane"), "{said}");
+    assert!(said.contains("keep one #1: it has a view"), "{said}");
     assert!(said.contains("delete two"), "{said}");
     let why = String::from_utf8_lossy(&told.stderr);
     assert!(why.contains("told yes to another plan"), "{why}");
@@ -282,7 +282,7 @@ fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
 }
 
 #[test]
-fn it_deletes_nothing_while_no_lunetad_says_where_the_panes_are() {
+fn it_deletes_nothing_while_no_lunetad_says_where_the_views_are() {
     let host = Host::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = scratch.path().canonicalize().unwrap();
@@ -404,10 +404,8 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
         }
         answered(&mut command)
     };
-    let pane = ("LUNETA_PANE", "work:1");
-    let first = [pane, ("LUNETA_TURN", "00000000000000aa")];
-    let second =
-        [pane, ("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
+    let first = [("LUNETA_TURN", "00000000000000aa")];
+    let second = [("LUNETA_TURN", "00000000000000bb"), ("LUNETA_TURN_BEFORE", "00000000000000aa")];
     let (_, plan) = planned(&in_turn(&first, &[]));
     let same_turn = in_turn(&first, &["--yes", &plan]);
     assert_eq!(same_turn.status.code(), Some(PLANNED));
@@ -738,9 +736,9 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
     far.gh.api("me\n");
     let head = repository.pushed("one");
     far.gh.open("one", &merged(1, &head, "me"));
-    let head = repository.pushed("paned");
-    far.gh.open("paned", &merged(2, &head, "me"));
-    let _serving = serving(&far, &repository.at("paned"));
+    let head = repository.pushed("viewed");
+    far.gh.open("viewed", &merged(2, &head, "me"));
+    let _serving = serving(&far, &repository.at("viewed"));
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |far| {
@@ -759,7 +757,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
-        assert_eq!(plan.kept[0].why, "it has a pane");
+        assert_eq!(plan.kept[0].why, "it has a view");
         let Goes { pushed, .. } = &plan.goes[0];
         let origin =
             Pushed::Goes(RemoteBranch { remote: "origin".to_owned(), branch: "one".to_owned() });
@@ -775,7 +773,7 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
         assert!(outcomes.iter().all(|outcome| outcome.came == Came::Gone), "{outcomes:?}");
         assert!(!repository.at("one").exists());
         assert!(!repository.on_origin("one"));
-        assert!(repository.at("paned").exists());
+        assert!(repository.at("viewed").exists());
 
         let relative = PrunesRequest { on: on(), dir: "n/main".to_owned() };
         let refused = daemon.prunes(relative).await.unwrap_err();

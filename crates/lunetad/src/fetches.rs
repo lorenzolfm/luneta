@@ -108,7 +108,7 @@ pub fn follow(core: SyncSender<core::Command>, sweep: Duration) -> io::Result<()
                     let (name, repository) = (&branch.name, &branch.repository);
                     log::say(&format!(
                         "the remote no longer has the upstream of {} in {}: it is not fetched \
-                         again while a pane works on it",
+                         again while a view works on it",
                         name.as_str(),
                         repository.as_str()
                     ));

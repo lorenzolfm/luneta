@@ -32,7 +32,7 @@ use crate::printed::{self, Printed};
 use crate::prune;
 use crate::pull::{At, Found, Kind, Readied, Ready, Wanted, Work};
 use crate::sidebar::{
-    self, ACCENT, LIT, Listed, Mark, NAME, PaneKey, PanePlace, Place, ProjectRow, TAG,
+    self, ACCENT, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place, ProjectRow, TAG,
     WorktreePlace,
 };
 use crate::skills::{Name, Search, Skills};
@@ -632,7 +632,7 @@ struct Delete {
 pub enum Target {
     Project(Machine, ProjectTarget),
     Worktree(Machine, WorktreeRow),
-    Pane(Machine, PaneRow),
+    View(Machine, ViewRow),
     Machine(Machine),
 }
 
@@ -643,17 +643,17 @@ pub struct ProjectTarget {
 }
 
 enum Offer<'t> {
-    SearchSkills(&'t PaneRow),
-    Skill(&'t PaneRow, &'static str),
-    Last(&'t PaneRow, Last),
-    FixChecks(&'t PaneRow),
-    NewView(&'t PaneRow),
-    NewWelcome(&'t PaneRow),
+    SearchSkills(&'t ViewRow),
+    Skill(&'t ViewRow, &'static str),
+    Last(&'t ViewRow, Last),
+    FixChecks(&'t ViewRow),
+    NewView(&'t ViewRow),
+    NewWelcome(&'t ViewRow),
     NewWorktree(ProjectId),
     NewProject,
     NewMachine,
     Rename(Renames),
-    CloseView(&'t PaneRow),
+    CloseView(&'t ViewRow),
     CloseWorktree(&'t WorktreeRow),
     DeleteProject(&'t Listed),
     ForgetMachine(&'t Destination),
@@ -674,9 +674,9 @@ pub struct WorktreeRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaneRow {
+pub struct ViewRow {
     pub session: Listed,
-    pub pane: PaneKey,
+    pub view: ViewKey,
     pub terminal: Option<ViewId>,
     pub cwd: Option<String>,
     pub branch: Option<String>,
@@ -708,7 +708,7 @@ impl Target {
         match self {
             Target::Project(machine, _)
             | Target::Worktree(machine, _)
-            | Target::Pane(machine, _)
+            | Target::View(machine, _)
             | Target::Machine(machine) => machine,
         }
     }
@@ -717,7 +717,7 @@ impl Target {
         match self {
             Target::Project(..) => Noun::Project,
             Target::Worktree(..) => Noun::Worktree,
-            Target::Pane(..) => Noun::View,
+            Target::View(..) => Noun::View,
             Target::Machine(_) => Noun::Machine,
         }
     }
@@ -731,19 +731,19 @@ impl Target {
             return None;
         }
         let offer = match (action, self) {
-            (Action::SearchSkills, Target::Pane(_, row)) => Offer::SearchSkills(row),
-            (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::Pane(_, row)) => {
+            (Action::SearchSkills, Target::View(_, row)) => Offer::SearchSkills(row),
+            (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::View(_, row)) => {
                 Offer::Skill(row, action.skill()?)
             },
-            (Action::FixLast, Target::Pane(_, row)) => Offer::Last(row, Last::Fix),
-            (Action::ExplainLast, Target::Pane(_, row)) => Offer::Last(row, Last::Explain),
-            (Action::FixChecks, Target::Pane(_, row)) => Offer::FixChecks(row),
-            (Action::NewView, Target::Pane(_, row)) => Offer::NewView(row),
-            (Action::NewWelcome, Target::Pane(_, row)) => Offer::NewWelcome(row),
+            (Action::FixLast, Target::View(_, row)) => Offer::Last(row, Last::Fix),
+            (Action::ExplainLast, Target::View(_, row)) => Offer::Last(row, Last::Explain),
+            (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
+            (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
+            (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
             (Action::NewWorktree, _) => Offer::NewWorktree(self.project()?.id()),
             (Action::NewProject, _) => Offer::NewProject,
             (Action::NewMachine, _) => Offer::NewMachine,
-            (Action::RenameView, Target::Pane(_, PaneRow { terminal: Some(terminal), .. })) => {
+            (Action::RenameView, Target::View(_, ViewRow { terminal: Some(terminal), .. })) => {
                 Offer::Rename(Renames::Terminal(*terminal))
             },
             (Action::RenameWorktree, Target::Worktree(_, row)) => {
@@ -752,7 +752,7 @@ impl Target {
             (Action::RenameProject, Target::Project(_, ProjectTarget { project, .. })) => {
                 Offer::Rename(Renames::Project(project.id()))
             },
-            (Action::CloseView, Target::Pane(_, row)) => Offer::CloseView(row),
+            (Action::CloseView, Target::View(_, row)) => Offer::CloseView(row),
             (Action::CloseWorktree, Target::Worktree(_, row)) => Offer::CloseWorktree(row),
             (Action::DeleteProject, Target::Project(_, target)) => {
                 Offer::DeleteProject(target.project.listed())
@@ -776,7 +776,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(target.project.clone()),
             Target::Worktree(_, row) => Some(row.place.project.clone()),
-            Target::Pane(_, row) => Some(ProjectRow::of(row.session.clone())),
+            Target::View(_, row) => Some(ProjectRow::of(row.session.clone())),
             Target::Machine(_) => None,
         }
     }
@@ -785,13 +785,13 @@ impl Target {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
             Target::Worktree(_, row) => Some(&row.folder),
-            Target::Pane(_, row) => row.cwd.as_deref(),
+            Target::View(_, row) => row.cwd.as_deref(),
         }
     }
 
     fn held_repository(&self) -> Option<&str> {
         match self {
-            Target::Pane(_, row) => row.repository.as_deref(),
+            Target::View(_, row) => row.repository.as_deref(),
             Target::Worktree(_, row) => row.repository.as_deref(),
             Target::Project(..) | Target::Machine(_) => None,
         }
@@ -815,7 +815,7 @@ impl Target {
 
     fn folder_hint(&self) -> String {
         let held = match self {
-            Target::Pane(_, row) => row.cwd.clone(),
+            Target::View(_, row) => row.cwd.clone(),
             Target::Worktree(_, row) => Some(row.folder.clone()),
             Target::Project(_, project) => Some(project.dir.clone()),
             Target::Machine(_) => None,
@@ -830,7 +830,7 @@ impl Target {
         match self {
             Target::Project(..) | Target::Machine(_) => None,
             Target::Worktree(_, row) => row.branch.as_deref(),
-            Target::Pane(_, row) => row.branch.as_deref(),
+            Target::View(_, row) => row.branch.as_deref(),
         }
     }
 
@@ -840,8 +840,8 @@ impl Target {
             (Target::Machine(machine), brief::Scope::Session | brief::Scope::Highlighted) => {
                 Briefed::Machine(machine.clone())
             },
-            (Target::Pane(machine, row), brief::Scope::Highlighted) => {
-                Briefed::Agent(machine.clone(), row.session.name().clone(), row.pane.id())
+            (Target::View(machine, row), brief::Scope::Highlighted) => {
+                Briefed::Agent(machine.clone(), row.session.name().clone(), row.view.id())
             },
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
@@ -851,18 +851,18 @@ impl Target {
                 Target::Project(machine, ProjectTarget { project, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(machine.clone(), project.listed().name().clone()),
-            (Target::Pane(machine, PaneRow { session, .. }), brief::Scope::Session) => {
+            (Target::View(machine, ViewRow { session, .. }), brief::Scope::Session) => {
                 Briefed::Session(machine.clone(), session.name().clone())
             },
         }
     }
 }
 
-fn started(keys: &Keys, row: &PaneRow, skill: &str) -> Result<Wants, String> {
-    let Beside { session, pane, cwd } = row.beside()?;
+fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
+    let Beside { session, view, cwd } = row.beside()?;
     let command = agents::on_skill(keys.agent.harness(), skill, None);
-    let opens = Opens::Pane { beside: pane.id(), command };
-    Ok(Wants::Open { session, pane, cwd, opens })
+    let opens = Opens::View { beside: view.id(), command };
+    Ok(Wants::Open { session, view, cwd, opens })
 }
 
 const ASKS_FIRST: [Action; 4] =
@@ -887,28 +887,28 @@ fn yes_key(action: Action) -> char {
 
 struct Beside {
     session: Listed,
-    pane: PaneKey,
+    view: ViewKey,
     cwd: Directory,
 }
 
-impl PaneRow {
+impl ViewRow {
     fn beside(&self) -> Result<Beside, String> {
-        let pane = self.pane;
+        let view = self.view;
         let Some(cwd) = self.cwd.clone() else {
             return Err(format!(
-                "menu: luneta does not know yet where view {pane} works; try again in a moment"
+                "menu: luneta does not know yet where view {view} works; try again in a moment"
             ));
         };
         let cwd =
-            Directory::parse(cwd).map_err(|why| format!("menu: where view {pane} works, {why}"))?;
-        Ok(Beside { session: self.session.clone(), pane, cwd })
+            Directory::parse(cwd).map_err(|why| format!("menu: where view {view} works, {why}"))?;
+        Ok(Beside { session: self.session.clone(), view, cwd })
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
         let beside = self.beside()?;
-        let pane = beside.pane;
+        let view = beside.view;
         let Some(PullRequest { number, state, url, .. }) = &self.pull_request else {
-            return Err(format!("menu: gh has found no pull request of view {pane}'s branch"));
+            return Err(format!("menu: gh has found no pull request of view {view}'s branch"));
         };
         match (state, url) {
             (State::Open | State::Draft, Some(url)) => {
@@ -922,7 +922,7 @@ impl PaneRow {
             (State::Merged, _) => Err(format!("menu: #{number} is merged")),
             (State::Closed, _) => Err(format!("menu: #{number} is closed")),
             (State::Open | State::Draft, None) => Err(format!(
-                "menu: view {pane}'s lunetad does not say the page of #{number}, as an older \
+                "menu: view {view}'s lunetad does not say the page of #{number}, as an older \
                  one does not"
             )),
         }
@@ -930,34 +930,34 @@ impl PaneRow {
 
     fn ended(&self) -> Result<(Beside, Ended), String> {
         let beside = self.beside()?;
-        let pane = beside.pane;
+        let view = beside.view;
         match &self.ran {
             Ran::Ended(ended) => Ok((beside, ended.clone())),
             Ran::Going(Some(command)) => Err(format!(
-                "menu: view {pane} runs `{}` still, and what it prints is not over",
+                "menu: view {view} runs `{}` still, and what it prints is not over",
                 command.as_str()
             )),
             Ran::Going(None) => Err(format!(
-                "menu: view {pane} runs a command still, and what it prints is not over"
+                "menu: view {view} runs a command still, and what it prints is not over"
             )),
             Ran::Stopped(Some(command)) => Err(format!(
-                "menu: `{}` is stopped in view {pane}, and not over; bring it back with `fg`",
+                "menu: `{}` is stopped in view {view}, and not over; bring it back with `fg`",
                 command.as_str()
             )),
             Ran::Stopped(None) => Err(format!(
-                "menu: a job is stopped in view {pane}, and not over; bring it back with `fg`"
+                "menu: a job is stopped in view {view}, and not over; bring it back with `fg`"
             )),
             Ran::EndedUnsaid => Err(format!(
-                "menu: view {pane}'s shell said no line of the command it ran last, by which \
+                "menu: view {view}'s shell said no line of the command it ran last, by which \
                  luneta finds what it printed"
             )),
             Ran::Unknown => Err(format!(
-                "menu: what view {pane}'s shell ran is in words this luneta cannot read, as a \
+                "menu: what view {view}'s shell ran is in words this luneta cannot read, as a \
                  newer lunetad's"
             )),
-            Ran::Ready => Err(format!("menu: view {pane}'s shell has run nothing yet")),
+            Ran::Ready => Err(format!("menu: view {view}'s shell has run nothing yet")),
             Ran::Unhooked => Err(format!(
-                "menu: view {pane}'s shell marks none of the commands it runs; a shell that \
+                "menu: view {view}'s shell marks none of the commands it runs; a shell that \
                  writes OSC 133, as fish 4 does, marks them"
             )),
         }
@@ -966,7 +966,7 @@ impl PaneRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Opens {
-    Pane { beside: u32, command: Vec<String> },
+    View { beside: u32, command: Vec<String> },
     Tab { name: Option<String>, command: Vec<String> },
 }
 
@@ -986,9 +986,9 @@ pub enum Wants {
     Plan { session: Listed, scope: Scope },
     Prunes { dir: Directory },
     Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Open { session: Listed, pane: PaneKey, cwd: Directory, opens: Opens },
+    Open { session: Listed, view: ViewKey, cwd: Directory, opens: Opens },
     Pull(Work, Wanted),
-    Printed { session: Listed, pane: PaneKey, ended: Ended },
+    Printed { session: Listed, view: ViewKey, ended: Ended },
     Checks { page: PullPage },
     Make {
         session: SessionName,
@@ -1011,7 +1011,7 @@ pub enum Done {
     Ssh(Destination),
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
-    Welcome { on: Machine, session: Listed, pane: PaneKey },
+    Welcome { on: Machine, session: Listed, view: ViewKey },
     Project { on: Machine, folder: String, name: Option<projects::Name> },
     Rename(Machine, Rename),
     Quit,
@@ -1243,8 +1243,8 @@ impl Menu {
             },
             Offer::Last(row, last) => match row.ended() {
                 Ok((beside, ended)) => {
-                    let (session, pane) = (beside.session.clone(), beside.pane);
-                    let wants = Wants::Printed { session, pane, ended: ended.clone() };
+                    let (session, view) = (beside.session.clone(), beside.view);
+                    let wants = Wants::Printed { session, view, ended: ended.clone() };
                     stays(Stage::Reading { keys, last, beside, ended }, wants)
                 },
                 Err(reason) => wrong(reason),
@@ -1257,16 +1257,16 @@ impl Menu {
                 Err(reason) => wrong(reason),
             },
             Offer::NewView(row) => match row.beside() {
-                Ok(Beside { session, pane, cwd }) => {
-                    let opens = Opens::Pane { beside: pane.id(), command: Vec::new() };
+                Ok(Beside { session, view, cwd }) => {
+                    let opens = Opens::View { beside: view.id(), command: Vec::new() };
                     let stage = Stage::Opening { keys };
-                    stays(stage, Wants::Open { session, pane, cwd, opens })
+                    stays(stage, Wants::Open { session, view, cwd, opens })
                 },
                 Err(reason) => wrong(reason),
             },
             Offer::NewWelcome(row) => {
                 let on = target.machine().clone();
-                Did::Closed(Done::Welcome { on, session: row.session.clone(), pane: row.pane })
+                Did::Closed(Done::Welcome { on, session: row.session.clone(), view: row.view })
             },
             Offer::NewWorktree(project) => {
                 let typing = Typing::Branch(project);
@@ -1281,7 +1281,7 @@ impl Menu {
             Offer::NewMachine => typing(keys, Typing::Machine),
             Offer::Rename(renames) => typing(keys, Typing::Rename(renames)),
             Offer::CloseView(row) => {
-                deleting(keys, Action::CloseView, &row.session, Scope::Pane(row.pane))
+                deleting(keys, Action::CloseView, &row.session, Scope::View(row.view))
             },
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
@@ -1310,7 +1310,7 @@ impl Menu {
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
-                (Pressed::Switched(agent), Target::Pane(_, row))
+                (Pressed::Switched(agent), Target::View(_, row))
                     if let Some(search) = &mut keys.search =>
                 {
                     search.refind();
@@ -1324,7 +1324,7 @@ impl Menu {
                 (Pressed::Moved | Pressed::Nothing, _) => {
                     stays(Stage::Choosing(keys), Wants::Nothing)
                 },
-                (Pressed::Start(skill), Target::Pane(_, row)) => {
+                (Pressed::Start(skill), Target::View(_, row)) => {
                     match started(&keys, row, &skill) {
                         Ok(wants) => stays(Stage::Opening { keys }, wants),
                         Err(reason) => Did::Closed(Done::Wrong(reason)),
@@ -1489,11 +1489,11 @@ impl Menu {
             Ok(dir) => dir,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        let opening = |session: Listed, pane: PaneKey, opens: Opens| {
+        let opening = |session: Listed, view: ViewKey, opens: Opens| {
             let (cwd, branch, ran) = (Some(folder.clone()), branch.clone(), Ran::Unhooked);
-            let row = PaneRow {
+            let row = ViewRow {
                 session: session.clone(),
-                pane,
+                view,
                 terminal: None,
                 cwd,
                 branch,
@@ -1501,23 +1501,23 @@ impl Menu {
                 pull_request: None,
                 ran,
             };
-            let target = Target::Pane(on.clone(), row);
+            let target = Target::View(on.clone(), row);
             let step = Step::Waiting(Wait::Opening);
             let stage = Stage::Pull { work: work.clone(), agent, step };
             let cwd = dir.clone();
-            Did::Stays(Menu { number, target, stage }, Wants::Open { session, pane, cwd, opens })
+            Did::Stays(Menu { number, target, stage }, Wants::Open { session, view, cwd, opens })
         };
         match (at, pull) {
-            (At::There((session, pane)), Pull::Worktree) => {
-                Did::Closed(Done::Go(on, Place::Pane(PanePlace { session, pane })))
+            (At::There((session, view)), Pull::Worktree) => {
+                Did::Closed(Done::Go(on, Place::View(ViewPlace { session, view })))
             },
-            (At::There((session, pane)), Pull::Agent) => {
-                let opens = Opens::Pane { beside: pane.id(), command };
-                opening(session, pane, opens)
+            (At::There((session, view)), Pull::Agent) => {
+                let opens = Opens::View { beside: view.id(), command };
+                opening(session, view, opens)
             },
-            (At::Session((session, pane)), _) => {
+            (At::Session((session, view)), _) => {
                 let opens = Opens::Tab { name: Some(work.tab()), command };
-                opening(session, pane, opens)
+                opening(session, view, opens)
             },
             (At::Clone { cwd: holder, name }, _) => {
                 let (session, cwd, tab) = (name.clone(), dir, work.tab());
@@ -1541,42 +1541,42 @@ impl Menu {
     }
 
     pub fn reran(&mut self, ran: Ran) {
-        if let Target::Pane(_, row) = &mut self.target {
+        if let Target::View(_, row) = &mut self.target {
             row.ran = ran;
         }
     }
 
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
         let Menu { number, target, stage } = self;
-        let Stage::Reading { keys, last, beside: Beside { session, pane, cwd }, ended } = stage
+        let Stage::Reading { keys, last, beside: Beside { session, view, cwd }, ended } = stage
         else {
             return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
         };
         let printed = match printed {
             Ok(printed) => printed,
             Err(why) => {
-                return Did::Closed(Done::Wrong(format!("menu: what view {pane} printed: {why}")));
+                return Did::Closed(Done::Wrong(format!("menu: what view {view} printed: {why}")));
             },
         };
-        let still = |row: &PaneRow| matches!(&row.ran, Ran::Ended(now) if *now == ended);
-        if !matches!(&target, Target::Pane(_, row) if still(row)) {
+        let still = |row: &ViewRow| matches!(&row.ran, Ran::Ended(now) if *now == ended);
+        if !matches!(&target, Target::View(_, row) if still(row)) {
             return Did::Closed(Done::Wrong(format!(
-                "menu: view {pane}'s shell went on as luneta read what `{}` printed; ask again",
+                "menu: view {view}'s shell went on as luneta read what `{}` printed; ask again",
                 ended.command.as_str()
             )));
         }
         let prompt = printed::prompt(&printed, last.asks(), &ended);
         let files: Vec<&str> = printed.file().into_iter().collect();
         let command = agents::on_words(keys.agent.harness(), prompt, &files);
-        let opens = Opens::Pane { beside: pane.id(), command };
+        let opens = Opens::View { beside: view.id(), command };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, pane, cwd, opens };
+        let wants = Wants::Open { session, view, cwd, opens };
         Did::Stays(Menu { number, target, stage }, wants)
     }
 
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
         let Menu { number: menu, target, stage } = self;
-        let Stage::Fetching { keys, beside: Beside { session, pane, cwd }, page } = stage else {
+        let Stage::Fetching { keys, beside: Beside { session, view, cwd }, page } = stage else {
             return Did::Stays(Menu { number: menu, target, stage }, Wants::Nothing);
         };
         let number = page.number();
@@ -1598,9 +1598,9 @@ impl Menu {
         }
         let prompt = checks::prompt(&page, &failing);
         let command = agents::on_words(keys.agent.harness(), prompt, &checks::files(&failing));
-        let opens = Opens::Pane { beside: pane.id(), command };
+        let opens = Opens::View { beside: view.id(), command };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, pane, cwd, opens };
+        let wants = Wants::Open { session, view, cwd, opens };
         Did::Stays(Menu { number: menu, target, stage }, wants)
     }
 
@@ -2283,24 +2283,24 @@ fn all_keys_line(inner: usize) -> Line<'static> {
 
 fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
     let name = agents::name(agent.harness());
-    let pane = match agent {
-        Picked::ByPane(_) => Some(VIEW_S),
+    let view = match agent {
+        Picked::ByView(_) => Some(VIEW_S),
         Picked::ByYou(_) => None,
     };
     let key = Hint::Tab.label();
-    let wide = |(pane, does): &(Option<&str>, Option<&str>)| {
-        let pane = pane.map_or(0, UnicodeWidthStr::width);
+    let wide = |(view, does): &(Option<&str>, Option<&str>)| {
+        let view = view.map_or(0, UnicodeWidthStr::width);
         let does = does.map_or(0, |does| 1 + does.width());
-        icons::WIDTH + 1 + name.width() + pane + GAP + key.width() + does
+        icons::WIDTH + 1 + name.width() + view + GAP + key.width() + does
     };
     let does = NEXT_DOES.map(Some);
-    let tries = [(pane, does[0]), (pane, does[1]), (pane, None), (None, None)];
+    let tries = [(view, does[0]), (view, does[1]), (view, None), (None, None)];
     let icon = icons::harness(agent.harness());
     let mut spans = vec![Span::raw(" "), Span::raw(icon), Span::raw(" ")];
     match tries.into_iter().find(|tried| wide(tried) <= inner) {
-        Some((pane, does)) => {
+        Some((view, does)) => {
             spans.push(Span::raw(name));
-            spans.extend(pane.map(|pane| Span::styled(pane, Style::new().fg(NAME))));
+            spans.extend(view.map(|view| Span::styled(view, Style::new().fg(NAME))));
             spans.push(Span::raw(" ".repeat(GAP)));
             spans.push(Span::styled(key, Style::new().fg(ACCENT)));
             if let Some(does) = does {
@@ -2493,10 +2493,10 @@ mod tests {
         Said::new(text.to_owned()).unwrap()
     }
 
-    fn row() -> PaneRow {
-        PaneRow {
+    fn row() -> ViewRow {
+        ViewRow {
             session: listed(),
-            pane: PaneKey::terminal(4),
+            view: ViewKey::terminal(4),
             terminal: None,
             cwd: Some("/w/luneta/main".to_owned()),
             branch: Some("feat/menu".to_owned()),
@@ -2506,8 +2506,8 @@ mod tests {
         }
     }
 
-    fn pane_row() -> Target {
-        Target::Pane(Machine::Local, row())
+    fn view_row() -> Target {
+        Target::View(Machine::Local, row())
     }
 
     fn project() -> ProjectRow {
@@ -2518,13 +2518,13 @@ mod tests {
         ViewId::of(9).unwrap()
     }
 
-    fn own_row() -> PaneRow {
+    fn own_row() -> ViewRow {
         let session = project().listed().clone();
-        PaneRow { session, pane: PaneKey::terminal(4), terminal: Some(terminal()), ..row() }
+        ViewRow { session, view: ViewKey::terminal(4), terminal: Some(terminal()), ..row() }
     }
 
-    fn own_pane() -> Target {
-        Target::Pane(Machine::Local, own_row())
+    fn own_view() -> Target {
+        Target::View(Machine::Local, own_row())
     }
 
     fn project_on(on: Machine) -> Target {
@@ -2556,7 +2556,7 @@ mod tests {
     }
 
     fn beside_row(opens: Opens) -> Wants {
-        Wants::Open { session: listed(), pane: PaneKey::terminal(4), cwd: main_dir(), opens }
+        Wants::Open { session: listed(), view: ViewKey::terminal(4), cwd: main_dir(), opens }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -2602,7 +2602,7 @@ mod tests {
 
     #[test]
     fn a_key_opens_its_group_and_a_key_in_it_opens_a_view_beside_the_row() {
-        let (menu, wants) = stays(opened(own_pane(), Some('n')));
+        let (menu, wants) = stays(opened(own_view(), Some('n')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
@@ -2618,9 +2618,9 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('v')));
         let cwd = main_dir();
-        let opens = Opens::Pane { beside: 4, command: Vec::new() };
-        let (session, pane) = (project().listed().clone(), PaneKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, pane, cwd: cwd.clone(), opens });
+        let opens = Opens::View { beside: 4, command: Vec::new() };
+        let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
+        assert_eq!(wants, Wants::Open { session, view, cwd: cwd.clone(), opens });
         let (menu, wants) = stays(menu.key(&char('v')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
@@ -2640,22 +2640,22 @@ mod tests {
         };
         let (id, here) = (project().id(), || Machine::Local);
         let branch = || Branch::parse("feat/x").unwrap();
-        assert_eq!(made(own_pane(), "feat/x"), Done::Worktree(here(), id, branch()));
+        assert_eq!(made(own_view(), "feat/x"), Done::Worktree(here(), id, branch()));
         assert_eq!(made(worktree_on(here()), " feat/x "), Done::Worktree(here(), id, branch()));
         assert_eq!(made(session_row(), "feat/x"), Done::Worktree(here(), id, branch()));
         let vps = || Machine::Remote("me@vps".parse().unwrap());
-        let far = Target::Pane(vps(), own_row());
+        let far = Target::View(vps(), own_row());
         assert_eq!(made(far, "feat/x"), Done::Worktree(vps(), id, branch()));
         assert_eq!(made(worktree_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
         assert_eq!(made(project_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
-        let menu = asked(own_pane());
+        let menu = asked(own_view());
         assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
             "─ New worktree ────────────────",
             " _",
             " its branch: one git has is",
         ]);
         let refused = |typed: &str| {
-            let menu = typed.chars().fold(asked(own_pane()), |menu, c| stays(menu.key(&char(c))).0);
+            let menu = typed.chars().fold(asked(own_view()), |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&enter));
             let Stage::Typing { wrong: Some(wrong), .. } = &menu.stage else {
                 panic!("{typed:?} keeps the box open, saying why");
@@ -2671,7 +2671,7 @@ mod tests {
 
     #[test]
     fn the_first_group_has_luneta_s_keys_and_backspace_goes_back_to_it() {
-        let (menu, _) = stays(opened(own_pane(), None));
+        let (menu, _) = stays(opened(own_view(), None));
         assert_eq!(
             text(&menu.lines(31, 11, 0).0),
             [
@@ -2692,22 +2692,22 @@ mod tests {
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ luneta ──────── luneta/main ─");
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
-        assert!(Menu::open(1, pane_row(), Some('x'), PICKED).is_none());
+        assert!(Menu::open(1, view_row(), Some('x'), PICKED).is_none());
     }
 
     #[test]
-    fn an_own_session_s_pane_opens_its_agents_beside_it() {
-        let (_, wants) = stays(stays(opened(own_pane(), Some('c'))).0.key(&char('t')));
+    fn an_own_session_s_view_opens_its_agents_beside_it() {
+        let (_, wants) = stays(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
-        let opens = Opens::Pane { beside: 4, command };
-        let (session, pane) = (project().listed().clone(), PaneKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, pane, cwd: main_dir(), opens });
+        let opens = Opens::View { beside: 4, command };
+        let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
+        assert_eq!(wants, Wants::Open { session, view, cwd: main_dir(), opens });
     }
 
     #[test]
     fn the_legend_lists_the_sidebar_s_commands_then_the_menu_s_groups_for_the_row() {
         assert_eq!(
-            text(&legend(Some(&own_pane()), 31, 15).0),
+            text(&legend(Some(&own_view()), 31, 15).0),
             [
                 "─ luneta ──────────────────────",
                 " /  Search",
@@ -2767,8 +2767,8 @@ mod tests {
     fn each_action_of_the_menu_is_offered_on_some_row() {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         let rows = [
-            own_pane(),
-            pane_row(),
+            own_view(),
+            view_row(),
             worktree_on(Machine::Local),
             project_on(Machine::Local),
             Target::Machine(vps),
@@ -2780,7 +2780,7 @@ mod tests {
 
     #[test]
     fn a_key_of_the_skills_group_starts_an_agent_on_its_skill_in_the_harness_named() {
-        let (menu, wants) = stays(opened(pane_row(), Some('c')));
+        let (menu, wants) = stays(opened(view_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
             text(&menu.lines(31, 10, 0).0),
@@ -2798,9 +2798,9 @@ mod tests {
         );
         let (_, wants) = stays(menu.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
+        assert_eq!(wants, beside_row(Opens::View { beside: 4, command: command.to_vec() }));
 
-        let (menu, _) = stays(opened(pane_row(), Some('c')));
+        let (menu, _) = stays(opened(view_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
         let lines = text(&menu.lines(31, 10, 0).0);
@@ -2810,13 +2810,13 @@ mod tests {
         ]);
         let (_, wants) = stays(menu.key(&char('t')));
         let command = ["pi", "/skill:thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command: command.to_vec() }));
+        assert_eq!(wants, beside_row(Opens::View { beside: 4, command: command.to_vec() }));
     }
 
     #[test]
-    fn the_agent_line_says_where_the_pane_s_agent_picked_the_harness() {
-        let pi = Picked::ByPane(Harness::Pi);
-        let (menu, _) = stays(Menu::open(1, pane_row(), Some('c'), pi).unwrap());
+    fn the_agent_line_says_where_the_view_s_agent_picked_the_harness() {
+        let pi = Picked::ByView(Harness::Pi);
+        let (menu, _) = stays(Menu::open(1, view_row(), Some('c'), pi).unwrap());
         let line = |menu: &Menu, width| text(&menu.lines(width, 10, 0).0)[7].clone();
         assert_eq!(line(&menu, 38), " \u{f03ff} pi, the view's  <TAB> another agent");
         assert_eq!(line(&menu, 37), " \u{f03ff} pi, the view's  <TAB> another");
@@ -2830,7 +2830,7 @@ mod tests {
 
     #[test]
     fn tab_does_nothing_where_the_menu_starts_no_agent() {
-        let (menu, _) = stays(opened(pane_row(), None));
+        let (menu, _) = stays(opened(view_row(), None));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Nothing);
         let (_, wants) = stays(menu.key(&char('c')));
@@ -2843,7 +2843,7 @@ mod tests {
     }
 
     fn ended_row() -> Target {
-        Target::Pane(Machine::Local, PaneRow { ran: Ran::Ended(cargo_test()), ..row() })
+        Target::View(Machine::Local, ViewRow { ran: Ran::Ended(cargo_test()), ..row() })
     }
 
     #[test]
@@ -2861,21 +2861,21 @@ mod tests {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy = PaneRow { ran: Ran::Going(Some(said("cargo test"))), ..row() };
-        let busy = Target::Pane(Machine::Local, busy);
+        let busy = ViewRow { ran: Ran::Going(Some(said("cargo test"))), ..row() };
+        let busy = Target::View(Machine::Local, busy);
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
-        let pane = PaneKey::terminal(4);
-        assert_eq!(wants, Wants::Printed { session: listed(), pane, ended: cargo_test() });
+        let view = ViewKey::terminal(4);
+        assert_eq!(wants, Wants::Printed { session: listed(), view, ended: cargo_test() });
     }
 
     #[test]
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        let pane = PaneKey::terminal(4);
-        assert_eq!(wants, Wants::Printed { session: listed(), pane, ended: cargo_test() });
+        let view = ViewKey::terminal(4);
+        assert_eq!(wants, Wants::Printed { session: listed(), view, ended: cargo_test() });
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
@@ -2887,15 +2887,15 @@ mod tests {
                       printed is in /run/luneta/printed/1.txt.";
         let read = "Read(//run/luneta/printed/1.txt)";
         let command = ["claude", "--allowedTools", read, "--", prompt];
-        let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
+        let opens = Opens::View { beside: 4, command: command.map(str::to_owned).to_vec() };
         assert_eq!(wants, beside_row(opens));
 
-        let pi = Picked::ByPane(Harness::Pi);
+        let pi = Picked::ByView(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
         let (menu, _) = stays(menu.key(&char('e')));
         let kept = Kept { file: "/run/luneta/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
         let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
-        let opens = Opens::Pane { beside: 4, command: vec!["pi".to_owned(), prompt.to_owned()] };
+        let opens = Opens::View { beside: 4, command: vec!["pi".to_owned(), prompt.to_owned()] };
         assert_eq!(wants, beside_row(opens));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -2904,7 +2904,7 @@ mod tests {
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), prompt.to_owned()];
-        let opens = Opens::Pane { beside: 4, command };
+        let opens = Opens::View { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
@@ -2922,7 +2922,7 @@ mod tests {
             checks: None,
             stale: false,
         });
-        Target::Pane(Machine::Local, PaneRow { pull_request, ..row() })
+        Target::View(Machine::Local, ViewRow { pull_request, ..row() })
     }
 
     const PULL: &str = "https://github.com/owner/luneta/pull/328";
@@ -2951,7 +2951,7 @@ mod tests {
         let prompt = checks::prompt(&PullPage::parse(PULL).unwrap(), &failing(2, 0));
         let read = "Read(//run/luneta/checks/1.log)";
         let command = ["claude", "--allowedTools", read, "--", &prompt];
-        let opens = Opens::Pane { beside: 4, command: command.map(str::to_owned).to_vec() };
+        let opens = Opens::View { beside: 4, command: command.map(str::to_owned).to_vec() };
         assert_eq!(wants, beside_row(opens));
 
         let fetched = |checks: Result<Failing, String>| {
@@ -2983,7 +2983,7 @@ mod tests {
         };
         let wrong = |why: &str| Done::Wrong(why.to_owned());
         let none = "menu: gh has found no pull request of view 4's branch";
-        assert_eq!(refused(pane_row()), wrong(none));
+        assert_eq!(refused(view_row()), wrong(none));
         assert_eq!(refused(pull_row(State::Merged, Some(PULL))), wrong("menu: #328 is merged"));
         assert_eq!(refused(pull_row(State::Closed, Some(PULL))), wrong("menu: #328 is closed"));
         let issue = "https://github.com/owner/luneta/issues/328";
@@ -3000,7 +3000,7 @@ mod tests {
             refused(pull_row(State::Open, None)),
             wrong("menu: view 4's lunetad does not say the page of #328, as an older one does not")
         );
-        let unsaid = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        let unsaid = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
@@ -3013,7 +3013,7 @@ mod tests {
                 done => panic!("it did {done:?}"),
             }
         };
-        let ran = |ran| Target::Pane(Machine::Local, PaneRow { ran, ..row() });
+        let ran = |ran| Target::View(Machine::Local, ViewRow { ran, ..row() });
         assert_eq!(
             refused(ran(Ran::Going(Some(said("make"))))),
             "menu: view 4 runs `make` still, and what it prints is not over"
@@ -3050,7 +3050,7 @@ mod tests {
 
     #[test]
     fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
-        for row in [pane_row(), session_row()] {
+        for row in [view_row(), session_row()] {
             let did = Menu::open(1, row.clone(), Some('a'), PICKED).expect("the menu has `a`");
             assert_eq!(closed(did), Done::Ask(row.clone()));
             let (menu, _) = stays(opened(row.clone(), None));
@@ -3062,7 +3062,7 @@ mod tests {
     fn i_opens_the_issue_box_for_the_repository_of_the_row() {
         let vps = Machine::Remote("vps".parse().unwrap());
         for on in [Machine::Local, vps] {
-            let row = Target::Pane(on.clone(), row());
+            let row = Target::View(on.clone(), row());
             let (home, name) = ("/w/luneta".to_owned(), "luneta".to_owned());
             let repository = Repository { on, dir: main_dir(), home, name };
             let did = Menu::open(1, row.clone(), Some('i'), PICKED).expect("the menu has `i`");
@@ -3070,8 +3070,8 @@ mod tests {
             let (menu, _) = stays(opened(row, None));
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
         }
-        let unrepositoried = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
-        let nowhere = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        let unrepositoried = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
+        let nowhere = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
         for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
             assert!(Menu::open(1, row.clone(), Some('i'), PICKED).is_none(), "{row:?}");
             let (menu, _) = stays(opened(row.clone(), None));
@@ -3095,9 +3095,9 @@ mod tests {
         );
         let luneta = || listed().name().clone();
         for (row, key, briefed) in [
-            (pane_row(), 'z', Briefed::Every),
-            (pane_row(), 's', Briefed::Session(Machine::Local, luneta())),
-            (pane_row(), 'h', Briefed::Agent(Machine::Local, luneta(), 4)),
+            (view_row(), 'z', Briefed::Every),
+            (view_row(), 's', Briefed::Session(Machine::Local, luneta())),
+            (view_row(), 'h', Briefed::Agent(Machine::Local, luneta(), 4)),
             (session_row(), 'h', Briefed::Session(Machine::Local, luneta())),
         ] {
             let (menu, _) = stays(opened(row, Some('b')));
@@ -3117,8 +3117,8 @@ mod tests {
     fn q_quits_luneta_from_the_menu_of_any_row_on_any_machine() {
         let vps = Machine::Remote("me@vps".parse().unwrap());
         let rows = [
-            own_pane(),
-            Target::Pane(vps.clone(), own_row()),
+            own_view(),
+            Target::View(vps.clone(), own_row()),
             worktree_on(vps),
             project_on(Machine::Local),
             local_header(),
@@ -3145,7 +3145,7 @@ mod tests {
         let enter = KeyEvent::from(KeyCode::Enter);
         let asked = |target: Target| stays(stays(opened(target, Some('n'))).0.key(&char('p'))).0;
         for (target, folder) in [
-            (pane_row(), "/w/luneta/main".to_owned()),
+            (view_row(), "/w/luneta/main".to_owned()),
             (worktree_on(Machine::Local), "/w/luneta/main".to_owned()),
             (session_row(), "/w/luneta".to_owned()),
             (local_header(), own_folder()),
@@ -3157,7 +3157,7 @@ mod tests {
             let named = closed(stays(menu.key(&enter)).0.key(&enter));
             assert_eq!(named, Done::Project { on, folder, name: None }, "{target:?}");
         }
-        let menu = asked(pane_row());
+        let menu = asked(view_row());
         assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
             "─ New project ─────────────────",
             " /w/luneta/main_",
@@ -3196,9 +3196,9 @@ mod tests {
         };
         let logs = || projects::Name::parse("logs").unwrap();
         let to = || Some(logs());
-        let done = closed(renamed(own_pane(), "logs"));
+        let done = closed(renamed(own_view(), "logs"));
         assert_eq!(done, Done::Rename(Machine::Local, Rename::Terminal(terminal(), to())));
-        let done = closed(renamed(Target::Pane(vps(), own_row()), ""));
+        let done = closed(renamed(Target::View(vps(), own_row()), ""));
         assert_eq!(done, Done::Rename(vps(), Rename::Terminal(terminal(), None)));
         let done = closed(renamed(worktree_on(vps()), "logs"));
         assert_eq!(done, Done::Rename(vps(), Rename::Worktree(worktree(), to())));
@@ -3228,14 +3228,14 @@ mod tests {
         assert_eq!(done, Done::Rename(Machine::Local, Rename::Worktree(worktree(), api)));
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('r')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" _", " its new name; with none, it"]);
-        for target in [pane_row(), local_header(), remote_header()] {
+        for target in [view_row(), local_header(), remote_header()] {
             assert!(Menu::open(1, target.clone(), Some('r'), PICKED).is_none(), "{target:?}");
         }
     }
 
     #[test]
     fn n_m_opens_a_box_for_a_machine_s_destination() {
-        for target in [pane_row(), session_row(), local_header(), remote_header()] {
+        for target in [view_row(), session_row(), local_header(), remote_header()] {
             let (menu, wants) = stays(opened(target, Some('n')));
             let (menu, _) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing);
@@ -3261,7 +3261,7 @@ mod tests {
             let added = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
             assert_eq!(added, Done::Ssh("me@v".parse().unwrap()));
         }
-        let (menu, _) = stays(opened(pane_row(), Some('n')));
+        let (menu, _) = stays(opened(view_row(), Some('n')));
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(title(match &menu.stage {
@@ -3277,8 +3277,8 @@ mod tests {
             let (menu, _) = stays(opened(target, None));
             text(&menu.lines(40, 12, 0).0)[1..].to_vec()
         };
-        let pane = Target::Pane(vps(), own_row());
-        assert_eq!(root(pane.clone()), [
+        let view = Target::View(vps(), own_row());
+        assert_eq!(root(view.clone()), [
             " /  Search skills",
             " a  Ask",
             " i  File issue",
@@ -3290,12 +3290,12 @@ mod tests {
             " q  Quit luneta",
             " <ESC> - Close",
         ]);
-        let (_, wants) = stays(stays(opened(pane.clone(), Some('c'))).0.key(&char('t')));
+        let (_, wants) = stays(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec();
-        let opens = Opens::Pane { beside: 4, command };
-        let (session, at) = (project().listed().clone(), PaneKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, pane: at, cwd: main_dir(), opens });
-        let (menu, _) = stays(opened(pane.clone(), Some('n')));
+        let opens = Opens::View { beside: 4, command };
+        let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
+        assert_eq!(wants, Wants::Open { session, view: at, cwd: main_dir(), opens });
+        let (menu, _) = stays(opened(view.clone(), Some('n')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..6], [
             " v  new view",
             " h  new welcome view",
@@ -3303,14 +3303,14 @@ mod tests {
             " p  new project",
             " m  new machine",
         ]);
-        let (menu, _) = stays(opened(pane.clone(), Some('d')));
+        let (menu, _) = stays(opened(view.clone(), Some('d')));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
             " d  close the view",
             " m  delete merged worktrees",
             " <BS> - Back, <ESC> - Close",
         ]);
         let (_, wants) = stays(menu.key(&char('d')));
-        let (session, scope) = (project().listed().clone(), Scope::Pane(PaneKey::terminal(4)));
+        let (session, scope) = (project().listed().clone(), Scope::View(ViewKey::terminal(4)));
         assert_eq!(wants, Wants::Plan { session, scope });
 
         let (menu, _) = stays(opened(worktree_on(vps()), Some('d')));
@@ -3322,7 +3322,7 @@ mod tests {
 
         let name = || project().listed().name().clone();
         for (row, highlighted) in [
-            (pane, Briefed::Agent(vps(), name(), 4)),
+            (view, Briefed::Agent(vps(), name(), 4)),
             (project_on(vps()), Briefed::Session(vps(), name())),
         ] {
             for (key, briefed) in [
@@ -3364,7 +3364,7 @@ mod tests {
 
     #[test]
     fn the_merged_worktrees_key_is_on_a_row_in_a_repository_alone() {
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
@@ -3378,8 +3378,8 @@ mod tests {
         assert_eq!(wants, Wants::Prunes { dir: main_dir() });
         assert!(menu.sweeping() && menu.turning());
 
-        let outside = Target::Pane(Machine::Local, PaneRow { repository: None, ..row() });
-        let unplaced = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        let outside = Target::View(Machine::Local, ViewRow { repository: None, ..row() });
+        let unplaced = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
         for target in [outside, unplaced, project_on(Machine::Local), remote_header()] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
@@ -3395,9 +3395,9 @@ mod tests {
         plan.kept.push(prunes::Kept {
             folder: "/w/luneta/issue-308".to_owned(),
             number: 310,
-            why: "it has a pane".to_owned(),
+            why: "it has a view".to_owned(),
         });
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, wants) = stays(menu.swept(Ok(plan)));
         assert_eq!(wants, Wants::Nothing);
@@ -3411,7 +3411,7 @@ mod tests {
                 " issue-282  #297  4.5 GB",
                 " dev-check  #293  916 MB",
                 " dev-ci     #303    6 MB",
-                " Keeps issue-308: it has a pane",
+                " Keeps issue-308: it has a view",
                 " <y> Yes  <BS> Back  <ESC> Close",
             ]
         );
@@ -3423,11 +3423,11 @@ mod tests {
                 "",
                 " issue-282  #297  4.5 GB",
                 " …and 2 more",
-                " Keeps issue-308: it has a pane",
+                " Keeps issue-308: it has a view",
                 " <y> Yes  <BS> Back  <ESC> Close",
             ]
         );
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         let mut plan = merged_plan(&[]);
         for name in ["k1", "k2", "k3"] {
@@ -3454,10 +3454,10 @@ mod tests {
     #[test]
     fn the_list_goes_ahead_on_yes_with_what_it_listed_alone() {
         let (one, two) = (("one", 1, 5), ("two", 2, 5));
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         for key in ['y', 'm'] {
-            let (asked, _) = stays(opened(pane_row(), Some('d')));
+            let (asked, _) = stays(opened(view_row(), Some('d')));
             let (asked, _) = stays(asked.key(&char('m')));
             let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[one, two]))));
             assert_eq!(wants, Wants::Nothing);
@@ -3492,7 +3492,7 @@ mod tests {
     #[test]
     fn the_list_asks_of_the_branches_that_go_on_a_remote_too() {
         let asked = |plan: prunes::Plan| {
-            let (menu, _) = stays(opened(pane_row(), Some('d')));
+            let (menu, _) = stays(opened(view_row(), Some('d')));
             let (menu, _) = stays(menu.key(&char('m')));
             let (menu, _) = stays(menu.swept(Ok(plan)));
             text(&menu.lines(33, 20, 0).0)[1..3].to_vec()
@@ -3513,7 +3513,7 @@ mod tests {
 
     #[test]
     fn nothing_to_delete_asks_nothing() {
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         let (waiting, wants) = stays(menu.key(&char('y')));
         assert_eq!(wants, Wants::Nothing);
@@ -3532,12 +3532,12 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert!(!listed.sweeping());
 
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         let wrong = closed(menu.swept(Err("lunetad does not answer".to_owned())));
         assert_eq!(wrong, Done::Wrong("menu: nothing deleted: lunetad does not answer".to_owned()));
 
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
     }
@@ -3607,7 +3607,7 @@ mod tests {
             " m  delete merged worktrees",
             " <BS> - Back, <ESC> - Close",
         ]);
-        assert_eq!(at(own_pane(), Some('d')), [
+        assert_eq!(at(own_view(), Some('d')), [
             " d  close the view",
             " m  delete merged worktrees",
             " <BS> - Back, <ESC> - Close",
@@ -3647,12 +3647,12 @@ mod tests {
 
     #[test]
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
-        let unknown = Target::Pane(Machine::Local, PaneRow { cwd: None, ..row() });
+        let unknown = Target::View(Machine::Local, ViewRow { cwd: None, ..row() });
         let (menu, _) = stays(opened(unknown, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where view 4 works")));
-        let relative = PaneRow { cwd: Some("w".to_owned()), ..own_row() };
-        let relative = Target::Pane(Machine::Local, relative);
+        let relative = ViewRow { cwd: Some("w".to_owned()), ..own_row() };
+        let relative = Target::View(Machine::Local, relative);
         let (menu, _) = stays(opened(relative, Some('n')));
         let why = "menu: where view 4 works, \"w\" is no absolute path".to_owned();
         assert_eq!(closed(menu.key(&char('v'))), Done::Wrong(why));
@@ -3669,7 +3669,7 @@ mod tests {
 
     #[test]
     fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
-        let (menu, _) = stays(opened(pane_row(), None));
+        let (menu, _) = stays(opened(view_row(), None));
         let (mut menu, wants) = stays(menu.key(&char('/')));
         assert_eq!(wants, Wants::Skills { cwd: "/w/luneta/main".to_owned(), agent: CLAUDE });
         assert_eq!(
@@ -3689,13 +3689,13 @@ mod tests {
         ]);
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(CLAUDE, "tigerstyle", None);
-        let opens = Opens::Pane { beside: 4, command };
+        let opens = Opens::View { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
     }
 
     #[test]
     fn tab_in_the_search_finds_the_skills_of_the_other_harness() {
-        let (mut menu, _) = stays(opened(pane_row(), Some('/')));
+        let (mut menu, _) = stays(opened(view_row(), Some('/')));
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let (menu, _) = stays(menu.key(&char('t')));
         let (mut menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
@@ -3713,12 +3713,12 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(Harness::Pi, "tdd", None);
-        assert_eq!(wants, beside_row(Opens::Pane { beside: 4, command }));
+        assert_eq!(wants, beside_row(Opens::View { beside: 4, command }));
     }
 
     #[test]
     fn a_click_on_a_skill_starts_an_agent_on_it_as_enter_does() {
-        let (mut menu, _) = stays(opened(pane_row(), Some('/')));
+        let (mut menu, _) = stays(opened(view_row(), Some('/')));
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
         let (_, spots) = menu.lines(31, 6, 0);
@@ -3734,7 +3734,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         let command = agents::on_skill(CLAUDE, "code-review", None);
-        let opens = Opens::Pane { beside: 4, command };
+        let opens = Opens::View { beside: 4, command };
         assert_eq!(wants, beside_row(opens));
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
@@ -3768,18 +3768,18 @@ mod tests {
 
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
         let session = listed();
-        let deletes = Deletes::Pane(PaneKey::terminal(4));
+        let deletes = Deletes::View(ViewKey::terminal(4));
         close::plan(&Subject { session: &session, deletes, agents: Ok(agents) })
     }
 
     #[test]
     fn a_delete_with_no_agent_at_work_to_end_goes_ahead_at_once() {
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
-        let scope = Scope::Pane(PaneKey::terminal(4));
+        let scope = Scope::View(ViewKey::terminal(4));
         assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let done = closed(menu.planned(Ok(plan(vec![(4, Doing::Idle)]))));
-        let act = Act::Pane { session: listed().name().clone(), pane: PaneKey::terminal(4) };
+        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
         assert_eq!(done, Done::Act(Machine::Local, act));
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('d')));
         let (_, wants) = stays(menu.key(&char('d')));
@@ -3790,7 +3790,7 @@ mod tests {
     #[test]
     fn a_delete_that_would_end_an_agent_at_work_asks_first() {
         let busy = || vec![(4, Doing::Busy)];
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, wants) = stays(menu.planned(Ok(plan(busy()))));
         assert_eq!(wants, Wants::Nothing);
@@ -3807,7 +3807,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.planned(Ok(plan(busy()))));
         let (menu, wants) = stays(menu.key(&char('d')));
-        let scope = Scope::Pane(PaneKey::terminal(4));
+        let scope = Scope::View(ViewKey::terminal(4));
         assert_eq!(wants, Wants::Plan { session: listed(), scope });
         let waiting = || vec![(4, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(Ok(plan(waiting()))));
@@ -3815,21 +3815,21 @@ mod tests {
         let asking = text(&menu.lines(31, 9, 0).0);
         assert_eq!(asking[1..3], [" Close the view? 1 agent, 1", " waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
-        let act = Act::Pane { session: listed().name().clone(), pane: PaneKey::terminal(4) };
+        let act = Act::View { session: listed().name().clone(), view: ViewKey::terminal(4) };
         assert_eq!(closed(menu.planned(Ok(plan(waiting())))), Done::Act(Machine::Local, act));
     }
 
     fn worktree_plan(agents: Vec<(u32, Doing)>) -> Plan {
         let session = project().listed().clone();
-        let (panes, seen) = (vec![4, 5], worktree_seen());
-        let deletes = Deletes::Worktree { worktree: worktree(), panes, seen };
+        let (views, seen) = (vec![4, 5], worktree_seen());
+        let deletes = Deletes::Worktree { worktree: worktree(), views, seen };
         close::plan(&Subject { session: &session, deletes, agents: Ok(agents) })
     }
 
     fn worktree_act() -> Act {
         let session = project().listed().name().clone();
-        let (panes, seen) = (vec![4, 5], worktree_seen());
-        Act::Worktree { session, worktree: worktree(), panes, seen }
+        let (views, seen) = (vec![4, 5], worktree_seen());
+        Act::Worktree { session, worktree: worktree(), views, seen }
     }
 
     fn worktree_seen() -> Vec<ViewId> {
@@ -3924,7 +3924,7 @@ mod tests {
 
     #[test]
     fn the_menu_floats_at_the_bottom_right_of_the_view_s_side() {
-        let menu = Menu::new(1, pane_row(), PICKED);
+        let menu = Menu::new(1, view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(floated(drawing(&menu), 50, 12), [
             "z".repeat(50),
@@ -3988,7 +3988,7 @@ mod tests {
 
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
-        let menu = Menu::new(1, pane_row(), PICKED);
+        let menu = Menu::new(1, view_row(), PICKED);
         assert_eq!(clicked(&menu, "Skills ▸"), Some(pressed(KeyCode::Char('c'))));
         assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
         assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
@@ -4002,7 +4002,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_delete_asks_first_as_its_key_does() {
-        let (menu, _) = stays(opened(pane_row(), Some('d')));
+        let (menu, _) = stays(opened(view_row(), Some('d')));
         assert_eq!(clicked(&menu, "close the view"), Some(pressed(KeyCode::Char('d'))));
         let (menu, _) = stays(menu.key(&char('d')));
         assert_eq!(clicked(&menu, "close the view"), None);
@@ -4014,14 +4014,14 @@ mod tests {
 
     #[test]
     fn a_note_floats_where_the_menu_does() {
-        let note = "menu: luneta does not know yet which pane luneta is on; try again in a moment";
+        let note = "menu: luneta does not know yet which view luneta is on; try again in a moment";
         let right = "z".repeat(5);
         let boxed = |inner: &str| format!("{right}│{inner:<43}│");
         assert_eq!(floated(|buffer, over| draw_note(buffer, over, note), 50, 7), [
             "z".repeat(50),
             "z".repeat(50),
             format!("{right}┌─ luneta {}┐", "─".repeat(34)),
-            boxed(" menu: luneta does not know yet which pane"),
+            boxed(" menu: luneta does not know yet which view"),
             boxed(" luneta is on; try again in a moment"),
             boxed(" <any key> - Close"),
             format!("{right}└{}┘", "─".repeat(43)),
@@ -4045,7 +4045,7 @@ mod tests {
     }
 
     fn pulling(key: char) -> Menu {
-        pulling_on(pane_row(), key)
+        pulling_on(view_row(), key)
     }
 
     fn here(ready: Ready) -> Found {
@@ -4054,7 +4054,7 @@ mod tests {
 
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
-        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let menu = Menu::pull(1, view_row(), link(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
@@ -4068,7 +4068,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
-        let syncing = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let syncing = Menu::pull(1, view_row(), link(), CLAUDE);
         let (syncing, wants) = stays(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
         assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
@@ -4102,33 +4102,33 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let session = || At::Session((other.clone(), PaneKey::terminal(7)));
+        let session = || At::Session((other.clone(), ViewKey::terminal(7)));
         for (key, command) in [('w', Vec::new()), ('r', review.clone())] {
             let (menu, wants) = stays(pulling(key).pulled(ready(session())));
             let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
             let cwd = directory(&folder);
-            let pane = PaneKey::terminal(7);
-            assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
-            let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
-            assert_eq!((&row.session, row.pane), (&other, PaneKey::terminal(7)));
+            let view = ViewKey::terminal(7);
+            assert_eq!(wants, Wants::Open { session: other.clone(), view, cwd, opens });
+            let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
+            assert_eq!((&row.session, row.view), (&other, ViewKey::terminal(7)));
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
-        let there = || At::There((other.clone(), PaneKey::terminal(9)));
-        let place = Place::Pane(PanePlace { session: other.clone(), pane: PaneKey::terminal(9) });
+        let there = || At::There((other.clone(), ViewKey::terminal(9)));
+        let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
         assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
-        let opens = Opens::Pane { beside: 9, command: review };
+        let opens = Opens::View { beside: 9, command: review };
         let cwd = directory(&folder);
-        let pane = PaneKey::terminal(9);
-        assert_eq!(wants, Wants::Open { session: other.clone(), pane, cwd, opens });
-        let Target::Pane(_, row) = menu.target() else { panic!("not a pane's row") };
-        assert_eq!((&row.session, row.pane), (&other, PaneKey::terminal(9)));
+        let view = ViewKey::terminal(9);
+        assert_eq!(wants, Wants::Open { session: other.clone(), view, cwd, opens });
+        let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
+        assert_eq!((&row.session, row.view), (&other, ViewKey::terminal(9)));
     }
 
     #[test]
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
-        let menu = Menu::pull(1, pane_row(), link(), CLAUDE);
+        let menu = Menu::pull(1, view_row(), link(), CLAUDE);
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(menu.lines(31, 9, 0).1.at(Position::new(5, 3)), Some(&Choice::Key(tab)));
         let (menu, wants) = stays(menu.key(&tab));
@@ -4140,7 +4140,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let folder = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
-        let at = At::Session((other.clone(), PaneKey::terminal(7)));
+        let at = At::Session((other.clone(), ViewKey::terminal(7)));
         let branch = Some("feat/x".to_owned());
         let ready = Ready { at, folder: folder.clone(), branch, moved_off: false, work };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
@@ -4151,14 +4151,14 @@ mod tests {
         let command = review.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
         let cwd = directory(&folder);
-        assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::terminal(7), cwd, opens });
+        assert_eq!(wants, Wants::Open { session: other, view: ViewKey::terminal(7), cwd, opens });
     }
 
     #[test]
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let menu = Menu::pull(1, pane_row(), issue.clone(), CLAUDE);
+        let menu = Menu::pull(1, view_row(), issue.clone(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
             [
@@ -4176,7 +4176,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let folder = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
-            at: At::Session((other.clone(), PaneKey::terminal(7))),
+            at: At::Session((other.clone(), ViewKey::terminal(7))),
             folder: folder.clone(),
             branch: Some("issue-2736".to_owned()),
             moved_off: false,
@@ -4187,14 +4187,14 @@ mod tests {
         let command = tackle.map(str::to_owned).to_vec();
         let opens = Opens::Tab { name: Some("#2736".to_owned()), command };
         let cwd = directory(&folder);
-        assert_eq!(wants, Wants::Open { session: other, pane: PaneKey::terminal(7), cwd, opens });
+        assert_eq!(wants, Wants::Open { session: other, view: ViewKey::terminal(7), cwd, opens });
     }
 
     #[test]
     fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let (menu, _) = stays(Menu::pull(1, pane_row(), issue.clone(), CLAUDE).key(&char('t')));
+        let (menu, _) = stays(Menu::pull(1, view_row(), issue.clone(), CLAUDE).key(&char('t')));
         let name = SessionName::parse("cdk").unwrap();
         let ready = Ready {
             at: At::Clone { cwd: directory("/w/cdk"), name },
@@ -4236,7 +4236,7 @@ mod tests {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
             Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
         };
-        let menu = Menu::pull(1, pane_row(), file(), CLAUDE);
+        let menu = Menu::pull(1, view_row(), file(), CLAUDE);
         assert_eq!(
             text(&menu.lines(38, 9, 0).0),
             [
@@ -4255,7 +4255,7 @@ mod tests {
         let other = Listed::new_project("cdk", 2);
         let (folder, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
         let ready = || Ready {
-            at: At::Session((other.clone(), PaneKey::terminal(7))),
+            at: At::Session((other.clone(), ViewKey::terminal(7))),
             folder: folder.to_owned(),
             branch: Some("md-sync-rework".to_owned()),
             moved_off: false,
@@ -4274,16 +4274,16 @@ mod tests {
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command };
         let session = other.clone();
         let cwd = directory(folder);
-        assert_eq!(wants, Wants::Open { session, pane: PaneKey::terminal(7), cwd, opens });
+        assert_eq!(wants, Wants::Open { session, view: ViewKey::terminal(7), cwd, opens });
 
         let pressed = |key: char| {
-            stays(Menu::pull(1, pane_row(), file(), CLAUDE).key(&char(key))).0
+            stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0
         };
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         let opens = Opens::Tab { name: Some("sync-rework".to_owned()), command: Vec::new() };
         let session = other.clone();
         let cwd = directory(folder);
-        assert_eq!(wants, Wants::Open { session, pane: PaneKey::terminal(7), cwd, opens });
+        assert_eq!(wants, Wants::Open { session, view: ViewKey::terminal(7), cwd, opens });
 
         assert_eq!(
             closed(pressed('w').pulled(Err("no such file".to_owned()))),
@@ -4329,14 +4329,14 @@ mod tests {
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
-        let row = || Target::Pane(vps(), row());
-        let place = Place::Pane(PanePlace { session: other.clone(), pane: PaneKey::terminal(9) });
-        let there = ready(At::There((other.clone(), PaneKey::terminal(9))));
+        let row = || Target::View(vps(), row());
+        let place = Place::View(ViewPlace { session: other.clone(), view: ViewKey::terminal(9) });
+        let there = ready(At::There((other.clone(), ViewKey::terminal(9))));
         assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
-        let at = At::Session((other, PaneKey::terminal(7)));
+        let at = At::Session((other, ViewKey::terminal(7)));
         let (menu, _) = stays(pulling_on(row(), 'w').pulled(ready(at)));
-        let Target::Pane(machine, row) = menu.target() else { panic!("not a pane's row") };
-        assert_eq!((machine, row.pane), (&vps(), PaneKey::terminal(7)));
+        let Target::View(machine, row) = menu.target() else { panic!("not a view's row") };
+        assert_eq!((machine, row.view), (&vps(), ViewKey::terminal(7)));
         let name = SessionName::parse("cdk").unwrap();
         let clone = At::Clone { cwd: directory("/w/cdk"), name };
         let header = Target::Machine(vps());
@@ -4355,17 +4355,17 @@ mod tests {
             let ready = Ready { at, folder, branch: None, moved_off: false, work };
             Ok(Found { on: vps(), ready })
         };
-        let rows = [session_row(), pane_row(), Target::Machine(Machine::Local)];
+        let rows = [session_row(), view_row(), Target::Machine(Machine::Local)];
         for row in rows {
-            let at = At::There((other.clone(), PaneKey::terminal(9)));
+            let at = At::There((other.clone(), ViewKey::terminal(9)));
             let (menu, wants) = stays(pulling_on(row.clone(), 'r').pulled(found(at)));
-            assert!(matches!(&wants, Wants::Open { pane, .. } if *pane == PaneKey::terminal(9)));
-            let Target::Pane(machine, opening) = menu.target() else { panic!("not a pane's row") };
-            assert_eq!((machine, opening.pane), (&vps(), PaneKey::terminal(9)));
+            assert!(matches!(&wants, Wants::Open { view, .. } if *view == ViewKey::terminal(9)));
+            let Target::View(machine, opening) = menu.target() else { panic!("not a view's row") };
+            assert_eq!((machine, opening.view), (&vps(), ViewKey::terminal(9)));
 
-            let pane = PaneKey::terminal(9);
-            let place = Place::Pane(PanePlace { session: other.clone(), pane });
-            let at = At::There((other.clone(), PaneKey::terminal(9)));
+            let view = ViewKey::terminal(9);
+            let place = Place::View(ViewPlace { session: other.clone(), view });
+            let at = At::There((other.clone(), ViewKey::terminal(9)));
             let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 

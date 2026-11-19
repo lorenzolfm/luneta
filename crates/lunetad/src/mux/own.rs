@@ -130,15 +130,15 @@ impl From<TerminalKey> for crate::api::TerminalKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct OwnPane {
+pub struct OwnView {
     pub session: OwnKey,
     pub id: NonZeroU32,
 }
 
-impl OwnPane {
+impl OwnView {
     #[must_use]
-    pub fn new(session: OwnKey, pane: u32) -> Option<Self> {
-        NonZeroU32::new(pane).map(|id| OwnPane { session, id })
+    pub fn new(session: OwnKey, view: u32) -> Option<Self> {
+        NonZeroU32::new(view).map(|id| OwnView { session, id })
     }
 }
 
@@ -171,7 +171,7 @@ fn environ() -> Vec<OsString> {
         .collect()
 }
 
-pub(crate) fn in_no_pane(command: &mut Command) {
+pub(crate) fn in_no_view(command: &mut Command) {
     for name in TERMINAL_VARS {
         command.env_remove(name);
     }

@@ -34,14 +34,14 @@ pub const fn next(harness: Harness) -> Harness {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Picked {
-    ByPane(Harness),
+    ByView(Harness),
     ByYou(Harness),
 }
 
 impl Picked {
     pub const fn harness(self) -> Harness {
         match self {
-            Picked::ByPane(harness) | Picked::ByYou(harness) => harness,
+            Picked::ByView(harness) | Picked::ByYou(harness) => harness,
         }
     }
 

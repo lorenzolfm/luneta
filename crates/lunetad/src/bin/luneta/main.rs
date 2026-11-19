@@ -67,7 +67,7 @@ use lunetad::{folder, release, SessionName};
     name = "luneta",
     version = release::SAID.as_str(),
     about = "Sessions of luneta's own multiplexer, beside a sidebar of every session on this \
-             host and what the agent in each pane is doing. With a command, ask lunetad, the \
+             host and what the agent in each view is doing. With a command, ask lunetad, the \
              daemon of this host, instead, or have it start or delete something"
 )]
 #[command(args_conflicts_with_subcommands = true)]
