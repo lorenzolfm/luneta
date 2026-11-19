@@ -33,6 +33,7 @@ type Daemon = DaemonClient<Channel>;
 enum Unmade {
     Nests(String),
     Failed(String),
+    InDoubt(String),
 }
 
 impl From<String> for Unmade {
@@ -42,11 +43,38 @@ impl From<String> for Unmade {
 }
 
 impl Unmade {
-    fn said(self) -> String {
-        match self {
-            Unmade::Nests(why) | Unmade::Failed(why) => why,
+    fn of(status: &Status) -> Unmade {
+        let why = status.message().to_owned();
+        match status.code() {
+            Code::AlreadyExists => Unmade::Nests(why),
+            code if refused(code) => Unmade::Failed(why),
+            _ => Unmade::InDoubt(why),
         }
     }
+
+    fn said(self) -> String {
+        match self {
+            Unmade::Nests(why) | Unmade::Failed(why) | Unmade::InDoubt(why) => why,
+        }
+    }
+
+    fn said_of(self, made: &str) -> String {
+        match self {
+            Unmade::Nests(why) | Unmade::Failed(why) => format!("no {made} made: {why}"),
+            Unmade::InDoubt(why) => format!("{why}, so the {made} may be made"),
+        }
+    }
+}
+
+fn refused(code: Code) -> bool {
+    let refusals = [
+        Code::InvalidArgument,
+        Code::FailedPrecondition,
+        Code::Aborted,
+        Code::NotFound,
+        Code::Unimplemented,
+    ];
+    refusals.contains(&code)
 }
 
 enum Tried {
@@ -103,9 +131,17 @@ fn asked_or<T, E: From<String>>(
         .map_err(|error| E::from(format!("no runtime: {error}")))?;
     runtime.block_on(async {
         let mut daemon = daemon::current(path).await.map_err(E::from)?.daemon;
-        let answered = tokio::time::timeout(within, asking(&mut daemon)).await;
-        answered.map_err(|_| late(format!("lunetad did not answer in {}s", within.as_secs())))?
+        answered_within(within, asking(&mut daemon), late).await
     })
+}
+
+async fn answered_within<T, E>(
+    within: Duration,
+    answer: impl Future<Output = Result<T, E>>,
+    late: impl FnOnce(String) -> E,
+) -> Result<T, E> {
+    let answered = tokio::time::timeout(within, answer).await;
+    answered.map_err(|_| late(format!("lunetad did not answer in {}s", within.as_secs())))?
 }
 
 pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
@@ -121,27 +157,26 @@ pub fn kept(path: &Path) -> Result<Vec<Project>, String> {
 }
 
 fn changed_on(path: &Path, on: Option<On>, change: Change) -> Result<Option<Made>, Unmade> {
-    asked(path, async |daemon| {
-        let request = ChangeProjectsRequest { on, change: Some(change) };
-        match daemon.change_projects(request).await {
-            Ok(made) => Ok(made.into_inner().made),
-            Err(status) => {
-                let why = status.message().to_owned();
-                Err(match status.code() {
-                    Code::AlreadyExists => Unmade::Nests(why),
-                    _ => Unmade::Failed(why),
-                })
-            },
-        }
-    })
+    let request = ChangeProjectsRequest { on, change: Some(change) };
+    let asking = async |daemon: &mut Daemon| match daemon.change_projects(request).await {
+        Ok(made) => Ok(made.into_inner().made),
+        Err(status) => Err(Unmade::of(&status)),
+    };
+    asked_or(path, ASKING, asking, Unmade::InDoubt)
 }
 
 fn add_project(path: &Path, dir: &str, name: Option<&str>) -> Result<ProjectId, Unmade> {
     let (dir, name) = (dir.to_owned(), name.map(str::to_owned));
     let change = Change::AddProject(AddProject { dir, name });
-    match changed_on(path, None, change)? {
-        Some(Made::Project(made)) => ProjectId::of(made).ok_or_else(|| zero("project").into()),
-        made => Err(Unmade::Failed(format!("lunetad made no project but {made:?}"))),
+    project_of(changed_on(path, None, change)?)
+}
+
+fn project_of(made: Option<Made>) -> Result<ProjectId, Unmade> {
+    match made {
+        Some(Made::Project(made)) => {
+            ProjectId::of(made).ok_or_else(|| Unmade::InDoubt(zero("project")))
+        },
+        made => Err(unread(made, "project")),
     }
 }
 
@@ -149,12 +184,16 @@ fn zero(made: &str) -> String {
     format!("lunetad said it made {made} 0, and no id is 0")
 }
 
-fn landed(made: Option<Made>) -> Result<Landed, String> {
-    let id = |id| WorktreeId::of(id).ok_or_else(|| zero("worktree"));
+fn unread(made: Option<Made>, wanted: &str) -> Unmade {
+    Unmade::InDoubt(format!("luneta can't read lunetad's answer {made:?} as a {wanted}"))
+}
+
+fn landed(made: Option<Made>) -> Result<Landed, Unmade> {
+    let id = |id| WorktreeId::of(id).ok_or_else(|| Unmade::InDoubt(zero("worktree")));
     match made {
         Some(Made::Worktree(made)) => id(made).map(Landed::Made),
         Some(Made::Found(found)) => id(found).map(Landed::Found),
-        made => Err(format!("lunetad found no worktree but {made:?}")),
+        made => Err(unread(made, "worktree")),
     }
 }
 
@@ -167,7 +206,8 @@ pub fn add_worktree(
 ) -> Result<Landed, String> {
     let (project, folder, name) = (project.get(), folder.to_owned(), name.map(str::to_owned));
     let change = Change::AddWorktree(AddWorktree { project, folder, name, argv });
-    landed(changed_on(path, on(machine), change).map_err(Unmade::said)?)
+    let added = changed_on(path, on(machine), change).and_then(landed);
+    added.map_err(|unmade| unmade.said_of("worktree"))
 }
 
 pub fn branched(
@@ -175,7 +215,7 @@ pub fn branched(
     machine: &Machine,
     project: ProjectId,
     branch: &Branch,
-) -> Result<Landed, Unready> {
+) -> Result<Landed, String> {
     let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
     let request = MakeWorktreeRequest { on, project, branch };
     let asking = async |daemon: &mut Daemon| {
@@ -190,7 +230,11 @@ pub fn branched(
         }
     };
     let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
-    asked_or(path, links::WORKTREE_PATIENCE, asking, late)
+    let made = asked_or(path, links::WORKTREE_PATIENCE, asking, late);
+    made.map_err(|unready| match unready {
+        Unready::Nowhere(why) | Unready::Failed(why) => format!("no worktree made: {why}"),
+        Unready::InDoubt(why) => why,
+    })
 }
 
 fn unbranched(status: &Status) -> Unready {
@@ -206,10 +250,11 @@ fn unbranched(status: &Status) -> Unready {
 
 fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {
     let start = Start { folder: folder.to_owned(), name: None };
-    match changed_on(path, None, Change::Start(start)).map_err(Unmade::said)? {
+    let started = changed_on(path, None, Change::Start(start)).and_then(|made| match made {
         Some(Made::Project(_)) => Ok(None),
         made => landed(made).map(Some),
-    }
+    });
+    started.map_err(|unmade| unmade.said_of("worktree"))
 }
 
 pub fn closed(
@@ -269,8 +314,7 @@ impl From<String> for Unmoved {
 impl Unmoved {
     fn of(status: &Status) -> Unmoved {
         let why = status.message().to_owned();
-        let refused = [Code::Aborted, Code::InvalidArgument, Code::FailedPrecondition];
-        if refused.contains(&status.code()) { Unmoved::Refused(why) } else { Unmoved::Unsure(why) }
+        if refused(status.code()) { Unmoved::Refused(why) } else { Unmoved::Unsure(why) }
     }
 }
 
@@ -369,14 +413,14 @@ fn started(
         let found = found.map(Landed::Found);
         return Ok(found.map(Landing::Worktree));
     };
-    let unmade = match add_project(path, folder, Some(name)) {
+    let unfound = match add_project(path, folder, Some(name)) {
         Ok(_) => format!("lunetad made the project of {}, and keeps it nowhere", cwd.display()),
-        Err(Unmade::Failed(why)) => return Err(Tried::Failed(why)),
-        Err(Unmade::Nests(why)) => why,
+        Err(unmade @ Unmade::Failed(_)) => return Err(Tried::Failed(unmade.said_of("project"))),
+        Err(unmade @ (Unmade::Nests(_) | Unmade::InDoubt(_))) => unmade.said_of("project"),
     };
     let projects = kept(path)?;
     let chosen = chosen(path, &projects, Some(name), cwd, folder);
-    chosen.unwrap_or(Err(Tried::Failed(unmade))).map(Some)
+    chosen.unwrap_or(Err(Tried::Failed(unfound))).map(Some)
 }
 
 pub fn made_at(
@@ -386,13 +430,12 @@ pub fn made_at(
     name: Option<&str>,
 ) -> Result<Landing, String> {
     let (folder, name) = (cwd.to_string(), name.map(str::to_owned));
-    match changed_on(path, on(machine), Change::Start(Start { folder, name })) {
-        Ok(Some(Made::Project(project))) => {
-            ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
-        },
-        Ok(made) => landed(made).map(Landing::Worktree),
-        Err(unmade) => Err(unmade.said()),
-    }
+    let start = Change::Start(Start { folder, name });
+    let made = changed_on(path, on(machine), start).and_then(|made| match made {
+        Some(Made::Project(_)) => project_of(made).map(Landing::Unopened),
+        made => landed(made).map(Landing::Worktree),
+    });
+    made.map_err(|unmade| unmade.said_of("worktree"))
 }
 
 pub fn pulled(
@@ -406,20 +449,22 @@ pub fn pulled(
     let (holder, folder) = (holder.to_string(), cwd.to_string());
     let (project, name) = (project.to_owned(), name.to_owned());
     let change = Change::Pull(Pull { holder, folder, project, name, argv });
-    landed(changed_on(path, on(machine), change).map_err(Unmade::said)?)
+    let pulled = changed_on(path, on(machine), change).and_then(landed);
+    pulled.map_err(|unmade| unmade.said_of("session"))
 }
 
 pub fn real(cwd: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(cwd).map_err(|error| format!("{}: {error}", cwd.display()))
 }
 
-fn made_there(machine: &Machine, change: Change) -> Result<Option<Made>, String> {
-    let path = lunetad::folder::find().map_err(|unfound| format!("{unfound}, to find lunetad in"))?;
-    changed_on(&path, on(machine), change).map_err(Unmade::said)
+fn made_there(machine: &Machine, change: Change) -> Result<Option<Made>, Unmade> {
+    let unfound = |unfound| Unmade::Failed(format!("{unfound}, to find lunetad in"));
+    let path = lunetad::folder::find().map_err(unfound)?;
+    changed_on(&path, on(machine), change)
 }
 
 fn changed_there(machine: &Machine, change: Change) -> Result<(), String> {
-    made_there(machine, change).map(drop)
+    made_there(machine, change).map(drop).map_err(Unmade::said)
 }
 
 pub fn closed_there(
@@ -465,20 +510,17 @@ pub fn project_made(
     name: Option<&Name>,
 ) -> Result<Landing, String> {
     let (dir, name) = (folder.to_owned(), name.map(spelled));
-    let unmade = |why: String| format!("no project made: {why}");
-    let made = made_there(machine, Change::AddProject(AddProject { dir, name })).map_err(unmade)?;
-    let project = match made {
-        Some(Made::Project(project)) => project,
-        made => return Err(unmade(format!("lunetad made no project but {made:?}"))),
-    };
-    let empty = |why: String| format!("{folder} is project {project}, with no worktree: {why}");
+    let made = made_there(machine, Change::AddProject(AddProject { dir, name }));
+    let project = made.and_then(project_of).map_err(|unmade| unmade.said_of("project"))?;
     let start = Start { folder: folder.to_owned(), name: None };
-    match made_there(machine, Change::Start(start)).map_err(empty)? {
-        Some(Made::Project(root)) if root == project => {
-            ProjectId::of(project).map(Landing::Unopened).ok_or_else(|| zero("project"))
-        },
-        made => landed(made).map(Landing::Worktree).map_err(empty),
-    }
+    let started = made_there(machine, Change::Start(start)).and_then(|made| match made {
+        Some(Made::Project(root)) if root == project.get() => Ok(Landing::Unopened(project)),
+        made => landed(made).map(Landing::Worktree),
+    });
+    let empty = |unmade: Unmade| {
+        format!("{folder} is project {project}: {}", unmade.said_of("worktree"))
+    };
+    started.map_err(empty)
 }
 
 fn spelled(name: &Name) -> String {
@@ -502,7 +544,8 @@ impl Landed {
 pub fn worked_in(path: &Path, folder: &Path, argv: Vec<String>) -> Result<Landed, String> {
     let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
     let change = Change::Join(Join { folder: folder.to_owned(), argv });
-    landed(changed_on(path, None, change).map_err(Unmade::said)?)
+    let joined = changed_on(path, None, change).and_then(landed);
+    joined.map_err(|unmade| unmade.said_of("worktree"))
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<String>, String> {
@@ -565,5 +608,77 @@ pub fn opened(path: &Path, worktree: WorktreeId, argv: Vec<String>) -> Result<()
             Heard::Refused(why) => return Err(format!("lunetad refused: {why}")),
             Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn said(status: &Status) -> String {
+        Unmade::of(status).said_of("project")
+    }
+
+    #[test]
+    fn only_a_refusal_from_lunetad_says_nothing_was_made() {
+        let refusals = [
+            Status::invalid_argument("it said no"),
+            Status::failed_precondition("it said no"),
+            Status::aborted("it said no"),
+            Status::not_found("it said no"),
+            Status::unimplemented("it said no"),
+            Status::already_exists("it said no"),
+        ];
+        for status in &refusals {
+            assert_eq!(said(status), "no project made: it said no", "{status:?}");
+        }
+        let doubts = [
+            Status::unavailable("it dropped"),
+            Status::cancelled("it dropped"),
+            Status::deadline_exceeded("it dropped"),
+            Status::unknown("it dropped"),
+            Status::internal("it dropped"),
+            Status::resource_exhausted("it dropped"),
+        ];
+        for status in &doubts {
+            assert_eq!(said(status), "it dropped, so the project may be made", "{status:?}");
+        }
+        for status in &refusals[..5] {
+            assert!(matches!(Unmoved::of(status), Unmoved::Refused(_)), "{status:?}");
+        }
+        for status in &doubts {
+            assert!(matches!(Unmoved::of(status), Unmoved::Unsure(_)), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn a_late_answer_says_the_change_may_be_made() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let never = std::future::pending::<Result<Option<Made>, Unmade>>();
+        let late = runtime.block_on(answered_within(Duration::ZERO, never, Unmade::InDoubt));
+        let said = late.map_err(|unmade| unmade.said_of("worktree"));
+        assert_eq!(said, Err("lunetad did not answer in 0s, so the worktree may be made".to_owned()));
+    }
+
+    #[test]
+    fn an_answer_that_names_no_such_thing_says_it_cannot_be_read() {
+        let said = |unmade: Unmade| unmade.said_of("worktree");
+        assert_eq!(
+            landed(None).map_err(said),
+            Err("luneta can't read lunetad's answer None as a worktree, so the worktree may be \
+                 made"
+                .to_owned())
+        );
+        assert_eq!(
+            landed(Some(Made::Worktree(0))).map_err(said),
+            Err("lunetad said it made worktree 0, and no id is 0, so the worktree may be made"
+                .to_owned())
+        );
+        let said = |unmade: Unmade| unmade.said_of("project");
+        let project = project_of(Some(Made::Taken(4))).map_err(said);
+        let unread = "luneta can't read lunetad's answer Some(Taken(4)) as a project";
+        assert_eq!(project, Err(format!("{unread}, so the project may be made")));
+        assert!(matches!(project_of(Some(Made::Project(4))), Ok(id) if id.get() == 4));
+        assert!(matches!(landed(Some(Made::Found(5))), Ok(Landed::Found(id)) if id.get() == 5));
     }
 }
