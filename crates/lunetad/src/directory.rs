@@ -31,6 +31,7 @@ impl From<Directory> for String {
 
 impl From<&crate::projects::Dir> for Directory {
     fn from(dir: &crate::projects::Dir) -> Self {
+        assert!(dir.as_str().starts_with('/'), "a projects::Dir is absolute, as {dir:?} is not");
         Directory(dir.as_str().to_owned())
     }
 }
