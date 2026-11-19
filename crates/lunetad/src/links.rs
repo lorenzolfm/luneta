@@ -999,6 +999,11 @@ fn cloned(
 }
 
 #[must_use]
+pub fn wt_holder(dir: &str) -> Option<String> {
+    (layout(dir) == Layout::Wt).then(|| holder(dir)).flatten()
+}
+
+#[must_use]
 pub fn holder(dir: &str) -> Option<String> {
     let Common::Of(common) = common_dir(dir) else {
         return None;

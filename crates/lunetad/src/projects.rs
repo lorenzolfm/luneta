@@ -392,6 +392,11 @@ impl Project {
         self.dir.join(&workstream.below)
     }
 
+    fn used_last_at(&self, folder: &Dir) -> Option<WorkstreamId> {
+        let there = self.workstreams.iter().filter(|it| self.folder(it) == *folder);
+        there.rev().max_by_key(|it| it.used).map(Workstream::id)
+    }
+
     fn last_used(&self) -> Option<WorkstreamId> {
         let mut last: Option<&Workstream> = None;
         for workstream in &self.workstreams {
@@ -453,7 +458,7 @@ pub enum Change {
     Start { folder: Dir, name: Option<Name> },
     Pull { holder: Dir, folder: Dir, project: Name, name: Name },
     RenameProject { project: ProjectId, to: Name },
-    WidenProject { project: ProjectId, dir: Dir },
+    Join { folder: Dir, clone: Dir, project: Option<ProjectId> },
     RenameWorkstream { workstream: WorkstreamId, to: Option<Name> },
     ReorderProjects { seen: Vec<ProjectId>, projects: Vec<ProjectId> },
     ReorderWorkstreams {
@@ -484,6 +489,8 @@ pub enum Change {
 pub enum Made {
     Project(ProjectId),
     Workstream(WorkstreamId),
+    Found(WorkstreamId),
+    Taken(WorkstreamId),
 }
 
 #[derive(Debug)]
@@ -549,9 +556,10 @@ impl Ask {
                 project: id("project", project).map(ProjectId)?,
                 to: Name::of_project(&to).map_err(field("to"))?,
             },
-            Asked::WidenProject(asked::WidenProject { project, dir }) => Change::WidenProject {
-                project: id("project", project).map(ProjectId)?,
-                dir: Dir::found(&dir).map_err(field("dir"))?,
+            Asked::Join(asked::Join { folder, clone, project }) => Change::Join {
+                folder: Dir::found(&folder).map_err(field("folder"))?,
+                clone: Dir::found(&clone).map_err(field("clone"))?,
+                project: project.map(|it| id("project", it).map(ProjectId)).transpose()?,
             },
             Asked::RenameWorkstream(asked::RenameWorkstream { workstream, to }) => {
                 Change::RenameWorkstream {
@@ -622,7 +630,7 @@ impl Change {
             | Change::Start { .. }
             | Change::Pull { .. }
             | Change::RenameProject { .. }
-            | Change::WidenProject { .. }
+            | Change::Join { .. }
             | Change::RenameWorkstream { .. }
             | Change::ReorderProjects { .. }
             | Change::ReorderWorkstreams { .. }
@@ -801,10 +809,11 @@ impl Projects {
             return Err(Refused::Stale(why));
         }
         let other = |it: &&Project, project: ProjectId, dir| it.id != project && it.dir.nests(dir);
-        if let Change::WidenProject { project, dir } = &change
-            && let Some(other) = self.projects.iter().find(|it| other(it, *project, dir))
+        if let Change::Join { folder, clone, project: Some(project) } = &change
+            && self.joined_at(folder).is_none()
+            && let Some(other) = self.projects.iter().find(|it| other(it, *project, clone))
         {
-            return Err(Refused::Nests(nested(dir, other)));
+            return Err(Refused::Nests(nested(clone, other)));
         }
         self.changed_by(change, draw).map_err(Refused::Said)
     }
@@ -814,12 +823,19 @@ impl Projects {
             Change::AddProject { dir, .. } => Some(dir),
             Change::Start { folder, .. } => self.held_at(folder).is_none().then_some(folder),
             Change::Pull { holder, folder, .. } => self.held_at(folder).is_none().then_some(holder),
+            Change::Join { folder, clone, project: None } => {
+                self.held_at(folder).is_none().then_some(clone)
+            },
             _ => None,
         }
     }
 
     fn held_at(&self, folder: &Dir) -> Option<(&Project, Below)> {
         self.projects.iter().find_map(|project| Some((project, project.dir.below(folder)?)))
+    }
+
+    fn joined_at(&self, folder: &Dir) -> Option<WorkstreamId> {
+        self.held_at(folder).and_then(|(held, _)| held.used_last_at(folder))
     }
 
     fn stale(&self, change: &Change) -> Option<String> {
@@ -865,13 +881,11 @@ impl Projects {
             },
             Change::WorkstreamAt { project, folder } => {
                 let held = changed.project(project)?;
-                let there = held.workstreams.iter().filter(|it| held.folder(it) == folder);
-                let at = there.rev().max_by_key(|it| it.used);
-                let Some(found) = at else {
+                let Some(found) = held.used_last_at(&folder) else {
                     let add = Change::AddWorkstream { project, folder, name: None };
                     return self.changed_by(add, draw);
                 };
-                Some(Made::Workstream(found.id))
+                Some(Made::Workstream(found))
             },
             Change::Start { folder, name } => match self.held_at(&folder) {
                 Some((held, below)) if below.is_own() => Some(match held.last_used() {
@@ -896,19 +910,24 @@ impl Projects {
                 changed.project(project)?.name = to;
                 None
             },
-            Change::WidenProject { project, dir } => {
-                let held = changed.project(project)?;
-                if dir.below(&held.dir).is_none() {
-                    let (dir, own) = (&dir.0, &held.dir.0);
-                    return Err(format!("{dir} does not hold {own}, the project's folder"));
+            Change::Join { folder, clone, project } => {
+                if let Some(found) = self.joined_at(&folder) {
+                    Some(Made::Found(found))
+                } else {
+                    let (with, joined) = match project {
+                        Some(project) => (self.widened(project, clone)?, project),
+                        None => match self.held_at(&folder) {
+                            Some((held, _)) => (self.clone(), held.id),
+                            None => self.with_project(clone, None, &mut draw)?,
+                        },
+                    };
+                    let Some(found) = with.joined_at(&folder) else {
+                        let add = Change::AddWorkstream { project: joined, folder, name: None };
+                        return with.changed_by(add, draw);
+                    };
+                    changed = with;
+                    Some(Made::Found(found))
                 }
-                let folders: Vec<Dir> = held.workstreams.iter().map(|it| held.folder(it)).collect();
-                for (workstream, folder) in held.workstreams.iter_mut().zip(folders) {
-                    let below = dir.below(&folder);
-                    workstream.below = below.expect("what holds the project's folder holds it");
-                }
-                held.dir = dir;
-                None
             },
             Change::RenameWorkstream { workstream, to } => {
                 let (project, at) = changed.workstream(workstream)?;
@@ -1104,6 +1123,23 @@ impl Projects {
         let mut changed = self.clone();
         changed.projects.push(Project { id, name, dir, workstreams: Vec::new() });
         Ok((changed, id))
+    }
+
+    fn widened(&self, project: ProjectId, dir: Dir) -> Result<Projects, String> {
+        let mut widened = self.clone();
+        let held = widened.project(project)?;
+        if dir.below(&held.dir).is_none() {
+            let (dir, own) = (&dir.0, &held.dir.0);
+            return Err(format!("{dir} does not hold {own}, the project's folder"));
+        }
+        let folders: Vec<Dir> = held.workstreams.iter().map(|it| held.folder(it)).collect();
+        for (workstream, folder) in held.workstreams.iter_mut().zip(folders) {
+            let below = dir.below(&folder);
+            workstream.below = below.expect("what holds the project's folder holds it");
+        }
+        held.dir = dir;
+        widened.followed();
+        Ok(widened)
     }
 
     fn kept_as(&self, changed: &Projects) {
@@ -1564,28 +1600,85 @@ mod tests {
         assert!(change(&projects, outside).unwrap_err().contains("is not in /w/luneta"));
     }
 
+    fn join(folder: &str, clone: &str, project: Option<ProjectId>) -> Change {
+        Change::Join { folder: dir(folder), clone: dir(clone), project }
+    }
+
     #[test]
-    fn a_project_widens_to_a_folder_that_holds_it_and_its_workstreams_stay_where_they_are() {
+    fn a_join_widens_the_project_to_its_clone_and_its_workstreams_stay_where_they_are() {
         let mut projects = Projects::default();
         let main = project(&mut projects, "/w/luneta/main");
         workstream(&mut projects, main, "/w/luneta/main");
         workstream(&mut projects, main, "/w/luneta/main/docs");
         let elo = project(&mut projects, "/w/elo");
-        let widen = |project, at| Change::WidenProject { project, dir: dir(at) };
-        (projects, _) = change(&projects, widen(main, "/w/luneta")).unwrap();
+        let feat = || join("/w/luneta/feat", "/w/luneta", Some(main));
+        let Made::Workstream(made) = add(&mut projects, feat()) else {
+            panic!("a join where no workstream is makes one");
+        };
         let widened = &projects.all()[0];
         assert_eq!((widened.id(), widened.dir().as_str()), (main, "/w/luneta"));
         assert_eq!(widened.name().as_str(), "main", "a widened project keeps its name");
         let folders: Vec<Dir> = projects.workstream_folders().collect();
-        assert_eq!(folders, ["/w/luneta/main", "/w/luneta/main/docs"].map(dir));
-        workstream(&mut projects, main, "/w/luneta/feat");
+        assert_eq!(folders, ["/w/luneta/main", "/w/luneta/main/docs", "/w/luneta/feat"].map(dir));
+        let (same, found) = change(&projects, feat()).unwrap();
+        assert_eq!((same == projects, found), (true, Some(Made::Found(made))), "joined again");
 
-        let narrower = change(&projects, widen(main, "/w/luneta/main")).unwrap_err();
+        let narrower = join("/w/luneta/fix", "/w/luneta/main", Some(main));
+        let narrower = change(&projects, narrower).unwrap_err();
         assert!(narrower.contains("does not hold /w/luneta"), "{narrower}");
-        let Err(Refused::Nests(said)) = refused(&projects, widen(elo, "/w")) else {
+        let Err(Refused::Nests(said)) = refused(&projects, join("/w/elo/fix", "/w", Some(elo)))
+        else {
             panic!("a project is widened over another");
         };
         assert!(said.contains("holds /w/luneta"), "{said}");
+    }
+
+    #[test]
+    fn a_join_of_no_project_is_in_the_project_that_holds_the_folder_or_one_made_of_the_clone() {
+        let mut projects = Projects::default();
+        let elo = project(&mut projects, "/w/elo");
+        let Made::Workstream(held) = add(&mut projects, join("/w/elo/fix", "/w/elo", None)) else {
+            panic!("a join where no workstream is makes one");
+        };
+        assert_eq!(projects.find(held).map(|(it, _)| it.id()), Some(elo));
+        let Made::Workstream(made) = add(&mut projects, join("/w/app/fix", "/w/app", None)) else {
+            panic!("a join where no workstream is makes one");
+        };
+        let (app, _) = projects.find(made).unwrap();
+        assert_eq!((app.dir().as_str(), app.name().as_str()), ("/w/app", "app"));
+        let Err(Refused::Nests(said)) = refused(&projects, join("/w/fix", "/w", None)) else {
+            panic!("a project is made over another");
+        };
+        assert!(said.contains("holds /w/elo"), "{said}");
+    }
+
+    #[test]
+    fn a_join_finds_the_workstream_its_widening_brought_to_the_folder() {
+        let mut projects = Projects::default();
+        let main = project(&mut projects, "/w/luneta/main");
+        let there = workstream(&mut projects, main, "/w/luneta/main");
+        let one = opened(&mut projects, there, 100, Placed::Alone);
+        let ran = Ran { terminal: one, folder: dir("/w/luneta/issue-7"), runs: Runs::Shell };
+        (projects, _) = change(&projects, Change::Ran(vec![ran])).unwrap();
+        let (_, stayed) = projects.find(there).unwrap();
+        assert_eq!(stayed.below().as_str(), "", "issue-7 is out of the project, until it widens");
+
+        let found = add(&mut projects, join("/w/luneta/issue-7", "/w/luneta", Some(main)));
+        assert_eq!(found, Made::Found(there), "no second workstream is made at issue-7");
+        let folders: Vec<Dir> = projects.workstream_folders().collect();
+        assert_eq!(folders, [dir("/w/luneta/issue-7")]);
+    }
+
+    #[test]
+    fn a_join_finds_the_workstream_used_last_at_the_folder() {
+        let mut projects = Projects::default();
+        let luneta = project(&mut projects, "/w/luneta");
+        let first = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let last = workstream(&mut projects, luneta, "/w/luneta/feat");
+        let went = Change::Went { workstream: last, at: Used::of_millis(5_000) };
+        (projects, _) = change(&projects, went).unwrap();
+        let found = add(&mut projects, join("/w/luneta/feat", "/w/luneta", Some(luneta)));
+        assert_eq!(found, Made::Found(last), "not {first}, the one listed first");
     }
 
     #[test]

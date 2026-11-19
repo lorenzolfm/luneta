@@ -1160,6 +1160,8 @@ impl Daemon for Host {
             Made::Workstream(workstream) => {
                 change_projects_response::Made::Workstream(workstream.get())
             },
+            Made::Found(workstream) => change_projects_response::Made::Found(workstream.get()),
+            Made::Taken(workstream) => change_projects_response::Made::Taken(workstream.get()),
         });
         Ok(Response::new(ChangeProjectsResponse { made, kept: Some(kept.to_api()) }))
     }

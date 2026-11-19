@@ -968,11 +968,11 @@ message ChangeProjectsRequest {
     Start start = 18;
     Pull pull = 19;
     Bring bring = 20;
-    WidenProject widen_project = 21;
+    Join join = 22;
   }
 
-  reserved 6, 7, 13, 14;
-  reserved "move_project", "move_workstream";
+  reserved 6, 7, 13, 14, 21;
+  reserved "move_project", "move_workstream", "widen_project";
 
   message AddProject {
     string dir = 1;
@@ -1052,9 +1052,10 @@ message ChangeProjectsRequest {
     TerminalKey from = 2;
   }
 
-  message WidenProject {
-    fixed64 project = 1;
-    string dir = 2;
+  message Join {
+    string folder = 1;
+    string clone = 2;
+    optional fixed64 project = 3;
   }
 }
 
@@ -1062,6 +1063,8 @@ message ChangeProjectsResponse {
   oneof made {
     fixed64 project = 3;
     fixed64 workstream = 4;
+    fixed64 found = 5;
+    fixed64 taken = 6;
   }
   Version kept = 2;
 
