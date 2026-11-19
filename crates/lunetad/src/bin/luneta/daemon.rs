@@ -73,6 +73,16 @@ impl From<Unreached> for String {
 }
 
 pub async fn running(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
+    let mut daemon = answering(path).await?;
+    let info = daemon.info(()).await;
+    let info = info.map_err(|status| Unreached::Failed(causes(&status)))?.into_inner();
+    if !release::is_own(&info.version, info.built) {
+        return Err(Unreached::Failed(unmatched(&info)));
+    }
+    Ok(daemon)
+}
+
+pub async fn answering(path: &Path) -> Result<DaemonClient<Channel>, Unreached> {
     let refused = |refusal: folder::Refusal| Unreached::Failed(refusal.to_string());
     let folder = folder::open(path).map_err(refused)?;
     let folder = folder.ok_or_else(|| Unreached::NoneRuns(path.to_owned()))?;
@@ -118,14 +128,22 @@ pub async fn current(path: &Path) -> Result<Current, String> {
                             reads.display(),
                             own.display()
                         ));
-                    } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
+                    } else if release::is_own(&info.version, info.built) {
                         reap(started);
                         return Ok(Current { folder, daemon, info });
+                    } else if !makes_way(running, Build::own(), || *starting.get_or_init(build)) {
+                        reap(started);
+                        return Err(kept(&info, starting.get().copied().flatten()));
                     } else {
                         match listener(&folder, pid).await {
                             Listener::Other if doubted == Some(pid) => {
                                 reap(started);
-                                return Ok(Current { folder, daemon, info });
+                                return Err(format!(
+                                    "lunetad {version} (pid {pid}) is older than this luneta, {}, \
+                                     but the kernel says another process listens on its socket, \
+                                     so luneta stops none",
+                                    *release::SAID
+                                ));
                             },
                             Listener::Other => {
                                 doubted = Some(pid);
@@ -185,6 +203,36 @@ pub async fn current(path: &Path) -> Result<Current, String> {
         }
         tokio::time::sleep(LOOK).await;
     }
+}
+
+pub fn unmatched(info: &InfoResponse) -> String {
+    let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
+    let (daemon, own) = (format!("lunetad {theirs} (pid {pid})"), release::SAID.as_str());
+    if newer(info) {
+        format!("{daemon} is newer than this luneta, {own}: run a luneta of its build")
+    } else {
+        let replaced = "open luneta to have it replaced";
+        format!("{daemon} is another build than this luneta, {own}: {replaced}")
+    }
+}
+
+fn newer(info: &InfoResponse) -> bool {
+    Build::of(&info.version, info.built) > Build::own()
+}
+
+fn kept(info: &InfoResponse, starting: Option<Build>) -> String {
+    let (theirs, pid) = (release::spelled(&info.version, info.built), info.pid);
+    if newer(info) {
+        let unmatched = unmatched(info);
+        return format!("{unmatched}, or end it (`kill {pid}`) for this one to start its own");
+    }
+    let (own, program) = (release::SAID.as_str(), lunetad());
+    let says = starting.map_or_else(|| "says no build".to_owned(), |it| format!("is {it}"));
+    format!(
+        "lunetad {theirs} (pid {pid}) is another build than this luneta, {own}, but {} {says}, \
+         no newer, so luneta leaves it be",
+        program.display()
+    )
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {

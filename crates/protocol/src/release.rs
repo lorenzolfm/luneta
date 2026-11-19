@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::LazyLock;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -11,6 +12,11 @@ pub const BUILT: Option<u64> = match option_env!("LUNETA_BUILT") {
 };
 
 pub static SAID: LazyLock<String> = LazyLock::new(|| spelled(VERSION, BUILT));
+
+#[must_use]
+pub fn is_own(version: &str, built: Option<u64>) -> bool {
+    version == VERSION && built == BUILT
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Release(u64, u64, u64);
@@ -54,6 +60,17 @@ impl Build {
     }
 }
 
+impl fmt::Display for Build {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Release(major, minor, patch) = self.release;
+        write!(f, "{major}.{minor}.{patch}")?;
+        match self.built {
+            Some(built) => write!(f, "+{built}"),
+            None => Ok(()),
+        }
+    }
+}
+
 #[must_use]
 pub fn spelled(version: &str, built: Option<u64>) -> String {
     match built {
@@ -72,6 +89,9 @@ mod tests {
             assert_eq!(Build::parse(&spelled("0.2.2", built)), Build::of("0.2.2", built));
         }
         assert_eq!(Build::parse(&SAID), Build::own());
+        assert_eq!(Build::own().map(|own| own.to_string()).as_deref(), Some(SAID.as_str()));
+        assert!(is_own(VERSION, BUILT));
+        assert!(!is_own(VERSION, Some(BUILT.map_or(0, |built| built + 1))));
         assert_eq!(Build::parse("0.2.2+"), None);
         assert_eq!(Build::parse("0.2.2+x"), None);
         assert_eq!(Build::parse("0.2+1"), None);

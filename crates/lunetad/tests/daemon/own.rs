@@ -1,15 +1,22 @@
-use std::fs;
+use std::env;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use lunetad::mux::own::api::mux_client::MuxClient;
 use lunetad::mux::own::api::{self as mux_api, ListRequest, Listing};
 use lunetad::mux::own::server;
-use tonic::transport::{Channel, Endpoint, Uri};
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::service::Routes;
+use tonic::transport::{Channel, Endpoint, Server, Uri};
 
 use crate::host::{eventually, start, Daemon, Host, Running, LUNETAD};
+
+const STAND_IN_MUX: &str = "LUNETA_TEST_STAND_IN_MUX_FOLDER";
+
+const LOCK: &str = "mux.lock";
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
@@ -21,7 +28,14 @@ pub fn built_server() -> PathBuf {
     let built = built.unwrap_or_else(|error| panic!("{shown}: {error}: {rebuild}"));
     let root = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
     let mut sources = Vec::new();
-    for source in ["crates/mux/src", "crates/mux/build.rs", "proto/luneta/mux"] {
+    let built_from = [
+        "crates/mux/src",
+        "crates/mux/build.rs",
+        "crates/protocol/src",
+        "crates/protocol/build.rs",
+        "proto/luneta",
+    ];
+    for source in built_from {
         files_in(&root.join(source), &mut sources);
     }
     assert!(sources.len() > 2, "luneta-mux's sources are not in {}", root.display());
@@ -141,6 +155,38 @@ impl Owned {
         });
         listening.and_then(rustix::process::Pid::from_raw)
     }
+
+    pub fn stand_in_mux(&self) -> Running {
+        let mut command = Command::new(env::current_exe().unwrap());
+        command.args(["own::stand_in_mux", "--exact", "--ignored"]);
+        command.env(STAND_IN_MUX, self.host.folder()).stdout(Stdio::null()).stderr(Stdio::null());
+        let stand_in = Running::spawn(&mut command);
+        let pid = rustix::process::Pid::from_raw(i32::try_from(stand_in.pid()).unwrap());
+        eventually("the stand-in luneta-mux listens", || (self.mux_pid() == pid).then_some(()));
+        stand_in
+    }
+}
+
+#[test]
+#[ignore = "the stand-in for a luneta-mux older than its Info, which a test runs as a process"]
+fn stand_in_mux() {
+    let Some(folder) = env::var_os(STAND_IN_MUX).map(PathBuf::from) else {
+        return;
+    };
+    let lock = OpenOptions::new().create(true).truncate(false).write(true).open(folder.join(LOCK));
+    let lock = lock.unwrap();
+    lock.lock().unwrap();
+    let socket = folder.join(server::SOCKET);
+    let _ = fs::remove_file(&socket);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        Server::builder()
+            .add_routes(Routes::default())
+            .serve_with_incoming(UnixListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
 }
 
 pub struct StalledMux(rustix::process::Pid);

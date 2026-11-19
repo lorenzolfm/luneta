@@ -1,5 +1,6 @@
 pub mod git;
 pub mod github;
+pub mod release;
 pub mod said;
 pub mod shell;
 pub mod tab;

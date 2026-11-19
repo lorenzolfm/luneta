@@ -14,6 +14,7 @@ service Mux {
   rpc SizeTerminal(SizeTerminalRequest) returns (SizeTerminalResponse);
   rpc TagTerminal(TagTerminalRequest) returns (TagTerminalResponse);
   rpc Show(stream FromViewer) returns (stream ToViewer);
+  rpc Info(InfoRequest) returns (InfoResponse);
 }
 
 message TerminalKey {
@@ -50,6 +51,13 @@ message TagTerminalRequest {
 }
 
 message TagTerminalResponse {}
+
+message InfoRequest {}
+
+message InfoResponse {
+  string version = 1;
+  optional uint64 built = 2;
+}
 
 message Opens {
   string cwd = 1;

@@ -59,6 +59,7 @@ pub fn follow(
             let unlisted = match followed {
                 Ok(Followed::Unreached { .. }) if retried => None,
                 Ok(Followed::Unreached { at }) => Some(layouts::Command::Unreached { since: at }),
+                Ok(Followed::Stopped) => Some(layouts::Command::Crashed),
                 Ok(Followed::Emptied { since }) => Some(layouts::Command::Emptied { since }),
                 Ok(Followed::LetGo) => return,
                 Err(failure) => {

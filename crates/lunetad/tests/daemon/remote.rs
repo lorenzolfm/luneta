@@ -36,13 +36,13 @@ use lunetad::images::{self, Png};
 use lunetad::issues::Filed;
 use lunetad::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
 use lunetad::transcripts::SessionId;
-use lunetad::{Directory, SessionName};
+use lunetad::{release, Directory, SessionName};
 use rustix::process::{kill_process, test_kill_process, Pid, Signal};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::{Code, Status};
 
-use crate::demand::{stop, Detached};
+use crate::demand::{bridged_stand_in, stop, Detached};
 use crate::host::{
     answered, eventually, folder_in, script, shared_script, start, start_as, Host, Vars,
     LUNETA, LUNETAD,
@@ -101,6 +101,10 @@ exec "$to/$destination"
 
     pub fn runs_luneta(&self, destination: &str, vars: Vars) {
         script(&self.to.join(format!("{destination}.luneta")), &luneta(&vars, "\"$@\""));
+    }
+
+    fn reaches_a_stand_in(&self, destination: &str, version: &str) {
+        script(&self.to.join(destination), &bridged_stand_in(version));
     }
 
     fn reaches_slowly(&self, destination: &str, vars: Vars, secs: u32) {
@@ -261,6 +265,21 @@ fn a_daemon_says_each_machine_its_hosts_file_names() {
     assert_eq!(lines[1..4], far, "{said}");
     let unread = "(lunetad could not read all of luneta's hosts file: its log says why)";
     assert_eq!(lines[4..], [unread], "{said}");
+}
+
+#[test]
+fn a_machine_whose_lunetad_is_another_build_is_unreached_and_says_both() {
+    let here = Host::new();
+    let stamp = release::BUILT.map_or(1, |built| built + 1);
+    let other = release::spelled(release::VERSION, Some(stamp));
+    FakeSsh::new(here.zellij.bin()).reaches_a_stand_in("far", &other);
+    hosts(&here, "far\n");
+    let _here = start(here.vars()).unwrap();
+    let unreached = unreached(&here, "far");
+    assert_eq!(unreached.stopped, Some(Stopped::Unmatched(())), "{}", unreached.why);
+    let why = &unreached.why;
+    assert!(why.starts_with(&format!("lunetad {other} (pid ")), "{why}");
+    assert!(why.ends_with(&format!("is another build than this one, {}", *release::SAID)), "{why}");
 }
 
 #[test]

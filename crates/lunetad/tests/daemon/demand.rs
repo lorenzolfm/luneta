@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
@@ -31,6 +31,7 @@ use lunetad::{folder, release, Claim};
 use prost::Message as _;
 use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{pending, StreamExt as _};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::host::{
@@ -56,8 +57,19 @@ const STAND_IN_WATCH_PID: &str = "LUNETA_TEST_STAND_IN_WATCH_PID";
 
 const STAND_IN_NOTES: &str = "LUNETA_TEST_STAND_IN_NOTES";
 
+const STAND_IN_BRIDGED: &str = "LUNETA_TEST_STAND_IN_BRIDGED_VERSION";
+
+const BRIDGED_FD: &str = "/dev/fd/3";
+
 fn watch(host: &Host, luneta: &Path) -> api::Host {
     written(host.vars().command(&luneta.display().to_string()).arg("watch"))
+}
+
+fn refused(host: &Host, luneta: &Path) -> String {
+    let output = answered(host.vars().command(&luneta.display().to_string()).arg("watch"));
+    let said = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "luneta watch was not refused: {said}");
+    said
 }
 
 fn written(command: &mut Command) -> api::Host {
@@ -308,8 +320,12 @@ fn luneta_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
 
     let elsewhere = moved();
     let other = "if [ \"$1\" = --version ]; then echo 'lunetad 0.0.0'; exit; fi\nexit 1\n";
-    script(&elsewhere.path().join("lunetad"), other);
-    assert_eq!(pid(&watch(&host, &elsewhere.path().join("luneta"))), older.pid());
+    let beside = elsewhere.path().join("lunetad");
+    script(&beside, other);
+    let said = refused(&host, &elsewhere.path().join("luneta"));
+    let kept = format!("but {} is 0.0.0, no newer, so luneta leaves it be", beside.display());
+    assert!(said.contains(&format!("lunetad {OLDER} (pid {})", older.pid())), "{said}");
+    assert!(said.contains(&kept), "{said}");
     assert_eq!(older.ended_within(Duration::ZERO), None);
 
     let current = watch(&host, Path::new(LUNETA));
@@ -328,18 +344,20 @@ fn luneta_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
 
     let later = Host::new();
     let mut after = stand_in(&later, &stamped(u64::MAX), None, None);
-    assert_eq!(pid(&watch(&later, Path::new(LUNETA))), after.pid());
+    let said = refused(&later, Path::new(LUNETA));
+    assert!(said.contains(&format!("is newer than this luneta, {}", *release::SAID)), "{said}");
     assert_eq!(after.ended_within(Duration::ZERO), None);
 
     let host = Host::new();
     let mut before = stand_in(&host, &stamped(0), None, None);
-    let reached = pid(&watch(&host, Path::new(LUNETA)));
     if release::BUILT.is_some() {
+        let reached = pid(&watch(&host, Path::new(LUNETA)));
         let _daemon = Detached { host: &host, pid: reached };
         assert!(before.ended_within(Duration::from_secs(5)).is_some(), "the stamped daemon runs on");
         assert_ne!(reached, before.pid());
     } else {
-        assert_eq!(reached, before.pid());
+        let said = refused(&host, Path::new(LUNETA));
+        assert!(said.contains(&format!("lunetad {} (pid ", stamped(0))), "{said}");
         assert_eq!(before.ended_within(Duration::ZERO), None);
     }
 }
@@ -370,11 +388,37 @@ fn lunetas_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
 }
 
 #[test]
-fn luneta_watch_keeps_a_daemon_newer_than_it() {
+fn luneta_watch_refuses_a_daemon_newer_than_it_and_leaves_it_be() {
     let host = Host::new();
     let mut newer = stand_in(&host, NEWER, None, None);
-    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), newer.pid());
+    let said = refused(&host, Path::new(LUNETA));
+    let (pid, own) = (newer.pid(), release::SAID.as_str());
+    let both = format!("lunetad {NEWER} (pid {pid}) is newer than this luneta, {own}");
+    assert!(said.contains(&both), "{said}");
+    assert!(said.contains(&format!("`kill {pid}`")), "{said}");
     assert_eq!(newer.ended_within(Duration::ZERO), None);
+}
+
+#[test]
+fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
+    for version in [OLDER, NEWER] {
+        let host = Host::new();
+        let mut other = stand_in(&host, version, None, None);
+        let output = answered(host.vars().command(LUNETA).arg("agents"));
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{said}");
+        let theirs = format!("lunetad {version} (pid {})", other.pid());
+        assert!(said.contains(&theirs), "{said}");
+        assert!(said.contains(release::SAID.as_str()), "{said}");
+
+        let output = answered(host.vars().command(LUNETA).arg("info"));
+        let out = String::from_utf8_lossy(&output.stdout);
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{said}");
+        assert!(out.starts_with(&theirs), "{out}");
+        assert!(said.contains(&theirs) && said.contains(release::SAID.as_str()), "{said}");
+        assert_eq!(other.ended_within(Duration::ZERO), None);
+    }
 }
 
 #[test]
@@ -382,7 +426,9 @@ fn luneta_watch_stops_no_process_but_the_one_the_kernel_says_listens() {
     let host = Host::new();
     let mut decoy = Running::spawn(Command::new("sleep").arg("60"));
     let mut older = stand_in(&host, OLDER, Some(decoy.pid()), None);
-    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), decoy.pid());
+    let said = refused(&host, Path::new(LUNETA));
+    let listens = "but the kernel says another process listens on its socket, so luneta stops none";
+    assert!(said.contains(listens), "{said}");
     assert_eq!(decoy.ended_within(Duration::ZERO), None);
     assert_eq!(older.ended_within(Duration::ZERO), None);
 }
@@ -421,8 +467,8 @@ fn luneta_watch_neither_asks_nor_stops_a_daemon_of_another_zellij_folder() {
     let host = Host::new();
     let link = elsewhere.path().join("sockets");
     symlink(host.sockets.path(), &link).unwrap();
-    let newer = stand_in(&host, NEWER, None, Some(&link));
-    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), newer.pid());
+    let same = stand_in(&host, &release::SAID, None, Some(&link));
+    assert_eq!(pid(&watch(&host, Path::new(LUNETA))), same.pid());
 }
 
 fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>) -> Running {
@@ -440,7 +486,7 @@ fn stand_in(host: &Host, version: &str, says: Option<u32>, reads: Option<&Path>)
 }
 
 pub fn stand_in_watched_as(host: &Host, watches_as: u32, notes: &Path) -> Running {
-    let mut command = stand_in_command(host, NEWER);
+    let mut command = stand_in_command(host, &release::SAID);
     command.env(STAND_IN_WATCH_PID, watches_as.to_string()).env(STAND_IN_NOTES, notes);
     let stand_in = Running::spawn(&mut command);
     eventually("the stand-in answers", || (answering(host)? == stand_in.pid()).then_some(()));
@@ -465,11 +511,7 @@ fn stand_in_lunetad() {
     let Some(folder) = env::var_os(STAND_IN) else {
         return;
     };
-    let said = env::var(STAND_IN_VERSION).unwrap();
-    let (version, built) = match said.split_once('+') {
-        Some((version, built)) => (version.to_owned(), Some(built.parse().unwrap())),
-        None => (said, None),
-    };
+    let (version, built) = build_of(env::var(STAND_IN_VERSION).unwrap());
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let reads = env::var_os(STAND_IN_READS).map(PathBuf::from);
     let watches_as = env::var(STAND_IN_WATCH_PID).ok().map(|pid| pid.parse().unwrap());
@@ -491,6 +533,61 @@ fn stand_in_lunetad() {
             .await
             .unwrap();
     });
+}
+
+fn build_of(said: String) -> (String, Option<u64>) {
+    match said.split_once('+') {
+        Some((version, built)) => (version.to_owned(), Some(built.parse().unwrap())),
+        None => (said, None),
+    }
+}
+
+pub fn bridged_stand_in(version: &str) -> String {
+    let program = env::current_exe().unwrap();
+    let test = "demand::stand_in_bridged_lunetad --exact --ignored";
+    let to = "3>&1 1>/dev/null 2>/dev/null";
+    format!("exec env {STAND_IN_BRIDGED}='{version}' '{}' {test} {to}\n", program.display())
+}
+
+#[test]
+#[ignore = "the stand-in for a daemon of another version that luneta bridge hands on, which a test \
+            runs as a process"]
+fn stand_in_bridged_lunetad() {
+    let Ok(said) = env::var(STAND_IN_BRIDGED) else {
+        return;
+    };
+    let (version, built) = build_of(said);
+    let mut out = OpenOptions::new().write(true).open(BRIDGED_FD).unwrap();
+    out.write_all(lunetad::BRIDGED).unwrap();
+    let (served, relayed) = UnixStream::pair().unwrap();
+    let mut up = relayed.try_clone().unwrap();
+    let mut down = relayed;
+    thread::spawn(move || {
+        relay(&mut io::stdin(), &mut up);
+        std::process::exit(0);
+    });
+    thread::spawn(move || relay(&mut down, &mut out));
+    served.set_nonblocking(true).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let served = tokio::net::UnixStream::from_std(served).unwrap();
+        let pid = std::process::id();
+        let stand_in = StandIn { version, built, pid, reads: None, watches_as: None, notes: None };
+        tonic::transport::Server::builder()
+            .add_service(DaemonServer::new(stand_in))
+            .serve_with_incoming(tokio_stream::once(Ok::<_, io::Error>(served)).chain(pending()))
+            .await
+            .unwrap();
+    });
+}
+
+fn relay(from: &mut impl Read, to: &mut impl Write) {
+    let mut buffer = vec![0; 64 * 1024];
+    while let Ok(read) = from.read(&mut buffer) {
+        if read == 0 || to.write_all(&buffer[..read]).is_err() {
+            return;
+        }
+    }
 }
 
 struct StandIn {

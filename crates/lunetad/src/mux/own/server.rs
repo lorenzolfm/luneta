@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -12,6 +14,7 @@ use std::{env, fs};
 use hyper_util::rt::TokioIo;
 use luneta_protocol::said::Said;
 use luneta_protocol::shell::Ending;
+use rustix::process::{Pid, Signal};
 use tokio::net::UnixStream;
 use tokio::runtime::{self, Runtime};
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -24,7 +27,7 @@ use super::TerminalKey;
 use crate::mux::{in_no_pane, Failure, Runs};
 use crate::projects::{Line, Size, VIEWS_MAX};
 use crate::shells::{Doing, Front};
-use crate::{folder, log, Directory};
+use crate::{folder, log, release, Directory};
 
 pub const SOCKET: &str = "mux.sock";
 
@@ -45,29 +48,77 @@ const _: () = assert!(
 
 const MAKING: Duration = Duration::from_secs(10);
 
+const STOPPING: Duration = Duration::from_secs(2);
+
 const LOOK: Duration = Duration::from_millis(10);
 
 const AGAIN: Duration = Duration::from_millis(100);
+
+static MATCHED: AtomicU32 = AtomicU32::new(0);
+
+pub(super) struct Unmatched {
+    pid: Option<u32>,
+    build: Option<String>,
+}
+
+impl fmt::Display for Unmatched {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pid = self.pid.map_or_default(|pid| format!(" (pid {pid})"));
+        let own = release::SAID.as_str();
+        match &self.build {
+            Some(build) => write!(f, "luneta-mux {build}{pid} is another build than {own}"),
+            None => write!(f, "luneta-mux{pid} says no build, as one older than {own} does"),
+        }
+    }
+}
+
+pub(super) enum Reached {
+    Unreached,
+    Matched(MuxClient<Channel>),
+    Unmatched(Unmatched),
+}
 
 struct Server {
     runtime: Runtime,
     client: MuxClient<Channel>,
 }
 
+enum Reach {
+    Server(Server),
+    Unreached(Runtime),
+    Unmatched(Runtime, Unmatched),
+}
+
 impl Server {
     fn reached() -> Result<Option<Server>, Failure> {
-        Ok(Server::reached_on(runtime()?, Some(ANSWER))?.ok())
+        match Server::reached_on(runtime()?, Some(ANSWER))? {
+            Reach::Server(server) => Ok(Some(server)),
+            Reach::Unreached(_) => Ok(None),
+            Reach::Unmatched(_, unmatched) => Err(Failure::Own(unmatched.to_string())),
+        }
     }
 
-    fn reached_on(
+    fn reached_on(runtime: Runtime, answer: Option<Duration>) -> Result<Reach, Failure> {
+        let socket = socket()?;
+        match runtime.block_on(connect(&socket, answer)) {
+            Ok(Reached::Matched(client)) => Ok(Reach::Server(Server { runtime, client })),
+            Ok(Reached::Unreached) => Ok(Reach::Unreached(runtime)),
+            Ok(Reached::Unmatched(unmatched)) => Ok(Reach::Unmatched(runtime, unmatched)),
+            Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
+        }
+    }
+
+    fn matched_on(
         runtime: Runtime,
         answer: Option<Duration>,
     ) -> Result<Result<Server, Runtime>, Failure> {
-        let socket = socket()?;
-        match runtime.block_on(connect(&socket, answer)) {
-            Ok(Some(client)) => Ok(Ok(Server { runtime, client })),
-            Ok(None) => Ok(Err(runtime)),
-            Err(error) => Err(Failure::Own(format!("{}: {error}", socket.display()))),
+        match Server::reached_on(runtime, answer)? {
+            Reach::Server(server) => Ok(Ok(server)),
+            Reach::Unreached(runtime) => Ok(Err(runtime)),
+            Reach::Unmatched(runtime, unmatched) => {
+                stop(&runtime, &unmatched)?;
+                Ok(Err(runtime))
+            },
         }
     }
 
@@ -84,6 +135,33 @@ impl Server {
         self.runtime.block_on(asking(self.client.clone())).map(Response::into_inner)
     }
 
+}
+
+fn stop(runtime: &Runtime, unmatched: &Unmatched) -> Result<(), Failure> {
+    let unstopped = |why: String| Failure::Own(format!("{unmatched}, and is not stopped: {why}"));
+    let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
+    let id = i32::try_from(pid).ok().and_then(Pid::from_raw);
+    let id = id.ok_or_else(|| unstopped(format!("{pid} is no pid")))?;
+    match rustix::process::kill_process(id, Signal::TERM) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => {},
+        Err(error) => return Err(unstopped(error.to_string())),
+    }
+    log::say(&format!("{unmatched}, and is stopped"));
+    let socket = socket()?;
+    let deadline = Instant::now() + STOPPING;
+    loop {
+        match runtime.block_on(connect(&socket, Some(ANSWER))) {
+            Ok(Reached::Unmatched(still)) if still.pid == unmatched.pid => {},
+            Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_)) => return Ok(()),
+            Err(_) => {},
+        }
+        if Instant::now() >= deadline {
+            let secs = STOPPING.as_secs();
+            let runs = format!("{unmatched}, and still runs {secs}s after it was stopped");
+            return Err(Failure::Own(runs));
+        }
+        thread::sleep(LOOK);
+    }
 }
 
 pub(super) fn runtime() -> Result<Runtime, Failure> {
@@ -106,16 +184,13 @@ fn listened_in() -> Result<PathBuf, Failure> {
     folder::find().map_err(|unfound| Failure::Own(unfound.to_string()))
 }
 
-pub(super) async fn connect(
-    socket: &Path,
-    answer: Option<Duration>,
-) -> io::Result<Option<MuxClient<Channel>>> {
-    let first = match UnixStream::connect(socket).await {
+pub(super) async fn connect(socket: &Path, answer: Option<Duration>) -> io::Result<Reached> {
+    let (first, pid) = match UnixStream::connect(socket).await {
         Ok(stream) => mine(stream)?,
         Err(error)
             if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
         {
-            return Ok(None);
+            return Ok(Reached::Unreached);
         },
         Err(error) => return Err(error),
     };
@@ -134,15 +209,40 @@ pub(super) async fn connect(
         }))
         .await
         .map_err(io::Error::other)?;
-    Ok(Some(MuxClient::new(channel)))
+    let mut client = MuxClient::new(channel);
+    if pid.is_some_and(|pid| MATCHED.load(Ordering::Relaxed) == pid) {
+        return Ok(Reached::Matched(client));
+    }
+    let asked = tokio::time::timeout(ANSWER, client.info(api::InfoRequest {})).await;
+    let late = || {
+        let late = format!("luneta-mux did not say its build in {}ms", ANSWER.as_millis());
+        io::Error::new(ErrorKind::TimedOut, late)
+    };
+    let build = match asked.map_err(|_| late())? {
+        Ok(info) => {
+            let api::InfoResponse { version, built } = info.into_inner();
+            if release::is_own(&version, built) {
+                if let Some(pid) = pid {
+                    MATCHED.store(pid, Ordering::Relaxed);
+                }
+                return Ok(Reached::Matched(client));
+            }
+            Some(release::spelled(&version, built))
+        },
+        Err(status) if status.code() == Code::Unimplemented => None,
+        Err(status) => return Err(io::Error::other(refused(&status).to_string())),
+    };
+    Ok(Reached::Unmatched(Unmatched { pid, build }))
 }
 
-fn mine(stream: UnixStream) -> io::Result<UnixStream> {
-    if stream.peer_cred()?.uid() != rustix::process::getuid().as_raw() {
+fn mine(stream: UnixStream) -> io::Result<(UnixStream, Option<u32>)> {
+    let peer = stream.peer_cred()?;
+    if peer.uid() != rustix::process::getuid().as_raw() {
         let refusal = "another user's process listens on luneta-mux's socket";
         return Err(io::Error::new(ErrorKind::PermissionDenied, refusal));
     }
-    Ok(stream)
+    let pid = peer.pid().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
+    Ok((stream, pid))
 }
 
 fn opens(cwd: &Directory, runs: Runs<'_>) -> Result<api::Opens, Failure> {
@@ -207,6 +307,7 @@ fn doing(is: &api::ran::Is) -> Result<Doing, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Followed {
     Unreached { at: Instant },
+    Stopped,
     Emptied { since: Instant },
     LetGo,
 }
@@ -215,8 +316,13 @@ pub fn followed(
     mut told: impl FnMut(Vec<String>, TerminalsListed) -> bool,
 ) -> Result<Followed, Failure> {
     let at = Instant::now();
-    let Ok(server) = Server::reached_on(runtime()?, None)? else {
-        return Ok(Followed::Unreached { at });
+    let server = match Server::reached_on(runtime()?, None)? {
+        Reach::Server(server) => server,
+        Reach::Unreached(_) => return Ok(Followed::Unreached { at }),
+        Reach::Unmatched(runtime, unmatched) => {
+            stop(&runtime, &unmatched)?;
+            return Ok(Followed::Stopped);
+        },
     };
     let since = Instant::now();
     let watched = server.ask(|mut client| async move { client.watch(api::WatchRequest {}).await });
@@ -451,7 +557,7 @@ fn on_started<T>(
         if Instant::now() >= deadline {
             return Err(Failure::Own("no server answered in time".to_owned()));
         }
-        let server = match Server::reached_on(runtime, Some(ANSWER))? {
+        let server = match Server::matched_on(runtime, Some(ANSWER))? {
             Ok(server) => server,
             Err(runtime) => started(runtime, deadline)?,
         };
@@ -492,7 +598,7 @@ fn started(mut runtime: Runtime, deadline: Instant) -> Result<Server, Failure> {
         };
         let again = Instant::now() + AGAIN;
         while Instant::now() < again {
-            runtime = match Server::reached_on(runtime, Some(ANSWER))? {
+            runtime = match Server::matched_on(runtime, Some(ANSWER))? {
                 Ok(server) => return Ok(server),
                 Err(runtime) => runtime,
             };
@@ -511,8 +617,18 @@ fn listened(
 ) -> Result<Result<Server, Runtime>, Failure> {
     loop {
         runtime = match Server::reached_on(runtime, Some(ANSWER))? {
-            Ok(server) => return Ok(Ok(server)),
-            Err(runtime) => runtime,
+            Reach::Server(server) => return Ok(Ok(server)),
+            Reach::Unreached(runtime) => runtime,
+            Reach::Unmatched(_, unmatched) if unmatched.pid == Some(started.child.id()) => {
+                let from = program();
+                let from = from.display();
+                let started = format!("{unmatched}, though lunetad started it from {from}");
+                return Err(Failure::Own(started));
+            },
+            Reach::Unmatched(runtime, unmatched) => {
+                stop(&runtime, &unmatched)?;
+                runtime
+            },
         };
         let ended = started.child.try_wait().map_err(|error| Failure::Own(error.to_string()))?;
         match ended {

@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use lunetad::mux::own::frames::{Line, Rows, Shows};
 use lunetad::mux::own::viewer::{self, Greeting, Reach, Seen, FRAMES_MAX};
 use lunetad::projects::{Size, WorktreeId};
 use lunetad::folder::Folder;
+use lunetad::release;
 use lunetad::{Asked, Beside, Destination, Heard, Where, BRIDGE_HELD_MAX};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -1077,6 +1079,34 @@ fn an_agent_resumes_when_lunetad_starts_with_no_mux() {
     again.until("the terminal restored", |laid| laid.panes.iter().all(|pane| key(pane).is_some()));
     let said = eventually("the agent is started again", || fs::read_to_string(&asked).ok());
     assert_eq!(said, "--resume resumed-7c22\n");
+}
+
+#[test]
+fn lunetad_stops_a_luneta_mux_that_says_no_build_and_restores_its_terminals() {
+    let mut owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let terminal = heard_in_below(&owned, &mut shown, "sleep 602");
+    drop(shown);
+    owned.stop_daemon();
+    owned.kill_mux();
+    let mut older = owned.stand_in_mux();
+    owned.start_daemon();
+    let stopped = older.ended_within(Duration::from_secs(5));
+    let stopped = stopped.expect("lunetad stops the luneta-mux that says no build");
+    assert_eq!(stopped.signal(), Some(rustix::process::Signal::TERM.as_raw()));
+    let mut again = Shown::new(&owned, worktree, 80, 24);
+    let restored = |laid: &Laid| laid.panes.iter().all(|pane| key(pane).is_some());
+    let laid = again.until("the terminal restored", restored);
+    assert_eq!(laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>(), [terminal]);
+    let restored = mux_key(key(&laid.panes[0]).unwrap());
+    eventually("its last command is typed at the prompt", || {
+        owned.dumped(restored).contains("sleep 602").then_some(())
+    });
+    let (pid, own) = (older.pid(), release::SAID.as_str());
+    let said = format!("luneta-mux (pid {pid}) says no build, as one older than {own} does");
+    let log = logged(&owned);
+    assert!(log.contains(&format!("{said}, and is stopped")), "{log}");
 }
 
 #[test]
