@@ -64,7 +64,10 @@ pub fn say(what: &str) {
     }
     match started.process {
         Process::Luneta => {},
-        Process::Lunetad => eprintln!("lunetad: {what}"),
+        Process::Lunetad => {
+            let line = format!("lunetad: {what}\n");
+            let _ = io::stderr().lock().write_all(line.as_bytes());
+        },
     }
 }
 
