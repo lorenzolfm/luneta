@@ -112,18 +112,18 @@ impl Layout {
         self.laid().and_then(Laid::focused).is_some_and(|pane| pane.found == Found::Welcome)
     }
 
-    fn closes(&mut self, key: &KeyEvent) -> bool {
+    fn closes(&mut self, key: &KeyEvent) -> Option<ViewId> {
         assert!(self.welcomes(), "only a welcome view is closed by its keys");
         let focused = self.focused().expect("a welcome view welcomes when focused");
         let closing = self.closing.take();
         if key.code != KeyCode::Char(CLOSE) || !key.modifiers.is_empty() {
-            return false;
+            return None;
         }
         if closing == Some(focused) {
-            return true;
+            return Some(focused);
         }
         self.closing = Some(focused);
-        false
+        None
     }
 
     fn focused_key(&self) -> Option<TerminalKey> {
@@ -736,8 +736,8 @@ impl Viewed {
     pub fn key(&mut self, key: &KeyEvent) {
         self.unselect();
         if self.layout.welcomes() {
-            if self.layout.closes(key) {
-                self.ask(Asked::Close);
+            if let Some(view) = self.layout.closes(key) {
+                self.ask(Asked::Close(view));
             }
             return;
         }
@@ -1082,17 +1082,19 @@ mod tests {
         assert!(!layout.laid_out(laid(panes(), 12, false)));
         let typed = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let d = typed(KeyCode::Char(CLOSE));
-        assert!(!layout.closes(&d));
-        assert!(layout.closes(&d), "d d closes it");
-        assert!(!layout.closes(&d));
-        assert!(!layout.closes(&typed(KeyCode::Char('x'))));
-        assert!(!layout.closes(&d), "another key between the two starts over");
-        assert!(!layout.closes(&KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL)));
-        assert!(!layout.closes(&d), "Ctrl d is no d");
+        let welcome = Some(ViewId::of(12).unwrap());
+        assert_eq!(layout.closes(&d), None);
+        assert_eq!(layout.closes(&d), welcome, "d d closes it, by its id");
+        assert_eq!(layout.closes(&d), None);
+        assert_eq!(layout.closes(&typed(KeyCode::Char('x'))), None);
+        assert_eq!(layout.closes(&d), None, "another key between the two starts over");
+        let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
+        assert_eq!(layout.closes(&ctrl_d), None);
+        assert_eq!(layout.closes(&d), None, "Ctrl d is no d");
         assert!(!layout.laid_out(laid(panes(), 11, false)));
         assert!(!layout.laid_out(laid(panes(), 12, false)));
-        assert!(!layout.closes(&d), "a focus gone elsewhere and back starts over");
-        assert!(layout.closes(&d));
+        assert_eq!(layout.closes(&d), None, "a focus gone elsewhere and back starts over");
+        assert_eq!(layout.closes(&d), welcome);
     }
 
     #[test]

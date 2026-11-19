@@ -493,7 +493,7 @@ fn a_closed_terminal_leaves_the_mux_and_its_layout_to_the_terminal_beside_it() {
     let first = shown.open();
     let second = shown.open();
     let third = shown.open();
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(third));
     let laid = shown.until("two terminals left", |laid| laid.panes.len() == 2);
     let left: Vec<u64> = laid.panes.iter().map(|pane| pane.view).collect();
     assert_eq!(left, [first, second]);
@@ -532,19 +532,24 @@ fn a_welcome_view_opens_beside_the_focus_and_closes_as_a_terminal_does() {
     });
     assert_eq!(owned.listing().terminals.len(), 1, "the mux holds no welcome view");
 
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(welcome));
     let laid = shown.until("the welcome view closed", |laid| laid.panes.len() == 1);
     assert_eq!((laid.panes[0].view, focused_of(&laid)), (terminal, Some(terminal)));
     assert!(tagged(&owned.listing(), terminal).is_some(), "the terminal beside it stays");
+    shown.ask(Event::Close(welcome));
 
     shown.ask(Event::Welcome(()));
-    shown.until("a welcome view again", |laid| laid.panes.len() == 2);
+    let laid = shown.until("a welcome view again", |laid| laid.panes.len() == 2);
+    let stayed = "a close of a view gone closes nothing, not the view focused since";
+    assert!(laid.panes.iter().any(|pane| pane.view == terminal), "{stayed}");
+    assert!(tagged(&owned.listing(), terminal).is_some(), "{stayed}");
+    let again = laid.panes.iter().find(|pane| welcomes(pane)).expect("a welcome").view;
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(terminal)) }));
     shown.until("the terminal focused", |it| focused_of(it) == Some(terminal));
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(terminal));
     let laid = shown.until("the terminal gone", |laid| laid.panes.len() == 1);
     assert!(welcomes(&laid.panes[0]), "the welcome view is left alone");
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(again));
     shown.until("the layout emptied", |laid| laid.panes.is_empty());
     assert_eq!(watched(&owned, workstream), [], "the workstream stays with its last view gone");
 }
@@ -555,7 +560,7 @@ fn a_workstream_stays_when_its_layout_s_last_terminal_closes_and_the_mux_takes_t
     let staying = workstream_in_home(&owned);
     let mut shown = Shown::new(&owned, staying, 80, 24);
     let last = shown.open();
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(last));
     shown.until("the view emptied", |laid| laid.panes.is_empty());
     assert_eq!(watched(&owned, staying), [], "the workstream stays, empty");
     assert_eq!(projects_of(&owned).len(), 1, "and so does its project");
@@ -647,7 +652,7 @@ fn an_open_the_layout_refuses_makes_no_terminal_in_the_mux() {
     let listing = owned.listing();
     assert_eq!(listing.terminals.len(), opened.len(), "the mux holds only the layouts' terminals");
     assert!(opened.iter().all(|terminal| tagged(&listing, *terminal).is_some()));
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(opened[opened.len() - 1]));
     shown.until("a terminal fewer", |laid| laid.panes.len() == opened.len() - 1);
 }
 
@@ -918,7 +923,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     }
     shown.ask(Event::Focus(show_request::Focus { to: Some(focus::To::View(closes)) }));
     shown.until("the terminal to close focused", |laid| focused_of(laid) == Some(closes));
-    shown.ask(Event::Close(()));
+    shown.ask(Event::Close(closes));
     let terminals = |laid: &Laid| laid.panes.iter().map(|pane| pane.view).collect::<Vec<_>>();
     shown.until("the restored terminal closed", |laid| terminals(laid) == [stays]);
     eventually("the closed terminal leaves the mux", || {

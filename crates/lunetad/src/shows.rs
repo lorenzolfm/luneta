@@ -233,7 +233,7 @@ pub enum Asked {
     Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
     Welcome,
-    Close,
+    Close(ViewId),
     Focus(ViewId),
     Step(Direction),
     Resize(Growth),
@@ -256,7 +256,7 @@ impl Asked {
                 Event::Open(show_request::Open { beside: Some(beside), argv })
             },
             Asked::Welcome => Event::Welcome(()),
-            Asked::Close => Event::Close(()),
+            Asked::Close(view) => Event::Close(view.get()),
             Asked::Focus(view) => {
                 let to = show_request::focus::To::View(view.get());
                 Event::Focus(show_request::Focus { to: Some(to) })

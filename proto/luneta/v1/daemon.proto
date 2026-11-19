@@ -1062,7 +1062,7 @@ message ShowRequest {
     Size size = 2;
     fixed64 go = 3;
     Open open = 4;
-    google.protobuf.Empty close = 5;
+    fixed64 close = 5;
     Focus focus = 6;
     Resize resize = 7;
     Move move = 8;

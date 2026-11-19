@@ -102,7 +102,7 @@ pub enum Asked {
     Go(WorkstreamId),
     Open { beside: Beside, argv: Vec<String> },
     Welcome,
-    Close,
+    Close(ViewId),
     Focus(Focus),
     Resize { sides: Sides, growth: layout::Growth },
     Move(Step),
@@ -159,7 +159,7 @@ impl Asked {
                 Asked::Open { beside, argv }
             },
             Event::Welcome(()) => Asked::Welcome,
-            Event::Close(()) => Asked::Close,
+            Event::Close(view) => Asked::Close(id("close", view).map(ViewId::new)?),
             Event::Focus(show_request::Focus { to }) => {
                 use show_request::focus::To;
                 Asked::Focus(match to.ok_or("focus: it says no terminal to go to")? {
@@ -725,7 +725,12 @@ impl Layouts {
             },
             Asked::Open { beside, argv } => self.open(client, beside, &argv)?,
             Asked::Welcome => self.welcome(client)?,
-            Asked::Close => self.close(focused()?)?,
+            Asked::Close(view) => {
+                if !self.layout(workstream)?.holds(view) {
+                    return Ok(Done::Quiet);
+                }
+                self.close(view)?;
+            },
             Asked::Focus(Focus::View(view)) => {
                 if !self.layout(workstream)?.holds(view) {
                     return Err(format!("the layout holds no view {view}"));
